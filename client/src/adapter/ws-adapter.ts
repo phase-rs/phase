@@ -1536,7 +1536,8 @@ export type WsAdapterEvent =
   | { type: "stateChanged"; snapshot: EngineSnapshot; events: GameEvent[]; logEntries?: GameLogEntry[]; serverRevision?: number;
       /** Server-published turn boundaries. Always an array on this transport —
        *  `[]` means "the server published none", never "unknown". */
-      rewindTargets?: RewindOption[] }
+      rewindTargets?: RewindOption[];
+      saying?: boolean }
   /** The server applied a state it could not send; `null` once a state arrives again. */
   | { type: "stateDelivery"; withheld: StateWithheldNotice | null }
   | { type: "sessionAttached"; attachment: NativeSessionAttachment }
@@ -1614,6 +1615,10 @@ export class WebSocketAdapter implements EngineAdapter {
   private _gameCode: string | null = null;
   private fullSessionKey: FullSessionKey | null = null;
   private readonly submission = new SubmissionSlot();
+  private readonly pendingSayingCommands = new Map<
+    number,
+    { resolve: (result: SubmitResult) => void; reject: (error: Error) => void }
+  >();
   private nextManaPaymentPreviewRequestId = 1;
   private pendingManaPaymentPreviews = new Map<
     number,
@@ -2062,6 +2067,9 @@ export class WebSocketAdapter implements EngineAdapter {
       this.rejectPendingManaPaymentPreviews(
         new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
       );
+      this.rejectPendingSayingCommands(
+        new AdapterError("WS_CLOSED", "Connection closed during saying submission", true),
+      );
       this.rejectAuthoritativeStateExport(
         new AdapterError("WS_CLOSED", "Connection closed during authoritative-state export", true),
       );
@@ -2113,9 +2121,28 @@ export class WebSocketAdapter implements EngineAdapter {
     // from the join-token-authenticated session, never from the payload.
     // A client-supplied actor here would provide zero additional safety and
     // only creates a spoofing surface if it were ever put on the wire.
-    this.assertNoPendingSubmission();
+    if (action.type !== "SayPhrase") {
+      this.assertNoPendingSubmission();
+    }
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "WebSocket not connected", false);
+    }
+
+    if (action.type === "SayPhrase") {
+      if (!this.commandCorrelationNegotiated()) {
+        if (!this.send({ type: "Action", data: { action } })) {
+          throw new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send action", true);
+        }
+        return { events: [], log_entries: [] };
+      }
+      const commandId = this.submission.claimCommandId();
+      return new Promise<SubmitResult>((resolve, reject) => {
+        this.pendingSayingCommands.set(commandId, { resolve, reject });
+        if (!this.send({ type: "Action", data: { action }, command_id: commandId })) {
+          this.pendingSayingCommands.delete(commandId);
+          reject(new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send action", true));
+        }
+      });
     }
 
     return this.submitGameFrame(
@@ -2396,6 +2423,9 @@ export class WebSocketAdapter implements EngineAdapter {
     );
     this.rejectPendingManaPaymentPreviews(
       new AdapterError("WS_CLOSED", "Adapter disposed during mana-payment preview", true),
+    );
+    this.rejectPendingSayingCommands(
+      new AdapterError("WS_CLOSED", "Adapter disposed during saying submission", true),
     );
     this.rejectAuthoritativeStateExport(
       new AdapterError("WS_CLOSED", "Adapter disposed during authoritative-state export", true),
@@ -2754,6 +2784,13 @@ export class WebSocketAdapter implements EngineAdapter {
     this.pendingInteractionPreviews.clear();
   }
 
+  private rejectPendingSayingCommands(error: Error): void {
+    for (const { reject } of this.pendingSayingCommands.values()) {
+      reject(error);
+    }
+    this.pendingSayingCommands.clear();
+  }
+
   /** Snapshot of the server's advertised identity, or null before ServerHello. */
   getServerInfo(): ServerInfo | null {
     return this._serverInfo;
@@ -3013,6 +3050,13 @@ export class WebSocketAdapter implements EngineAdapter {
           // own correlated completion it still answers the pending command;
           // dropping it would leave the submission slot occupied. Legacy
           // (uncorrelated) frames keep the old drop-only behaviour.
+          if (typeof msg.command_id === "number") {
+            const sayingPending = this.pendingSayingCommands.get(msg.command_id);
+            if (sayingPending) {
+              this.pendingSayingCommands.delete(msg.command_id);
+              sayingPending.resolve({ events: data.events, log_entries: data.log_entries });
+            }
+          }
           if (msg.command_id !== undefined) {
             const stalePending = this.submission.take(msg.command_id);
             if (stalePending) {
@@ -3041,6 +3085,15 @@ export class WebSocketAdapter implements EngineAdapter {
         );
         this.cachedStateRevision = data.state_revision ?? this.cachedStateRevision;
         this.settleWithheld();
+        let isSaying = false;
+        if (typeof msg.command_id === "number") {
+          const sayingPending = this.pendingSayingCommands.get(msg.command_id);
+          if (sayingPending) {
+            this.pendingSayingCommands.delete(msg.command_id);
+            sayingPending.resolve({ events: data.events, log_entries: data.log_entries });
+            isSaying = true;
+          }
+        }
         const pending = this.submission.take(msg.command_id);
         const resolvedAction = pending !== null;
         if (pending) {
@@ -3055,6 +3108,7 @@ export class WebSocketAdapter implements EngineAdapter {
             logEntries: data.log_entries,
             serverRevision: data.state_revision,
             rewindTargets: data.rewind_targets ?? [],
+            ...(isSaying ? { saying: true } : {}),
           });
         }
         break;
@@ -3065,6 +3119,13 @@ export class WebSocketAdapter implements EngineAdapter {
         const error = isActionRejection(data.rejection)
           ? actionRejectionError(data.rejection)
           : new AdapterError(AdapterErrorCode.WASM_ERROR, "Server sent an invalid action rejection.", false);
+        if (typeof msg.command_id === "number") {
+          const sayingPending = this.pendingSayingCommands.get(msg.command_id);
+          if (sayingPending) {
+            this.pendingSayingCommands.delete(msg.command_id);
+            sayingPending.reject(error);
+          }
+        }
         const pending = this.submission.take(msg.command_id);
         if (pending) {
           pending.reject(error);
@@ -3086,9 +3147,17 @@ export class WebSocketAdapter implements EngineAdapter {
 
       case "ActionFailed": {
         const data = msg.data as { message: string };
+        const error = new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true);
+        if (typeof msg.command_id === "number") {
+          const sayingPending = this.pendingSayingCommands.get(msg.command_id);
+          if (sayingPending) {
+            this.pendingSayingCommands.delete(msg.command_id);
+            sayingPending.reject(error);
+          }
+        }
         const pending = this.submission.take(msg.command_id);
         if (pending) {
-          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
+          pending.reject(error);
           this.emit({ type: "actionPendingChanged", pending: false });
         } else if (this.submission.unmatched(msg.command_id).surfaces) {
           this.emit({ type: "operationFailed", message: data.message });
@@ -3123,6 +3192,13 @@ export class WebSocketAdapter implements EngineAdapter {
           this.emit({ type: "bootstrapDelivered" });
           if (this.reconnectInFlight) this.completeReconnect(true);
         } else {
+          if (typeof msg.command_id === "number") {
+            const sayingPending = this.pendingSayingCommands.get(msg.command_id);
+            if (sayingPending) {
+              this.pendingSayingCommands.delete(msg.command_id);
+              sayingPending.resolve({ events: [], log_entries: [] });
+            }
+          }
           const pending = this.submission.take(msg.command_id);
           if (pending) {
             pending.resolve({ events: [], log_entries: [] });

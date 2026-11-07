@@ -70,6 +70,7 @@ use crate::types::card_type::CoreType;
 use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
 use crate::types::player::PlayerCounterKind;
 use crate::types::statics::{ActivationExemption, CostModifyMode, StaticMode};
+use crate::types::un_actions::PhrasePace;
 use crate::types::zones::Zone;
 
 use super::super::oracle_target::{
@@ -12792,17 +12793,31 @@ fn parse_mana_and_life_payment(rest_orig: &str) -> Option<AbilityCost> {
 }
 
 /// Un-card: the body of a spoken payment after `say ` — a quoted phrase with an
-/// optional delivery qualifier (`in a robot voice`) and optional final period.
-pub(crate) fn parse_say_phrase_payment(input: &str) -> OracleResult<'_, String> {
+/// optional delivery qualifier (`in a robot voice`, `quickly`) and optional
+/// final period. The qualifier is part of the payment, not of the phrase: Toy
+/// Boat's "Say \"Toy Boat\" quickly" yields `("Toy Boat", Quickly)` so the
+/// engine can require one saying per age counter inside the pace window.
+pub(crate) fn parse_say_phrase_payment(input: &str) -> OracleResult<'_, (String, PhrasePace)> {
     let (rest, phrase) = super::parse_quoted_phrase(input)?;
     let (rest, _) = opt(preceded(
         tag(" in a "),
         terminated(take_until(" voice"), tag(" voice")),
     ))
     .parse(rest)?;
+    let mut rest = rest;
+    let mut pace = PhrasePace::Said;
+    // Nom on the lowercased body of the remainder so the qualifier matches
+    // regardless of case; the original slice is preserved for the phrase.
+    let lower = rest.to_lowercase();
+    if let Some(((), after)) = nom_on_lower(rest, &lower, |i| {
+        value((), tag::<_, _, OracleError<'_>>(" quickly")).parse(i)
+    }) {
+        pace = PhrasePace::quickly();
+        rest = after;
+    }
     let (rest, _) = opt(tag(".")).parse(rest)?;
     let (rest, _) = eof.parse(rest)?;
-    Ok((rest, phrase.trim().to_string()))
+    Ok((rest, (phrase.trim().to_string(), pace)))
 }
 
 /// CR 118.1 + CR 107.1c + CR 107.3f: the cost named by a `pay ` residue, plus
@@ -13019,10 +13034,15 @@ pub(super) fn parse_cost_resource_ast(
     if let Some((_, rest_orig)) =
         nom_on_lower(text, lower, |input| value((), tag("say ")).parse(input))
     {
-        if let Ok((_, phrase)) = parse_say_phrase_payment(rest_orig) {
-            // A spoken payment has no amount axis.
+        if let Ok((_, (phrase, pace))) = parse_say_phrase_payment(rest_orig) {
+            // A spoken payment has no amount axis (main's `scale` is always
+            // `None`); the phrase's delivery pace is part of the cost.
             return Some(CostResourceImperativeAst::Pay {
-                cost: AbilityCost::SayPhrase { phrase },
+                cost: AbilityCost::SayPhrase {
+                    phrase,
+                    pace,
+                    repetitions: 1,
+                },
                 scale: None,
             });
         }

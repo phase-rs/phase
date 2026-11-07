@@ -5938,7 +5938,10 @@ fn project_action_payload(
         | GameAction::RollPlanarDie
         | GameAction::CompanionToHand
         | GameAction::CancelAutoPass
-        | GameAction::PassParadigmOffer => {}
+        | GameAction::PassParadigmOffer
+        // The saying's payment identity and host stamps distinguish one
+        // observation from another, but carry no game object surface.
+        | GameAction::SayPhrase { .. } => {}
         GameAction::ChooseMeldPair { partner_id, .. } => {
             push_object_surface(surfaces, state, *partner_id, InteractionRoleCode::Partner)
         }
@@ -6942,6 +6945,7 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
             InteractionActionCode::DecideOptionalEffectAndRemember
         }
         GameAction::PayUnlessCost { .. } => InteractionActionCode::PayUnlessCost,
+        GameAction::SayPhrase { .. } => InteractionActionCode::SayPhrase,
         GameAction::ChooseUnlessCostBranch { .. } => InteractionActionCode::ChooseUnlessCostBranch,
         GameAction::ChooseActivationCostBranch { .. } => {
             InteractionActionCode::ChooseActivationCostBranch

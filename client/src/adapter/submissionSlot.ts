@@ -65,6 +65,11 @@ export class SubmissionSlot {
     return submission;
   }
 
+  /** Mint an independent monotonic command id without claiming the ordinary submission slot. */
+  claimCommandId(): number {
+    return this.nextCommandId++;
+  }
+
   owns(submission: PendingSubmission): boolean {
     return this.pending === submission;
   }

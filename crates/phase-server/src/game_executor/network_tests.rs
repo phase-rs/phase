@@ -7269,5 +7269,220 @@ mod oversized_publication {
                 outcome.expect("the withdrawal, the concession, or the AI decision never arrived");
             });
         }
+
+        fn toy_boat_state(deadline_ms: Option<u64>) -> (engine::types::game_state::GameState, u64) {
+            let mut scenario = engine::game::scenario::GameScenario::new();
+            scenario.at_phase(engine::types::phase::Phase::Untap);
+            let toy_boat = scenario
+                .add_creature_from_oracle(
+                    P0,
+                    "Toy Boat",
+                    3,
+                    3,
+                    "Cumulative upkeep\u{2014}Say \"Toy Boat\" quickly. (At the beginning of your upkeep, put an age counter on this creature, then sacrifice it unless you say \"Toy Boat\" once for each age counter on it\u{2014}without pausing between or fumbling it.)",
+                )
+                .id();
+            scenario.with_counter(toy_boat, engine::types::counter::CounterType::Age, 1);
+            let filler = ["Filler"; 4];
+            scenario.with_library_top(P0, &filler);
+            scenario.with_library_top(PlayerId(1), &filler);
+            let mut runner = scenario.build();
+            runner.state_mut().un_actions.set_enabled(P0, true);
+            runner.advance_to_upkeep();
+            runner.resolve_top();
+            if let Some(deadline) = deadline_ms {
+                if let Some(ref mut payment) = runner.state_mut().say_payment {
+                    payment.deadline_ms = Some(deadline);
+                }
+            }
+            let payment_id = runner.state().say_payment.as_ref().unwrap().id;
+            (runner.state().clone(), payment_id)
+        }
+
+        #[test]
+        fn say_phrase_expiry_runs_when_payer_is_offline() {
+            run_async_test(|| async {
+                let table = NativeTable::duel().await;
+                let now = crate::epoch_ms_at_ingress(std::time::Instant::now());
+                let (state, _) = toy_boat_state(Some(now + 40));
+                install(&table, state, &[]).await;
+                let mut p1 = table.connect(P1).await;
+                let target = {
+                    let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                        .await
+                        .unwrap();
+                    crate::say_phrase_expiry_target(&session)
+                };
+                crate::schedule_say_phrase_expiry(
+                    target,
+                    &table.app.context.game_executor,
+                    &table.app.sessions,
+                    &table.app.db,
+                    &table.app.draft_sessions,
+                    &table.app.connections,
+                    &table.app.game_db,
+                    &table.app.game_spectators,
+                    &table.key.game_code,
+                );
+                let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+                    let update = until_type(&mut p1, "StateUpdate").await;
+                    assert!(
+                        update["data"]["state"]["say_payment"].is_null(),
+                        "say_payment must be cleared on offline expiry: {update}"
+                    );
+                })
+                .await;
+                table.server.abort();
+                outcome.expect("expiry state update never reached connected opponent");
+            });
+        }
+
+        #[test]
+        fn say_phrase_rejects_genuinely_late_saying() {
+            run_async_test(|| async {
+                let table = NativeTable::duel().await;
+                let now = crate::epoch_ms_at_ingress(std::time::Instant::now());
+                let (state, payment_id) = toy_boat_state(Some(now + 30));
+                install(&table, state, &[]).await;
+                let mut p0 = table.connect(P0).await;
+                let _p1 = table.connect(P1).await;
+                let target = {
+                    let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                        .await
+                        .unwrap();
+                    crate::say_phrase_expiry_target(&session)
+                };
+                crate::schedule_say_phrase_expiry(
+                    target,
+                    &table.app.context.game_executor,
+                    &table.app.sessions,
+                    &table.app.db,
+                    &table.app.draft_sessions,
+                    &table.app.connections,
+                    &table.app.game_db,
+                    &table.app.game_spectators,
+                    &table.key.game_code,
+                );
+                let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+                    let _ = until_type(&mut p0, "StateUpdate").await;
+                    let late_action = GameAction::SayPhrase {
+                        payment: payment_id,
+                        seq: 1,
+                        at_ms: 0,
+                        report: engine::types::un_actions::SayPhraseReport::Saying,
+                    };
+                    send_command_frame(&mut p0, &late_action, 10).await;
+                    let reply = receive_command_frame(&mut p0).await;
+                    assert!(
+                        reply["type"] == "ActionRejected" || reply["type"] == "ActionFailed",
+                        "late saying must be rejected: {reply}"
+                    );
+                })
+                .await;
+                table.server.abort();
+                outcome.expect("expected rejection for late saying");
+            });
+        }
+
+        #[test]
+        fn say_phrase_drains_queued_saying_before_expiry() {
+            run_async_test(|| async {
+                let table = NativeTable::duel().await;
+                let now = crate::epoch_ms_at_ingress(std::time::Instant::now());
+                let (state, payment_id) = toy_boat_state(Some(now + 200));
+                install(&table, state, &[]).await;
+                let mut p0 = table.connect(P0).await;
+                let target = {
+                    let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                        .await
+                        .unwrap();
+                    crate::say_phrase_expiry_target(&session)
+                };
+                let saying_action = GameAction::SayPhrase {
+                    payment: payment_id,
+                    seq: 1,
+                    at_ms: 0,
+                    report: engine::types::un_actions::SayPhraseReport::Saying,
+                };
+                send_command_frame(&mut p0, &saying_action, 42).await;
+                crate::schedule_say_phrase_expiry(
+                    target,
+                    &table.app.context.game_executor,
+                    &table.app.sessions,
+                    &table.app.db,
+                    &table.app.draft_sessions,
+                    &table.app.connections,
+                    &table.app.game_db,
+                    &table.app.game_spectators,
+                    &table.key.game_code,
+                );
+                let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+                    let comp = completion(&mut p0, 42).await;
+                    assert_eq!(comp["command_id"], 42);
+                    let state = session_read(&table, |s| s.state.clone()).await;
+                    let say_payment = state.say_payment.as_ref().expect("payment still active");
+                    assert_eq!(say_payment.said, 1);
+                })
+                .await;
+                table.server.abort();
+                outcome.expect("timely saying was not completed");
+            });
+        }
+
+        #[test]
+        fn say_phrase_parks_timely_frame_before_decode_while_deadline_elapses() {
+            run_async_test(|| async {
+                let table = NativeTable::duel().await;
+                let now = crate::epoch_ms_at_ingress(std::time::Instant::now());
+                let (state, payment_id) = toy_boat_state(Some(now + 200));
+                install(&table, state, &[]).await;
+                let mut p0 = table.connect(P0).await;
+                let target = {
+                    let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                        .await
+                        .unwrap();
+                    crate::say_phrase_expiry_target(&session)
+                };
+                let saying_action = GameAction::SayPhrase {
+                    payment: payment_id,
+                    seq: 1,
+                    at_ms: 0,
+                    report: engine::types::un_actions::SayPhraseReport::Saying,
+                };
+                let decode_gate = table
+                    .app
+                    .context
+                    .socket_hooks
+                    .arm_resync(crate::socket_test_hooks::ResyncPoint::Decode);
+                send_command_frame(&mut p0, &saying_action, 42).await;
+                decode_gate.entered.notified().await;
+
+                crate::schedule_say_phrase_expiry(
+                    target,
+                    &table.app.context.game_executor,
+                    &table.app.sessions,
+                    &table.app.db,
+                    &table.app.draft_sessions,
+                    &table.app.connections,
+                    &table.app.game_db,
+                    &table.app.game_spectators,
+                    &table.key.game_code,
+                );
+
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                decode_gate.release.notify_one();
+
+                let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+                    let comp = completion(&mut p0, 42).await;
+                    assert_eq!(comp["command_id"], 42);
+                    let state = session_read(&table, |s| s.state.clone()).await;
+                    let say_payment = state.say_payment.as_ref().expect("payment still active");
+                    assert_eq!(say_payment.said, 1);
+                })
+                .await;
+                table.server.abort();
+                outcome.expect("timely saying held before decode was processed before expiry");
+            });
+        }
     }
 }

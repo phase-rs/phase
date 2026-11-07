@@ -183,8 +183,49 @@ describe("PeerSession", () => {
     await conn.simulateData(actionMessage);
 
     expect(handler).toHaveBeenCalledTimes(1);
-    expect(handler).toHaveBeenCalledWith(actionMessage);
+    expect(handler).toHaveBeenCalledWith(actionMessage, expect.any(Number));
     session.close();
+  });
+
+  it("stamps each message at ingress even when an earlier handler is slow", async () => {
+    vi.useFakeTimers();
+    const { conn, session } = createTestSession();
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const received: Array<{ type: string; receivedAtMs: number }> = [];
+    session.onMessage(async (msg, receivedAtMs) => {
+      received.push({ type: msg.type, receivedAtMs });
+      if (msg.type === "action") await blocked;
+    });
+    try {
+      vi.setSystemTime(1_000);
+      const first = conn.simulateData({
+        type: "action",
+        senderPlayerId: 0,
+        action: { type: "PassPriority" },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(received).toEqual([{ type: "action", receivedAtMs: 1_000 }]);
+
+      // The second frame arrives while the first handler is still running.
+      vi.setSystemTime(1_250);
+      const second = conn.simulateData({ type: "concede" });
+      await vi.advanceTimersByTimeAsync(0);
+      // The queue reaches it much later; the stamp must still be the instant
+      // the transport read it, not the time the handler acquired the game.
+      vi.setSystemTime(5_000);
+      release();
+      await Promise.all([first, second]);
+
+      expect(received).toEqual([
+        { type: "action", receivedAtMs: 1_000 },
+        { type: "concede", receivedAtMs: 1_250 },
+      ]);
+    } finally {
+      release();
+      session.close();
+      vi.useRealTimers();
+    }
   });
 
   it("buffers messages when no listeners are attached, then flushes on subscribe", async () => {
@@ -202,7 +243,7 @@ describe("PeerSession", () => {
     await flushAsync();
 
     expect(handler).toHaveBeenCalledTimes(1);
-    expect(handler).toHaveBeenCalledWith(actionMessage);
+    expect(handler).toHaveBeenCalledWith(actionMessage, expect.any(Number));
     session.close();
   });
 
@@ -369,6 +410,7 @@ describe("PeerSession", () => {
     expect(handler).toHaveBeenCalledTimes(1);
     expect(handler).toHaveBeenCalledWith(
       expect.objectContaining({ type: "game_setup", wireProtocolVersion: 25 }),
+      expect.any(Number),
     );
     session.close();
   });

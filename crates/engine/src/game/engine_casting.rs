@@ -128,6 +128,7 @@ impl CastUndoAction {
             | GameAction::RespondToSpliceOffer { .. }
             | GameAction::DecideOptionalEffectAndRemember { .. }
             | GameAction::PayUnlessCost { .. }
+            | GameAction::SayPhrase { .. }
             | GameAction::ChooseUnlessCostBranch { .. }
             | GameAction::ChooseActivationCostBranch { .. }
             | GameAction::PayCombatTax { .. }

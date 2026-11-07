@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "A spoken cost (AbilityCost::SayPhrase) is now paid one saying per PayUnlessCost; an older peer's single payment no longer completes a multi-saying cumulative upkeep"
+}

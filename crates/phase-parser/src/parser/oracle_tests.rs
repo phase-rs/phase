@@ -15,6 +15,7 @@ use crate::types::ability::{
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
+use crate::types::un_actions::PhrasePace;
 
 // Printed Oracle text and metadata verified against MTGJSON AtomicCards.
 const DIAGNOSTIC_JULIUS: &str = "Dr. Julius Jumblemorph is every creature type (even if this card isn't on the battlefield).\nWhenever a host you control enters, you may search your library and/or graveyard for a card with augment and combine it with that host. If you search your library this way, shuffle.";
@@ -18511,6 +18512,219 @@ fn parse_cumulative_upkeep_or_mana() {
         }
         other => panic!("expected OneOf with 2 Mana costs, got {other:?}"),
     }
+}
+
+#[test]
+fn parse_cumulative_upkeep_say_phrase_quickly() {
+    // Un-card (no CR entry) + CR 702.24a: Toy Boat's cumulative upkeep is a
+    // spoken payment with the "quickly" delivery qualifier. The qualifier is
+    // part of the payment (`PhrasePace::Quickly` with the engine's window), not
+    // part of the phrase, and the base cost is said once before the per-counter
+    // expansion raises the repetition count.
+    let r = parse(
+        "Cumulative upkeep\u{2014}Say \"Toy Boat\" quickly. (At the beginning of your upkeep, put an age counter on this creature, then sacrifice it unless you say \"Toy Boat\" once for each age counter on it\u{2014}without pausing between or fumbling it.)",
+        "Toy Boat",
+        &[],
+        &["Artifact", "Creature"],
+        &["Ship"],
+    );
+    let cu_kw = r
+        .extracted_keywords
+        .iter()
+        .find(|k| matches!(k, Keyword::CumulativeUpkeep(_)));
+    let Some(Keyword::CumulativeUpkeep(cost)) = cu_kw else {
+        panic!(
+            "CumulativeUpkeep keyword not extracted: {:?}",
+            r.extracted_keywords
+        );
+    };
+    match cost {
+        AbilityCost::SayPhrase {
+            phrase,
+            pace,
+            repetitions,
+        } => {
+            assert_eq!(phrase, "Toy Boat");
+            assert_eq!(*pace, PhrasePace::quickly());
+            assert_eq!(
+                pace.max_gap_ms(),
+                Some(1000),
+                "the published window is one second"
+            );
+            assert_eq!(*repetitions, 1, "PerCounter raises the count at resolution");
+        }
+        other => panic!("expected SayPhrase(\"Toy Boat\", quickly), got {other:?}"),
+    }
+}
+
+/// Walk an ability tree for a spoken cost of `phrase`. A tree covers the
+/// quoted speech wherever the parser attached it (activated ability head or a
+/// continuation link).
+fn tree_has_say_phrase(def: &AbilityDefinition, phrase: &str) -> bool {
+    fn cost_matches(cost: &AbilityCost, phrase: &str) -> bool {
+        match cost {
+            AbilityCost::SayPhrase { phrase: said, .. } => said.as_str() == phrase,
+            AbilityCost::OneOf { costs } => costs.iter().any(|cost| cost_matches(cost, phrase)),
+            _ => false,
+        }
+    }
+    def.cost
+        .as_ref()
+        .is_some_and(|cost| cost_matches(cost, phrase))
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(|sub| tree_has_say_phrase(sub, phrase))
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(|alt| tree_has_say_phrase(alt, phrase))
+}
+
+/// The description of the first `Unimplemented` gap in the tree, if any.
+fn tree_unimplemented_description(def: &AbilityDefinition) -> Option<&str> {
+    match def.effect.as_ref() {
+        Effect::Unimplemented { description, .. } => description.as_deref(),
+        _ => None,
+    }
+    .or_else(|| {
+        def.sub_ability
+            .as_deref()
+            .and_then(tree_unimplemented_description)
+    })
+    .or_else(|| {
+        def.else_ability
+            .as_deref()
+            .and_then(tree_unimplemented_description)
+    })
+}
+
+fn tree_has_unimplemented(def: &AbilityDefinition) -> bool {
+    matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(tree_has_unimplemented)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(tree_has_unimplemented)
+}
+
+/// Un-card (no CR entry) + CR 115.1 (targets change only through an ability
+/// that explicitly says so): preserving the exact speech literal keeps the
+/// quoted sentence as the saying ability's spoken cost.
+/// CR 115.1 + CR 115.9c: the restricted retarget activation ("Change the
+/// target of target spell or ability that targets only you") is explicitly
+/// deferred — it stays an honest Unsupported gap until stack-ability target
+/// restrictions are implemented in the engine.
+#[test]
+fn parse_say_phrase_scope_im_rubber_exposes_spoken_cost_and_defers_retarget() {
+    let r = parse(
+        "When you speak in non-rhyming sentences, sacrifice this enchantment.\nSay \"I'm rubber, you're glue. Everything bounces off me and sticks to you\": Change the target of target spell or ability that targets only you.",
+        "I'm Rubber, You're Glue",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+    assert!(
+        r.abilities.iter().any(|ability| tree_has_say_phrase(
+            ability,
+            "I'm rubber, you're glue. Everything bounces off me and sticks to you"
+        )),
+        "the quoted speech is the ability's spoken cost: {:?}",
+        r.abilities
+    );
+    assert!(
+        r.abilities.iter().any(|ability| matches!(
+            ability.effect.as_ref(),
+            Effect::Unimplemented { name, .. } if name == "ChangeTargets"
+        )),
+        "the restricted change-target activation remains an honest unsupported gap: {:?}",
+        r.abilities
+    );
+}
+
+/// Un-card (no CR entry): Ow's trigger is recognized while the repeated speech
+/// stays literally quoted. The "once for each permanent named Ow" payment is a
+/// known unsupported gap and stays honest rather than being approximated.
+#[test]
+fn parse_say_phrase_scope_ow_preserves_speech() {
+    let r = parse(
+        "Whenever a creature deals damage to a player, that player may say \"Ow\" once for each permanent named Ow. If the player doesn't, this enchantment deals 1 damage to them.",
+        "Ow",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+    let [trigger] = r.triggers.as_slice() else {
+        panic!("exactly the damage trigger parses: {:?}", r.triggers);
+    };
+    assert_eq!(trigger.mode, TriggerMode::DamageDone);
+    let execute = trigger.execute.as_deref().expect("the trigger has a body");
+    // The per-permanent spoken payment is an honest gap, not a `SayPhrase`
+    // cost approximation, and the gap carries the speech verbatim.
+    assert!(!tree_has_say_phrase(execute, "Ow"));
+    assert_eq!(
+        tree_unimplemented_description(execute),
+        Some("that player may say \"Ow\" once for each permanent named Ow"),
+        "the gap names the exact speech: {execute:?}"
+    );
+}
+
+/// Un-card (no CR entry): "Ach! Hans, run!" keeps its punctuation and ellipsis
+/// verbatim, so the quoted speech is never confused with the card's own name.
+#[test]
+fn parse_say_phrase_scope_ach_hans_preserves_speech() {
+    let r = parse(
+        "At the beginning of your upkeep, you may say \"Ach! Hans, run! It's the . . .\" and the name of a creature card. If you do, search your library for a card with that name, put it onto the battlefield, then shuffle. That creature gains haste. Exile it at the beginning of the next end step.",
+        "Ach! Hans, Run!",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+    let [trigger] = r.triggers.as_slice() else {
+        panic!("exactly the upkeep trigger parses: {:?}", r.triggers);
+    };
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    let execute = trigger.execute.as_deref().expect("the trigger has a body");
+    // Saying a phrase AND a card name is not a `SayPhrase` cost the engine can
+    // pay, so it stays an honest gap whose text keeps the speech verbatim.
+    assert!(!tree_has_say_phrase(
+        execute,
+        "Ach! Hans, run! It's the . . ."
+    ));
+    assert_eq!(
+        tree_unimplemented_description(execute),
+        Some("say \"Ach! Hans, run! It's the . . .\" and the name of a creature card"),
+        "the gap names the exact speech: {execute:?}"
+    );
+}
+
+/// Un-card (no CR entry): Goblin S.W.A.T. Team's speech is its own name, which
+/// the literal masking must NOT normalize to `~`. The unsupported "swats the
+/// table" unless clause stays an explicit `Unimplemented` gap.
+#[test]
+fn parse_say_phrase_scope_goblin_swat_preserves_name_and_gap() {
+    let r = parse(
+        "Say \"Goblin S.W.A.T. Team\": Put a +1/+1 counter on this creature unless an opponent swats the table within five seconds. Activate only once each turn.",
+        "Goblin S.W.A.T. Team",
+        &[],
+        &["Creature"],
+        &["Goblin"],
+    );
+    assert!(
+        r.abilities
+            .iter()
+            .any(|ability| tree_has_say_phrase(ability, "Goblin S.W.A.T. Team")),
+        "the printed name is literal speech, not a ~ reference: {:?}",
+        r.abilities
+    );
+    assert!(
+        r.abilities.iter().any(tree_has_unimplemented),
+        "the repeated physical-action unless clause remains an honest gap: {:?}",
+        r.abilities
+    );
 }
 
 #[test]

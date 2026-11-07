@@ -237,6 +237,9 @@ pub fn rekey_after_trusted_restore(state: &mut GameState) {
         .wrapping_add(1)
         .max(1);
     state.precast_shortcut_runtime.must_diverge = None;
+    if let Some(payment) = state.say_payment.as_mut() {
+        payment.id = state.un_actions.mint_say_payment_id();
+    }
     if let Some(caster) = reoffer_from {
         let waiting_for = maybe_offer_after_cast_triggers(state, caster, priority_for(caster));
         crate::game::public_state::sync_waiting_for(state, &waiting_for);

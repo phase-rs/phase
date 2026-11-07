@@ -1293,25 +1293,43 @@ fn pay_ability_cost_inner(
         ));
     }
     match cost {
-        // Un-card (no CR entry): saying the phrase is the whole payment.
-        AbilityCost::SayPhrase { phrase } => {
+        // Un-card (no CR entry): saying the phrase is the whole payment. A
+        // cumulative-upkeep expansion of a spoken cost demands one saying per age
+        // counter (CR 702.24a), so this authority announces one `PhraseSaid` per
+        // `repetitions` in the cost it is handed. The interactive unless-payment
+        // prompt hands it one saying at a time and re-asks for the rest, so no
+        // caller can report a multi-saying payment from a single action; a
+        // non-interactive payment of a cost that still carries `repetitions > 1`
+        // announces them all here, as one payment.
+        //
+        // The pace (Toy Boat's "quickly") is a wall-clock property of the saying
+        // itself. As with `types::contest`, the engine never reads a clock — a
+        // host that can observe wall-clock time reports what the human did, so
+        // the payment records exactly the sayings that were reported.
+        AbilityCost::SayPhrase {
+            phrase,
+            repetitions,
+            ..
+        } => {
             if !super::un_actions::player_can_say_phrases(state, player) {
                 return Ok(payment_failed(
                     "Player has not opted in to Un-card spoken actions".to_string(),
                 ));
             }
             if !dry_run {
-                events.push(GameEvent::PhraseSaid {
-                    player,
-                    phrase: phrase.clone(),
-                });
-                super::un_actions::record_tell(
-                    state,
-                    player,
-                    &crate::types::un_actions::UnTell::Said {
-                        text: phrase.clone(),
-                    },
-                );
+                for _ in 0..(*repetitions).max(1) {
+                    events.push(GameEvent::PhraseSaid {
+                        player,
+                        phrase: phrase.clone(),
+                    });
+                    super::un_actions::record_tell(
+                        state,
+                        player,
+                        &crate::types::un_actions::UnTell::Said {
+                            text: phrase.clone(),
+                        },
+                    );
+                }
             }
         }
         AbilityCost::Tap => {
@@ -3736,9 +3754,7 @@ mod tests {
             .add_enchantment_from_oracle(P0, "Phrase Source", "Flying")
             .id();
         let mut runner = scenario.build();
-        let cost = AbilityCost::SayPhrase {
-            phrase: "Gotcha!".to_string(),
-        };
+        let cost = AbilityCost::say_phrase("Gotcha!");
         let excluded = HashSet::new();
         let scope = PaymentScope::Activation {
             excluded_sources: &excluded,
@@ -4041,9 +4057,7 @@ mod tests {
             },
             AbilityCost::Tap => AbilityCost::Tap,
             AbilityCost::Untap => AbilityCost::Untap,
-            AbilityCost::SayPhrase { .. } => AbilityCost::SayPhrase {
-                phrase: "Gotcha!".to_string(),
-            },
+            AbilityCost::SayPhrase { .. } => AbilityCost::say_phrase("Gotcha!"),
             AbilityCost::Loyalty { .. } => AbilityCost::Loyalty { amount: 1 },
             AbilityCost::Sacrifice(_) => {
                 AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1))

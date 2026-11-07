@@ -23,7 +23,8 @@ use crate::types::identifiers::{ObjectId, ObjectIdentityBinding};
 use crate::types::player::PlayerId;
 use crate::types::triggers::TriggerMode;
 use crate::types::un_actions::{
-    spoken_words, word_matches, GotchaCondition, GotchaOffer, UnAction, UnTell, UnTellKind,
+    spoken_words, word_matches, GotchaCondition, GotchaOffer, SayPhrasePayment, UnAction, UnTell,
+    UnTellKind,
 };
 use crate::types::zones::Zone;
 
@@ -40,11 +41,51 @@ pub fn player_can_say_phrases(state: &GameState, player: PlayerId) -> bool {
 pub fn say_phrase_prompt(effect: &Effect) -> Option<String> {
     match effect {
         Effect::PayCost {
-            cost: AbilityCost::SayPhrase { phrase },
+            cost:
+                AbilityCost::SayPhrase {
+                    phrase,
+                    repetitions,
+                    ..
+                },
             ..
-        } => Some(format!("Say \"{phrase}\"")),
+        } => {
+            let times = (*repetitions).max(1);
+            Some(if times > 1 {
+                format!("Say \"{phrase}\" {times} times")
+            } else {
+                format!("Say \"{phrase}\"")
+            })
+        }
         _ => None,
     }
+}
+
+/// Whether `cost` is a TIMED spoken payment (Toy Boat's "Say \"Toy Boat\"
+/// quickly"), which only host-stamped `GameAction::SayPhrase` observations can
+/// pay.
+pub fn is_timed_saying(cost: &AbilityCost) -> bool {
+    matches!(cost, AbilityCost::SayPhrase { pace, .. } if pace.is_quick())
+}
+
+/// Un-card (no CR entry): arm the engine-owned payment instance for the
+/// unless-payment prompt that is about to surface `cost`.
+///
+/// A TIMED spoken payment gets its engine-authored instance when the prompt
+/// surfaces, so the client can name it in its first `SayPhrase` observation and
+/// its deadline survives a reconnect. Any other prompt supersedes a spoken one,
+/// so the slot is cleared otherwise. This is the single authority every route
+/// that surfaces `WaitingFor::UnlessPayment` goes through — the direct
+/// unless-cost and the branch picked from a disjunctive (`OneOf`) one alike.
+pub(crate) fn arm_say_payment(state: &mut GameState, cost: &AbilityCost) {
+    state.say_payment = match cost {
+        AbilityCost::SayPhrase { repetitions, .. } if is_timed_saying(cost) => {
+            Some(Box::new(SayPhrasePayment::new(
+                state.un_actions.mint_say_payment_id(),
+                (*repetitions).max(1),
+            )))
+        }
+        _ => None,
+    };
 }
 
 /// Whether paying `cost` would need `player` to say a phrase they have not

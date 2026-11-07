@@ -2998,7 +2998,10 @@
     },
     "sayPhrase": {
       "title": "Say it to stop the effect",
-      "say": "Say “{{phrase}}”",
+      "say": "Dites « {{phrase}} »",
+      "sayTimes": "Dites « {{phrase}} » {{count}} fois",
+      "progress": "{{said}} sur {{required}} dites",
+      "quickly": "Sans pause ni hésitation : chaque clic doit arriver dans la seconde !",
       "stayQuiet": "Stay quiet"
     },
     "fx": {

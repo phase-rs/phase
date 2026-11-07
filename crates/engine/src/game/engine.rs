@@ -41,6 +41,7 @@ use crate::types::resolved_commands::{
     ResolvedOncePerTurnPermission, ResolvedRulesCommand,
 };
 use crate::types::statics::CastFrequency;
+use crate::types::un_actions::SayPhraseObservation;
 use crate::types::zones::Zone;
 
 use super::ability_utils::{
@@ -14929,6 +14930,28 @@ fn apply_non_priority_pass_action(
                 state,
                 waiting_for.clone(),
                 pay,
+                &mut events,
+            );
+        }
+        // Un-card (no CR entry): one host-stamped observation of a timed spoken
+        // unless-cost — a saying, or the host's clock passing the window. The
+        // host reports the instant (and a saying's sequence); the deterministic
+        // engine decides whether it landed inside the window it stores
+        // (`types::un_actions::SayPhrasePayment`).
+        (
+            waiting_for @ WaitingFor::UnlessPayment { .. },
+            GameAction::SayPhrase {
+                payment,
+                seq,
+                at_ms,
+                report,
+            },
+        ) => {
+            return engine_payment_choices::handle_say_phrase(
+                state,
+                waiting_for.clone(),
+                payment,
+                SayPhraseObservation { seq, at_ms, report },
                 &mut events,
             );
         }

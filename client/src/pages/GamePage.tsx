@@ -21,12 +21,16 @@ import type {
   GameFormat,
   MatchConfig,
   ObjectId,
+  PhrasePace,
+  SayPhrasePayment,
   SerializedAbilityCost,
   AiDecisionDiagnosticReceipt,
   TakebackEvent,
   TakebackResolution,
 } from "../adapter/types";
 import {
+  AdapterError,
+  AdapterErrorCode,
   supportsAiDecisionDiagnostics,
   supportsDebugHandReveal,
   supportsMatchConcede,
@@ -174,6 +178,7 @@ import { P2PHostAdapter, type P2PAdapterEvent } from "../adapter/p2p-adapter.ts"
 import { WebSocketAdapter } from "../adapter/ws-adapter.ts";
 import type { WsAdapterEvent } from "../adapter/ws-adapter.ts";
 import { MANA_PAYMENT_WAITING_FOR_TYPES } from "../game/waitingForRegistry.ts";
+import { sayPhraseHostClockMs } from "../game/sayPhraseClock.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../hooks/useInspectHoverProps.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
@@ -3836,6 +3841,10 @@ function formatUnlessCost(
         count?: number;
         /** Un-card `SayPhrase` cost: the phrase the payer says. */
         phrase?: string;
+        /** CR 702.24a: how many times it must be said (Toy Boat: one per age counter). */
+        repetitions?: number;
+        /** Delivery pace; a `Quickly` pace carries the engine's window. */
+        pace?: PhrasePace;
       },
   t: TFunction<"game">,
 ): string {
@@ -3869,8 +3878,13 @@ function formatUnlessCost(
   switch (cost.type) {
     // Legacy `UnlessCost` JSON (pre-2026-05-09 fold) — preserved for
     // saved-game compat.
-    case "SayPhrase":
-      return t("unActions.sayPhrase.say", { phrase: cost.phrase ?? "" });
+    case "SayPhrase": {
+      const times = cost.repetitions ?? 1;
+      const phrase = cost.phrase ?? "";
+      return times > 1
+        ? t("unActions.sayPhrase.sayTimes", { phrase, count: times })
+        : t("unActions.sayPhrase.say", { phrase });
+    }
     case "Fixed":
       return cost.cost ? formatManaCost(cost.cost) : "0";
     case "DiscardCard":
@@ -3902,10 +3916,267 @@ function formatUnlessCost(
   }
 }
 
-/** The say-it prompt for a `SayPhrase` unless-cost. Answering "pay" says the phrase. */
-function SayPhrasePanel({ phrase, effect }: { phrase: string; effect?: string }) {
+/** How often a closed spoken-payment window is re-reported while the engine,
+ *  judging on its own clock, has not yet lapsed it. */
+const SAY_PHRASE_EXPIRY_RETRY_MS = 250;
+
+/**
+ * The say-it prompt for a `SayPhrase` unless-cost. Answering "pay" says the
+ * phrase. Toy Boat's cumulative upkeep asks for the phrase once per age counter
+ * *quickly*: the engine publishes both the repetition count (CR 702.24a) and the
+ * pace window, and this panel's only job is to collect that many clicks and time
+ * them. A lapsed window is reported as declining the payment (CR 118.12a), so the
+ * engine -- not the client -- produces the sacrifice.
+ */
+function SayPhrasePanel({
+  phrase,
+  repetitions,
+  quickWindowMs,
+  sayPayment,
+  effect,
+}: {
+  phrase: string;
+  /** Sayings the engine still owes an answer for (one click each). */
+  repetitions: number;
+  /** Present for a "quickly" payment: each click must land inside the window. */
+  quickWindowMs?: number;
+  /** The engine-owned instance of this payment, when it is a timed one. */
+  sayPayment?: SayPhrasePayment | null;
+  effect?: string;
+}) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
+  // The ENGINE owns this payment. `sayPayment` is the instance it minted for
+  // this prompt: how many sayings it has actually accepted and the host instant
+  // by which the next one must arrive. Each click is a host-stamped observation
+  // (`SayPhrase`) that the engine validates against that deadline, so a pause is
+  // judged by the engine and this panel only renders the result.
+  const said = sayPayment?.said ?? 0;
+  const total = Math.max(1, sayPayment?.owed ?? repetitions);
+  const paymentId = sayPayment?.id ?? 0;
+  // Continue the host sequence the engine already accepted. A client that
+  // reconnects mid-payment must not replay a sequence number: the engine rejects
+  // it as a duplicate (`SayPhrasePayment::observe`).
+  const seq = useRef(sayPayment?.last_seq ?? 0);
+  // The host instant of this payment's most recent click. It is what the
+  // engine validates, so the window is armed from it rather than from an
+  // acknowledgement (a slow round trip must not shorten the player's window).
+  const lastSaidAt = useRef<number | null>(null);
+  // Sayings submitted by this panel that the engine has not accepted yet,
+  // keyed by the host sequence they carry. A definite no-send retracts exactly
+  // the attempt it settled, and the engine's accepted count below is the
+  // authority for progress.
+  const [inFlight, setInFlight] = useState<Map<number, number>>(() => new Map());
+  const inFlightRef = useRef(inFlight);
+  inFlightRef.current = inFlight;
+  const paymentIdRef = useRef(paymentId);
+  paymentIdRef.current = paymentId;
+  // A phrase paid at the payer's own pace has no host stamps: its clicks are
+  // counted locally until the engine's prompt closes.
+  const [quietReported, setQuietReported] = useState(said);
+  const reported =
+    quickWindowMs === undefined ? quietReported : said + inFlight.size;
+
+  // A fresh engine instance is a fresh payment; local progress restarts from
+  // it.
+  useEffect(() => {
+    seq.current = sayPayment?.last_seq ?? 0;
+    lastSaidAt.current = null;
+    setInFlight(new Map());
+    setQuietReported(said);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paymentId]);
+
+  useEffect(() => {
+    if (quickWindowMs === undefined) {
+      setQuietReported((current) => Math.max(current, said));
+    }
+  }, [quickWindowMs, said]);
+
+  // Drop attempts the engine has accepted. Until this runs, the local suffix
+  // keeps a rapid click from over-reporting past the payment's requirement.
+  // `last_seq` is the published sequence authority; `said` covers a state that
+  // predates it (or a stand-in engine that only publishes the count), where
+  // the accepted attempts are exactly the first `said` sequences.
+  const lastAcceptedSeq = Math.max(sayPayment?.last_seq ?? 0, said);
+  useEffect(() => {
+    setInFlight((current) => {
+      let next: Map<number, number> | null = null;
+      for (const attemptSeq of current.keys()) {
+        if (attemptSeq > lastAcceptedSeq) continue;
+        next ??= new Map(current);
+        next.delete(attemptSeq);
+      }
+      return next ?? current;
+    });
+  }, [lastAcceptedSeq]);
+
+  // CR 118.12a: the pace is part of the payment. The window times the pause
+  // *between* sayings, so it only starts once a saying has been made: a single
+  // required saying has no pause to measure and must never expire before it is
+  // made. It is armed from the host instant of the player's own click, so only
+  // an actual pause can lapse it, and a saying still awaiting an
+  // acknowledgement holds it (the engine already has that answer). A payment
+  // restored after a reload or reconnect has no click from this panel, so it is
+  // armed from the deadline the engine retained (same epoch-millisecond domain).
+  //
+  // A closed window is reported as an EXPIRY, never as a saying: the engine
+  // lapses the payment only once its clock is past the deadline, and an expiry
+  // never counts toward the payment. The report is sent strictly after the
+  // deadline and repeated until the engine closes the prompt, because the
+  // engine judges it on its own (possibly server) clock.
+  const retainedDeadline = sayPayment?.deadline_ms;
+  // Track the current deadline in a ref. The timer callback reads this ref
+  // directly so it always uses the latest deadline without needing to be
+  // restarted on every local saying.
+  const deadlineRef = useRef<number | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = undefined;
+      }
+      deadlineRef.current = null;
+    };
+  }, []);
+
+  // Compute the current deadline based on latest click or retained deadline.
+  const computeDeadline = (): number | null => {
+    const hasLocalClick = lastSaidAt.current !== null;
+    const hasRestoredDeadline = said > 0 && retainedDeadline !== undefined && retainedDeadline !== null;
+    if (quickWindowMs === undefined || (!hasLocalClick && !hasRestoredDeadline)) return null;
+    return lastSaidAt.current !== null ? lastSaidAt.current + quickWindowMs : retainedDeadline!;
+  };
+
+  // Start the expiry timer. The callback reads deadlineRef.current so it
+  // automatically uses the latest deadline (updated by `say` on each click
+  // or by this effect on engine acknowledgement).
+  const startTimer = () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    const check = () => {
+      if (!mountedRef.current) return;
+      if (paymentIdRef.current !== paymentId) return;
+      const deadline = deadlineRef.current;
+      if (deadline === null) return;
+      const now = sayPhraseHostClockMs();
+      if (now <= deadline) {
+        timerRef.current = setTimeout(check, deadline - now + 1);
+        return;
+      }
+      void dispatch({
+        type: "SayPhrase",
+        data: { payment: paymentId, seq: 0, at_ms: now, report: "Expiry" },
+      }).catch(() => {});
+      if (!mountedRef.current || paymentIdRef.current !== paymentId) return;
+      timerRef.current = setTimeout(check, SAY_PHRASE_EXPIRY_RETRY_MS);
+    };
+    const deadline = deadlineRef.current;
+    if (deadline !== null) {
+      timerRef.current = setTimeout(check, Math.max(0, deadline - sayPhraseHostClockMs() + 1));
+    }
+  };
+
+  // Effect: compute deadline and start timer when engine acknowledges a saying
+  // (said changes) or payment/retained deadline changes. The deadline ref is
+  // also updated in `say()` on each local click.
+  //
+  // The timer only arms AFTER the first saying (said > 0 or a local click).
+  // A fresh prompt with said = 0 has no pause to measure; the window starts
+  // on the first click. A restored payment (said > 0) arms from the engine's
+  // retained deadline_ms.
+  useEffect(() => {
+    // No saying made yet and no local click: no pause to time, don't run.
+    if (said === 0 && lastSaidAt.current === null) {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = undefined;
+      }
+      deadlineRef.current = null;
+      return;
+    }
+
+    const deadline = computeDeadline();
+    if (deadline === null) {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = undefined;
+      }
+      deadlineRef.current = null;
+      return;
+    }
+    deadlineRef.current = deadline;
+    startTimer();
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dispatch, paymentId, quickWindowMs, retainedDeadline, said]);
+
+  const submitSaying = (at: number, retriesLeft: number) => {
+    seq.current += 1;
+    const attemptSeq = seq.current;
+    const attemptPayment = paymentId;
+    setInFlight((current) => new Map(current).set(attemptSeq, at));
+    void dispatch({
+      type: "SayPhrase",
+      data: { payment: attemptPayment, seq: attemptSeq, at_ms: at, report: "Saying" },
+    }).catch((err) => {
+      // Fence the settlement by the payment and sequence that issued it: a
+      // rejection from an older payment must never decrement a replacement's
+      // count, and a stale attempt must not retract a newer one.
+      if (paymentIdRef.current !== attemptPayment) return;
+      setInFlight((current) => {
+        if (!current.has(attemptSeq)) return current;
+        const next = new Map(current);
+        next.delete(attemptSeq);
+        return next;
+      });
+      if (!(err instanceof AdapterError && err.code === AdapterErrorCode.ACTION_NOT_SENT)) {
+        return;
+      }
+      if (retriesLeft > 0) {
+        // Definite no-send: the bytes never left this host. Retry the SAME
+        // spoken instant as a fresh sequence. The engine requires a newer
+        // sequence, and an observation that never arrived cannot consume one
+        // of the sayings.
+        submitSaying(at, retriesLeft - 1);
+      } else if (inFlightRef.current.size <= 1) {
+        // Nothing reached the authority; reopen the click instead of leaving a
+        // local count that blocks the next saying forever.
+        lastSaidAt.current = null;
+      }
+    });
+  };
+
+  const say = () => {
+    // One click is one saying, and the engine accepts no more than the payment
+    // requires (a rapid double click must not over-report).
+    if (reported >= total) return;
+    if (quickWindowMs === undefined) {
+      const attemptPayment = paymentId;
+      setQuietReported((current) => current + 1);
+      void dispatch({ type: "PayUnlessCost", data: { pay: true } }).catch((err) => {
+        if (paymentIdRef.current !== attemptPayment) return;
+        if (err instanceof AdapterError && err.code === AdapterErrorCode.ACTION_NOT_SENT) {
+          setQuietReported((current) => Math.max(said, current - 1));
+        }
+      });
+      return;
+    }
+    const at = sayPhraseHostClockMs();
+    lastSaidAt.current = at;
+    // Update the deadline ref. The running timer will pick up the new deadline
+    // on its next check without needing to be restarted.
+    deadlineRef.current = at + quickWindowMs;
+    submitSaying(at, 2);
+  };
+
+  const required = total;
 
   return (
     <AnimatePresence>
@@ -3923,20 +4194,26 @@ function SayPhrasePanel({ phrase, effect }: { phrase: string; effect?: string })
           {effect && (
             <p className="mb-2 text-center text-xs text-gray-400">{effect}</p>
           )}
+          {quickWindowMs !== undefined && required > 1 && (
+            <p className="mb-2 text-center text-xs font-semibold text-fuchsia-200">
+              {t("unActions.sayPhrase.quickly")}
+            </p>
+          )}
           <div className="flex flex-col items-center gap-3">
-            <motion.button
+            {/* The text box that says the phrase: one click per repetition. */}
+            <button
               type="button"
-              onClick={() =>
-                dispatch({ type: "PayUnlessCost", data: { pay: true } })
-              }
-              className={gameButtonClass({ tone: "emerald", size: "md" })}
-              animate={{ rotate: [0, -2, 2, -2, 0], scale: [1, 1.03, 1] }}
-              transition={{ duration: 1.2, repeat: Infinity }}
-              whileTap={{ scale: 0.92, rotate: 6 }}
+              onClick={say}
+              aria-label={t("unActions.sayPhrase.say", { phrase })}
+              className="w-full rounded-lg border-2 border-fuchsia-300/40 bg-gray-950 px-4 py-3 text-center font-mono text-lg font-semibold text-fuchsia-100 shadow-inner transition hover:border-fuchsia-300/70 active:scale-[0.98]"
             >
-              <span aria-hidden className="mr-2">{"\u{1F64F}"}</span>
-              {t("unActions.sayPhrase.say", { phrase })}
-            </motion.button>
+              {phrase}
+            </button>
+            {required > 1 && (
+              <p className="text-center text-xs text-gray-400">
+                {t("unActions.sayPhrase.progress", { said, required })}
+              </p>
+            )}
             <button
               type="button"
               onClick={() =>
@@ -3957,6 +4234,7 @@ function UnlessPaymentPanel() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const waitingFor = useGameStore((s) => s.waitingFor);
+  const sayPayment = useGameStore((s) => s.gameState?.say_payment ?? null);
 
   if (waitingFor?.type !== "UnlessPayment") return null;
 
@@ -3966,7 +4244,18 @@ function UnlessPaymentPanel() {
   // Un-card say-it payment (Rod of Spanking's "unless that player says ..."):
   // the "payment" is a spoken phrase, so it gets its own button and gag.
   if (waitingFor.data.cost.type === "SayPhrase") {
-    return <SayPhrasePanel phrase={waitingFor.data.cost.phrase} effect={effect} />;
+    const sayCost = waitingFor.data.cost;
+    return (
+      <SayPhrasePanel
+        phrase={sayCost.phrase}
+        repetitions={sayCost.repetitions ?? 1}
+        quickWindowMs={
+          sayCost.pace?.type === "Quickly" ? sayCost.pace.max_gap_ms : undefined
+        }
+        sayPayment={sayPayment}
+        effect={effect}
+      />
+    );
   }
 
   const costDisplay = formatUnlessCost(waitingFor.data.cost, t);

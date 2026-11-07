@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "SayPhrase gains a host-stamped observation action and GameState carries the engine-owned SayPhrasePayment instance; an older peer cannot answer a timed spoken payment"
+}

@@ -1,0 +1,6 @@
+{
+  "surfaces": [
+    "wire"
+  ],
+  "reason": "P2PMessage gains saying_result, the correlated reply to one spoken-payment observation; an older host cannot answer it"
+}

@@ -1287,6 +1287,7 @@ fn fatal_startup(message: impl std::fmt::Display) -> ! {
 }
 
 /// Per-socket state tracking which game/player this connection belongs to.
+#[derive(Default)]
 struct SocketIdentity {
     game_code: Option<String>,
     player_id: Option<PlayerId>,
@@ -5156,6 +5157,22 @@ async fn handle_socket(
     // before that queued greeting is encoded.
     let (hello_tx, hello_rx) = tokio::sync::oneshot::channel();
     let (application, mut incoming) = mpsc::channel(socket_ingress::MAX_COMMANDS);
+    let drain_ingress = socket.ingress_sender();
+    tx.set_ingress_drain(move || {
+        let ingress = drain_ingress.clone();
+        async move {
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            let received = socket_io::Received {
+                message: socket_io::IngressFrame::Drain(done_tx),
+                received_at: Instant::now(),
+                admission: crate::socket_ingress::Admission::synthetic(),
+                heartbeat: socket_io::HeartbeatInspection::Complete,
+            };
+            if ingress.send(received).await.is_ok() {
+                let _ = done_rx.await;
+            }
+        }
+    });
     transport.set_decoder(tokio::spawn(socket_decode::run(
         frames,
         socket.clone(),
@@ -5189,6 +5206,11 @@ async fn handle_socket(
                     None => break,
                 },
             };
+            if let Some(drain) = client_msg.drain {
+                let _ = drain.send(());
+                drop(admission);
+                continue;
+            }
             socket.set_command_id(client_msg.command_id());
             let resync = client_msg.resync;
             let client_msg = client_msg.message;
@@ -8935,7 +8957,11 @@ async fn handle_full_game_submission(
     game_db: &SharedGameDb,
     game_spectators: &SharedGameSpectators,
     identity: &SocketIdentity,
+    received_at: Instant,
 ) {
+    // Un-card (no CR entry): attribute the observation to the instant the
+    // socket read it, not to the moment its queued handler acquired the game.
+    let host_received_at_ms = epoch_ms_at_ingress(received_at);
     let reply = tx.for_completion(command_id);
     let kind = submission.kind();
     let is_zero_count_debug_create = submission.is_zero_count_debug_create();
@@ -8970,6 +8996,53 @@ async fn handle_full_game_submission(
         return;
     }
     let session = session.expect("the authority gate proved the session exists");
+    let seat = identity
+        .player_id
+        .expect("the authority gate proved this seat");
+    apply_and_publish_full_submission(
+        session,
+        submission,
+        &player_token,
+        seat,
+        command_id,
+        host_received_at_ms,
+        &reply,
+        executor,
+        state,
+        db,
+        draft_state,
+        connections,
+        game_db,
+        game_spectators,
+        game_code,
+        kind,
+        lock_start,
+        is_zero_count_debug_create,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_and_publish_full_submission(
+    session: tokio::sync::OwnedMutexGuard<server_core::session::GameSession>,
+    submission: GameSubmission,
+    player_token: &str,
+    seat: PlayerId,
+    command_id: Option<server_core::protocol::CommandId>,
+    host_received_at_ms: u64,
+    reply: &crate::socket_mailbox::Completion<'_>,
+    executor: &game_executor::GameExecutor,
+    state: &SharedState,
+    db: &SharedDb,
+    draft_state: &SharedDraftState,
+    connections: &SharedConnections,
+    game_db: &SharedGameDb,
+    game_spectators: &SharedGameSpectators,
+    game_code: String,
+    kind: &'static str,
+    lock_start: Instant,
+    is_zero_count_debug_create: bool,
+) {
     let publisher = if is_zero_count_debug_create {
         None
     } else {
@@ -8989,30 +9062,24 @@ async fn handle_full_game_submission(
                 Vec::new(),
             )
             .await
-            .with_completion(
-                identity
-                    .player_id
-                    .expect("the authority gate proved this seat"),
-                command_id,
-            ),
+            .with_completion(seat, command_id),
         )
     };
     let card_db = db.clone();
     let persistence = game_db.clone();
     let persistence_executor = executor.clone();
     let code = game_code.clone();
-    let seat = identity
-        .player_id
-        .expect("the authority gate proved this seat");
+    let player_token = player_token.to_string();
     // The owned game guard spans admission waits, AI continuations and all
     // publication. Other games can use the CPU between these work units.
     let (session, applied) = executor
         .with_session(session, move |session| {
             let HandledAction { result, takeback } = match submission {
-                GameSubmission::Action(action) => session.handle_action_with_card_db_outcome(
+                GameSubmission::Action(action) => session.handle_action_with_card_db_outcome_at(
                     &player_token,
                     action,
                     Some(card_db.as_ref()),
+                    host_received_at_ms,
                 ),
                 GameSubmission::Interaction(submission) => session
                     .handle_interaction_with_rejection(&player_token, submission)
@@ -9087,6 +9154,7 @@ async fn handle_full_game_submission(
             return;
         }
     };
+    let expiry = say_phrase_expiry_target(&session);
     let AppliedHumanSubmission {
         revision,
         unpublished,
@@ -9102,6 +9170,17 @@ async fn handle_full_game_submission(
         broadcast_ai_failure(connections, &game_code, ai.fault).await;
         info!(game = %game_code, kind, lock_ms = lock_start.elapsed().as_millis(), ai_actions = 0, "game submission processed (lock held)");
         drop(session);
+        schedule_say_phrase_expiry(
+            expiry,
+            executor,
+            state,
+            db,
+            draft_state,
+            connections,
+            game_db,
+            game_spectators,
+            &game_code,
+        );
         return;
     };
     finish_full_ai_continuation(
@@ -9111,17 +9190,28 @@ async fn handle_full_game_submission(
         revision,
         publisher,
         takeback_after.into_iter().collect(),
-        &reply,
+        reply,
         executor,
         state,
         draft_state,
         connections,
         game_db,
-        game_code,
+        game_code.clone(),
         kind,
         lock_start,
     )
     .await;
+    schedule_say_phrase_expiry(
+        expiry,
+        executor,
+        state,
+        db,
+        draft_state,
+        connections,
+        game_db,
+        game_spectators,
+        &game_code,
+    );
 }
 
 /// Runs the AI continuation of a human transition whose publication waited on
@@ -10032,6 +10122,187 @@ async fn handle_resync_state(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The epoch-millisecond instant of a server ingress observation.
+///
+/// `received_at` is monotonic; subtracting its age from the current wall clock
+/// recovers the receipt instant even after the command waited behind earlier
+/// work. No client-controlled timestamp enters this value.
+fn epoch_ms_at_ingress(received_at: Instant) -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    now.saturating_sub(received_at.elapsed().as_millis() as u64)
+}
+
+/// The live timed spoken payment the server must lapse on its own clock.
+///
+/// Un-card (no CR entry): Toy Boat's one-second gap is observed by the host.
+/// The client may report the lapse too, but it cannot be the only timer: a
+/// reloaded or skewed payer would otherwise hold the payment open forever.
+/// `(payer, payer token, payment id, deadline)` is read under the session lock.
+pub(crate) fn say_phrase_expiry_target(
+    session: &GameSession,
+) -> Option<(PlayerId, String, u64, u64)> {
+    if session.hosting() == server_core::session::HostingMode::SingleUser {
+        return None;
+    }
+    let payment = session.state.say_payment.as_deref()?;
+    let deadline_ms = payment.deadline_ms?;
+    let engine::types::game_state::WaitingFor::UnlessPayment { player, .. } =
+        &session.state.waiting_for
+    else {
+        return None;
+    };
+    let token = session.player_tokens.get(player.0 as usize)?;
+    if token.is_empty() {
+        return None;
+    }
+    Some((*player, token.clone(), payment.id, deadline_ms))
+}
+
+/// Arm one server-clock lapse observation for a live spoken payment.
+///
+/// The task owns the payer's identity and re-enters the ordinary submission
+/// path, so the expiry gets the same authority gate, publication, persistence
+/// and AI continuation as any other action. It re-reads the live deadline
+/// before submitting: a saying accepted while the task slept advances the
+/// deadline, and an expiry frame from the old deadline must not be sent.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn schedule_say_phrase_expiry(
+    target: Option<(PlayerId, String, u64, u64)>,
+    executor: &game_executor::GameExecutor,
+    state: &SharedState,
+    db: &SharedDb,
+    draft_state: &SharedDraftState,
+    connections: &SharedConnections,
+    game_db: &SharedGameDb,
+    game_spectators: &SharedGameSpectators,
+    game_code: &str,
+) {
+    let Some((payer, token, payment_id, deadline_ms)) = target else {
+        return;
+    };
+    let executor = executor.clone();
+    let state = state.clone();
+    let db = db.clone();
+    let draft_state = draft_state.clone();
+    let connections = connections.clone();
+    let game_db = game_db.clone();
+    let game_spectators = game_spectators.clone();
+    let game_code = game_code.to_string();
+    tokio::spawn(async move {
+        let mut sleep_for = Duration::from_millis(
+            deadline_ms.saturating_sub(epoch_ms_at_ingress(Instant::now())) + 1,
+        );
+        loop {
+            tokio::time::sleep(sleep_for).await;
+            let payer_tx = {
+                let routes = connections.lock().await;
+                routes
+                    .get(&game_code)
+                    .and_then(|seats| seats.get(&payer))
+                    .cloned()
+            };
+            if let Some(ref payer_tx) = payer_tx {
+                payer_tx.drain_ingress().await;
+            }
+            let live = match lock_session(&state, &game_code).await {
+                Ok(session) => say_phrase_expiry_target(&session),
+                Err(_) => return,
+            };
+            match live {
+                Some((live_payer, _, live_payment, live_deadline))
+                    if live_payer == payer && live_payment == payment_id =>
+                {
+                    let now = epoch_ms_at_ingress(Instant::now());
+                    if live_deadline > now {
+                        sleep_for = Duration::from_millis(live_deadline.saturating_sub(now) + 1);
+                        continue;
+                    }
+                    break;
+                }
+                // The payment was answered, replaced, or this session retired.
+                _ => return,
+            }
+        }
+        apply_say_phrase_expiry(
+            &game_code,
+            payer,
+            &token,
+            payment_id,
+            &executor,
+            &state,
+            &db,
+            &draft_state,
+            &connections,
+            &game_db,
+            &game_spectators,
+            Instant::now(),
+        )
+        .await;
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_say_phrase_expiry(
+    game_code: &str,
+    payer: PlayerId,
+    player_token: &str,
+    payment_id: u64,
+    executor: &game_executor::GameExecutor,
+    state: &SharedState,
+    db: &SharedDb,
+    draft_state: &SharedDraftState,
+    connections: &SharedConnections,
+    game_db: &SharedGameDb,
+    game_spectators: &SharedGameSpectators,
+    received_at: Instant,
+) {
+    let host_received_at_ms = epoch_ms_at_ingress(received_at);
+    let lock_start = Instant::now();
+    let Ok(session) = lock_session(state, game_code).await else {
+        return;
+    };
+    let live = say_phrase_expiry_target(&session);
+    let Some((live_payer, _, live_payment, live_deadline)) = live else {
+        return;
+    };
+    if live_payer != payer || live_payment != payment_id || live_deadline > host_received_at_ms {
+        return;
+    }
+    let (dummy_tx, _) = socket_mailbox::channel();
+    let reply = dummy_tx.for_completion(None);
+    let action = GameAction::SayPhrase {
+        payment: payment_id,
+        seq: 0,
+        at_ms: 0,
+        report: engine::types::un_actions::SayPhraseReport::Expiry,
+    };
+    apply_and_publish_full_submission(
+        session,
+        GameSubmission::Action(action),
+        player_token,
+        payer,
+        None,
+        host_received_at_ms,
+        &reply,
+        executor,
+        state,
+        db,
+        draft_state,
+        connections,
+        game_db,
+        game_spectators,
+        game_code.to_string(),
+        "say_phrase_expiry",
+        lock_start,
+        false,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_client_message(
     client_msg: ClientMessage,
     resync: Option<socket_mailbox::ResyncPermit>,
@@ -10491,6 +10762,7 @@ async fn handle_client_message(
                 game_db,
                 game_spectators,
                 identity,
+                received_at,
             )
             .await;
             if let Some(game_code) = identity.game_code.as_deref() {
@@ -10522,6 +10794,7 @@ async fn handle_client_message(
                 game_db,
                 game_spectators,
                 identity,
+                received_at,
             )
             .await;
             if let Some(game_code) = identity.game_code.as_deref() {
@@ -19710,6 +19983,23 @@ mod game_submission_tests {
     use tokio_tungstenite::tungstenite::Message as WsMessage;
     use tokio_tungstenite::MaybeTlsStream;
     use tokio_tungstenite::WebSocketStream;
+
+    /// The receipt instant must survive the application queue. A handler that
+    /// finally runs after earlier publication, broadcast and AI work must not
+    /// stamp the observation with its own later clock, or two timely packets
+    /// can be judged late.
+    #[test]
+    fn ingress_instant_survives_a_delayed_handler() {
+        let received_at = std::time::Instant::now()
+            .checked_sub(Duration::from_secs(30))
+            .expect("the test clock supports a 30s interval");
+        let stamped = epoch_ms_at_ingress(received_at);
+        let handler_time = epoch_ms_at_ingress(std::time::Instant::now());
+        assert!(
+            handler_time.saturating_sub(stamped) >= 29_000,
+            "queued work kept the receipt instant: stamped={stamped}, handler={handler_time}"
+        );
+    }
 
     #[test]
     fn zero_count_debug_create_is_the_only_submission_no_op() {

@@ -129,9 +129,7 @@ fn rod_of_spanking_parses_an_unless_say_phrase_cost() {
         .expect("untap is gated by an unless cost");
     assert_eq!(
         unless.cost,
-        AbilityCost::SayPhrase {
-            phrase: "Thank you, sir. May I have another?".to_string()
-        }
+        AbilityCost::say_phrase("Thank you, sir. May I have another?")
     );
 }
 
@@ -223,7 +221,7 @@ fn say_it_payments_parse_for_optional_you_may_say_cards() {
         assert!(
             matches!(
                 &*execute.effect,
-                Effect::PayCost { cost: AbilityCost::SayPhrase { phrase: p }, .. } if p == phrase
+                Effect::PayCost { cost: AbilityCost::SayPhrase { phrase: p, .. }, .. } if p == phrase
             ),
             "{phrase}: expected a SayPhrase payment, got {:?}",
             execute.effect
@@ -1660,9 +1658,7 @@ fn a_spoken_activation_cost_parses_to_say_phrase_not_an_effect_cost() {
         panic!("expected a composite cost, got {:?}", ability.cost);
     };
     assert!(
-        costs.contains(&AbilityCost::SayPhrase {
-            phrase: "It's coming".to_string()
-        }),
+        costs.contains(&AbilityCost::say_phrase("It's coming")),
         "the spoken cost is a direct SayPhrase component: {costs:?}"
     );
     assert!(
