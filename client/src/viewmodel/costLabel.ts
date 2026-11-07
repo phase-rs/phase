@@ -117,7 +117,49 @@ type SerializedCost = {
   cost?: { type: string; shards?: string[]; generic?: number };
   filter?: { type: string; type_filters?: unknown[] } | null;
   zone?: string | null;
+  effect?: {
+    type: string;
+    amount?: QuantityExpr | number;
+    player?: {
+      type: string;
+      controller?: string | null;
+      type_filters?: unknown[];
+      properties?: unknown[];
+      player?: { type: string; exclude?: { type: string }; relation?: string };
+    };
+  };
 };
+
+/**
+ * Display-only formatting of an engine `EffectCost` (precedent: `formatFilteredCard`).
+ * The engine is the authority on what the cost is; this only renders the
+ * recipient shapes it pays at cast time — "have an opponent gain N life"
+ * (Invigorate) and "have each other player gain N life" (Reverent Silence).
+ * Every other effect-cost has no rendering here (null), so `formatCost` keeps
+ * its generic "Activate" label and keyword detail shows nothing.
+ */
+function formatEffectCost(effect: SerializedCost["effect"]): string | null {
+  if (effect?.type !== "GainLife") return null;
+  const player = effect.player;
+  const amount = formatQuantity(effect.amount, 1);
+  if (
+    player?.type === "Typed" &&
+    player.controller === "Opponent" &&
+    (player.type_filters ?? []).length === 0 &&
+    (player.properties ?? []).length === 0
+  ) {
+    return i18n.t("game:resolutionOptionalPayment.cost.haveOpponentGainLife", { amount });
+  }
+  const scope = player?.type === "PlayerMatching" ? player.player : undefined;
+  if (
+    scope?.type === "AllExcept" &&
+    scope.exclude?.type === "Controller" &&
+    (scope.relation ?? "All") === "All"
+  ) {
+    return i18n.t("game:resolutionOptionalPayment.cost.haveEachOtherPlayerGainLife", { amount });
+  }
+  return null;
+}
 
 function formatTypeFilter(filter: unknown): string {
   if (typeof filter === "string") return filter;
@@ -377,6 +419,8 @@ export function formatKnownCost(cost: SerializedCost): string | null {
       return (cost.costs ?? []).map(formatCost).join(", ");
     case "OneOf":
       return (cost.costs ?? []).map(formatCost).join(" or ");
+    case "EffectCost":
+      return formatEffectCost(cost.effect);
     default:
       return null;
   }
