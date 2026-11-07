@@ -255,6 +255,11 @@ impl CommanderEligibilityRule {
             | GameFormat::Archenemy
             | GameFormat::Planechase
             | GameFormat::Momir
+            // Like Momir, the command zone holds an engine object (the Horde
+            // emblem), not a decklist commander — Commander-format hordes whose
+            // survivors run commanders are a config-level axis, not a
+            // format-level eligibility rule.
+            | GameFormat::Horde
             | GameFormat::Freeform
             | GameFormat::Dandan => Ok(None),
             GameFormat::Custom(id) => Err(FormatConfigError(format!(

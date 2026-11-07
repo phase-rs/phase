@@ -54,6 +54,18 @@ pub(super) fn token_is_outside_battlefield_and_stack(state: &GameState, obj: &Ga
     obj.is_token && obj.zone != Zone::Battlefield && !object_has_stack_residency(state, obj)
 }
 
+/// CR 111.8 movement freeze, Horde-aware: a token outside the battlefield and
+/// stack cannot change zones — EXCEPT a Horde-deck token (`is_horde_deck_token`),
+/// which moves by design in boss-deck games (Events library↔graveyard,
+/// Shredder's Challenge returns, stage-clear exiles). Classic decks never move
+/// their flagged placeholders, so the carve-out is inert there. Single authority
+/// for the three movement guards (`move_to_zone`, `move_to_library_at_index`,
+/// the zone-pipeline primitive); the CR 704.5d sweep (`sba.rs`) pairs the same
+/// flag with the raw outside-battlefield predicate plus the copy rule.
+pub(super) fn token_cannot_change_zones(state: &GameState, obj: &GameObject) -> bool {
+    token_is_outside_battlefield_and_stack(state, obj) && !obj.is_horde_deck_token
+}
+
 /// CR 704.5e + CR 707.10a: A copy of a card in any zone other than the stack or
 /// the battlefield ceases to exist as a state-based action. Distinct from the
 /// token rule (CR 704.5d): a copy of a card is legal on the battlefield
@@ -1492,6 +1504,35 @@ pub fn apply_resolved_zone_change(
     Ok(())
 }
 
+/// Boss-stage Horde (Turtle Team-Up product booklet, printed p. 7):
+/// Boss-owned cards bound for hand are "put into their graveyard instead".
+///
+/// The single authority for that product redirect. The proposed-zone seam
+/// (`zone_pipeline::execute_zone_move_with_applied_terminal`) normalizes
+/// through this BEFORE consulting replacements, so graveyard-scoped
+/// replacements (Rest in Peace) observe the real destination: CR 400.6
+/// applies replacements before the move happens, and CR 616.1f repeats the
+/// process for effects that would now be applicable. The raw mover below
+/// keeps the same mapping as a backstop for paths that bypass the consult
+/// (exempt causes, DebugCommand), where there is no replacement pass to
+/// inform. Owner-scoped, so a survivor's bounced card is unaffected; the
+/// identity return keeps the classic mill-race top-of-library redirect (and
+/// every non-Horde move) on the mover-level mapping below, unchanged.
+pub(crate) fn boss_hand_redirect_destination(
+    state: &GameState,
+    owner: PlayerId,
+    dest: Zone,
+) -> Zone {
+    if dest == Zone::Hand
+        && super::horde::is_horde_seat(state, owner)
+        && super::horde::has_boss_stages(state)
+    {
+        Zone::Graveyard
+    } else {
+        dest
+    }
+}
+
 /// CR 400.7: Move an object to a new zone. An object that moves to a new zone becomes a new object.
 ///
 /// Plain-entry convenience wrapper: delegates to
@@ -1561,10 +1602,12 @@ pub(crate) fn move_to_zone_with_entry_flags(
     // flicker ("exile target permanent, then return it") on a token would return
     // it before the cease-to-exist SBA runs. The Stack carve-out matches the
     // CR 111.7 SBA so a copy of a spell still resolves off the stack normally.
+    // (Horde-deck tokens are exempt via `token_cannot_change_zones` — boss-deck
+    // loops move them by design.)
     if state
         .objects
         .get(&object_id)
-        .is_some_and(|obj| token_is_outside_battlefield_and_stack(state, obj))
+        .is_some_and(|obj| token_cannot_change_zones(state, obj))
     {
         return;
     }
@@ -1699,6 +1742,32 @@ pub(crate) fn move_to_zone_with_entry_flags(
         // CR 717.6: Astrotorium-backed cards that would move to any zone other
         // than battlefield, exile, or command move to command instead.
         to = Zone::Command;
+    }
+    // The Horde has no hand, so ANY move that would put a Horde-owned card
+    // into a hand redirects by product rule (owner-scoped, so a survivor's
+    // bounced card is unaffected; `is_horde_seat` is a no-op outside Horde
+    // games):
+    // - Classic mill-race Horde (hordemagic.com): "If a permanent is returned
+    //   to the Horde's 'hand' and is owned by the Horde, it goes on top of
+    //   the library" — redirect to the TOP of that Horde's library
+    //   (generalizing "permanent" to any card, since the Horde can never
+    //   hold a card in hand). The top-of-library placement is applied after
+    //   the move completes below.
+    // - Boss-stage Horde (Turtle Team-Up product booklet, printed p. 7):
+    //   Boss-owned cards bound for hand are "put into their graveyard
+    //   instead" (Villain Scheme! reshuffles Boss Ninjas from there; the
+    //   library redirect would wrongly recycle them into the event deck).
+    //   Consulted moves already normalized through
+    //   `boss_hand_redirect_destination` at the proposal seam; this arm is
+    //   the backstop for consult-bypassing paths (exempt causes,
+    //   DebugCommand).
+    let horde_hand_to_top = to == Zone::Hand
+        && super::horde::is_horde_seat(state, owner)
+        && !super::horde::has_boss_stages(state);
+    if horde_hand_to_top {
+        to = Zone::Library;
+    } else {
+        to = boss_hand_redirect_destination(state, owner, to);
     }
     // CR 400.7 + CR 611.3a: a static may depend on an object's membership in
     // either the leaving or destination zone through its recipient filter,
@@ -1861,6 +1930,15 @@ pub(crate) fn move_to_zone_with_entry_flags(
         &zone_change_record.linked_exile_snapshot,
         &cast_cost_pile,
     );
+
+    // Horde hand→library redirect (above): `add_to_zone` appended to the BOTTOM of
+    // the library, but the rule puts the card on TOP, so move it to the front.
+    if horde_hand_to_top {
+        if let Some(player) = state.players.iter_mut().find(|p| p.id == owner) {
+            player.library.retain(|&id| id != object_id);
+            player.library.push_front(object_id);
+        }
+    }
 
     // CR 603.6c: Drop the leaving permanent from the TriggerIndex. The
     // leaves-battlefield last-known-information scan in
@@ -2716,11 +2794,12 @@ pub fn move_to_library_at_index(
     index: Option<usize>,
     events: &mut Vec<GameEvent>,
 ) {
-    // CR 111.8: A token that has left the battlefield can't move to another zone.
+    // CR 111.8: A token that has left the battlefield can't move to another zone
+    // (Horde-deck tokens exempt — boss-deck loops move them by design).
     if state
         .objects
         .get(&object_id)
-        .is_some_and(|obj| token_is_outside_battlefield_and_stack(state, obj))
+        .is_some_and(|obj| token_cannot_change_zones(state, obj))
     {
         return;
     }

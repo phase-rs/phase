@@ -803,8 +803,10 @@ pub(crate) fn zone_move_is_primitive_noop(
     object: &GameObject,
     to: Zone,
 ) -> bool {
-    // CR 111.8: a token outside the battlefield (and not stack-resident) stays put.
-    zones::token_is_outside_battlefield_and_stack(state, object)
+    // CR 111.8: a token outside the battlefield (and not stack-resident) stays
+    // put — except a Horde-deck token, which moves by design in boss-deck
+    // games (see `zones::token_cannot_change_zones`).
+    zones::token_cannot_change_zones(state, object)
         // CR 400.6 + CR 603.6d: Battlefield -> Battlefield is no entry event.
         || (object.zone == Zone::Battlefield && to == Zone::Battlefield)
 }
@@ -4753,6 +4755,23 @@ fn execute_zone_move_with_applied_terminal(
     if from_zone == Zone::Library && dest_zone == Zone::Library && library_placement.is_none() {
         return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
     }
+    // Boss-stage Horde (Turtle Team-Up booklet, printed p. 7): Boss-owned
+    // cards bound for hand go to their graveyard "instead". Normalize the
+    // PROPOSED destination — before `replace_event` consults — so
+    // graveyard-scoped replacements (Rest in Peace) observe the real
+    // destination and survive CR 616.1 ordering pauses on the parked event.
+    // CR 400.6 applies replacements before the move happens; CR 616.1f
+    // repeats the process for effects that would now be applicable. The
+    // classic top-of-library redirect stays a mover-level mapping in
+    // `zones::move_to_zone` (unchanged); that mover also keeps this mapping
+    // as a backstop for consult-bypassing paths. The object exists (the
+    // missing-object arm returned above), so the owner read is total.
+    let dest_zone = {
+        let owner = state.objects.get(&obj_id).map(|obj| obj.owner);
+        owner.map_or(dest_zone, |owner| {
+            zones::boss_hand_redirect_destination(state, owner, dest_zone)
+        })
+    };
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
     if let ProposedEvent::ZoneChange {
         applied,

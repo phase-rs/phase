@@ -6,9 +6,10 @@ use std::collections::{HashMap, HashSet};
 use rand::seq::SliceRandom;
 
 use crate::types::ability::{
-    AbilityCost, ChoiceType, ChosenAttribute, DigRestOrder, DigRestSplitScope, Effect, EffectKind,
-    ForwardedResultContext, GuessOutcome, LibraryPosition, ParentTargetMissingReason, QuantityExpr,
-    QuantityRef, ReciprocalZoneChoiceRole, ResolvedAbility, TapCreaturesSelectionMode, TargetRef,
+    AbilityCost, ChoiceType, ChosenAttribute, CostPaidObjectSnapshot, DigRestOrder,
+    DigRestSplitScope, Effect, EffectKind, ForwardedResultContext, GuessOutcome, LibraryPosition,
+    ParentTargetMissingReason, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    ResolvedAbility, TapCreaturesSelectionMode, TargetRef,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
@@ -1173,6 +1174,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::DiscardToHandSize { .. }
             | WaitingFor::ConniveDiscard { .. }
             | WaitingFor::DiscardChoice { .. }
+            | WaitingFor::HeroEventChoice { .. }
             | WaitingFor::EffectZoneChoice { .. }
             | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::NamedChoice { .. }
@@ -5304,11 +5306,28 @@ pub(super) fn handle_resolution_choice(
                 end_reveal_for_cards_left_in_library(state, &unkept);
             }
             effects::publish_fresh_tracked_set(state, publish_set);
+            // CR 608.2c: For Demonstrative scope ("that card", "this way"),
+            // stamp the kept card as the effect context object so downstream
+            // sub_abilities (e.g., GainLife with ObjectManaValue scope) can
+            // resolve it. Only the first kept card is relevant for Reviving
+            // Vapors-style "put one of them into your hand" effects.
+            let effect_context_snapshot = kept.first().and_then(|first_kept| {
+                state.entering_or_live_object(*first_kept).map(|obj| {
+                    let lki = obj.snapshot_public_characteristics();
+                    CostPaidObjectSnapshot::capture(obj, lki)
+                })
+            });
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
                 // CR 608.2c: ParentTarget continuations (Hideaway conceal, dig
                 // conditionals on the kept card) bind to the kept selection.
                 // Hand/bottom/exile tails route via TrackedSetFiltered instead.
                 bind_dig_continuation_targets(&mut frame.pending.chain, &kept);
+                if let Some(snapshot) = effect_context_snapshot {
+                    frame
+                        .pending
+                        .chain
+                        .set_effect_context_object_recursive(snapshot);
+                }
                 frame.pending.chain.context.optional_effect_performed = !kept.is_empty();
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
@@ -6643,6 +6662,130 @@ pub(super) fn handle_resolution_choice(
             if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                 if announced {
                     return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
+                }
+                return Ok(ResolutionChoiceOutcome::WaitingForWithInlineTriggers(
+                    waiting_for,
+                ));
+            }
+            ResolutionChoiceOutcome::WaitingFor(waiting_for)
+        }
+        (
+            WaitingFor::HeroEventChoice {
+                player,
+                event: kind,
+                event_id,
+                cards,
+                count,
+                up_to,
+                min,
+                remaining_heroes,
+                answers,
+                copies_pending,
+                fired_baxters,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            // Turtle Team-Up hero-choice answer: count + distinctness + offer
+            // membership, mirroring DiscardChoice. No zone-freshness check —
+            // answers don't apply until the queue drains, so nothing moves
+            // between the prompt and the answer; membership in the frozen
+            // offer suffices.
+            if up_to && chosen.len() > count {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must choose at most {} card(s), got {}",
+                    count,
+                    chosen.len()
+                )));
+            }
+            if up_to && chosen.len() < min {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must choose at least {} card(s), got {}",
+                    min,
+                    chosen.len()
+                )));
+            }
+            if !up_to && chosen.len() != count {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must choose exactly {} card(s), got {}",
+                    count,
+                    chosen.len()
+                )));
+            }
+            let unique_chosen: HashSet<ObjectId> = chosen.iter().copied().collect();
+            if unique_chosen.len() != chosen.len() {
+                return Err(EngineError::InvalidAction(
+                    "Selected cards must be distinct".to_string(),
+                ));
+            }
+            for card_id in &chosen {
+                if !cards.contains(card_id) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected card not in eligible set".to_string(),
+                    ));
+                }
+            }
+
+            // The Boss seat owns the resolving Event (Events are never owned
+            // by a hero), so ownership re-derives the seat for application.
+            let Some(horde) = state.objects.get(&event_id).map(|o| o.owner) else {
+                return Err(EngineError::InvalidAction(
+                    "Hero-event source left the game".to_string(),
+                ));
+            };
+
+            let events_before_effect = events.len();
+            let progress = super::boss::answer_hero_event_choice(
+                state,
+                horde,
+                event_id,
+                kind,
+                player,
+                chosen,
+                remaining_heroes,
+                answers,
+                fired_baxters,
+                copies_pending,
+                events,
+            );
+            if matches!(progress, super::boss::HeroEventProgress::Prompted) {
+                // The queue advanced (or a nested replacement prompt took
+                // over mid-batch): defer this answer's observer triggers
+                // across the pause, exactly like the discard pause path.
+                defer_observer_triggers_for_paused_choice(state, events, events_before_effect);
+                return Ok(action_result_outcome(events, state.waiting_for.clone()));
+            }
+            let events_after_move = events.len();
+
+            // The Event was the Horde's action, so priority returns to the
+            // active player (not the answering hero) — the post-spell shape —
+            // and any parked chain behind the prompt (Savanti's trigger rest)
+            // resumes through the continuation drain.
+            let active = state.active_player;
+            let waiting_for = finish_with_continuation(state, active, events);
+
+            // Batch this resolution's observer triggers (dies, discards, life)
+            // across the choice pause, like the DiscardChoice completion: the
+            // move slice plus the continuation slice drain together.
+            for (start, end) in [
+                (events_before_effect, events_after_move),
+                (events_after_move, events.len()),
+            ] {
+                if end <= start {
+                    continue;
+                }
+                let trigger_events: Vec<GameEvent> = events[start..end]
+                    .iter()
+                    .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                    .cloned()
+                    .collect();
+                if !trigger_events.is_empty() {
+                    super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+                }
+            }
+
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
                 }
                 return Ok(ResolutionChoiceOutcome::WaitingForWithInlineTriggers(
                     waiting_for,
@@ -10474,6 +10617,17 @@ pub(crate) fn run_batch_completion(
         BatchCompletion::MilledDeliveryComplete { player_id, cards } => {
             effects::mill::complete_mill_delivery(state, player_id, cards, events)
         }
+        BatchCompletion::HordeMillFromLossDeliveryComplete {
+            player_id,
+            milled,
+            legendary_cohort,
+        } => crate::game::horde::complete_advanced_mill_from_loss(
+            state,
+            player_id,
+            milled,
+            legendary_cohort,
+            events,
+        ),
         BatchCompletion::ReturnAsAuraNoTargetComplete { source_id } => {
             effects::return_as_aura::complete_no_target_delivery(source_id, events)
         }
@@ -10975,6 +11129,24 @@ pub(crate) fn run_batch_completion(
             // its own completed outcome only after both tails have finished.
             let kept_completed = kept_delivery.completed_ids();
             let rest_completed = rest_delivery.completed_ids();
+            // CR 608.2c: a later instruction that reads the card this Dig put
+            // into its kept destination ("that card's mana value") names THAT
+            // card. Bind the settled kept selection here, ahead of the
+            // event-derived referent below: once the rest pile has also moved,
+            // the batch's events can describe a single REST card instead, and an
+            // event-derived snapshot would then hand the continuation the wrong
+            // object (a three-card reveal with two cards moved would yield no
+            // snapshot at all).
+            let settled_kept_snapshot = kept_delivery
+                .destination
+                .is_some()
+                .then(|| kept_delivery.completed_ids())
+                .and_then(|ids| ids.first().copied())
+                .and_then(|id| {
+                    state.entering_or_live_object(id).map(|obj| {
+                        CostPaidObjectSnapshot::capture(obj, obj.snapshot_public_characteristics())
+                    })
+                });
             if let Some(kept) = publish_tracked_set {
                 let published = if !kept.is_empty()
                     && rest_delivery.destination.is_some()
@@ -11044,7 +11216,9 @@ pub(crate) fn run_batch_completion(
                     subject: reveal_until_hit_snapshot,
                 });
             }
-            if let Some(snapshot) = effects::parent_referent_context_from_events(state, events) {
+            if let Some(snapshot) = settled_kept_snapshot
+                .or_else(|| effects::parent_referent_context_from_events(state, events))
+            {
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
                     frame
                         .pending

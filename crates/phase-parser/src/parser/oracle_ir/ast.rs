@@ -527,6 +527,36 @@ pub(crate) enum ContinuationAst {
     BecomesPlotted,
     /// CR 702.143d: "It/that card/they become foretold" after an exile effect.
     BecomesForetold,
+    /// CR 701.20a + CR 701.20e + CR 608.2c: "Put all other cards revealed this
+    /// way into exile" (or hand / randomized library) — the complement of a
+    /// REVEAL instruction's selection, named separately from that instruction
+    /// because an intervening clause uses the revealed card first ("You gain
+    /// life equal to that card's mana value"). Bound only to a PROVED public
+    /// reveal (`Dig { reveal: true, destination: Some(dest) }` where
+    /// `dest != Library`) whose selection departs the library: a private "look
+    /// at" never publishes a revealed population, and a selection remaining in
+    /// the library cannot be partitioned via `LastRevealed`. An owner-ordered
+    /// library (CR 401.4) or graveyard (CR 404.3) remainder is refused because
+    /// this instruction does not own an ordering prompt.
+    ///
+    /// Lowers to an explicit `ChangeZoneAll { origin: Library, target:
+    /// LastRevealed }`: "the cards the preceding reveal revealed that are still
+    /// in the library". Naming the complement by provenance keeps the reveal's
+    /// own tracked-set publication untouched, so a reveal whose kept cards are
+    /// routed by downstream sub_abilities (Zimone's Experiment: "Put all land
+    /// cards revealed this way onto the battlefield tapped and put all creature
+    /// cards revealed this way into your hand") never has its selected
+    /// population swapped for the unselected one — not even when zero cards
+    /// were selected.
+    RevealedRemainder {
+        destination: Zone,
+        /// CR 401.4 + CR 400.5 + CR 404.3: only an explicitly randomized library
+        /// remainder (or non-ordered zones like exile/hand) is accepted; an
+        /// owner-ordered remainder has no prompt on this path and is refused at
+        /// parse time rather than silently kept in place.
+        #[serde(default, skip_serializing_if = "DigRestOrder::is_preserve")]
+        rest_order: DigRestOrder,
+    },
     /// "Put the rest on the bottom/into your graveyard" after Dig/RevealTop —
     /// sets `rest_destination` on the preceding Dig effect. The destination is
     /// parsed from the text (bottom of library, graveyard, hand, etc.).
@@ -3417,6 +3447,9 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
+        // Turtle Team-Up (no CR section — casual product): "the bosses play a
+        // card" is a one-shot — a duration does not govern it.
+        | Effect::HordePlayCard { .. } => false,
         | Effect::Unimplemented { .. } => false,
     }
 }

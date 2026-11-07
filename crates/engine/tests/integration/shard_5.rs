@@ -419,6 +419,7 @@ mod wrenn_and_six_up_to_one_optout;
 mod wrens_run_vanquisher_reveal_cost;
 mod x_announcement_target_constraints;
 mod x_mana_sacrifice_residual;
+mod x_prevention_amount;
 mod xantid_swarm_defending_player_cant_cast;
 mod yare_extra_blockers;
 mod yavimaya_enchantress_dynamic_pump;

@@ -32895,6 +32895,7 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
         | QuantityRef::SelfManaValue
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::ExiledFromHandThisResolution
