@@ -214,6 +214,12 @@ pub(super) fn handle_replacement_choice(
     // parked for the next answer; only a settled round trip may close the batch.
     // Nothing is left behind on this path — the anchor is a local that dies here.
     if !matches!(waiting_for, WaitingFor::Priority { .. }) {
+        state.waiting_for = waiting_for.clone();
+        // CR 603.2 + CR 603.6a + CR 616.1f: preserve completed entries' observers
+        // while this answer pauses again. Only scan this answer's entry events:
+        // inner paused-discard collectors already own its Discarded events, which
+        // queued zone-change witnesses cannot deduplicate.
+        super::triggers::park_entry_observer_triggers_if_paused(state, events, action_event_start);
         return Ok(waiting_for);
     }
     state.waiting_for = waiting_for.clone();

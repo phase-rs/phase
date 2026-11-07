@@ -971,6 +971,7 @@ fn spark_double_counter_completion_replays_copied_targeted_trigger() {
 
 mod feldon_tokens {
     use super::*;
+    use engine::game::scenario_db::GameScenarioDbExt;
     use engine::types::events::GameEvent;
     use engine::types::keywords::Keyword;
     use engine::types::mana::{ManaType, ManaUnit};
@@ -1351,6 +1352,163 @@ mod feldon_tokens {
     #[test]
     fn p1_both_counter_pauses_survive_persisted_restore() {
         ordered_loyalty_batch(true);
+    }
+
+    #[test]
+    fn altar_collects_each_token_entry_across_counter_ordering_pauses() {
+        let db = crate::support::shared_card_db().expect("integration card database");
+        let (mut scenario, feldon) = setup();
+        let card = graveyard_copier(&mut scenario, false);
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+            .id();
+        let season = scenario
+            .add_enchantment_from_oracle(P0, "Doubling Season", SEASON)
+            .id();
+        scenario.add_real_card(P0, "Altar of the Brood", Zone::Battlefield, db);
+        let mut runner = scenario.build();
+        let before = runner.state().players[1].library.len();
+        assert!(before >= 4);
+        let mut events = runner
+            .activate(feldon, 0)
+            .target_object(card)
+            .resolve()
+            .events()
+            .to_vec();
+        let (first, copy_events) = choose_copy(&mut runner, feldon);
+        events.extend(copy_events);
+        events.extend(choose_token_counter_order(&mut runner, first, scales));
+        let (second, copy_events) = choose_copy(&mut runner, feldon);
+        events.extend(copy_events);
+        assert_ne!(first, second, "Season creates two distinct entrants");
+        events.extend(choose_token_counter_order(&mut runner, second, season));
+        assert_entry_publication(&runner, first, &events);
+        assert_entry_publication(&runner, second, &events);
+        runner.advance_until_stack_empty();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty());
+        // CR 603.2 + CR 603.3b: each entrant contributes one Altar trigger,
+        // even when identical triggers share a batched stack entry.
+        assert_eq!(
+            runner.state().players[1].library.len(),
+            before - 2,
+            "Altar mills exactly once for each entrant"
+        );
+    }
+
+    #[test]
+    fn counter_ordering_answers_do_not_split_one_or_more_token_observers() {
+        counter_ordering_observer_draws(false);
+    }
+
+    #[test]
+    fn counter_ordering_answers_do_not_spend_parked_one_or_more_firing_limits() {
+        counter_ordering_observer_draws(true);
+    }
+
+    fn counter_ordering_observer_draws(with_firing_limit: bool) {
+        let db = crate::support::shared_card_db().expect("integration card database");
+        let (mut scenario, feldon) = setup();
+        let card = graveyard_copier(&mut scenario, false);
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+            .id();
+        let season = scenario
+            .add_enchantment_from_oracle(P0, "Doubling Season", SEASON)
+            .id();
+        scenario.add_real_card(P0, "Altar of the Brood", Zone::Battlefield, db);
+        let observer = if with_firing_limit {
+            scenario
+                .add_enchantment_from_oracle(
+                    P0,
+                    "Tocasia's Welcome",
+                    "Whenever one or more creatures you control with mana value 3 or less enter, draw a card. This ability triggers only once each turn.",
+                )
+                .id()
+        } else {
+            scenario
+                .add_creature_from_oracle(
+                    P0,
+                    "Mister Fantastic, Reed Richards",
+                    2,
+                    4,
+                    "Whenever one or more tokens you control enter, you may draw a card.",
+                )
+                .as_legendary()
+                .id()
+        };
+        let later_entry = with_firing_limit.then(|| {
+            scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Raise the Alarm",
+                    true,
+                    "Create two 1/1 white Soldier creature tokens.",
+                )
+                .id()
+        });
+        let mut runner = scenario.build();
+        let library_before = runner.state().players[1].library.len();
+        let hand_before = runner.state().players[0].hand.len();
+        runner.activate(feldon, 0).target_object(card).resolve();
+        let (first, _) = choose_copy(&mut runner, feldon);
+        choose_token_counter_order(&mut runner, first, scales);
+        let (second, _) = choose_copy(&mut runner, feldon);
+        assert_ne!(first, second, "Season creates two distinct entrants");
+        choose_token_counter_order(&mut runner, second, season);
+        for _ in 0..3 {
+            runner.advance_until_stack_empty();
+            let WaitingFor::OptionalEffectChoice {
+                player, source_id, ..
+            } = &runner.state().waiting_for
+            else {
+                break;
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(
+                *source_id, observer,
+                "only the token observer offers a draw"
+            );
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .unwrap();
+        }
+        assert_token_entry_complete(&mut runner);
+        assert_eq!(
+            runner.state().players[1].library.len(),
+            library_before - 2,
+            "Altar still mills exactly once for each entrant"
+        );
+        let drawn = runner.state().players[0].hand.len() - hand_before;
+        // CR 603.2c: replacement answers must not split one "one or more" batch.
+        // The settled scan may miss the non-final entrant (pre-existing residual).
+        assert_ne!(drawn, 2, "one batch must not produce two observer draws");
+        assert_eq!(
+            drawn, 1,
+            "positive reach guard: the observer actually triggers and its draw resolves"
+        );
+        if let Some(spell) = later_entry {
+            let outcome = runner.cast(spell).resolve();
+            outcome.assert_hand_drawn(P0, 0);
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::Priority { .. }
+            ));
+            assert_token_entry_complete(&mut runner);
+            assert_eq!(
+                runner
+                    .state()
+                    .objects
+                    .values()
+                    .filter(|object| object.is_token && object.zone == Zone::Battlefield)
+                    .count(),
+                6,
+                "four later qualifying entrants do not bypass Welcome's spent turn limit"
+            );
+        }
     }
 
     #[test]
