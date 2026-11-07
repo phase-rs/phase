@@ -7658,6 +7658,7 @@ fn cast_spell_moves_card_from_hand_to_stack_and_returns_priority() {
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
     }
 
@@ -7733,6 +7734,7 @@ fn both_pass_with_spell_on_stack_resolves_spell() {
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
     }
 
@@ -7833,6 +7835,7 @@ fn brainstorm_resolves_draw_then_put_two_cards_on_top() {
         restrictions: Vec::new(),
         grants: vec![],
         expiry: None,
+        source_incarnation: None,
     });
 
     apply_as_current(
@@ -8744,6 +8747,7 @@ fn fizzle_target_removed_before_resolution() {
         restrictions: Vec::new(),
         grants: vec![],
         expiry: None,
+        source_incarnation: None,
     });
 
     // Cast bolt — multiple valid targets (creature + 2 players) requires selection
@@ -8803,6 +8807,7 @@ fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usi
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
     }
 }
@@ -10813,6 +10818,7 @@ fn untap_during_mana_payment_returns_mana_payment() {
         restrictions: Vec::new(),
         grants: vec![],
         expiry: None,
+        source_incarnation: None,
     });
 
     // Create a forest on the battlefield to tap during ManaPayment

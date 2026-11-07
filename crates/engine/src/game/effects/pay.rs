@@ -613,6 +613,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
         let cost = ManaCost::Cost {
@@ -728,6 +729,7 @@ mod tests {
             restrictions: vec![ManaRestriction::OnlyForActivation],
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
         let ability = make_ability(Effect::PayCost {
             cost: AbilityCost::Mana {
@@ -904,6 +906,7 @@ mod tests {
             restrictions: vec![],
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
         let ability = make_ability(Effect::PayCost {
             cost: AbilityCost::Composite {
@@ -942,6 +945,7 @@ mod tests {
             restrictions: vec![ManaRestriction::OnlyForActivation],
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
         let ability = make_ability(Effect::PayCost {
             cost: AbilityCost::Mana {
@@ -971,6 +975,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
         let ability = make_ability(Effect::PayCost {
@@ -1001,6 +1006,7 @@ mod tests {
             restrictions: vec![],
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
         let ability = make_ability(Effect::PayCost {
             cost: AbilityCost::Composite {
@@ -1783,6 +1789,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
         state.current_trigger_event = Some(GameEvent::LifeChanged {
@@ -1911,6 +1918,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
         for _ in 0..4 {
@@ -1923,6 +1931,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
 
@@ -2161,6 +2170,7 @@ mod tests {
             restrictions: vec![],
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
 
         let mut draw = ResolvedAbility::new(
@@ -2301,6 +2311,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
         // CR 119.3: Three life gained — this is the `EventContextAmount` cap.
@@ -2473,6 +2484,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
         state.current_trigger_event = Some(GameEvent::LifeChanged {
@@ -2579,6 +2591,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
 
@@ -2958,6 +2971,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
         state.current_trigger_event = Some(GameEvent::LifeChanged {
@@ -3089,6 +3103,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
         // Only 2 life gained.
@@ -3182,6 +3197,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
         for _ in 0..3 {
@@ -3194,6 +3210,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
 
@@ -3418,6 +3435,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
     }
@@ -3752,6 +3770,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
     }

@@ -10506,6 +10506,7 @@ mod tests {
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
 
         let (actions, _, grouped) = crate::ai_support::legal_actions_full(&state);
@@ -10650,6 +10651,7 @@ mod tests {
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
     }
 

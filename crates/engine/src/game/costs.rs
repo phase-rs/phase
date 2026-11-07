@@ -2216,11 +2216,16 @@ fn pay_ability_cost_inner(
                             state, player, source_id, produced,
                         );
                     let mut deposited = false;
+                    // CR 106.3 + CR 400.7: this cost's mana production does not
+                    // move its source, so the live epoch is the producer.
+                    let source_incarnation =
+                        super::mana_payment::live_source_incarnation(state, source_id);
                     for color in colors {
                         deposited |=
                             !super::mana_payment::produce_mana_with_attributes_from_source_quality(
                                 state,
                                 source_id,
+                                source_incarnation,
                                 super::mana_sources::mana_color_to_type(color),
                                 player,
                                 false,

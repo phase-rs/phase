@@ -1379,6 +1379,7 @@ fn setup_esper_sentinel_unless_payment(pay_mana: bool) -> GameState {
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
     }
 

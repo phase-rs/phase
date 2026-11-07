@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ability::{AbilityTag, Comparator, FilterProp, QuantityExpr, TargetFilter, TypedFilter};
 use super::counter::CounterType;
-use super::identifiers::ObjectId;
+use super::identifiers::{ObjectId, ObjectIncarnationRef};
 use super::keywords::{Keyword, KeywordKind};
 use super::zones::Zone;
 
@@ -1166,6 +1166,28 @@ pub struct ManaUnit {
     /// specified expiry condition is met.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expiry: Option<ManaExpiry>,
+    /// CR 106.3 + CR 113.7 + CR 400.7: the incarnation of `source_id` that
+    /// produced this unit, captured when the mana was produced.
+    ///
+    /// CR 106.3 makes the source of mana the source of the ability that produced
+    /// it, and CR 113.7 makes that the object that generated the ability — the
+    /// object as it stood when the ability was activated, not whatever later
+    /// occupies `source_id`. CR 400.7 makes those different objects: a mana
+    /// ability whose own cost sacrifices or exiles its source (Minimus
+    /// Containment's granted Treasure ability, Lion's Eye Diamond) produces its
+    /// mana at the same storage id the departed object's successor now holds, so
+    /// re-resolving `source_id` after payment names the wrong object.
+    ///
+    /// Storage is the exact `(ObjectId, u64)` pair — the same minimal shape
+    /// `AttackDeclarationRecord::incarnation`, `TriggeringObjectRef::incarnation`
+    /// and `ResolvedAbility::source_incarnation` use — because `source_id`
+    /// already carries the id half. [`Self::source_incarnation_ref`] lifts the
+    /// pair into the crate's [`ObjectIncarnationRef`] pin for consumers that
+    /// need it. `None` marks a unit whose producing epoch was never captured
+    /// (a legacy payload, or a synthetic/payment-marker unit); it is not a claim
+    /// that the live object is the producer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_incarnation: Option<u64>,
 }
 
 // CR 104.4b: `pip_id` is a runtime/UI identity tag (the pin key used to direct
@@ -1187,6 +1209,7 @@ impl PartialEq for ManaUnit {
             restrictions,
             grants,
             expiry,
+            source_incarnation,
         } = self;
         let ManaUnit {
             color: other_color,
@@ -1197,6 +1220,7 @@ impl PartialEq for ManaUnit {
             restrictions: other_restrictions,
             grants: other_grants,
             expiry: other_expiry,
+            source_incarnation: other_source_incarnation,
         } = other;
         color == other_color
             && source_id == other_source_id
@@ -1205,6 +1229,7 @@ impl PartialEq for ManaUnit {
             && restrictions == other_restrictions
             && grants == other_grants
             && expiry == other_expiry
+            && source_incarnation == other_source_incarnation
     }
 }
 
@@ -1212,10 +1237,11 @@ impl PartialEq for ManaUnit {
 /// reader to tell them apart, so the pool merges units of one shape.
 ///
 /// CR 106.4: mana is held in a player's pool. CR 106.1b: `color` is one of the
-/// six mana types, colorless included. CR 106.3: `source_id` is the producing
-/// source. CR 106.6: `restrictions` and `grants` are the spending restrictions
-/// and additional effects the producing ability attached. CR 107.4h: the snow
-/// supertype marks mana from a snow source.
+/// six mana types, colorless included. CR 106.3: `source_id` and
+/// `source_incarnation` are the producing source and the object incarnation that
+/// produced it. CR 106.6: `restrictions` and `grants` are the spending
+/// restrictions and additional effects the producing ability attached. CR
+/// 107.4h: the snow supertype marks mana from a snow source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ManaShape {
     pub color: ManaType,
@@ -1225,6 +1251,10 @@ pub struct ManaShape {
     pub restrictions: Vec<ManaRestriction>,
     pub grants: Vec<ManaSpellGrant>,
     pub expiry: Option<ManaExpiry>,
+    /// CR 400.7: part of the shape, not just the unit — two units from the same
+    /// storage id but different producing incarnations are distinguishable by
+    /// source-provenance readers, so the pool must not merge them.
+    pub source_incarnation: Option<u64>,
 }
 
 impl ManaShape {
@@ -1237,6 +1267,7 @@ impl ManaShape {
             restrictions,
             grants,
             expiry,
+            source_incarnation,
         } = self;
         ManaUnit {
             color,
@@ -1247,6 +1278,7 @@ impl ManaShape {
             restrictions,
             grants,
             expiry,
+            source_incarnation,
         }
     }
 
@@ -1270,6 +1302,7 @@ impl ManaUnit {
             restrictions,
             grants,
             expiry,
+            source_incarnation,
         } = self;
         (
             ManaShape {
@@ -1280,6 +1313,7 @@ impl ManaUnit {
                 restrictions,
                 grants,
                 expiry,
+                source_incarnation,
             },
             pip_id,
         )
@@ -1301,6 +1335,7 @@ impl ManaUnit {
             restrictions,
             grants: Vec::new(),
             expiry: None,
+            source_incarnation: None,
         }
     }
 
@@ -1317,11 +1352,22 @@ impl ManaUnit {
             restrictions: vec![ManaRestriction::ConvokePayment],
             grants: Vec::new(),
             expiry: None,
+            // CR 702.51a: a convoke tap is not mana production, so there is no
+            // producing incarnation to pin.
+            source_incarnation: None,
         }
     }
 
     pub fn is_convoke_payment(&self) -> bool {
         self.restrictions.contains(&ManaRestriction::ConvokePayment)
+    }
+
+    /// CR 106.3 + CR 400.7: this unit's producing source as an exact
+    /// incarnation pin — the storage `source_id` paired with the epoch
+    /// production captured — or `None` when the epoch was never captured.
+    pub fn source_incarnation_ref(&self) -> Option<ObjectIncarnationRef> {
+        self.source_incarnation
+            .map(|incarnation| ObjectIncarnationRef::of(self.source_id, incarnation))
     }
 }
 

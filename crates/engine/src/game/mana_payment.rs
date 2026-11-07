@@ -370,9 +370,11 @@ pub fn produce_mana_with_attributes(
 ) -> Vec<ManaUnit> {
     let source_could_produce_two_or_more_colors =
         super::mana_sources::source_could_produce_two_or_more_colors(state, source_id, player_id);
+    let source_incarnation = live_source_incarnation(state, source_id);
     produce_mana_with_attributes_from_source_quality(
         state,
         source_id,
+        source_incarnation,
         mana_type,
         player_id,
         tapped_for_mana,
@@ -384,10 +386,52 @@ pub fn produce_mana_with_attributes(
     )
 }
 
+/// CR 106.3 + CR 113.7 + CR 400.7: the producing epoch of `source_id` as it
+/// stands NOW — the answer exactly when production did not itself move the
+/// source, which is every production path that is not a mana ability paying a
+/// self-moving cost. Those paths must instead pass the epoch captured at
+/// activation (`ResolvedAbility::announced_source_incarnation`) to
+/// [`produce_mana_with_attributes_from_source_quality`], because by production
+/// time `source_id` names the moved object (CR 400.7).
+///
+/// The single authority: every production site that stamps a produced
+/// [`ManaUnit`] resolves its source epoch here or supplies an earlier capture.
+pub(crate) fn live_source_incarnation(state: &GameState, source_id: ObjectId) -> Option<u64> {
+    state
+        .objects
+        .get(&source_id)
+        .map(|source| source.incarnation)
+}
+
+/// CR 106.3 + CR 113.7 + CR 400.7: the object epoch that generated `ability`,
+/// for stamping the mana it produces.
+///
+/// CR 113.7 makes the object that generated the ability the source of the
+/// ability; CR 106.3 makes it the source of the mana. For an activated ability
+/// that is the epoch captured at announcement
+/// (`ResolvedAbility::announced_source_incarnation`), because a cost paid during
+/// the activation may have sacrificed or exiled the source (CR 601.2h) — by
+/// resolution the storage id names the moved object. Abilities with no
+/// announcement capture (spells, triggered abilities) have not moved, so their
+/// live epoch answers.
+pub(crate) fn producing_incarnation_for_ability(
+    state: &GameState,
+    ability: &crate::types::ability::ResolvedAbility,
+) -> Option<u64> {
+    ability
+        .announced_source_incarnation
+        .or_else(|| live_source_incarnation(state, ability.source_id))
+}
+
+/// CR 106.3 + CR 113.7 + CR 400.7: `source_incarnation` is the object epoch the
+/// produced units pin as their producing source. It is threaded in rather than
+/// re-read here precisely so a mana ability whose cost moved its own source can
+/// stamp the epoch that generated the ability.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn produce_mana_with_attributes_from_source_quality(
     state: &mut GameState,
     source_id: ObjectId,
+    source_incarnation: Option<u64>,
     mana_type: ManaType,
     player_id: PlayerId,
     tapped_for_mana: bool,
@@ -430,6 +474,10 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
             restrictions: restrictions.to_vec(),
             grants: grants.to_vec(),
             expiry,
+            // CR 106.3 + CR 113.7 + CR 400.7: bind the producing incarnation
+            // now, while it is still known — a later payment-time read of
+            // `source_id` can name a different object.
+            source_incarnation,
         };
 
         // CR 118.3a: stamp a stable pip id on pool entry so the unit can be pinned.
@@ -2897,6 +2945,7 @@ mod tests {
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         }
     }
 
@@ -3063,6 +3112,7 @@ mod tests {
                 filter: TargetFilter::Any,
             }],
             expiry: Some(ManaExpiry::EndOfTurn),
+            source_incarnation: None,
         }
     }
 
@@ -4134,6 +4184,7 @@ mod tests {
             restrictions: vec![ManaRestriction::OnlyForCreatureType("Elf".to_string())],
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
         pool.add(make_unit(ManaType::Green));
 
@@ -4213,6 +4264,7 @@ mod tests {
                 }],
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
         for _ in 0..2 {
@@ -4291,6 +4343,7 @@ mod tests {
             }],
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
 
         let cost = ManaCost::Cost {
@@ -4381,6 +4434,7 @@ mod tests {
             restrictions: runtime,
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
 
         let one_blue = ManaCost::Cost {
@@ -4501,6 +4555,7 @@ mod tests {
                 }],
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             }],
         );
 
@@ -4531,6 +4586,7 @@ mod tests {
             )],
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
 
         let cost = ManaCost::Cost {
@@ -4606,6 +4662,7 @@ mod tests {
             )],
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
 
         let cost = ManaCost::Cost {
@@ -4740,6 +4797,7 @@ mod tests {
             restrictions: vec![],
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
         let cost = ManaCost::Cost {
             shards: vec![ManaCostShard::White],
@@ -4817,6 +4875,7 @@ mod tests {
             restrictions: vec![],
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
         let cost = ManaCost::Cost {
             shards: vec![ManaCostShard::Blue],

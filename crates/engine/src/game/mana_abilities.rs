@@ -753,9 +753,17 @@ fn produce_mana_from_bound_ability(
             produced_for_ability_events.push((recipient, produced_mana.clone()));
         }
         for &mana_type in &produced_mana {
+            // CR 106.3 + CR 113.7 + CR 400.7: the mana's source is the object
+            // that generated this ability (CR 113.7) — the epoch captured at the
+            // activation's announcement, before a self-sacrifice / self-exile
+            // cost moved it (CR 601.2h). Reading `state.objects[source_id]` here
+            // would name the moved object.
+            let source_incarnation =
+                mana_payment::producing_incarnation_for_ability(state, resolved_for_quantity);
             mana_payment::produce_mana_with_attributes_from_source_quality(
                 state,
                 source_id,
+                source_incarnation,
                 mana_type,
                 recipient,
                 tapped,
@@ -6627,6 +6635,7 @@ mod tests {
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
     }

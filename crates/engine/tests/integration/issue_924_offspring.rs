@@ -32,6 +32,7 @@ fn fund_mana(runner: &mut GameRunner, count: usize) {
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
     }
 }

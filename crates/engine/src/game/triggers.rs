@@ -49061,6 +49061,7 @@ pub mod tests {
                     restrictions: Vec::new(),
                     grants: vec![],
                     expiry: None,
+                    source_incarnation: None,
                 });
                 p0.mana_pool.add(ManaUnit {
                     color: ManaType::Black,
@@ -49071,6 +49072,7 @@ pub mod tests {
                     restrictions: Vec::new(),
                     grants: vec![],
                     expiry: None,
+                    source_incarnation: None,
                 });
             }
         }
@@ -49221,6 +49223,7 @@ pub mod tests {
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
     }
@@ -49402,6 +49405,7 @@ pub mod tests {
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
     }

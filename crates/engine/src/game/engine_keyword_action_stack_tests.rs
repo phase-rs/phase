@@ -1406,6 +1406,7 @@ fn granted_equip_attaches_through_full_activation_pipeline() {
             restrictions: vec![],
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         }],
     );
 

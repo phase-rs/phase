@@ -465,6 +465,7 @@ fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usi
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
     }
 }
@@ -1301,6 +1302,7 @@ fn add_restricted_mana(
         restrictions,
         grants: vec![],
         expiry: None,
+        source_incarnation: None,
     });
 }
 
@@ -2283,6 +2285,7 @@ fn play_from_exile_any_color_preserves_snow_source_requirement() {
         restrictions: Vec::new(),
         grants: vec![],
         expiry: None,
+        source_incarnation: None,
     });
     let allowed_card = allowed.objects[&allowed_spell].card_id;
     apply_as_current(
@@ -5407,6 +5410,7 @@ fn conditional_mana_keyword_grant_applies_to_matching_spell() {
             duration: Box::new(crate::types::ability::Duration::UntilEndOfTurn),
         }],
         expiry: None,
+        source_incarnation: None,
     };
 
     apply_mana_spell_grants(&mut state, dragon_id, std::slice::from_ref(&unit));
@@ -5456,6 +5460,7 @@ fn mana_keyword_grants_apply_both_temporary_and_permanent_durations() {
             duration: Box::new(crate::types::ability::Duration::UntilEndOfTurn),
         }],
         expiry: None,
+        source_incarnation: None,
     };
     let permanent_unit = ManaUnit {
         color: ManaType::Colorless,
@@ -5470,6 +5475,7 @@ fn mana_keyword_grants_apply_both_temporary_and_permanent_durations() {
             duration: Box::new(crate::types::ability::Duration::Permanent),
         }],
         expiry: None,
+        source_incarnation: None,
     };
 
     apply_mana_spell_grants(&mut state, dragon_id, &[eot_unit, permanent_unit]);
@@ -5570,6 +5576,7 @@ fn mana_spend_trigger_fires_only_on_matching_spell() {
             ability: Box::new(trigger_ability),
         }],
         expiry: None,
+        source_incarnation: None,
     };
 
     let before = state.stack.len();
@@ -5707,6 +5714,7 @@ fn mana_spend_trigger_shares_creature_type_with_commander() {
             ability: Box::new(trigger_ability),
         }],
         expiry: None,
+        source_incarnation: None,
     };
 
     let base = state.deferred_triggers.len();
@@ -5801,6 +5809,7 @@ fn mana_spend_trigger_cast_pipeline_places_trigger_after_spell_is_cast() {
                 ability: Box::new(trigger_ability),
             }],
             expiry: None,
+            source_incarnation: None,
         });
 
     let mut events = Vec::new();
@@ -10997,6 +11006,7 @@ fn self_ref_exile_cost_exiles_card_from_hand() {
         restrictions: Vec::new(),
         grants: vec![],
         expiry: None,
+        source_incarnation: None,
     });
     activate_and_assert_exiled(&mut state, curse, "Curse of the Cabal", Some(3));
 
@@ -53789,6 +53799,7 @@ fn add_mana_from_source(
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
     }
 }
@@ -59775,6 +59786,7 @@ fn path_of_ancestry_unit(source_id: ObjectId) -> ManaUnit {
             )),
         }],
         expiry: None,
+        source_incarnation: None,
     }
 }
 

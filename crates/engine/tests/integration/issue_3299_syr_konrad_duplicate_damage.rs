@@ -121,6 +121,7 @@ fn syr_konrad_deals_one_damage_per_milled_creature() {
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
         p0.mana_pool.add(ManaUnit {
             color: ManaType::Black,
@@ -131,6 +132,7 @@ fn syr_konrad_deals_one_damage_per_milled_creature() {
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
     }
 

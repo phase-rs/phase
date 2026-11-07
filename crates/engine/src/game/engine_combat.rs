@@ -1627,6 +1627,7 @@ mod tests {
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         let life_before = state.players[0].life;
 
@@ -1704,6 +1705,7 @@ mod tests {
                     restrictions: Vec::new(),
                     grants: vec![],
                     expiry: None,
+                    source_incarnation: None,
                 });
         }
         let life_before = state.players[0].life;

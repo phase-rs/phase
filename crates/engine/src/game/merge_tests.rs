@@ -1213,6 +1213,7 @@ mod cast_pipeline {
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
     }

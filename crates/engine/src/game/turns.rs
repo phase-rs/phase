@@ -5599,6 +5599,7 @@ card into your hand at the beginning of your next end step.";
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
 
         let mut events = Vec::new();

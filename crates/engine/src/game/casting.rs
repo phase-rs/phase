@@ -24591,20 +24591,7 @@ pub(super) fn pay_mana_cost_with_choices_and_resume(
     }
 
     if !mana_spent_units.is_empty() {
-        let source_snapshots: Vec<_> = mana_spent_units
-            .iter()
-            .filter_map(|unit| {
-                state
-                    .objects
-                    .get(&unit.source_id)
-                    .map(|source| source.snapshot_for_mana_spent())
-                    .or_else(|| state.lki_cache.get(&unit.source_id).cloned())
-                    .map(|lki| crate::types::game_state::ManaSpentSourceSnapshot {
-                        source_id: unit.source_id,
-                        lki,
-                    })
-            })
-            .collect();
+        let source_snapshots = mana_spent_source_snapshots(state, &mana_spent_units);
         if let Some(obj) = state.objects.get_mut(&source_id) {
             obj.mana_spent_to_cast = true;
             obj.mana_spent_to_cast_amount = mana_spent_units.len() as u32;
@@ -24729,20 +24716,7 @@ pub(super) fn pay_mana_cost_from_pool_with_choices(
     }
 
     if !mana_spent_units.is_empty() {
-        let source_snapshots: Vec<_> = mana_spent_units
-            .iter()
-            .filter_map(|unit| {
-                state
-                    .objects
-                    .get(&unit.source_id)
-                    .map(|source| source.snapshot_for_mana_spent())
-                    .or_else(|| state.lki_cache.get(&unit.source_id).cloned())
-                    .map(|lki| crate::types::game_state::ManaSpentSourceSnapshot {
-                        source_id: unit.source_id,
-                        lki,
-                    })
-            })
-            .collect();
+        let source_snapshots = mana_spent_source_snapshots(state, &mana_spent_units);
         if let Some(obj) = state.objects.get_mut(&source_id) {
             obj.mana_spent_to_cast = true;
             obj.mana_spent_to_cast_amount = mana_spent_units.len() as u32;
@@ -24811,6 +24785,68 @@ fn cleanup_unused_convoke_payments(
     }
 
     release_unspent_tap_markers(state, player, &unused_sources);
+}
+
+/// CR 106.3 + CR 601.2h + CR 400.7: the provenance recorded for every unit a
+/// completed payment spent, in unit order.
+///
+/// The single capture authority for both payment paths (`pay_mana_cost…` with
+/// and without pre-chosen Phyrexian payments): each unit records the source that
+/// PRODUCED its mana, resolved by the epoch production pinned on the unit.
+fn mana_spent_source_snapshots(
+    state: &GameState,
+    units: &[crate::types::mana::ManaUnit],
+) -> Vec<crate::types::game_state::ManaSpentSourceSnapshot> {
+    units
+        .iter()
+        .filter_map(|unit| mana_spent_source_snapshot(state, unit))
+        .collect()
+}
+
+/// CR 106.3 + CR 113.7 + CR 400.7: one spent unit's producing source.
+///
+/// CR 106.3 makes the mana's source the source of the ability that produced it,
+/// and CR 113.7 makes that the object which generated the ability — so the
+/// answer is the incarnation the unit pinned at production, not whatever now
+/// occupies its storage id. A mana ability whose own cost sacrificed its source
+/// (a Treasure ability granted to the permanent, Lion's Eye Diamond) is the case
+/// that separates the two: CR 400.7 makes the sacrificed card's successor a
+/// different object, so a live re-read would record the graveyard card.
+///
+/// Resolution is exact and fails closed: the live object answers only while it
+/// still IS the pinned incarnation, otherwise the epoch's exit last-known
+/// information (`exit_lki_for_incarnation`) does, and only then is the fact
+/// unprovable. A unit that predates the pin (legacy payload, synthetic pool
+/// fixture) keeps the historical live-then-`lki_cache` read, so no answer that
+/// was already reachable changes.
+fn mana_spent_source_snapshot(
+    state: &GameState,
+    unit: &crate::types::mana::ManaUnit,
+) -> Option<crate::types::game_state::ManaSpentSourceSnapshot> {
+    use crate::game::game_object::ObjectIncarnationRefExt as _;
+
+    let lki = match unit.source_incarnation_ref() {
+        Some(pinned) => match state.objects.get(&pinned.object_id).filter(|source| {
+            crate::types::identifiers::ObjectIncarnationRef::from_object(source) == pinned
+        }) {
+            Some(source) => source.snapshot_for_mana_spent(),
+            None => super::filter::exit_lki_for_incarnation(
+                state,
+                pinned.object_id,
+                pinned.incarnation,
+            )?
+            .clone(),
+        },
+        None => state
+            .objects
+            .get(&unit.source_id)
+            .map(crate::game::game_object::GameObject::snapshot_for_mana_spent)
+            .or_else(|| state.lki_cache.get(&unit.source_id).cloned())?,
+    };
+    Some(crate::types::game_state::ManaSpentSourceSnapshot {
+        source_id: unit.source_id,
+        lki,
+    })
 }
 
 /// CR 702.51a + CR 702.126a + CR 701.67a: each of these taps a permanent

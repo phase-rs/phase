@@ -3639,6 +3639,7 @@ mod tests {
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
 
         // Creature card in player A's graveyard (cross-player axis).
@@ -6867,6 +6868,7 @@ mod tests {
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
         for _ in 0..3 {
@@ -6879,6 +6881,7 @@ mod tests {
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
         let (_actions, spell_costs, _grouped) = legal_actions_full(&state);
@@ -6906,6 +6909,7 @@ mod tests {
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::Colorless,
@@ -6916,6 +6920,7 @@ mod tests {
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
         let land_id = create_object(
             &mut state,

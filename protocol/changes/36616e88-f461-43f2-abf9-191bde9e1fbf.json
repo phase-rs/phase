@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "ManaUnit gains source_incarnation, the CR 400.7 producing-object epoch bound at mana production so a spent mana unit's source snapshot records the object that produced the mana rather than whatever now occupies its storage id. Additive and optional, but an older peer that omits it falls back to the pre-fix live-id lookup, so the two peers can disagree on a rules outcome (whether mana came from a Treasure, and therefore whether a first-spell cascade grant applies) rather than merely losing a display field."
+}

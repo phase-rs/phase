@@ -478,6 +478,7 @@ mod tests {
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
     }
@@ -717,6 +718,7 @@ mod tests {
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
 
         let regen_idx = runner.state().objects[&card_id]

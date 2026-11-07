@@ -23659,6 +23659,7 @@ mod tests {
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
 
@@ -23727,6 +23728,7 @@ mod tests {
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
 
         let mut events = Vec::new();
@@ -26923,6 +26925,7 @@ mod tests {
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -28745,6 +28748,7 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
     }
@@ -28767,6 +28771,7 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
     }
@@ -28936,6 +28941,7 @@ library in a random order.";
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
+                source_incarnation: None,
             });
         }
     }

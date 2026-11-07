@@ -4041,6 +4041,7 @@ mod tests {
             restrictions: vec![ManaRestriction::OnlyForSpell],
             grants: Vec::new(),
             expiry: None,
+            source_incarnation: None,
         }
     }
 

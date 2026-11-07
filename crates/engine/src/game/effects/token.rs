@@ -9907,6 +9907,7 @@ mod tests {
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         });
 
         let result = apply_as_current(

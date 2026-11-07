@@ -33,6 +33,7 @@ fn red_mana(n: usize) -> Vec<ManaUnit> {
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
+            source_incarnation: None,
         })
         .collect()
 }
