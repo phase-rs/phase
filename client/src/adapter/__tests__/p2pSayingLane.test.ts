@@ -84,6 +84,14 @@ type HostGuestMessageInternals = {
   nativeBridge: {
     submitAction: (action: GameAction, player: number) => Promise<{ result: SubmitResult }>;
   };
+  publishHostSnapshot: (result: SubmitResult) => Promise<boolean>;
+  broadcastStateUpdate: (
+    transition: unknown,
+    terminalReason?: string,
+    saying?: boolean,
+  ) => Promise<void>;
+  runAiLoop: () => Promise<void>;
+  persistAuthoritativeState: () => void;
   send: (session: unknown, msg: unknown) => Promise<boolean>;
   sendSayingFailure: (session: unknown, action: GameAction, error: unknown) => void;
   handleGuestMessage: (
@@ -313,6 +321,72 @@ describe("P2P saying reply lane", () => {
         seq: 1,
         accepted: false,
         message: "Payment already expired",
+      },
+    ]);
+  });
+
+  it("restamps a guest's saying with the host's receipt clock", async () => {
+    const sentMessages: unknown[] = [];
+    const session = {} as unknown as PeerSession;
+    const submitted: Array<{ action: GameAction; player: number }> = [];
+    const submitAction = vi.fn(async (action: GameAction, player: number) => {
+      submitted.push({ action, player });
+      return { result: EMPTY };
+    });
+
+    const host = Object.create(
+      P2PHostAdapter.prototype,
+    ) as unknown as HostGuestMessageInternals;
+    host.handlePendingTerminalReconnectFrame = () => false;
+    host.authenticatedGuestPlayerId = () => 1;
+    host.concedingSeats = new Set();
+    host.eliminatedSeats = new Set();
+    host.gameRunState = "running";
+    host.guestSessions = new Map([[1, session]]);
+    host.applyBrowserMutation = (run) => run();
+    host.nativeBridge = { submitAction };
+    host.send = vi.fn((_session: unknown, msg: unknown) => {
+      sentMessages.push(msg);
+      return Promise.resolve(true);
+    });
+    host.publishHostSnapshot = vi.fn(async () => true);
+    host.broadcastStateUpdate = vi.fn(async () => {});
+    host.runAiLoop = vi.fn(async () => {});
+    host.persistAuthoritativeState = vi.fn();
+
+    // The guest claims a stale instant and a sequence of its choosing. The
+    // payment identity and sequence are the guest's observation; the instant
+    // is the host's evidence and must be replaced at receipt.
+    await host.handleGuestMessage(
+      session,
+      {
+        type: "action",
+        senderPlayerId: 1,
+        action: saying(3),
+      },
+      1_730_000_000_123,
+    );
+
+    expect(submitted).toEqual([
+      {
+        action: {
+          type: "SayPhrase",
+          data: {
+            payment: 7,
+            seq: 3,
+            at_ms: 1_730_000_000_123,
+            report: "Saying",
+          },
+        },
+        player: 1,
+      },
+    ]);
+    expect(sentMessages).toEqual([
+      {
+        type: "saying_result",
+        payment: 7,
+        seq: 3,
+        accepted: true,
       },
     ]);
   });
