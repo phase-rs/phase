@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "WaitingFor::UnlessPayment carries AbilityCost::SayPhrase with pace and repetitions; an older peer cannot decode the timed spoken payment parameters and would silently drop the pace window or repetition count"
+}

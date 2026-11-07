@@ -18,7 +18,7 @@ use crate::types::mana::ManaSourceSelection;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::resolution::OptionalEffectFrame;
-use crate::types::un_actions::{SayPhraseDisposition, SayPhraseObservation, SayPhrasePayment};
+use crate::types::un_actions::{SayPhraseDisposition, SayPhraseObservation};
 use crate::types::zones::Zone;
 use crate::types::ResolutionOptionalPaymentChoice;
 
@@ -2102,27 +2102,14 @@ pub(super) fn handle_say_phrase(
 
     // Bind the observation to the engine-authored instance. A frame addressed to
     // an instance that is no longer live (a delayed delivery from an earlier
-    // upkeep) is ignored exactly as a stale contest click is. The client's `0`
-    // names "the payment this prompt advertises", which is also how the first
-    // saying of a freshly surfaced prompt arrives before any acknowledgement.
+    // upkeep or discarded takeback branch) is ignored exactly as a stale contest
+    // click is. The engine requires the concrete current ID: zero is never an alias.
     let is_bound = state
         .say_payment
         .as_ref()
         .is_some_and(|payment| payment.id == payment_id);
     if !is_bound {
-        if payment_id != 0 {
-            return Ok(action_result(events, state.waiting_for.clone()));
-        }
-        // `0` names "the payment this prompt advertises". Bind it to the live
-        // instance when one exists instead of minting a replacement: a client
-        // that omits the id must not be able to restart the count (and its
-        // window) by sending 0 again.
-        if state.say_payment.is_none() {
-            state.say_payment = Some(Box::new(SayPhrasePayment::new(
-                state.un_actions.mint_say_payment_id(),
-                repetitions,
-            )));
-        }
+        return Ok(action_result(events, state.waiting_for.clone()));
     }
 
     let payment = state.say_payment.as_mut().expect("spoken payment ensured");

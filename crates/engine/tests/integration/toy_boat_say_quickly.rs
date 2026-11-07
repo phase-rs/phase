@@ -210,6 +210,57 @@ fn toy_boat_demands_one_saying_per_age_counter() {
     );
 }
 
+/// CR 702.24a + Un-card (no CR entry): with two preloaded age counters the
+/// upkeep tick adds a third, demanding three sayings of "Toy Boat" in quick
+/// succession. This exercises the full three-saying window in one payment.
+#[test]
+fn toy_boat_demands_three_sayings_with_two_preloaded_counters() {
+    let (runner, toy_boat) = setup_at_unless_prompt(2, true);
+
+    assert_eq!(
+        runner.state().objects[&toy_boat]
+            .counters
+            .get(&CounterType::Age)
+            .copied(),
+        Some(3),
+        "the upkeep tick adds one age counter to the two preloaded"
+    );
+
+    match &runner.state().waiting_for {
+        WaitingFor::UnlessPayment { player, cost, .. } => {
+            assert_eq!(*player, P0, "the controller is the payer");
+            match cost {
+                AbilityCost::SayPhrase {
+                    phrase,
+                    pace,
+                    repetitions,
+                } => {
+                    assert_eq!(phrase, "Toy Boat");
+                    assert_eq!(pace, &PhrasePace::quickly());
+                    assert_eq!(
+                        *repetitions, 3,
+                        "one saying per age counter (three counters after the tick)"
+                    );
+                }
+                other => panic!("expected a SayPhrase unless-cost, got {other:?}"),
+            }
+        }
+        other => panic!("expected the say-it unless prompt, got {other:?}"),
+    }
+
+    let payment = runner
+        .state()
+        .say_payment
+        .as_ref()
+        .expect("the prompt carries a payment instance");
+    assert_eq!(payment.owed, 3, "the instance owns the full requirement");
+    assert_eq!(payment.said, 0, "nothing has been reported yet");
+    assert!(
+        payment.deadline_ms.is_none(),
+        "reading the prompt is never a pause: the window starts at the first saying"
+    );
+}
+
 /// CR 702.24a + CR 118.12a + Un-card (no CR entry): the engine owns the count.
 /// Each host observation reports exactly ONE saying and the prompt comes back
 /// carrying the sayings still owed; only the last one completes the payment.
@@ -615,7 +666,7 @@ fn a_restored_payment_lapses_on_its_retained_clock() {
     // clock that restarted near zero. It is judged at the payment's retained
     // clock (1_800, from the last expiry check), not at its raw stamp — here
     // inside the window, so it counts and the restarted origin gains nothing.
-    let (mut runner, toy_boat) = setup_at_unless_prompt(1, true);
+    let (mut runner, toy_boat) = setup_at_unless_prompt(2, true);
     say(&mut runner, 1, 1_000);
     let wire = serde_json::to_string(runner.state()).expect("state serializes");
     *runner.state_mut() = serde_json::from_str(&wire).expect("state deserializes");
@@ -625,6 +676,13 @@ fn a_restored_payment_lapses_on_its_retained_clock() {
         phrases_said(&restarted.events).len(),
         1,
         "inside the retained window the saying counts"
+    );
+    // The retained clock keeps the window open to 2_800. A raw stamp would close it at 1_050.
+    let last = say(&mut runner, 3, 2_000);
+    assert_eq!(
+        phrases_said(&last.events).len(),
+        1,
+        "the retained deadline, not the raw stamp, governs the final saying"
     );
     assert_eq!(runner.state().objects[&toy_boat].zone, Zone::Battlefield);
 }
@@ -732,40 +790,44 @@ fn a_replaced_payment_rejects_the_retired_instance() {
     assert_eq!(phrases_said(&fresh.events).len(), 1);
 }
 
-/// `payment: 0` means "the payment this prompt advertises". It binds to the
-/// LIVE instance rather than minting a replacement, so a client that omits the
-/// id cannot restart the count (and its window) by sending 0 again.
+/// `payment: 0` is not accepted as an alias for the live instance; the concrete
+/// payment id minted by the engine is required so stale or unnamed frames cannot bind.
 #[test]
-fn a_zero_payment_id_binds_to_the_live_instance() {
+fn a_zero_payment_id_is_ignored_and_does_not_bind() {
     let (mut runner, _toy_boat) = setup_at_unless_prompt(1, true);
     let live = payment_id(&runner);
 
-    runner
+    let ignored = runner
         .act(GameAction::SayPhrase {
             payment: 0,
             seq: 1,
             at_ms: 1_000,
             report: SayPhraseReport::Saying,
         })
-        .expect("the advertised payment accepts an unnamed observation");
+        .expect("the action is processed");
+    assert_eq!(
+        phrases_said(&ignored.events).len(),
+        0,
+        "payment id 0 is ignored and does not count as a saying"
+    );
     assert_eq!(
         runner.state().say_payment.as_ref().unwrap().id,
         live,
-        "0 binds to the live instance, it does not mint a new one"
+        "payment instance remains intact"
     );
-    assert_eq!(owed(&runner), 1);
+    assert_eq!(owed(&runner), 2, "owed count is unchanged");
 
-    // The second unnamed saying still binds to the same instance and finishes
-    // the payment; a reset would have left two sayings owed again.
-    runner
+    // The concrete live id counts as expected.
+    let counted = runner
         .act(GameAction::SayPhrase {
-            payment: 0,
-            seq: 2,
-            at_ms: 1_500,
+            payment: live,
+            seq: 1,
+            at_ms: 1_000,
             report: SayPhraseReport::Saying,
         })
-        .expect("the remaining saying is accepted");
-    assert!(runner.state().say_payment.is_none());
+        .expect("concrete payment id is accepted");
+    assert_eq!(phrases_said(&counted.events).len(), 1);
+    assert_eq!(owed(&runner), 1);
 }
 
 /// The instance's own accounting is a pure function of host observations, so
