@@ -7308,10 +7308,11 @@ mod oversized_publication {
                 install(&table, state, &[]).await;
                 let mut p1 = table.connect(P1).await;
                 let target = {
-                    let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
-                        .await
-                        .unwrap();
-                    crate::say_phrase_expiry_target(&session)
+                    let mut session =
+                        crate::lock_session(&table.app.sessions, &table.key.game_code)
+                            .await
+                            .unwrap();
+                    crate::claim_say_phrase_expiry(&mut session)
                 };
                 crate::schedule_say_phrase_expiry(
                     target,
@@ -7507,10 +7508,11 @@ mod oversized_publication {
                 let mut p0 = table.connect(P0).await;
                 let _p1 = table.connect(P1).await;
                 let target = {
-                    let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
-                        .await
-                        .unwrap();
-                    crate::say_phrase_expiry_target(&session)
+                    let mut session =
+                        crate::lock_session(&table.app.sessions, &table.key.game_code)
+                            .await
+                            .unwrap();
+                    crate::claim_say_phrase_expiry(&mut session)
                 };
                 crate::schedule_say_phrase_expiry(
                     target,
@@ -7553,10 +7555,11 @@ mod oversized_publication {
                 install(&table, state, &[]).await;
                 let mut p0 = table.connect(P0).await;
                 let target = {
-                    let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
-                        .await
-                        .unwrap();
-                    crate::say_phrase_expiry_target(&session)
+                    let mut session =
+                        crate::lock_session(&table.app.sessions, &table.key.game_code)
+                            .await
+                            .unwrap();
+                    crate::claim_say_phrase_expiry(&mut session)
                 };
                 let saying_action = GameAction::SayPhrase {
                     payment: payment_id,
@@ -7598,10 +7601,11 @@ mod oversized_publication {
                 install(&table, state, &[]).await;
                 let mut p0 = table.connect(P0).await;
                 let target = {
-                    let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
-                        .await
-                        .unwrap();
-                    crate::say_phrase_expiry_target(&session)
+                    let mut session =
+                        crate::lock_session(&table.app.sessions, &table.key.game_code)
+                            .await
+                            .unwrap();
+                    crate::claim_say_phrase_expiry(&mut session)
                 };
                 let saying_action = GameAction::SayPhrase {
                     payment: payment_id,
@@ -7645,24 +7649,136 @@ mod oversized_publication {
             });
         }
 
+        async fn request_say_phrase_expiry(
+            socket: &mut ClientSocket,
+            request_id: u64,
+            lapse: Option<u64>,
+        ) -> serde_json::Value {
+            use futures_util::SinkExt;
+            use tokio_tungstenite::tungstenite::Message;
+            let request =
+                server_core::protocol::ClientMessage::SayPhraseExpiry { request_id, lapse };
+            socket
+                .send(Message::Text(
+                    serde_json::to_string(&request).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+            loop {
+                let frame = receive_command_frame(socket).await;
+                if (frame["type"] == "SayPhraseExpiry" || frame["type"] == "SayPhraseExpiryFailed")
+                    && frame["data"]["request_id"] == request_id
+                {
+                    return frame;
+                }
+            }
+        }
+
+        /// The single-user sidecar answers its native P2P host's bounded expiry
+        /// read with the live payment, refuses an early lapse, and applies a
+        /// lapse past the deadline under the payer's authority without any seat
+        /// (the absent opponent included) being attached by it.
         #[test]
-        fn say_phrase_coalesces_redundant_expiry_tasks() {
+        fn native_host_reads_and_lapses_a_spoken_payment() {
             run_async_test(|| async {
                 let table = NativeTable::duel().await;
                 let now = crate::epoch_ms_at_ingress(std::time::Instant::now());
-                let (state, payment_id) = toy_boat_state(Some(now + 200));
+                let (state, payment_id) = toy_boat_state(Some(now + 150));
+                install(&table, state, &[]).await;
+                let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                    .await
+                    .unwrap();
+                let (lease, ()) = table
+                    .app
+                    .context
+                    .game_executor
+                    .with_session(session, |session| {
+                        session.set_hosting(server_core::session::HostingMode::SingleUser);
+                    })
+                    .await;
+                drop(lease);
+                let mut host = table.connect(P0).await;
+                let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+                    let read = request_say_phrase_expiry(&mut host, 1, None).await;
+                    assert_eq!(read["type"], "SayPhraseExpiry", "{read}");
+                    assert_eq!(read["data"]["target"]["payment"], payment_id, "{read}");
+                    assert_eq!(read["data"]["target"]["payer"], 0, "{read}");
+
+                    let early = request_say_phrase_expiry(&mut host, 2, Some(payment_id)).await;
+                    assert_eq!(
+                        early["data"]["target"]["payment"], payment_id,
+                        "a lapse before the deadline leaves the payment live: {early}"
+                    );
+
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    let lapsed = request_say_phrase_expiry(&mut host, 3, Some(payment_id)).await;
+                    assert_eq!(lapsed["type"], "SayPhraseExpiry", "{lapsed}");
+                    assert!(lapsed["data"]["target"].is_null(), "{lapsed}");
+                })
+                .await;
+                let (state, opponent_routed) = (
+                    session_read(&table, |s| s.state.clone()).await,
+                    table
+                        .app
+                        .connections
+                        .lock()
+                        .await
+                        .get(&table.key.game_code)
+                        .is_some_and(|seats| seats.contains_key(&P1)),
+                );
+                table.server.abort();
+                outcome.expect("the native expiry authority answered");
+                assert!(state.say_payment.is_none(), "the payment lapsed");
+                assert!(
+                    !state
+                        .battlefield
+                        .iter()
+                        .any(|id| state.objects[id].name == "Toy Boat"),
+                    "the unpaid cumulative upkeep sacrificed Toy Boat"
+                );
+                assert!(!opponent_routed, "the lapse attached no absent seat");
+            });
+        }
+
+        /// A shared server times spoken payments itself; and only the host seat
+        /// of a single-user sidecar is its native expiry authority.
+        #[test]
+        fn native_expiry_authority_is_host_and_single_user_only() {
+            run_async_test(|| async {
+                let table = NativeTable::duel().await;
+                let now = crate::epoch_ms_at_ingress(std::time::Instant::now());
+                let (state, payment_id) = toy_boat_state(Some(now + 60_000));
+                install(&table, state, &[]).await;
+                let mut host = table.connect(P0).await;
+                let mut guest = table.connect(P1).await;
+                let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+                    let shared = request_say_phrase_expiry(&mut host, 1, Some(payment_id)).await;
+                    assert_eq!(shared["type"], "SayPhraseExpiryFailed", "{shared}");
+                    let not_host = request_say_phrase_expiry(&mut guest, 2, None).await;
+                    assert_eq!(not_host["type"], "SayPhraseExpiryFailed", "{not_host}");
+                })
+                .await;
+                let payment = session_read(&table, |s| s.state.say_payment.clone()).await;
+                table.server.abort();
+                outcome.expect("refusals arrived");
+                assert!(payment.is_some(), "a refused request lapsed nothing");
+            });
+        }
+
+        /// One live payment has one expiry owner: repeated scheduling claims
+        /// nothing more, and a task whose payment was rekeyed retires without
+        /// draining. Exactly one payer-ingress drain is observed per lapse.
+        #[test]
+        fn say_phrase_expiry_has_one_owner_across_rekey_and_rescheduling() {
+            run_async_test(|| async {
+                let table = NativeTable::duel().await;
+                let now = crate::epoch_ms_at_ingress(std::time::Instant::now());
+                let (state, payment_id) = toy_boat_state(Some(now + 150));
                 install(&table, state, &[]).await;
                 let _p0 = table.connect(P0).await;
-                let target = {
-                    let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
-                        .await
-                        .unwrap();
-                    crate::say_phrase_expiry_target(&session)
-                };
-                // Schedule multiple times for the same live payment:
-                for _ in 0..5 {
+                let schedule = |claim| {
                     crate::schedule_say_phrase_expiry(
-                        target.clone(),
+                        claim,
                         &table.app.context.game_executor,
                         &table.app.sessions,
                         &table.app.db,
@@ -7671,27 +7787,79 @@ mod oversized_publication {
                         &table.app.game_db,
                         &table.app.game_spectators,
                         &table.key.game_code,
-                    );
-                }
-                // Yield so spawned task can acquire session lock and claim:
-                tokio::task::yield_now().await;
-                tokio::time::sleep(Duration::from_millis(10)).await;
-
-                // Verify that active_say_expiry_task is set to payment_id:
-                let active_task = session_read(&table, |s| s.active_say_expiry_task).await;
-                assert_eq!(active_task, Some(payment_id));
-
-                // Wait for the single coalesced task to complete expiry:
-                tokio::time::sleep(Duration::from_millis(350)).await;
-
-                let state = session_read(&table, |s| s.state.clone()).await;
-                let final_active = session_read(&table, |s| s.active_say_expiry_task).await;
-                table.server.abort();
-                assert_eq!(
-                    final_active, None,
-                    "expiry task claim released upon termination"
+                    )
+                };
+                let claims = {
+                    let mut session =
+                        crate::lock_session(&table.app.sessions, &table.key.game_code)
+                            .await
+                            .unwrap();
+                    (0..5)
+                        .map(|_| crate::claim_say_phrase_expiry(&mut session))
+                        .collect::<Vec<_>>()
+                };
+                assert!(claims[0].is_some(), "the live payment is claimed once");
+                assert!(
+                    claims[1..].iter().all(Option::is_none),
+                    "an owned payment admits no second task: {claims:?}"
                 );
-                assert!(state.say_payment.is_none(), "payment expired");
+                for claim in claims {
+                    schedule(claim);
+                }
+
+                // Rekey the live payment while the first owner sleeps.
+                let rekeyed = payment_id + 100;
+                let rekey_claim = {
+                    let mut session =
+                        crate::lock_session(&table.app.sessions, &table.key.game_code)
+                            .await
+                            .unwrap();
+                    session
+                        .state
+                        .say_payment
+                        .as_mut()
+                        .expect("the payment is live")
+                        .id = rekeyed;
+                    let first = crate::claim_say_phrase_expiry(&mut session);
+                    let again = crate::claim_say_phrase_expiry(&mut session);
+                    assert!(again.is_none(), "the rekeyed payment has one owner");
+                    first
+                };
+                assert_eq!(
+                    rekey_claim.as_ref().map(|claim| claim.payment_id),
+                    Some(rekeyed)
+                );
+                schedule(rekey_claim);
+
+                let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        let (payment, owner) = session_read(&table, |s| {
+                            (s.state.say_payment.clone(), s.active_say_expiry_task)
+                        })
+                        .await;
+                        if payment.is_none() && owner.is_none() {
+                            break;
+                        }
+                    }
+                })
+                .await;
+                // Let the retired owner of the old payment finish its check.
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                table.server.abort();
+                outcome.expect("the rekeyed payment lapsed and its owner retired");
+                let drains: Vec<u64> = crate::SAY_EXPIRY_DRAINS
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(code, _)| *code == table.key.game_code)
+                    .map(|(_, payment)| *payment)
+                    .collect();
+                assert_eq!(
+                    drains,
+                    vec![rekeyed],
+                    "only the live payment's owner drained, once"
+                );
             });
         }
     }

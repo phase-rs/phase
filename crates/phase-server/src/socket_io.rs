@@ -1094,6 +1094,7 @@ fn state_frame(message: &ServerMessage) -> StateFrame<'_> {
         },
         ServerMessage::AuthoritativeStateExport { .. } => StateFrame::Export,
         ServerMessage::ManaPaymentPreview { .. } => StateFrame::NonState,
+        ServerMessage::SayPhraseExpiry { .. } => StateFrame::NonState,
         ServerMessage::InteractionPreview { .. } => StateFrame::NonState,
         ServerMessage::ServerHello { .. }
         | ServerMessage::GameCreated { .. }
@@ -1107,6 +1108,7 @@ fn state_frame(message: &ServerMessage) -> StateFrame<'_> {
         | ServerMessage::ManaPaymentPreviewRejected { .. }
         | ServerMessage::ManaPaymentPreviewFailed { .. }
         | ServerMessage::AuthoritativeStateExportFailed { .. }
+        | ServerMessage::SayPhraseExpiryFailed { .. }
         | ServerMessage::InteractionPreviewFailed { .. }
         | ServerMessage::OpponentDisconnected { .. }
         | ServerMessage::OpponentReconnected { .. }

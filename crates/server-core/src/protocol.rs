@@ -303,6 +303,16 @@ pub struct TerminalBootstrapRequest {
     pub request_id: String,
 }
 
+/// Un-card (no CR entry): the live timed spoken payment an expiry authority
+/// must time — who owes it, which engine-minted payment it is, and the
+/// epoch-millisecond deadline the engine stored for the next saying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SayPhraseExpiryTarget {
+    pub payer: PlayerId,
+    pub payment: u64,
+    pub deadline_ms: u64,
+}
+
 // clippy::large_enum_variant: `CreateGameWithSettings` is the outlier. This
 // enum is a short-lived per-frame deserialize target that is matched and
 // destructured at once, never stored or queued, so boxing that variant's fields
@@ -355,6 +365,22 @@ pub enum ClientMessage {
     /// server authorizes this capability from the authenticated host seat;
     /// neither a player token nor a game code travels in the payload.
     ExportAuthoritativeState,
+    /// Un-card (no CR entry): the native P2P host's bounded read of the live
+    /// timed spoken payment, optionally lapsing it first.
+    ///
+    /// Only the authenticated host seat of a single-user sidecar may send this;
+    /// a shared server lapses spoken payments on its own clock. With
+    /// `lapse: Some(payment)` the server drains the payer's ingress, then
+    /// submits the expiry observation for the engine-owned payer under the
+    /// payer's own authority (the payer's presence is never touched) when that
+    /// payment is still live and past its deadline on the server's clock. The
+    /// answer always carries the live payment afterwards, independent of any
+    /// seat's (possibly withheld or oversized) state delivery.
+    SayPhraseExpiry {
+        request_id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lapse: Option<u64>,
+    },
     /// One opaque, engine-authored interaction response. The client echoes the
     /// submission the engine published in `ViewerInteraction`; it never derives
     /// a `GameAction` from the opportunity schema. Like `Action`, the
@@ -949,6 +975,19 @@ pub enum ServerMessage {
     /// Requester-only operational or authorization failure for an
     /// authoritative-state export.
     AuthoritativeStateExportFailed {
+        message: String,
+    },
+    /// Requester-only answer to `ClientMessage::SayPhraseExpiry`: the live
+    /// timed spoken payment the host must time, if any.
+    SayPhraseExpiry {
+        request_id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<SayPhraseExpiryTarget>,
+    },
+    /// Requester-only operational or authorization failure for
+    /// `ClientMessage::SayPhraseExpiry`.
+    SayPhraseExpiryFailed {
+        request_id: u64,
         message: String,
     },
     /// Answer to a `PreviewInteraction` request, carrying the engine's own DTO —

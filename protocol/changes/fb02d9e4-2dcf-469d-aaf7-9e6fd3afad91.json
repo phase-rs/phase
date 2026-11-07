@@ -1,0 +1,6 @@
+{
+  "surfaces": [
+    "full"
+  ],
+  "reason": "Full protocol gains ClientMessage::SayPhraseExpiry and ServerMessage::SayPhraseExpiry / SayPhraseExpiryFailed: the native P2P host's bounded, host-only read and lapse of a live timed spoken payment (Toy Boat). Older servers reject the request; older clients cannot parse the answer."
+}

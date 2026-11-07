@@ -111,6 +111,7 @@ pub fn guard_client_message_before_dispatch(
         | ClientMessage::ConcedeMatch
         | ClientMessage::AbandonGame
         | ClientMessage::ExportAuthoritativeState
+        | ClientMessage::SayPhraseExpiry { .. }
         // One `u32` sequence number: no field to bound, so nothing to reject.
         | ClientMessage::ContestClick { .. }
         | ClientMessage::RequestTakeback(_)
@@ -376,6 +377,7 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
         | ClientMessage::ExportAuthoritativeState
+        | ClientMessage::SayPhraseExpiry { .. }
         | ClientMessage::ResyncState
         | ClientMessage::SubscribeLobby
         | ClientMessage::UnsubscribeLobby
@@ -572,6 +574,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
         | ClientMessage::PreviewInteraction { .. }
         | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::ExportAuthoritativeState
+        | ClientMessage::SayPhraseExpiry { .. }
         | ClientMessage::ResyncState
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame

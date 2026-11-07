@@ -210,6 +210,12 @@ impl Envelope {
             ServerMessage::AuthoritativeStateExport { .. } => {
                 Some(ServerMessage::AuthoritativeStateExportFailed { message: reason })
             }
+            ServerMessage::SayPhraseExpiry { request_id, .. } => {
+                Some(ServerMessage::SayPhraseExpiryFailed {
+                    request_id: *request_id,
+                    message: reason,
+                })
+            }
             ServerMessage::ManaPaymentPreview { request_id, .. } => {
                 Some(ServerMessage::ManaPaymentPreviewFailed {
                     request_id: *request_id,
@@ -234,6 +240,7 @@ impl Envelope {
             | ServerMessage::ManaPaymentPreviewRejected { .. }
             | ServerMessage::ManaPaymentPreviewFailed { .. }
             | ServerMessage::AuthoritativeStateExportFailed { .. }
+            | ServerMessage::SayPhraseExpiryFailed { .. }
             | ServerMessage::InteractionPreviewFailed { .. }
             | ServerMessage::OpponentDisconnected { .. }
             | ServerMessage::OpponentReconnected { .. }

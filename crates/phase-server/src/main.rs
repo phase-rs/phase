@@ -563,10 +563,10 @@ fn finish_restored_full_startup(
 fn restored_say_phrase_expiry(
     manager: &mut SessionManager,
     game_code: &str,
-) -> Option<(PlayerId, String, u64, u64)> {
+) -> Option<SayPhraseExpiryClaim> {
     manager
         .session_exclusive(game_code)
-        .and_then(|session| say_phrase_expiry_target(session))
+        .and_then(claim_say_phrase_expiry)
 }
 
 /// Restores persisted game sessions from disk for Full mode and arms any restored
@@ -1639,6 +1639,7 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         | ClientMessage::PreviewInteraction { .. }
         | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::ExportAuthoritativeState
+        | ClientMessage::SayPhraseExpiry { .. }
         | ClientMessage::ResyncState
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
@@ -1933,6 +1934,7 @@ fn full_socket_authority(message: &ClientMessage) -> FullSocketAuthority {
         | ClientMessage::PreviewInteraction { .. }
         | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::ExportAuthoritativeState
+        | ClientMessage::SayPhraseExpiry { .. }
         | ClientMessage::AbandonGame
         | ClientMessage::SeatMutate { .. }
         | ClientMessage::Concede
@@ -8548,6 +8550,12 @@ fn operation_failed_message(
         ClientMessage::ExportAuthoritativeState => {
             Some(ServerMessage::AuthoritativeStateExportFailed { message: message.into() })
         }
+        ClientMessage::SayPhraseExpiry { request_id, .. } => {
+            Some(ServerMessage::SayPhraseExpiryFailed {
+                request_id: *request_id,
+                message: message.into(),
+            })
+        }
         ClientMessage::PreviewInteraction { request } => {
             Some(ServerMessage::InteractionPreviewFailed {
                 request_id: request.request_id.clone(),
@@ -9133,7 +9141,7 @@ async fn apply_and_publish_full_submission(
     let player_token = player_token.to_string();
     // The owned game guard spans admission waits, AI continuations and all
     // publication. Other games can use the CPU between these work units.
-    let (session, applied) = executor
+    let (mut session, applied) = executor
         .with_session(session, move |session| {
             let HandledAction { result, takeback } = match submission {
                 GameSubmission::Action(action) => session.handle_action_with_card_db_outcome_at(
@@ -9215,7 +9223,7 @@ async fn apply_and_publish_full_submission(
             return;
         }
     };
-    let expiry = say_phrase_expiry_target(&session);
+    let expiry = claim_say_phrase_expiry(&mut session);
     let AppliedHumanSubmission {
         revision,
         unpublished,
@@ -10196,18 +10204,13 @@ fn epoch_ms_at_ingress(received_at: Instant) -> u64 {
     now.saturating_sub(received_at.elapsed().as_millis() as u64)
 }
 
-/// The live timed spoken payment the server must lapse on its own clock.
+/// The live timed spoken payment of a session, read under its lock:
+/// `(payer, payer token, payment id, deadline)`.
 ///
-/// Un-card (no CR entry): Toy Boat's one-second gap is observed by the host.
-/// The client may report the lapse too, but it cannot be the only timer: a
-/// reloaded or skewed payer would otherwise hold the payment open forever.
-/// `(payer, payer token, payment id, deadline)` is read under the session lock.
-pub(crate) fn say_phrase_expiry_target(
-    session: &GameSession,
-) -> Option<(PlayerId, String, u64, u64)> {
-    if session.hosting() == server_core::session::HostingMode::SingleUser {
-        return None;
-    }
+/// Un-card (no CR entry): Toy Boat's one-second gap is observed by the host
+/// that owns the clock. This read is hosting-agnostic; [`claim_say_phrase_expiry`]
+/// decides who times it.
+fn live_say_phrase_payment(session: &GameSession) -> Option<(PlayerId, String, u64, u64)> {
     let payment = session.state.say_payment.as_deref()?;
     let deadline_ms = payment.deadline_ms?;
     let engine::types::game_state::WaitingFor::UnlessPayment { player, .. } =
@@ -10222,16 +10225,103 @@ pub(crate) fn say_phrase_expiry_target(
     Some((*player, token.clone(), payment.id, deadline_ms))
 }
 
-/// Arm one server-clock lapse observation for a live spoken payment.
+/// The one live server-clock lapse observation of a Full session's timed
+/// spoken payment, claimed under the session lock before its task exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SayPhraseExpiryClaim {
+    pub(crate) payer: PlayerId,
+    pub(crate) payer_token: String,
+    pub(crate) payment_id: u64,
+    pub(crate) deadline_ms: u64,
+}
+
+/// Claim the server's lapse observation for the live timed spoken payment.
 ///
-/// The task owns the payer's identity and re-enters the ordinary submission
-/// path, so the expiry gets the same authority gate, publication, persistence
-/// and AI continuation as any other action. It re-reads the live deadline
-/// before submitting: a saying accepted while the task slept advances the
-/// deadline, and an expiry frame from the old deadline must not be sent.
+/// The client may report the lapse too, but it cannot be the only timer: a
+/// reloaded or skewed payer would otherwise hold the payment open forever.
+/// The claim is taken against the payment that is live under this same lock,
+/// so a task is only ever spawned for the current payment, and at most one
+/// task owns a payment: `None` when nothing is timed or a task already owns
+/// it. A single-user sidecar is timed by its native P2P host instead
+/// (`ClientMessage::SayPhraseExpiry`), which alone can order the lapse after
+/// the sayings still crossing its WebRTC ingress.
+pub(crate) fn claim_say_phrase_expiry(session: &mut GameSession) -> Option<SayPhraseExpiryClaim> {
+    if session.hosting() == server_core::session::HostingMode::SingleUser {
+        return None;
+    }
+    let (payer, payer_token, payment_id, deadline_ms) = live_say_phrase_payment(session)?;
+    session
+        .claim_say_phrase_expiry(payment_id)
+        .then_some(SayPhraseExpiryClaim {
+            payer,
+            payer_token,
+            payment_id,
+            deadline_ms,
+        })
+}
+
+/// Whether `claim` still owns its session's live payment, and that payment's
+/// current deadline. A saying accepted while the owner slept moves the
+/// deadline; a lapse, a rekey or another payment ends the claim.
+fn owned_say_phrase_deadline(session: &GameSession, claim: &SayPhraseExpiryClaim) -> Option<u64> {
+    if session.active_say_expiry_task != Some(claim.payment_id) {
+        return None;
+    }
+    match live_say_phrase_payment(session) {
+        Some((payer, _, payment_id, deadline_ms))
+            if payer == claim.payer && payment_id == claim.payment_id =>
+        {
+            Some(deadline_ms)
+        }
+        _ => None,
+    }
+}
+
+/// Test-only observation of each payer-ingress drain an expiry owner performs,
+/// so tests can prove a payment's lapse is attempted by exactly one owner.
+#[cfg(test)]
+pub(crate) static SAY_EXPIRY_DRAINS: std::sync::Mutex<Vec<(String, u64)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Drain the payer's already-received frames so a timely saying still in
+/// that seat's ingress is applied before the lapse is judged. A payer with no
+/// attached route has nothing in flight.
+async fn drain_say_phrase_payer(
+    connections: &SharedConnections,
+    game_code: &str,
+    payer: PlayerId,
+    payment_id: u64,
+) {
+    #[cfg(test)]
+    SAY_EXPIRY_DRAINS
+        .lock()
+        .unwrap()
+        .push((game_code.to_string(), payment_id));
+    #[cfg(not(test))]
+    let _ = payment_id;
+    let payer_tx = {
+        let routes = connections.lock().await;
+        routes
+            .get(game_code)
+            .and_then(|seats| seats.get(&payer))
+            .cloned()
+    };
+    if let Some(payer_tx) = payer_tx {
+        payer_tx.drain_ingress().await;
+    }
+}
+
+/// Arm the claimed server-clock lapse observation for a live spoken payment.
+///
+/// The task owns its claim from before it is spawned until it retires: it
+/// checks ownership before every drain, judges and applies the lapse under one
+/// session lock, and releases only its own claim afterwards. The lapse
+/// re-enters the ordinary Full submission path under the payer's authority,
+/// so it gets the same authority gate, publication, persistence and AI
+/// continuation as any other action.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn schedule_say_phrase_expiry(
-    target: Option<(PlayerId, String, u64, u64)>,
+    claim: Option<SayPhraseExpiryClaim>,
     executor: &game_executor::GameExecutor,
     state: &SharedState,
     db: &SharedDb,
@@ -10241,7 +10331,7 @@ pub(crate) fn schedule_say_phrase_expiry(
     game_spectators: &SharedGameSpectators,
     game_code: &str,
 ) {
-    let Some((payer, token, payment_id, deadline_ms)) = target else {
+    let Some(claim) = claim else {
         return;
     };
     let executor = executor.clone();
@@ -10253,80 +10343,78 @@ pub(crate) fn schedule_say_phrase_expiry(
     let game_spectators = game_spectators.clone();
     let game_code = game_code.to_string();
     tokio::spawn(async move {
-        {
-            let Ok(mut session) = lock_session(&state, &game_code).await else {
-                return;
-            };
-            if !session.claim_say_phrase_expiry(payment_id) {
-                return;
-            }
-        }
-        let mut sleep_for = Duration::from_millis(
-            deadline_ms.saturating_sub(epoch_ms_at_ingress(Instant::now())) + 1,
-        );
+        let mut deadline_ms = claim.deadline_ms;
         loop {
-            tokio::time::sleep(sleep_for).await;
-            let payer_tx = {
-                let routes = connections.lock().await;
-                routes
-                    .get(&game_code)
-                    .and_then(|seats| seats.get(&payer))
-                    .cloned()
-            };
-            if let Some(ref payer_tx) = payer_tx {
-                payer_tx.drain_ingress().await;
-            }
-            let live = match lock_session(&state, &game_code).await {
-                Ok(session) => say_phrase_expiry_target(&session),
+            let now = epoch_ms_at_ingress(Instant::now());
+            tokio::time::sleep(Duration::from_millis(deadline_ms.saturating_sub(now) + 1)).await;
+            // Only the owner drains: a task whose claim ended retires first.
+            let owned = match lock_session(&state, &game_code).await {
+                Ok(session) => owned_say_phrase_deadline(&session, &claim),
                 Err(_) => return,
             };
-            match live {
-                Some((live_payer, _, live_payment, live_deadline))
-                    if live_payer == payer && live_payment == payment_id =>
-                {
-                    let now = epoch_ms_at_ingress(Instant::now());
-                    if live_deadline > now {
-                        sleep_for = Duration::from_millis(live_deadline.saturating_sub(now) + 1);
-                        continue;
-                    }
-                    break;
-                }
-                // The payment was answered, replaced, or this session retired.
-                _ => {
-                    if let Ok(mut session) = lock_session(&state, &game_code).await {
-                        session.release_say_phrase_expiry(payment_id);
-                    }
-                    return;
-                }
+            if owned.is_none() {
+                retire_say_phrase_expiry(&state, &game_code, claim.payment_id).await;
+                return;
             }
+            drain_say_phrase_payer(&connections, &game_code, claim.payer, claim.payment_id).await;
+            let Ok(session) = lock_session(&state, &game_code).await else {
+                return;
+            };
+            let Some(live_deadline) = owned_say_phrase_deadline(&session, &claim) else {
+                drop(session);
+                retire_say_phrase_expiry(&state, &game_code, claim.payment_id).await;
+                return;
+            };
+            let received_at = Instant::now();
+            // CR 118.12a: only a clock strictly past the deadline is a pause.
+            if live_deadline >= epoch_ms_at_ingress(received_at) {
+                deadline_ms = live_deadline;
+                continue;
+            }
+            // Judged and applied under the same lock, still owned.
+            submit_say_phrase_lapse(
+                session,
+                &game_code,
+                claim.payer,
+                &claim.payer_token,
+                claim.payment_id,
+                received_at,
+                &executor,
+                &state,
+                &db,
+                &draft_state,
+                &connections,
+                &game_db,
+                &game_spectators,
+            )
+            .await;
+            retire_say_phrase_expiry(&state, &game_code, claim.payment_id).await;
+            return;
         }
-        if let Ok(mut session) = lock_session(&state, &game_code).await {
-            session.release_say_phrase_expiry(payment_id);
-        }
-        apply_say_phrase_expiry(
-            &game_code,
-            payer,
-            &token,
-            payment_id,
-            &executor,
-            &state,
-            &db,
-            &draft_state,
-            &connections,
-            &game_db,
-            &game_spectators,
-            Instant::now(),
-        )
-        .await;
     });
 }
 
+/// Release `payment_id`'s claim if it is still the session's owner; a newer
+/// payment's claim is left alone.
+async fn retire_say_phrase_expiry(state: &SharedState, game_code: &str, payment_id: u64) {
+    if let Ok(mut session) = lock_session(state, game_code).await {
+        session.release_say_phrase_expiry(payment_id);
+    }
+}
+
+/// Submit the host-observed lapse of `payment_id` for the engine-owned payer.
+///
+/// The observation is an `Expiry` report, never a saying; it is stamped with
+/// the host's own clock at `received_at` and applied under the payer's token
+/// with a detached reply, so no seat's socket or presence is involved.
 #[allow(clippy::too_many_arguments)]
-async fn apply_say_phrase_expiry(
+async fn submit_say_phrase_lapse(
+    session: OwnedMutexGuard<GameSession>,
     game_code: &str,
     payer: PlayerId,
-    player_token: &str,
+    payer_token: &str,
     payment_id: u64,
+    received_at: Instant,
     executor: &game_executor::GameExecutor,
     state: &SharedState,
     db: &SharedDb,
@@ -10334,22 +10422,9 @@ async fn apply_say_phrase_expiry(
     connections: &SharedConnections,
     game_db: &SharedGameDb,
     game_spectators: &SharedGameSpectators,
-    received_at: Instant,
 ) {
-    let host_received_at_ms = epoch_ms_at_ingress(received_at);
-    let lock_start = Instant::now();
-    let Ok(session) = lock_session(state, game_code).await else {
-        return;
-    };
-    let live = say_phrase_expiry_target(&session);
-    let Some((live_payer, _, live_payment, live_deadline)) = live else {
-        return;
-    };
-    if live_payer != payer || live_payment != payment_id || live_deadline > host_received_at_ms {
-        return;
-    }
-    let (dummy_tx, _) = socket_mailbox::channel();
-    let reply = dummy_tx.for_completion(None);
+    let (detached_tx, _) = socket_mailbox::channel();
+    let reply = detached_tx.for_completion(None);
     let action = GameAction::SayPhrase {
         payment: payment_id,
         seq: 0,
@@ -10359,10 +10434,10 @@ async fn apply_say_phrase_expiry(
     apply_and_publish_full_submission(
         session,
         GameSubmission::Action(action),
-        player_token,
+        payer_token,
         payer,
         None,
-        host_received_at_ms,
+        epoch_ms_at_ingress(received_at),
         &reply,
         executor,
         state,
@@ -10373,10 +10448,111 @@ async fn apply_say_phrase_expiry(
         game_spectators,
         game_code.to_string(),
         "say_phrase_expiry",
-        lock_start,
+        Instant::now(),
         false,
     )
     .await;
+}
+
+/// The native P2P host's bounded expiry authority (`ClientMessage::SayPhraseExpiry`).
+///
+/// Only the authenticated host seat of a single-user sidecar is answered. With
+/// `lapse`, the payer's ingress is drained and the lapse is judged and applied
+/// under one session lock when that payment is still live and past its
+/// deadline on this clock. The answer is the live payment afterwards.
+#[allow(clippy::too_many_arguments)]
+async fn handle_native_say_phrase_expiry(
+    request_id: u64,
+    lapse: Option<u64>,
+    identity: &SocketIdentity,
+    executor: &game_executor::GameExecutor,
+    state: &SharedState,
+    db: &SharedDb,
+    draft_state: &SharedDraftState,
+    connections: &SharedConnections,
+    game_db: &SharedGameDb,
+    game_spectators: &SharedGameSpectators,
+) -> ServerMessage {
+    let failed = |message: &str| ServerMessage::SayPhraseExpiryFailed {
+        request_id,
+        message: message.to_string(),
+    };
+    let game_code = match (identity.game_code.as_deref(), identity.player_id) {
+        (Some(game_code), Some(PlayerId(0))) => game_code,
+        (Some(_), Some(_)) => return failed("Only the game host times spoken payments"),
+        _ => return failed("Not in a game"),
+    };
+    let read = |session: &GameSession| {
+        live_say_phrase_payment(session).map(|(payer, _, payment, deadline_ms)| {
+            server_core::protocol::SayPhraseExpiryTarget {
+                payer,
+                payment,
+                deadline_ms,
+            }
+        })
+    };
+    let Ok(session) = lock_session(state, game_code).await else {
+        return failed("Game session is no longer available");
+    };
+    if session.hosting() != server_core::session::HostingMode::SingleUser {
+        return failed("Spoken payments are timed by this server, not a local host");
+    }
+    let live = live_say_phrase_payment(&session);
+    let Some(payment_id) = lapse else {
+        return ServerMessage::SayPhraseExpiry {
+            request_id,
+            target: read(&session),
+        };
+    };
+    let Some((payer, payer_token, _, _)) =
+        live.filter(|(_, _, live_payment, _)| *live_payment == payment_id)
+    else {
+        return ServerMessage::SayPhraseExpiry {
+            request_id,
+            target: read(&session),
+        };
+    };
+    drop(session);
+    // The host's own frames are already ordered ahead of this request on its
+    // socket; any other payer's received frames are applied first.
+    if payer != PlayerId(0) {
+        drain_say_phrase_payer(connections, game_code, payer, payment_id).await;
+    }
+    let Ok(session) = lock_session(state, game_code).await else {
+        return failed("Game session is no longer available");
+    };
+    let received_at = Instant::now();
+    let lapsed =
+        live_say_phrase_payment(&session).is_some_and(|(live_payer, _, live, deadline)| {
+            live_payer == payer && live == payment_id && deadline < epoch_ms_at_ingress(received_at)
+        });
+    if lapsed {
+        submit_say_phrase_lapse(
+            session,
+            game_code,
+            payer,
+            &payer_token,
+            payment_id,
+            received_at,
+            executor,
+            state,
+            db,
+            draft_state,
+            connections,
+            game_db,
+            game_spectators,
+        )
+        .await;
+    } else {
+        drop(session);
+    }
+    match lock_session(state, game_code).await {
+        Ok(session) => ServerMessage::SayPhraseExpiry {
+            request_id,
+            target: read(&session),
+        },
+        Err(_) => failed("Game session is no longer available"),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -10811,6 +10987,23 @@ async fn handle_client_message(
                 },
             };
 
+            let _ = tx.send(response);
+        }
+
+        ClientMessage::SayPhraseExpiry { request_id, lapse } => {
+            let response = handle_native_say_phrase_expiry(
+                request_id,
+                lapse,
+                identity,
+                &context.game_executor,
+                state,
+                db,
+                draft_state,
+                connections,
+                game_db,
+                game_spectators,
+            )
+            .await;
             let _ = tx.send(response);
         }
 
@@ -12235,7 +12428,7 @@ async fn handle_client_message(
             } else {
                 (guard, Vec::new(), None)
             };
-            let (guard, (rewind_targets, eliminated, full_key)) = context
+            let (mut guard, (rewind_targets, eliminated, full_key)) = context
                 .game_executor
                 .with_session(guard, move |session| {
                     // Capture live affordances after every AI continuation, under the same
@@ -12329,7 +12522,7 @@ async fn handle_client_message(
             // a rollback rekeys it, and a declined or cancelled vote leaves the
             // payment whose expiry the pending vote refused. Re-arm the server's
             // lapse observation so the payer need not act for it to lapse.
-            let expiry = say_phrase_expiry_target(&guard);
+            let expiry = claim_say_phrase_expiry(&mut guard);
             drop(guard);
             schedule_say_phrase_expiry(
                 expiry,
@@ -12397,7 +12590,7 @@ async fn handle_client_message(
             } else {
                 (guard, Vec::new(), None)
             };
-            let (guard, (rewind_targets, eliminated, full_key)) = context
+            let (mut guard, (rewind_targets, eliminated, full_key)) = context
                 .game_executor
                 .with_session(guard, move |session| {
                     if approved {
@@ -12474,7 +12667,7 @@ async fn handle_client_message(
             // a rollback rekeys it, and a declined or cancelled vote leaves the
             // payment whose expiry the pending vote refused. Re-arm the server's
             // lapse observation so the payer need not act for it to lapse.
-            let expiry = say_phrase_expiry_target(&guard);
+            let expiry = claim_say_phrase_expiry(&mut guard);
             drop(guard);
             schedule_say_phrase_expiry(
                 expiry,
@@ -12516,7 +12709,7 @@ async fn handle_client_message(
                 return;
             }
             let guard = session.expect("the gate above proved the session is present");
-            let (guard, result) = context
+            let (mut guard, result) = context
                 .game_executor
                 .with_session(guard, move |session| session.cancel_takeback(player_id))
                 .await;
@@ -12552,7 +12745,7 @@ async fn handle_client_message(
             // a rollback rekeys it, and a declined or cancelled vote leaves the
             // payment whose expiry the pending vote refused. Re-arm the server's
             // lapse observation so the payer need not act for it to lapse.
-            let expiry = say_phrase_expiry_target(&guard);
+            let expiry = claim_say_phrase_expiry(&mut guard);
             drop(guard);
             schedule_say_phrase_expiry(
                 expiry,
