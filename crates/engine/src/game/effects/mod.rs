@@ -10484,6 +10484,7 @@ fn continuous_modification_reads_filter_population(
         ContinuousModification::CopyValues { .. }
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::CopyChosen
+        | ContinuousModification::AddCopiedCountersOnEnter
         | ContinuousModification::SetName { .. }
         | ContinuousModification::SetTextName { .. }
         | ContinuousModification::SubstituteTextWord { .. }

@@ -5323,11 +5323,19 @@ fn create_entry_copy_spec_for_replacement(
             },
         )
     };
+    // CR 707.2 + CR 122.6: a copied-counters rider reads the copy source's
+    // counters (or its last-known counters) as the copy payload is fixed.
+    let mut additional_modifications = additional_modifications.clone();
+    crate::game::effects::become_copy::snapshot_copied_counter_exceptions(
+        state,
+        *copy_source,
+        &mut additional_modifications,
+    );
     Some(CopyTokenSpec {
         values: Box::new(values),
         display,
         extra_keywords: Vec::new(),
-        additional_modifications: additional_modifications.clone(),
+        additional_modifications,
         tapped: false,
         enters_attacking: false,
         attack_request: TokenAttackRequest::Unspecified,
@@ -9993,6 +10001,105 @@ pub(super) fn current_self_enter_replacement_choice(
         })
         .find(|ability| matches!(&*ability.effect, Effect::Choose { persist: true, .. }))
         .cloned()
+}
+
+/// CR 614.12 + CR 616.1f: the entering object's own optional self-replacements
+/// that apply to its battlefield entry, as it now exists — the optional sibling
+/// of [`current_self_enter_replacement_modifiers`] and
+/// [`current_self_enter_replacement_choice`], which consider only mandatory
+/// ones. Read after an enter-as-copy choice, when a copy may have given the
+/// object a "you may have this enter as a copy" replacement of its own.
+pub(super) fn self_enter_optional_replacements(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Vec<(ReplacementId, &ReplacementDefinition)> {
+    let registry = replacement_registry();
+    let event = ProposedEvent::zone_change(source_id, Zone::Battlefield, Zone::Battlefield, None);
+    find_applicable_replacements(state, &event, registry)
+        .into_iter()
+        .filter(|rid| rid.source == source_id)
+        .filter_map(|rid| replacement_definition_for_id(state, rid).map(|def| (rid, def)))
+        .filter(|(_, replacement)| replacement_mode_is_optional(&replacement.mode))
+        .collect()
+}
+
+/// CR 616.1c + CR 616.1f + CR 614.12a: park the optional copy replacement an
+/// entering object acquired by becoming a copy, and raise the ordinary
+/// accept/decline `ReplacementChoice` for it.
+///
+/// The object already entered (the interactive copy choice resolves
+/// post-move), so the parked proposal is the synthetic battlefield-to-battlefield
+/// copy-surface shape also used by [`surface_copied_entry_payment`]; it is never
+/// delivered. Its applied set carries the entry's enter-as-copy chain
+/// (CR 614.5, keyed by provenance, including the offered replacement's), and
+/// its `enter_with_counters` holds the counters the current copy's exceptions
+/// realize, which survive only a decline (CR 707.9e). The affected object's
+/// controller makes the choice (CR 616.1).
+pub(super) fn park_acquired_copy_offer(
+    state: &mut GameState,
+    source_id: ObjectId,
+    rid: ReplacementId,
+    applied: HashSet<AppliedReplacementKey>,
+    exception_counters: Vec<(CounterType, u32)>,
+) -> WaitingFor {
+    let chooser = state
+        .objects
+        .get(&source_id)
+        .map_or(state.active_player, |object| object.controller);
+    let mut proposed =
+        ProposedEvent::zone_change(source_id, Zone::Battlefield, Zone::Battlefield, None);
+    if let ProposedEvent::ZoneChange {
+        enter_with_counters,
+        applied: proposed_applied,
+        ..
+    } = &mut proposed
+    {
+        *enter_with_counters = exception_counters;
+        *proposed_applied = applied;
+    }
+    state.pending_replacement = Some(PendingReplacement {
+        proposed,
+        sacrifice_provenance: None,
+        candidates: vec![rid],
+        search_found_candidates: Vec::new(),
+        depth: 0,
+        is_optional: true,
+        choice_player: Some(chooser),
+        library_placement: None,
+        exile_controller: None,
+        exile_duration: None,
+        exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+        excess_recipient: None,
+        lifelink_bonus: 0,
+        may_cost_paid: false,
+        may_cost_remaining: None,
+        delivery_boundary: None,
+        unrepresentable_life_change: state.ingress_life_policy(),
+    });
+    state.waiting_for = replacement_choice_waiting_for(chooser, state);
+    state.waiting_for.clone()
+}
+
+/// CR 616.1f + CR 614.5: whether the parked replacement is an acquired-copy
+/// offer raised by [`park_acquired_copy_offer`]. The offer is identified by its
+/// typed provenance key: its proposal's applied set records the offered
+/// candidate as an [`AppliedReplacementKey::EnterAsCopyFrom`] for the entrant,
+/// which only that park writes.
+pub(crate) fn parked_replacement_is_acquired_copy_offer(pending: &PendingReplacement) -> bool {
+    let (ProposedEvent::ZoneChange { object_id, .. }, [rid]) =
+        (&pending.proposed, pending.candidates.as_slice())
+    else {
+        return false;
+    };
+    pending.is_optional
+        && rid.source == *object_id
+        && pending.proposed.applied_set().iter().any(|key| {
+            matches!(
+                key,
+                AppliedReplacementKey::EnterAsCopyFrom { source, index, .. }
+                    if *source == rid.source && *index == rid.index
+            )
+        })
 }
 
 /// CR 614.12a + CR 707.2 + CR 614.1c: surface a copied as-enters life payment (Clone

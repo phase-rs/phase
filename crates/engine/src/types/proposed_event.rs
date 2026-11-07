@@ -100,6 +100,19 @@ pub enum AppliedReplacementKey {
         index: usize,
         controller: PlayerId,
     },
+    /// CR 614.5 + CR 616.1f + CR 707.9e: an "enter as a copy" replacement
+    /// applied to an entry, identified by its provenance — the object whose
+    /// copiable values supplied it. An entering permanent that becomes a copy
+    /// acquires the copied object's copy replacement as a new effect at the
+    /// same definition slot its own printed one occupied, so `source`/`index`
+    /// alone cannot tell the two apart; `copied` does. The entrant's own
+    /// replacement is provenanced by the entrant itself, or for a token copy by
+    /// the object the token copies.
+    EnterAsCopyFrom {
+        source: ObjectId,
+        index: usize,
+        copied: ObjectIncarnationRef,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -119,6 +132,11 @@ enum TaggedAppliedReplacementKey {
         source: ObjectId,
         index: usize,
         controller: PlayerId,
+    },
+    EnterAsCopyFrom {
+        source: ObjectId,
+        index: usize,
+        copied: ObjectIncarnationRef,
     },
 }
 
@@ -158,6 +176,15 @@ impl AppliedReplacementKeyCompat {
                 source,
                 index,
                 controller,
+            },
+            AppliedReplacementKeyCompat::Tagged(TaggedAppliedReplacementKey::EnterAsCopyFrom {
+                source,
+                index,
+                copied,
+            }) => AppliedReplacementKey::EnterAsCopyFrom {
+                source,
+                index,
+                copied,
             },
             AppliedReplacementKeyCompat::Legacy(ReplacementId {
                 source: ObjectId(0),
@@ -199,7 +226,8 @@ impl AppliedReplacementKey {
     pub fn source(self) -> ObjectId {
         match self {
             AppliedReplacementKey::Object { source, .. }
-            | AppliedReplacementKey::EntryControllerChoice { source, .. } => source,
+            | AppliedReplacementKey::EntryControllerChoice { source, .. }
+            | AppliedReplacementKey::EnterAsCopyFrom { source, .. } => source,
             AppliedReplacementKey::Floating { .. } | AppliedReplacementKey::StepEndMana { .. } => {
                 ObjectId(0)
             }
@@ -211,7 +239,8 @@ impl AppliedReplacementKey {
             AppliedReplacementKey::Object { index, .. }
             | AppliedReplacementKey::Floating { index }
             | AppliedReplacementKey::StepEndMana { index }
-            | AppliedReplacementKey::EntryControllerChoice { index, .. } => index,
+            | AppliedReplacementKey::EntryControllerChoice { index, .. }
+            | AppliedReplacementKey::EnterAsCopyFrom { index, .. } => index,
         }
     }
 

@@ -5574,6 +5574,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
                 None => format!("enter with {count_str} {} counter", counter_type.as_str()),
             }
         }
+        ContinuousModification::AddCopiedCountersOnEnter => {
+            "enter with the copied permanent's counters".to_string()
+        }
         ContinuousModification::SetStartingLoyalty { value } => {
             format!("starting loyalty {value}")
         }

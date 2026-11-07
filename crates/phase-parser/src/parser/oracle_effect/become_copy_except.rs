@@ -284,6 +284,9 @@ pub(crate) fn parse_except_body<'a>(
     if let Some((rest, modification)) = parse_enters_with_additional_counter(input) {
         return Some((rest, vec![modification]));
     }
+    if let Ok((rest, modification)) = parse_enters_with_copied_counters(input) {
+        return Some((rest, vec![modification]));
+    }
     if let Some((rest, modification)) = parse_starting_loyalty_override(input) {
         return Some((rest, vec![modification]));
     }
@@ -1870,6 +1873,31 @@ fn parse_enters_with_additional_counter(input: &str) -> Option<(&str, Continuous
             if_type,
         },
     ))
+}
+
+/// CR 707.2 + CR 122.6: Match `"it enters with additional counters on it equal
+/// to the same number and kind[s] of counters the copied <type> has on it"`.
+/// Emits [`ContinuousModification::AddCopiedCountersOnEnter`]: counters are
+/// not copiable values (CR 707.2), so the rider reproduces every kind on the
+/// copied permanent with its count. Dominion Saboteur carries it as the
+/// accepted-branch `"If you do, …"` sentence; the same body is admitted inside
+/// an `except` clause so either framing lowers identically.
+pub(crate) fn parse_enters_with_copied_counters(
+    input: &str,
+) -> OracleResult<'_, ContinuousModification> {
+    let (rest, _) = tag("it enters with additional counters on it equal to the same number and ")
+        .parse(input)?;
+    let (rest, _) = alt((tag("kinds"), tag("kind"))).parse(rest)?;
+    let (rest, _) = tag(" of counters the copied ").parse(rest)?;
+    let (rest, _) = alt((
+        tag("permanent"),
+        tag("creature"),
+        tag("artifact"),
+        tag("object"),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" has on it").parse(rest)?;
+    Ok((rest, ContinuousModification::AddCopiedCountersOnEnter))
 }
 
 /// Parse `"an additional N "` / `"an additional "` (implicit N=1) leading the

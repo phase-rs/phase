@@ -1784,14 +1784,19 @@ pub(crate) fn apply_combat_damage(
     let mut prevention_tally: Vec<(AppliedReplacementKey, i32)> =
         prevention_tally.into_iter().collect();
     prevention_tally.sort_by_key(|(key, _)| match key {
-        AppliedReplacementKey::Object { source, index } => (0u8, source.0, *index, 0u8),
-        AppliedReplacementKey::Floating { index } => (1, 0, *index, 0),
-        AppliedReplacementKey::StepEndMana { index } => (2, 0, *index, 0),
+        AppliedReplacementKey::Object { source, index } => (0u8, source.0, *index, 0u64, 0u64),
+        AppliedReplacementKey::Floating { index } => (1, 0, *index, 0, 0),
+        AppliedReplacementKey::StepEndMana { index } => (2, 0, *index, 0, 0),
         AppliedReplacementKey::EntryControllerChoice {
             source,
             index,
             controller,
-        } => (3, source.0, *index, controller.0),
+        } => (3, source.0, *index, u64::from(controller.0), 0),
+        AppliedReplacementKey::EnterAsCopyFrom {
+            source,
+            index,
+            copied,
+        } => (4, source.0, *index, copied.object_id.0, copied.incarnation),
     });
 
     drain_combat_lifelink(

@@ -189,6 +189,8 @@ fn continuous_modification_references_x(modification: &ContinuousModification) -
         }
         // CR 707.2c (Metamorphic Alteration): inert copy marker references no X.
         ContinuousModification::CopyChosen
+        // CR 707.2: copied-counter counts come from the copied permanent, not X.
+        | ContinuousModification::AddCopiedCountersOnEnter
         | ContinuousModification::SetName { .. }
         | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
