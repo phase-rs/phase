@@ -200,7 +200,7 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::BodyScope;
 pub(crate) use crate::parser::oracle_ir::context::{
     BareCardAggregateBinding, ChosenColorQualifierScope, DeclaredSlotEntry, DeclaredSlotRegistry,
-    HeadWindowProbe, ParseContext, PriorZoneChoicePartition, TokenPtFollowup,
+    HeadWindowProbe, ParseContext, PriorZoneChoicePartition, SpellAnaphorBinding, TokenPtFollowup,
     TriggerConditionScope,
 };
 use crate::parser::oracle_ir::effect_chain::{
@@ -2552,6 +2552,8 @@ fn try_parse_whenever_this_turn_from(
     // this selects a parsing mode, it does not implement a rule.)
     let mut inner_ctx = ParseContext {
         trigger_condition_scope: TriggerConditionScope::Delayed,
+        // CR 603.7 + CR 608.2k: delayed body, no announced parent target.
+        spell_anaphor_binding: SpellAnaphorBinding::EventSource,
         ..ParseContext::default()
     };
     let mut trigger_def = parse_dealt_damage_this_way_dies_trigger(condition_text, &mut inner_ctx)
@@ -3060,7 +3062,15 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
     let mut inner = if let Some(parsed) = try_parse_enters_with_additional_counters(effect_lower) {
         parsed
     } else {
-        parse_effect_chain(effect_text, AbilityKind::Spell)
+        // CR 603.7 + CR 608.2k: this body belongs to a delayed triggered ability;
+        // hand down the event-source binding so the bare spell anaphor is not
+        // refined to a parent target the delayed trigger does not have.
+        // Standalone mode, matching this builder's pre-existing entry point.
+        lower_ability_ir(&parse_ability_ir_standalone_with_spell_anaphor(
+            effect_text,
+            AbilityKind::Spell,
+            SpellAnaphorBinding::EventSource,
+        ))
     };
     // CR 608.2k: In a "when you next cast a <spell> this turn" delayed trigger the
     // "that <spell>" anaphor in the body names the newly-cast spell object (the
@@ -3184,7 +3194,11 @@ fn try_parse_when_next_generic_event(tp: TextPair) -> Option<ParsedEffectClause>
     // Reuse the shared trigger-condition parser. Re-prefix "you " so the bare
     // condition (e.g. "attack") matches the "you attack" production; the parser
     // accepts an optional "whenever "/"when " prefix but expects the subject.
-    let mut inner_ctx = ParseContext::default();
+    let mut inner_ctx = ParseContext {
+        // CR 603.7 + CR 608.2k: delayed-body anaphors keep the event-source binding.
+        spell_anaphor_binding: SpellAnaphorBinding::EventSource,
+        ..ParseContext::default()
+    };
     let condition_for_parser = format!("you {condition_text}");
     let (mode, mut trigger_def) = crate::parser::oracle_trigger::parse_trigger_condition(
         &condition_for_parser,
@@ -3268,7 +3282,11 @@ fn try_parse_reflexive_this_way_trigger(tp: TextPair) -> Option<ParsedEffectClau
         return None;
     }
 
-    let mut inner_ctx = ParseContext::default();
+    let mut inner_ctx = ParseContext {
+        // CR 603.7 + CR 608.2k: delayed-body anaphors keep the event-source binding.
+        spell_anaphor_binding: SpellAnaphorBinding::EventSource,
+        ..ParseContext::default()
+    };
     let trigger_def = if let Some(def) = parse_reflexive_excess_damage_trigger(before.lower) {
         def
     } else {
@@ -3444,6 +3462,8 @@ fn try_parse_at_next_phase_delayed_trigger(
     let (effect_text, condition) = strip_temporal_prefix(text);
     let condition = condition?;
     let mut ctx = antecedents.clone_player_antecedents();
+    // CR 603.7 + CR 608.2k: delayed body, no announced parent target.
+    ctx.spell_anaphor_binding = SpellAnaphorBinding::EventSource;
     let inner = parse_effect_chain_with_context(effect_text, kind, &mut ctx);
     Some(ParsedEffectClause {
         optional_targeting: false,
@@ -5262,6 +5282,8 @@ fn try_parse_inline_delayed_trigger(
     // Throwaway (`ChosenColorQualifierScope` rule 1) — the parsed `inner` is
     // kept, `inner_ctx` is dropped.
     let mut inner_ctx = ctx.clone_throwaway();
+    // CR 603.7 + CR 608.2k: delayed body, no announced parent target.
+    inner_ctx.spell_anaphor_binding = SpellAnaphorBinding::EventSource;
     inner_ctx.subject = match &condition {
         DelayedTriggerCondition::WhenDies { filter }
         | DelayedTriggerCondition::WhenLeavesPlayFiltered { filter }
@@ -8813,6 +8835,13 @@ fn parse_event_context_ref_with_ctx<'a>(
         (TargetFilter::TriggeringPlayer, Some(ControllerRef::ParentTargetController)) => {
             TargetFilter::ParentTargetController
         }
+        // CR 608.2c: "that player" after "choose an opponent (at random)"
+        // names the player the `Choose` selected, not the trigger event's
+        // player (Indoraptor, the Perfect Hybrid).
+        (TargetFilter::TriggeringPlayer, Some(scope @ ControllerRef::ChosenPlayer { .. })) => {
+            subject::chosen_player_anaphor_filter(Some(scope))
+                .unwrap_or(TargetFilter::TriggeringPlayer)
+        }
         // CR 608.2c + CR 109.4 + CR 115.1: "that player" after a targeted
         // `Choose` ("target opponent chooses self or others") or a
         // player-typed `TargetOnly` names the ANNOUNCED target — the most
@@ -9651,6 +9680,12 @@ fn parse_effect_clause_with_damage_context(
             );
             let (stripped, unless_pay) =
                 extract_resolution_unless_pay_modifier(&clause_text, player_scope.as_ref());
+            let mut unless_pay = unless_pay;
+            rebind_chosen_player_unless_payer(
+                unless_pay.as_mut(),
+                ctx.relative_player_scope.as_ref(),
+                &stripped,
+            );
             if unless_pay.is_some() {
                 unless_pay_deferred = unless_pay;
                 (None, stripped)
@@ -12392,7 +12427,14 @@ fn parse_effect_clause_inner_with_damage_context(
     if let Some((is_win, effect_text)) =
         imperative::try_parse_reflexive_coin_flip_branch(text, &lower)
     {
-        let inner = parse_effect_chain(effect_text, AbilityKind::Spell);
+        // CR 603.7 + CR 608.2k: reflexive delayed body — keep the event-source
+        // binding for a bare spell anaphor.
+        // Standalone mode, matching this builder's pre-existing entry point.
+        let inner = lower_ability_ir(&parse_ability_ir_standalone_with_spell_anaphor(
+            effect_text,
+            AbilityKind::Spell,
+            SpellAnaphorBinding::EventSource,
+        ));
         return build_reflexive_coin_flip_trigger(is_win, inner);
     }
 
@@ -12606,7 +12648,7 @@ fn parse_effect_clause_inner_with_damage_context(
 
     // CR 115.7: "change the target of" / "you may choose new targets for" —
     // must be checked before subject stripping since "you may choose" would be split.
-    if let Some(effect) = try_parse_change_targets(tp.lower) {
+    if let Some(effect) = try_parse_change_targets(tp.lower, ctx) {
         return parsed_clause(effect);
     }
 
@@ -15830,6 +15872,7 @@ fn quantity_ref_reads_chain_local_result(reference: &QuantityRef) -> bool {
         | QuantityRef::EnteredThisTurn { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -17049,6 +17092,36 @@ fn parse_per_owner_exiled_this_way(i: &str) -> OracleResult<'_, CardPlayMode> {
     Ok((i, mode))
 }
 
+/// CR 406.3a + CR 608.2c: "[for each card exiled this way, ]the player who
+/// exiled it may play|cast it" (Vulcan Mind-Meld) — each exiled card's grant
+/// binds to the player who performed its exile, not its owner or the
+/// ability's controller (`PermissionGrantee::ObjectExiler`). The distributive
+/// "for each card exiled this way" head names the same per-card binding the
+/// singular "it" pronoun already carries, so it adds no repetition.
+fn parse_object_exiler_play_grant(i: &str) -> OracleResult<'_, CardPlayMode> {
+    let (i, _) = opt(alt((
+        tag("for each card exiled this way, "),
+        tag("for each of those cards, "),
+    )))
+    .parse(i)?;
+    let (i, _) = tag("the player who exiled ").parse(i)?;
+    let (i, _) = alt((tag("it"), tag("that card"))).parse(i)?;
+    let (i, mode) = alt((
+        value(CardPlayMode::Play, tag(" may play ")),
+        value(CardPlayMode::Cast, tag(" may cast ")),
+    ))
+    .parse(i)?;
+    let (i, _) = alt((tag("it"), tag("that card"))).parse(i)?;
+    Ok((i, mode))
+}
+
+/// CR 611.2a + CR 406.3a: Recognizer for [`parse_object_exiler_play_grant`],
+/// consulted before the generic "for each <X>, " repeat peel — the
+/// distributive head is part of the per-card grant, not a repeat count.
+pub(crate) fn is_object_exiler_play_grant(lower: &str) -> bool {
+    parse_object_exiler_play_grant(lower).is_ok()
+}
+
 /// CR 603.2 + CR 109.4: "that creature's controller may play|cast that card|it"
 /// as a whole clause inside a trigger, where "that creature" is the object that
 /// caused the trigger (Curse of Hospitality: "Whenever a creature deals combat
@@ -17091,7 +17164,12 @@ fn try_parse_per_grantee_play_grant(
     let per_owner_mode = parse_per_owner_exiled_this_way(lower)
         .ok()
         .map(|(_, mode)| mode);
-    let grantee = if alt((
+    let exiler_mode = parse_object_exiler_play_grant(lower)
+        .ok()
+        .map(|(_, mode)| mode);
+    let grantee = if exiler_mode.is_some() {
+        crate::types::ability::PermissionGrantee::ObjectExiler
+    } else if alt((
         tag::<_, _, OracleError<'_>>("for each of those cards, its owner may play it"),
         tag("for each of those cards, its owner may cast it"),
         tag("its owner may play it"),
@@ -17148,7 +17226,7 @@ fn try_parse_per_grantee_play_grant(
     } else {
         return None;
     };
-    let mode = per_owner_mode.unwrap_or_else(|| {
+    let mode = per_owner_mode.or(exiler_mode).unwrap_or_else(|| {
         if alt((
             tag::<_, _, OracleError<'_>>("for each of those cards, its owner may cast it"),
             tag("its owner may cast it"),
@@ -17450,6 +17528,9 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
             tag::<_, _, OracleError<'_>>("that card"),
             tag("that spell"),
             tag("those cards"),
+            // CR 608.2c: "the chosen cards" names the cards a preceding choice
+            // selected from the exiled set (Ensign Pavel Chekov).
+            tag("the chosen cards"),
             tag("the cards exiled this way"),
             tag("cards exiled this way"),
             tag("it "),
@@ -17511,12 +17592,12 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
         ))
         .parse(tp.lower)
         .is_ok();
-        let mass_anaphor_form = alt((
-            tag::<_, _, OracleError<'_>>("play those cards"),
-            tag("cast those cards"),
-        ))
-        .parse(tp.lower)
-        .is_ok();
+        let mass_anaphor_form = (
+            alt((tag::<_, _, OracleError<'_>>("play "), tag("cast "))),
+            alt((tag("those cards"), tag("the chosen cards"))),
+        )
+            .parse(tp.lower)
+            .is_ok();
         if look_at_play_anaphor_form || mass_anaphor_form {
             // fall through to the grant builder.
         } else {
@@ -21144,9 +21225,31 @@ fn placement_tail_orders_in_any_order(rest: &str) -> bool {
     .is_some()
 }
 
+/// CR 608.2c: does a placement's noun phrase (the text before its positional
+/// terminator, with any cardinality already peeled) name a PLURAL set anaphor —
+/// "those cards" / "these cards" / "them" — with nothing after it? Such a phrase
+/// moves every card of the set it refers to (Stomping Slabs: "reveal the top
+/// seven cards …, then put those cards on the bottom"), not the lowering
+/// default of one card.
+fn placement_names_plural_set_anaphor(noun_phrase: &str) -> bool {
+    all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("those cards"),
+        tag("these cards"),
+        tag("them"),
+    )))
+    .parse(noun_phrase.trim_end())
+    .is_ok()
+}
+
 /// A placement's noun-phrase filter (`None` when it names nothing more specific
-/// than `Any`), its cardinality, and whether its tail closes with "in any order".
-type PlacementNounPhrase = (Option<TargetFilter>, LibraryPlacementCardinality, bool);
+/// than `Any`), its cardinality, whether its tail closes with "in any order", and
+/// whether the noun phrase is a plural set anaphor.
+type PlacementNounPhrase = (
+    Option<TargetFilter>,
+    LibraryPlacementCardinality,
+    bool,
+    bool,
+);
 
 /// `follower` is the player who follows this clause's instruction when the
 /// clause names one structurally (the controller of an imperative, CR 608.2c);
@@ -21246,21 +21349,33 @@ fn refine_put_at_library_position(
                 new_target,
                 cardinality,
                 placement_tail_orders_in_any_order(placement_tail),
+                placement_names_plural_set_anaphor(after_count),
             ))
         })();
-        if let Some((maybe_filter, cardinality, orders_in_any_order)) = extracted {
+        if let Some((maybe_filter, cardinality, orders_in_any_order, names_plural_set)) = extracted
+        {
             if *target == TargetFilter::Any {
                 if let Some(filter) = maybe_filter {
                     *target = filter;
                 }
             }
             match cardinality {
-                // CR 401.4 + CR 608.2c: "those cards" (a tracked set the chain
-                // already named) placed "in any order" is ordered by the player
-                // following the instruction, not each card's owner. A bare
-                // pronoun partition ("any number of them") is not a named set
-                // and keeps its owner-arranged base shape.
+                // CR 608.2c: "put those cards on the bottom" after a look/reveal
+                // names the WHOLE tracked set the earlier instruction published
+                // (Stomping Slabs), so every member is placed — the `Fixed(1)`
+                // lowering default would move one card and leave the rest of the
+                // set where it was.
                 LibraryPlacementCardinality::Unstated => {
+                    if names_plural_set && matches!(*target, TargetFilter::TrackedSet { .. }) {
+                        *count = QuantityExpr::Ref {
+                            qty: QuantityRef::TrackedSetSize,
+                        };
+                    }
+                    // CR 401.4 + CR 608.2c: "those cards" (a tracked set the
+                    // chain already named) placed "in any order" is ordered by
+                    // the player following the instruction, not each card's
+                    // owner. A bare pronoun partition ("any number of them") is
+                    // not a named set and keeps its owner-arranged base shape.
                     if orders_in_any_order
                         && matches!(
                             *target,
@@ -24318,6 +24433,7 @@ fn parent_population_amount_is_plain(amount: &QuantityExpr) -> bool {
             | QuantityRef::EnteredThisTurn { .. }
             | QuantityRef::SacrificedThisTurn { .. }
             | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::EnergyPaidOrLostThisTurn
             | QuantityRef::BendTypesThisTurn
             | QuantityRef::LifeGainedThisTurn { .. }
             | QuantityRef::CardsDrawnThisTurn { .. }
@@ -24842,7 +24958,13 @@ fn push_counter_conjunct_target(
 ) -> Option<()> {
     let reparsed = format!("counter {kw} {}", conjunct.trim());
     let reparsed_lower = reparsed.to_lowercase();
-    let target = match imperative::parse_counter_ast(&reparsed, &reparsed_lower)? {
+    // Mass-counter conjuncts carry typed filters ("counter all creatures"), never a
+    // bare spell anaphor, so the default (non-trigger) context is correct here.
+    let target = match imperative::parse_counter_ast(
+        &reparsed,
+        &reparsed_lower,
+        &mut ParseContext::default(),
+    )? {
         ZoneCounterImperativeAst::Counter {
             all: true, target, ..
         } => target,
@@ -26990,6 +27112,15 @@ fn has_player_anaphoric_reference(lower: &str) -> bool {
             tag("the player"),
         ))
         .parse(input)
+    })
+    .is_some()
+}
+
+/// CR 608.2c: the possessive "their library" — a library-owner anaphor that a
+/// preceding player declaration can bind.
+fn has_their_library_possessive(lower: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(lower, |input| {
+        tag::<_, _, OracleError<'_>>("their library").parse(input)
     })
     .is_some()
 }
@@ -32830,6 +32961,24 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
         {
             *flipper = subject_filter;
         }
+        // CR 608.2c + CR 115.1: "Target opponent looks at the top card of YOUR
+        // library, then exiles it face down" (Vulcan Mind-Meld) — the subject
+        // is not the library's owner, so it is the player who performs the
+        // exile. A subject acting on its own library ("their") keeps the
+        // library-owner reading; only "your library" under a player subject
+        // reaches this arm.
+        Effect::ExileTop {
+            player,
+            actor: actor @ crate::types::ability::LibraryInstructionActor::Controller,
+            ..
+        } if subject_names_player
+            && *player == TargetFilter::Controller
+            && subject_filter != TargetFilter::Controller =>
+        {
+            *actor = crate::types::ability::LibraryInstructionActor::Player {
+                player: subject_filter,
+            };
+        }
         // CR 608.2d + CR 109.4 + CR 115.1: "target opponent chooses …" /
         // "target player chooses …" — bind the named chooser so the choice
         // belongs to the announced target, not the source's controller (the
@@ -37588,7 +37737,7 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
     }
 
     // CR 115.7: "change the target of" / "you may choose new targets for"
-    if let Some(effect) = try_parse_change_targets(tp.lower) {
+    if let Some(effect) = try_parse_change_targets(tp.lower, ctx) {
         return parsed_clause(effect);
     }
 
@@ -40122,10 +40271,34 @@ fn fold_cast_copy_of_card_defs(defs: &mut Vec<AbilityDefinition>) {
         // `CastCopyOfCard` both creates and casts the copies — so drop it and
         // keep the count-bearing `CastCopyOfCard`. The `up_to` choice in the
         // resolver carries the "you may cast" optionality, so the def-level
-        // `optional`/`repeat_for` are cleared to mirror the legacy fold.
-        if matches!(&*defs[index + 1].effect, Effect::CastCopyOfCard { .. }) {
+        // `optional` is cleared to mirror the legacy fold.
+        //
+        // CR 707.12 + CR 707.12a: the copy half's multiplicity ("copy that
+        // card three times" — Mnemonic Deluge; "X times, where X is …" —
+        // Infinite Diversity) rides the copy def's `repeat_for`. It is carried
+        // onto the fused `CastCopyOfCard` so each iteration creates one copy of
+        // every source and offers its cast individually (CR 707.12a), instead
+        // of being dropped with the redundant `CopySpell`. Only an uncapped cast
+        // carries it: an "up to N of the copies" cap counts across ALL copies,
+        // which a per-iteration cap cannot express (no printed card combines
+        // the two), so a capped cast keeps the legacy single-pass reading. A
+        // member-driven "for each card exiled this way" loop is not a
+        // multiplicity either: the resolver already covers every tracked-set
+        // member in one pass (the Case 2 rationale), so it is dropped too.
+        if let Effect::CastCopyOfCard { count, .. } = &*defs[index + 1].effect {
+            let member_driven = matches!(
+                defs[index].repeat_for,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize | QuantityRef::FilteredTrackedSetSize { .. },
+                })
+            );
+            let multiplicity = if count.is_none() && !member_driven {
+                defs[index].repeat_for.take()
+            } else {
+                None
+            };
             defs[index + 1].optional = false;
-            defs[index + 1].repeat_for = None;
+            defs[index + 1].repeat_for = multiplicity;
             defs.remove(index);
             continue;
         }
@@ -40595,7 +40768,6 @@ pub fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mut Targe
         | Effect::Surveil { target, .. }
         | Effect::Dig { player: target, .. }
         | Effect::RevealTop { player: target, .. }
-        | Effect::ExileTop { player: target, .. }
         | Effect::Manifest { target, .. }
         // CR 701.60a: Suspect acts on a target permanent; expose its filter so
         // anaphor rewrites (e.g. self-targeting "Otherwise, suspect it") reach it.
@@ -40605,6 +40777,16 @@ pub fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mut Targe
         // "~ is no longer suspected") reach it.
         | Effect::Unsuspect { target, .. }
         | Effect::TargetOnly { target, .. } => f(target),
+        // CR 608.2c: a named subject that performs the exile is a player slot
+        // like the library owner, so an anaphor rewrite reaches both alike.
+        Effect::ExileTop { player, actor, .. } => {
+            f(player);
+            match actor {
+                crate::types::ability::LibraryInstructionActor::Controller
+                | crate::types::ability::LibraryInstructionActor::LibraryPlayer => {}
+                crate::types::ability::LibraryInstructionActor::Player { player } => f(player),
+            }
+        }
         Effect::PutCounter { target, .. } | Effect::RemoveCounter { target, .. } => f(target),
         Effect::GoadAll { target } => f(target),
         Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } => f(target),
@@ -44036,11 +44218,26 @@ fn parse_ability_ir_with_damage_context(
 /// original mode by swapping one function name, with the argument list unchanged
 /// — there is no context argument for a reviewer to get wrong.
 pub(crate) fn parse_ability_ir_standalone(text: &str, kind: AbilityKind) -> AbilityIr {
+    parse_ability_ir_standalone_with_spell_anaphor(text, kind, SpellAnaphorBinding::ParentTarget)
+}
+
+/// `Standalone` mode with a handed-down spell-anaphor binding — the
+/// mode-pinned wrapper for a fresh-context body that belongs to a triggered
+/// ability (delayed/reflexive body, trigger-owned die row, mana-spend trigger).
+/// Like [`parse_ability_ir_standalone`], it takes no `ParseContext`.
+pub(crate) fn parse_ability_ir_standalone_with_spell_anaphor(
+    text: &str,
+    kind: AbilityKind,
+    binding: SpellAnaphorBinding,
+) -> AbilityIr {
     parse_ability_ir(
         text,
         kind,
         ChainLoweringMode::Standalone,
-        &mut ParseContext::default(),
+        &mut ParseContext {
+            spell_anaphor_binding: binding,
+            ..ParseContext::default()
+        },
     )
 }
 
@@ -44060,19 +44257,27 @@ pub(crate) fn parse_ability_ir_with_context(
     parse_ability_ir(text, kind, ChainLoweringMode::WithContext, ctx)
 }
 
-/// Parse a nested effect body with only its parent-target binding preserved.
+/// Parse a nested effect body with only its parent-target binding and its
+/// spell-anaphor binding preserved.
 ///
 /// Nested replacement bodies are independent ability parses: parser-local state
-/// from their enclosing clause must not leak into them. `ParentTarget` is the
-/// sole inherited binding because it names the earlier selected object that the
-/// nested body's pronouns may continue to reference.
+/// from their enclosing clause must not leak into them. Two bindings are
+/// inherited: `ParentTarget`, which names the earlier selected object that the
+/// nested body's pronouns may continue to reference, and the spell-anaphor
+/// binding (CR 608.2k), which keeps a bare "that spell" in an "instead"
+/// sub-body of a triggered ability naming the trigger's event spell.
 pub(super) fn parse_child_ability_with_parent_target(
     text: &str,
     kind: AbilityKind,
     parent_target_available: bool,
+    spell_anaphor_binding: SpellAnaphorBinding,
 ) -> AbilityDefinition {
     let mut child_ctx = ParseContext {
         parent_target_available,
+        // CR 608.2k: an "instead" sub-body parsed out of a triggered ability has
+        // no announced parent target; carry the binding so a bare "that spell"
+        // keeps the trigger's event-source reading.
+        spell_anaphor_binding,
         ..ParseContext::default()
     };
     lower_ability_ir(&parse_ability_ir_with_damage_context(
@@ -47200,6 +47405,7 @@ fn parse_effect_chain_ir_body(
                 &text,
                 kind,
                 instead_parent_target_available,
+                ctx.effective_spell_anaphor_binding(),
             );
             if body.condition.is_some() {
                 builder
@@ -47892,6 +48098,9 @@ fn parse_effect_chain_ir_body(
                 // controls" is a per-opponent choice, not a repeat count; peeling
                 // the prefix would lose the population "that player" refers to.
                 || is_for_each_opponent_choose_controlled(&text.to_lowercase())
+                // CR 608.2c: "for each card exiled this way, the player who
+                // exiled it may play it" is one per-card grant.
+                || is_object_exiler_play_grant(&text.to_lowercase())
             {
                 (None, text, None, None)
             } else if let Some(stripped) = strip_redundant_flip_win_quantifier(&text) {
@@ -48226,6 +48435,11 @@ fn parse_effect_chain_ir_body(
 
         let (text, mut unless_pay) =
             extract_resolution_unless_pay_modifier(&text, player_scope.as_ref());
+        rebind_chosen_player_unless_payer(
+            unless_pay.as_mut(),
+            chain_chosen_player_scope.as_ref(),
+            &text,
+        );
 
         // CR 701.17a + CR 608.2k: Derive the actor performing this chunk's effect
         // from any actor prefix that was just stripped ("you (may) ", "an
@@ -48665,6 +48879,11 @@ fn parse_effect_chain_ir_body(
             // player" on Ghyrson) bind to the triggering event instead of being
             // reparsed as ordinary target phrases.
             in_trigger: ctx.in_trigger,
+            // CR 603.7 + CR 608.2k: a delayed-trigger body's chunks are still that
+            // delayed body, so its spell-anaphor binding travels with them. The
+            // raw field is copied (not the effective one): `in_trigger` travels
+            // separately on the line above and dominates at the consumer.
+            spell_anaphor_binding: ctx.spell_anaphor_binding,
             bare_card_aggregate_source,
             nearest_dig_rest_zone,
             // CR 608.2c + CR 122.1: a bare counter anaphor in this chunk's body
@@ -49412,9 +49631,12 @@ fn parse_effect_chain_ir_body(
             // from, so "put those cards …" reads them out of the library. A bare
             // reveal is still a reveal `Dig` with no kept-card destination here;
             // assembly demotes it to `RevealTop` later.
+            // CR 701.20e: looking at a card follows the same rules as revealing
+            // it, so a bare look-only `Dig` also leaves its cards in the library.
+            // Without this a following "put those cards into your graveyard"
+            // falls back to the impulse exile origin and moves nothing.
             Effect::RevealTop { .. }
             | Effect::Dig {
-                reveal: true,
                 destination: None,
                 keep_count: None,
                 ..
@@ -49806,6 +50028,29 @@ fn parse_effect_chain_ir_body(
                 )
                 .unwrap_or(TargetFilter::ParentTarget)
             });
+        }
+        // CR 608.2c + CR 115.1: "You look at the top two cards of THEIR library"
+        // after a clause that announced a player target ("Target opponent looks
+        // at the top card of your library, then exiles it face down" — Vulcan
+        // Mind-Meld). The possessive names that declared player; a bare
+        // `ParentTarget` would instead read the object the previous instruction
+        // handed on (the card it just exiled) and so the wrong library.
+        if chain_has_prior_player_target_referent(builder.clauses())
+            && has_their_library_possessive(&text_lower)
+        {
+            if let Effect::Dig { player, .. } | Effect::ExileTop { player, .. } = &mut clause.effect
+            {
+                if *player == TargetFilter::ParentTarget {
+                    if let Some(declared) = declared_player_reference(
+                        builder.clauses(),
+                        &mut declarations,
+                        &mut chain_declared_groups,
+                        &enclosing_declared_player,
+                    ) {
+                        *player = declared;
+                    }
+                }
+            }
         }
         if chunk.boundary_after != Some(ClauseBoundary::Sentence)
             && !carried_player
@@ -50418,6 +50663,19 @@ fn parse_effect_chain_ir_body(
                     .replace_with_gap("search_result_condition");
                 break 'source_clause;
             }
+            // CR 701.20a: "revealed this way" names a PUBLIC reveal's
+            // population. When a remainder clause's only candidate antecedent is
+            // a private "look at", it cannot be bound; record the refusal so the
+            // clause is kept at its written position as an honest gap (below)
+            // instead of lowering to a tracked-set complement move that names
+            // cards no reveal published.
+            let mut revealed_remainder_without_public_reveal = false;
+            // CR 701.20a + CR 608.2c: the same refusal, second cause — the only
+            // candidate reveal is separated from the remainder by an instruction
+            // that is NOT proved to leave the reveal population alone (`Clash`
+            // replaces the engine's one reveal ledger), so no single reveal owns
+            // the cards this clause names.
+            let mut revealed_remainder_after_intervening_clause = false;
             let mut followup_continuation = effective_prev_effect
                 .as_ref()
                 .and_then(|eff| {
@@ -50476,19 +50734,40 @@ fn parse_effect_chain_ir_body(
                     // double that damage instead") is lookback-transparent: it restates
                     // the instruction it replaces and neither selects nor re-binds the
                     // reveal's cards, so its placeholder does not end the scan.
-                    non_absorbed
-                        .iter()
-                        .filter(|c| {
-                            !matches!(
-                                c.disposition,
-                                ClauseDisposition::ReplaceMeaning {
-                                    kind: ReplaceMeaningKind::Instead(_)
-                                }
-                            )
-                        })
-                        .map(|c| effective_effect_of(c))
-                        .take_while(|effect| !matches!(effect, Effect::Unimplemented { .. }))
-                        .find_map(|deeper| match deeper {
+                    // CR 701.20a + CR 608.2c: binding the displaced remainder to
+                    // an earlier `Dig` means walking back across every clause in
+                    // between, and the engine keeps exactly ONE reveal population
+                    // (`last_revealed_ids`). A crossed clause proved not to touch it
+                    // (`clause_preserves_reveal_population`) is transparent;
+                    // anything else may replace it — a `Clash` clears the ledger and
+                    // refills it with BOTH clashing players' top cards — so the
+                    // remainder would then name cards that reveal never produced (an
+                    // opponent's among them). The `Dig` arm below is therefore
+                    // reachable only while the whole crossed span stays proved
+                    // preserving; otherwise the clause keeps its written position as
+                    // an honest gap (below). `RevealUntil` is different by
+                    // construction: it owns its rest pile on its OWN instruction
+                    // (`rest_destination`), so its lookback keeps the printed-order
+                    // transparency it already had.
+                    let remainder_clause =
+                        sequence::parse_revealed_remainder_clause(normalized_text);
+                    let mut crossed_span_preserves_reveal = true;
+                    for prior_clause in non_absorbed.iter().filter(|c| {
+                        !matches!(
+                            c.disposition,
+                            ClauseDisposition::ReplaceMeaning {
+                                kind: ReplaceMeaningKind::Instead(_)
+                            }
+                        )
+                    }) {
+                        let deeper = effective_effect_of(prior_clause);
+                        // An unrecognized instruction may itself select or
+                        // re-bind the referent, so it ends the scan (and was
+                        // never a candidate).
+                        if matches!(deeper, Effect::Unimplemented { .. }) {
+                            break;
+                        }
+                        let bound = match &deeper {
                             Effect::RevealUntil { .. } => {
                                 match parse_followup_continuation_ast(normalized_text, &deeper, ctx)
                                 {
@@ -50501,8 +50780,80 @@ fn parse_effect_chain_ir_body(
                                     _ => None,
                                 }
                             }
+                            // CR 701.20a + CR 701.20e + CR 608.2c: the same
+                            // displacement applies to a PUBLIC reveal `Dig`
+                            // whose remainder is named after a clause that reads
+                            // the revealed card (Reviving Vapors' "You gain life
+                            // equal to that card's mana value" before "Put all
+                            // other cards revealed this way into your
+                            // graveyard"). The remainder must state its
+                            // destination and may not be owner-ordered, and it
+                            // is never read off a later tracked-set move, so the
+                            // Dig keeps its kept-pile publication for the
+                            // downstream sub_abilities.
+                            // CR 701.20a: "revealed this way" names the
+                            // population of a PUBLIC reveal; a private "look at"
+                            // never publishes one. A `reveal: false` Dig is not
+                            // an antecedent, so the clause keeps its written
+                            // position as an honest gap instead of being
+                            // absorbed into the look. Absorption would move the
+                            // remainder ahead of an intervening instruction
+                            // ("Draw a card") and change which card the draw
+                            // reaches, violating CR 608.2c's written order.
+                            Effect::Dig { reveal: true, .. } => {
+                                if !crossed_span_preserves_reveal {
+                                    // The reveal that could own this remainder is
+                                    // separated from it by an instruction that may
+                                    // have replaced the population, so it no longer
+                                    // names this clause's cards. Refuse the binding
+                                    // and record the gap below.
+                                    revealed_remainder_after_intervening_clause =
+                                        remainder_clause.is_some();
+                                    break;
+                                }
+                                sequence::parse_revealed_remainder_clause(normalized_text)
+                            }
+                            // CR 701.20a: a private look never publishes a
+                            // revealed population, so it is not an antecedent
+                            // for "revealed this way". Refuse the clause rather
+                            // than patch the look's rest destination (which
+                            // would move the remainder ahead of an intervening
+                            // instruction) or bind it anywhere else.
+                            Effect::Dig { reveal: false, .. } if remainder_clause.is_some() => {
+                                revealed_remainder_without_public_reveal = true;
+                                None
+                            }
                             _ => None,
-                        })
+                        };
+                        if bound.is_some() {
+                            return bound;
+                        }
+                        // CR 701.20a + CR 608.2c: record whether this clause may be
+                        // crossed on the way to an earlier `Dig`. Prove its entire
+                        // own-resolution definition is reveal-free using the scoped
+                        // traversal, refusing any intrinsic continuation or
+                        // compound/wrapped writer (e.g. TargetOnly -> RevealTop -> GainLife).
+                        let mut clause_preserves = prior_clause.disposition.intrinsic().is_none();
+                        if clause_preserves {
+                            let mut clause_def =
+                                AbilityDefinition::new(kind, prior_clause.parsed.effect.clone());
+                            clause_def.sub_ability = prior_clause.parsed.sub_ability.clone();
+                            let _ = crate::types::ability_visit::visit_ability_def_scoped(
+                                &clause_def,
+                                crate::types::ability_visit::ResolutionScope::OwnResolutionOnly,
+                                &mut |effect| {
+                                    if !sequence::clause_preserves_reveal_population(effect) {
+                                        clause_preserves = false;
+                                        std::ops::ControlFlow::Break(())
+                                    } else {
+                                        std::ops::ControlFlow::Continue(())
+                                    }
+                                },
+                            );
+                        }
+                        crossed_span_preserves_reveal &= clause_preserves;
+                    }
+                    None
                 })
                 .or_else(|| {
                     // CR 707.10c: a "you may choose new targets for the copy/copies"
@@ -50556,6 +50907,28 @@ fn parse_effect_chain_ir_body(
                 });
             if search_reveal_owners.is_some() {
                 followup_continuation = Some(ContinuationAst::SearchResultClauseHandled);
+            }
+            // CR 701.20a + CR 608.2c: the clause names a reveal remainder, but
+            // no public reveal antecedent was proved (only a private look). Keep
+            // it at its written position as an honest unsupported boundary —
+            // never absorbed into the look (which would reorder it) and never
+            // lowered to a move of cards no reveal published.
+            if followup_continuation.is_none() {
+                if revealed_remainder_without_public_reveal {
+                    clause.effect = Effect::unimplemented(
+                        "revealed_remainder_without_public_reveal",
+                        normalized_text,
+                    );
+                } else if revealed_remainder_after_intervening_clause {
+                    // CR 701.20a + CR 608.2c: the reveal the clause could name is
+                    // separated from it by an instruction that may replace the
+                    // reveal population. Keep the written position; never fall
+                    // back to an unbound tracked-set move.
+                    clause.effect = Effect::unimplemented(
+                        "revealed_remainder_after_intervening_clause",
+                        normalized_text,
+                    );
+                }
             }
             // CR 608.2c + CR 109.5: a reveal choice is the controller's only when the
             // consuming instruction addresses the controller ("you" / imperative).
@@ -52359,6 +52732,65 @@ fn parse_unless_have_you_draw_cost(after_unless: &str) -> Option<AbilityCost> {
     })
 }
 
+/// CR 608.2c + CR 118.12a: after "choose an opponent at random." the anaphoric
+/// unless-payer "they" names the player that `Choose` selected, not a declared
+/// target slot (which resolves to nobody when none exists). Rebinds through the
+/// single chosen-player anaphor authority.
+///
+/// CR 608.2c: this is a FALLBACK, not an override. A clause that declares its
+/// own player subject ("Target player loses 3 life unless they discard a card")
+/// supplies the NEARER antecedent for the "they", which `TargetFilter::Player`
+/// already binds, so an earlier choice must never capture that payer.
+fn rebind_chosen_player_unless_payer(
+    modifier: Option<&mut UnlessPayModifier>,
+    scope: Option<&ControllerRef>,
+    clause_text: &str,
+) {
+    let Some(modifier) = modifier else {
+        return;
+    };
+    if modifier.payer != TargetFilter::Player {
+        return;
+    }
+    // Only a chain that actually chose a player can supply a competing
+    // antecedent, so the clause scan below runs only for that shape.
+    let Some(chosen) = subject::chosen_player_anaphor_filter(scope) else {
+        return;
+    };
+    if clause_declares_player_target(clause_text) {
+        return;
+    }
+    modifier.payer = chosen;
+}
+
+/// CR 115.1 + CR 608.2c: True when an effect clause declares its own player
+/// target ("target player", "target opponent") — as the subject ("Target player
+/// loses 3 life …") or as a recipient after a verb ("deals 3 damage to target
+/// player"). Either position is the nearer antecedent of a following "they"/
+/// "that player", so anaphor rebinding must not reach past it to a player an
+/// earlier instruction chose.
+///
+/// Scans at word boundaries because a declared recipient sits mid-clause. The
+/// probe requires the target KEYWORD, so a descriptor or anaphoric phrase
+/// ("a player", "that player") never blocks rebinding.
+fn clause_declares_player_target(clause_text: &str) -> bool {
+    let lower = clause_text.to_ascii_lowercase();
+    nom_primitives::scan_at_word_boundaries(&lower, parse_declared_player_target_probe).is_some()
+}
+
+/// CR 115.1: scan probe for [`clause_declares_player_target`]. Delegates the
+/// phrase grammar to the single target parser and the player-containing shape
+/// check to the existing explicit-player-target predicate.
+fn parse_declared_player_target_probe(input: &str) -> OracleResult<'_, ()> {
+    let (filter, rest, syntax) =
+        super::oracle_target::parse_target_with_syntax(input, &mut ParseContext::default());
+    if syntax == TargetSyntax::TargetKeyword && target_filter_is_explicit_player_target(&filter) {
+        Ok((rest, ()))
+    } else {
+        Err(oracle_err(input))
+    }
+}
+
 fn extract_resolution_unless_pay_modifier(
     text: &str,
     player_scope: Option<&PlayerFilter>,
@@ -52921,6 +53353,13 @@ fn parse_put_rest_library_position(lower: &str) -> Option<LibraryPosition> {
     let (after_rest, _) = take_until::<_, _, OracleError<'_>>("the rest")
         .parse(lower)
         .ok()?;
+    rest_tail_library_position(after_rest)
+}
+
+/// CR 401.4: the library position ("on the bottom" / "on top [of …]") a
+/// "the rest …" tail names, shared by the standalone put-the-rest clause and the
+/// same-clause Dig remainder ("… and the rest on top of your library").
+pub(super) fn rest_tail_library_position(after_rest: &str) -> Option<LibraryPosition> {
     if scan_contains_phrase(after_rest, "on the bottom") {
         Some(LibraryPosition::Bottom)
     } else if scan_contains_phrase(after_rest, "on top") {
@@ -53369,7 +53808,7 @@ fn starts_with_you_may_choose_new_targets(text: &str) -> bool {
     .is_some()
 }
 
-fn try_parse_change_targets(lower: &str) -> Option<Effect> {
+fn try_parse_change_targets(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
     type E<'a> = OracleError<'a>;
 
     let (rest, scope) = alt((
@@ -53433,7 +53872,8 @@ fn try_parse_change_targets(lower: &str) -> Option<Effect> {
         // `constrain_filter_to_stack` pass is needed or wanted.
         stack_target
     } else if scan_contains_phrase(spell_phrase_clean, "spell") {
-        // Parse with parse_target for type-specific spells (e.g. "instant or sorcery spell")
+        // Parse with the context-free entry (unchanged diagnostics), then refine a
+        // bare "that spell" for a non-trigger instruction below.
         let (parsed, _) = parse_target(spell_phrase_clean);
         constrain_filter_to_stack(parsed)
     } else {
@@ -53441,6 +53881,10 @@ fn try_parse_change_targets(lower: &str) -> Option<Effect> {
         parsed
     };
 
+    // CR 608.2c: a non-trigger retarget instruction's bare "that spell" names the
+    // spell mentioned earlier in the same sequence; a triggered one keeps the
+    // event-source binding.
+    target = crate::parser::oracle_target::bind_spell_anaphor_to_context(ctx, target);
     // Add HasSingleTarget property if "with a single target" was specified
     if has_single_target {
         target = add_single_target_constraint(target);
@@ -54319,12 +54763,12 @@ fn last_night_together_folds_attacker_restriction_into_additional_phase() {
 /// keep both legs.
 #[cfg(test)]
 mod change_targets_stack_object_tests {
-    use super::{try_parse_change_targets, TargetFilter};
+    use super::{try_parse_change_targets, ParseContext, SpellAnaphorBinding, TargetFilter};
     use crate::types::ability::{Effect, FilterProp, StackAbilityKind, TypeFilter};
     use crate::types::zones::Zone;
 
     fn change_targets_filter(lower: &str) -> TargetFilter {
-        match try_parse_change_targets(lower)
+        match try_parse_change_targets(lower, &mut ParseContext::default())
             .unwrap_or_else(|| panic!("retarget clause must parse: {lower}"))
         {
             Effect::ChangeTargets { target, .. } => target,
@@ -54374,6 +54818,60 @@ mod change_targets_stack_object_tests {
             );
         };
         assert_eq!(tf.properties, vec![FilterProp::HasSingleTarget]);
+    }
+
+    /// CR 608.2c + CR 608.2k + CR 115.7: a bare "that spell" retarget binds through
+    /// the shared `SpellAnaphorBinding` — `ParentTarget` in a resolving
+    /// spell/ability body, `TriggeringSource` when the body belongs to a triggered
+    /// ability (directly via `in_trigger`, or handed down via `EventSource`).
+    ///
+    /// Honest scope: this test is SYNTHETIC. No printed card has a NON-trigger
+    /// bare "that spell" retarget. Speedball, New Warrior ("Whenever a player casts
+    /// a spell that targets Speedball, he gets +2/+2 until end of turn. You may
+    /// choose new targets for that spell.") and Ricochet ("Change the target of
+    /// that spell to the player with the lowest result.") are triggers, and the
+    /// nearest resolving-spell card, Wyll's Reversal ("Choose target spell or
+    /// ability with one or more targets. ... You may choose new targets for that
+    /// spell or ability."), says "that spell or ability" and takes the earlier
+    /// "spell or ability" branch. The test is a regression guard for the shared
+    /// anaphor binding applied at the end of `try_parse_change_targets`: deleting
+    /// that `bind_spell_anaphor_to_context` call leaves `TriggeringSource` in every
+    /// row below, flipping the default-context (`ParentTarget`) assertions.
+    #[test]
+    fn bare_that_spell_retarget_binds_through_spell_anaphor_binding() {
+        for phrase in [
+            "change the target of that spell",
+            "you may choose new targets for that spell",
+        ] {
+            let bound = |mut ctx: ParseContext| match try_parse_change_targets(phrase, &mut ctx)
+                .unwrap_or_else(|| panic!("retarget clause must parse: {phrase}"))
+            {
+                Effect::ChangeTargets { target, .. } => target,
+                other => panic!("expected ChangeTargets for {phrase}, got {other:?}"),
+            };
+
+            assert_eq!(
+                bound(ParseContext::default()),
+                TargetFilter::ParentTarget,
+                "{phrase}: a resolving spell's bare \"that spell\" is the announced spell"
+            );
+            assert_eq!(
+                bound(ParseContext {
+                    in_trigger: true,
+                    ..Default::default()
+                }),
+                TargetFilter::TriggeringSource,
+                "{phrase}: a trigger-owned body keeps the event-source binding"
+            );
+            assert_eq!(
+                bound(ParseContext {
+                    spell_anaphor_binding: SpellAnaphorBinding::EventSource,
+                    ..Default::default()
+                }),
+                TargetFilter::TriggeringSource,
+                "{phrase}: a handed-down EventSource binding keeps the event source"
+            );
+        }
     }
 
     /// The ten printed "spell or ability" retarget cards (Bolt Bend, Spellskite,

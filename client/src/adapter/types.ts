@@ -3227,7 +3227,10 @@ export type RetargetScope =
 // CR 601.2c: one descent step from a stack entry's root ResolvedAbility
 // toward a node that owns declared targets. Mirrors `ChainStep`
 // (crates/engine/src/types/game_state.rs).
-export type ChainStep = "SubAbility" | "ElseAbility";
+export type ChainStep =
+  | "SubAbility"
+  | "ElseAbility"
+  | { CoinFlipBranch: { result: "Won" | "Lost" } };
 
 // CR 115.7d: the address of ONE declared-target slot inside a resolved
 // chain. Mirrors `RetargetSlotAddress`
@@ -3624,7 +3627,13 @@ export type PayableResource =
   // cost (still carrying the X shard alongside any colored/generic pips,
   // e.g. `{X}{W}{U}{B}`) — the engine concretizes X into it and pays the
   // full result, so colored requirements are never dropped (#6410).
-  | { type: "ManaGeneric"; data: { base_cost: ManaCost } }
+  // CR 107.1c: `composition` says how the chosen amount becomes the cost —
+  // "ConcretizeX" (above; the default when absent) or "PerUnit" (`base_cost`
+  // repeated the chosen number of times). The "ManaGeneric" tag is legacy-frozen.
+  | {
+      type: "ManaGeneric";
+      data: { base_cost: ManaCost; composition?: "ConcretizeX" | "PerUnit" };
+    }
   | { type: "Counters" }
   | { type: "Speed" }
   // CR 732.2a: not a resource payment — the finite count an accepted
