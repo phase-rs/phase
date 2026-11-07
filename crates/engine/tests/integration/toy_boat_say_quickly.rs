@@ -693,12 +693,57 @@ fn a_restored_payment_lapses_on_its_retained_clock() {
 /// author. The saying itself arrives as a host-stamped observation.
 #[test]
 fn timed_spoken_prompt_advertises_only_the_decline() {
-    let (runner, _toy_boat) = setup_at_unless_prompt(1, true);
+    let (mut runner, _toy_boat) = setup_at_unless_prompt(1, true);
     let actions = legal_actions(runner.state());
     assert_eq!(
         actions,
         vec![GameAction::PayUnlessCost { pay: false }],
         "only the decline is an exact response to a timed spoken payment"
+    );
+
+    // CR 118.12a: The interaction API derives exact choices for the prompt.
+    // Confirm it advertises only the decline choice, matching legal_actions.
+    engine::game::interaction::bind_interaction_authority(
+        runner.state_mut(),
+        engine::types::interaction::InteractionSessionId("say-prompt".to_string()),
+    )
+    .expect("bind interaction authority");
+    let filtered = engine::game::filter_state_for_viewer(runner.state(), P0);
+    let view = engine::game::interaction::derive_viewer_interaction(runner.state(), &filtered, P0);
+    assert!(view.can_submit, "P0 is authorized to answer the prompt");
+    assert_eq!(
+        view.opportunities.len(),
+        1,
+        "exactly one prompt opportunity"
+    );
+    let opportunity = &view.opportunities[0];
+    let engine::types::interaction::InteractionOpportunityResponse::ExactChoices { choices } =
+        &opportunity.response
+    else {
+        panic!(
+            "expected ExactChoices response, got {:?}",
+            opportunity.response
+        );
+    };
+    assert_eq!(
+        choices.len(),
+        1,
+        "interaction choices offer only the decline"
+    );
+
+    let submission = engine::types::interaction::InteractionSubmission {
+        interaction_id: opportunity.interaction_id.clone(),
+        response: engine::types::interaction::InteractionResponse::Choose {
+            choice_id: choices[0].id.clone(),
+        },
+    };
+    let resolved =
+        engine::game::interaction::resolve_interaction_response(runner.state(), P0, &submission)
+            .expect("resolves interaction response");
+    assert_eq!(
+        resolved,
+        GameAction::PayUnlessCost { pay: false },
+        "resolved action is the decline"
     );
 }
 
