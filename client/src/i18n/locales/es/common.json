@@ -13,7 +13,8 @@
   "quantityRef": {
     "highestNumber": "el número más alto",
     "lowestNumber": "el número más bajo",
-    "chosenNumber": "el número elegido"
+    "chosenNumber": "el número elegido",
+    "energyPaidOrLostThisTurn": "energía pagada o perdida este turno"
   },
   "scryOutcome": {
     "title": "Adivinación completada",

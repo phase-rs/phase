@@ -2062,6 +2062,11 @@ pub enum ParitySource {
     /// CR 608.2c: Reads the most recent odd/even named choice made earlier in
     /// the same resolving instruction sequence.
     LastNamedChoice,
+    /// CR 607.2d: Reads the odd/even quality the source object chose as it
+    /// entered and keeps in its chosen attributes ("As this enchantment enters,
+    /// choose odd or even" read by "… of the chosen quality" — Ashling's
+    /// Prerogative). A source with no such choice matches no parity.
+    SourceChosen,
 }
 
 /// A branch in a d20/d6/d4 result table (CR 706.2).
@@ -5568,6 +5573,12 @@ pub enum PermissionGrantee {
     /// of Hospitality), read through `TargetFilter::TriggeringSourceController`
     /// with its last-known-information fallback (CR 608.2h).
     TriggeringSourceController,
+    /// CR 406.3a + CR 608.2c — each object's recorded exiling player (the
+    /// player who performed the exile that put it there, which need not be
+    /// its owner or the ability's controller): "For each card exiled this way,
+    /// the player who exiled it may play it" (Vulcan Mind-Meld). A card whose
+    /// exile was not attributed to a player is granted to nobody.
+    ObjectExiler,
 }
 
 /// Returns true when `grantee` is the default (`AbilityController`). Used as a
@@ -7482,10 +7493,16 @@ pub enum FilterProp {
     /// Differs from `SameName` (which reads the source object's name): this
     /// reads from `ability.targets[0]` when that target is `TargetRef::Object`,
     /// looking up the name from `state.objects` (or `lki_cache` if the target
-    /// has already left its zone).
+    /// has already left its zone). A nameless object (a face-down permanent,
+    /// CR 708.2a) shares no name — not with another nameless object and not with
+    /// itself (CR 201.2a); the evaluator compares through the shared
+    /// `names_shared` rule.
     SameNameAsParentTarget,
     /// CR 607.2a + CR 201.2: Matches an object whose name equals a card durably
     /// exiled by this ability's source. Used by the Extraplanar Lens class.
+    /// A nameless object (a face-down permanent, CR 708.2a) shares no name —
+    /// not with another nameless object and not with itself (CR 201.2a); the
+    /// evaluator compares through the shared `names_shared` rule.
     SameNameAsExiledBySource,
     /// CR 201.2 + CR 201.2a: Matches objects whose name equals the name of any
     /// permanent currently on the battlefield. `controller` optionally narrows
@@ -7493,11 +7510,21 @@ pub enum FilterProp {
     /// i.e. "shares a name with a permanent" unqualified). Used by "put a card
     /// onto the battlefield if it has the same name as a permanent" patterns
     /// (Mitotic Manipulation, and any analogous dig-with-name-match effect).
+    /// A nameless object (a face-down permanent, CR 708.2a) shares no name —
+    /// not with another nameless object and not with itself (CR 201.2a); the
+    /// evaluator compares through the shared `names_shared` rule.
     NameMatchesAnyPermanent {
         controller: Option<ControllerRef>,
     },
-    /// CR 903.3 + CR 903.3d: Matches permanents on the battlefield that are a
-    /// commander. Reads `GameObject::is_commander`, set during deck construction
+    /// CR 903.3 + CR 903.3d: Matches an object that is a commander. It checks no zone
+    /// itself; whatever reads the filter supplies the zone. A population reads the
+    /// zones `FilterProp::InZone` / `FilterProp::InAnyZone` name (Cloudkill's "a
+    /// commander you own on the battlefield or in the command zone"; every zone for
+    /// Tangleweave Armor's "your commanders", CR 903.3e), or the battlefield when the
+    /// filter names none (Command Chair's "commanders you control"). Other readers
+    /// look where their effect does: Command Beacon's "Put your commander into your
+    /// hand from the command zone" is a move whose `origin` names that zone.
+    /// Reads `GameObject::is_commander`, set during deck construction
     /// per CR 903.3 (the legendary card designated as that deck's commander).
     /// Used for "commander(s) you control", "your commander" subject phrases
     /// and for "target commander" in commander-format effects (Codsworth, Falthis,
@@ -8071,6 +8098,14 @@ pub enum ThisWayCause {
     /// CR 701.9a: the member was discarded this way (cause survives a
     /// replacement that redirects the discard to another zone — CR 614.6).
     Discarded,
+    /// CR 701.26a: the member was tapped this way — only an actual
+    /// untapped→tapped change counts. A permanent that was already tapped, or
+    /// that a "can't become tapped" restriction kept upright, is not tapped by
+    /// the instruction and so never becomes a member of a mass tap's set (it
+    /// emits no `PermanentTapped`, and a mass tap declares no targets to fall
+    /// back to). Master of the Wild Hunt: "Each Wolf tapped this way
+    /// deals damage equal to its power to target creature."
+    Tapped,
     /// CR 608.2c + CR 400.7: the member was returned (put onto the battlefield)
     /// this way by a one-shot put-onto-battlefield instruction.
     Returned,
@@ -8102,7 +8137,9 @@ impl ThisWayCause {
     /// The origin zone the producing transition must have departed, when the
     /// action determines one. `None` for destination-named actions (Exiled,
     /// Returned, Bounced, PutIntoGraveyard, OwnerLibraryShuffleSubject),
-    /// which arrive from anywhere. The origin-stamp site requires the
+    /// which arrive from anywhere, and for `Tapped`, which names no transition
+    /// at all (callers gate on [`Self::is_zone_transition`] first). The
+    /// origin-stamp site requires the
     /// member's latest zone-change record to agree; a mismatch means the
     /// record is not the producing transition and no origin is stamped.
     pub fn expected_origin_zone(self) -> Option<crate::types::zones::Zone> {
@@ -8113,11 +8150,34 @@ impl ThisWayCause {
             ThisWayCause::Milled => Some(Zone::Library),
             // CR 701.9a: discard moves hand cards to the graveyard.
             ThisWayCause::Discarded => Some(Zone::Hand),
+            // CR 701.26a: tapping is not a zone transition (see
+            // `is_zone_transition`), so it determines no departed zone.
+            ThisWayCause::Tapped => None,
             ThisWayCause::Exiled
             | ThisWayCause::Returned
             | ThisWayCause::Bounced
             | ThisWayCause::PutIntoGraveyard
             | ThisWayCause::OwnerLibraryShuffleSubject => None,
+        }
+    }
+
+    /// CR 400.7 + CR 701.26a: does the producing action move the member between
+    /// zones? Every cause but `Tapped` names a zone-moving action; tapping
+    /// turns a permanent sideways where it is, so a tapped member's latest
+    /// zone-change record is an earlier, unrelated transition and must never be
+    /// stamped as its producing origin.
+    pub fn is_zone_transition(self) -> bool {
+        match self {
+            ThisWayCause::Tapped => false,
+            ThisWayCause::OwnerLibraryShuffleSubject
+            | ThisWayCause::Discarded
+            | ThisWayCause::Returned
+            | ThisWayCause::Exiled
+            | ThisWayCause::Milled
+            | ThisWayCause::Destroyed
+            | ThisWayCause::Sacrificed
+            | ThisWayCause::Bounced
+            | ThisWayCause::PutIntoGraveyard => true,
         }
     }
 }
@@ -8230,6 +8290,12 @@ pub enum TargetFilter {
     /// Matches spells on the stack (not activated/triggered abilities).
     /// CR 115.1a: Used by "becomes the target of a spell" triggers to filter source type.
     StackSpell,
+    /// CR 601.2f: The spell whose total cost is being determined — the "that
+    /// spell" of a cost modifier ("Spells you cast cost {1} less to cast for
+    /// each card with the same name as that spell in your graveyard", Locket of
+    /// Yesterdays). Only a cast-time cost-modifier evaluation carries this
+    /// referent; everywhere else it names no object.
+    CastingSpell,
     /// Matches a specific permanent by ObjectId.
     /// Used for duration-based statics that target a specific object
     /// (e.g., "that permanent loses all abilities for as long as ~").
@@ -8374,6 +8440,9 @@ pub enum TargetFilter {
     /// (`Some(Exiled)`) and "sacrificed this way" (`Some(Sacrificed)`)
     /// references disjointly — and a sacrifice that a replacement redirects to
     /// Exile (CR 614.6) still counts as `Sacrificed` (issue #2932).
+    /// A mass tap stamps its newly tapped members `Tapped` (CR 701.26a), so
+    /// "each Wolf tapped this way" (`Some(Tapped)`) reads exactly the
+    /// permanents the instruction tapped.
     TrackedSetFiltered {
         id: super::identifiers::TrackedSetId,
         filter: Box<TargetFilter>,
@@ -8746,6 +8815,7 @@ pub fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter) -> bo
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -8971,19 +9041,23 @@ pub fn filter_contains_filter_prop(
 ) -> bool {
     filter_grammar_any(filter, &|node| match node {
         FilterGrammarNode::Prop(prop) => predicate(prop),
-        FilterGrammarNode::Filter(_) => false,
+        FilterGrammarNode::Filter(_) | FilterGrammarNode::Player(_) => false,
     })
 }
 
 /// One node of the filter grammar as the grammar walkers below reach it: a
-/// `TargetFilter` at its entry, or a `FilterProp` at its entry. The walkers are
-/// generic over what a caller looks for; each entry that calls them names the
-/// node kind it tests (`filter_contains_filter_prop` above, and
-/// `crate::game::filter`'s `*_operands_contain` family).
+/// `TargetFilter`, a `FilterProp` or a `PlayerFilter` at its entry. The walkers
+/// are generic over what a caller looks for; each entry that calls them names
+/// the node kind it tests (`filter_contains_filter_prop` above, and
+/// `crate::game::filter`'s `*_operands_contain` family). A player filter is a
+/// node in its own right because some of its variants read state themselves
+/// (`TrackedSetPossessor` reads the chain's tracked set) rather than only
+/// through the target filters they nest.
 #[derive(Clone, Copy)]
 pub enum FilterGrammarNode<'a> {
     Filter(&'a TargetFilter),
     Prop(&'a FilterProp),
+    Player(&'a PlayerFilter),
 }
 
 /// The complete target → property → player → quantity topology of the filter
@@ -9045,6 +9119,7 @@ pub fn filter_grammar_any(
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -9209,6 +9284,9 @@ pub fn player_filter_grammar_any(
     filter: &PlayerFilter,
     visit: &dyn Fn(FilterGrammarNode<'_>) -> bool,
 ) -> bool {
+    if visit(FilterGrammarNode::Player(filter)) {
+        return true;
+    }
     match filter {
         PlayerFilter::OpponentDealtDamage { source, .. } => source
             .as_deref()
@@ -9357,6 +9435,7 @@ pub fn quantity_ref_grammar_any(
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
@@ -9372,6 +9451,7 @@ pub fn quantity_ref_grammar_any(
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -9468,6 +9548,37 @@ pub fn retarget_chosen_card_type_to_creature_type(filter: &mut TargetFilter) -> 
         *filter = rewritten;
     }
     complete
+}
+
+/// CR 607.2d: Rebinds every `ManaValueParity { LastNamedChoice }` leaf beneath
+/// `filter` to the source's persisted choice. Returns whether any leaf was
+/// rebound; an incomplete bounded walk leaves `filter` untouched and reports
+/// `false`, as [`retarget_chosen_card_type_to_creature_type`] does.
+pub fn rebind_chosen_parity_to_source(filter: &mut TargetFilter) -> bool {
+    let mut rewritten = filter.clone();
+    let mut complete = true;
+    let mut rebound = false;
+    rewrite_filter_props::<()>(
+        &mut rewritten,
+        &mut |_, _, _| {},
+        &mut |prop| {
+            if let FilterProp::ManaValueParity {
+                parity: parity @ ParitySource::LastNamedChoice,
+            } = prop
+            {
+                *parity = ParitySource::SourceChosen;
+                rebound = true;
+            }
+        },
+        &mut |_| {},
+        &mut complete,
+        false,
+        None,
+    );
+    if complete && rebound {
+        *filter = rewritten;
+    }
+    complete && rebound
 }
 
 /// Rewrite every node and property reachable through `filter`, recording any incomplete
@@ -9571,6 +9682,7 @@ pub fn rewrite_filter_props<C>(
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -10185,6 +10297,7 @@ fn rewrite_quantity_ref_filter_props<C>(
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
@@ -10200,6 +10313,7 @@ fn rewrite_quantity_ref_filter_props<C>(
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -10458,6 +10572,7 @@ pub(crate) fn filter_binds_player(
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -10536,8 +10651,8 @@ pub fn names_resolution_chosen_recipient(target: &TargetFilter) -> bool {
     }
 }
 
-/// Recurse into compound filters so a wrapped `ParentTargetController` is
-/// detected wherever it appears (`Or { filters: [..., ParentTargetController, ...] }`).
+/// Recurse into compound filters so parent-object, controller, and owner
+/// dependencies remain visible to inheritance and delayed snapshotting.
 pub fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
     match filter {
         // CR 603.7c + CR 608.2c: a `ParentTargetSlot { index }` delayed effect
@@ -10549,7 +10664,10 @@ pub fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. } => true,
         TargetFilter::Typed(typed) => {
-            matches!(typed.controller, Some(ControllerRef::ParentTargetController))
+            matches!(
+                typed.controller,
+                Some(ControllerRef::ParentTargetController | ControllerRef::ParentTargetOwner)
+            )
                 // CR 608.2c + CR 109.1: a `DistinctFrom { reference: ParentTarget }`
                 // property (Jodah's "put the rest ..." exclusion of the declined
                 // hit, Radiance's "each OTHER creature that shares a color with it")
@@ -10963,7 +11081,10 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
-        | Effect::Unimplemented { .. } => InstructionObjectReach::Unclassified,
+        | Effect::Unimplemented { .. }
+        // Turtle Team-Up: plays cards whose own instructions introduce objects;
+        // this instruction's reach is not classified.
+        | Effect::HordePlayCard { .. } => InstructionObjectReach::Unclassified,
     }
 }
 
@@ -11012,7 +11133,7 @@ pub fn effect_requires_parent_target_object(effect: &Effect) -> bool {
 
 /// CR 608.2c + CR 608.2h: Recursively identify the filter forms that require
 /// the parent's object referent rather than its last-known identity metadata.
-fn filter_requires_parent_target_object(filter: &TargetFilter) -> bool {
+pub fn filter_requires_parent_target_object(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => true,
         TargetFilter::Typed(typed) => typed.properties.iter().any(|property| {
@@ -11638,7 +11759,11 @@ pub enum CardTypeSetSource {
     Zone { zone: ZoneRef, scope: CountScope },
     /// CR 607.2a + CR 406.6: Cards exiled by the source's linked ability.
     ExiledBySource,
-    /// CR 109.2: Objects matching a battlefield-style filter.
+    /// Objects matching `filter`. A typed filter that names no zone reads the
+    /// battlefield; `FilterProp::InZone` / `FilterProp::InAnyZone` name the zones
+    /// it reads otherwise. When the Oracle description has a card type or subtype,
+    /// names no zone and doesn't say "card", "spell", "source" or "scheme", that
+    /// default is CR 109.2's reading: a permanent of that type on the battlefield.
     Objects { filter: TargetFilter },
     /// CR 608.2c + CR 205.2a: distinct card types among the current chain
     /// tracked set, optionally restricted to members produced by `caused_by`.
@@ -11896,6 +12021,7 @@ fn target_filter_has_unsupported_selected_ref(filter: &TargetFilter, nested: boo
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::SourceChosenPlayer
@@ -12356,6 +12482,7 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         | QuantityRef::NameStickerLetterCount { .. }
         | QuantityRef::SelfManaValue
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::ExiledFromHandThisResolution
@@ -12377,6 +12504,7 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         | QuantityRef::Devotion { .. }
         | QuantityRef::VoteCount { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::TurnsTaken
         | QuantityRef::EventContextSourceCostX
@@ -13482,6 +13610,16 @@ pub enum QuantityRef {
     /// with ~" conditional statics (Veteran Survivor, etc.) — composes with
     /// `StaticCondition::QuantityComparison` rather than requiring a dedicated variant.
     CardsExiledBySource,
+    /// Turtle Team-Up: the number of Bosses currently deployed (face-up Boss
+    /// cards in the command zone). Chrome Dome's "+1/+0 for each boss in play"
+    /// reads this live so the bonus tracks stage transitions without
+    /// re-grafting. Not expressible as `ObjectCount { filter }`: there is no
+    /// Boss `TypeFilter` member, no face-up predicate, and undeployed
+    /// (face-down) Bosses share `Zone::Command`, so even a Boss+InZone filter
+    /// would over-count. No CR section (casual product) — the product booklet
+    /// is the authority. Synthesized only (Boss grafts never go through the
+    /// Oracle parser).
+    DeployedBossCount,
     /// CR 607.2b: The power of a specific card exiled by the source, indexed by order.
     /// Its only producer is The Mimeoplasm's entry replacement, which reads the second
     /// card exiled "this way" (the per-turn ledger) for counter placement. Readers of
@@ -13725,6 +13863,13 @@ pub enum QuantityRef {
     },
     /// CR 700.13: Number of crimes the controller has committed this turn.
     CrimesCommittedThisTurn,
+    /// CR 107.14 + CR 122.1: Number of energy counters the controller has paid
+    /// or lost this turn. Reads `Player::energy_paid_or_lost_this_turn`, bumped
+    /// on every energy decrement (cost payment or any other removal) and reset
+    /// at turn start. Backs "for each {E} you've paid or lost this turn"
+    /// (Blaster Hulk). Controller-scoped, mirroring the bare
+    /// `CrimesCommittedThisTurn` per-turn accumulator sibling.
+    EnergyPaidOrLostThisTurn,
     /// CR 701.65b / 701.66b / 701.67c / 702.189b: count of distinct bend types
     /// (air/earth/water/fire) the controller has performed this turn — these are
     /// the "whenever a player [airbends/earthbends/waterbends/firebends]" trigger
@@ -14198,6 +14343,7 @@ impl QuantityRef {
             | QuantityRef::SharedCardTypes { .. }
             | QuantityRef::DistinctSubtypes { .. }
             | QuantityRef::CardsExiledBySource
+            | QuantityRef::DeployedBossCount
             | QuantityRef::ExiledCardPower { .. }
             | QuantityRef::ZoneCardCount { .. }
             | QuantityRef::BasicLandTypeCount { .. }
@@ -14216,6 +14362,7 @@ impl QuantityRef {
             | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
             | QuantityRef::EnteredThisTurn { .. }
             | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::EnergyPaidOrLostThisTurn
             | QuantityRef::BendTypesThisTurn
             | QuantityRef::TurnsTaken
             | QuantityRef::ZoneChangeCountThisTurn { .. }
@@ -14353,6 +14500,7 @@ impl QuantityRef {
             | QuantityRef::TargetZoneCardCount { .. }
             | QuantityRef::Devotion { .. }
             | QuantityRef::CardsExiledBySource
+            | QuantityRef::DeployedBossCount
             | QuantityRef::ExiledCardPower { .. }
             | QuantityRef::BasicLandTypeCount { .. }
             | QuantityRef::TrackedSetSize
@@ -14373,6 +14521,7 @@ impl QuantityRef {
             | QuantityRef::EventContextSourceCostX
             | QuantityRef::EventContextSourceModesChosen
             | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::EnergyPaidOrLostThisTurn
             | QuantityRef::BendTypesThisTurn
             | QuantityRef::LifeGainedThisTurn { .. }
             | QuantityRef::CardsDrawnThisTurn { .. }
@@ -14466,6 +14615,7 @@ impl QuantityRef {
             | QuantityRef::SharedCardTypes { .. }
             | QuantityRef::DistinctSubtypes { .. }
             | QuantityRef::CardsExiledBySource
+            | QuantityRef::DeployedBossCount
             | QuantityRef::ExiledCardPower { .. }
             | QuantityRef::ZoneCardCount { .. }
             | QuantityRef::BasicLandTypeCount { .. }
@@ -14484,6 +14634,7 @@ impl QuantityRef {
             | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
             | QuantityRef::EnteredThisTurn { .. }
             | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::EnergyPaidOrLostThisTurn
             | QuantityRef::BendTypesThisTurn
             | QuantityRef::TurnsTaken
             | QuantityRef::ZoneChangeCountThisTurn { .. }
@@ -14606,7 +14757,7 @@ pub enum ObjectProperty {
     Toughness,
     ManaValue,
     /// CR 107.4a + CR 202.1: The number of colored mana symbols of `color` in
-    /// this object's mana cost. Summed (via `QuantityRef::Aggregate`) over a
+    /// this object's mana cost. Summed (via `QuantityRef::PropertyAggregate`) over a
     /// zone-scoped filter, this expresses chroma in any zone — "the number of
     /// black mana symbols in the mana costs of cards in your graveyard" (Umbra
     /// Stalker) is `Sum` of `ManaSymbolCount(Black)` over cards in your
@@ -15347,7 +15498,7 @@ pub fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRead {
         | QuantityRef::SpellsCastThisTurn { .. } | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SpellsCastThisGame { .. } | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::TargetZoneCardCount { .. } | QuantityRef::Devotion { .. }
-        | QuantityRef::BasicLandTypeCount { .. } | QuantityRef::CardsExiledBySource
+        | QuantityRef::BasicLandTypeCount { .. } | QuantityRef::CardsExiledBySource | QuantityRef::DeployedBossCount
         // Numbers, counters on players, and resolution/turn records.
         | QuantityRef::LifeAboveStarting | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount | QuantityRef::TriggeringScryBottomCount
@@ -15357,6 +15508,7 @@ pub fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRead {
         | QuantityRef::PreviousEffectCount | QuantityRef::UnspentMana { .. }
         | QuantityRef::EventContextAmount | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn | QuantityRef::TurnsTaken | QuantityRef::NotedNumber
         | QuantityRef::ChosenNumber | QuantityRef::DescendedThisTurn | QuantityRef::SpellsCastLastTurn
         | QuantityRef::DungeonsCompleted | QuantityRef::CostXPaid | QuantityRef::KickerCount
@@ -15688,6 +15840,9 @@ impl Effect {
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
+            // Horde-internal wave instruction: never parser-built, never an
+            // indicated action — no address route from its shape.
+            | Effect::HordePlayCard { .. }
             | Effect::Unimplemented { .. } => {}
         }
         let scoped_change_zone = matches!(
@@ -15993,6 +16148,11 @@ pub fn indicated_action_commit(effect: &Effect) -> IndicatedActionCommit {
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
+        // Horde-internal wave instruction: never parser-built, never an
+        // indicated action. OnAccept fails closed — OnSpellCast would route
+        // to the strict single-card CastFromZone shape check above, which a
+        // Horde wave play can never satisfy.
+        | Effect::HordePlayCard { .. }
         | Effect::Unimplemented { .. } => IndicatedActionCommit::OnAccept,
     }
 }
@@ -20455,7 +20615,7 @@ impl LegacyPaymentCost {
 /// The controller of the spell or ability follows its instructions, unless the
 /// instruction names its subject — and a subject acting on "their library" is
 /// the player whose library it is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum LibraryInstructionActor {
     /// "Exile the top card of target player's library" — the controller acts.
     #[default]
@@ -20463,12 +20623,37 @@ pub enum LibraryInstructionActor {
     /// "That player exiles the top card of their library" — the player whose
     /// library it is acts (Uba Mask, Ingest, Crumbling Sanctuary).
     LibraryPlayer,
+    /// CR 608.2c: the instruction's named subject is a player other than the
+    /// library's owner — "Target opponent looks at the top card of your
+    /// library, then exiles it face down" (Vulcan Mind-Meld). CR 115.1: a
+    /// targeting subject (`player` not a context ref) is the instruction's
+    /// declared player target, surfaced by [`Effect::target_filter`] when the
+    /// library owner is itself a context ref.
+    Player { player: TargetFilter },
 }
 
 impl LibraryInstructionActor {
     /// Serde skip-helper: `Controller` is the default and is omitted from JSON.
     pub fn is_controller(&self) -> bool {
         matches!(self, Self::Controller)
+    }
+
+    /// CR 115.1: the subject's player filter when it names a target, so the
+    /// instruction can declare it. `None` for the controller, the library
+    /// owner, and context-ref subjects ("its controller").
+    pub fn declared_target(&self) -> Option<&TargetFilter> {
+        match self {
+            Self::Player { player } if !player.is_context_ref() => Some(player),
+            Self::Controller | Self::LibraryPlayer | Self::Player { .. } => None,
+        }
+    }
+
+    /// Mutable form of [`Self::declared_target`].
+    pub fn declared_target_mut(&mut self) -> Option<&mut TargetFilter> {
+        match self {
+            Self::Player { player } if !player.is_context_ref() => Some(player),
+            Self::Controller | Self::LibraryPlayer | Self::Player { .. } => None,
+        }
     }
 }
 
@@ -20504,6 +20689,13 @@ pub enum LibraryPosition {
     RandomWithinTop {
         n: QuantityExpr,
     },
+}
+
+impl LibraryPosition {
+    /// Serde skip-helper: `Top` is the default and is omitted from JSON.
+    pub fn is_top(&self) -> bool {
+        matches!(self, Self::Top)
+    }
 }
 
 /// CR 701.24a + CR 701.24d: Whether a mass move into a library is the move
@@ -21572,6 +21764,35 @@ impl DigRestOrder {
     }
 }
 
+/// CR 701.20e + CR 608.2c: what happens to the cards a look-at Dig did NOT keep.
+///
+/// Looking at cards never moves them (CR 701.20e). An instruction that routes
+/// its chosen cards out of the library and stays silent about the others ("put
+/// any number of land cards from among them onto the battlefield tapped") leaves
+/// those others exactly where they are. That outcome is neither of the two
+/// states `rest_destination: Option<Zone>` can name: its `None` means the
+/// historical graveyard default (a move), and `Some(Zone::Library)` means an
+/// explicit "put the rest on the bottom" (also a move, and one that reorders
+/// the library under CR 401.4, changing the next draw of any such dig that has
+/// no later shuffle).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DigRestRemainder {
+    /// Move the unkept cards to `rest_destination` (`None` = graveyard).
+    #[default]
+    Route,
+    /// The instruction named no destination for the unkept cards, so they are
+    /// never moved: they were only looked at and stay in the library in their
+    /// existing order.
+    StayInLibrary,
+}
+
+impl DigRestRemainder {
+    pub fn is_route(&self) -> bool {
+        matches!(self, DigRestRemainder::Route)
+    }
+}
+
 /// CR 701.20e + CR 608.2c: Discriminates where `Effect::Dig` reads its
 /// card set from. `Library` (the default) reads from the top of the library;
 /// `PriorLook` reads from `GameState::private_look_ids`, which was populated
@@ -22476,9 +22697,17 @@ pub enum Effect {
         /// Filter for keepable cards (Any = no filter).
         #[serde(default = "default_target_filter_any")]
         filter: TargetFilter,
-        /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom).
+        /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom
+        /// unless `rest_split_top_count` names a top position).
         #[serde(default)]
         rest_destination: Option<Zone>,
+        /// CR 701.20e: whether the unkept cards are moved at all. A silent
+        /// remainder ("… put any number of land cards from among them onto the
+        /// battlefield", with no clause naming the rest) stays in the library
+        /// untouched — `RestRemainder::StayInLibrary` — rather than being routed
+        /// to `rest_destination`'s graveyard default or to the library bottom.
+        #[serde(default, skip_serializing_if = "DigRestRemainder::is_route")]
+        rest_remainder: DigRestRemainder,
         /// CR 401.2 + CR 701.20e + CR 608.2c: Telling Time-class split of the
         /// unkept remainder between the two rules-legal positions of ONE
         /// library ("...one on top of your library, and one on the bottom of
@@ -22489,9 +22718,14 @@ pub enum Effect {
         /// is known only to them).
         ///
         /// `Some(n)` = exactly `n` of the remainder go on top and the rest go
-        /// to the bottom, via a `WaitingFor::DigRestSplitChoice` pause.
-        /// `None` = unchanged behavior: the whole remainder goes uniformly to
-        /// `rest_destination` (defaulting to Graveyard). Note CR 701.20d: the
+        /// to the bottom, via a `WaitingFor::DigRestSplitChoice` pause. `n` is
+        /// clamped to the actual remainder, so a value at or beyond the pile
+        /// size is the DEGENERATE all-top remainder the parser emits for "…
+        /// and the rest on top of your library" (Diabolic Vision) — the whole
+        /// pile goes on top and its CR 401.4 arrangement
+        /// is still the owner's choice. `None` = unchanged behavior: the whole
+        /// remainder goes uniformly to `rest_destination` (defaulting to
+        /// Graveyard). Note CR 701.20d: the
         /// remainder cards are reordered within the library by this split, so
         /// they stop being revealed and become new objects — the shared
         /// `reorder_within_library` primitive that performs the move already
@@ -23257,10 +23491,26 @@ pub enum Effect {
     /// counter resolvers and reuses the whole `ChooseOneOfBranch` interactive
     /// surface. This is the choose-ONE-kind sibling of the
     /// `repeat_for: DistinctCounterKindsAmong` for-EACH-kind loop.
+    ///
+    /// A printed kind (`counter_type: Some`) fixes the kind instead of choosing
+    /// among those present: "put a charge counter on it or remove one from it"
+    /// (Immard, the Stormcleaver) may always add one, and may remove one only
+    /// while the object has one of that kind (CR 608.2d).
     ChooseCounterAdjustment {
         adjustment: CounterAdjustment,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        /// CR 122.1: the printed counter kind; `None` chooses among the kinds
+        /// present on the object.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        counter_type: Option<CounterType>,
+        /// The object whose counters change: the inherited parent target
+        /// (Clockspinning) or the ability's own source ("it" — Immard).
+        #[serde(
+            default = "default_target_filter_parent",
+            skip_serializing_if = "is_target_filter_parent_target"
+        )]
+        target: TargetFilter,
     },
     /// CR 701.10a + CR 613.4c: Multiply power/toughness of target creature by
     /// `factor` via a layer-7c continuous modification. `factor: 2` is "double"
@@ -24157,6 +24407,12 @@ pub enum Effect {
         /// `PaymentCost::ScaledMana`). When `Some(times)` the mana `cost` base
         /// is multiplied by `times` at payment ("pay {N} for each object chosen
         /// this way"); `times == 0` yields `{0}`, a trivial no-op success.
+        /// That first producer is the per-object `TrackedSetSize` payment
+        /// (Thelon's Curse; CR 118.1). The second producer is a `times` that
+        /// still carries the unannounced X (`times.contains_x()`): the
+        /// multiplier is then the player-chosen amount of a resolution-time
+        /// prompt (`pay::resolve` → `PayableResource::Mana { composition:
+        /// PerUnit }`, CR 107.1c; "pay any amount of {R}", Leyline Tyrant).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scale: Option<QuantityExpr>,
         /// CR 608.2c: Player who pays the resolution-time cost. Defaults to
@@ -24358,11 +24614,13 @@ pub enum Effect {
     /// `recipient_scope`.
     PreventDamage {
         amount: PreventionAmount,
-        /// CR 615.11 + CR 107.3i: When present, overrides `amount` at effect
-        /// resolution — the dynamic quantity is resolved to a concrete count and
-        /// the prevention shield is created as a static `Next(n)` depletion shield.
-        /// Set by "prevent X … where X is <quantity>" clauses. `None` for the
-        /// common fixed/All forms.
+        /// CR 615.7 + CR 107.3a + CR 107.3c: when present, overrides `amount` at
+        /// effect resolution — the quantity is resolved to a concrete count and
+        /// the shield is created as a static `Next(n)` depletion shield (CR 615.7).
+        /// Set by the announced `{X}` of a counted prevention clause ('prevent the
+        /// next X damage …', CR 107.3a) or by a trailing 'where X is <quantity>'
+        /// binder (CR 107.3c), which overwrites the announced-X reading. `None`
+        /// for the fixed/All forms.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         amount_dynamic: Option<QuantityExpr>,
         #[serde(default = "default_target_filter_any")]
@@ -25159,7 +25417,8 @@ pub enum Effect {
         #[serde(default = "default_target_filter_controller")]
         player: TargetFilter,
     },
-    /// Put a target on top or bottom of its owner's library.
+    /// Put a target on top or bottom of its owner's library, or (via
+    /// `top_position`) at an Nth-from-the-top slot or the bottom (CR 401.7).
     PutOnTopOrBottom {
         target: TargetFilter,
         /// CR 608.2d: the player directed by the Oracle text chooses top or bottom.
@@ -25171,6 +25430,12 @@ pub enum Effect {
             skip_serializing_if = "is_target_filter_parent_target_owner"
         )]
         chooser: TargetFilter,
+        /// CR 401.7 + CR 608.2d: where the object goes when the chooser picks the
+        /// "top" branch. `Top` (the default) is the plain "top or bottom" choice;
+        /// `NthFromTop { n: 2 }` is "second from the top or on the bottom" (Deem
+        /// Inferior, Trickster's Stratagem). The other branch is always the bottom.
+        #[serde(default, skip_serializing_if = "LibraryPosition::is_top")]
+        top_position: LibraryPosition,
     },
     /// Deliver a gift to an opponent: draw a card, create a token, etc.
     /// Resolves for the opponent of the ability's controller (2-player: the single opponent).
@@ -25516,6 +25781,18 @@ pub enum Effect {
     Monstrosity {
         /// Number of +1/+1 counters to place.
         count: QuantityExpr,
+    },
+    /// Turtle Team-Up (Savanti Romero, Temporal Rogue): "the bosses play a
+    /// card" — reveal and resolve the top card of the Boss event deck
+    /// immediately, outside the wave (Savanti triggers on combat damage, mid
+    /// combat). Not a cast: creatures enter, Events resolve one-shot, exactly
+    /// as in the Action-phase wave. No CR section (casual product) — the
+    /// product booklet is the authority. Synthesized only (Boss grafts never
+    /// go through the Oracle parser).
+    HordePlayCard {
+        /// How many cards to play.
+        #[serde(default = "default_one")]
+        count: u32,
     },
     /// Digital-only Specialize: permanently become a color-specific face after
     /// paying the synthesized activation cost (mana + discard). Not in CR text.
@@ -26094,6 +26371,27 @@ pub fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilte
     // carve-out above; matches the `None` its mass siblings (DestroyAll/BounceAll)
     // return from `Effect::target_filter`.
     if matches!(effect, Effect::UnattachAll { .. }) {
+        return None;
+    }
+    // CR 115.1a + CR 119.5: "Each player's life total becomes …" (Repay in
+    // Kind, Biorhythm, Worldfire) is not a targeted spell — its text never uses
+    // the phrase "target [something]". `AllPlayers` is the resolution-time
+    // population `resolve_set_life_total` iterates in APNAP order, not a
+    // declared target. Surfacing it here would mint a required slot, but
+    // `AllPlayers` is not a shape `targeting::find_legal_targets` enumerates as a
+    // player or object target, so that slot's candidate pool is EMPTY and
+    // `build_target_slots_for_announcement` rejected the cast with
+    // "No legal targets available" before it could ever be announced
+    // (phase-rs/phase#10455). Mirrors the `UnattachAll` and
+    // `Sacrifice` carve-outs above; the single-player forms ("your" →
+    // `Controller`, "target player's" → `Player`) keep their slots untouched.
+    if matches!(
+        effect,
+        Effect::SetLifeTotal {
+            target: TargetFilter::AllPlayers,
+            ..
+        }
+    ) {
         return None;
     }
     // CR 115.1 + Whitemane Lion ruling: A `Bounce` whose Oracle text omitted
@@ -27612,6 +27910,7 @@ pub fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
@@ -27623,6 +27922,7 @@ pub fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
@@ -27748,6 +28048,7 @@ pub fn filter_recipient_read(filter: &TargetFilter) -> RecipientRead {
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -28338,6 +28639,10 @@ fn default_target_filter_parent_target_owner() -> TargetFilter {
     TargetFilter::ParentTargetOwner
 }
 
+fn is_target_filter_parent_target(filter: &TargetFilter) -> bool {
+    matches!(filter, TargetFilter::ParentTarget)
+}
+
 fn is_target_filter_parent_target_owner(filter: &TargetFilter) -> bool {
     matches!(filter, TargetFilter::ParentTargetOwner)
 }
@@ -28704,6 +29009,7 @@ impl TargetFilter {
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringPlayer
             | TargetFilter::TriggeringSource
+            | TargetFilter::CastingSpell
             | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::EventTarget
             | TargetFilter::TriggeringSourceController
@@ -28784,6 +29090,7 @@ impl TargetFilter {
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringPlayer
             | TargetFilter::TriggeringSource
+            | TargetFilter::CastingSpell
             | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::EventTarget
             | TargetFilter::TriggeringSourceController
@@ -29200,6 +29507,7 @@ impl TargetFilter {
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringPlayer
             | TargetFilter::TriggeringSource
+            | TargetFilter::CastingSpell
             | TargetFilter::EventTarget
             | TargetFilter::TriggeringSourceController
             | TargetFilter::EventTargetController
@@ -29347,6 +29655,18 @@ impl TargetFilter {
         if self.chosen_player_index().is_some() {
             return true;
         }
+        // CR 603.2 + CR 701.23a: a contentless player-scoped filter controlled by the
+        // triggering player ("search that player's library") reads the player from the
+        // trigger event at resolution; it is never announced as a target.
+        if matches!(
+            self,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.is_empty()
+                    && tf.properties.is_empty()
+                    && matches!(tf.controller, Some(ControllerRef::TriggeringPlayer))
+        ) {
+            return true;
+        }
         matches!(
             self,
             TargetFilter::None
@@ -29423,6 +29743,22 @@ impl TargetFilter {
                 // CR 201.5a + CR 115.10a: a granter named by a granted body is affected, never a
                 // declared target.
                 | TargetFilter::GrantingObject { .. }
+        )
+    }
+
+    /// CR 608.2c + CR 115.10a: true when this filter names a population bound
+    /// earlier in the same resolution ("those Wolves" — a `TrackedSet` /
+    /// `TrackedSetFiltered` published by a prior instruction), never announced
+    /// as a target. The single authority shared by the parser (a damage clause
+    /// whose recipient is such a population never takes that population as its
+    /// antecedent) and the engine (a division among such a population is chosen
+    /// while the effect is applied, CR 608.2d, not announced with the targets,
+    /// CR 601.2d). Deliberately narrower than [`Self::is_context_ref`]: a
+    /// `ParentTarget` / `ParentTargetSlot` recipient names ANNOUNCED targets.
+    pub fn is_tracked_set_population(&self) -> bool {
+        matches!(
+            self,
+            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
         )
     }
 
@@ -30152,6 +30488,7 @@ impl Effect {
             // nor the note names a copied stack object.
             | Effect::CreateBoon { .. }
             | Effect::NoteNumber { .. }
+            | Effect::HordePlayCard { .. }
             // CR 701.33b: abandoning names no stack object at all.
             | Effect::AbandonScheme
             | Effect::Unimplemented { .. } => false,
@@ -30404,6 +30741,7 @@ impl Effect {
             // note resolve their slot as operand, never as a donor.
             | Effect::CreateBoon { .. }
             | Effect::NoteNumber { .. }
+            | Effect::HordePlayCard { .. }
             // CR 701.33b: abandoning resolves its slot as operand.
             | Effect::AbandonScheme
             | Effect::Unimplemented { .. } => AttachmentHostSlot::Operand,
@@ -30598,6 +30936,12 @@ impl Effect {
                 }
             }
 
+            // CR 115.1 + CR 608.2c: "Target opponent looks at the top card of
+            // your library, then exiles it face down" — the library owner is a
+            // context ref, so the targeting subject is the declared player.
+            Effect::ExileTop { player, actor, .. } if player.is_context_ref() => {
+                Some(actor.declared_target().unwrap_or(player))
+            }
             Effect::Dig { player, .. }
             | Effect::ExileTop { player, .. }
             | Effect::ExileFaceDownPile { player, .. }
@@ -30965,6 +31309,9 @@ impl Effect {
             // surfaced by `collect_target_slots`.
             | Effect::ChooseCounterAdjustment { .. }
             | Effect::Unimplemented { .. }
+            // Turtle Team-Up (no CR section — casual product): HordePlayCard
+            // names no target; the Boss event deck it plays from is implied.
+            | Effect::HordePlayCard { .. }
             // CR 603.7e: ChooseObjectsIntoTrackedSet has no discrete effect-target
             // slot — `chooser` is a player ref resolved like `PayCost.payer`, and
             // `filter` constrains the interactive selection, not a targeting slot.
@@ -31189,6 +31536,13 @@ impl Effect {
                 }
             }
 
+            // CR 115.1 + CR 608.2c: mirrors `target_filter` — a targeting
+            // subject of a context-ref library owner is the declared player.
+            Effect::ExileTop { player, actor, .. }
+                if player.is_context_ref() && actor.declared_target().is_some() =>
+            {
+                actor.declared_target_mut()
+            }
             Effect::Dig { player, .. }
             | Effect::ExileTop { player, .. }
             | Effect::ExileFaceDownPile { player, .. }
@@ -31423,6 +31777,7 @@ impl Effect {
             | Effect::ChooseOneOf { .. }
             | Effect::ChooseCounterAdjustment { .. }
             | Effect::Unimplemented { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::SeparateIntoPiles { .. }
             | Effect::ExileTopCardContest { .. }
@@ -31557,7 +31912,12 @@ impl Effect {
             | Effect::Learn
             // Randomly picks card(s) FROM a library matching a filter; the library
             // is always the origin.
-            | Effect::Seek { .. } => true,
+            | Effect::Seek { .. }
+            // Turtle Team-Up (no CR section — casual product): "the bosses
+            // play a card" reveals the top cards of the Boss event deck (a
+            // library) and resolves them onto the battlefield / into the
+            // graveyard; the library is always the origin.
+            | Effect::HordePlayCard { .. } => true,
 
             // CR 701.40a names no source zone ("Put that card onto the
             // battlefield face down"), so the verdict is conditional on the
@@ -32416,6 +32776,9 @@ impl Effect {
             | Effect::VentureInto { .. }
             | Effect::VentureIntoDungeon
             | Effect::WinTheGame { .. }
+            // Turtle Team-Up: plays cards; this node publishes no created referent
+            // (a played card's own token creation is that node's answer).
+            | Effect::HordePlayCard { .. }
             | Effect::AbandonScheme
             => None,
         }
@@ -32904,6 +33267,9 @@ macro_rules! define_effect_quantity_walk {
                 f(count);
                 visit_library_position(position, f);
             }
+            Effect::PutOnTopOrBottom { top_position, .. } => {
+                visit_library_position(top_position, f);
+            }
             Effect::ChooseDrawnThisTurnPayOrTopdeck {
                 count,
                 life_payment,
@@ -33100,7 +33466,6 @@ macro_rules! define_effect_quantity_walk {
             | Effect::Ripple { .. }
             | Effect::MiracleCast { .. }
             | Effect::MadnessCast { .. }
-            | Effect::PutOnTopOrBottom { .. }
             | Effect::GiftDelivery { .. }
             | Effect::Goad { .. }
             | Effect::GoadAll { .. }
@@ -33133,6 +33498,7 @@ macro_rules! define_effect_quantity_walk {
             // CR 122.1: the per-kind magnitude is `EventCounterReproductionCount`,
             // not a `QuantityExpr`, so there is nothing to visit here.
             | Effect::ReproduceEventCounters { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::Unimplemented { .. } => {}
         }
     }
@@ -33492,6 +33858,7 @@ impl Effect {
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::Unimplemented { .. } => {}
         }
     }
@@ -33772,6 +34139,7 @@ impl Effect {
             // CR 122.1: per-kind magnitude is `EventCounterReproductionCount`,
             // not a `QuantityExpr`.
             | Effect::ReproduceEventCounters { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::WinTheGame { .. } => None,
         }
     }
@@ -34043,6 +34411,7 @@ impl Effect {
             // CR 122.1: per-kind magnitude is `EventCounterReproductionCount`,
             // not a `QuantityExpr`.
             | Effect::ReproduceEventCounters { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::WinTheGame { .. } => None,
         }
     }
@@ -34266,6 +34635,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Amass { .. } => "Amass",
         Effect::EmpowerJace { .. } => "EmpowerJace",
         Effect::Monstrosity { .. } => "Monstrosity",
+        Effect::HordePlayCard { .. } => "HordePlayCard",
         Effect::Specialize => "Specialize",
         Effect::Renown { .. } => "Renown",
         Effect::Bolster { .. } => "Bolster",
@@ -34527,6 +34897,7 @@ pub enum EffectKind {
     Amass,
     EmpowerJace,
     Monstrosity,
+    HordePlayCard,
     Specialize,
     Renown,
     Bolster,
@@ -34821,6 +35192,7 @@ impl From<&Effect> for EffectKind {
             Effect::Amass { .. } => EffectKind::Amass,
             Effect::EmpowerJace { .. } => EffectKind::EmpowerJace,
             Effect::Monstrosity { .. } => EffectKind::Monstrosity,
+            Effect::HordePlayCard { .. } => EffectKind::HordePlayCard,
             Effect::Specialize => EffectKind::Specialize,
             Effect::Renown { .. } => EffectKind::Renown,
             Effect::Bolster { .. } => EffectKind::Bolster,
@@ -35196,7 +35568,8 @@ pub enum ActivationManaPaymentRestriction {
 }
 
 /// Structured spell-casting restrictions parsed from Oracle text.
-/// These describe when — and, for `CantSpendMana`, how — a spell may be cast.
+/// These describe when — and, for `CantSpendMana`, how; for `OnlyFromZones`,
+/// from where — a spell may be cast.
 /// Runtime enforcement can be added independently of parsing/export support.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -35237,6 +35610,24 @@ pub enum CastingRestriction {
     /// Parameterized over the allowed mana colors for paying {X}.
     SpendOnlyOnX {
         colors: Vec<ManaColor>,
+    },
+    /// CR 601.3 + CR 113.6f: "You may cast this card from your graveyard, but
+    /// not from anywhere else." (Haakon, Stromgald Scourge) — restricts WHERE
+    /// the spell may be cast from: a cast whose origin zone is not in `zones`
+    /// is prohibited, whatever permission would otherwise allow it (CR 101.2).
+    /// CR 113.6f makes the restriction function in every zone, so it rides the
+    /// object's own restrictions rather than a battlefield static.
+    ///
+    /// CR 109.5 + CR 400.1: `pool` keeps whose graveyard the permission names.
+    /// "Your graveyard" is the would-be controller's, so `OwnGraveyard` admits
+    /// a graveyard origin only when the caster owns that graveyard: an opponent
+    /// casting the card from its owner's graveyard (Tinybones, the Pickpocket)
+    /// is casting it from "anywhere else". Origins in shared zones (exile)
+    /// aren't scoped by it.
+    OnlyFromZones {
+        zones: Vec<Zone>,
+        #[serde(default)]
+        pool: super::statics::GraveyardPermissionPool,
     },
 }
 
@@ -35467,11 +35858,13 @@ pub struct AbilityDefinition {
     /// (Mana Clash, Goblin Lyre, Pixie Queen, Vexing Sphinx, Maddening Hex, etc.).
     /// Read at target-selection time to short-circuit `WaitingFor::TargetSelection`.
     pub target_selection_mode: TargetSelectionMode,
-    /// CR 601.2c + CR 603.3d: When set, this player (not the controller) announces
-    /// this ability's target(s) at stack placement. `None` = controller chooses
-    /// (default). Mirrors `target_selection_mode` (the same "by-whom are targets
-    /// selected" axis). Unlike `optional_player` and `optional_for`, this is a
-    /// stack-placement target choice, not a resolution-time optional actor.
+    /// CR 601.2c + CR 603.3d + CR 608.2d: the player who makes this ability
+    /// node's object choices — its targets at stack placement, or, for an
+    /// untargeted division announced while the effect is applied
+    /// (`ability_utils::resolution_time_division`), the division. `None` = the
+    /// controller (default). Mirrors `target_selection_mode` (the same "by-whom"
+    /// axis). Unlike `optional_player` and `optional_for`, this is not a
+    /// resolution-time optional actor.
     pub target_chooser: Option<TargetFilter>,
     /// CR 608.2c + CR 107.1c: per-iteration loop-continuation predicate, the
     /// non-count companion to `repeat_for`. When `Some`, the resolution chain
@@ -37383,6 +37776,181 @@ pub enum AbilityCondition {
 }
 
 impl AbilityCondition {
+    /// CR 608.2c: whether any quantity this condition compares satisfies `pred`,
+    /// through the `Not` / `ConditionInstead` / `And` / `Or` wrappers. The single
+    /// traversal for "does this gate measure <population>" questions (a gate that
+    /// counts the chain's tracked set consumes it).
+    pub fn any_quantity_expr(&self, pred: &dyn Fn(&QuantityExpr) -> bool) -> bool {
+        match self {
+            AbilityCondition::QuantityCheck { lhs, rhs, .. } => pred(lhs) || pred(rhs),
+            AbilityCondition::QuantityQuality { quantity, .. } => pred(quantity),
+            AbilityCondition::PreviousEffectAmount { rhs, .. } => pred(rhs),
+            AbilityCondition::Not { condition }
+            | AbilityCondition::ConditionInstead { inner: condition } => {
+                condition.any_quantity_expr(pred)
+            }
+            AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+                conditions
+                    .iter()
+                    .any(|condition| condition.any_quantity_expr(pred))
+            }
+            AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+            | AbilityCondition::TriggerEventTargetExploitedBySource
+            | AbilityCondition::AdditionalCostPaidInstead
+            | AbilityCondition::AlternativeManaCostPaid
+            | AbilityCondition::EventOutcomeWon
+            | AbilityCondition::WhenYouDo
+            | AbilityCondition::SourceEnteredThisTurn
+            | AbilityCondition::HasMaxSpeed
+            | AbilityCondition::IsMonarch
+            | AbilityCondition::IsInitiative
+            | AbilityCondition::HasCityBlessing
+            | AbilityCondition::HasEnduringStory
+            | AbilityCondition::IsRingBearer
+            | AbilityCondition::HasObjectTarget
+            | AbilityCondition::IsYourTurn
+            | AbilityCondition::FirstCombatPhaseOfTurn
+            | AbilityCondition::FirstEndStepOfTurn
+            | AbilityCondition::SourceIsTapped
+            | AbilityCondition::SourceAttachedToCreature
+            | AbilityCondition::DayNightIsNeither
+            | AbilityCondition::AdditionalCostPaid { .. }
+            | AbilityCondition::EffectOutcome { .. }
+            | AbilityCondition::CoinFlipOutcome { .. }
+            | AbilityCondition::ChosenLabelIs { .. }
+            | AbilityCondition::WasCast { .. }
+            | AbilityCondition::CastDuringPhase { .. }
+            | AbilityCondition::CurrentPhaseIs { .. }
+            | AbilityCondition::CastTimingPermission { .. }
+            | AbilityCondition::ManaColorSpent { .. }
+            | AbilityCondition::RevealedHasCardType { .. }
+            | AbilityCondition::ObjectsShareQuality { .. }
+            | AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. }
+            | AbilityCondition::CastVariantPaid { .. }
+            | AbilityCondition::CastVariantPaidInstead { .. }
+            | AbilityCondition::ControlsCommander { .. }
+            | AbilityCondition::DiscardedCardMatchesFilter { .. }
+            | AbilityCondition::CompletedDungeon { .. }
+            | AbilityCondition::TargetHasKeywordInstead { .. }
+            | AbilityCondition::TargetMatchesFilter { .. }
+            | AbilityCondition::TriggeringSpellTargetsFilter { .. }
+            | AbilityCondition::SourceMatchesFilter { .. }
+            | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
+            | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
+            | AbilityCondition::ControllerControlsMatching { .. }
+            | AbilityCondition::ControllerControlledMatchingAsCast { .. }
+            | AbilityCondition::WasStartingPlayer { .. }
+            | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+            | AbilityCondition::ZoneChangedThisWay { .. }
+            | AbilityCondition::CostPaidObjectMatchesFilter { .. }
+            | AbilityCondition::DayNightIs { .. }
+            | AbilityCondition::AbilityUseCountThisTurn { .. }
+            | AbilityCondition::SourceLacksKeyword { .. }
+            | AbilityCondition::ScopedPlayerMatches { .. } => false,
+        }
+    }
+
+    /// CR 608.2c: whether any filter-grammar node this condition carries — a
+    /// `TargetFilter`, a `PlayerFilter`'s nested filters, a `FilterProp`, or a
+    /// filter inside a compared quantity — satisfies `visit`, through the `Not`
+    /// / `ConditionInstead` / `And` / `Or` wrappers. The filter-axis companion of
+    /// [`Self::any_quantity_expr`]: a gate that tests membership in the chain's
+    /// tracked set ("if it was put into your graveyard this way") reads it as
+    /// surely as one that counts it. Exhaustive, no wildcard arm, so a new
+    /// filter-bearing condition must say what it carries.
+    pub fn any_filter_grammar(&self, visit: &dyn Fn(FilterGrammarNode<'_>) -> bool) -> bool {
+        match self {
+            AbilityCondition::RevealedHasCardType {
+                additional_filter,
+                subtype_filter,
+                ..
+            } => {
+                additional_filter
+                    .as_ref()
+                    .is_some_and(|prop| filter_prop_grammar_any(prop, visit))
+                    || subtype_filter
+                        .as_deref()
+                        .is_some_and(|filter| filter_grammar_any(filter, visit))
+            }
+            AbilityCondition::ObjectsShareQuality {
+                subject, reference, ..
+            } => filter_grammar_any(subject, visit) || filter_grammar_any(reference, visit),
+            AbilityCondition::TargetSharesNameWithOtherExiledThisWay { target: filter }
+            | AbilityCondition::DiscardedCardMatchesFilter { filter }
+            | AbilityCondition::TargetMatchesFilter { filter, .. }
+            | AbilityCondition::TriggeringSpellTargetsFilter { filter }
+            | AbilityCondition::SourceMatchesFilter { filter }
+            | AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter }
+            | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
+            | AbilityCondition::ControllerControlsMatching { filter }
+            | AbilityCondition::ControllerControlledMatchingAsCast { filter }
+            | AbilityCondition::ZoneChangedThisWay { filter, .. }
+            | AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
+                filter_grammar_any(filter, visit)
+            }
+            AbilityCondition::ScopedPlayerMatches { filter } => {
+                player_filter_grammar_any(filter, visit)
+            }
+            AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+                quantity_expr_grammar_any(lhs, visit) || quantity_expr_grammar_any(rhs, visit)
+            }
+            AbilityCondition::QuantityQuality { quantity, .. } => {
+                quantity_expr_grammar_any(quantity, visit)
+            }
+            AbilityCondition::PreviousEffectAmount { rhs, .. } => {
+                quantity_expr_grammar_any(rhs, visit)
+            }
+            AbilityCondition::Not { condition }
+            | AbilityCondition::ConditionInstead { inner: condition } => {
+                condition.any_filter_grammar(visit)
+            }
+            AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+                conditions
+                    .iter()
+                    .any(|condition| condition.any_filter_grammar(visit))
+            }
+            AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+            | AbilityCondition::TriggerEventTargetExploitedBySource
+            | AbilityCondition::AdditionalCostPaid { .. }
+            | AbilityCondition::AdditionalCostPaidInstead
+            | AbilityCondition::AlternativeManaCostPaid
+            | AbilityCondition::EffectOutcome { .. }
+            | AbilityCondition::EventOutcomeWon
+            | AbilityCondition::CoinFlipOutcome { .. }
+            | AbilityCondition::ChosenLabelIs { .. }
+            | AbilityCondition::WhenYouDo
+            | AbilityCondition::WasCast { .. }
+            | AbilityCondition::CastDuringPhase { .. }
+            | AbilityCondition::CurrentPhaseIs { .. }
+            | AbilityCondition::CastTimingPermission { .. }
+            | AbilityCondition::ManaColorSpent { .. }
+            | AbilityCondition::SourceEnteredThisTurn
+            | AbilityCondition::CastVariantPaid { .. }
+            | AbilityCondition::CastVariantPaidInstead { .. }
+            | AbilityCondition::HasMaxSpeed
+            | AbilityCondition::IsMonarch
+            | AbilityCondition::IsInitiative
+            | AbilityCondition::HasCityBlessing
+            | AbilityCondition::HasEnduringStory
+            | AbilityCondition::ControlsCommander { .. }
+            | AbilityCondition::IsRingBearer
+            | AbilityCondition::CompletedDungeon { .. }
+            | AbilityCondition::TargetHasKeywordInstead { .. }
+            | AbilityCondition::HasObjectTarget
+            | AbilityCondition::IsYourTurn
+            | AbilityCondition::WasStartingPlayer { .. }
+            | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+            | AbilityCondition::FirstCombatPhaseOfTurn
+            | AbilityCondition::FirstEndStepOfTurn
+            | AbilityCondition::SourceIsTapped
+            | AbilityCondition::SourceAttachedToCreature
+            | AbilityCondition::DayNightIsNeither
+            | AbilityCondition::DayNightIs { .. }
+            | AbilityCondition::AbilityUseCountThisTurn { .. }
+            | AbilityCondition::SourceLacksKeyword { .. } => false,
+        }
+    }
+
     /// CR 608.2k: does this ability condition read the cost-paid object?
     pub fn references_cost_paid_object(&self) -> bool {
         match self {
@@ -42927,6 +43495,49 @@ mod tests {
         assert_eq!(XModification::DOUBLE.apply(2), 4);
         assert_eq!(XModification::DOUBLE.apply(u32::MAX), u32::MAX);
         assert_eq!(XModification::Times { factor: 3 }.apply(2), 6);
+    }
+
+    /// CR 608.2c + CR 115.10a: only a tracked-set population (bound earlier in
+    /// the same resolution) is a CR 608.2d untargeted division recipient. The
+    /// wider `is_context_ref` also admits announced-target anaphors
+    /// (`ParentTarget` / `ParentTargetSlot`) and self/none references, which is
+    /// why it was rejected as the shared parser/runtime key.
+    #[test]
+    fn tracked_set_population_is_only_tracked_sets() {
+        let tracked = TargetFilter::TrackedSet {
+            id: crate::types::identifiers::TrackedSetId(0),
+        };
+        let tracked_filtered = TargetFilter::TrackedSetFiltered {
+            id: crate::types::identifiers::TrackedSetId(0),
+            filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+            caused_by: None,
+        };
+        assert!(tracked.is_tracked_set_population());
+        assert!(tracked_filtered.is_tracked_set_population());
+
+        for announced_or_self in [
+            TargetFilter::ParentTarget,
+            TargetFilter::ParentTargetSlot { index: 1 },
+            TargetFilter::SelfRef,
+            TargetFilter::None,
+            TargetFilter::LastCreated,
+            TargetFilter::Typed(TypedFilter::creature()),
+        ] {
+            assert!(
+                !announced_or_self.is_tracked_set_population(),
+                "{announced_or_self:?} is not a tracked-set population"
+            );
+        }
+        for wider in [
+            TargetFilter::ParentTarget,
+            TargetFilter::SelfRef,
+            TargetFilter::None,
+        ] {
+            assert!(
+                wider.is_context_ref(),
+                "{wider:?} IS a context ref — the wider predicate would misclassify it"
+            );
+        }
     }
 
     #[test]

@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import type { ObjectId, PlayerId } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { groupByName, partitionByType } from "../../viewmodel/battlefieldProps.ts";
 import { tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { CardImage } from "../card/CardImage.tsx";
@@ -61,6 +62,7 @@ export function BattlefieldPeekPopover({
   // CR 122.1: the engine's counter-display projection is part of the group IDENTITY, so the peek
   // splits exactly where the main board does. Store-owned ref or `undefined` — no allocation.
   const counterDisplay = useGameStore((s) => s.gameState?.derived?.counter_display);
+  const showOwnerPrintings = usePreferencesStore((s) => s.showOwnerPrintings);
   if (!battlefield || !objects) return null;
 
   const owned = battlefield
@@ -85,7 +87,7 @@ export function BattlefieldPeekPopover({
     .map((id) => objects[id])
     .filter((obj): obj is NonNullable<typeof obj> => obj != null);
   const unboundedPileIds = new Set(unboundedPile ?? []);
-  const groups = groupByName(candidateObjects, undefined, unboundedPileIds, counterDisplay);
+  const groups = groupByName(candidateObjects, undefined, unboundedPileIds, counterDisplay, showOwnerPrintings);
   // Sort legal targets to the front during targeting so the cap can never
   // hide a card the player needs to see. In idle mode the order from
   // `partitionByType` (creatures → planeswalkers → support) is preserved
@@ -167,6 +169,8 @@ export function BattlefieldPeekPopover({
               >
                 <CardImage
                   cardName={obj.name}
+                  ownerPrinting={obj.printing}
+                  ownerPrintedRef={obj.printed_ref}
                   size="small"
                   isToken={obj.display_source === "Token"}
                   tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined}

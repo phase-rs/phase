@@ -132,6 +132,7 @@ fn target_names_one_object(target: &TargetFilter) -> bool {
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController

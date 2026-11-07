@@ -973,6 +973,7 @@ fn static_ability_match_applies(
         if let Some(defended) = def.attack_defended.as_ref() {
             if !super::restrictions::attack_target_matches_defended_scope(
                 state,
+                obj.id,
                 context.attack_target.as_ref(),
                 defended,
                 def.source_controller.unwrap_or(obj.controller),
@@ -1785,6 +1786,25 @@ pub fn player_cannot_be_targeted_by(
     source_id: ObjectId,
     source_controller: PlayerId,
 ) -> bool {
+    player_cannot_be_targeted_by_with_source_name(
+        state,
+        player_id,
+        source_id,
+        source_controller,
+        None,
+    )
+}
+
+/// CR 702.16b + CR 608.2h: Player targeting legality taking an optional source name
+/// projection into account for `ProtectionTarget::ChosenCardName` (e.g. when a token
+/// or Clone has departed the battlefield).
+pub fn player_cannot_be_targeted_by_with_source_name(
+    state: &GameState,
+    player_id: PlayerId,
+    source_id: ObjectId,
+    source_controller: PlayerId,
+    source_name: Option<&str>,
+) -> bool {
     // CR 702.18a: shroud on a player — can't be the target of spells or abilities
     // from any player.
     if player_has_shroud(state, player_id) {
@@ -1801,7 +1821,7 @@ pub fn player_cannot_be_targeted_by(
         return true;
     }
     // CR 702.16b + CR 702.16j: protection from the source.
-    player_protection_from(state, player_id, Some(source_id))
+    player_protection_from_with_source_name(state, player_id, Some(source_id), source_name)
 }
 
 /// CR 702.16: Single authority for player-scoped protection enforcement.
@@ -1820,10 +1840,22 @@ pub fn player_protection_from(
     player_id: PlayerId,
     source: Option<ObjectId>,
 ) -> bool {
-    player_protection_from_object(
+    player_protection_from_with_source_name(state, player_id, source, None)
+}
+
+/// CR 702.16 + CR 608.2h: [`player_protection_from`] with an explicit source name
+/// override for `ProtectionTarget::ChosenCardName`.
+pub fn player_protection_from_with_source_name(
+    state: &GameState,
+    player_id: PlayerId,
+    source: Option<ObjectId>,
+    source_name: Option<&str>,
+) -> bool {
+    player_protection_from_object_with_source_name(
         state,
         player_id,
         source.and_then(|id| state.objects.get(&id)),
+        source_name,
     )
 }
 
@@ -1841,7 +1873,114 @@ pub fn player_protection_from_object(
     player_id: PlayerId,
     source: Option<&crate::game::game_object::GameObject>,
 ) -> bool {
-    matching_player_protection(state, player_id, source).is_some()
+    player_protection_from_object_with_source_name(state, player_id, source, None)
+}
+
+/// CR 702.16 + CR 614.12 + CR 608.2h: [`player_protection_from_object`] with an explicit
+/// source name override for `ProtectionTarget::ChosenCardName`.
+pub fn player_protection_from_object_with_source_name(
+    state: &GameState,
+    player_id: PlayerId,
+    source: Option<&crate::game::game_object::GameObject>,
+    source_name: Option<&str>,
+) -> bool {
+    use crate::game::keywords::source_matches_card_type;
+    use crate::types::ability::ControllerRef;
+    use crate::types::keywords::ProtectionTarget;
+
+    // CR 702.16j: protection from everything covers every source.
+    if player_has_protection_from_everything(state, player_id) {
+        return true;
+    }
+    let effective_name = source_name.or_else(|| source.map(|o| o.name.as_str()));
+    if source.is_none() && effective_name.is_none() {
+        return false;
+    }
+    let context = StaticCheckContext {
+        player_id: Some(player_id),
+        ..Default::default()
+    };
+    // CR 702.16: O(1) presence gate on the battlefield/command-zone PlayerProtection
+    // authority ONLY. The `Everything` transient-effect authority is handled by the
+    // short-circuit above (a separate authority the index does not fold), so wrap the
+    // loop rather than early-returning.
+    if static_kind_present(state, StaticModeKind::PlayerProtection) {
+        crate::game::perf_counters::record_static_full_scan();
+        // CR 114.4: Abilities of emblems function in the command zone.
+        for (src_obj, def) in game_functioning_statics(state) {
+            let StaticMode::PlayerProtection(ref target) = def.mode else {
+                continue;
+            };
+            if let Some(ref affected) = def.affected {
+                if !static_filter_matches(state, &context, affected, src_obj.id) {
+                    continue;
+                }
+            }
+            if !static_condition_matches_context(
+                state,
+                src_obj.id,
+                src_obj.controller,
+                def,
+                &context,
+            ) {
+                continue;
+            }
+            let protects = match target {
+                // CR 702.16j: handled by the short-circuit above.
+                ProtectionTarget::Everything => false,
+                // CR 702.16 + CR 205.2: protection from the card type
+                // chosen as the granting permanent (e.g. Serra's Emissary) entered.
+                ProtectionTarget::ChosenCardType => source.is_some_and(|source_obj| {
+                    src_obj
+                        .chosen_card_type()
+                        .and_then(|ct| ct.protection_quality_str())
+                        .is_some_and(|quality| source_matches_card_type(source_obj, quality))
+                }),
+                // CR 702.16a + CR 702.16e + CR 608.2h + CR 201.2: protection from the card name
+                // chosen as the granting permanent (e.g. Runed Halo) entered. Evaluates against
+                // the effective source name (LKI name for departed sources, live object name
+                // for live sources).
+                ProtectionTarget::ChosenCardName => {
+                    src_obj.chosen_card_name().is_some_and(|chosen| {
+                        crate::game::filter::source_has_chosen_name(source, source_name, chosen)
+                    })
+                }
+                // CR 702.16k: "Protection from [a player]" at the player level — the
+                // protected player has protection from each object the specified
+                // player(s) control. "Each of your opponents" (CR 702.16i) → the
+                // `Opponent` scope: any source NOT controlled by the protected
+                // player is an opponent's object in 1v1 and free-for-all. Mirrors the
+                // object-level arm in `game/keywords.rs::source_matches_protection_target`.
+                ProtectionTarget::FromPlayer(scope) => {
+                    source.is_some_and(|source_obj| match scope {
+                        ControllerRef::Opponent => source_obj.controller != player_id,
+                        ControllerRef::You => source_obj.controller == player_id,
+                        // Target/chosen player refs have no static context here —
+                        // fail closed (the parser never emits them for protection).
+                        _ => false,
+                    })
+                }
+                // Truly inert at the player level — no card grants these qualities to
+                // a player; object-level grants of these qualities flow through the
+                // `AddKeyword(Protection)` continuous path, not `PlayerProtection`.
+                ProtectionTarget::ChosenColor
+                | ProtectionTarget::ChosenPlayer
+                | ProtectionTarget::Color(_)
+                | ProtectionTarget::Multicolored
+                | ProtectionTarget::Quality(_)
+                | ProtectionTarget::CardType(_)
+                | ProtectionTarget::Filter(_) => false,
+                // CR 702.16i: no card grants a color-set protection to a player;
+                // inert like the arms above. Object-level sets expand through
+                // `keywords::resolve_granted_protection`.
+                ProtectionTarget::EachColor(_) => false,
+            };
+            if protects {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// CR 702.16 + CR 615.13 (Matt R8-F1): the resolved quality of the FIRST
@@ -1949,6 +2088,22 @@ fn all_matching_player_protections(
                     .chosen_card_type()
                     .and_then(|ct| ct.protection_quality_str())
                     .and_then(|quality| matching_card_type_quality(source_obj, quality)),
+                // CR 702.16a + CR 702.16e + CR 608.2h + CR 201.2: protection from the card name
+                // chosen as the granting permanent (e.g. Runed Halo) entered.
+                ProtectionTarget::ChosenCardName => src_obj
+                    .chosen_card_name()
+                    .filter(|chosen| {
+                        crate::game::filter::source_has_chosen_name(
+                            Some(source_obj),
+                            None,
+                            chosen,
+                        )
+                    })
+                    .map(|chosen| {
+                        MatchedProtectionQuality::ChosenName(
+                            crate::game::keywords::fnv1a_64(chosen.as_bytes()),
+                        )
+                    }),
                 // CR 702.16k: "Protection from [a player]" at the player level — the
                 // protected player has protection from each object the specified
                 // player(s) control. "Each of your opponents" (CR 702.16i) → the
@@ -3825,6 +3980,65 @@ mod tests {
         assert!(
             !player_protection_from(&state, PlayerId(1), Some(own_source)),
             "the opponent gains no protection — affected is the controller only"
+        );
+    }
+
+    /// CR 702.16a + CR 702.16e + CR 201.2: A `PlayerProtection(ChosenCardName)`
+    /// static (Runed Halo's "You have protection from the chosen card name.")
+    /// makes its controller protected from every source whose name matches the
+    /// chosen card name, and NOT from sources with different names.
+    #[test]
+    fn player_protection_from_chosen_card_name_grants_against_matching_name_sources() {
+        use crate::types::ability::ChosenAttribute;
+
+        let mut state = setup();
+
+        let halo = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Runed Halo".to_string(),
+            Zone::Battlefield,
+        );
+        let halo_obj = state.objects.get_mut(&halo).unwrap();
+        halo_obj
+            .chosen_attributes
+            .push(ChosenAttribute::CardName("Grizzly Bears".to_string()));
+        halo_obj.static_definitions.push(
+            StaticDefinition::new(StaticMode::PlayerProtection(
+                crate::types::keywords::ProtectionTarget::ChosenCardName,
+            ))
+            .affected(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            )),
+        );
+
+        let bear_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        let giant_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Hill Giant".to_string(),
+            Zone::Battlefield,
+        );
+
+        assert!(
+            player_protection_from(&state, PlayerId(0), Some(bear_source)),
+            "controller must have protection from source with chosen card name"
+        );
+        assert!(
+            !player_protection_from(&state, PlayerId(0), Some(giant_source)),
+            "controller must NOT have protection from source with different card name"
+        );
+        assert!(
+            !player_protection_from(&state, PlayerId(1), Some(bear_source)),
+            "opponent must NOT have protection from source"
         );
     }
 

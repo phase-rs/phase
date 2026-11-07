@@ -13,7 +13,8 @@
   "quantityRef": {
     "highestNumber": "the highest number",
     "lowestNumber": "the lowest number",
-    "chosenNumber": "the chosen number"
+    "chosenNumber": "the chosen number",
+    "energyPaidOrLostThisTurn": "energy paid or lost this turn"
   },
   "scryOutcome": {
     "title": "Scry complete",

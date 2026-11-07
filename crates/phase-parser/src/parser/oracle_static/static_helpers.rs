@@ -841,7 +841,20 @@ pub(crate) fn try_parse_cost_modification(
     let mut dynamic_count = if let Some((_, after_for_each)) = cost_tp.split_around("for each ") {
         // Strip trailing period/punctuation
         let count_text = after_for_each.original.trim_end_matches('.');
-        super::oracle_quantity::parse_for_each_clause(count_text)
+        let count_lower = count_text.to_ascii_lowercase();
+        // CR 601.2f: "that spell" in a cost modifier is the spell being cast.
+        let named_like_spell =
+            all_consuming(nom_quantity::parse_cards_named_like_cost_modified_spell)
+                .parse(count_lower.as_str())
+                .ok()
+                .map(|(_, qty)| qty);
+        let population_union = all_consuming(nom_quantity::parse_for_each_population_union)
+            .parse(count_lower.as_str())
+            .ok()
+            .map(|(_, qty)| qty);
+        named_like_spell
+            .or(population_union)
+            .or_else(|| super::oracle_quantity::parse_for_each_clause(count_text))
             .or_else(|| {
                 parse_cda_quantity(count_text).and_then(|expr| match expr {
                     QuantityExpr::Ref { qty } => Some(qty),
@@ -859,14 +872,23 @@ pub(crate) fn try_parse_cost_modification(
                 }
             })
             .or_else(|| {
-                let (count_filter, _) = parse_type_phrase_folding(count_text);
-                Some(QuantityRef::ObjectCount {
+                let (count_filter, remainder) = parse_type_phrase_folding(count_text);
+                // CR 601.2f: an unconstrained filter means the type phrase
+                // recognized nothing; counting every object would invent a
+                // reduction, so the clause stays unparsed instead (#7899).
+                // Also require full clause consumption — an unparsed qualifier
+                // would make the count apply more broadly than the text allows.
+                (remainder.trim().is_empty()
+                    && count_filter != TargetFilter::Typed(TypedFilter::default()))
+                .then_some(QuantityRef::ObjectCount {
                     filter: count_filter,
                 })
             })
     } else {
         None
     };
+    let has_unparsed_for_each =
+        dynamic_count.is_none() && cost_tp.split_around("for each ").is_some();
 
     if dynamic_count.is_none() && amount_is_variable_x {
         let (_, where_x_text) = super::oracle_effect::strip_trailing_where_x(cost_tp);
@@ -882,6 +904,12 @@ pub(crate) fn try_parse_cost_modification(
     // and no dynamic_count silently under-reduces by {1} (Drag to the Underworld
     // class when the where-X clause fails to lower).
     if amount_is_variable_x && dynamic_count.is_none() {
+        return None;
+    }
+
+    // CR 601.2f: a "for each" clause whose count did not parse must not
+    // degrade to a flat per-unit change.
+    if has_unparsed_for_each {
         return None;
     }
 
