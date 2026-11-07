@@ -25,6 +25,7 @@ mod activation_cost_target_settlement;
 mod activation_manual_mana_payment;
 mod ad_nauseam_repeat;
 mod adamant_enters_with_leading_if_gate;
+mod adamantoise_vigor_combat_order;
 mod added_untap_step_is_not_a_turn_start;
 mod additional_combat_anchor_and_recipient;
 mod additional_phase_recipient_kinds;
