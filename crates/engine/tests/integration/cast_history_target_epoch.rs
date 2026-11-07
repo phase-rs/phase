@@ -52,8 +52,8 @@ use engine::types::ability::{FilterProp, TargetFilter, TargetRef, TypedFilter};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{
-    ActivationTargetFact, CastPaymentMode, GameState, PersistedGameState, PersistedRestoreError,
-    SpellCastRecord, WaitingFor,
+    ActivationTargetFact, CastPaymentMode, CostResume, GameState, PersistedGameState,
+    PersistedRestoreError, SpellCastRecord, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -106,6 +106,13 @@ fn cast(runner: &mut GameRunner, spell: ObjectId, mode: CastPaymentMode) {
 
 /// Answers each announcement prompt until priority opens, returning the prompts
 /// it answered — the reach guard that the payment really paused.
+///
+/// CR 601.2c + CR 601.2h: a cast parked on an interactive cost prompt already
+/// carries the announced-target latch on the `PendingCast` inside the prompt,
+/// because the boundary that settles targets runs before any cost is paid. This
+/// asserts it at the prompt itself, which is what makes every witness below a
+/// latch-BEFORE-the-move test: when the cost card is returned or sacrificed, the
+/// facts are already fixed and the later move cannot be what produced them.
 fn drive_to_priority(
     runner: &mut GameRunner,
     target: ObjectId,
@@ -119,6 +126,17 @@ fn drive_to_priority(
             .next()
             .unwrap_or_default()
             .to_string();
+        if let WaitingFor::PayCost {
+            resume: CostResume::Spell { spell },
+            ..
+        } = &wf
+        {
+            assert!(
+                spell.committed_target_facts.is_some(),
+                "reach guard: the announced-target latch is already set at the cost prompt, \
+                 before the cost moves anything"
+            );
+        }
         let action = match wf {
             WaitingFor::Priority { .. } | WaitingFor::OrderTriggers { .. } => return prompts,
             WaitingFor::TargetSelection { .. } => GameAction::SelectTargets {

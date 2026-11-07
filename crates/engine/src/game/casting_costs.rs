@@ -13475,16 +13475,20 @@ fn finalize_cast_pre_payment_checks(
     // that reached payment without passing that boundary; it is the pre-payment
     // moment for every route that takes it. `FinalizePrePaymentChecks` is then the
     // carrier every parked payment continuation re-enters with, so the write reads
-    // selection-time facts even when the cast suspends on an additional-cost move
-    // that removes a target (Bone Splinters sacrificing the creature it also
+    // announcement-time facts even when the cast suspends on an additional-cost
+    // move that removes a target (Bone Splinters sacrificing the creature it also
     // targets). Re-reading by raw id after payment would describe the target's new
     // incarnation under CR 400.7: the returned Dryad Arbor keeps its printed
     // "Land Creature" type line in hand, while an animated Mishra's Factory
     // returned the same way reverts to its printed "Land" and a sacrificed one is
     // a graveyard Land — and a sacrificed Grizzly Bears stays a graveyard
-    // Creature. None of those later readings is the CR 115.9 selection-time
-    // reading the history predicates are defined over, nor the CR 115.9b
-    // completed-cast reading that ignores a departed target.
+    // Creature. None of those later readings is the CR 601.2c announcement-time
+    // reading these records exist for: the cost-axis predicates are evaluated at
+    // CR 601.2f, before the total cost is paid. CR 115.9b is a different question
+    // with a different answer — a current-state read that ignores a target which
+    // has left the zone it was expected in — and it is answered by the live
+    // reader (`filter::stack_entry_targets_satisfy`) over a spell still on the
+    // stack, not by this record.
     let committed_target_facts = Some(committed_target_facts.unwrap_or_else(|| {
         super::casting::capture_target_facts(state, &declared_targets_in_chain(ability))
     }));

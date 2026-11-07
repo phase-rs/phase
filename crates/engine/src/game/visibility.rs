@@ -4265,14 +4265,24 @@ fn ability_payment_names_hidden_source(
             .any(|(_, child)| ability_payment_names_hidden_source(child, hidden_ids))
 }
 
-/// A paused cast keeps its spell ability; blank only its hidden-source payment entries and
-/// hidden linked-exile members' mana values. Its commit finalization is server authority.
+/// A paused cast keeps its spell ability; blank only its hidden-source payment entries,
+/// hidden linked-exile members' mana values, and the last-known characteristics of a
+/// declared target the viewer cannot see. Its commit finalization is server authority.
 fn redact_pending_cast_payment(
     pending: &mut crate::types::game_state::PendingCast,
     hidden_ids: &HashSet<ObjectId>,
 ) {
     redact_ability_payment(&mut pending.ability, hidden_ids);
     pending.prepaid_finalization = None;
+    // CR 400.2 + CR 400.7: from its announcement the cast also carries the
+    // announced-target facts on `PendingCast` itself (`committed_target_facts`), so
+    // a target this viewer cannot see must lose its last-known characteristics here
+    // through the same authority the cast-history records use. Without this the
+    // projection would blank the identical vector on the `prepaid_finalization`
+    // carrier cleared above and hand it out through the live one.
+    if let Some(facts) = pending.committed_target_facts.as_mut() {
+        redact_target_facts(facts, hidden_ids);
+    }
 }
 
 /// A paused mana ability keeps the ability it pays for in its resume cursors. Its
@@ -11104,6 +11114,67 @@ mod tests {
         let pc = filtered.pending_cast.as_ref().unwrap();
         assert_eq!(pc.object_id, ObjectId(10));
         assert_eq!(pc.card_id, CardId(1));
+    }
+
+    /// CR 400.2 + CR 400.7: the announced-target latch a paused cast carries on its
+    /// live `PendingCast` is redacted exactly like the copy on `prepaid_finalization`
+    /// — a target this viewer cannot see keeps its slot and its stable id and loses
+    /// its last-known characteristics, while the caster still sees its own.
+    #[test]
+    fn pending_cast_declared_target_facts_are_redacted_for_a_hidden_target() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        let hidden = create_object(
+            &mut state,
+            CardId(77),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+        let mut pending = dummy_pending_cast(ObjectId(10), CardId(1), PlayerId(0));
+        pending.committed_target_facts = Some(vec![
+            crate::types::game_state::ActivationTargetFact::Object {
+                id: hidden,
+                lki: Box::new(state.objects[&hidden].snapshot_public_characteristics()),
+            },
+        ]);
+        state.pending_cast = Some(pending);
+        state.waiting_for = WaitingFor::ManaPayment {
+            player: PlayerId(0),
+            convoke_mode: None,
+        };
+
+        let object_fact = |state: &GameState| {
+            let facts = state
+                .pending_cast
+                .as_ref()
+                .expect("the pause is public (CR 601.2 + CR 400.2)")
+                .committed_target_facts
+                .as_ref()
+                .expect("the declared-target latch rides the live cast");
+            let [crate::types::game_state::ActivationTargetFact::Object { id, lki }] =
+                facts.as_slice()
+            else {
+                panic!("one object target fact, kept as a slot: {facts:?}");
+            };
+            (*id, lki.name.clone())
+        };
+
+        let observer = filter_state_for_viewer(&state, PlayerId(1));
+        let (id, name) = object_fact(&observer);
+        assert_eq!(id, hidden, "the slot keeps the target's stable id");
+        assert_eq!(
+            name, HIDDEN_CARD_NAME,
+            "the hidden target's last-known identity is blanked on the live carrier \
+             exactly as it is on `prepaid_finalization`"
+        );
+
+        let caster = filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(
+            object_fact(&caster),
+            (hidden, "Grizzly Bears".to_string()),
+            "the caster still sees the target it announced"
+        );
     }
 
     #[test]

@@ -31888,6 +31888,15 @@ pub(crate) fn capture_target_facts(
 /// zone change. First capture wins: a spell declares its targets once, and a
 /// continuation that re-enters the boundary must not restate them from the
 /// moved object.
+///
+/// Deliberate scope of the frozen facts (CR 601.2c): this is the
+/// announcement-time reading, so a cost that mutates a target *in place* rather
+/// than moving it — tapping it for convoke or an "as an additional cost, tap"
+/// clause, putting counters on it, pumping it — is now recorded as it was when
+/// announced, where an earlier capture point taken after such a cost recorded the
+/// mutated value. That is the reading the cost-axis predicates are defined over
+/// (CR 601.2f evaluates them before the total cost is paid); the in-place
+/// alternative would make the record depend on how the caster chose to pay.
 pub(crate) fn latch_committed_target_facts(
     state: &GameState,
     ability: &ResolvedAbility,
