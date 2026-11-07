@@ -11481,6 +11481,25 @@ fn is_player_scope_local_continuation(
     child: &Effect,
     scope: &PlayerFilter,
 ) -> bool {
+    // CR 608.2c + CR 701.20a: an owner-relative top-card instruction follows
+    // that owner's terminal shuffle inside the published owner iteration.
+    // Other player populations do not acquire this continuation authority.
+    if is_owner_library_shuffle_scope(scope)
+        && matches!(
+            (parent, child),
+            (
+                Effect::Shuffle {
+                    target: TargetFilter::ScopedPlayer,
+                },
+                Effect::RevealTop {
+                    player: TargetFilter::ScopedPlayer,
+                    ..
+                }
+            )
+        )
+    {
+        return true;
+    }
     // CR 109.5 + CR 608.2c: Compound-subject distribution — when the parent
     // and child effects of a player_scope-tagged ability both reference an
     // iteration-bound recipient (`OriginalController` or `ScopedPlayer`), the
@@ -11931,7 +11950,10 @@ fn detach_after_player_scope_local_chain(
     // referent consumer, so it still runs as its own post-all-iterations loop.
     let referent_in_scope =
         referent_introduced || effect_introduces_per_iteration_referent(&node.effect);
-    let next_is_co_scoped_anaphoric_consumer = next.player_scope.as_ref() == Some(scope)
+    // CR 608.2c: the owner-shuffle continuation introduces its revealed card
+    // inside this iteration without a second explicit scope on "put it".
+    let next_is_co_scoped_anaphoric_consumer = (next.player_scope.as_ref() == Some(scope)
+        || (next.player_scope.is_none() && is_owner_library_shuffle_scope(scope)))
         && referent_in_scope
         && effect_consumes_parent_object_referent(&next.effect);
     if next_is_co_scoped_anaphoric_consumer {
@@ -15634,19 +15656,49 @@ pub(crate) enum TrackedSetPublicationInput<'a> {
 
 fn is_owner_library_shuffle_consumer(ability: &ResolvedAbility) -> bool {
     matches!(
-        (&ability.effect, ability.player_scope.as_ref()),
-        (
-            Effect::Shuffle {
-                target: TargetFilter::ScopedPlayer,
-            },
-            Some(PlayerFilter::TrackedSetPossessor {
-                relation: PlayerRelation::All,
-                possession: PossessionAxis::Owner,
-                filter: TargetFilter::Any,
-                caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
-            })
-        )
+        ability.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer,
+        }
+    ) && ability
+        .player_scope
+        .as_ref()
+        .is_some_and(is_owner_library_shuffle_scope)
+}
+
+fn is_owner_library_shuffle_scope(scope: &PlayerFilter) -> bool {
+    matches!(
+        scope,
+        PlayerFilter::TrackedSetPossessor {
+            relation: PlayerRelation::All,
+            possession: PossessionAxis::Owner,
+            filter: TargetFilter::Any,
+            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
+        }
     )
+}
+
+/// CR 608.2c: the selected-object move publishes its own owner population,
+/// including an empty population, before its immediate terminal shuffle.
+fn is_selected_owner_library_shuffle_operation(ability: &ResolvedAbility) -> bool {
+    matches!(
+        &ability.effect,
+        Effect::ChangeZoneAll {
+            origin: None,
+            destination: Zone::Library,
+            target: TargetFilter::ParentTarget
+                | TargetFilter::ParentTargetSlot { .. }
+                | TargetFilter::PostReplacementDamageTarget
+                | TargetFilter::PostReplacementDamageTargetOwner,
+            library_position: None,
+            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            random_order: false,
+            ..
+        }
+    ) && ability
+        .sub_ability
+        .as_deref()
+        .is_some_and(is_owner_library_shuffle_consumer)
 }
 
 fn first_tracked_set_consumer_mode(
@@ -15827,6 +15879,31 @@ fn publish_prospective_tracked_set(
         }
     }
     ledger.sort_unstable_by_key(|(player, _)| player.0);
+}
+
+/// CR 701.24c + CR 608.2c: a selected-object shuffle starts a new owner
+/// population, even when no objects were selected. Only the selected owners
+/// participate; an unrelated player target or enclosing scope supplies none.
+pub(crate) fn publish_selected_owner_library_subjects(
+    state: &mut GameState,
+    producer: &ResolvedAbility,
+    objects: &[ObjectId],
+) {
+    let mut participants: Vec<_> = objects
+        .iter()
+        .filter_map(|id| state.objects.get(id).map(|object| object.owner))
+        .collect();
+    participants.sort_unstable();
+    participants.dedup();
+    state.chain_tracked_set_id = None;
+    publish_tracked_set_for_resolution(
+        state,
+        producer,
+        TrackedSetPublicationInput::FinalizedSubjects {
+            objects,
+            participants: &participants,
+        },
+    );
 }
 
 /// Single authority for tracked-set publication at event and prospective
@@ -16267,6 +16344,29 @@ fn optional_head_declined_all_object_targets(ability: &ResolvedAbility) -> bool 
             .targets
             .iter()
             .any(|t| matches!(t, TargetRef::Object(_)))
+}
+
+/// CR 608.2c + CR 609.3: prove whether a supported phasing union has no
+/// instruction independent of its parent target. Unknown shapes retain pruning.
+fn phase_out_context_union_requires_parent(effect: &Effect) -> Option<bool> {
+    fn requires_parent(filter: &TargetFilter) -> Option<bool> {
+        match filter {
+            TargetFilter::ParentTarget => Some(true),
+            TargetFilter::SelfRef => Some(false),
+            TargetFilter::Or { filters } => filters.iter().try_fold(true, |dependent, filter| {
+                // Inspect every child, even after SelfRef: unsupported later leaves
+                // must invalidate the proof rather than inherit independence.
+                requires_parent(filter).map(|child| dependent && child)
+            }),
+            _ => None,
+        }
+    }
+    match effect {
+        Effect::PhaseOut {
+            target: target @ TargetFilter::Or { .. },
+        } => requires_parent(target),
+        _ => None,
+    }
 }
 
 /// CR 608.2c + CR 601.2c: Whether [`resolved_object_filter`] should concretize
@@ -26210,6 +26310,11 @@ fn resolve_chain_body(
             && ability.targets.is_empty()
             && effect_refs_parent_target(&sub.effect)
             && optional_head_declined_all_object_targets(ability)
+            // CR 608.2c: publish the selected operation's empty owner set before
+            // its terminal shuffle can read a previous instruction's owners.
+            && !is_selected_owner_library_shuffle_operation(sub)
+            // CR 609.3: independent union work takes normal context fallthrough.
+            && phase_out_context_union_requires_parent(&sub.effect) != Some(false)
         {
             // CR 115.6 + CR 608.2c (issue #5287): Optional multi-target / up-to-one
             // head legally chose zero object targets — a ParentTarget consumer
@@ -29007,6 +29112,260 @@ mod tests {
         LibraryInstructionActor, LibraryPosition, ParentTargetMissingReason,
         SearchSelectionConstraint, SpentColor, UNION_DEPTH_BUDGET,
     };
+
+    #[test]
+    fn phase_out_context_union_dependency_proof_is_bounded() {
+        use TargetFilter::{Or, ParentTarget, SelfRef};
+        for (target, expected) in [
+            (
+                Or {
+                    filters: vec![SelfRef, ParentTarget],
+                },
+                Some(false),
+            ),
+            (
+                Or {
+                    filters: vec![
+                        ParentTarget,
+                        Or {
+                            filters: vec![SelfRef, SelfRef],
+                        },
+                    ],
+                },
+                Some(false),
+            ),
+            (
+                Or {
+                    filters: vec![
+                        ParentTarget,
+                        Or {
+                            filters: vec![ParentTarget],
+                        },
+                    ],
+                },
+                Some(true),
+            ),
+            (Or { filters: vec![] }, Some(true)),
+            (
+                Or {
+                    filters: vec![Or { filters: vec![] }],
+                },
+                Some(true),
+            ),
+            (
+                Or {
+                    filters: vec![TargetFilter::Any, SelfRef, ParentTarget],
+                },
+                None,
+            ),
+            (
+                Or {
+                    filters: vec![SelfRef, ParentTarget, TargetFilter::Any],
+                },
+                None,
+            ),
+            (
+                Or {
+                    filters: vec![
+                        SelfRef,
+                        Or {
+                            filters: vec![TargetFilter::Any],
+                        },
+                    ],
+                },
+                None,
+            ),
+            (ParentTarget, None),
+            (
+                TargetFilter::And {
+                    filters: vec![SelfRef, ParentTarget],
+                },
+                None,
+            ),
+            (
+                TargetFilter::Not {
+                    filter: Box::new(SelfRef),
+                },
+                None,
+            ),
+        ] {
+            assert_eq!(
+                phase_out_context_union_requires_parent(&Effect::PhaseOut {
+                    target: target.clone()
+                }),
+                expected,
+                "{target:?}"
+            );
+            assert_eq!(
+                phase_out_context_union_requires_parent(&Effect::PhaseIn { target }),
+                None
+            );
+        }
+        assert_eq!(
+            phase_out_context_union_requires_parent(&Effect::Destroy {
+                target: ParentTarget,
+                cant_regenerate: false
+            }),
+            None
+        );
+    }
+
+    // Synthetic composition supplement: Defiant has the union but no Draw tail;
+    // Samwise supplies the real parent-only plus independent-tail preservation.
+    // CR 115.6 + CR 608.2c + CR 609.3: zero targets omit only dependent work.
+    #[test]
+    fn phase_out_optional_parent_chain_preserves_independent_tail() {
+        use TargetFilter::{Or, ParentTarget, SelfRef};
+        for (target, selected, stale, reaches, phases_source) in [
+            (ParentTarget, false, false, false, false),
+            (ParentTarget, true, false, true, false),
+            (
+                Or {
+                    filters: vec![
+                        ParentTarget,
+                        Or {
+                            filters: vec![ParentTarget],
+                        },
+                    ],
+                },
+                false,
+                false,
+                false,
+                false,
+            ),
+            (
+                Or {
+                    filters: vec![SelfRef, ParentTarget],
+                },
+                false,
+                false,
+                true,
+                true,
+            ),
+            (
+                Or {
+                    filters: vec![
+                        ParentTarget,
+                        Or {
+                            filters: vec![SelfRef, SelfRef],
+                        },
+                    ],
+                },
+                false,
+                false,
+                true,
+                true,
+            ),
+            (
+                Or {
+                    filters: vec![SelfRef, ParentTarget],
+                },
+                false,
+                true,
+                true,
+                false,
+            ),
+            (
+                Or {
+                    filters: vec![SelfRef, ParentTarget],
+                },
+                true,
+                false,
+                true,
+                true,
+            ),
+            (
+                Or {
+                    filters: vec![SelfRef, ParentTarget, TargetFilter::Any],
+                },
+                false,
+                false,
+                false,
+                false,
+            ),
+            (
+                Or {
+                    filters: vec![TargetFilter::Any, ParentTarget, SelfRef],
+                },
+                false,
+                false,
+                false,
+                false,
+            ),
+            (Or { filters: vec![] }, false, false, true, false),
+            (
+                Or {
+                    filters: vec![Or { filters: vec![] }],
+                },
+                false,
+                false,
+                true,
+                false,
+            ),
+        ] {
+            let mut scenario = GameScenario::new();
+            let source = scenario.add_creature(P0, "Source", 2, 2).id();
+            let chosen = scenario.add_creature(P0, "Chosen", 2, 2).id();
+            let unrelated = scenario.add_creature(P1, "Unrelated", 2, 2).id();
+            scenario.with_library_top(P0, &["Island", "Mountain"]);
+            let mut state = scenario.build().state().clone();
+            let mut draw = ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                P0,
+            );
+            draw.sub_link = SubAbilityLink::SequentialSibling;
+            let mut child = ResolvedAbility::new(Effect::PhaseOut { target }, vec![], source, P0)
+                .sub_ability(draw);
+            child.source_incarnation = Some(state.objects[&source].incarnation);
+            let mut head = ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Any,
+                },
+                if selected {
+                    vec![TargetRef::Object(chosen)]
+                } else {
+                    vec![]
+                },
+                source,
+                P0,
+            )
+            .sub_ability(child);
+            head.optional_targeting = true;
+            if stale {
+                state.objects.get_mut(&source).unwrap().incarnation += 1;
+            }
+            let hand_before = state.players[0].hand.len();
+            let mut events = vec![];
+            assert_eq!(
+                resolve_ability_chain_step(&mut state, &head, &mut events, 1).unwrap(),
+                ResolutionProgress::Complete
+            );
+            assert_eq!(state.players[0].hand.len(), hand_before + 1);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        GameEvent::EffectResolved {
+                            kind: EffectKind::PhaseOut,
+                            ..
+                        }
+                    ))
+                    .count(),
+                usize::from(reaches)
+            );
+            assert_eq!(state.objects[&source].is_phased_out(), phases_source);
+            assert_eq!(state.objects[&chosen].is_phased_out(), selected);
+            assert!(!state.objects[&unrelated].is_phased_out());
+            assert!(state.stack.is_empty());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        }
+    }
 
     /// CR 603.2h + CR 608.2d: the "would it prompt" authority agrees with production for
     /// an instance whose controller already took the ability's indicated action — no gate
@@ -52689,6 +53048,76 @@ mod tests {
         apply_parent_chain_context(&mut child, &parent, None, &mut state);
         assert!(child.context.face_down_in_exile.is_face_down());
         assert_eq!(child.context.duration_events, latched);
+    }
+
+    // SHAPE supplement to the public Chaos Warp cast regression: retain the
+    // revealed-card consumer, but not an independent instruction, in this scope.
+    #[test]
+    fn owner_shuffle_scope_keeps_reveal_and_anaphoric_deploy_only() {
+        let definition = crate::parser::oracle_effect::parse_effect_chain(
+            "The owner of target permanent shuffles it into their library, then reveals the top card of their library. If it's a permanent card, they put it onto the battlefield.",
+            AbilityKind::Spell,
+        );
+        let ability = build_resolved_from_def(&definition, ObjectId(100), PlayerId(0));
+        let mut shuffle = ability.sub_ability.unwrap().sub_ability.unwrap();
+        let scope = shuffle.player_scope.clone().expect("published owner scope");
+        assert!(is_owner_library_shuffle_consumer(&shuffle));
+        let reveal = shuffle.sub_ability.as_deref_mut().expect("reveal");
+        assert!(matches!(
+            reveal.effect,
+            Effect::RevealTop {
+                player: TargetFilter::ScopedPlayer,
+                ..
+            }
+        ));
+        let deploy = reveal
+            .sub_ability
+            .as_deref_mut()
+            .expect("conditional deploy");
+        assert!(deploy.condition.is_some());
+        assert!(effect_consumes_parent_object_referent(&deploy.effect));
+        let mut independent = ResolvedAbility::new(
+            Effect::Draw {
+                target: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        independent.sub_link = SubAbilityLink::SequentialSibling;
+        deploy.sub_ability = Some(Box::new(independent));
+        let (scoped, tail) = split_player_scope_chain(&shuffle, &scope);
+        let kept_reveal = scoped.sub_ability.expect("reveal stays local");
+        let kept_deploy = kept_reveal.sub_ability.expect("deploy stays local");
+        assert!(kept_deploy.condition.is_some());
+        assert!(kept_deploy.sub_ability.is_none());
+        assert!(matches!(
+            tail.expect("independent sibling detaches").effect,
+            Effect::Draw { .. }
+        ));
+
+        // CR 608.2c: neither another population nor an explicit controller
+        // library instruction receives owner-relative continuation authority.
+        let (unrelated, tail) = split_player_scope_chain(&shuffle, &PlayerFilter::All);
+        assert!(unrelated.sub_ability.is_none());
+        assert!(matches!(
+            tail.expect("unrelated-scope reveal detaches").effect,
+            Effect::RevealTop { .. }
+        ));
+        shuffle.sub_ability.as_deref_mut().unwrap().effect = Effect::RevealTop {
+            player: TargetFilter::Controller,
+            count: 1,
+        };
+        let (explicit_your, tail) = split_player_scope_chain(&shuffle, &scope);
+        assert!(explicit_your.sub_ability.is_none());
+        assert!(matches!(
+            tail.expect("your-library reveal detaches").effect,
+            Effect::RevealTop {
+                player: TargetFilter::Controller,
+                ..
+            }
+        ));
     }
 
     /// CR 608.2c — building-block discriminator for the per-player reveal-anaphora

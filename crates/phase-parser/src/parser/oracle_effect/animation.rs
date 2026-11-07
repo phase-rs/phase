@@ -553,6 +553,10 @@ fn parse_animation_supertype(input: &str) -> OracleResult<'_, AnimationTypeToken
 /// tokens (`X` in "X/X"), lowercase connectives (`and`, `gets`, `gains`,
 /// `until`), and mid-word positions (if followed by `/`, `:`, digits, etc.).
 fn parse_animation_subtype(input: &str) -> OracleResult<'_, AnimationTypeToken> {
+    peek(satisfy(|c: char| c.is_ascii_uppercase())).parse(input)?;
+    if let Ok(parsed) = parse_registered_animation_subtype(input) {
+        return Ok(parsed);
+    }
     let (rest, word) = recognize(pair(
         // First char: capital letter.
         satisfy(|c: char| c.is_ascii_uppercase()),
@@ -599,6 +603,9 @@ fn parse_animation_type_sequence(input: &str) -> OracleResult<'_, Vec<AnimationT
 /// expression (e.g., trigger-effect text that has been pre-lowercased by the
 /// oracle_trigger pipeline).
 fn parse_animation_subtype_loose(input: &str) -> OracleResult<'_, AnimationTypeToken> {
+    if let Ok(parsed) = parse_registered_animation_subtype(input) {
+        return Ok(parsed);
+    }
     let (rest, word) = recognize(pair(
         satisfy(|c: char| c.is_ascii_alphabetic()),
         pair(
@@ -615,6 +622,24 @@ fn parse_animation_subtype_loose(input: &str) -> OracleResult<'_, AnimationTypeT
     )))
     .parse(rest)?;
     Ok((rest, AnimationTypeToken::Subtype(word.to_string())))
+}
+
+/// CR 205.3m: registered subtype words and plurals name the same subtype.
+/// Retain this grammar's punctuation boundary even when the registry accepts
+/// a broader word boundary, and consume multiword subtypes as one token.
+fn parse_registered_animation_subtype(input: &str) -> OracleResult<'_, AnimationTypeToken> {
+    let Some((canonical, consumed)) = super::super::oracle_util::parse_subtype(input) else {
+        return Err(oracle_err(input));
+    };
+    let rest = &input[consumed..];
+    let (rest, _) = peek(alt((
+        eof,
+        recognize(satisfy(|c: char| {
+            c.is_whitespace() || matches!(c, ',' | '.' | ';' | ')' | '!' | '?')
+        })),
+    )))
+    .parse(rest)?;
+    Ok((rest, AnimationTypeToken::Subtype(canonical)))
 }
 
 /// Case-insensitive type-token parser: core type / supertype / subtype,
@@ -1037,6 +1062,36 @@ pub(crate) fn parse_animation_conjunct_keywords(tail: &str) -> Option<Vec<Keywor
 #[cfg(test)]
 mod test_den_bugbear {
     use super::*;
+
+    #[test]
+    fn animation_registered_subtypes_are_canonical_and_word_bounded() {
+        use crate::types::ability::ContinuousModification;
+        for (printed, canonical) in [
+            ("Warriors", "Warrior"),
+            ("Elves", "Elf"),
+            ("Time Lords", "Time Lord"),
+        ] {
+            let (_, token) = parse_animation_subtype(printed).expect("registered subtype");
+            assert!(matches!(token, AnimationTypeToken::Subtype(ref name) if name == canonical));
+            let descriptor = format!("{printed} in addition to their other types");
+            assert_eq!(
+                parse_becomes_type_modifications(&descriptor),
+                vec![ContinuousModification::AddSubtype {
+                    subtype: canonical.into()
+                }]
+            );
+            assert_eq!(
+                parse_becomes_type_modifications(&descriptor.to_lowercase()),
+                vec![ContinuousModification::AddSubtype {
+                    subtype: canonical.into()
+                }]
+            );
+        }
+        assert!(parse_animation_subtype("warriors").is_err());
+        assert!(parse_animation_subtype("Warriors3/3").is_err());
+        assert!(parse_animation_subtype("Warriors:").is_err());
+        assert!(parse_animation_subtype("Noveltype").is_ok());
+    }
 
     /// #2917 (CR 305.7 / 613.1d): a trailing "that's still a land" rider must
     /// not truncate the keyword list. Nissa, Who Shakes the World grants the

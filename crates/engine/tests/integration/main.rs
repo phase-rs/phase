@@ -271,6 +271,7 @@ mod committed_dump_walk;
 mod conformer_shuriken;
 mod conquerors_galleon_end_of_combat_transform;
 mod dromokas_command_spell_prevention;
+mod elixir_of_immortality_stolen_activation;
 mod enchant_tapped_creature;
 mod impulsive_maneuvers_batch_shield;
 mod kang_dynasty_until_next_turn_rider;
