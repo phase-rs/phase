@@ -321,10 +321,13 @@ fn strip_pending_latch(json: &mut serde_json::Value) -> bool {
 /// (`pending_cost_move_resume`, `pending_deferred_life_cost_resume`,
 /// `pending_discard_for_cost`), including the `prepaid_finalization` pre-payment
 /// checks and cost-move completion payloads nested inside them. That is the state
-/// a save written before the latch existed has, and it is the state a `PayCost`
-/// park needs: that prompt keeps a second copy of the cast on
-/// `WaitingFor::PayCost`'s `CostResume::Spell`, so stripping only
-/// `state.pending_cast` would leave the facts in place and test nothing.
+/// a save written before the latch existed has.
+///
+/// The `PayCost` park needs the whole list rather than one field:
+/// `pay_additional_cost_with_source` parks the cast on
+/// `WaitingFor::PayCost`'s `CostResume::Spell` and does not set
+/// `state.pending_cast`, so a strip scoped to `state.pending_cast` finds nothing
+/// to strip there and tests nothing.
 ///
 /// The carrier list is deliberately the admission walk's, not the whole document:
 /// the same key also rides the `spell_cast_reversal` undo journal's `before`
