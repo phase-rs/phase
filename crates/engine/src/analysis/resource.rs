@@ -3658,6 +3658,7 @@ fn static_mode_projected_count(mode: &crate::types::statics::StaticMode) -> Opti
         | StaticMode::TopOfLibraryHasPlot
         | StaticMode::TopOfLibraryPlotPermission
         | StaticMode::CastFromHandFree { .. }
+        | StaticMode::HandPlayPermission { .. }
         | StaticMode::LinkedCollectionCounterPlayPermission
         | StaticMode::CountersPersistAcrossZones { .. }
         | StaticMode::CountersCantBeRemoved { .. }
