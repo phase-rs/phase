@@ -19948,12 +19948,7 @@ fn continue_with_prepared(
                 // CR 601.2c + CR 603.2: stage announcement triggers for the Aura before
                 // payment, so automatic mana payment (e.g. sacrificing Blood Pet) does not
                 // move the target before triggers match.
-                let mut pending = pending_cast_from_prepared(&prepared, resolved.clone());
-                // CR 115.1 + CR 601.2c + CR 400.7: the Aura's enchant target was just
-                // announced on this automatic branch, which does not pass the
-                // interactive declaration boundary — latch it here and carry it to
-                // payment.
-                let lock = latch_and_lock_declared_targets(state, &resolved, &mut pending);
+                let pending = pending_cast_from_prepared(&prepared, resolved.clone());
                 super::announcement_triggers::stage_with_pending_owner(
                     state,
                     &pending,
@@ -19973,7 +19968,7 @@ fn continue_with_prepared(
                     prepared.cast_timing_permission,
                     prepared.origin_zone,
                     prepared.payment_mode,
-                    lock,
+                    casting_costs::CostLockInput::default(),
                     events,
                 );
             } else {
@@ -20037,10 +20032,7 @@ fn continue_with_prepared(
             // CR 601.2c + CR 603.2: stage announcement triggers for the mutating creature spell
             // before payment, so automatic mana payment (e.g. sacrificing Blood Pet) does not
             // move the target before triggers match.
-            let mut pending = pending_cast_from_prepared(&prepared, resolved.clone());
-            // CR 115.1 + CR 601.2c + CR 400.7: the mutate target was just announced on
-            // this automatic branch, so latch it before any cost can move it.
-            let lock = latch_and_lock_declared_targets(state, &resolved, &mut pending);
+            let pending = pending_cast_from_prepared(&prepared, resolved.clone());
             super::announcement_triggers::stage_with_pending_owner(
                 state,
                 &pending,
@@ -20060,7 +20052,7 @@ fn continue_with_prepared(
                 prepared.cast_timing_permission,
                 prepared.origin_zone,
                 prepared.payment_mode,
-                lock,
+                casting_costs::CostLockInput::default(),
                 events,
             );
         } else {
@@ -20433,14 +20425,7 @@ fn continue_with_prepared(
             // CR 601.2c + CR 603.2: stage announcement triggers for the spell before
             // payment, so automatic mana payment (e.g. sacrificing Blood Pet) does not
             // move the target before triggers match.
-            let mut pending = pending_cast_from_prepared(&prepared, resolved.clone());
-            // CR 115.1 + CR 601.2c + CR 400.7: this branch announced the spell's targets
-            // itself and goes straight to cost payment, so it never reaches the
-            // interactive `finish_pending_cast_cost_or_pay` boundary that latches them.
-            // Latch here, while the targets are still the announced objects, and carry
-            // the facts to payment so the CR 601.2i write does not re-read the storage
-            // id after CR 601.2h moved the returned land (Devour in Flames).
-            let lock = latch_and_lock_declared_targets(state, &resolved, &mut pending);
+            let pending = pending_cast_from_prepared(&prepared, resolved.clone());
             super::announcement_triggers::stage_with_pending_owner(
                 state,
                 &pending,
@@ -20460,7 +20445,7 @@ fn continue_with_prepared(
                 prepared.cast_timing_permission,
                 prepared.origin_zone,
                 prepared.payment_mode,
-                lock,
+                casting_costs::CostLockInput::default(),
                 events,
             );
         }
@@ -31932,31 +31917,6 @@ pub(crate) fn latch_committed_target_facts(
             &declared_targets_in_chain(ability),
         ));
     }
-}
-
-/// CR 115.1 + CR 601.2c + CR 400.7: the automatic-announcement counterpart of
-/// [`latch_committed_target_facts`]'s interactive boundary.
-///
-/// The engine announces the targets itself when exactly one assignment is legal
-/// (CR 601.2c — the announcement is the caster's either way) and hands the cast
-/// straight to `check_additional_cost_or_pay`, never passing
-/// `finish_pending_cast_cost_or_pay`, the boundary that latches on the
-/// interactive path. Without this, the latch stays `None` through cost payment
-/// and the CR 601.2i history write falls back to a raw-id capture taken after
-/// CR 601.2h has already moved the cost's objects — which records the returned
-/// card's printed baseline instead of the announced target (CR 400.7).
-///
-/// Latch now, while the targets are still the announced objects, and hand the
-/// facts to payment through the pipeline's existing [`casting_costs::CostLockInput`]
-/// carrier — the same field every rebuild site already preserves — rather than
-/// introducing a second path for the facts to travel.
-pub(super) fn latch_and_lock_declared_targets(
-    state: &GameState,
-    ability: &ResolvedAbility,
-    pending: &mut PendingCast,
-) -> casting_costs::CostLockInput {
-    latch_committed_target_facts(state, ability, pending);
-    casting_costs::CostLockInput::from_pending(pending)
 }
 
 /// [`capture_activation_record`] from an ability definition and its committed

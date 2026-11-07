@@ -8457,11 +8457,12 @@ pub(super) fn push_ability_entry(
 /// `CastSpell → [ModeChoice] → [TargetSelection] → [AdditionalCostChoice] → pay_and_push_with_lock → Stack`
 ///
 /// CR 115.1 + CR 601.2c + CR 400.7: `lock` is the caller's cost-determination
-/// state, and it is the only way a route that announced its targets without
-/// passing `finish_pending_cast_cost_or_pay` (the automatic-announcement
-/// branches in `casting`) can carry the announced-target latch to the CR 601.2i
-/// write. A caller that has not declared targets — or a spell with none —
-/// passes [`CostLockInput::default`].
+/// state. It is NOT where the announced-target latch is taken any more: this
+/// authority is an entry point every cast route reaches, so the latch is taken
+/// once inside it ([`check_additional_cost_or_pay_with_kept_cost`]) from the
+/// declared targets it was handed. A caller therefore passes
+/// [`CostLockInput::default`] unless it is re-entering with state it already
+/// carries.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_additional_cost_or_pay(
     state: &mut GameState,
@@ -9292,6 +9293,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
 /// sacrifice selection a cast already made before its deferred target
 /// declaration. Every pending cast it rebuilds keeps both, so the sacrifice is
 /// made once and a kept reduction (in `lock`) is locked into the total once.
+///
+/// This is also where the announced-target latch is taken (CR 115.1 +
+/// CR 601.2c + CR 400.7), and it is taken HERE rather than at any of the routes
+/// into it because this function is the one place every cast route passes on its
+/// way from declaration to payment: the interactive declaration boundary
+/// (`finish_pending_cast_cost_or_pay`), the automatic-announcement branches in
+/// `casting`, the deferred-cost re-entries, and any future route, without each
+/// one owing the call.
 #[allow(clippy::too_many_arguments)]
 fn check_additional_cost_or_pay_with_kept_cost(
     state: &mut GameState,
@@ -9312,6 +9321,21 @@ fn check_additional_cost_or_pay_with_kept_cost(
     keyword_queue_decided: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 115.1 + CR 601.2c + CR 400.7: latch the targets this cast announced
+    // while they are still the objects the caster chose — no cost has been paid
+    // on this entry (CR 601.2h). The gate is the declaration itself rather than a
+    // per-route flag: an ability with no declared target has either not reached
+    // CR 601.2c yet (a deferred declaration pays its costs first, and latches when
+    // it comes back through here with targets) or declares nothing at all, and
+    // both are honestly "no facts owed" until a declaration exists. First capture
+    // wins, so a re-entry carrying the latch in `lock` never re-reads an object a
+    // paid cost has already moved.
+    let declared = declared_targets_in_chain(&ability);
+    if !declared.is_empty() {
+        lock.committed_target_facts
+            .get_or_insert_with(|| super::casting::capture_target_facts(state, &declared));
+    }
+
     if casting_variant == CastingVariant::Normal
         && lock.alternative_cost_election
             == crate::types::game_state::SpellAlternativeCostElection::Undecided
@@ -13110,13 +13134,14 @@ pub(super) struct CostLockInput {
     pub election: Option<CostReductionElection>,
     pub alternative_cost_election: crate::types::game_state::SpellAlternativeCostElection,
     /// CR 115.1 + CR 601.2c + CR 400.7: the announced-target latch
-    /// (`PendingCast::committed_target_facts`), captured at the shared
-    /// declaration→payment boundary and carried across every rebuild so the
-    /// CR 601.2i history write records the targets the caster announced rather
-    /// than the objects that later share their storage ids. It is `None` on a
-    /// cast that has not declared its targets yet (a deferred declaration pays
-    /// its costs first) and on the test-only `Default` carrier; the boundary
-    /// that declares them is what fills it.
+    /// (`PendingCast::committed_target_facts`), taken by the additional-cost
+    /// authority (`check_additional_cost_or_pay_with_kept_cost`) and carried
+    /// across every rebuild so the CR 601.2i history write records the targets
+    /// the caster announced rather than the objects that later share their
+    /// storage ids. It is `None` on a [`CostLockInput::default`] carrier — the
+    /// production route for a cast that has not declared its targets yet (a
+    /// deferred declaration pays its costs first), whose declaration fills it
+    /// when the cast comes back through that authority.
     pub committed_target_facts: Option<Vec<crate::types::game_state::ActivationTargetFact>>,
 }
 
