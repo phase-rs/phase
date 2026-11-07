@@ -40108,6 +40108,42 @@ pub enum TriggerDefinitionOccurrenceRef {
 }
 
 impl TriggerDefinitionOccurrenceRef {
+    /// Yields every object incarnation this occurrence names, an expanded grant's
+    /// provider included (CR 400.7). An occurrence names its source object only
+    /// through [`TriggerDefinitionRef::source`], so a bare occurrence has no
+    /// source incarnation of its own.
+    pub fn for_each_incarnation_mut(&mut self, f: &mut impl FnMut(ObjectId, &mut u64)) {
+        if let Self::ExpandedGrant { provider, .. } = self {
+            provider.for_each_incarnation_mut(f);
+        }
+    }
+
+    /// Yields every layer-6 grant generation this occurrence names, an expanded
+    /// grant's provider included, keyed by the object whose allocator minted it
+    /// (`minted_by`; CR 613.1f).
+    pub fn for_each_grant_generation_mut(
+        &mut self,
+        minted_by: ObjectId,
+        f: &mut impl FnMut(ObjectId, &mut u64),
+    ) {
+        match self {
+            Self::KeywordCompanion { grant_instance, .. }
+            | Self::CopyRetained { grant_instance, .. }
+            | Self::Granted { grant_instance } => {
+                f(minted_by, &mut grant_instance.0);
+            }
+            Self::ExpandedGrant {
+                grant_instance,
+                provider,
+                provider_output_index: _,
+            } => {
+                f(minted_by, &mut grant_instance.0);
+                provider.for_each_grant_generation_mut(f);
+            }
+            Self::Printed { .. } | Self::CopiedValue { .. } | Self::Unmaterialized => {}
+        }
+    }
+
     /// CR 607.1 + CR 607.5 + CR 613.1f: whether this trigger occurrence is one
     /// of its object's characteristic abilities (and of which copiable set) or
     /// one it gained in layer 6. `None` when the occurrence carries no
@@ -40191,34 +40227,14 @@ impl TriggerDefinitionRef {
     /// included (CR 400.7).
     pub fn for_each_incarnation_mut(&mut self, f: &mut impl FnMut(ObjectId, &mut u64)) {
         f(self.source.object_id, &mut self.source.incarnation);
-        if let TriggerDefinitionOccurrenceRef::ExpandedGrant { provider, .. } = &mut self.occurrence
-        {
-            provider.for_each_incarnation_mut(f);
-        }
+        self.occurrence.for_each_incarnation_mut(f);
     }
 
     /// Yields every layer-6 grant generation this reference names, an expanded grant's provider
     /// included, keyed by the object whose allocator minted it.
     pub fn for_each_grant_generation_mut(&mut self, f: &mut impl FnMut(ObjectId, &mut u64)) {
-        let minted_by = self.source.object_id;
-        match &mut self.occurrence {
-            TriggerDefinitionOccurrenceRef::KeywordCompanion { grant_instance, .. }
-            | TriggerDefinitionOccurrenceRef::CopyRetained { grant_instance, .. }
-            | TriggerDefinitionOccurrenceRef::Granted { grant_instance } => {
-                f(minted_by, &mut grant_instance.0);
-            }
-            TriggerDefinitionOccurrenceRef::ExpandedGrant {
-                grant_instance,
-                provider,
-                provider_output_index: _,
-            } => {
-                f(minted_by, &mut grant_instance.0);
-                provider.for_each_grant_generation_mut(f);
-            }
-            TriggerDefinitionOccurrenceRef::Printed { .. }
-            | TriggerDefinitionOccurrenceRef::CopiedValue { .. }
-            | TriggerDefinitionOccurrenceRef::Unmaterialized => {}
-        }
+        self.occurrence
+            .for_each_grant_generation_mut(self.source.object_id, f);
     }
 
     /// CR 113.2c + CR 603.2 + CR 603.2h: the key under which `def`'s per-definition
