@@ -26,7 +26,6 @@ type PendingSaying = {
   resolve: (result: SubmitResult) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
-  sent: boolean;
 };
 
 /**
@@ -383,7 +382,6 @@ describe("P2P saying reply lane", () => {
     });
 
     const guestInternals = guest as unknown as {
-      pendingSubmissionSent: boolean;
       parkPendingSubmission: (
         resolve: (result: SubmitResult) => void,
         reject: (error: Error) => void,
@@ -417,6 +415,53 @@ describe("P2P saying reply lane", () => {
     });
     guestInternals.handleHostDisconnect(guestInternals.session);
     await expect(unsentPromise).rejects.toMatchObject({
+      code: AdapterErrorCode.ACTION_NOT_SENT,
+    });
+
+    // 2b. A frame still queued in the session's FIFO when it is lost may yet
+    // reach the host, so it is in doubt rather than retryable as unsent:
+    const reattach = async () => {
+      const conn = new FakeDataConnection();
+      guestInternals.attachSession(conn as unknown as TransportConnection);
+      await conn.simulateData({
+        type: "reconnect_ack",
+        wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+        assignedPlayerId: 1,
+        revision: 1,
+        state: remoteState("reattached"),
+        events: [],
+        playerNames: { 0: "Host", 1: "Guest" },
+        legalActions: [],
+      });
+      return conn;
+    };
+    await reattach();
+    const queued = guest.submitAction(untimedPayment, 1);
+    guestInternals.handleHostDisconnect(guestInternals.session);
+    await expect(queued).rejects.toMatchObject({ code: "P2P_ERROR" });
+
+    // 2c. A frame the transport accepted is in doubt too:
+    const sentConn = await reattach();
+    const sentAction = guest.submitAction(untimedPayment, 1);
+    await vi.waitFor(async () =>
+      expect((await sentConn.getSentMessages()).some(
+        (m) => (m as { type?: string }).type === "action",
+      )).toBe(true));
+    guestInternals.handleHostDisconnect(guestInternals.session);
+    await expect(sentAction).rejects.toMatchObject({ code: "P2P_ERROR" });
+
+    // 2d. A queued saying is in doubt for the same reason:
+    await reattach();
+    const queuedSaying = guest.submitAction(saying(1), 1);
+    guestInternals.handleHostDisconnect(guestInternals.session);
+    await expect(queuedSaying).rejects.toMatchObject({ code: "P2P_ERROR" });
+
+    // 2e. A queued frame whose session closes before it is encoded never left:
+    const closingConn = await reattach();
+    const neverLeft = guest.submitAction(untimedPayment, 1);
+    closingConn.open = false;
+    guestInternals.handleHostDisconnect(guestInternals.session);
+    await expect(neverLeft).rejects.toMatchObject({
       code: AdapterErrorCode.ACTION_NOT_SENT,
     });
 

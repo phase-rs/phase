@@ -6105,7 +6105,14 @@ export class P2PHostAdapter implements EngineAdapter {
  */
 type PendingSubmissionOutcome =
   | { kind: "resolve"; result: SubmitResult }
-  | { kind: "reject"; error: Error };
+  | { kind: "reject"; error: Error }
+  /** The session the submission was sent on is gone. */
+  | { kind: "sessionLost" };
+
+const actionNotSentError = () =>
+  new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send action", true);
+const actionInDoubtError = () =>
+  new AdapterError("P2P_ERROR", "Host disconnected while submitting an action", true);
 
 /**
  * Guest-side P2P adapter. Maintains the `Peer` reference for auto-reconnect,
@@ -6128,7 +6135,10 @@ export class P2PGuestAdapter implements EngineAdapter {
   /** Armed with the slot in `parkPendingSubmission`, cleared only by
    *  `settlePendingSubmission` — see `SUBMISSION_TIMEOUT_MS`. */
   private pendingSubmissionTimer: ReturnType<typeof setTimeout> | null = null;
-  private pendingSubmissionSent = false;
+  /** The transport's answer for the parked submission's frame; `null` when no
+   *  frame was handed to a transport. Until it settles the frame sits in the
+   *  session's FIFO and may still be encoded and sent after a session swap. */
+  private pendingSubmissionSend: Promise<boolean> | null = null;
   /**
    * Spoken observations whose host reply is still in flight, keyed by payment
    * and sequence. They settle through `saying_result` only, never through an
@@ -6140,7 +6150,8 @@ export class P2PGuestAdapter implements EngineAdapter {
       resolve: (result: SubmitResult) => void;
       reject: (error: Error) => void;
       timer: ReturnType<typeof setTimeout>;
-      sent: boolean;
+      /** The transport's answer for this saying's frame. */
+      send: Promise<boolean> | null;
     }
   >();
   private nextManaPaymentPreviewRequestId = 1;
@@ -6297,11 +6308,7 @@ export class P2PGuestAdapter implements EngineAdapter {
         this.emit({ type: "reconnectFailed", reason });
       },
     });
-    this.rejectPendingSubmission(
-      this.pendingSubmissionSent
-        ? new AdapterError("P2P_ERROR", "Host disconnected while submitting an action", true)
-        : new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send action", true),
-    );
+    this.settlePendingSubmission({ kind: "sessionLost" });
     this.rejectAllPendingSayings(
       new AdapterError("P2P_ERROR", "Host disconnected while submitting a saying", true),
     );
@@ -6341,21 +6348,30 @@ export class P2PGuestAdapter implements EngineAdapter {
     if (action.type === "SayPhrase") {
       return this.submitSaying(action);
     }
+    return this.submitParked({
+      type: "action",
+      senderPlayerId: this.assignedPlayerId!,
+      action,
+    });
+  }
+
+  /**
+   * Park the single submission slot and send its frame. The send is tracked
+   * as queued until the transport answers: only a transport that reports it
+   * could not send the frame proves a no-send, so only that settles the slot
+   * as `ACTION_NOT_SENT`. A session swap while the frame is still queued is
+   * ambiguous — the old peer's FIFO may still deliver it.
+   */
+  private submitParked(
+    message: Extract<P2PMessage, { type: "action" | "interaction" }>,
+  ): Promise<SubmitResult> {
     return new Promise<SubmitResult>((resolve, reject) => {
       this.parkPendingSubmission(resolve, reject);
-      void this.send({
-        type: "action",
-        senderPlayerId: this.assignedPlayerId!,
-        action,
-      }).then((sent) => {
-        if (this.pendingResolve === resolve) {
-          this.pendingSubmissionSent = sent;
-          if (!sent) {
-            this.settlePendingSubmission({
-              kind: "reject",
-              error: new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send action", true),
-            });
-          }
+      const send = this.send(message);
+      this.pendingSubmissionSend = send;
+      void send.then((sent) => {
+        if (!sent && this.pendingResolve === resolve) {
+          this.settlePendingSubmission({ kind: "reject", error: actionNotSentError() });
         }
       });
     });
@@ -6394,17 +6410,16 @@ export class P2PGuestAdapter implements EngineAdapter {
           ),
         );
       }, SUBMISSION_TIMEOUT_MS);
-      this.pendingSayings.set(key, { resolve, reject, timer, sent: false });
+      this.pendingSayings.set(key, { resolve, reject, timer, send: null });
     });
-    const sent = await this.send({
+    const send = this.send({
       type: "action",
       senderPlayerId: this.assignedPlayerId!,
       action,
     });
     const pending = this.pendingSayings.get(key);
-    if (pending) {
-      pending.sent = sent;
-    }
+    if (pending) pending.send = send;
+    const sent = await send;
     if (!sent) {
       this.rejectSaying(
         key,
@@ -6440,14 +6455,22 @@ export class P2PGuestAdapter implements EngineAdapter {
     pending.resolve({ events: [], log_entries: [] });
   }
 
+  /** A lost session leaves each in-flight saying in doubt unless its
+   *  transport reports the frame was never sent: a frame still queued in the
+   *  old session's FIFO may yet reach the host. */
   private rejectAllPendingSayings(error: Error): void {
     for (const [key, pending] of [...this.pendingSayings]) {
       this.pendingSayings.delete(key);
       clearTimeout(pending.timer);
-      const err = pending.sent
-        ? error
-        : new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send saying", true);
-      pending.reject(err);
+      const notSent = new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send saying", true);
+      if (pending.send === null) {
+        pending.reject(notSent);
+      } else {
+        void pending.send.then(
+          (sent) => pending.reject(sent ? error : notSent),
+          () => pending.reject(error),
+        );
+      }
     }
   }
 
@@ -6456,23 +6479,10 @@ export class P2PGuestAdapter implements EngineAdapter {
     _actor: PlayerId,
   ): Promise<SubmitResult> {
     this.requireAuthenticatedSession();
-    return new Promise<SubmitResult>((resolve, reject) => {
-      this.parkPendingSubmission(resolve, reject);
-      void this.send({
-        type: "interaction",
-        senderPlayerId: this.assignedPlayerId!,
-        submission,
-      }).then((sent) => {
-        if (this.pendingResolve === resolve) {
-          this.pendingSubmissionSent = sent;
-          if (!sent) {
-            this.settlePendingSubmission({
-              kind: "reject",
-              error: new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send action", true),
-            });
-          }
-        }
-      });
+    return this.submitParked({
+      type: "interaction",
+      senderPlayerId: this.assignedPlayerId!,
+      submission,
     });
   }
 
@@ -7125,13 +7135,29 @@ export class P2PGuestAdapter implements EngineAdapter {
     const reject = this.pendingReject;
     this.pendingResolve = null;
     this.pendingReject = null;
-    this.pendingSubmissionSent = false;
+    const send = this.pendingSubmissionSend;
+    this.pendingSubmissionSend = null;
     if (outcome.kind === "resolve") {
       if (!resolve) return false;
       resolve(outcome.result);
       return true;
     }
     if (!reject) return false;
+    if (outcome.kind === "sessionLost") {
+      // The slot is released now, but the caller's outcome waits for the
+      // transport: only a send it reports as failed proves a no-send. A frame
+      // that was sent, or that may still leave the old session's FIFO, is in
+      // doubt — retrying it could apply the action twice.
+      if (send === null) {
+        reject(actionNotSentError());
+      } else {
+        void send.then(
+          (sent) => reject(sent ? actionInDoubtError() : actionNotSentError()),
+          () => reject(actionInDoubtError()),
+        );
+      }
+      return true;
+    }
     reject(outcome.error);
     return true;
   }
@@ -7171,7 +7197,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     });
     this.pendingResolve = resolve;
     this.pendingReject = reject;
-    this.pendingSubmissionSent = false;
+    this.pendingSubmissionSend = null;
     this.pendingSubmissionTimer = setTimeout(() => {
       this.pendingSubmissionTimer = null;
       this.settlePendingSubmission({
@@ -7241,10 +7267,7 @@ export class P2PGuestAdapter implements EngineAdapter {
 
   private handleHostDisconnect(session: PeerSession): void {
     if (session !== this.session) return;
-    const error = this.pendingSubmissionSent
-      ? new AdapterError("P2P_ERROR", "Host disconnected while submitting an action", true)
-      : new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send action", true);
-    this.rejectPendingSubmission(error);
+    this.settlePendingSubmission({ kind: "sessionLost" });
     this.rejectAllPendingSayings(
       new AdapterError("P2P_ERROR", "Host disconnected while submitting a saying", true),
     );
