@@ -5920,7 +5920,7 @@ mod w3_library_placement_tests {
         sentinels: &[ObjectId],
     ) {
         // CR 730.3a: do not assert a fixed internal permutation. The owner's
-        // private arrangement consumer is deferred to R4b.
+        // private arrangement consumer is deferred to R4c (#10637).
         let library: Vec<_> = state.players[0].library.iter().copied().collect();
         assert_eq!(&library[components.len()..], sentinels);
         assert_eq!(

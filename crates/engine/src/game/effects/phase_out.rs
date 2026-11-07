@@ -171,7 +171,7 @@ pub(super) fn collect_object_targets(
         _ => None,
     };
     if let Some(filters) = context_union_legs {
-        // CR 702.26a + CR 702.26h: gather the whole batch before phasing any
+        // CR 702.26g + CR 702.26h: gather the whole batch before phasing any
         // member, so an attachment selected with its host phases indirectly.
         let mut seen = HashSet::new();
         return filters
