@@ -544,9 +544,9 @@ struct BlinkedBridge {
 }
 
 /// Pass priority until `done` holds, hiding the first card each hideaway
-/// offers, accepting every optional play, and aiming each cast at P1 (the
-/// DuringResolution Shock is always sent there, as in
-/// `activate_mosswort_second_ability`).
+/// offers and accepting every optional play. An accepted free play casts
+/// during the resolution (CR 608.2g), so the hidden Shock's target choice
+/// is answered at P1.
 fn resolve_until(runner: &mut GameRunner, done: impl Fn(&GameState) -> bool) {
     for _ in 0..64 {
         if done(runner.state()) {
@@ -560,11 +560,12 @@ fn resolve_until(runner: &mut GameRunner, done: impl Fn(&GameState) -> bool) {
             WaitingFor::OptionalEffectChoice { .. } => {
                 GameAction::DecideOptionalEffect { accept: true }
             }
-            // The hidden Shock, cast during the resolution (CR 608.2g), chooses
-            // its target; the shared `runner.act(action)` below submits it.
-            WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
-                target: Some(TargetRef::Player(P1)),
-            },
+            // The hidden Shock, cast during the resolution, chooses its target.
+            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Player(P1)),
+                }
+            }
             other => panic!("unexpected prompt {other:?}"),
         };
         runner.act(action).expect("prompt answer accepted");
@@ -652,10 +653,16 @@ fn blink_bridge_under_its_activation(rehide: bool) -> Option<BlinkedBridge> {
     })
 }
 
+/// A hidden instant played during the resolution has resolved into the graveyard.
+fn was_played(state: &GameState, card: ObjectId) -> bool {
+    state.objects[&card].zone == Zone::Graveyard
+}
+
 /// CR 113.7a + CR 607.2a + CR 400.7: Bridge's activation waits while Bridge is
 /// blinked, and the returned Bridge's hideaway hides a new card. The activation
 /// is the activating Bridge's, so "the exiled card" is the card that Bridge
-/// hid: it plays that card free and not the new one.
+/// hid: it casts that card free during the resolution (CR 608.2g) and not
+/// the new one.
 #[test]
 fn old_bridge_activation_plays_its_own_card_not_the_new_one() {
     let Some(mut blink) = blink_bridge_under_its_activation(true) else {
@@ -686,22 +693,28 @@ fn old_bridge_activation_plays_its_own_card_not_the_new_one() {
     let life_before = blink.runner.state().players[1].life;
     resolve_until(&mut blink.runner, priority_with_stack(0));
     let state = blink.runner.state();
-    // CR 608.2g: the old Bridge's activation casts the card it hid during the
-    // resolution — the Shock, not the returned Bridge's Bolt.
-    assert_eq!(
-        state.objects[&blink.hidden].zone,
-        Zone::Graveyard,
-        "the activating Bridge's Shock was cast and resolved"
-    );
     assert_eq!(
         state.players[1].life,
         life_before - 2,
-        "the cast Shock dealt 2 damage to the targeted player"
+        "the activation casts the Shock its Bridge hid (P1 takes 2)"
+    );
+    assert_eq!(
+        state.objects[&blink.hidden].zone,
+        Zone::Graveyard,
+        "the cast Shock resolved into its owner's graveyard"
+    );
+    assert!(
+        was_played(state, blink.hidden),
+        "the activation plays the card the activating Bridge hid"
+    );
+    assert!(
+        !was_played(state, rehidden),
+        "the returned Bridge's card is not the activating Bridge's exiled card"
     );
     assert_eq!(
         state.objects[&rehidden].zone,
         Zone::Exile,
-        "the returned Bridge's Bolt stays exiled, unplayed"
+        "the returned Bridge's card is never cast"
     );
     assert_no_permissions(&blink.runner, blink.hidden);
     assert_no_permissions(&blink.runner, rehidden);
@@ -733,17 +746,19 @@ fn old_bridge_activation_after_an_empty_rehide_still_plays_its_card() {
     let life_before = blink.runner.state().players[1].life;
     resolve_until(&mut blink.runner, priority_with_stack(0));
     let state = blink.runner.state();
-    // CR 608.2g: as above, the activation casts its own hidden Shock during
-    // the resolution even though the rehide found nothing.
-    assert_eq!(
-        state.objects[&blink.hidden].zone,
-        Zone::Graveyard,
-        "the activating Bridge's Shock was cast and resolved"
-    );
     assert_eq!(
         state.players[1].life,
         life_before - 2,
-        "the cast Shock dealt 2 damage to the targeted player"
+        "the activation casts the Shock its Bridge hid (P1 takes 2)"
+    );
+    assert_eq!(
+        state.objects[&blink.hidden].zone,
+        Zone::Graveyard,
+        "the cast Shock resolved into its owner's graveyard"
+    );
+    assert!(
+        was_played(state, blink.hidden),
+        "the activation plays the card the activating Bridge hid"
     );
     assert_no_permissions(&blink.runner, blink.hidden);
 }
