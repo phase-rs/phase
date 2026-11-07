@@ -442,7 +442,7 @@ fn run_regenerations_upkeep(
                     .iter()
                     .position(|t| t.description.starts_with("Whenever one or more time"))
                     .expect("the Regenerations Restored trigger is being ordered");
-                // Index 0 is placed first (resolves last, CR 405.3).
+                // Index 0 is placed first (resolves last, CR 603.3b + CR 405.2).
                 let mut order: Vec<usize> = (0..triggers.len()).filter(|&i| i != regen).collect();
                 if regen_resolves_first {
                     order.push(regen);

@@ -792,8 +792,8 @@ fn obzedat_moved_out_of_exile_and_back_does_not_return() {
     obzedat_end_step(&mut runner, obzedat, Optional::Accept);
     let exiled = incarnation(&runner, obzedat);
     let delayed = runner.state().delayed_triggers.len();
-    // Pull from Eternity's "target face-up exiled card" does not parse, so its
-    // move goes through the zone pipeline.
+    // Pull from Eternity's "target face-up exiled card" misparses (its target drops
+    // the exile zone), so its move goes through the zone pipeline.
     let mut events = Vec::new();
     move_object_for_test(
         runner.state_mut(),

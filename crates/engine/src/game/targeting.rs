@@ -2922,16 +2922,18 @@ pub(crate) fn infers_own_source(
 }
 
 /// CR 400.7: whether the untargeted anaphor `filter` infers the ability's own
-/// source and the ability can no longer find it, so the instruction has no
-/// such referent.
+/// source, the ability can no longer find it, and no other inferred referent
+/// remains, so the instruction has no referent at all. An inference that still
+/// names other objects (a spell-cast or attack tier) is not unbound.
 pub(crate) fn inferred_source_referent_is_unbound(
     state: &GameState,
     ability: &ResolvedAbility,
     filter: &TargetFilter,
 ) -> bool {
-    inferred_anaphor_referents(state, ability, filter)
-        .is_some_and(|refs| refs.contains(&TargetRef::Object(ability.source_id)))
-        && ability.self_ref_binding(state).is_none()
+    inferred_anaphor_referents(state, ability, filter).is_some_and(|refs| {
+        refs.contains(&TargetRef::Object(ability.source_id))
+            && admit_inferred_source_referents(state, ability, refs).is_empty()
+    })
 }
 
 fn blocked_attacker_from_event(
@@ -9996,5 +9998,83 @@ mod inferred_source_anaphor_tests {
             referents(&state, &ability, &TargetFilter::ParentTarget),
             vec![]
         );
+    }
+
+    /// Puts a spell on the stack targeting `targets` and makes its cast the
+    /// current trigger event, so the spell-cast tier infers those targets.
+    fn cast_spell_targeting(state: &mut GameState, targets: Vec<TargetRef>) {
+        let spell = create_object(
+            state,
+            CardId(50),
+            PlayerId(0),
+            "Targeting Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(50),
+                ability: Some(Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    targets,
+                    spell,
+                    PlayerId(0),
+                ))),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(50),
+            controller: PlayerId(0),
+            object_id: spell,
+            cast_mana_value: None,
+        });
+    }
+
+    /// CR 400.7 + CR 608.2c: the source referent is unbound only when the
+    /// departed source was the inference's sole referent. A spell targeting
+    /// Loki, God of Lies (the trigger's source) and a second creature still
+    /// names the second creature after Loki is blinked.
+    #[test]
+    fn the_source_referent_is_unbound_only_when_admission_empties_the_inference() {
+        let mut state = GameState::new_two_player(7);
+        let loki = creature(&mut state, 1);
+        let other = creature(&mut state, 2);
+        let ability = triggered(&state, loki);
+        cast_spell_targeting(
+            &mut state,
+            vec![TargetRef::Object(loki), TargetRef::Object(other)],
+        );
+        assert!(
+            !inferred_source_referent_is_unbound(&state, &ability, &TargetFilter::ParentTarget),
+            "reach: a current source is bound"
+        );
+        blink(&mut state, loki);
+        assert_eq!(
+            referents(&state, &ability, &TargetFilter::ParentTarget),
+            vec![TargetRef::Object(other)]
+        );
+        assert!(!inferred_source_referent_is_unbound(
+            &state,
+            &ability,
+            &TargetFilter::ParentTarget
+        ));
+
+        let mut state = GameState::new_two_player(7);
+        let loki = creature(&mut state, 1);
+        let ability = triggered(&state, loki);
+        cast_spell_targeting(&mut state, vec![TargetRef::Object(loki)]);
+        blink(&mut state, loki);
+        assert!(inferred_source_referent_is_unbound(
+            &state,
+            &ability,
+            &TargetFilter::ParentTarget
+        ));
     }
 }
