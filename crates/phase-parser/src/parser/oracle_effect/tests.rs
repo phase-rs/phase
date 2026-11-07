@@ -79703,8 +79703,8 @@ fn bare_choose_controller_subject_chain_keeps_resolution_timing() {
 
 /// SHAPE: an inherited non-controller subject's object-and-player choice. Unlike the
 /// bare choice above, the base declared Resolution here unconditionally; the
-/// `clause_subject_chooser` gate on this producer was added by round 8 for printed
-/// subjects. This row extends that withdrawal to the inherited subject, matching
+/// `clause_subject_chooser` gate on this producer applies to printed subjects. This
+/// row extends that withdrawal to the inherited subject, matching
 /// `compound_choice_non_controller_subject_object_and_player_keeps_stack_timing`
 /// ("An opponent chooses a creature you control and an opponent." -> Stack). It is a
 /// deliberate departure from the base and pins no rules claim: the target opponent
