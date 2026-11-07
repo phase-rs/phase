@@ -14,10 +14,11 @@ use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::{ActivatedAbilityKind, BoundActivationCost, GameEvent, ManaTapState};
 use crate::types::game_state::{
     CostResume, GameState, ManaAbilityCostCursor, ManaAbilityCostParent,
-    ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume, ManaChoice,
-    ManaChoiceContext, ManaChoicePrompt, ManaColorChoiceResume, ManaTriggerFixedPointResume,
-    PausedCounterCostRemoval, PayCostKind, PayableResource, PendingCostMoveResume,
-    PendingCounterRemoval, PendingManaAbility, ProductionOverride, WaitingFor,
+    ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume,
+    ManaAmountComposition, ManaChoice, ManaChoiceContext, ManaChoicePrompt, ManaColorChoiceResume,
+    ManaTriggerFixedPointResume, PausedCounterCostRemoval, PayCostKind, PayableResource,
+    PendingCostMoveResume, PendingCounterRemoval, PendingManaAbility, ProductionOverride,
+    WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{ManaColor, ManaCost, ManaPool, ManaType, PaymentContext};
@@ -2252,9 +2253,12 @@ fn mana_ability_x_announcement(
                 PayableResource::Speed,
                 super::speed::effective_speed(state, pending.player) as u32,
             ),
+            // CR 107.3a + CR 602.2b: a mana ability's `{X}` leg announces X
+            // for that cost, so the chosen amount concretizes X.
             Some(AnnouncedXLeg::Mana(mana_leg)) => (
-                PayableResource::ManaGeneric {
+                PayableResource::Mana {
                     base_cost: mana_leg.clone(),
+                    composition: ManaAmountComposition::ConcretizeX,
                 },
                 mana_leg_x_cap(state, pending, mana_leg),
             ),
@@ -7611,6 +7615,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: crate::types::ability::DigRestOrder::Preserve,
                 reveal: false,

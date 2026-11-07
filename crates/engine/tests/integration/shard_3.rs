@@ -356,6 +356,7 @@ mod issue_1023_oversold_cemetery;
 mod issue_1025_rishkars_expertise;
 mod issue_10315_one_ring_attackable;
 mod issue_10401_off_zone_ability_cost_reduction;
+mod issue_10431_resumed_batch_terminal_completion;
 mod issue_1092_chthonian_nightmare;
 mod issue_1120_warden_of_the_grove;
 mod issue_1128_elrond_scry_counter;
