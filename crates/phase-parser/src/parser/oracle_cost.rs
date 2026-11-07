@@ -2688,7 +2688,7 @@ mod tests {
     #[test]
     fn alternative_splitter_skips_a_delimiter_inside_a_quotation() {
         let text = "Say \"Red or Blue\" quickly or pay {2}";
-        let outer = text.rfind(" or ").expect("outer separator");
+        let outer = "Say \"Red or Blue\" quickly".len();
         assert_eq!(find_unquoted_delimiter(text, " or "), Some(outer));
         assert_eq!(
             split_binary_cost_legs(text, " or "),
