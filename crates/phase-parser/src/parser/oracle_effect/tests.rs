@@ -96550,6 +96550,70 @@ fn revealed_remainder_is_not_absorbed_into_a_private_look_across_a_draw() {
     );
 }
 
+/// CR 701.20a + CR 608.2c: a "revealed this way" remainder names ONE public
+/// reveal's population, and the engine keeps exactly one such population
+/// (`last_revealed_ids`). An intervening instruction that can replace it — a
+/// `Clash` clears the ledger and refills it with BOTH clashing players' top
+/// cards — severs the remainder from the reveal, so the clause keeps its
+/// written position as an honest gap instead of moving cards the reveal never
+/// produced (an opponent's among them).
+///
+/// No printed card is known to print this exact sequence; the boundary is what
+/// is being pinned, so the text only has to be reachable by the grammar. Both
+/// guards assert reach — the public reveal parses as the head and the clash
+/// parses as the intervening clause — so the refusal cannot pass vacuously.
+#[test]
+fn revealed_remainder_is_refused_across_an_intervening_reveal_writer() {
+    let def = parse_effect_chain(
+        "Reveal the top three cards of your library and put one of them into your hand. \
+         Clash with an opponent. Put all other cards revealed this way into your graveyard.",
+        AbilityKind::Spell,
+    );
+
+    let mut chain: Vec<&AbilityDefinition> = Vec::new();
+    let mut cursor = Some(&def);
+    while let Some(node) = cursor {
+        chain.push(node);
+        cursor = node.sub_ability.as_deref();
+    }
+
+    // Reach guard 1: the head is the PUBLIC reveal the remainder would name.
+    assert!(
+        matches!(
+            chain.first().map(|node| &*node.effect),
+            Some(Effect::Dig { reveal: true, .. })
+        ),
+        "the head must be the public reveal Dig: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+    // Reach guard 2: the intervening instruction parsed as a clash, so the
+    // backward scan really had to decide whether to cross a reveal writer.
+    assert!(
+        matches!(chain.get(1).map(|node| &*node.effect), Some(Effect::Clash)),
+        "the intervening clause must parse as Clash: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+    // The refusal: the remainder survives at its written position as a gap with
+    // THIS reason (an unrelated parse miss would not be evidence).
+    assert!(
+        matches!(
+            chain.get(2).map(|node| &*node.effect),
+            Some(Effect::Unimplemented { name, .. })
+                if name == "revealed_remainder_after_intervening_clause"
+        ),
+        "the remainder must be refused after the clash: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+    // Nothing anywhere may move the reveal population.
+    assert!(
+        chain
+            .iter()
+            .all(|node| !matches!(&*node.effect, Effect::ChangeZoneAll { .. })),
+        "nothing may move the remainder as a revealed-set move: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+}
+
 /// CR 701.20a + CR 608.2c: the rest-pile clause of a reveal instruction claims
 /// only destinations it fully understands, and only an explicitly randomized
 /// library remainder (CR 401.4). Everything else is refused, not defaulted to a

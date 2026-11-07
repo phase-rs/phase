@@ -789,6 +789,34 @@ pub(super) fn parse_revealed_remainder_clause(input: &str) -> Option<Continuatio
         })
 }
 
+/// CR 701.20a + CR 608.2c: may the backward scan from a "revealed this way"
+/// remainder be carried ACROSS this clause to an earlier reveal?
+///
+/// The remainder names the population of ONE public reveal, and the engine keeps
+/// exactly one such population (`GameState::last_revealed_ids`). A clause that
+/// publishes a new one — a `Clash` clears the ledger and refills it with both
+/// clashing players' top cards, and every other reveal producer overwrites it
+/// just the same — therefore re-points a later remainder at cards the reveal
+/// never produced. Written order (CR 608.2c) does not make that reading legal:
+/// it makes the clause a NEW antecedent, and the remainder no longer refers to
+/// the earlier reveal at all.
+///
+/// The test is a POSITIVE proof, deliberately an allow-list of effects that
+/// cannot touch the reveal ledger rather than a survey of the ones that can: a
+/// producer missed by a deny-list is exactly the defect this guards against,
+/// while an observer missed by the allow-list only leaves an honest gap at its
+/// written position. Wrappers (`CreateDelayedTrigger`, `TargetOnly`, …) are NOT
+/// crossed even when they happen to nest an observer: their own resolution is
+/// not proved to be reveal-free, so the honest answer is "unproved".
+pub(super) fn clause_preserves_reveal_population(effect: &Effect) -> bool {
+    // Pure life arithmetic. It reads the settled card's mana value and moves no
+    // card, so it cannot publish or replace a reveal (Reviving Vapors' "You gain
+    // life equal to that card's mana value"). Extending this allow-list means
+    // proving the new clause reveal-free; there is deliberately no deny-list to
+    // add to, because a missed producer is the defect this predicate guards.
+    matches!(effect, Effect::GainLife { .. })
+}
+
 /// CR 608.2c: The destination a "the other cards revealed this way" clause
 /// states, read through the shared partition-destination grammar
 /// ([`parse_choice_partition_destination`]) so this path cannot drift from the
@@ -10829,6 +10857,17 @@ mod tests {
             parse_choice_partition_destination(" into the player's graveyard").ok(),
             Some(("", Zone::Graveyard))
         );
+        // CR 400.3: the plural-owner graveyard form (Dance, Pathetic
+        // Marionette) is its own arm, so it parses as `Graveyard` with no
+        // remainder. The singular noun stays refused with the plural
+        // possessive: "their owners' graveyard" names no single graveyard, and
+        // letting it fall through to the shared possessive arm would silently
+        // accept the mismatched pair.
+        assert_eq!(
+            parse_choice_partition_destination(" into their owners' graveyards").ok(),
+            Some(("", Zone::Graveyard))
+        );
+        assert!(parse_choice_partition_destination(" into their owners' graveyard").is_err());
     }
 
     /// SHAPE — CR 608.2c: a conditional destination owns movement; this

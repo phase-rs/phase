@@ -50397,6 +50397,12 @@ fn parse_effect_chain_ir_body(
             // instead of lowering to a tracked-set complement move that names
             // cards no reveal published.
             let mut revealed_remainder_without_public_reveal = false;
+            // CR 701.20a + CR 608.2c: the same refusal, second cause — the only
+            // candidate reveal is separated from the remainder by an instruction
+            // that is NOT proved to leave the reveal population alone (`Clash`
+            // replaces the engine's one reveal ledger), so no single reveal owns
+            // the cards this clause names.
+            let mut revealed_remainder_after_intervening_clause = false;
             let mut followup_continuation = effective_prev_effect
                 .as_ref()
                 .and_then(|eff| {
@@ -50455,7 +50461,25 @@ fn parse_effect_chain_ir_body(
                     // double that damage instead") is lookback-transparent: it restates
                     // the instruction it replaces and neither selects nor re-binds the
                     // reveal's cards, so its placeholder does not end the scan.
-                    non_absorbed
+                    // CR 701.20a + CR 608.2c: binding the displaced remainder to
+                    // an earlier `Dig` means walking back across every clause in
+                    // between, and the engine keeps exactly ONE reveal population
+                    // (`last_revealed_ids`). A crossed clause proved not to touch it
+                    // (`clause_preserves_reveal_population`) is transparent;
+                    // anything else may replace it — a `Clash` clears the ledger and
+                    // refills it with BOTH clashing players' top cards — so the
+                    // remainder would then name cards that reveal never produced (an
+                    // opponent's among them). The `Dig` arm below is therefore
+                    // reachable only while the whole crossed span stays proved
+                    // preserving; otherwise the clause keeps its written position as
+                    // an honest gap (below). `RevealUntil` is different by
+                    // construction: it owns its rest pile on its OWN instruction
+                    // (`rest_destination`), so its lookback keeps the printed-order
+                    // transparency it already had.
+                    let remainder_clause =
+                        sequence::parse_revealed_remainder_clause(normalized_text);
+                    let mut crossed_span_preserves_reveal = true;
+                    for deeper in non_absorbed
                         .iter()
                         .filter(|c| {
                             !matches!(
@@ -50466,8 +50490,14 @@ fn parse_effect_chain_ir_body(
                             )
                         })
                         .map(|c| effective_effect_of(c))
-                        .take_while(|effect| !matches!(effect, Effect::Unimplemented { .. }))
-                        .find_map(|deeper| match deeper {
+                    {
+                        // An unrecognized instruction may itself select or
+                        // re-bind the referent, so it ends the scan (and was
+                        // never a candidate).
+                        if matches!(deeper, Effect::Unimplemented { .. }) {
+                            break;
+                        }
+                        let bound = match &deeper {
                             Effect::RevealUntil { .. } => {
                                 match parse_followup_continuation_ast(normalized_text, &deeper, ctx)
                                 {
@@ -50501,6 +50531,16 @@ fn parse_effect_chain_ir_body(
                             // ("Draw a card") and change which card the draw
                             // reaches, violating CR 608.2c's written order.
                             Effect::Dig { reveal: true, .. } => {
+                                if !crossed_span_preserves_reveal {
+                                    // The reveal that could own this remainder is
+                                    // separated from it by an instruction that may
+                                    // have replaced the population, so it no longer
+                                    // names this clause's cards. Refuse the binding
+                                    // and record the gap below.
+                                    revealed_remainder_after_intervening_clause =
+                                        remainder_clause.is_some();
+                                    break;
+                                }
                                 sequence::parse_revealed_remainder_clause(normalized_text)
                             }
                             // CR 701.20a: a private look never publishes a
@@ -50509,15 +50549,21 @@ fn parse_effect_chain_ir_body(
                             // than patch the look's rest destination (which
                             // would move the remainder ahead of an intervening
                             // instruction) or bind it anywhere else.
-                            Effect::Dig { reveal: false, .. }
-                                if sequence::parse_revealed_remainder_clause(normalized_text)
-                                    .is_some() =>
-                            {
+                            Effect::Dig { reveal: false, .. } if remainder_clause.is_some() => {
                                 revealed_remainder_without_public_reveal = true;
                                 None
                             }
                             _ => None,
-                        })
+                        };
+                        if bound.is_some() {
+                            return bound;
+                        }
+                        // CR 701.20a + CR 608.2c: record whether this clause may be
+                        // crossed on the way to an earlier `Dig`.
+                        crossed_span_preserves_reveal &=
+                            sequence::clause_preserves_reveal_population(&deeper);
+                    }
+                    None
                 })
                 .or_else(|| {
                     // CR 707.10c: a "you may choose new targets for the copy/copies"
@@ -50577,11 +50623,22 @@ fn parse_effect_chain_ir_body(
             // it at its written position as an honest unsupported boundary —
             // never absorbed into the look (which would reorder it) and never
             // lowered to a move of cards no reveal published.
-            if revealed_remainder_without_public_reveal && followup_continuation.is_none() {
-                clause.effect = Effect::unimplemented(
-                    "revealed_remainder_without_public_reveal",
-                    normalized_text,
-                );
+            if followup_continuation.is_none() {
+                if revealed_remainder_without_public_reveal {
+                    clause.effect = Effect::unimplemented(
+                        "revealed_remainder_without_public_reveal",
+                        normalized_text,
+                    );
+                } else if revealed_remainder_after_intervening_clause {
+                    // CR 701.20a + CR 608.2c: the reveal the clause could name is
+                    // separated from it by an instruction that may replace the
+                    // reveal population. Keep the written position; never fall
+                    // back to an unbound tracked-set move.
+                    clause.effect = Effect::unimplemented(
+                        "revealed_remainder_after_intervening_clause",
+                        normalized_text,
+                    );
+                }
             }
             // CR 608.2c + CR 109.5: a reveal choice is the controller's only when the
             // consuming instruction addresses the controller ("you" / imperative).
