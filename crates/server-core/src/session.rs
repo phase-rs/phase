@@ -1832,7 +1832,18 @@ impl GameSession {
         // evidence the engine judges, so the server never trusts the one a
         // client claims — it stamps the observation at its own receipt, in the
         // epoch-millisecond domain every host uses (`GameAction::stamped_by_host`).
-        let action = action.stamped_by_host(host_received_at_ms);
+        // In SingleUser hosting mode (e.g. desktop sidecar acting as a local engine
+        // for a P2P host), the browser host already stamped the trusted WebRTC
+        // ingress time before forwarding over the loopback socket. Preserve that
+        // non-zero stamp rather than overwriting it with the later loopback receipt.
+        let action = if self.hosting == HostingMode::SingleUser {
+            match action {
+                GameAction::SayPhrase { at_ms, .. } if at_ms != 0 => action,
+                _ => action.stamped_by_host(host_received_at_ms),
+            }
+        } else {
+            action.stamped_by_host(host_received_at_ms)
+        };
 
         // GH #1507: while a takeback request is awaiting approval, the
         // authoritative state must not move out from under it — a new
