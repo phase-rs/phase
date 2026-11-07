@@ -2099,9 +2099,18 @@ export class WebSocketAdapter implements EngineAdapter {
     // from the join-token-authenticated session, never from the payload.
     // A client-supplied actor here would provide zero additional safety and
     // only creates a spoofing surface if it were ever put on the wire.
-    this.assertNoPendingSubmission();
+    if (action.type !== "SayPhrase") {
+      this.assertNoPendingSubmission();
+    }
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "WebSocket not connected", false);
+    }
+
+    if (action.type === "SayPhrase") {
+      if (!this.send({ type: "Action", data: { action } })) {
+        throw new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send action", true);
+      }
+      return { events: [], log_entries: [] };
     }
 
     return this.submitGameFrame(

@@ -6012,6 +6012,14 @@ export class P2PGuestAdapter implements EngineAdapter {
     // another identity, the host would detect the mismatch and drop the
     // action before touching the engine.
     this.requireAuthenticatedSession();
+    if (action.type === "SayPhrase") {
+      this.send({
+        type: "action",
+        senderPlayerId: this.assignedPlayerId!,
+        action,
+      });
+      return { events: [], log_entries: [] };
+    }
     return new Promise<SubmitResult>((resolve, reject) => {
       this.parkPendingSubmission(resolve, reject);
       this.send({

@@ -689,12 +689,14 @@ async function processAction(
   // A hidden tab (e.g. a P2P host whose AI keeps acting in the background)
   // skips presentation entirely: queued animation steps, notices and SFX would
   // only pile up behind throttled timers and replay stale on return.
-  const skipPresentation = isDocumentHidden();
+  // SayPhrase actions are real-time spoken observations: skip presentation and animation
+  // delays so subsequent sayings are not blocked behind earlier acknowledgements.
+  const skipPresentation = isDocumentHidden() || action.type === "SayPhrase";
 
   // 5b. Surface in-game dice/coin rolls out-of-band (DiceRollOverlay), the same
   // way the turn banner bypasses the animation queue. These events are marked
   // NON_VISUAL so normalizeEvents skips them below.
-  if (!skipPresentation) {
+  if (!isDocumentHidden()) {
     flashInGameRolls(events);
     flashCompletedScry(events);
     flashUnActionEvents(events);
@@ -895,6 +897,17 @@ async function dispatchActionInternal(
   const currentWaitingFor = useGameStore.getState().waitingFor;
 
   if (isAnimating) {
+    if (submittedAction.type === "SayPhrase") {
+      return processAction(
+        submittedAction,
+        actor,
+        dispatchGeneration,
+        session,
+        proposal,
+        proposalOutcome,
+        automated,
+      );
+    }
     // Same action + same actor + same prompt is a duplicate. A changed prompt
     // is a new decision even when the payload is structurally identical.
     if (

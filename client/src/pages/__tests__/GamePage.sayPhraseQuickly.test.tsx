@@ -2,10 +2,12 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router";
 
-import type {
-  PhrasePace,
-  SayPhrasePayment,
-  WaitingFor,
+import {
+  AdapterError,
+  AdapterErrorCode,
+  type PhrasePace,
+  type SayPhrasePayment,
+  type WaitingFor,
 } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
@@ -525,20 +527,23 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
   });
 
   it("lets a following prompt start a fresh payment", async () => {
-    setup(1);
+    // 2 sayings owed: saying 1 leaves the panel mounted with said > 0
+    setup(2);
     render(gamePageTree());
 
     await screen.findByText(PHRASE);
     fireEvent.click(phraseBox());
     expect(sayPhraseCalls()).toHaveLength(1);
+    expect(sayPhraseCalls()[0].seq).toBe(1);
 
-    // Successive Toy Boat upkeeps replace the prompt at the same position, so
-    // the retained panel must not inherit the finished payment.
+    // Directly replace the prompt with a second prompt while SayPhrasePanel
+    // remains mounted and said is greater than zero, without completing payment 1
+    // or passing through a null prompt.
     const state = useGameStore.getState().gameState!;
     act(() => {
       useGameStore.setState({
         waitingFor: toyBoatUnlessPayment(1),
-        gameState: { ...state, say_payment: { ...paymentFor(1), id: PAYMENT_ID + 1 } },
+        gameState: { ...state, say_payment: { ...paymentFor(1, 0), id: PAYMENT_ID + 1 } },
       });
     });
     fireEvent.click(phraseBox());
@@ -547,5 +552,20 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
     expect(calls).toHaveLength(2);
     expect(calls[1].payment).toBe(PAYMENT_ID + 1);
     expect(calls[1].seq).toBe(1);
+  });
+
+  it("rolls back optimistic reported count when SayPhrase dispatch rejects with ACTION_NOT_SENT", async () => {
+    setup(2);
+    dispatchMock.mockRejectedValueOnce(
+      new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Network failed", true),
+    );
+    render(gamePageTree());
+
+    expect(await screen.findByText("0 of 2 said")).toBeInTheDocument();
+    fireEvent.click(phraseBox());
+    // Since dispatch failed with ACTION_NOT_SENT, the optimistic count rolls back to 0
+    await waitFor(() => {
+      expect(screen.getByText("0 of 2 said")).toBeInTheDocument();
+    });
   });
 });

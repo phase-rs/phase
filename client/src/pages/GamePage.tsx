@@ -28,6 +28,8 @@ import type {
   TakebackResolution,
 } from "../adapter/types";
 import {
+  AdapterError,
+  AdapterErrorCode,
   supportsAiDecisionDiagnostics,
   supportsDebugHandReveal,
   supportsMatchConcede,
@@ -3952,13 +3954,11 @@ function SayPhrasePanel({
   // Clicks reported to the engine in this payment, including those still
   // awaiting an acknowledgement.
   const [reported, setReported] = useState(said);
-  const awaitingAck = Math.max(0, reported - said);
 
   // A fresh engine instance is a fresh payment; local progress restarts from
-  // it. A payment already in progress keeps its click stamps.
+  // it.
   useEffect(() => {
-    if (said > 0) return;
-    seq.current = 0;
+    seq.current = sayPayment?.last_seq ?? 0;
     lastSaidAt.current = null;
     setReported(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3979,29 +3979,64 @@ function SayPhrasePanel({
   // deadline and repeated until the engine closes the prompt, because the
   // engine judges it on its own (possibly server) clock.
   const retainedDeadline = sayPayment?.deadline_ms;
-  useEffect(() => {
-    if (quickWindowMs === undefined || said === 0 || awaitingAck > 0) return;
-    const deadline =
-      lastSaidAt.current !== null
-        ? lastSaidAt.current + quickWindowMs
-        : retainedDeadline;
-    if (deadline === undefined || deadline === null) return;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+  // Track the current deadline in a ref. The timer callback reads this ref
+  // directly so it always uses the latest deadline without needing to be
+  // restarted on every local saying.
+  const deadlineRef = useRef<number | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  // Compute the current deadline based on latest click or retained deadline.
+  const computeDeadline = (): number | null => {
+    const hasLocalClick = reported > 0;
+    const hasRestoredDeadline = said > 0 && retainedDeadline !== undefined && retainedDeadline !== null;
+    if (quickWindowMs === undefined || (!hasLocalClick && !hasRestoredDeadline)) return null;
+    return lastSaidAt.current !== null ? lastSaidAt.current + quickWindowMs : retainedDeadline!;
+  };
+
+  // Start the expiry timer. The callback reads deadlineRef.current so it
+  // automatically uses the latest deadline (updated by `say` on each click
+  // or by this effect on engine acknowledgement).
+  const startTimer = () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
     const check = () => {
+      const deadline = deadlineRef.current;
+      if (deadline === null) return;
       const now = sayPhraseHostClockMs();
       if (now <= deadline) {
-        timer = setTimeout(check, deadline - now + 1);
+        timerRef.current = setTimeout(check, deadline - now + 1);
         return;
       }
       void dispatch({
         type: "SayPhrase",
         data: { payment: paymentId, seq: 0, at_ms: now, report: "Expiry" },
-      });
-      timer = setTimeout(check, SAY_PHRASE_EXPIRY_RETRY_MS);
+      }).catch(() => {});
+      timerRef.current = setTimeout(check, SAY_PHRASE_EXPIRY_RETRY_MS);
     };
-    timer = setTimeout(check, Math.max(0, deadline - sayPhraseHostClockMs() + 1));
-    return () => clearTimeout(timer);
-  }, [awaitingAck, dispatch, paymentId, quickWindowMs, retainedDeadline, said]);
+    const deadline = deadlineRef.current;
+    if (deadline !== null) {
+      timerRef.current = setTimeout(check, Math.max(0, deadline - sayPhraseHostClockMs() + 1));
+    }
+  };
+
+  // Effect: compute deadline and start timer when engine acknowledges a saying
+  // (said changes) or payment/retained deadline changes. The deadline ref is
+  // also updated in `say()` on each local click.
+  useEffect(() => {
+    const deadline = computeDeadline();
+    if (deadline === null) {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = undefined;
+      }
+      deadlineRef.current = null;
+      return;
+    }
+    deadlineRef.current = deadline;
+    startTimer();
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, [dispatch, paymentId, quickWindowMs, retainedDeadline, said]);
 
   const say = () => {
     // One click is one saying, and the engine accepts no more than the payment
@@ -4016,11 +4051,16 @@ function SayPhrasePanel({
     lastSaidAt.current = at;
     seq.current += 1;
     setReported((current) => current + 1);
-    // `payment: 0` names "the instance this prompt advertises"; after the first
-    // acknowledgement the engine's own id is rendered from `sayPayment`.
+    // Update the deadline ref. The running timer will pick up the new deadline
+    // on its next check without needing to be restarted.
+    deadlineRef.current = at + (quickWindowMs ?? 0);
     void dispatch({
       type: "SayPhrase",
       data: { payment: paymentId, seq: seq.current, at_ms: at, report: "Saying" },
+    }).catch((err) => {
+      if (err instanceof AdapterError && err.code === AdapterErrorCode.ACTION_NOT_SENT) {
+        setReported((current) => Math.max(said, current - 1));
+      }
     });
   };
 

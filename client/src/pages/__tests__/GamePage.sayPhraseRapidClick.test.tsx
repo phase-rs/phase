@@ -136,36 +136,60 @@ class FakeToyBoatEngine {
     this.release = resolve;
   });
 
+  private queue = Promise.resolve();
+
   releaseFirst = () => this.release();
 
   submittedSayings(): Saying[] {
     return this.submitted
-      .filter((action): action is GameAction & { type: "SayPhrase" } => action.type === "SayPhrase")
+      .filter(
+        (action): action is GameAction & { type: "SayPhrase" } =>
+          action.type === "SayPhrase" &&
+          (action.data as { report?: string })?.report !== "Expiry",
+      )
       .map((action) => action.data as Saying);
   }
 
   async submitAction(action: GameAction): Promise<SubmitResult> {
     this.submitted.push(action);
-    if (action.type === "PayUnlessCost") {
-      if (action.data.pay === false) this.declined = true;
-      return { events: [], log_entries: [] };
-    }
-    if (action.type !== "SayPhrase") return { events: [], log_entries: [] };
+    return new Promise((resolve) => {
+      this.queue = this.queue.then(async () => {
+        if (action.type === "PayUnlessCost") {
+          if (action.data.pay === false) this.declined = true;
+          resolve({ events: [], log_entries: [] });
+          return;
+        }
+        if (action.type !== "SayPhrase") {
+          resolve({ events: [], log_entries: [] });
+          return;
+        }
 
-    if (this.submitted.filter((submitted) => submitted.type === "SayPhrase").length === 1) {
-      await this.firstReply;
-    }
-    const saying = action.data as Saying;
-    const last = this.sayings[this.sayings.length - 1];
-    const valid =
-      saying.payment === PAYMENT_ID &&
-      saying.seq === this.said + 1 &&
-      (last === undefined || saying.at_ms - last.at_ms <= GAP_MS);
-    if (valid) {
-      this.sayings.push(saying);
-      this.said += 1;
-    }
-    return { events: [], log_entries: [] };
+        const saying = action.data as Saying & { report?: string };
+        if (saying.report === "Expiry") {
+          resolve({ events: [], log_entries: [] });
+          return;
+        }
+
+        const sayingCount = this.submitted.filter(
+          (s) =>
+            s.type === "SayPhrase" &&
+            (s.data as { report?: string })?.report !== "Expiry",
+        ).length;
+        if (sayingCount === 1) {
+          await this.firstReply;
+        }
+        const last = this.sayings[this.sayings.length - 1];
+        const valid =
+          saying.payment === PAYMENT_ID &&
+          saying.seq === this.said + 1 &&
+          (last === undefined || saying.at_ms - last.at_ms <= GAP_MS);
+        if (valid) {
+          this.sayings.push(saying);
+          this.said += 1;
+        }
+        resolve({ events: [], log_entries: [] });
+      });
+    });
   }
 
   state(): GameState {
@@ -256,14 +280,13 @@ describe("GamePage rapid sayings through the real dispatch queue", () => {
     render(gamePageTree());
     expect(await screen.findByText(PHRASE)).toBeInTheDocument();
 
-    // Both clicks land while the first submission is in flight (the real
-    // dispatch mutex is held), so the second saying is queued.
+    // Both clicks land while the first submission is in flight.
+    // Timed sayings are submitted immediately without awaiting the first reply.
     fireEvent.click(phraseBox());
     fireEvent.click(phraseBox());
-    expect(engine.submittedSayings()).toHaveLength(1);
+    expect(engine.submittedSayings()).toHaveLength(2);
 
     engine.releaseFirst();
-    await waitFor(() => expect(engine.submittedSayings()).toHaveLength(2));
     await waitFor(() =>
       expect(useGameStore.getState().waitingFor?.type).not.toBe("UnlessPayment"),
     );
@@ -276,5 +299,81 @@ describe("GamePage rapid sayings through the real dispatch queue", () => {
     expect(engine.said).toBe(OWED);
     expect(engine.declined).toBe(false);
     expect(useGameStore.getState().gameState?.say_payment ?? null).toBeNull();
+  });
+
+  it("lapses payment when second saying arrives past the pace deadline (late input)", async () => {
+    const engine = new FakeToyBoatEngine();
+    const originalSubmitAction = engine.submitAction.bind(engine);
+    const firstStamp = 1_000;
+    engine.submitAction = async (action: GameAction) => {
+      if (action.type === "SayPhrase") {
+        const seq = (action.data as Saying).seq;
+        const stampedAt = seq === 1 ? firstStamp : firstStamp + GAP_MS + 200;
+        (action.data as Saying).at_ms = stampedAt;
+      }
+      return originalSubmitAction(action);
+    };
+
+    const initial = engine.state();
+    useGameStore.setState({
+      gameId: "say-phrase-late",
+      gameMode: "ai",
+      adapter: engine.adapter(),
+      gameState: initial,
+      waitingFor: initial.waiting_for,
+      legalActions: [],
+      events: [],
+      eventHistory: [],
+      logHistory: [],
+      nextLogSeq: 0,
+      stateHistory: [],
+      turnCheckpoints: [],
+      lastCommittedSeq: 0,
+    });
+
+    render(gamePageTree());
+    expect(await screen.findByText(PHRASE)).toBeInTheDocument();
+
+    fireEvent.click(phraseBox());
+    fireEvent.click(phraseBox());
+    engine.releaseFirst();
+
+    await waitFor(() => expect(engine.submittedSayings()).toHaveLength(2));
+    expect(engine.said).toBe(1);
+  });
+
+  it("continues the sequence without replaying seq when reconnecting mid-payment", async () => {
+    const engine = new FakeToyBoatEngine();
+    engine.said = 1;
+    const initial = buildGameState({
+      waiting_for: prompt(1),
+      active_player: 0,
+      priority_player: 0,
+      turn_number: 3,
+      say_payment: { id: PAYMENT_ID, owed: OWED, said: 1, clock_ms: 0, last_seq: 1 },
+    });
+
+    useGameStore.setState({
+      gameId: "say-phrase-reconnect",
+      gameMode: "ai",
+      adapter: engine.adapter(),
+      gameState: initial,
+      waitingFor: initial.waiting_for,
+      legalActions: [],
+      events: [],
+      eventHistory: [],
+      logHistory: [],
+      nextLogSeq: 0,
+      stateHistory: [],
+      turnCheckpoints: [],
+      lastCommittedSeq: 0,
+    });
+
+    render(gamePageTree());
+    expect(await screen.findByText(PHRASE)).toBeInTheDocument();
+
+    fireEvent.click(phraseBox());
+    expect(engine.submittedSayings()).toHaveLength(1);
+    expect(engine.submittedSayings()[0].seq).toBe(2);
   });
 });
