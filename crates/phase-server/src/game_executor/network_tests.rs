@@ -7337,6 +7337,188 @@ mod oversized_publication {
             });
         }
 
+        /// A server restart restores a Toy Boat payment mid-window. The
+        /// startup pass re-arms the lapse on the server's own clock, so the
+        /// payment lapses (and Toy Boat is sacrificed, CR 118.12a) although
+        /// its payer never reconnects and no client reports anything.
+        #[test]
+        fn a_restored_say_phrase_payment_lapses_with_its_payer_away() {
+            run_async_test(|| async {
+                let table = NativeTable::duel().await;
+                let code = table.key.game_code.clone();
+                let now = crate::epoch_ms_at_ingress(std::time::Instant::now());
+                let (state, payment_id) = toy_boat_state(Some(now + 300));
+                install(&table, state, &[]).await;
+                let persisted = session_read(&table, |session| {
+                    session
+                        .full_persist_snapshot()
+                        .expect("Full session is runtime-bound")
+                })
+                .await;
+                assert!(matches!(
+                    table.app.game_db.save_full_session(&persisted),
+                    Ok(server_core::FullPersistDisposition::Applied)
+                ));
+
+                // Restart: retire the live session and restore it from disk
+                // exactly as the startup pass does.
+                let row = table
+                    .app
+                    .game_db
+                    .load_active_full_sessions()
+                    .expect("load rows")
+                    .into_iter()
+                    .find(|row| row.key.game_code == code)
+                    .expect("the payment's session was persisted");
+                let expiry = {
+                    let mut mgr = table.app.sessions.lock().await;
+                    assert!(mgr.remove_game(&code));
+                    mgr.reconnect.remove_game(&code);
+                    let mut broker = table.app.lobby.lock().await;
+                    broker.lobby_mut().unregister_game(&code);
+                    let runtime = server_core::session::FullRuntime {
+                        key: row.key.clone(),
+                        activation_epoch: row.activation_epoch,
+                    };
+                    let mut session =
+                        GameSession::from_persisted(row.persisted, &table.app.db).expect("restore");
+                    session.seed_deck_pools_encoding(row.deck_pools_json);
+                    assert!(matches!(
+                        crate::finish_restored_full_startup(
+                            &mut mgr,
+                            &table.app.game_db,
+                            &runtime,
+                            session
+                        ),
+                        Ok(crate::RestoredFullStartup::Active)
+                    ));
+                    let expiry = crate::restored_say_phrase_expiry(&mut mgr, &code);
+                    crate::publish_restored_full_session(&mut mgr, broker.lobby_mut(), &code);
+                    expiry
+                };
+                // The restore boundary rekeys the payment, so a frame delayed
+                // from before the restart can never be taken for this one.
+                assert!(
+                    matches!(expiry, Some((P0, _, id, _)) if id != payment_id),
+                    "reach guard: the rekeyed payment is live for its payer: {expiry:?}"
+                );
+
+                // Only the opponent returns; the payer stays away.
+                let mut p1 = table.connect(P1).await;
+                crate::schedule_say_phrase_expiry(
+                    expiry,
+                    &table.app.context.game_executor,
+                    &table.app.sessions,
+                    &table.app.db,
+                    &table.app.draft_sessions,
+                    &table.app.connections,
+                    &table.app.game_db,
+                    &table.app.game_spectators,
+                    &code,
+                );
+                let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let update = until_type(&mut p1, "StateUpdate").await;
+                        if update["data"]["state"]["say_payment"].is_null() {
+                            break;
+                        }
+                    }
+                })
+                .await;
+                let state = session_read(&table, |session| session.state.clone()).await;
+                table.server.abort();
+                outcome.expect("the restored payment never lapsed");
+                assert!(state.say_payment.is_none());
+                assert!(
+                    !matches!(
+                        state.waiting_for,
+                        engine::types::game_state::WaitingFor::UnlessPayment { .. }
+                    ),
+                    "the lapse closed the payment: {:?}",
+                    state.waiting_for
+                );
+                assert!(
+                    !state
+                        .battlefield
+                        .iter()
+                        .any(|id| state.objects[id].name == "Toy Boat"),
+                    "an unpaid cumulative upkeep sacrifices Toy Boat"
+                );
+            });
+        }
+
+        /// The payer's window closes while a takeback vote is pending, so the
+        /// server's expiry report is refused. Declining the vote leaves the
+        /// payment live; the server re-arms its own lapse, so the payment
+        /// lapses with no further report from any client.
+        #[test]
+        fn a_declined_takeback_vote_rearms_a_refused_say_phrase_expiry() {
+            run_async_test(|| async {
+                let table = NativeTable::duel().await;
+                let (state, payment_id) = toy_boat_state(None);
+                install(&table, state, &[]).await;
+                let mut p0 = table.connect(P0).await;
+                let mut p1 = table.connect(P1).await;
+                let outcome = tokio::time::timeout(Duration::from_secs(15), async {
+                    // The first of two sayings opens the window between them.
+                    let first = GameAction::SayPhrase {
+                        payment: payment_id,
+                        seq: 1,
+                        at_ms: 0,
+                        report: engine::types::un_actions::SayPhraseReport::Saying,
+                    };
+                    send_command_frame(&mut p0, &first, 1).await;
+                    completion(&mut p0, 1).await;
+                    let deadline = session_read(&table, |session| {
+                        session
+                            .state
+                            .say_payment
+                            .as_ref()
+                            .and_then(|payment| payment.deadline_ms)
+                    })
+                    .await
+                    .expect("reach guard: one saying of two armed the window");
+
+                    request_takeback(&mut p0).await;
+                    assert_requested(&mut p1, P0).await;
+                    // Let the window close under the pending vote: the
+                    // server's expiry report is refused.
+                    let now = crate::epoch_ms_at_ingress(std::time::Instant::now());
+                    tokio::time::sleep(Duration::from_millis(deadline.saturating_sub(now) + 300))
+                        .await;
+                    assert!(
+                        session_read(&table, |session| session.state.say_payment.is_some()).await,
+                        "the pending vote refused the expiry"
+                    );
+
+                    send_test_message(
+                        &mut p1,
+                        &ClientMessage::RespondTakeback { approve: false },
+                        false,
+                    )
+                    .await;
+                    loop {
+                        let update = until_type(&mut p1, "StateUpdate").await;
+                        if update["data"]["state"]["say_payment"].is_null() {
+                            break;
+                        }
+                    }
+                })
+                .await;
+                let state = session_read(&table, |session| session.state.clone()).await;
+                table.server.abort();
+                outcome.expect("the payment never lapsed after the vote was declined");
+                assert!(state.say_payment.is_none());
+                assert!(
+                    !state
+                        .battlefield
+                        .iter()
+                        .any(|id| state.objects[id].name == "Toy Boat"),
+                    "an unpaid cumulative upkeep sacrifices Toy Boat"
+                );
+            });
+        }
+
         #[test]
         fn say_phrase_rejects_genuinely_late_saying() {
             run_async_test(|| async {

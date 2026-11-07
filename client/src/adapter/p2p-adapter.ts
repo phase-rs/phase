@@ -1326,6 +1326,8 @@ const RECONNECT_STEADY_STATE_MS = 60_000;
  * to end.
  */
 const SUBMISSION_TIMEOUT_MS = 30_000;
+/** Pause before the authority repeats an expiry report it was refused. */
+const SAY_EXPIRY_RETRY_MS = 250;
 // A stale proposal leaves the prompt unchanged, so cap retries to prevent a
 // persistent authority race from becoming a tight host-loop spin.
 const MAX_AI_PROPOSAL_STALE_RETRIES = 3;
@@ -2748,6 +2750,10 @@ export class P2PHostAdapter implements EngineAdapter {
       // (the fresh-start emitter) never runs on resume. Re-announce the seat
       // names here so the host's own UI labels its guests again.
       this.emit({ type: "playerIdentity", playerId: 0, playerNames: this.playerNamesForSeats() });
+      // A resumed game may hold a timed spoken payment mid-window. Its lapse
+      // is observed on this authority's clock, so it is armed now rather than
+      // waiting for the payer (who may never return) to act.
+      this.scheduleSayPhraseExpiry();
     }
     traceAdapter("Host", "initialize-complete", {});
     this.initialized = true;
@@ -3529,6 +3535,9 @@ export class P2PHostAdapter implements EngineAdapter {
       this.sayingRevisions.add(revision);
     }
     const saying = isSaying || this.sayingRevisions.has(revision);
+    // Full publishes its own revisions — a rollback or resume among them can
+    // rekey or restore a timed spoken payment. Re-arm the lapse from it.
+    this.scheduleSayPhraseExpiry();
     const allNames = this.playerNamesForSeats();
     const sends: Array<Promise<boolean>> = [];
     for (const [pid, session] of this.guestSessions) {
@@ -4509,7 +4518,17 @@ export class P2PHostAdapter implements EngineAdapter {
       await this.runAiLoop();
       void this.persistAuthoritativeState();
     } catch (err) {
+      // Refused — e.g. while a takeback vote is pending. The payment stays
+      // live, so report again after a pause instead of spinning on it.
       console.warn("[P2PHost] authority expiry report failed:", err);
+      this.sayExpiryPayment = null;
+      this.sayExpiryDeadline = null;
+      this.clearSayExpiryTimer();
+      this.sayExpiryTimer = setTimeout(() => {
+        this.sayExpiryTimer = null;
+        this.scheduleSayPhraseExpiry();
+      }, SAY_EXPIRY_RETRY_MS);
+      return;
     }
     this.sayExpiryPayment = null;
     this.sayExpiryDeadline = null;
@@ -4813,6 +4832,9 @@ export class P2PHostAdapter implements EngineAdapter {
           void this.persistAuthoritativeState();
         } else {
           await this.enqueueDelivery(async () => this.announceTakeback(resolvedTakebackEvent(notice)));
+          // The pending vote may have refused a timed payment's expiry report;
+          // the payment is still live, so its lapse is re-armed.
+          this.scheduleSayPhraseExpiry();
         }
         // The AI loop stops while a vote is open; every resolution restarts it.
         await this.runAiLoop();

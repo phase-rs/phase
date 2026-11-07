@@ -555,6 +555,20 @@ fn finish_restored_full_startup(
     completion
 }
 
+/// The live timed spoken payment of a session the startup pass just restored,
+/// read after `finish_restored_full_startup` so a resumed stack automation has
+/// already run. The caller re-arms it once the shared server state exists: the
+/// lapse is observed on the server's clock, so a payer who never reconnects
+/// still sees the payment lapse.
+fn restored_say_phrase_expiry(
+    manager: &mut SessionManager,
+    game_code: &str,
+) -> Option<(PlayerId, String, u64, u64)> {
+    manager
+        .session_exclusive(game_code)
+        .and_then(|session| say_phrase_expiry_target(session))
+}
+
 async fn reserve_lobby_subscriber_slot(
     lobby_subscribers: &SharedLobbySubscribers,
     tx: &crate::socket_mailbox::Sender,
@@ -3180,6 +3194,10 @@ async fn serve() {
                 let mut lob_guard = lobby.lock().await;
                 let lob = lob_guard.lobby_mut();
                 let mut restored = 0u32;
+                // Timed spoken payments restored mid-window. Their lapse is
+                // observed on the server's clock, so it is re-armed here: a
+                // payer who never reconnects must still see it lapse.
+                let mut restored_expiries = Vec::new();
 
                 for snapshot in persisted_games {
                     // The reader already decoded this value; re-serializing it
@@ -3203,8 +3221,12 @@ async fn serve() {
                                     info!(game = %game_code, "terminalized restored Full session");
                                 }
                                 Ok(RestoredFullStartup::Active) => {
+                                    let expiry = restored_say_phrase_expiry(&mut mgr, game_code);
                                     publish_restored_full_session(&mut mgr, lob, game_code);
                                     restored += 1;
+                                    if expiry.is_some() {
+                                        restored_expiries.push((game_code.clone(), expiry));
+                                    }
                                 }
                                 Err(error) => {
                                     warn!(game = %game_code, %error, "restored Full session remains private for recovery");
@@ -3222,6 +3244,21 @@ async fn serve() {
                 // could read nothing print the same count and are told apart
                 // by the warn below.
                 info!(count = restored, "restored active games from disk");
+                drop(lob_guard);
+                drop(mgr);
+                for (game_code, expiry) in restored_expiries {
+                    schedule_say_phrase_expiry(
+                        expiry,
+                        &server_context.game_executor,
+                        &state,
+                        &db,
+                        &draft_sessions,
+                        &connections,
+                        &game_db,
+                        &game_spectators,
+                        &game_code,
+                    );
+                }
                 match game_db.count_legacy_full_sessions() {
                     Ok(0) => {}
                     Ok(dropped) => warn!(
@@ -12248,7 +12285,23 @@ async fn handle_client_message(
                     }
                 }
             }
+            // A vote's resolution can leave a timed spoken payment live again:
+            // a rollback rekeys it, and a declined or cancelled vote leaves the
+            // payment whose expiry the pending vote refused. Re-arm the server's
+            // lapse observation so the payer need not act for it to lapse.
+            let expiry = say_phrase_expiry_target(&guard);
             drop(guard);
+            schedule_say_phrase_expiry(
+                expiry,
+                &context.game_executor,
+                state,
+                db,
+                draft_state,
+                connections,
+                game_db,
+                game_spectators,
+                &game_code,
+            );
         }
 
         ClientMessage::RespondTakeback { approve } => {
@@ -12377,7 +12430,23 @@ async fn handle_client_message(
                     }
                 }
             }
+            // A vote's resolution can leave a timed spoken payment live again:
+            // a rollback rekeys it, and a declined or cancelled vote leaves the
+            // payment whose expiry the pending vote refused. Re-arm the server's
+            // lapse observation so the payer need not act for it to lapse.
+            let expiry = say_phrase_expiry_target(&guard);
             drop(guard);
+            schedule_say_phrase_expiry(
+                expiry,
+                &context.game_executor,
+                state,
+                db,
+                draft_state,
+                connections,
+                game_db,
+                game_spectators,
+                &game_code,
+            );
         }
 
         ClientMessage::CancelTakeback => {
@@ -12439,7 +12508,23 @@ async fn handle_client_message(
                     }
                 }
             }
+            // A vote's resolution can leave a timed spoken payment live again:
+            // a rollback rekeys it, and a declined or cancelled vote leaves the
+            // payment whose expiry the pending vote refused. Re-arm the server's
+            // lapse observation so the payer need not act for it to lapse.
+            let expiry = say_phrase_expiry_target(&guard);
             drop(guard);
+            schedule_say_phrase_expiry(
+                expiry,
+                &context.game_executor,
+                state,
+                db,
+                draft_state,
+                connections,
+                game_db,
+                game_spectators,
+                &game_code,
+            );
         }
 
         ClientMessage::SpectatorJoin { game_code } => {

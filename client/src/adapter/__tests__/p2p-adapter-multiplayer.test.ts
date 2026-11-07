@@ -2954,6 +2954,41 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     adapter.dispose();
   });
 
+  it("lapses a restored overdue spoken payment on its own clock while the payer is away", async () => {
+    // Toy Boat's payment was mid-window when the host page closed. The payer
+    // (seat 1) never returns; the resumed authority must still lapse it.
+    const overdue = {
+      players: [],
+      objects: {},
+      waiting_for: { type: "UnlessPayment", data: { player: 1 } },
+      say_payment: { id: 9, owed: 2, said: 1, clock_ms: 0, last_seq: 1, deadline_ms: Date.now() - 1 },
+    };
+    mocks.getState.mockResolvedValue(overdue as never);
+    // The engine lapses the payment on the authority's expiry report.
+    mocks.submitAction.mockImplementationOnce(async () => {
+      mocks.getState.mockResolvedValue({
+        players: [],
+        objects: {},
+        waiting_for: { type: "Priority", data: { player: 0 } },
+      });
+      return { events: [] };
+    });
+    const { adapter } = makeResumedHost();
+    try {
+      await adapter.initialize();
+      await vi.waitFor(() => expect(mocks.submitAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "SayPhrase",
+          data: expect.objectContaining({ payment: 9, seq: 0, report: "Expiry" }),
+        }),
+        1,
+      ));
+      expect(mocks.submitAction).toHaveBeenCalledTimes(1);
+    } finally {
+      adapter.dispose();
+    }
+  });
+
   // Issue #9527: a refreshed host labelled its guest "Opp 2" because the
   // guest's join-time display name was never persisted and the resumed host
   // never re-announced seat names to its own UI.

@@ -222,6 +222,28 @@ describe("P2P saying reply lane", () => {
     expect(host.runAiLoop).toHaveBeenCalledTimes(1);
   });
 
+  it("re-reports a refused lapse after a pause instead of spinning on it", async () => {
+    vi.useFakeTimers();
+    try {
+      // A pending takeback vote refuses the authority's expiry report; the
+      // payment stays live, so the lapse must be observed again later.
+      const submitAction = vi.fn(async () => {
+        throw new AdapterError(AdapterErrorCode.ACTION_REJECTED, "A takeback vote is pending", true);
+      });
+      const host = makeHost(submitAction);
+
+      await host.expireSayPhrase(7);
+      expect(submitAction).toHaveBeenCalledTimes(1);
+      expect(host.publishHostSnapshot).not.toHaveBeenCalled();
+      expect(host.scheduleSayPhraseExpiry).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(250);
+      expect(host.scheduleSayPhraseExpiry).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("settles a saying without consuming a parked ordinary command", async () => {
     const guest = makeGuest(true);
     const said = guest.submitSaying(saying());
