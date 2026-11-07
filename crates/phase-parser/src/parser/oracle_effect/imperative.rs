@@ -22,7 +22,7 @@ use super::counter::{
 use super::lower::{
     parse_multi_target_count_expr, parse_where_x_quantity_expression,
     parse_where_x_quantity_expression_with_owner, rebind_cost_paid_object_pt_to_target,
-    strip_leading_quantifier, strip_terminal_where_x, strip_trailing_where_x,
+    strip_leading_quantifier, strip_terminal_where_x, strip_trailing_where_x, WhereXBinding,
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_with_context};
 use super::token::try_parse_token;
@@ -3770,16 +3770,30 @@ pub(super) fn parse_search_and_creation_ast(
         if let Some(player) = parse_dig_library_owner(rest_lower, ctx, DigOwnerPhrase::WithHeadNoun)
         {
             // CR 701.20e + CR 701.13a + CR 406.3: "look at the top card ... and
-            // exiles it face down" (Gonti, Night Minister) — fuse into ExileTop so
-            // the card leaves the library and the trailing play grant can bind to
-            // the tracked set.
-            if preceded(
-                take_until::<_, _, OracleError<'_>>("and exiles it face down"),
-                tag::<_, _, OracleError<'_>>("and exiles it face down"),
-            )
-            .parse(rest_lower)
-            .is_ok()
-            {
+            // exiles it face down" (Gonti, Night Minister) / "..., then exiles it
+            // face down" (Vulcan Mind-Meld) — the subject's own continuation —
+            // fuse into ExileTop so the card leaves the library and the trailing
+            // play grant can bind to the tracked set.
+            if let Some(tail) = nom_primitives::scan_at_word_boundaries(rest_lower, |i| {
+                preceded(
+                    (
+                        alt((tag::<_, _, OracleError<'_>>("and "), tag("then "))),
+                        tag("exiles "),
+                        alt((tag("it"), tag("them"))),
+                        tag(" face down"),
+                    ),
+                    nom::combinator::rest,
+                )
+                .parse(i)
+            }) {
+                // CR 608.2c: a fused instruction cannot discard a later rider.
+                // Claim the gap here so it cannot fall through to generic Dig.
+                if !terminal_punctuation_only(tail) {
+                    return Some(SearchCreationImperativeAst::Unimplemented {
+                        gap: "look_exile_tail",
+                        fragment: text.to_string(),
+                    });
+                }
                 return Some(SearchCreationImperativeAst::ExileTopLookedAt {
                     player,
                     count,
@@ -4140,6 +4154,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: crate::types::ability::DigRestOrder::Preserve,
             reveal,
@@ -6056,6 +6071,47 @@ fn parse_controlled_battlefield_body(
     Some((up_to, filter))
 }
 
+/// CR 406.2 + CR 608.2c + CR 608.2d: Parse the per-player exile-pool body
+/// "[up to one|a|an|one] `<type-phrase>` that player owns exiled this way" —
+/// everything after "choose " (Ensign Pavel Chekov: "For each opponent, choose
+/// a land card that player owns exiled this way"). The pool is the cards the
+/// preceding instruction exiled (the chain's tracked set), split by owner: each
+/// iterated player's share is the part of that set they own. Returns
+/// `(up_to, filter)`; the whole clause must be consumed.
+fn parse_owned_exiled_this_way_body(
+    after_verb: &str,
+    ctx: &mut ParseContext,
+) -> Option<(bool, TargetFilter)> {
+    type E<'a> = OracleError<'a>;
+
+    let (after_qty, up_to) = alt((
+        value(true, tag::<_, _, E>("up to one ")),
+        value(false, tag("a ")),
+        value(false, tag("an ")),
+        value(false, tag("one ")),
+    ))
+    .parse(after_verb)
+    .ok()?;
+    let (type_phrase, owner_clause) = nom_primitives::scan_split_at_phrase(after_qty, |i| {
+        tag::<_, _, E>("that player owns exiled this way").parse(i)
+    })?;
+    let (after_clause, _) = tag::<_, _, E>("that player owns exiled this way")
+        .parse(owner_clause)
+        .ok()?;
+    if !terminal_punctuation_only(after_clause) {
+        return None;
+    }
+    let type_phrase = type_phrase.trim_end();
+    if type_phrase.is_empty() {
+        return None;
+    }
+    let filter = super::search::parse_search_filter(type_phrase, ctx);
+    if matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    Some((up_to, filter))
+}
+
 /// CR 101.4 + CR 102.2 + CR 608.2c: "For each [other] player, exile [up to one]
 /// [target] `<type-phrase>` that player controls" — Kaya, Spirits' Justice's −2.
 /// The combined choose+exile per-iterated-player form: each iterated player's
@@ -6446,24 +6502,42 @@ pub(super) fn parse_for_each_opponent_choose_controlled(
     )
         .parse(lower)
         .ok()?;
-    let (up_to, filter) = parse_controlled_battlefield_body(after_verb, ctx)?;
-    // Nothing may follow "that player controls": a trailing instruction on the
-    // same clause would otherwise be dropped silently.
-    let (_, (), after_clause) = nom_primitives::scan_preceded(after_verb, |i| {
-        controller_phrase_among(&[ControllerPhrase::THAT_PLAYER_CONTROLS]).parse(i)
-    })?;
-    if !terminal_punctuation_only(after_clause) {
-        return None;
-    }
+    let (zone, candidate_source, up_to, filter) =
+        match parse_owned_exiled_this_way_body(after_verb, ctx) {
+            Some((up_to, filter)) => (
+                Zone::Exile,
+                crate::types::ability::ZoneChoiceCandidateSource::Tracked,
+                up_to,
+                filter,
+            ),
+            None => {
+                let (up_to, filter) = parse_controlled_battlefield_body(after_verb, ctx)?;
+                // Nothing may follow "that player controls": a trailing
+                // instruction on the same clause would otherwise be dropped
+                // silently.
+                let (_, (), after_clause) = nom_primitives::scan_preceded(after_verb, |i| {
+                    controller_phrase_among(&[ControllerPhrase::THAT_PLAYER_CONTROLS]).parse(i)
+                })?;
+                if !terminal_punctuation_only(after_clause) {
+                    return None;
+                }
+                (
+                    Zone::Battlefield,
+                    crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+                    up_to,
+                    filter,
+                )
+            }
+        };
 
     Some(parsed_clause(Effect::ChooseFromZone {
         count: 1,
-        zone: Zone::Battlefield,
+        zone,
         additional_zones: Vec::new(),
         zone_owner: ZoneOwner::Each(PerPlayerScope::Opponents),
         filter: Some(filter),
         chooser: Chooser::Controller.into(),
-        candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+        candidate_source,
         reciprocal_role: None,
         gather_role: None,
         up_to,
@@ -12446,7 +12520,11 @@ fn counter_unless_where_x_quantity(rest: &str) -> Option<&str> {
     Some(qty_text.trim_end_matches('.').trim())
 }
 
-pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
+pub(super) fn parse_counter_ast(
+    text: &str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ZoneCounterImperativeAst> {
     // CR 701.6 + CR 405.1: "Counter all/each [filter] spells/abilities"
     // mass-counter precheck. Mirrors the `parse_destroy_ast` precheck +
     // `BounceAll` precedent: consume the verb plus an optional `all`/`each`
@@ -12526,14 +12604,23 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
     // `oracle_effect::try_parse_put_zone_change_parts`).
     let (without_where_tp, where_x_expression) =
         super::strip_trailing_where_x(crate::parser::oracle_util::TextPair::new(rest_orig, rest));
+    // CR 608.2c: parse the stack-target phrase with the context-free entry (the
+    // same one this parser used before the anaphor fix, so diagnostics stay put),
+    // then refine a bare "that spell" for a non-trigger instruction to the spell's
+    // earlier announced target.
     let (target, _rem) = parse_target(without_where_tp.original);
+    let target = crate::parser::oracle_target::bind_spell_anaphor_to_context(ctx, target);
     #[cfg(debug_assertions)]
     assert_no_compound_remainder(_rem, text);
     // `parse_target("... spell with mana value X or less")` already scopes
     // the spell phrase to the stack through the shared target parser. Keep this
     // path on that building block and only apply the trailing X definition.
     // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
-    let target = super::apply_where_x_to_filter(target, where_x_expression.as_deref())?;
+    // `WhereXBinding::bare` binds the where-X count with no player antecedents:
+    // this path does not hand the parse context's antecedents to the count, so
+    // the filter bound keeps the legacy seeds.
+    let target =
+        super::apply_where_x_to_filter(target, WhereXBinding::bare(where_x_expression.as_deref()))?;
     // CR 118.12: Parse "unless its controller pays {X}" for conditional counters
     let unless_pay = parse_counter_unless_pay(rest)?;
     Some(ZoneCounterImperativeAst::Counter {
@@ -12544,25 +12631,23 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
     })
 }
 
+/// Shared word-boundary guard for the `pay` residue tokens: the token just
+/// consumed must be followed by end-of-input or punctuation/whitespace — not
+/// another alpha char. This blocks false matches like "lifelink" when we only
+/// want "life", or "manafoo" when we only want "mana".
+fn word_boundary(i: &str) -> OracleResult<'_, ()> {
+    peek(alt((value((), eof), value((), recognize(one_of(" .,")))))).parse(i)
+}
+
 /// CR 118.8 + CR 119.4: Parse the amount portion of a "pay <amount> life" cost.
 ///
 /// `rest` is the lowercase text after the leading `"pay "` token. Returns the
 /// resolved `QuantityExpr` on success — literal (`"3 life"`), X variable
 /// (`"X life"`), or a dynamic reference (`"life equal to its power"`,
 /// `"life equal to <quantity-ref>"`). All dispatch is nom-combinator based,
-/// with a shared `life_with_boundary` combinator that guards `"life"` against
+/// with the shared `word_boundary` combinator that guards `"life"` against
 /// accidental alpha-suffix matches (e.g., `"x lifelink"`).
 fn parse_pay_life_amount(rest: &str) -> Option<QuantityExpr> {
-    use crate::parser::oracle_nom::error::OracleResult;
-    use nom::sequence::terminated;
-
-    // Shared word-boundary guard: the token just consumed must be followed by
-    // end-of-input or punctuation/whitespace — not another alpha char. This
-    // blocks false matches like "lifelink" when we only want "life".
-    fn word_boundary(i: &str) -> OracleResult<'_, ()> {
-        peek(alt((value((), eof), value((), recognize(one_of(" .,")))))).parse(i)
-    }
-
     // CR 118.8: "pay life equal to <quantity-ref>" — delegates to the shared
     // event-context / named-quantity resolvers so every dynamic amount pattern
     // already recognized for gain/lose life composes here too. The quantity
@@ -12652,65 +12737,111 @@ pub(crate) fn parse_say_phrase_payment(input: &str) -> OracleResult<'_, String> 
     Ok((rest, phrase.trim().to_string()))
 }
 
+/// CR 118.1 + CR 107.1c + CR 107.3f: the cost named by a `pay ` residue, plus
+/// the resolution-time multiplier when the clause scales that cost by an
+/// amount the player chooses (`pay any amount of {R}`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PayResidueCost {
+    pub(crate) cost: AbilityCost,
+    pub(crate) scale: Option<QuantityExpr>,
+}
+
+/// CR 107.3f: the player-chosen amount of an `any amount of …` payment,
+/// encoded as the bare `X` variable bound at resolution.
+fn any_amount_variable_x() -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::Variable {
+            name: "X".to_string(),
+        },
+    }
+}
+
+/// Adapter: the existing mana-symbol authority (`parse_mana_symbols`, which
+/// case-folds itself) as a nom parser.
+fn pay_mana_symbols(i: &str) -> OracleResult<'_, crate::types::mana::ManaCost> {
+    parse_mana_symbols(i)
+        .map(|(cost, rest)| (rest, cost))
+        .ok_or_else(|| oracle_err(i))
+}
+
+/// CR 107.1c + CR 107.3f + CR 118.1: the `any amount of …` payments, nested
+/// under their shared prefix — one `alt` arm per resource:
+/// - `life` (CR 119.4) and `mana` (Join forces) → the variable amount lives in
+///   the cost itself (`PayLife { X }` / `Mana { {X} }`), no scale;
+/// - `{e}` (CR 107.14) → `PayEnergy { X }`, no scale;
+/// - mana symbols (`any amount of {R}`) → the per-unit cost `{R}` scaled by
+///   the player-chosen amount (bare `Variable "X"`). The leaf must consume the
+///   whole tail (a lone trailing period allowed), so `any amount of {R} and
+///   {G}` declines instead of silently dropping `and {G}`, and the per-unit
+///   cost may not itself carry an `{X}` shard.
+fn parse_any_amount_of_payment(i: &str) -> OracleResult<'_, PayResidueCost> {
+    preceded(
+        tag("any amount of "),
+        alt((
+            map(terminated(tag("life"), word_boundary), |_| PayResidueCost {
+                cost: AbilityCost::PayLife {
+                    amount: any_amount_variable_x(),
+                },
+                scale: None,
+            }),
+            map(terminated(tag("mana"), word_boundary), |_| PayResidueCost {
+                cost: AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::Cost {
+                        shards: vec![crate::types::mana::ManaCostShard::X],
+                        generic: 0,
+                    },
+                },
+                scale: None,
+            }),
+            map(tag("{e}"), |_| PayResidueCost {
+                cost: AbilityCost::PayEnergy {
+                    amount: any_amount_variable_x(),
+                },
+                scale: None,
+            }),
+            map(
+                all_consuming(terminated(
+                    verify(pay_mana_symbols, |cost: &crate::types::mana::ManaCost| {
+                        !cost.has_x()
+                    }),
+                    opt(tag(".")),
+                )),
+                |cost| PayResidueCost {
+                    cost: AbilityCost::Mana { cost },
+                    scale: Some(any_amount_variable_x()),
+                },
+            ),
+        )),
+    )
+    .parse(i)
+}
+
 /// CR 118.1 + CR 119.4 + CR 107.1c: parse the residue after a `pay ` prefix
-/// into an `AbilityCost` — mana+life combos, `pay <amount> life`, any-amount
-/// energy/life/mana payments, `{E}` counts, and bare mana symbols. Single
-/// authority shared by the imperative `CostResource` family and the as-enters
-/// payment replacement builder (`parse_as_enters_pay`, which requires the
-/// any-amount-life shape). `rest` is the lowercased remainder, `rest_orig` the
-/// original-case remainder for case-sensitive mana parsing.
-pub(crate) fn parse_pay_residue_cost(rest: &str, rest_orig: &str) -> Option<AbilityCost> {
+/// into a [`PayResidueCost`] — mana+life combos, `pay <amount> life`,
+/// any-amount energy/life/mana/mana-symbol payments
+/// (`parse_any_amount_of_payment`; only the mana-symbol leaf carries a
+/// `scale`), the separate fixed-quantity `an amount of {E} equal to …` axis,
+/// `{E}` counts, and bare mana symbols. Single authority shared by the
+/// imperative `CostResource` family and the as-enters payment replacement
+/// builder (`parse_as_enters_pay`, which requires the unscaled any-amount-life
+/// shape). `rest` is the lowercased remainder, `rest_orig` the original-case
+/// remainder for case-sensitive mana parsing.
+pub(crate) fn parse_pay_residue_cost(rest: &str, rest_orig: &str) -> Option<PayResidueCost> {
     if let Some(cost) = parse_mana_and_life_payment(rest_orig) {
-        return Some(cost);
+        return Some(PayResidueCost { cost, scale: None });
     }
     // CR 118.1 + CR 119.4: `pay <amount> life` — literal count, X variable,
     // or dynamic reference (`pay life equal to its power`). Dispatched with
     // nom combinators over the post-"pay " remainder.
     if let Some(amount) = parse_pay_life_amount(rest) {
-        return Some(AbilityCost::PayLife { amount });
-    }
-    // CR 107.14: "pay any amount of {E}" → variable energy payment
-    if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("any amount of {e}").parse(rest) {
-        return Some(AbilityCost::PayEnergy {
-            amount: QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "X".to_string(),
-                },
-            },
+        return Some(PayResidueCost {
+            cost: AbilityCost::PayLife { amount },
+            scale: None,
         });
     }
-    // CR 119.4 + CR 107.1c: "pay any amount of life" → variable life payment;
-    // the amount paid binds X for the downstream "draw/look at that many"
-    // step. The word-boundary guard (eof or " .,") blocks "lifelink" /
-    // "lifeforce" from false-matching.
-    if terminated(
-        tag::<_, _, OracleError<'_>>("any amount of life"),
-        peek(alt((
-            value((), eof),
-            value((), nom::combinator::recognize(one_of(" .,"))),
-        ))),
-    )
-    .parse(rest)
-    .is_ok()
-    {
-        return Some(AbilityCost::PayLife {
-            amount: QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "X".to_string(),
-                },
-            },
-        });
-    }
-    // CR 118.1 + CR 107.3: "pay any amount of mana" → variable generic
-    // mana payment. Join forces uses the total paid this way as X for the
-    // following effect chain.
-    if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("any amount of mana").parse(rest) {
-        return Some(AbilityCost::Mana {
-            cost: crate::types::mana::ManaCost::Cost {
-                shards: vec![crate::types::mana::ManaCostShard::X],
-                generic: 0,
-            },
-        });
+    // CR 107.1c + CR 107.3f + CR 118.1: "pay any amount of <life|mana|{E}|mana symbols>".
+    if let Ok((_, residue)) = parse_any_amount_of_payment(rest) {
+        return Some(residue);
     }
     // "pay an amount of {e} equal to ..." → dynamic energy payment.
     // Delegates to the single-authority combinator
@@ -12721,15 +12852,21 @@ pub(crate) fn parse_pay_residue_cost(rest: &str, rest_orig: &str) -> Option<Abil
         .is_ok()
     {
         if let Some(amount) = super::parse_dynamic_energy_unless_cost(rest) {
-            return Some(AbilityCost::PayEnergy { amount });
+            return Some(PayResidueCost {
+                cost: AbilityCost::PayEnergy { amount },
+                scale: None,
+            });
         }
         // Fallback: variable energy payment
-        return Some(AbilityCost::PayEnergy {
-            amount: QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "X".to_string(),
+        return Some(PayResidueCost {
+            cost: AbilityCost::PayEnergy {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
                 },
             },
+            scale: None,
         });
     }
     // CR 107.14: "pay {E}", "pay {E}{E}", "pay N {E}" → AbilityCost::PayEnergy.
@@ -12741,10 +12878,13 @@ pub(crate) fn parse_pay_residue_cost(rest: &str, rest_orig: &str) -> Option<Abil
         let cleaned = rest.replace("{e}", "").replace(' ', "");
         if cleaned.is_empty() {
             // Pure {E} symbols: "pay {e}{e}"
-            return Some(AbilityCost::PayEnergy {
-                amount: QuantityExpr::Fixed {
-                    value: energy_count as i32,
+            return Some(PayResidueCost {
+                cost: AbilityCost::PayEnergy {
+                    amount: QuantityExpr::Fixed {
+                        value: energy_count as i32,
+                    },
                 },
+                scale: None,
             });
         }
         // "pay N {e}" / "pay eight {e}" — `parse_number` halts before the
@@ -12760,15 +12900,21 @@ pub(crate) fn parse_pay_residue_cost(rest: &str, rest_orig: &str) -> Option<Abil
             .parse(after_number)
             .is_ok()
             {
-                return Some(AbilityCost::PayEnergy {
-                    amount: QuantityExpr::Fixed { value: n as i32 },
+                return Some(PayResidueCost {
+                    cost: AbilityCost::PayEnergy {
+                        amount: QuantityExpr::Fixed { value: n as i32 },
+                    },
+                    scale: None,
                 });
             }
         }
     }
     // "pay {2}{B}" → AbilityCost::Mana (CR 118.3a)
     if let Some((mana_cost, _)) = parse_mana_symbols(rest_orig.trim()) {
-        return Some(AbilityCost::Mana { cost: mana_cost });
+        return Some(PayResidueCost {
+            cost: AbilityCost::Mana { cost: mana_cost },
+            scale: None,
+        });
     }
     None
 }
@@ -12795,8 +12941,8 @@ pub(super) fn parse_cost_resource_ast(
         nom_on_lower(text, lower, |input| value((), tag("pay ")).parse(input))
     {
         let rest = &lower[lower.len() - rest_orig.len()..];
-        if let Some(cost) = parse_pay_residue_cost(rest, rest_orig) {
-            return Some(CostResourceImperativeAst::Pay { cost });
+        if let Some(PayResidueCost { cost, scale }) = parse_pay_residue_cost(rest, rest_orig) {
+            return Some(CostResourceImperativeAst::Pay { cost, scale });
         }
     }
     // Un-card (no CR entry): `say "<phrase>" [in a <adjective> voice]` — a spoken
@@ -12806,8 +12952,10 @@ pub(super) fn parse_cost_resource_ast(
         nom_on_lower(text, lower, |input| value((), tag("say ")).parse(input))
     {
         if let Ok((_, phrase)) = parse_say_phrase_payment(rest_orig) {
+            // A spoken payment has no amount axis.
             return Some(CostResourceImperativeAst::Pay {
                 cost: AbilityCost::SayPhrase { phrase },
+                scale: None,
             });
         }
     }
@@ -12913,9 +13061,9 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
                 }
             }
         }
-        CostResourceImperativeAst::Pay { cost } => Effect::PayCost {
+        CostResourceImperativeAst::Pay { cost, scale } => Effect::PayCost {
             cost,
-            scale: None,
+            scale,
             payer: TargetFilter::Controller,
         },
         CostResourceImperativeAst::DamageEffect(effect) => *effect,
@@ -18326,7 +18474,7 @@ pub(super) fn parse_zone_counter_ast<'a>(
     if let Some(ast) = parse_exile_ast(text, lower, ctx) {
         return Some(Ok(ast));
     }
-    if let Some(ast) = parse_counter_ast(text, lower) {
+    if let Some(ast) = parse_counter_ast(text, lower, ctx) {
         return Some(Ok(ast));
     }
     if tag::<_, _, OracleError<'_>>("put ").parse(lower).is_ok()
@@ -19373,6 +19521,55 @@ mod tests {
         }
     }
 
+    /// CR 608.2c + CR 608.2d: "for each opponent, choose <type> that player owns
+    /// exiled this way" reads each opponent's share of the chain's exiled set
+    /// (`Tracked`, in exile); a trailing instruction is refused, not dropped.
+    #[test]
+    fn for_each_opponent_choose_owned_exiled_this_way() {
+        let parse = |text: &str| {
+            parse_for_each_opponent_choose_controlled(text, &mut ParseContext::default())
+        };
+        for (text, expected_up_to) in [
+            (
+                "for each opponent, choose a land card that player owns exiled this way.",
+                false,
+            ),
+            (
+                "for each opponent, choose up to one creature card that player owns exiled this way",
+                true,
+            ),
+        ] {
+            let clause = parse(text).unwrap_or_else(|| panic!("{text:?} parses"));
+            let Effect::ChooseFromZone {
+                zone,
+                zone_owner,
+                filter,
+                candidate_source,
+                up_to,
+                count,
+                ..
+            } = clause.effect
+            else {
+                panic!("{text:?}: expected ChooseFromZone, got {:?}", clause.effect);
+            };
+            assert_eq!(zone, Zone::Exile, "{text:?}");
+            assert_eq!(zone_owner, ZoneOwner::Each(PerPlayerScope::Opponents));
+            assert_eq!(
+                candidate_source,
+                crate::types::ability::ZoneChoiceCandidateSource::Tracked
+            );
+            assert_eq!(up_to, expected_up_to, "{text:?}");
+            assert_eq!(count, 1);
+            assert!(filter.is_some(), "{text:?}");
+        }
+        for declined in [
+            "for each opponent, choose a land card that player owns exiled this way and sacrifice it.",
+            "for each opponent, choose that player owns exiled this way.",
+        ] {
+            assert!(parse(declined).is_none(), "{declined:?}");
+        }
+    }
+
     #[test]
     fn single_category_sacrifice_rest_marker() {
         for admitted in CHOOSER_DOMAIN {
@@ -20335,7 +20532,7 @@ mod tests {
     #[test]
     fn parse_counter_louisoix_three_way_disjunction() {
         let text = "Counter target activated ability, triggered ability, or noncreature spell.";
-        let ast = parse_counter_ast(text, &text.to_lowercase())
+        let ast = parse_counter_ast(text, &text.to_lowercase(), &mut ParseContext::default())
             .expect("Louisoix's Sacrifice counter clause should parse");
         let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
             panic!("expected a Counter AST");
@@ -20376,7 +20573,7 @@ mod tests {
     #[test]
     fn parse_counter_spider_sense_spell_first_disjunction() {
         let text = "Counter target instant spell, sorcery spell, or triggered ability.";
-        let ast = parse_counter_ast(text, &text.to_lowercase())
+        let ast = parse_counter_ast(text, &text.to_lowercase(), &mut ParseContext::default())
             .expect("Spider-Sense counter clause should parse");
         let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
             panic!("expected a Counter AST");
@@ -20429,7 +20626,7 @@ mod tests {
     #[test]
     fn parse_counter_disallow_three_way_disjunction() {
         let text = "Counter target spell, activated ability, or triggered ability.";
-        let ast = parse_counter_ast(text, &text.to_lowercase())
+        let ast = parse_counter_ast(text, &text.to_lowercase(), &mut ParseContext::default())
             .expect("Disallow counter clause should parse");
         let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
             panic!("expected a Counter AST");
@@ -20484,7 +20681,7 @@ mod tests {
     #[test]
     fn parse_counter_target_spell_with_where_x_cmc_bound() {
         let text = "counter target spell with mana value X or less, where X is the number of Faeries you control.";
-        let ast = parse_counter_ast(text, &text.to_lowercase())
+        let ast = parse_counter_ast(text, &text.to_lowercase(), &mut ParseContext::default())
             .expect("Spellstutter Sprite counter clause should parse");
         let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
             panic!("expected a Counter AST");
@@ -20536,7 +20733,7 @@ mod tests {
     #[test]
     fn parse_counter_plain_spell_unchanged() {
         let text = "Counter target spell.";
-        let ast = parse_counter_ast(text, &text.to_lowercase())
+        let ast = parse_counter_ast(text, &text.to_lowercase(), &mut ParseContext::default())
             .expect("\"Counter target spell\" should parse");
         let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
             panic!("expected a Counter AST");
@@ -23932,6 +24129,7 @@ mod tests {
         let lower = text.to_lowercase();
         let Some(CostResourceImperativeAst::Pay {
             cost: AbilityCost::Mana { cost },
+            ..
         }) = parse_cost_resource_ast(text, &lower, &mut ParseContext::default())
         else {
             panic!("expected variable mana PayCost");
@@ -23954,6 +24152,7 @@ mod tests {
         let lower = text.to_lowercase();
         let Some(CostResourceImperativeAst::Pay {
             cost: AbilityCost::PayLife { amount },
+            ..
         }) = parse_cost_resource_ast(text, &lower, &mut ParseContext::default())
         else {
             panic!("expected PayLife cost for {text:?}");
@@ -23983,6 +24182,7 @@ mod tests {
             let lower = text.to_lowercase();
             let Some(CostResourceImperativeAst::Pay {
                 cost: AbilityCost::PayLife { amount },
+                ..
             }) = parse_cost_resource_ast(text, &lower, &mut ParseContext::default())
             else {
                 panic!("expected PayLife variable cost for {text:?}");
@@ -24009,7 +24209,8 @@ mod tests {
                 !matches!(
                     res,
                     Some(CostResourceImperativeAst::Pay {
-                        cost: AbilityCost::PayLife { .. }
+                        cost: AbilityCost::PayLife { .. },
+                        ..
                     })
                 ),
                 "{text:?} must not parse as a life payment"
@@ -31148,14 +31349,14 @@ mod tests {
         );
         // Reach-guard: the neighboring energy forms still parse.
         assert_eq!(
-            parse_pay_residue_cost("{e}{e}", "{E}{E}"),
+            parse_pay_residue_cost("{e}{e}", "{E}{E}").map(|r| r.cost),
             Some(AbilityCost::PayEnergy {
                 amount: QuantityExpr::Fixed { value: 2 }
             }),
             "pure sigils still parse"
         );
         assert_eq!(
-            parse_pay_residue_cost("eight {e}", "eight {E}"),
+            parse_pay_residue_cost("eight {e}", "eight {E}").map(|r| r.cost),
             Some(AbilityCost::PayEnergy {
                 amount: QuantityExpr::Fixed { value: 8 }
             }),
@@ -31163,7 +31364,7 @@ mod tests {
         );
         assert!(
             matches!(
-                parse_pay_residue_cost("any amount of {e}", "any amount of {E}"),
+                parse_pay_residue_cost("any amount of {e}", "any amount of {E}").map(|r| r.cost),
                 Some(AbilityCost::PayEnergy {
                     amount: QuantityExpr::Ref {
                         qty: QuantityRef::Variable { .. }
@@ -31172,6 +31373,288 @@ mod tests {
             ),
             "variable energy still parses"
         );
+    }
+
+    /// The bare `X` the `any amount of <mana symbols>` leaf must emit as its
+    /// scale — asserted by equality, never `contains_x()`: the engine's submit
+    /// arm scales the base cost by the chosen amount, which is only right for
+    /// a bare X.
+    fn bare_variable_x() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }
+    }
+
+    /// CR 107.1c + CR 107.3f + CR 118.1: "pay any amount of <mana symbols>"
+    /// is the per-unit cost scaled by the player-chosen amount, for any
+    /// symbol run (single colored, multi-symbol, colorless, generic) and with
+    /// a lone trailing period.
+    #[test]
+    fn pay_any_amount_of_mana_symbols_scales_per_unit_cost() {
+        assert_eq!(
+            parse_pay_residue_cost("any amount of {r}", "any amount of {R}"),
+            Some(PayResidueCost {
+                cost: AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::Cost {
+                        shards: vec![crate::types::mana::ManaCostShard::Red],
+                        generic: 0,
+                    },
+                },
+                scale: Some(bare_variable_x()),
+            }),
+            "Leyline Tyrant's {{R}} is a per-unit cost scaled by bare X"
+        );
+        for symbols in ["{r}", "{g}", "{r}{r}", "{c}", "{2}"] {
+            let lower = format!("any amount of {symbols}");
+            let (expected, _) = parse_mana_symbols(symbols).expect("symbol run parses");
+            let residue = parse_pay_residue_cost(&lower, &lower);
+            assert_eq!(
+                residue,
+                Some(PayResidueCost {
+                    cost: AbilityCost::Mana { cost: expected },
+                    scale: Some(bare_variable_x()),
+                }),
+                "{lower}"
+            );
+            let scale = residue.and_then(|r| r.scale).expect("scaled");
+            assert!(crate::types::ability::is_pay_any_amount(&scale), "{lower}");
+        }
+        assert_eq!(
+            parse_pay_residue_cost("any amount of {r}.", "any amount of {R}."),
+            parse_pay_residue_cost("any amount of {r}", "any amount of {R}"),
+            "a lone trailing period is accepted"
+        );
+    }
+
+    /// The folded `any amount of` siblings keep their unscaled shapes, keep
+    /// their word-boundary guards (`life`), and `mana` gains one (intended
+    /// tightening: `manafoo` declines; `mana,` still parses).
+    #[test]
+    fn pay_any_amount_of_siblings_keep_unscaled_shape() {
+        let x_mana = AbilityCost::Mana {
+            cost: crate::types::mana::ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::X],
+                generic: 0,
+            },
+        };
+        for (lower, expected) in [
+            (
+                "any amount of {e}",
+                AbilityCost::PayEnergy {
+                    amount: bare_variable_x(),
+                },
+            ),
+            (
+                "any amount of life",
+                AbilityCost::PayLife {
+                    amount: bare_variable_x(),
+                },
+            ),
+            ("any amount of mana", x_mana.clone()),
+            ("any amount of mana, then", x_mana),
+            (
+                "{r}",
+                AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::Cost {
+                        shards: vec![crate::types::mana::ManaCostShard::Red],
+                        generic: 0,
+                    },
+                },
+            ),
+        ] {
+            assert_eq!(
+                parse_pay_residue_cost(lower, lower),
+                Some(PayResidueCost {
+                    cost: expected,
+                    scale: None,
+                }),
+                "{lower}"
+            );
+        }
+        for lower in [
+            "any amount of lifelink",
+            "any amount of lifeforce",
+            "any amount of manafoo",
+        ] {
+            assert_eq!(parse_pay_residue_cost(lower, lower), None, "{lower}");
+        }
+    }
+
+    /// The mana-symbol leaf declines a tail it cannot consume (instead of
+    /// paying `{R}` per unit with `and {G}` silently dropped) and a per-unit
+    /// cost carrying an `{X}` shard; the whole clause then stays unparsed.
+    #[test]
+    fn pay_any_amount_of_mana_symbols_declines_tail_and_x_shard() {
+        // Reach-guard: the same prefix and leaf accept the bare symbol run.
+        assert!(parse_pay_residue_cost("any amount of {r}", "any amount of {R}").is_some());
+        for lower in ["any amount of {r} and {g}", "any amount of {x}"] {
+            assert_eq!(parse_pay_residue_cost(lower, lower), None, "{lower}");
+        }
+        let text = "pay any amount of {R} and {G}";
+        let lower = text.to_lowercase();
+        assert_eq!(
+            parse_cost_resource_ast(text, &lower, &mut ParseContext::default()),
+            None,
+            "{text}"
+        );
+    }
+
+    /// Behemoth of Vault 0 ("…you may pay an amount of {E} equal to target
+    /// nonland permanent's mana value…") still reaches the separate
+    /// `an amount of {e} equal to` arm: an energy cost, never scaled. Only the
+    /// variant is pinned for its verbatim tail (today's amount is the
+    /// quantity-parser fallback, not derived from the card).
+    #[test]
+    fn pay_any_amount_fold_keeps_energy_equal_to_arm_reachable() {
+        let behemoth = parse_pay_residue_cost(
+            "an amount of {e} equal to target nonland permanent's mana value",
+            "an amount of {E} equal to target nonland permanent's mana value",
+        );
+        assert!(
+            matches!(
+                behemoth,
+                Some(PayResidueCost {
+                    cost: AbilityCost::PayEnergy { .. },
+                    scale: None,
+                })
+            ),
+            "Behemoth of Vault 0 tail: {behemoth:?}"
+        );
+        assert_eq!(
+            parse_pay_residue_cost(
+                "an amount of {e} equal to its mana value",
+                "an amount of {E} equal to its mana value",
+            ),
+            Some(PayResidueCost {
+                cost: AbilityCost::PayEnergy {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: crate::types::ability::ObjectScope::Recipient,
+                        },
+                    },
+                },
+                scale: None,
+            }),
+            "the dynamic-energy delegation is reached"
+        );
+        // Paired positives: the fold's leaf and its `{e}` sibling.
+        assert_eq!(
+            parse_pay_residue_cost("any amount of {r}", "any amount of {R}").and_then(|r| r.scale),
+            Some(bare_variable_x())
+        );
+        assert!(matches!(
+            parse_pay_residue_cost("any amount of {e}", "any amount of {E}"),
+            Some(PayResidueCost {
+                cost: AbilityCost::PayEnergy { .. },
+                scale: None,
+            })
+        ));
+    }
+
+    /// Lowering carries the residue's scale onto `Effect::PayCost`; an
+    /// unscaled payment lowers with `scale: None`.
+    #[test]
+    fn pay_any_amount_lowering_carries_bare_variable_x_scale() {
+        let red = AbilityCost::Mana {
+            cost: crate::types::mana::ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::Red],
+                generic: 0,
+            },
+        };
+        for (text, scale) in [
+            ("pay any amount of {R}", Some(bare_variable_x())),
+            ("pay {R}", None),
+        ] {
+            let lower = text.to_lowercase();
+            let ast = parse_cost_resource_ast(text, &lower, &mut ParseContext::default())
+                .expect("pay clause parses");
+            assert_eq!(
+                lower_cost_resource_ast(ast),
+                Effect::PayCost {
+                    cost: red.clone(),
+                    scale,
+                    payer: TargetFilter::Controller,
+                },
+                "{text}"
+            );
+        }
+    }
+
+    /// Leyline Tyrant, verbatim Oracle text: the dies trigger's execute chain
+    /// is the per-unit `{R}` payment scaled by bare X, followed by a
+    /// "When you do" rider (CR 603.12) dealing "that much" damage
+    /// (`EventContextAmount`) to any target — nothing unimplemented.
+    #[test]
+    fn pay_any_amount_leyline_tyrant_whole_card_reaches_engine_shape() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        let parsed = parse_oracle_text(
+            "Flying\nYou don't lose unspent red mana as steps and phases end.\nWhen this creature dies, you may pay any amount of {R}. When you do, it deals that much damage to any target.",
+            "Leyline Tyrant",
+            &[],
+            &["Creature".to_string()],
+            &["Dragon".to_string()],
+        );
+        // Reach-guard: the whole card parsed, static line included.
+        assert!(
+            parsed
+                .statics
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::StepEndUnspentMana { .. })),
+            "static line: {:?}",
+            parsed.statics
+        );
+        assert_eq!(parsed.triggers.len(), 1, "{:?}", parsed.triggers);
+        let trigger = &parsed.triggers[0];
+        assert_eq!(
+            trigger.mode,
+            crate::types::triggers::TriggerMode::ChangesZone
+        );
+        assert_eq!(trigger.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.destination, Some(Zone::Graveyard));
+        assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+        let execute = trigger.execute.as_deref().expect("trigger execute");
+        assert!(execute.optional, "\"you may pay\" is optional: {trigger:?}");
+        assert_eq!(
+            *execute.effect,
+            Effect::PayCost {
+                cost: AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::Cost {
+                        shards: vec![crate::types::mana::ManaCostShard::Red],
+                        generic: 0,
+                    },
+                },
+                scale: Some(bare_variable_x()),
+                payer: TargetFilter::Controller,
+            }
+        );
+        let rider = execute.sub_ability.as_deref().expect("When you do rider");
+        assert_eq!(rider.condition, Some(AbilityCondition::WhenYouDo));
+        assert!(
+            matches!(
+                &*rider.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                    target: TargetFilter::Any,
+                    ..
+                }
+            ),
+            "rider: {:?}",
+            rider.effect
+        );
+        let mut node = Some(execute);
+        while let Some(def) = node {
+            assert!(
+                !matches!(&*def.effect, Effect::Unimplemented { .. }),
+                "unimplemented link: {:?}",
+                def.effect
+            );
+            node = def.sub_ability.as_deref();
+        }
     }
 }
 

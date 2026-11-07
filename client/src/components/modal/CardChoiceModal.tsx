@@ -214,6 +214,17 @@ export function CardChoiceModal() {
           data={waitingFor.data}
         />
       );
+    case "DigBottomOrder":
+      if (!canActForWaitingState) return null;
+      return (
+        <RevealUntilBottomOrderModal
+          key={
+            activeSelectInteractionId ??
+            `${waitingFor.data.player}:${waitingFor.data.source_id}:${waitingFor.data.cards.join(",")}`
+          }
+          data={waitingFor.data}
+        />
+      );
     case "CoinFlipKeepChoice":
       if (!canActForWaitingState) return null;
       return <CoinFlipKeepModal data={waitingFor.data} />;

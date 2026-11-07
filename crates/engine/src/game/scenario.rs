@@ -2072,6 +2072,7 @@ impl GameRunner {
             WaitingFor::RippleRevealChoice { .. } => "RippleRevealChoice",
             WaitingFor::RippleBottomOrder { .. } => "RippleBottomOrder",
             WaitingFor::RevealUntilBottomOrder { .. } => "RevealUntilBottomOrder",
+            WaitingFor::DigBottomOrder { .. } => "DigBottomOrder",
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
@@ -3725,7 +3726,8 @@ fn drive_resolution(
                 act_collect(runner, GameAction::SelectCards { cards: keep }, &mut events)?;
             }
             WaitingFor::RippleBottomOrder { cards, .. }
-            | WaitingFor::RevealUntilBottomOrder { cards, .. } => {
+            | WaitingFor::RevealUntilBottomOrder { cards, .. }
+            | WaitingFor::DigBottomOrder { cards, .. } => {
                 let cards = cards.clone();
                 act_collect(runner, GameAction::SelectCards { cards }, &mut events)?;
             }

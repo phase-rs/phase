@@ -4,6 +4,7 @@
 // `--test`), so one implementation serves both without shipping guard code in a release build.
 // MEASURED, not assumed — the alternative already in this tree is `test_support.rs` / `support.rs`,
 // twin files kept equal by a comment asking a human to remember.
+#![recursion_limit = "512"]
 #[path = "../../src/source_census.rs"]
 mod source_census;
 
@@ -76,6 +77,7 @@ mod dreadhorde_arcanist_ceiling_4943;
 mod dyadrine_counter_selection;
 mod emissary_green;
 mod emissary_of_despair_and_hope;
+mod ensign_pavel_chekov_exiled_lands;
 mod etali_primal_sickness_poison;
 mod etrata_cloak_enters_under_cloaker_5944;
 mod exiled_card_power_linked_pile;
@@ -101,6 +103,7 @@ mod grim_repriser_restriction;
 mod hellkite_tyrant_steal_artifacts_2906;
 mod heroic_sacrifice_redirect;
 mod hunters_insight_combat_draw;
+mod indoraptor_enrage_chosen_opponent;
 mod innocent_bystander_whole_event_damage;
 mod interaction_contract;
 mod invasion_of_alara_8750;
@@ -163,8 +166,10 @@ mod karazikar_attack_scope_7189;
 mod kashi_tribe_damage_tap_freeze;
 mod kibo_uktabi_prince_defending_player_sacrifice;
 mod kilo_live_offer_from_real_dump;
+mod later_instruction_unless_bindings;
 mod lathiel_end_step_counters_repro;
 mod layer_boundary_census;
+mod leyline_tyrant_pay_any_red_damage;
 mod lost_monarch_combat_damage_by_type_intervening_if;
 mod mana_ability_mana_payment_window;
 mod mana_burn;
@@ -198,9 +203,11 @@ mod parser_oracle;
 mod parser_oracle_effect;
 mod part_in_friendship_conditional_reveal;
 mod pass_priority_structural_legality;
+mod pay_x_effect_payment_ceiling;
 mod period_confirm_rows;
 mod perpetual_gains;
 mod perrie_the_pulverizer_attack_trigger_6219;
+mod petals_of_insight;
 mod play_trace;
 mod power_fist_combat_damage_regression;
 mod preacher_of_the_schism_life_gates;
@@ -212,11 +219,13 @@ mod random_result_source_identity;
 mod replacement_choice_trigger_gating;
 mod resolve_all_consent;
 mod rev_tithe_extractor_facedown_cast;
+mod reveal_pick_visibility;
 mod reveal_until_that_many;
 mod ring_equipped_creature_color_condition;
 mod rules;
 mod screaming_nemesis_combat_damage_multi_trigger;
 mod self_exile_cast_permission;
+mod seven_of_nine_differently_named_lands;
 mod sliver_static_grants;
 mod smaug_noncombat_damage_treasure;
 mod sovereign_okinec_ahau;
@@ -233,6 +242,7 @@ mod swallow_optional_you_may;
 mod target_instance_identity_9280;
 mod terra_herald_optional_prompt;
 mod tezzeret_cruel_captain_emblem;
+mod thada_adel_search_damaged_player;
 mod thoughtweft_trample_regression;
 mod total_war_attacking_player_scope;
 mod types_ability;
@@ -244,6 +254,7 @@ mod vengeful_ancestor_goaded_attack_trigger;
 mod viewer_projection_ingest_gate;
 mod void_winnower_announced_x;
 mod vrestin_menoptra_leader_5949;
+mod vulcan_mind_meld_exiler_plays;
 mod wba_fodder_multiset;
 mod wba_loop_firewall_interposition;
 mod will_of_the_mardu_target_player_token_count;
@@ -295,6 +306,7 @@ mod zenos_yae_galvus_chosen_object;
 
 mod base_pt_designation_filter;
 mod controller_anaphor_binds_through_context;
+mod through_the_forest_gate;
 
 mod resolution_progress_contract;
 
@@ -303,3 +315,4 @@ mod niambi_granted_trigger_once_each_turn;
 mod q_stacking_the_deck;
 mod risky_move_gain_control_trigger;
 mod token_attack_destination;
+mod venat_heros_sundering_transform_8071;
