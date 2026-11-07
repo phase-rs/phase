@@ -9114,6 +9114,41 @@ fn expand_granted_activated_abilities(
                         donated.activation_restrictions.push(restriction.clone());
                     }
                 }
+                // CR 113.2c + CR 201.5a + CR 400.7: stamp the donated copy
+                // with its provider incarnation so reference-granted copies
+                // from distinct providers stay distinct instances that
+                // function independently. `get_or_insert` preserves an
+                // existing stamp, so transitive re-donation collapses onto
+                // the original provider.
+                let provider_stamp = ObjectIncarnationRef::from_object(provider);
+                donated.granting_object.get_or_insert(provider_stamp);
+                // CR 201.5a: bind ONLY unbound granter symbols to the
+                // provider incarnation. Printed donors can carry unbound
+                // `GrantingObject` symbols (e.g. by-name self costs); those
+                // are dead until bound. Deliberately NOT the raw
+                // `granter_symbols_mut::bind` — its `Scope` arm overwrites
+                // unconditionally. `Caster` symbols are untouched.
+                granter_symbols_mut::each_node(
+                    DefinitionNodeMut::Ability(&mut donated),
+                    &mut |node| {
+                        granter_symbols_mut::node_fields(node, &mut |symbol| match symbol {
+                            granter_symbols_mut::Symbol::Filter(bound) => {
+                                bound.get_or_insert(provider_stamp);
+                            }
+                            granter_symbols_mut::Symbol::Scope(scope) => {
+                                if matches!(
+                                    scope,
+                                    crate::types::ability::ObjectScope::GrantingObject
+                                ) {
+                                    *scope = crate::types::ability::ObjectScope::SpecificObject {
+                                        object: provider_stamp,
+                                    };
+                                }
+                            }
+                            granter_symbols_mut::Symbol::Caster(_) => {}
+                        })
+                    },
+                );
                 let modification = ContinuousModification::GrantAbility {
                     definition: Box::new(donated),
                 };
@@ -11603,6 +11638,40 @@ fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zo
     }
 }
 
+/// CR 113.2c + CR 201.5a + CR 614.1c + CR 611.2c: two-tier `GrantAbility`
+/// dedup. Tier-1 (base, intentionally preserved collapse including
+/// stamped-vs-base): collapse iff some ability in `obj.abilities[..base_end]`
+/// with a `None` head `granting_object` is equal-modulo-HEAD-`granting_object`
+/// to the grant — modulo strips EXACTLY the head `granting_object: Option`
+/// field (clone, set head `None`, full `==`); every nested field, including
+/// nested `TargetFilter::GrantingObject { bound }` filters and `ObjectScope`
+/// symbols, compares byte-exact. Tier-1 applies ONLY against existing entries
+/// with head `granting_object` `None`; grant-vs-grant pairs use Tier-2 only.
+/// Tier-2 (grants): collapse iff FULL equality (stamp included) with an
+/// already-pushed grant at index `>= base_end`. Full-`==` fast path first
+/// covers all pinned unstamped cases with zero clones; clone-strip-compare
+/// runs only on the unequal path.
+fn grant_ability_is_duplicate(
+    obj: &crate::game::game_object::GameObject,
+    granted: &AbilityDefinition,
+) -> bool {
+    let base_end = obj.granted_abilities_from.unwrap_or(obj.abilities.len());
+    if obj.abilities[..base_end].iter().any(|a| a == granted) {
+        return true;
+    }
+    if granted.granting_object.is_some() {
+        let mut stripped = granted.clone();
+        stripped.granting_object = None;
+        if obj.abilities[..base_end]
+            .iter()
+            .any(|a| a.granting_object.is_none() && *a == stripped)
+        {
+            return true;
+        }
+    }
+    obj.abilities[base_end..].iter().any(|a| a == granted)
+}
+
 fn apply_continuous_effect_filtered(
     state: &mut GameState,
     effect: &ActiveContinuousEffect,
@@ -12514,11 +12583,14 @@ fn apply_continuous_effect_filtered(
             // modifications (e.g., Ragost parses the "have ..." clause twice)
             // or from multiple sources granting the same ability — must not
             // stack, unless a granter stamp (CR 201.5a) keeps each granter's copy
-            // apart (CR 113.2c). Structural equality dedup keeps the grant
-            // idempotent.
+            // apart (CR 113.2c). Two-tier dedup (`grant_ability_is_duplicate`)
+            // keeps the grant idempotent: Tier-1 collapses against a base
+            // ability equal modulo EXACTLY the head stamp; Tier-2 collapses
+            // only on FULL equality (stamp included) with an already-pushed
+            // grant, so copies donated by distinct providers stay distinct.
             ContinuousModification::GrantAbility { definition } => {
                 let granted = *definition.clone();
-                if !obj.abilities.iter().any(|a| a == &granted) {
+                if !grant_ability_is_duplicate(obj, &granted) {
                     // CR 613.1f + CR 607.1: layer-6 grants follow the
                     // characteristic prefix; the first one marks its end.
                     obj.granted_abilities_from
@@ -21379,9 +21451,14 @@ mod tests {
         state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
+        // CR 113.2c + CR 201.5a: the donated copy carries the provider's
+        // incarnation stamp on its head.
+        let mut expected_granted = granted.clone();
+        expected_granted.granting_object =
+            Some(ObjectIncarnationRef::from_object(&state.objects[&exiled]));
         let host_obj = state.objects.get(&host).unwrap();
         assert!(
-            host_obj.abilities.iter().any(|a| a == &granted),
+            host_obj.abilities.iter().any(|a| a == &expected_granted),
             "Myr Welder must gain the exiled card's activated ability; got {:?}",
             host_obj.abilities
         );
@@ -21529,9 +21606,17 @@ mod tests {
             "host must hold exactly the three donated loyalty defs; got {:?}",
             host_abilities
         );
+        // CR 113.2c + CR 201.5a: donated copies carry the provider's
+        // incarnation stamp on the head.
+        let provider_stamp = ObjectIncarnationRef::from_object(&state.objects[&provider]);
+        let expected = [&plus_one, &minus_three, &minus_x].map(|def| {
+            let mut stamped = def.clone();
+            stamped.granting_object = Some(provider_stamp);
+            stamped
+        });
         for donated in host_abilities.iter() {
             assert!(
-                donated == &plus_one || donated == &minus_three || donated == &minus_x,
+                expected.iter().any(|want| donated == want),
                 "unexpected donated def {donated:?}"
             );
             assert_eq!(
@@ -21669,6 +21754,11 @@ mod tests {
         give_printed_loyalty(&mut state, first, &first_def);
         state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
+        // CR 113.2c + CR 201.5a: the donated copy carries the provider's
+        // incarnation stamp on its head.
+        let mut expected_first = first_def.clone();
+        expected_first.granting_object =
+            Some(ObjectIncarnationRef::from_object(&state.objects[&first]));
         assert!(
             state
                 .objects
@@ -21676,7 +21766,7 @@ mod tests {
                 .unwrap()
                 .abilities
                 .iter()
-                .any(|a| a == &first_def),
+                .any(|a| a == &expected_first),
             "host must hold the first provider's loyalty def; got {:?}",
             state.objects.get(&host).unwrap().abilities
         );
@@ -21703,8 +21793,13 @@ mod tests {
                 1,
                 "only the remaining provider's def must stay; got {held:?}"
             );
+            // CR 113.2c + CR 201.5a: the donated copy carries the provider's
+            // incarnation stamp on its head.
+            let mut expected_second = second_def.clone();
+            expected_second.granting_object =
+                Some(ObjectIncarnationRef::from_object(&state.objects[&second]));
             assert!(
-                held.iter().any(|a| a == &second_def),
+                held.iter().any(|a| a == &expected_second),
                 "remaining def must be the second provider's; got {held:?}"
             );
         }
@@ -21864,9 +21959,17 @@ mod tests {
             3,
             "Bolas must hold exactly the three donated loyalty defs; got {held:?}"
         );
+        // CR 113.2c + CR 201.5a: donated copies carry the provider's
+        // incarnation stamp on the head.
+        let donor_stamp = ObjectIncarnationRef::from_object(&state.objects[&donor]);
+        let expected = [&plus_one, &minus_three, &minus_x].map(|def| {
+            let mut stamped = def.clone();
+            stamped.granting_object = Some(donor_stamp);
+            stamped
+        });
         for donated in held.iter() {
             assert!(
-                donated == &plus_one || donated == &minus_three || donated == &minus_x,
+                expected.iter().any(|want| donated == want),
                 "unexpected donated def {donated:?}"
             );
             assert_eq!(
@@ -21918,7 +22021,21 @@ mod tests {
             5,
             "Bolas must hold both donors' loyalty defs; got {held:?}"
         );
-        for def in [&plus_one, &minus_three, &minus_x, &opp_plus, &opp_minus] {
+        // CR 113.2c + CR 201.5a: donated copies carry their provider's
+        // incarnation stamp on the head.
+        let opp_stamp = ObjectIncarnationRef::from_object(&state.objects[&opp_donor]);
+        let expected_all = [&plus_one, &minus_three, &minus_x].map(|def| {
+            let mut stamped = def.clone();
+            stamped.granting_object =
+                Some(ObjectIncarnationRef::from_object(&state.objects[&donor]));
+            stamped
+        });
+        let expected_opp = [&opp_plus, &opp_minus].map(|def| {
+            let mut stamped = def.clone();
+            stamped.granting_object = Some(opp_stamp);
+            stamped
+        });
+        for def in expected_all.iter().chain(expected_opp.iter()) {
             assert!(
                 held.iter().any(|a| a == def),
                 "Bolas must hold donated def {def:?}; got {held:?}"
@@ -22009,6 +22126,11 @@ mod tests {
         give_printed_loyalty(&mut state, first, &first_def);
         state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
+        // CR 113.2c + CR 201.5a: the donated copy carries the provider's
+        // incarnation stamp on its head.
+        let mut expected_first = first_def.clone();
+        expected_first.granting_object =
+            Some(ObjectIncarnationRef::from_object(&state.objects[&first]));
         assert!(
             state
                 .objects
@@ -22016,7 +22138,7 @@ mod tests {
                 .unwrap()
                 .abilities
                 .iter()
-                .any(|a| a == &first_def),
+                .any(|a| a == &expected_first),
             "Bolas must hold the first donor's loyalty def; got {:?}",
             state.objects.get(&bolas).unwrap().abilities
         );
@@ -22043,8 +22165,13 @@ mod tests {
                 1,
                 "only the remaining donor's def must stay; got {held:?}"
             );
+            // CR 113.2c + CR 201.5a: the donated copy carries the provider's
+            // incarnation stamp on its head.
+            let mut expected_second = second_def.clone();
+            expected_second.granting_object =
+                Some(ObjectIncarnationRef::from_object(&state.objects[&second]));
             assert!(
-                held.iter().any(|a| a == &second_def),
+                held.iter().any(|a| a == &expected_second),
                 "remaining def must be the second donor's; got {held:?}"
             );
         }
@@ -22178,9 +22305,9 @@ mod tests {
         for pass in 1..=2 {
             state.layers_dirty.mark_full();
             evaluate_layers(&mut state);
-            for (id, own, other) in [
-                (bolas_a, &a_printed, &b_printed),
-                (bolas_b, &b_printed, &a_printed),
+            for (id, own, other_id, other) in [
+                (bolas_a, &a_printed, bolas_b, &b_printed),
+                (bolas_b, &b_printed, bolas_a, &a_printed),
             ] {
                 let held = &state.objects.get(&id).unwrap().abilities;
                 assert_eq!(
@@ -22188,7 +22315,25 @@ mod tests {
                     8,
                     "pass {pass}: Bolas must hold own 3 + other's 3 + donor's 2; got {held:?}"
                 );
-                for def in own.iter().chain(other.iter()).chain(donor_defs.iter()) {
+                // CR 113.2c + CR 201.5a: donated copies carry their
+                // provider's incarnation stamp on the head — the other
+                // Bolas's defs name the other Bolas, the donor's defs name
+                // the donor (transitive re-donation preserves the original
+                // stamp). Own printed defs stay unstamped.
+                let mut expected: Vec<AbilityDefinition> = own.to_vec();
+                let other_stamp = ObjectIncarnationRef::from_object(&state.objects[&other_id]);
+                for def in other.iter() {
+                    let mut stamped = def.clone();
+                    stamped.granting_object = Some(other_stamp);
+                    expected.push(stamped);
+                }
+                let donor_stamp = ObjectIncarnationRef::from_object(&state.objects[&donor]);
+                for def in donor_defs.iter() {
+                    let mut stamped = def.clone();
+                    stamped.granting_object = Some(donor_stamp);
+                    expected.push(stamped);
+                }
+                for def in &expected {
                     assert_eq!(
                         held.iter().filter(|a| a == &def).count(),
                         1,
@@ -22309,10 +22454,15 @@ mod tests {
         state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
+        // CR 113.2c + CR 201.5a: the donated copy carries the provider's
+        // incarnation stamp on its head.
+        let mut expected_quoted = quoted_loyalty.clone();
+        expected_quoted.granting_object =
+            Some(ObjectIncarnationRef::from_object(&state.objects[&donor]));
         let held = &state.objects.get(&bolas).unwrap().abilities;
         let donated = held
             .iter()
-            .find(|a| a == &&quoted_loyalty)
+            .find(|a| a == &&expected_quoted)
             .unwrap_or_else(|| panic!("Bolas must gain the quoted loyalty def; got {held:?}"));
         assert!(
             donated
@@ -22450,6 +22600,10 @@ mod tests {
         capped_material_ability
             .activation_restrictions
             .push(ActivationRestriction::OnlyOnceEachTurn);
+        // CR 113.2c + CR 201.5a: the donated copy carries the provider's
+        // incarnation stamp on its head.
+        capped_material_ability.granting_object =
+            Some(ObjectIncarnationRef::from_object(&state.objects[&material]));
 
         let locus_obj = state.objects.get(&locus).unwrap();
         assert!(
@@ -22566,9 +22720,17 @@ mod tests {
         state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
+        // CR 113.2c + CR 201.5a: the donated copy carries the provider's
+        // incarnation stamp on its head.
+        let mut expected_donor_ability = donor_ability.clone();
+        expected_donor_ability.granting_object =
+            Some(ObjectIncarnationRef::from_object(&state.objects[&donor]));
         let marvin_obj = state.objects.get(&marvin).unwrap();
         assert!(
-            marvin_obj.abilities.iter().any(|a| a == &donor_ability),
+            marvin_obj
+                .abilities
+                .iter()
+                .any(|a| a == &expected_donor_ability),
             "Marvin must gain the differently-named creature's activated \
              ability; got {:?}",
             marvin_obj.abilities
@@ -22585,6 +22747,166 @@ mod tests {
              (controller=You); got {:?}",
             marvin_obj.abilities
         );
+    }
+
+    /// CR 113.2c: two identically-worded battlefield donors grant Marvin TWO
+    /// independent instances of the same ability — one per provider
+    /// incarnation. Reverting the provider head stamp collapses the pair to
+    /// one (RED). Hand-built donors in the single-donor test's style, using
+    /// Llanowar Elves' "{T}: Add {G}." shape.
+    #[test]
+    fn marvin_two_identical_donors_grant_two_independent_abilities() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        let mut state = setup();
+
+        // Marvin carries the parser-produced static (same sentence as the
+        // single-donor test above).
+        let marvin = make_creature(&mut state, "Marvin, Murderous Mimic", 0, 3, PlayerId(0));
+        let parsed = parse_oracle_text(
+            "Marvin has all activated abilities of creatures you control that \
+             don't have the same name as this creature.",
+            "Marvin, Murderous Mimic",
+            &[],
+            &["Artifact".into(), "Creature".into()],
+            &[],
+        );
+        assert_eq!(
+            parsed.statics.len(),
+            1,
+            "Marvin parses to exactly one static; got {:?}",
+            parsed.statics
+        );
+        {
+            let obj = state.objects.get_mut(&marvin).unwrap();
+            obj.card_types.core_types.insert(0, CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions = parsed.statics.clone().into();
+        }
+
+        // Two differently-named donors with byte-identical "{T}: Add {G}."
+        // abilities.
+        let elf_mana = || {
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Green],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: Vec::new(),
+                    grants: Vec::new(),
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap)
+        };
+        let donor_a = make_creature(&mut state, "Llanowar Elves A", 1, 1, PlayerId(0));
+        Arc::make_mut(&mut state.objects.get_mut(&donor_a).unwrap().abilities).push(elf_mana());
+        let donor_b = make_creature(&mut state, "Llanowar Elves B", 1, 1, PlayerId(0));
+        Arc::make_mut(&mut state.objects.get_mut(&donor_b).unwrap().abilities).push(elf_mana());
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let held = &state.objects.get(&marvin).unwrap().abilities;
+        assert_eq!(
+            held.len(),
+            2,
+            "Marvin must hold one instance per identically-worded donor; got {held:?}"
+        );
+        let stamp_a = ObjectIncarnationRef::from_object(&state.objects[&donor_a]);
+        let stamp_b = ObjectIncarnationRef::from_object(&state.objects[&donor_b]);
+        for def in held.iter() {
+            let stamp = def
+                .granting_object
+                .expect("donated def must be head-stamped");
+            assert!(
+                stamp == stamp_a || stamp == stamp_b,
+                "donated def must name one of the two donors; got {def:?}"
+            );
+            let mut expected = elf_mana();
+            expected.granting_object = Some(stamp);
+            assert_eq!(
+                def, &expected,
+                "donated def must equal the donor's ability plus its stamp; got {def:?}"
+            );
+        }
+        assert_ne!(
+            held[0].granting_object, held[1].granting_object,
+            "the two instances must name distinct providers; got {held:?}"
+        );
+    }
+
+    /// CR 201.5a: a reference-donated activated ability whose donor carries an
+    /// unbound by-name self-cost symbol leaves the expander with its head
+    /// stamped AND that cost symbol bound to the provider incarnation.
+    /// SYNTHETIC shape — no printed reference-donated activated ability
+    /// carries granter symbols (verified by fixture-wide scan); the nearest
+    /// printed donor is Deconstruction Hammer ("Sacrifice <name>").
+    #[test]
+    fn expand_binds_unbound_by_name_cost_symbol_to_provider() {
+        let mut state = setup();
+        let host = make_creature(&mut state, "Host", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.static_definitions = vec![StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+                    source: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ),
+                    cap: None,
+                    kind: None,
+                }])]
+            .into();
+        }
+        let provider = make_creature(&mut state, "Donor Elf", 1, 1, PlayerId(0));
+        let donor_ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::GrantingObject { bound: None },
+            1,
+        )));
+        Arc::make_mut(&mut state.objects.get_mut(&provider).unwrap().abilities)
+            .push(donor_ability.clone());
+
+        let source = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        let effects =
+            expand_granted_activated_abilities(&state, host, 1, &[host], &source, None, None)
+                .effects;
+        assert_eq!(
+            effects.len(),
+            1,
+            "exactly the provider's ability must expand; got {effects:?}"
+        );
+        let stamp = ObjectIncarnationRef::from_object(&state.objects[&provider]);
+        match &effects[0].modification {
+            ContinuousModification::GrantAbility { definition } => {
+                assert_eq!(
+                    definition.granting_object,
+                    Some(stamp),
+                    "donated head must be stamped with the provider; got {definition:?}"
+                );
+                match &definition.cost {
+                    Some(AbilityCost::Sacrifice(cost)) => {
+                        assert_eq!(
+                            cost.target,
+                            TargetFilter::GrantingObject { bound: Some(stamp) },
+                            "the by-name cost symbol must bind to the provider; got {cost:?}"
+                        );
+                    }
+                    other => panic!("expected the by-name sacrifice cost, got {other:?}"),
+                }
+            }
+            other => panic!("expected a GrantAbility expansion, got {other:?}"),
+        }
     }
 
     /// CR 613.1f + CR 205.3: Agatha's Soul Cauldron — "Creatures you control with
@@ -22721,12 +23043,18 @@ mod tests {
         state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
+        // CR 113.2c + CR 201.5a: the donated copy carries the provider's
+        // incarnation stamp on its head.
+        let mut expected_creature_ability = creature_ability.clone();
+        expected_creature_ability.granting_object = Some(ObjectIncarnationRef::from_object(
+            &state.objects[&exiled_creature],
+        ));
         let countered_obj = state.objects.get(&countered).unwrap();
         assert!(
             countered_obj
                 .abilities
                 .iter()
-                .any(|a| a == &creature_ability),
+                .any(|a| a == &expected_creature_ability),
             "A countered creature must gain the exiled creature card's ability; \
              got {:?}",
             countered_obj.abilities
@@ -22838,21 +23166,39 @@ mod tests {
         state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
+        // CR 113.2c + CR 201.5a: the donated copy carries the provider's
+        // incarnation stamp on its head.
+        let mut expected_ability = ability.clone();
+        expected_ability.granting_object = Some(ObjectIncarnationRef::from_object(
+            &state.objects[&bf_provider],
+        ));
         let host_obj = state.objects.get(&host).unwrap();
         assert!(
-            host_obj.abilities.iter().any(|a| a == &ability),
+            host_obj.abilities.iter().any(|a| a == &expected_ability),
             "host must gain the battlefield opponent creature's activated \
              ability (InZone{{Battlefield}} matches); got {:?}",
             host_obj.abilities
         );
         // The hand provider has the same ability; if InZone{Battlefield} is not
         // enforced at runtime, the ability would appear twice in host_obj.abilities
-        // (once per provider). We assert exactly ONE grant was applied.
-        let grant_count = host_obj.abilities.iter().filter(|a| *a == &ability).count();
+        // (once per provider, each with its own provider stamp). We assert
+        // exactly ONE grant was applied: the host carries no base abilities, so
+        // its whole ability list must be the single battlefield donation.
+        let grant_count = host_obj
+            .abilities
+            .iter()
+            .filter(|a| *a == &expected_ability)
+            .count();
         assert_eq!(
             grant_count, 1,
             "hand provider must NOT donate: expected 1 grant (from bf_provider), \
              got {grant_count} (hand_provider donated a duplicate)"
+        );
+        assert_eq!(
+            host_obj.abilities.len(),
+            1,
+            "host must hold exactly the one battlefield donation; got {:?}",
+            host_obj.abilities
         );
     }
 
@@ -22935,7 +23281,7 @@ mod tests {
 
         // Elf card in YOUR graveyard — donates.
         let elf_ability = gain(2);
-        graveyard_card(
+        let dead_elf = graveyard_card(
             &mut state,
             PlayerId(0),
             "Dead Elf",
@@ -22973,9 +23319,14 @@ mod tests {
         state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
+        // CR 113.2c + CR 201.5a: the donated copy carries the provider's
+        // incarnation stamp on its head.
+        let mut expected_elf_ability = elf_ability.clone();
+        expected_elf_ability.granting_object =
+            Some(ObjectIncarnationRef::from_object(&state.objects[&dead_elf]));
         let abilities = &state.objects.get(&thranduil).unwrap().abilities;
         assert!(
-            abilities.iter().any(|a| a == &elf_ability),
+            abilities.iter().any(|a| a == &expected_elf_ability),
             "Thranduil must gain the activated ability of the Elf card in its \
              controller's graveyard; got {abilities:?}"
         );
@@ -23137,9 +23488,14 @@ mod tests {
             "reach-guard: Maskwood Nexus must make the graveyard card an Elf; got {:?}",
             card_obj.card_types.subtypes
         );
+        // CR 113.2c + CR 201.5a: the donated copy carries the provider's
+        // incarnation stamp on its head.
+        let mut expected_ability = ability.clone();
+        expected_ability.granting_object =
+            Some(ObjectIncarnationRef::from_object(&state.objects[&card]));
         let abilities = &state.objects.get(&thranduil).unwrap().abilities;
         assert!(
-            abilities.iter().any(|a| a == &ability),
+            abilities.iter().any(|a| a == &expected_ability),
             "a graveyard card that became an Elf in layer 4 must donate in layer 6; got {abilities:?}"
         );
     }
@@ -23193,10 +23549,11 @@ mod tests {
             },
         )
         .cost(AbilityCost::Tap);
-        scenario
+        let donor = scenario
             .add_creature_to_graveyard(P0, "Test Elf Donor", 1, 1)
             .with_subtypes(vec!["Elf"])
-            .with_ability_definition(donated.clone());
+            .with_ability_definition(donated.clone())
+            .id();
         let song = scenario
             .add_creature(P0, "Song of the Dryads", 0, 0)
             .as_enchantment()
@@ -23227,8 +23584,15 @@ mod tests {
 
         state.layers_dirty.mark_full();
         flush_layers(&mut state);
+        // CR 113.2c + CR 201.5a: the donated copy carries the provider's
+        // incarnation stamp on its head.
+        let mut expected_donated = donated.clone();
+        expected_donated.granting_object =
+            Some(ObjectIncarnationRef::from_object(&state.objects[&donor]));
         assert!(
-            state.objects[&thranduil].abilities.contains(&donated),
+            state.objects[&thranduil]
+                .abilities
+                .contains(&expected_donated),
             "the unsuppressed printed static must donate the graveyard ability"
         );
 
@@ -23303,7 +23667,7 @@ mod tests {
 
         // Two exiled provider cards, each carrying one distinct activated ability,
         // both tracked by the host.
-        let mut provider_abilities = Vec::new();
+        let mut provider_abilities: Vec<(ObjectId, AbilityDefinition)> = Vec::new();
         for i in 0..2 {
             let provider = create_object(
                 &mut state,
@@ -23329,7 +23693,7 @@ mod tests {
                 source_id: host,
                 kind: ExileLinkKind::TrackedBySource,
             });
-            provider_abilities.push(ability);
+            provider_abilities.push((provider, ability));
         }
 
         let m = state.objects.len() as u64;
@@ -23357,11 +23721,17 @@ mod tests {
         // Behavioral equivalence through the production entry point.
         state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
+        // CR 113.2c + CR 201.5a: donated copies carry their provider's
+        // incarnation stamp on the head.
         for &recipient in &recipients {
             let obj = state.objects.get(&recipient).unwrap();
-            for ability in &provider_abilities {
+            for (provider_id, ability) in &provider_abilities {
+                let mut expected = ability.clone();
+                expected.granting_object = Some(ObjectIncarnationRef::from_object(
+                    &state.objects[provider_id],
+                ));
                 assert!(
-                    obj.abilities.iter().any(|a| a == ability),
+                    obj.abilities.iter().any(|a| a == &expected),
                     "each recipient must gain every exiled provider's activated ability"
                 );
             }
@@ -23461,10 +23831,15 @@ mod tests {
         // Behavioral equivalence through the production entry point.
         state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
+        // CR 113.2c + CR 201.5a: the donated copy carries the provider's
+        // incarnation stamp on its head.
+        let mut expected = ability.clone();
+        expected.granting_object =
+            Some(ObjectIncarnationRef::from_object(&state.objects[&provider]));
         for recipient in [recipient_p0, recipient_p1] {
             let obj = state.objects.get(&recipient).unwrap();
             assert!(
-                obj.abilities.iter().any(|a| a == &ability),
+                obj.abilities.iter().any(|a| a == &expected),
                 "each controller's recipient must gain the exiled provider's ability"
             );
         }
