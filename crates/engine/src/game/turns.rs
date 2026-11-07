@@ -1482,11 +1482,19 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     state.priority_player = turn_control::turn_decision_maker(state);
     priority::clear_priority_passes(state);
     state.players_attacked_this_step.clear();
-    // CR 400.7: LKI persists within a step but is invalidated on step transition.
+    // Engine policy (not a CR rule): step-scoped LKI tables are cleared on step
+    // transition; the copiable-values table keeps what a pending copy can still
+    // read (below).
     state.lki_cache.clear();
     state.lki_copiable_values.clear();
     state.lki_by_incarnation.clear();
-    state.lki_copiable_values_by_incarnation.clear();
+    // CR 608.2h + CR 707.2 + CR 603.7e: a copy effect that reads its own departed
+    // source in a later step (Esoteric Duplicator's delayed copy of "that artifact")
+    // uses the source's last known copiable values, so the step clear keeps exactly
+    // the incarnations a pending carrier can still read as its own copy source
+    // (the collector loop normalisation uses); every other entry is history.
+    let readable = state.readable_own_copy_sources();
+    state.retain_own_copy_source_values(&readable);
     state.clear_departed_stack_records();
     // CR 607.2b + CR 113.7a: linked-exile LKI is likewise step-scoped — it only
     // needs to outlive the resolution of the ability whose source just left.

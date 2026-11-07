@@ -696,6 +696,60 @@ fn defeat_siege_in_combat(
     graveyard_creature: bool,
     p1_real_permanents: &[&str],
 ) -> (GameRunner, ObjectId, Vec<GameEvent>) {
+    let c = defeat_siege_with_attackers(
+        name,
+        &[(attacker_power, first_strike)],
+        graveyard_creature,
+        p1_real_permanents,
+    );
+    (c.runner, c.battle, c.events)
+}
+
+/// The outcome of `defeat_siege_with_attackers`.
+struct SiegeCombat {
+    runner: GameRunner,
+    battle: ObjectId,
+    /// Every event after the attack declaration through the damage action
+    /// that removed the last defense counter.
+    events: Vec<GameEvent>,
+    /// Set when, after any drive-loop action, the battle still had defense
+    /// counters while the stack held a triggered ability from the battle.
+    stack_had_siege_trigger_before_zero: bool,
+}
+
+fn defense(runner: &GameRunner, battle: ObjectId) -> u32 {
+    runner.state().objects[&battle]
+        .counters
+        .get(&CounterType::Defense)
+        .copied()
+        .unwrap_or(0)
+}
+
+fn siege_triggers_on_stack(runner: &GameRunner, battle: ObjectId) -> usize {
+    runner
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| {
+            matches!(
+                &entry.kind,
+                StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == battle
+            )
+        })
+        .count()
+}
+
+/// `defeat_siege_in_combat` with one P0 attacker per `(power, first_strike)`
+/// pair, every attacker declared at the battle. Stops once the battle's
+/// defense count is 0 and every trigger has been placed on the stack (trigger
+/// ordering is answered with the identity order; priority is never passed
+/// after the last defense counter leaves).
+fn defeat_siege_with_attackers(
+    name: &str,
+    attackers: &[(i32, bool)],
+    graveyard_creature: bool,
+    p1_real_permanents: &[&str],
+) -> SiegeCombat {
     let db = shared_card_db().expect("integration fixture must be present");
 
     let mut scenario = GameScenario::new();
@@ -707,34 +761,41 @@ fn defeat_siege_in_combat(
         scenario.add_real_card(P1, real_name, Zone::Battlefield, db);
     }
     let battle = scenario.add_real_card(P0, name, Zone::Battlefield, db);
-    let attacker = {
-        let mut builder =
-            scenario.add_creature(P0, "Siege Breaker", attacker_power, attacker_power);
-        if first_strike {
-            builder.with_keyword(Keyword::FirstStrike);
-        }
-        builder.id()
-    };
+    let attacker_ids: Vec<ObjectId> = attackers
+        .iter()
+        .map(|&(attacker_power, first_strike)| {
+            let mut builder =
+                scenario.add_creature(P0, "Siege Breaker", attacker_power, attacker_power);
+            if first_strike {
+                builder.with_keyword(Keyword::FirstStrike);
+            }
+            builder.id()
+        })
+        .collect();
 
     let mut runner = scenario.build();
 
-    if first_strike {
-        assert!(
-            runner.state().objects[&attacker].has_keyword(&Keyword::FirstStrike),
-            "CR 510.4: the attacker must have first strike for the first-strike \
-             damage step to be exercised"
-        );
+    for (&attacker, &(_, first_strike)) in attacker_ids.iter().zip(attackers) {
+        if first_strike {
+            assert!(
+                runner.state().objects[&attacker].has_keyword(&Keyword::FirstStrike),
+                "CR 510.4: the attacker must have first strike for the first-strike \
+                 damage step to be exercised"
+            );
+        }
     }
 
-    // Attacker must be combat-ready (not summoning sick).
+    // Attackers must be combat-ready (not summoning sick).
     {
         let turn = runner.state().turn_number.saturating_sub(1);
-        runner
-            .state_mut()
-            .objects
-            .get_mut(&attacker)
-            .unwrap()
-            .entered_battlefield_turn = Some(turn);
+        for attacker in &attacker_ids {
+            runner
+                .state_mut()
+                .objects
+                .get_mut(attacker)
+                .unwrap()
+                .entered_battlefield_turn = Some(turn);
+        }
     }
 
     // Reach guards: `name` really is a Siege with defense counters and a back
@@ -797,15 +858,24 @@ fn defeat_siege_in_combat(
 
     runner
         .act(GameAction::DeclareAttackers {
-            attacks: vec![(attacker, AttackTarget::Battle(battle))],
+            attacks: attacker_ids
+                .iter()
+                .map(|&attacker| (attacker, AttackTarget::Battle(battle)))
+                .collect(),
             bands: vec![],
         })
         .expect("attacking a battle controlled by you but protected by an opponent is legal");
 
     let mut events = Vec::new();
-    let mut damage_dealt = false;
-    for _ in 0..12 {
-        if damage_dealt {
+    let mut stack_had_siege_trigger_before_zero = false;
+    let mut defeated = false;
+    for _ in 0..24 {
+        // Stop once the last defense counter is gone and every trigger it
+        // caused has been placed (no ordering prompt left open).
+        if defense(&runner, battle) == 0
+            && !matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. })
+        {
+            defeated = true;
             break;
         }
         match runner.state().waiting_for.clone() {
@@ -819,27 +889,120 @@ fn defeat_siege_in_combat(
             }
             WaitingFor::Priority { .. } => {
                 let result = runner.act(GameAction::PassPriority).expect("pass priority");
-                damage_dealt = result.events.iter().any(|e| {
-                    matches!(
-                        e,
-                        GameEvent::CounterRemoved {
-                            object_id,
-                            counter_type: CounterType::Defense,
-                            ..
-                        } if *object_id == battle
-                    )
-                });
+                events.extend(result.events);
+            }
+            // CR 603.3b: several triggers from one controller are ordered;
+            // the identity order places them without passing priority.
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let result = runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order triggers");
                 events.extend(result.events);
             }
             other => panic!("unexpected wait while driving combat: {other:?}"),
         }
+        if defense(&runner, battle) > 0 && siege_triggers_on_stack(&runner, battle) > 0 {
+            stack_had_siege_trigger_before_zero = true;
+        }
     }
     assert!(
-        damage_dealt,
+        defeated,
         "combat damage must have removed the Siege's last defense counter"
     );
 
-    (runner, battle, events)
+    SiegeCombat {
+        runner,
+        battle,
+        events,
+        stack_had_siege_trigger_before_zero,
+    }
+}
+
+fn defense_removals(events: &[GameEvent], battle: ObjectId) -> Vec<u32> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::CounterRemoved {
+                object_id,
+                counter_type: CounterType::Defense,
+                count,
+            } if *object_id == battle => Some(*count),
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 510.2 + CR 603.2c + CR 310.12b (U6 discriminator): two attackers deal
+/// their combat damage to one Siege simultaneously. Each assignment removes
+/// defense counters in its own `CounterRemoved` event (3 -> 1 -> 0), but the
+/// two events are one simultaneous batch, so "the last defense counter is
+/// removed" happens once: exactly one victory trigger.
+#[test]
+fn two_attackers_defeating_a_siege_trigger_its_victory_once() {
+    let SiegeCombat {
+        mut runner,
+        battle,
+        events,
+        ..
+    } = defeat_siege_with_attackers(
+        "Invasion of Gobakhan",
+        &[(2, false), (2, false)],
+        false,
+        &[],
+    );
+
+    // Reach guards: both attackers' damage removed defense counters, in two
+    // removal events, and none is left.
+    assert_eq!(
+        defense_removals(&events, battle).len(),
+        2,
+        "each attacker's damage removes defense counters in its own event"
+    );
+    assert_eq!(defense(&runner, battle), 0);
+    // Discriminator.
+    assert_eq!(
+        siege_triggers_on_stack(&runner, battle),
+        1,
+        "the last defense counter is removed once, so the Siege triggers once"
+    );
+
+    resolve_victory(&mut runner, battle, true);
+    let obj = &runner.state().objects[&battle];
+    assert_eq!(obj.name, "Lightshield Array");
+    assert!(obj.transformed);
+    assert_eq!(obj.zone, Zone::Battlefield);
+}
+
+/// CR 510.4 + CR 310.12b + CR 603.2c (regression guard; passes at base): a
+/// first-strike attacker and a regular attacker defeat one Siege across the
+/// two combat-damage steps, which are two separate batches. The first step
+/// (3 -> 1) removes no "last" counter; the second (1 -> 0, clamped to 1)
+/// does, so the Siege triggers exactly once, in the second step. Guards the
+/// per-batch fold against folding across batches or firing on a non-zero
+/// batch.
+#[test]
+fn first_strike_and_regular_damage_defeat_a_siege_once_in_the_second_step() {
+    let SiegeCombat {
+        runner,
+        battle,
+        events,
+        stack_had_siege_trigger_before_zero,
+    } = defeat_siege_with_attackers("Invasion of Gobakhan", &[(2, true), (2, false)], false, &[]);
+
+    // Reach guard: two batches, the first removing 2 and the second 1.
+    assert_eq!(defense_removals(&events, battle), vec![2, 1]);
+    assert_eq!(defense(&runner, battle), 0);
+    assert!(
+        !stack_had_siege_trigger_before_zero,
+        "the first-strike batch left a defense counter, so nothing triggered"
+    );
+    assert_eq!(
+        siege_triggers_on_stack(&runner, battle),
+        1,
+        "the second batch removed the last defense counter once"
+    );
 }
 
 /// Drive from the post-damage decision point through the Siege's CR 310.12b

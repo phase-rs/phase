@@ -114,10 +114,45 @@ pub fn resolve(
     // (`compute_current_copiable_values`, which is zone-agnostic) — so such
     // a source in the graveyard is fine.
     //
+    // CR 109.4 + CR 115.1: `CopyTokenOf` may carry a *player* target in
+    // `ability.targets` — the `owner` slot for "target opponent creates a
+    // token that's a copy of it" (Wedding Ring). The copy *source* axis is
+    // object-only, so a context-ref source (`ParentTarget` / `None`) would
+    // otherwise see the owner player as a non-empty `ability.targets` and
+    // fail to fall back to the source object. Resolve against an
+    // object-only view so the two axes never cross-contaminate.
+    let object_only_ability;
+    let resolution_ability = if ability
+        .targets
+        .iter()
+        .any(|t| matches!(t, TargetRef::Player(_)))
+    {
+        let mut narrowed = ability.clone();
+        // An occurrence projection: object occurrences keep their pins.
+        let objects: Vec<usize> = narrowed
+            .targets
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| matches!(t, TargetRef::Object(_)))
+            .map(|(position, _)| position)
+            .collect();
+        narrowed.project_target_occurrences(&objects);
+        object_only_ability = narrowed;
+        &object_only_ability
+    } else {
+        ability
+    };
+
     // CR 608.2h + CR 707.2: "a copy of this creature" (`SelfRef`) reads its own
     // source through `copy_source`, which supplies the source's last-known
     // copiable values once it has left the zone the ability identified it in.
-    let copy_sources: Vec<CopySource> = if copies_own_source(&ability.effect) {
+    // An inferred own-source "copy of it" (`ParentTarget` / `None` with no
+    // propagated targets) reads the source the same way, so a departed source
+    // still supplies its last-known copiable values (Nacatl War-Pride ruling).
+    let reads_own_source = copies_own_source(&ability.effect)
+        || (source_filter.is_none()
+            && targeting::infers_own_source(state, resolution_ability, target_filter));
+    let copy_sources: Vec<CopySource> = if reads_own_source {
         copy_source(state, ability, CopySourceReferent::OwnSource)
             .into_iter()
             .collect()
@@ -181,41 +216,13 @@ pub fn resolve(
         } else {
             // CR 608.2c + 603.10a: Delegate to the unified 3-tier dispatch so
             // `None` / `ParentTarget` fall back to source only when
-            // `ability.targets` is empty. An own-source `SelfRef` never
-            // reaches this branch: it is read through `copy_source` above,
-            // which never reads `ability.targets`, so a chained
-            // `CopyTokenOf { target: SelfRef }` sub-ability cannot inherit the
-            // parent's targets via chain propagation in
-            // `effects::mod.rs::resolve_ability_chain` (issue #323 class).
-            //
-            // CR 109.4 + CR 115.1: `CopyTokenOf` may carry a *player* target in
-            // `ability.targets` — the `owner` slot for "target opponent creates a
-            // token that's a copy of it" (Wedding Ring). The copy *source* axis is
-            // object-only, so a context-ref source (`ParentTarget` / `None`) would
-            // otherwise see the owner player as a non-empty `ability.targets` and
-            // fail to fall back to the source object. Resolve against an
-            // object-only view so the two axes never cross-contaminate.
-            let object_only_ability;
-            let resolution_ability = if ability
-                .targets
-                .iter()
-                .any(|t| matches!(t, TargetRef::Player(_)))
-            {
-                let mut narrowed = ability.clone();
-                // An occurrence projection: object occurrences keep their pins.
-                let objects: Vec<usize> = narrowed
-                    .targets
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, t)| matches!(t, TargetRef::Object(_)))
-                    .map(|(position, _)| position)
-                    .collect();
-                narrowed.project_target_occurrences(&objects);
-                object_only_ability = narrowed;
-                &object_only_ability
-            } else {
-                ability
-            };
+            // `ability.targets` is empty. An own-source `SelfRef`, or an
+            // inferred own-source `ParentTarget` / `None`, never reaches this
+            // branch: it is read through `copy_source` above, which never reads
+            // `ability.targets`, so a chained `CopyTokenOf { target: SelfRef }`
+            // sub-ability cannot inherit the parent's targets via chain
+            // propagation in `effects::mod.rs::resolve_ability_chain` (issue
+            // #323 class).
             crate::game::effects::resolved_effect_object_ids(
                 state,
                 resolution_ability,
@@ -405,6 +412,22 @@ pub(crate) fn copies_own_source(effect: &Effect) -> bool {
     )
 }
 
+/// CR 104.4b + CR 608.2h: an inferred own-source "copy of it" (`ParentTarget` /
+/// `None`, no source filter) may read the source's last-known copiable values
+/// through `copy_source(OwnSource)`, so loop normalisation must keep them. A
+/// shape-level superset: retaining an entry another referent never reads is
+/// harmless.
+fn may_infer_own_copy_source(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::CopyTokenOf {
+            target: TargetFilter::ParentTarget | TargetFilter::None,
+            source_filter: None,
+            ..
+        }
+    )
+}
+
 /// CR 400.7 + CR 608.2h: the `CopyTokenOf` ability a keyword handler builds to
 /// copy its own source (Myriad, CR 702.116a; Encore, CR 702.141a). It carries
 /// the outer ability's captured source identity, so `copy_source` binds the
@@ -437,7 +460,7 @@ pub(crate) fn collect_own_copy_sources(
     ability: &ResolvedAbility,
     sources: &mut HashSet<ObjectIncarnationRef>,
 ) {
-    if copies_own_source(&ability.effect) {
+    if copies_own_source(&ability.effect) || may_infer_own_copy_source(&ability.effect) {
         sources.extend(captured_own_source(ability));
     }
     for (_, branch) in ability.child_links() {
@@ -6458,6 +6481,106 @@ mod tests {
         assert!(
             state.battlefield.contains(&squirrel),
             "the Squirrel survives the end step"
+        );
+    }
+
+    /// CR 104.4b + CR 608.2h: an inferred own-source "copy of it"
+    /// (`ParentTarget` / `None`, no source filter) may read its departed
+    /// source's last-known copiable values, so loop normalisation keeps them;
+    /// a filtered copy source never reads them and they are still pruned.
+    #[test]
+    fn normalize_for_loop_keeps_the_values_an_inferred_own_source_copy_reads() {
+        use crate::types::game_state::{loop_states_equal, StackEntry, StackEntryKind};
+        use crate::types::identifiers::CardId;
+
+        let source = ObjectId(5);
+        let captured = 7;
+        let state_with = |target: TargetFilter, source_filter: Option<TargetFilter>, name: &str| {
+            let mut state = GameState::new_two_player(7);
+            let values_object = create_object(
+                &mut state,
+                CardId(90),
+                PlayerId(0),
+                "Copy Source".to_string(),
+                Zone::Exile,
+            );
+            let mut values = crate::game::printed_cards::intrinsic_copiable_values(
+                &state.objects[&values_object],
+            );
+            values.name = name.to_string();
+            let mut ability = ResolvedAbility::new(
+                Effect::CopyTokenOf {
+                    target,
+                    owner: TargetFilter::Controller,
+                    source_filter,
+                    enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    extra_keywords: vec![],
+                    additional_modifications: vec![],
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            ability.source_incarnation = Some(captured);
+            state.stack.push_back(StackEntry {
+                id: ObjectId(20),
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: Box::new(ability),
+                    condition: None,
+                    trigger_event: None,
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+            state
+                .lki_copiable_values_by_incarnation
+                .entry(source)
+                .or_default()
+                .insert(captured, values);
+            state
+        };
+        // Normalisation renames the retained incarnation keys, so read the values.
+        let retained = |state: &GameState| {
+            state
+                .normalize_for_loop()
+                .lki_copiable_values_by_incarnation
+                .get(&source)
+                .and_then(|history| history.values().next().map(|values| values.name.clone()))
+        };
+
+        for target in [TargetFilter::ParentTarget, TargetFilter::None] {
+            let departed = state_with(target.clone(), None, "Departed");
+            assert_eq!(
+                retained(&departed),
+                Some("Departed".to_string()),
+                "{target:?}: the captured incarnation's values survive"
+            );
+            let other = state_with(target.clone(), None, "Other");
+            assert!(
+                !loop_states_equal(&departed.normalize_for_loop(), &other.normalize_for_loop()),
+                "{target:?}: values the copy can read distinguish two loop states"
+            );
+        }
+
+        let filtered = state_with(
+            TargetFilter::ParentTarget,
+            Some(TargetFilter::Any),
+            "Departed",
+        );
+        assert_eq!(
+            retained(&filtered),
+            None,
+            "a filtered copy source never reads the own source's values"
         );
     }
 }
