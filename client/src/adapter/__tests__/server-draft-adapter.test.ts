@@ -6,6 +6,9 @@ import { PROTOCOL_VERSION } from "../ws-adapter";
 import { AdapterError, AdapterErrorCode } from "../types";
 import type { DraftPlayerView } from "../draft-adapter";
 import type { GameAction, GameLogEntry, GameState, LegalActionsResult, ObjectAction, SubmitResult } from "../types";
+import { StateCodecRuntime, type StateCodecSession } from "../state-codec-runtime";
+import { STATE_CODEC_SOCKET_TIMEOUT_MS } from "../../services/stateCodecSocket";
+import type { EngineModule } from "../engine-queries";
 import type * as OpenPhaseSocketModule from "../../services/openPhaseSocket";
 import type {
   InteractionChoiceId,
@@ -18,9 +21,19 @@ import { usePreferencesStore } from "../../stores/preferencesStore";
 import type { PrintingEntry } from "../../services/scryfall";
 import type * as Scryfall from "../../services/scryfall";
 
-const artIO = vi.hoisted(() => ({ face: vi.fn(), catalog: vi.fn(), bounds: vi.fn() }));
+const artIO = vi.hoisted(() => ({
+  face: vi.fn(),
+  catalog: vi.fn(),
+  bounds: vi.fn(),
+  // Present on the fake shared engine only while the default-wiring test runs.
+  openCodec: null as null | (() => Promise<unknown>),
+}));
 vi.mock("../wasm-adapter", () => ({
-  getSharedAdapter: () => ({ getCardFaceData: artIO.face, checkDeckPrintingsBounds: artIO.bounds }),
+  getSharedAdapter: () => ({
+    getCardFaceData: artIO.face,
+    checkDeckPrintingsBounds: artIO.bounds,
+    ...(artIO.openCodec ? { openStateCodecSession: artIO.openCodec } : {}),
+  }),
 }));
 vi.mock("../../services/scryfall", async (original) => ({
   ...await original<typeof Scryfall>(), getCardPrintings: artIO.catalog,
@@ -265,6 +278,17 @@ function submissionTypes(ws: MockWebSocket): string[] {
     .filter((type): type is string => type === "Action" || type === "Interaction");
 }
 
+function lastSubmissionCommandId(ws: MockWebSocket): unknown {
+  for (const [raw] of ws.send.mock.calls.slice().reverse()) {
+    if (typeof raw !== "string") continue;
+    const frame: unknown = JSON.parse(raw);
+    if (typeof frame !== "object" || frame === null || !("type" in frame)) continue;
+    if (frame.type !== "Action" && frame.type !== "Interaction") continue;
+    return "command_id" in frame ? frame.command_id : undefined;
+  }
+  throw new Error("No game submission was sent");
+}
+
 function enterAcceptedFullMatch(adapter: ServerDraftAdapter, ws: MockWebSocket): void {
   const events = vi.fn();
   adapter.onEvent(events);
@@ -337,7 +361,7 @@ describe("ServerDraftAdapter", () => {
 
   beforeEach(async () => {
     MockWebSocket.last = null;
-    adapter = new ServerDraftAdapter("ws://localhost:9374/ws");
+    adapter = new ServerDraftAdapter("ws://localhost:9374/ws", { stateCodecSessionProvider: null });
     // Start a createDraft flow — this triggers attachSocket.
     const createPromise = adapter.createDraft({
       displayName: "Alice",
@@ -381,7 +405,7 @@ describe("ServerDraftAdapter", () => {
 
   it("sends Chaos candidates without a client assignment schedule", async () => {
     MockWebSocket.last = null;
-    const chaos = new ServerDraftAdapter("ws://localhost:9374/ws");
+    const chaos = new ServerDraftAdapter("ws://localhost:9374/ws", { stateCodecSessionProvider: null });
     const createPromise = chaos.createDraft({
       displayName: "Alice",
       source: { type: "Chaos", data: { candidate_codes: ["AAA", "BBB"] } },
@@ -414,7 +438,7 @@ describe("ServerDraftAdapter", () => {
 
   it("rejects a stale Full server before setup or draft updates can mutate state", async () => {
     MockWebSocket.last = null;
-    const staleAdapter = new ServerDraftAdapter("ws://localhost:9374/ws");
+    const staleAdapter = new ServerDraftAdapter("ws://localhost:9374/ws", { stateCodecSessionProvider: null });
     const listener = vi.fn();
     staleAdapter.onEvent(listener);
     const createPromise = staleAdapter.createDraft({
@@ -672,7 +696,7 @@ describe("ServerDraftAdapter", () => {
 
   it("rejects createDraft when the post-handshake setup frame cannot be sent", async () => {
     MockWebSocket.last = null;
-    const setupFailingAdapter = new ServerDraftAdapter("ws://localhost:9374/ws");
+    const setupFailingAdapter = new ServerDraftAdapter("ws://localhost:9374/ws", { stateCodecSessionProvider: null });
     const createPromise = setupFailingAdapter.createDraft({
       displayName: "Alice",
       setCodes: ["MKM"],
@@ -1858,7 +1882,7 @@ describe("ServerDraftAdapter", () => {
 
     // The draft adapter's own precondition, which its WS twin does not carry.
     it("refuses a preview outside the match phase", async () => {
-      const lobbyAdapter = new ServerDraftAdapter("ws://localhost:9374/ws");
+      const lobbyAdapter = new ServerDraftAdapter("ws://localhost:9374/ws", { stateCodecSessionProvider: null });
       await expect(lobbyAdapter.previewInteraction(previewRequest, 0)).rejects.toMatchObject({
         code: "PHASE_ERROR",
       });
@@ -1875,7 +1899,7 @@ describe("ServerDraftAdapter game-command correlation", () => {
   /** One draft seat that has reached an accepted Full match on its own socket. */
   async function seatInMatch(hello: string): Promise<{ seat: ServerDraftAdapter; socket: MockWebSocket }> {
     MockWebSocket.last = null;
-    const seat = new ServerDraftAdapter("ws://localhost:9374/ws");
+    const seat = new ServerDraftAdapter("ws://localhost:9374/ws", { stateCodecSessionProvider: null });
     const created = seat.createDraft({
       displayName: "Seat",
       setCodes: ["MKM"],
@@ -2185,7 +2209,7 @@ describe("draft attachment settlement", () => {
   }
 
   beforeEach(async () => {
-    adapter = new ServerDraftAdapter("ws://localhost:9374/ws");
+    adapter = new ServerDraftAdapter("ws://localhost:9374/ws", { stateCodecSessionProvider: null });
     const created = adapter.createDraft(settings);
     established = await completeHandshake();
     receive(established, "DraftCreated", credentials);
@@ -2682,7 +2706,7 @@ describe("draft attachment open failures", () => {
     injectedOpenFailure.current = null;
     openedUrls.length = 0;
     MockWebSocket.last = null;
-    adapter = new ServerDraftAdapter("ws://localhost:9374/ws");
+    adapter = new ServerDraftAdapter("ws://localhost:9374/ws", { stateCodecSessionProvider: null });
     const created = adapter.createDraft(settings);
     const established = await completeHandshake();
     receive(established, "DraftCreated", credentials);
@@ -2731,5 +2755,1770 @@ describe("draft attachment open failures", () => {
     // no transport was ever created, so no setup frame could have been sent.
     expect(openedUrls).toEqual(["ws://localhost:9374/ws"]);
     expect(MockWebSocket.last).toBeNull();
+  });
+});
+
+// ── Negotiated StateCodecV1 delivery ────────────────────────────────────
+//
+// The decoder is substituted: these rows prove the draft transport routes,
+// gates and recovers. Exact reconstruction is the real-WASM integration row.
+
+const CODEC_SERVER_HELLO = JSON.stringify({
+  type: "ServerHello",
+  data: {
+    server_version: "0.0.0-test",
+    build_commit: "testhash",
+    protocol_version: PROTOCOL_VERSION,
+    mode: "Full",
+    command_correlation: "CommandIdV1",
+    state_codecs: ["StateCodecV1"],
+  },
+});
+const CODEC_SERVER_CONFIRMATION = JSON.stringify({
+  type: "ServerHello",
+  data: { server_version: "0.0.0-test", selected_state_codec: "StateCodecV1" },
+});
+
+type DraftDecodeResult =
+  | { kind: "decoded"; json: string }
+  | { kind: "resyncRequired" };
+
+function draftCodecSession(handler: (frame: Uint8Array) => DraftDecodeResult) {
+  const decode = vi.fn(async (frame: Uint8Array) => handler(frame));
+  const close = vi.fn();
+  return { session: { decode, close }, decode, close };
+}
+
+function draftFrame(type: "Full" | "Delta", envelope: unknown): string {
+  return JSON.stringify({ type, data: { state: envelope, revision: 1 } });
+}
+
+/** Decode handler that unwraps the frame's embedded envelope verbatim. */
+function decodeEnvelope(frame: Uint8Array): DraftDecodeResult {
+  const parsed = JSON.parse(new TextDecoder().decode(frame)) as { data: { state: unknown } };
+  return { kind: "decoded", json: JSON.stringify(parsed.data.state) };
+}
+
+async function startCodecDraft(session: StateCodecSession, correlated = true) {
+  MockWebSocket.last = null;
+  const provider = vi.fn(async () => session);
+  const adapter = new ServerDraftAdapter("ws://localhost:9374/ws", {
+    stateCodecSessionProvider: provider,
+  });
+  const createPromise = adapter.createDraft({
+    displayName: "Alice",
+    setCodes: ["MKM"],
+    kind: "Premier",
+    public: true,
+    tournamentFormat: "Swiss",
+    podPolicy: "Competitive",
+    podSize: 8,
+  });
+  await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+  const ws = MockWebSocket.last!;
+  const hello = JSON.parse(CODEC_SERVER_HELLO);
+  if (!correlated) delete hello.data.command_correlation;
+  ws.dispatchSynthetic("message", JSON.stringify(hello));
+  await vi.waitFor(() => expect(ws.send).toHaveBeenCalledWith(
+    expect.stringContaining('"type":"CreateDraftWithSettings"'),
+  ));
+  ws.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+  receive(ws, "DraftCreated", { draft_code: "ABCD12", player_token: "tok123", seat_index: 0 });
+  await createPromise;
+  // Private transport identity is observed only to discriminate retired-wrapper races.
+  const attached = adapter as unknown as { ws: unknown };
+  return { adapter, ws, session, provider, transport: attached.ws };
+}
+
+/**
+ * Drives a codec socket to an accepted match: DraftMatchStart, then the Full
+ * frame whose decoded text is the genuine GameStarted envelope.
+ */
+async function enterCodecMatch(
+  ws: MockWebSocket,
+  events: unknown[],
+  matchId = "r1-t0",
+): Promise<void> {
+  receive(ws, "DraftMatchStart", {
+    match_id: matchId,
+    round: 1,
+    game_code: FULL_KEY.game_code,
+    full_key: FULL_KEY,
+    player_token: "match-draft-token",
+    your_player: 0,
+    opponent_name: "Bob",
+  });
+  ws.dispatchSynthetic("message", draftFrame("Full", {
+    type: "GameStarted",
+    data: { state: matchState("accepted-full-start"), your_player: 0, full_key: FULL_KEY },
+  }));
+  await vi.waitFor(() =>
+    expect(events).toContainEqual(expect.objectContaining({ type: "gameStateUpdated" })),
+  );
+  // GameStarted cannot be a Delta baseline. Establish StateUpdate shape first.
+  ws.dispatchSynthetic("message", draftFrame("Full", {
+    type: "StateUpdate",
+    data: { state: matchState("accepted-update"), events: [], full_key: FULL_KEY },
+  }));
+  await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+    type: "gameStateUpdated", state: expect.objectContaining({ label: "accepted-update" }),
+  })));
+  ws.send.mockClear();
+}
+
+/** The snapshot-transport counterpart of {@link enterCodecMatch}: plain frames, no decoder. */
+async function enterPlainMatch(
+  ws: MockWebSocket,
+  events: unknown[],
+  matchId = "r1-t0",
+): Promise<void> {
+  receive(ws, "DraftMatchStart", {
+    match_id: matchId,
+    round: 1,
+    game_code: FULL_KEY.game_code,
+    full_key: FULL_KEY,
+    player_token: "match-draft-token",
+    your_player: 0,
+    opponent_name: "Bob",
+  });
+  receive(ws, "GameStarted", {
+    state: matchState("plain-start"), your_player: 0, full_key: FULL_KEY,
+  });
+  await vi.waitFor(() =>
+    expect(events).toContainEqual(expect.objectContaining({ type: "gameStateUpdated" })),
+  );
+  receive(ws, "StateUpdate", {
+    state: matchState("plain-update"), events: [], full_key: FULL_KEY,
+  });
+  await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+    type: "gameStateUpdated", state: expect.objectContaining({ label: "plain-update" }),
+  })));
+  ws.send.mockClear();
+}
+
+/** Whether this socket's ClientHello offered StateCodecV1. */
+function offeredCodec(ws: MockWebSocket): boolean {
+  const hello = ws.send.mock.calls
+    .map(([text]) => JSON.parse(text as string) as { type?: string; data?: { state_codecs?: unknown } })
+    .find((frame) => frame.type === "ClientHello");
+  if (!hello) throw new Error("no ClientHello was sent");
+  return hello.data?.state_codecs !== undefined;
+}
+
+/** The adapter's delivery policy, observed only to discriminate when it was decided. */
+function policyOf(adapter: ServerDraftAdapter): unknown {
+  return (adapter as unknown as { stateCodec: { deliveryPolicy: unknown } }).stateCodec.deliveryPolicy;
+}
+
+/**
+ * A real `StateCodecRuntime` over a scripted engine, exposed as the lease
+ * provider the shared WasmAdapter facade hands out. The poison verdict is the
+ * runtime's own and is not mocked: `script.trapNext` makes the engine's next
+ * decode raise a genuine `WebAssembly.RuntimeError`, which the runtime latches
+ * before it refuses every later open and decode, whichever session asks.
+ */
+function realRuntimeCodec() {
+  interface FakeHandle { json(): string; free(): void; clone_handle(): FakeHandle }
+  const script = { trapNext: false };
+  const handle = (json: string): FakeHandle => ({
+    json: () => json,
+    free: () => undefined,
+    clone_handle: () => handle(json),
+  });
+  const engine = {
+    state_codec_decode: vi.fn((frame: Uint8Array) => {
+      if (script.trapNext) {
+        script.trapNext = false;
+        throw new WebAssembly.RuntimeError("unreachable");
+      }
+      const parsed = JSON.parse(new TextDecoder().decode(frame)) as { data: { state: unknown } };
+      return handle(JSON.stringify(parsed.data.state));
+    }),
+  };
+  const runtime = new StateCodecRuntime(engine as unknown as EngineModule);
+  const provider = vi.fn(async (): Promise<StateCodecSession | null> => {
+    const sessionId = runtime.open();
+    return {
+      decode: async (frame) => runtime.decode(sessionId, frame),
+      close: () => runtime.close(sessionId),
+    };
+  });
+  return { engine, runtime, script, provider };
+}
+
+/**
+ * Submits a command on `ws` and completes it with its correlated StateUpdate,
+ * as a codec Delta frame or as a plain snapshot frame.
+ */
+async function completeDraftCommand(
+  adapter: ServerDraftAdapter,
+  ws: MockWebSocket,
+  label: string,
+  transport: "codec" | "plain",
+): Promise<void> {
+  const before = submissionTypes(ws).length;
+  const settled = trackRejection(adapter.submitAction({ type: "PassPriority" } as GameAction, 0));
+  await vi.waitFor(() => expect(submissionTypes(ws)).toHaveLength(before + 1));
+  const completion = {
+    type: "StateUpdate",
+    command_id: lastSubmissionCommandId(ws),
+    data: { state: matchState(label), events: [], full_key: FULL_KEY },
+  };
+  ws.dispatchSynthetic("message", transport === "codec"
+    ? draftFrame("Delta", completion)
+    : JSON.stringify(completion));
+  await expect(settled()).resolves.toMatchObject({ resolvedWith: { events: [] } });
+}
+
+describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
+  it("emits the same match state and events as the snapshot stream", async () => {
+    const matchStart = {
+      match_id: "r1-t0",
+      round: 1,
+      game_code: FULL_KEY.game_code,
+      full_key: FULL_KEY,
+      player_token: "match-draft-token",
+      your_player: 0,
+      opponent_name: "Bob",
+    };
+    const startedState = matchState("codec-start");
+    const gameStarted = { type: "GameStarted", data: {
+      state: startedState, your_player: 0, full_key: FULL_KEY,
+      legal_actions: [{ type: "PassPriority" }], auto_pass_recommended: true,
+      spell_costs: { "12": { generic: 1 } }, derived: { marker: "雪 🧙" },
+    } };
+    const updateState = matchState("codec-update");
+    const stateUpdate = {
+      type: "StateUpdate",
+      data: { state: updateState, events: [{ marker: "codec-update" }], full_key: FULL_KEY,
+        log_entries: [debugLogEntry("Éowyn")] },
+    };
+
+    const codec = await startCodecDraft(draftCodecSession(decodeEnvelope).session);
+    const codecEvents: unknown[] = [];
+    codec.adapter.onEvent((event) => codecEvents.push(event));
+    receive(codec.ws, "DraftMatchStart", matchStart);
+    codec.ws.dispatchSynthetic("message", draftFrame("Full", gameStarted));
+    codec.ws.dispatchSynthetic("message", draftFrame("Full", stateUpdate));
+
+    const snapshot = new ServerDraftAdapter("ws://localhost:9374/ws", {
+      stateCodecSessionProvider: null,
+    });
+    const snapshotEvents: unknown[] = [];
+    snapshot.onEvent((event) => snapshotEvents.push(event));
+    MockWebSocket.last = null;
+    const createPromise = snapshot.createDraft({
+      displayName: "Alice",
+      setCodes: ["MKM"],
+      kind: "Premier",
+      public: true,
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+      podSize: 8,
+    });
+    await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+    const ws = MockWebSocket.last!;
+    ws.dispatchSynthetic("message", SERVER_HELLO);
+    await vi.waitFor(() =>
+      expect((snapshot as unknown as { ws: unknown }).ws).not.toBeNull(),
+    );
+    receive(ws, "DraftCreated", { draft_code: "ABCD12", player_token: "tok123", seat_index: 0 });
+    await createPromise;
+    receive(ws, "DraftMatchStart", matchStart);
+    ws.dispatchSynthetic("message", JSON.stringify(gameStarted));
+    ws.dispatchSynthetic("message", JSON.stringify(stateUpdate));
+
+    const shape = (events: unknown[]) => events
+      .filter((event): event is { type: string } =>
+        typeof event === "object" && event !== null && "type" in event)
+      .filter((event) => event.type === "gameStateUpdated")
+      .map((event) => {
+        const typed = event as {
+          state?: unknown;
+          events?: unknown;
+          legalResult?: unknown;
+          logEntries?: unknown;
+        };
+        return {
+          state: typed.state,
+          events: typed.events,
+          legalResult: typed.legalResult,
+          logEntries: typed.logEntries,
+        };
+      });
+
+    expect(shape(codecEvents)).toHaveLength(2);
+    const expected = [{
+      state: { ...startedState, derived: gameStarted.data.derived }, events: [],
+      legalResult: { actions: gameStarted.data.legal_actions, autoPassRecommended: true,
+        endContinuousEffectOffers: [], manaPaymentShortcutActions: [],
+        spellCosts: gameStarted.data.spell_costs, legalActionsByObject: undefined,
+        activationBlockReasons: undefined, viewerInteraction: undefined },
+      logEntries: undefined,
+    }, {
+      state: { ...updateState, derived: undefined }, events: stateUpdate.data.events,
+      legalResult: { actions: [], autoPassRecommended: false, endContinuousEffectOffers: [],
+        manaPaymentShortcutActions: [], spellCosts: undefined, legalActionsByObject: undefined,
+        activationBlockReasons: undefined, viewerInteraction: undefined },
+      logEntries: stateUpdate.data.log_entries,
+    }];
+    expect(shape(snapshotEvents)).toEqual(expected);
+    expect(shape(codecEvents)).toEqual(expected);
+    expect(shape(codecEvents)).toEqual(shape(snapshotEvents));
+    codec.adapter.dispose();
+    snapshot.dispose();
+  });
+
+  it("treats a rejection in a new match as bootstrap-fatal, not recoverable", async () => {
+    let calls = 0;
+    const session = draftCodecSession((frame) => {
+      calls++;
+      // Match A's GameStarted and first update establish a live stream.
+      return calls <= 2 ? decodeEnvelope(frame) : { kind: "resyncRequired" };
+    });
+    const { adapter, ws } = await startCodecDraft(session.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+
+    await enterCodecMatch(ws, events);
+    expect(events).toContainEqual(expect.objectContaining({ type: "gameStateUpdated" }));
+
+    // Match B: a different match id resets bootstrap to pending.
+    receive(ws, "DraftMatchStart", {
+      match_id: "r2-t0",
+      round: 2,
+      game_code: FULL_KEY.game_code,
+      full_key: FULL_KEY,
+      player_token: "match-draft-token",
+      your_player: 0,
+      opponent_name: "Carol",
+    });
+    const startedB = { type: "GameStarted", data: { state: matchState("b-start"), your_player: 0, full_key: FULL_KEY } };
+    ws.dispatchSynthetic("message", draftFrame("Full", startedB));
+
+    await vi.waitFor(() => expect(events).toContainEqual({ type: "disconnected" }));
+    expect(ws.send).toHaveBeenCalledWith('{"type":"ResyncState"}');
+    expect(
+      ws.send.mock.calls.filter(([value]) => value === '{"type":"ResyncState"}'),
+    ).toHaveLength(1);
+    expect(
+      events.some((event) =>
+        (event as { type?: string; state?: { label?: string } }).type === "gameStateUpdated"
+        && (event as { state?: { label?: string } }).state?.label === "b-start"),
+    ).toBe(false);
+  });
+
+  it.each([
+    ["Action", true], ["Interaction", true], ["Action", false], ["Interaction", false],
+  ] as const)("recovers an established %s (correlated=%s), gating new submissions until Full", async (kind, correlated) => {
+    const session = draftCodecSession(decodeEnvelope);
+    const { adapter, ws } = await startCodecDraft(session.session, correlated);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+
+    // Reject an established StateUpdate Delta, then recover on a new Full.
+    let calls = 0;
+    session.decode.mockImplementation(async (frame: Uint8Array) => {
+      calls++;
+      return calls === 1 ? { kind: "resyncRequired" } : decodeEnvelope(frame);
+    });
+
+    const pending = kind === "Action" ? adapter.submitAction({ type: "PassPriority" }, 0)
+      : adapter.submitInteraction(interactionSubmission("codec-initial"), 0);
+    const observed = trackRejection(pending);
+    const oldId = correlated ? lastSubmissionCommandId(ws) : undefined;
+    const reentrant: Promise<unknown>[] = [];
+    const stop = adapter.onEvent((event) => {
+      if ((event.type === "actionPendingChanged" && !event.pending) || event.type === "gameStateUpdated") {
+        reentrant.push(adapter.submitInteraction(interactionSubmission("codec-reentrant"), 0).catch((error: unknown) => error));
+      }
+    });
+    ws.dispatchSynthetic("message", draftFrame("Delta", {
+      type: "StateUpdate",
+      data: { state: matchState("peer"), events: [], full_key: FULL_KEY },
+    }));
+    await expect(observed()).resolves.toMatchObject({
+      code: "WS_CLOSED",
+      message: "State delivery interrupted during action",
+      recoverable: true,
+    });
+
+    const sentBefore = submissionTypes(ws).length;
+    await expect(adapter.submitAction({ type: "PassPriority" } as GameAction, 0)).rejects
+      .toMatchObject({ code: "ACTION_NOT_SENT" });
+    expect(submissionTypes(ws)).toHaveLength(sentBefore);
+
+    ws.dispatchSynthetic("message", draftFrame("Full", {
+      type: "StateUpdate",
+      data: { state: matchState("resync"), events: [], full_key: FULL_KEY },
+    }));
+    await vi.waitFor(() => expect(() => (adapter as unknown as { stateCodec: { assertNotRecovering(): void } }).stateCodec.assertNotRecovering()).not.toThrow());
+    expect(await Promise.all(reentrant)).toEqual([
+      expect.objectContaining({ code: "ACTION_NOT_SENT" }),
+      expect.objectContaining({ code: "ACTION_NOT_SENT" }),
+    ]);
+    stop();
+
+    const resumed = adapter.submitAction({ type: "PassPriority" } as GameAction, 0);
+    await vi.waitFor(() => expect(submissionTypes(ws)).toHaveLength(sentBefore + 1));
+    const settled = vi.fn();
+    void resumed.then(settled);
+    if (correlated) {
+      ws.dispatchSynthetic("message", draftFrame("Delta", {
+        type: "StateUpdate", command_id: oldId,
+        data: { state: matchState("old-echo"), events: [], full_key: FULL_KEY },
+      }));
+      await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+        type: "gameStateUpdated", state: expect.objectContaining({ label: "old-echo" }),
+      })));
+      expect(settled).not.toHaveBeenCalled();
+    }
+    ws.dispatchSynthetic("message", draftFrame("Delta", {
+      type: "StateUpdate", command_id: correlated ? lastSubmissionCommandId(ws) : undefined,
+      data: { state: matchState("own"), events: [], full_key: FULL_KEY },
+    }));
+    await expect(resumed).resolves.toMatchObject({ events: [] });
+    adapter.dispose();
+  });
+});
+
+describe("ServerDraftAdapter — retired codec transport", () => {
+  it("does not let a retired socket's recovery drop the replacement's pending command", async () => {
+    // Two attachments live during the overlap; only the current one owns the
+    // command slot. Full suite semantics allow a superseded socket to keep
+    // delivering its own draft replies (see J2), so the isolation must come
+    // from the attachment identity check, not from dropping frames.
+    const session = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider, transport } = await startCodecDraft(session.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+
+    const replacementSession = draftCodecSession(decodeEnvelope);
+    provider.mockResolvedValueOnce(replacementSession.session);
+    // A replacement attachment takes over the adapter.
+    const reconnecting = adapter.reconnectDraft();
+    await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(ws));
+    const replacement = MockWebSocket.last!;
+    replacement.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+    await vi.waitFor(() => {
+      const attached = adapter as unknown as { ws: unknown };
+      expect(attached.ws).not.toBe(transport);
+    });
+    replacement.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+    receive(replacement, "DraftStateUpdate", { view: createMockDraftView({ pick_number: 1 }) });
+    await reconnecting;
+    events.length = 0;
+    await enterCodecMatch(replacement, events);
+    events.length = 0;
+    // The command is owned and sent by the replacement, not its predecessor.
+    const pending = adapter.submitAction({ type: "PassPriority" } as GameAction, 0);
+    const observed = trackRejection(pending);
+    const commandId = lastSubmissionCommandId(replacement);
+
+    // A rejection on the RETIRED transport must not touch the live slot.
+    session.decode.mockImplementationOnce(async () => ({ kind: "resyncRequired" }));
+    ws.dispatchSynthetic("message", draftFrame("Delta", {
+      type: "StateUpdate",
+      data: { state: matchState("retired"), events: [], full_key: FULL_KEY },
+    }));
+    await vi.waitFor(() => expect(ws.send).toHaveBeenCalledWith('{"type":"ResyncState"}'));
+    expect(events).not.toContainEqual({ type: "actionPendingChanged", pending: false });
+    expect(() => (adapter as unknown as { stateCodec: { assertNotRecovering(): void } }).stateCodec.assertNotRecovering()).not.toThrow();
+
+    // The live command still settles on its own correlated completion,
+    // delivered on the transport that now owns the slot.
+    replacement.dispatchSynthetic("message", draftFrame("Full", {
+      type: "StateUpdate",
+      data: { state: matchState("own"), events: [], full_key: FULL_KEY },
+      command_id: commandId,
+    }));
+    await expect(observed()).resolves.toMatchObject({ resolvedWith: { events: [] } });
+    adapter.dispose();
+  });
+
+  it("fences a retired delayed decode while the replacement accepts a live update", async () => {
+    const session = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider } = await startCodecDraft(session.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    let finish!: (value: DraftDecodeResult) => void;
+    session.decode.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    ws.dispatchSynthetic("message", draftFrame("Delta", {}));
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    const replacementSession = draftCodecSession(decodeEnvelope);
+    provider.mockResolvedValueOnce(replacementSession.session);
+    const reattached = adapter.reconnectDraft();
+    await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(ws));
+    const replacement = MockWebSocket.last!;
+    replacement.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+    await vi.waitFor(() => expect(replacement.send).toHaveBeenCalledWith(
+      expect.stringContaining('"type":"ReconnectDraft"')));
+    replacement.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+    receive(replacement, "DraftStateUpdate", { view: createMockDraftView() });
+    await reattached;
+    events.length = 0;
+    await enterCodecMatch(replacement, events);
+    events.length = 0;
+    finish({ kind: "decoded", json: JSON.stringify({ type: "StateUpdate",
+      data: { state: matchState("retired-late"), events: [], full_key: FULL_KEY } }) });
+    replacement.dispatchSynthetic("message", draftFrame("Delta", { type: "StateUpdate",
+      data: { state: matchState("live"), events: [], full_key: FULL_KEY } }));
+    await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+      type: "gameStateUpdated", state: expect.objectContaining({ label: "live" }),
+    })));
+    expect(events).not.toContainEqual(expect.objectContaining({
+      type: "gameStateUpdated", state: expect.objectContaining({ label: "retired-late" }),
+    }));
+    adapter.dispose();
+    ws.dispatchSynthetic("close");
+  });
+});
+
+describe("ServerDraftAdapter — codec identity and bootstrap boundaries", () => {
+  it("keeps ignored identity frames on the wire baseline and accepts the matching stream", async () => {
+    const session = draftCodecSession(decodeEnvelope);
+    const { adapter, ws } = await startCodecDraft(session.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    events.length = 0;
+    const wrongKey = { ...FULL_KEY, generation: FULL_KEY.generation + 1 };
+    const rejected = { type: "StateUpdate", data: { state: matchState("ignored-key"),
+      events: [], full_key: wrongKey } };
+    ws.dispatchSynthetic("message", draftFrame("Full", rejected));
+    ws.dispatchSynthetic("message", draftFrame("Delta", rejected));
+    ws.dispatchSynthetic("message", draftFrame("Full", { type: "GameStarted",
+      data: { state: matchState("wrong-player"), your_player: 1, full_key: FULL_KEY } }));
+    ws.dispatchSynthetic("message", draftFrame("Full", { type: "StateUpdate",
+      data: { state: matchState("missing-key"), events: [] } }));
+    ws.dispatchSynthetic("message", draftFrame("Full", { type: "StateUpdate",
+      data: { state: matchState("matching-full"), events: [], full_key: FULL_KEY } }));
+    ws.dispatchSynthetic("message", draftFrame("Delta", { type: "StateUpdate",
+      data: { state: matchState("matching-delta"), events: [], full_key: FULL_KEY } }));
+    await vi.waitFor(() => expect(events).toHaveLength(2));
+    expect(events).toEqual([
+      expect.objectContaining({ type: "gameStateUpdated", state: expect.objectContaining({ label: "matching-full" }) }),
+      expect.objectContaining({ type: "gameStateUpdated", state: expect.objectContaining({ label: "matching-delta" }) }),
+    ]);
+    expect(session.decode).toHaveBeenCalledTimes(8);
+    expect(session.close).not.toHaveBeenCalled();
+    expect(ws.send).not.toHaveBeenCalledWith('{"type":"ResyncState"}');
+    expect(ws.close).not.toHaveBeenCalled();
+    adapter.dispose();
+  });
+
+  it.each(["Full", "Delta"] as const)("closes on an initial rejected %s and reattaches with genuine bootstrap", async (type) => {
+    const first = draftCodecSession(() => ({ kind: "resyncRequired" }));
+    const { adapter, ws, provider } = await startCodecDraft(first.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    receive(ws, "DraftMatchStart", { match_id: "r1-t0", round: 1,
+      game_code: FULL_KEY.game_code, full_key: FULL_KEY,
+      player_token: "match-token", your_player: 0, opponent_name: "Opponent" });
+    ws.dispatchSynthetic("message", draftFrame(type, { type: "GameStarted",
+      data: { state: matchState("bad-start"), your_player: 0, full_key: FULL_KEY } }));
+    await vi.waitFor(() => expect(events).toContainEqual({ type: "disconnected" }));
+    expect(first.close).toHaveBeenCalledOnce();
+    expect(ws.send.mock.calls.filter(([text]) => text === '{"type":"ResyncState"}')).toHaveLength(1);
+    ws.dispatchSynthetic("message", draftFrame("Full", { type: "StateUpdate",
+      data: { state: matchState("late"), full_key: FULL_KEY, events: [] } }));
+    ws.dispatchSynthetic("message", draftFrame("Delta", {}));
+    await expect(adapter.getSnapshot()).rejects.toThrow("No game state");
+    // A rejection before bootstrap is a terminal codec reason: this adapter's
+    // next attachment is snapshot-only, so the provider is not consulted again
+    // and play is restored from plain frames.
+    expect(provider).toHaveBeenCalledOnce();
+    const reattached = adapter.reconnectDraft();
+    await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(ws));
+    const replacement = MockWebSocket.last!;
+    replacement.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+    await vi.waitFor(() => expect(replacement.send).toHaveBeenCalledWith(expect.stringContaining('"type":"ReconnectDraft"')));
+    expect(offeredCodec(replacement)).toBe(false);
+    receive(replacement, "DraftStateUpdate", { view: createMockDraftView() });
+    await reattached;
+    events.length = 0;
+    await enterPlainMatch(replacement, events);
+    receive(replacement, "StateUpdate", { state: matchState("reattached-update"), events: [], full_key: FULL_KEY });
+    await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+      type: "gameStateUpdated", state: expect.objectContaining({ label: "reattached-update" }),
+    })));
+    expect(provider).toHaveBeenCalledOnce();
+    expect(first.decode).toHaveBeenCalledOnce();
+    expect(replacement.send).not.toHaveBeenCalledWith('{"type":"ResyncState"}');
+    adapter.dispose();
+  });
+});
+
+describe("ServerDraftAdapter — codec degradation policy", () => {
+  const pass = { type: "PassPriority" } as GameAction;
+  const stateUpdate = (label: string) => ({
+    type: "StateUpdate", data: { state: matchState(label), events: [], full_key: FULL_KEY },
+  });
+
+  async function reattachSnapshotOnly(adapter: ServerDraftAdapter, previous: MockWebSocket) {
+    const reattached = adapter.reconnectDraft();
+    await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(previous));
+    const replacement = MockWebSocket.last!;
+    replacement.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+    await vi.waitFor(() => expect(replacement.send).toHaveBeenCalledWith(
+      expect.stringContaining('"type":"ReconnectDraft"')));
+    receive(replacement, "DraftStateUpdate", { view: createMockDraftView() });
+    await reattached;
+    return replacement;
+  }
+
+  // Confirmation has no deadline and heartbeat does not bound the wait,
+  // so an initial attachment whose second hello is slow still completes and
+  // is not degraded: a deadline would fail it after the create/join request
+  // was sent, orphaning the seat whose credentials arrive in the reply.
+  it.each(["create", "join"] as const)(
+    "completes an initial %s whose confirmation hello arrives after the former deadline, leaving the policy negotiating",
+    async (kind) => {
+      vi.useFakeTimers();
+      const session = draftCodecSession(decodeEnvelope);
+      const provider = vi.fn(async () => session.session);
+      MockWebSocket.last = null;
+      const adapter = new ServerDraftAdapter("ws://localhost:9374/ws", {
+        stateCodecSessionProvider: provider,
+      });
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      try {
+        const attachment = kind === "create"
+          ? adapter.createDraft({
+            displayName: "Alice", setCodes: ["MKM"], kind: "Premier", public: true,
+            tournamentFormat: "Swiss", podPolicy: "Competitive", podSize: 8,
+          })
+          : adapter.joinDraft("ABCD12", "Alice");
+        const outcome = attachment.then(
+          () => "resolved" as const,
+          (error: unknown) => error,
+        );
+        await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+        const ws = MockWebSocket.last!;
+        ws.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+        const setupType = kind === "create" ? "CreateDraftWithSettings" : "JoinDraftWithPassword";
+        await vi.waitFor(() => expect(ws.send).toHaveBeenCalledWith(
+          expect.stringContaining(`"type":"${setupType}"`)));
+        // Reach guard: the codec was offered and the setup request is on the wire.
+        expect(offeredCodec(ws)).toBe(true);
+
+        await vi.advanceTimersByTimeAsync(STATE_CODEC_SOCKET_TIMEOUT_MS + 1000);
+        expect(ws.close).not.toHaveBeenCalled();
+        expect(session.close).not.toHaveBeenCalled();
+        expect(policyOf(adapter)).toEqual({ kind: "negotiate" });
+        // The settlement helpers below wait on real macrotasks.
+        vi.useRealTimers();
+
+        ws.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+        if (kind === "create") {
+          receive(ws, "DraftCreated", { draft_code: "ABCD12", player_token: "tok123", seat_index: 0 });
+        } else {
+          receive(ws, "DraftJoined", {
+            draft_code: "ABCD12", player_token: "tok123", seat_index: 0, view: createMockDraftView(),
+          });
+        }
+        // The owner is settled with the reply, not rejected.
+        expect(await outcome).toBe("resolved");
+        expect(ws.close).not.toHaveBeenCalled();
+        expect(session.close).not.toHaveBeenCalled();
+
+        // The match start (a GameStarted Full) bootstraps through the codec.
+        await enterCodecMatch(ws, events);
+        expect(session.decode).toHaveBeenCalledTimes(2);
+        await completeDraftCommand(adapter, ws, "slow-confirmation-command", "codec");
+        expect(session.decode).toHaveBeenCalledTimes(3);
+        expect(policyOf(adapter)).toEqual({ kind: "negotiate" });
+        expect(provider).toHaveBeenCalledOnce();
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("tolerates one completed recovery, closes after the second and reattaches snapshot-only; a fresh adapter negotiates", async () => {
+    const session = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider } = await startCodecDraft(session.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    const seen = (label: string) => expect(events).toContainEqual(expect.objectContaining({
+      type: "gameStateUpdated", state: expect.objectContaining({ label }),
+    }));
+    try {
+      // Recovery one completes; the command after it is admitted.
+      session.decode.mockImplementationOnce(async () => ({ kind: "resyncRequired" }));
+      ws.dispatchSynthetic("message", draftFrame("Delta", stateUpdate("corrupt-1")));
+      await vi.waitFor(() => expect(ws.send.mock.calls.filter(([t]) => t === '{"type":"ResyncState"}')).toHaveLength(1));
+      ws.dispatchSynthetic("message", draftFrame("Full", stateUpdate("resync-1")));
+      await vi.waitFor(() => seen("resync-1"));
+      void adapter.submitAction(pass, 0).catch(() => undefined);
+      await vi.waitFor(() => expect(submissionTypes(ws)).toHaveLength(1));
+      expect(ws.close).not.toHaveBeenCalled();
+
+      // Recovery two: the Full is delivered, then the stream closes.
+      ws.dispatchSynthetic("message", draftFrame("Delta", stateUpdate("healthy")));
+      await vi.waitFor(() => seen("healthy"));
+      session.decode.mockImplementationOnce(async () => ({ kind: "resyncRequired" }));
+      ws.dispatchSynthetic("message", draftFrame("Delta", stateUpdate("corrupt-2")));
+      await vi.waitFor(() => expect(ws.send.mock.calls.filter(([t]) => t === '{"type":"ResyncState"}')).toHaveLength(2));
+      ws.dispatchSynthetic("message", draftFrame("Full", stateUpdate("resync-2")));
+      await vi.waitFor(() => seen("resync-2"));
+      await vi.waitFor(() => expect(events).toContainEqual({ type: "disconnected" }));
+      expect(session.close).toHaveBeenCalledOnce();
+
+      const replacement = await reattachSnapshotOnly(adapter, ws);
+      expect(provider).toHaveBeenCalledOnce();
+      expect(offeredCodec(replacement)).toBe(false);
+      events.length = 0;
+      await enterPlainMatch(replacement, events);
+      expect(provider).toHaveBeenCalledOnce();
+
+      // The degraded adapter stays usable: a plain command completes ...
+      await completeDraftCommand(adapter, replacement, "plain-command-1", "plain");
+      // ... a new match on the snapshot socket stays snapshot ...
+      events.length = 0;
+      await enterPlainMatch(replacement, events, "r2-t0");
+      await completeDraftCommand(adapter, replacement, "plain-command-2", "plain");
+      expect(provider).toHaveBeenCalledOnce();
+      // ... and the new match did not re-enable negotiation for the next attachment.
+      replacement.dispatchSynthetic("close");
+      await vi.waitFor(() => expect(events).toContainEqual({ type: "disconnected" }));
+      const again = await reattachSnapshotOnly(adapter, replacement);
+      expect(offeredCodec(again)).toBe(false);
+      expect(provider).toHaveBeenCalledOnce();
+    } finally {
+      adapter.dispose();
+    }
+
+    const next = draftCodecSession(decodeEnvelope);
+    const fresh = await startCodecDraft(next.session);
+    const freshEvents: unknown[] = [];
+    fresh.adapter.onEvent((event) => freshEvents.push(event));
+    try {
+      expect(offeredCodec(fresh.ws)).toBe(true);
+      // The fresh adapter decodes, bootstraps and completes a command, not only advertises.
+      await enterCodecMatch(fresh.ws, freshEvents);
+      expect(next.decode).toHaveBeenCalledTimes(2);
+      await completeDraftCommand(fresh.adapter, fresh.ws, "fresh-command", "codec");
+      expect(next.decode).toHaveBeenCalledTimes(3);
+    } finally {
+      fresh.adapter.dispose();
+    }
+  });
+
+  it("closes a lease that arrives after the adapter degraded, opens the pending attachment snapshot-only and settles it", async () => {
+    const session = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider } = await startCodecDraft(session.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    let release!: (lease: StateCodecSession | null) => void;
+    provider.mockImplementationOnce(() => new Promise<StateCodecSession>((resolve) => {
+      release = resolve as (lease: StateCodecSession | null) => void;
+    }));
+    const late = draftCodecSession(decodeEnvelope);
+    try {
+      const reattached = adapter.reconnectDraft();
+      const settled = trackRejection(reattached);
+      await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+
+      session.decode.mockImplementationOnce(async () => { throw new Error("decoder trapped"); });
+      ws.dispatchSynthetic("message", draftFrame("Delta", stateUpdate("never-applied")));
+      await vi.waitFor(() => expect(session.close).toHaveBeenCalledOnce());
+      // Reach guard: A is gone and B's preparation is still outstanding.
+      expect(late.close).not.toHaveBeenCalled();
+
+      release(late.session);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(ws));
+      const replacement = MockWebSocket.last!;
+      replacement.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+      await vi.waitFor(() => expect(replacement.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"ReconnectDraft"')));
+      expect(late.close).toHaveBeenCalledOnce();
+      expect(offeredCodec(replacement)).toBe(false);
+      receive(replacement, "DraftStateUpdate", { view: createMockDraftView() });
+      // The attachment owner is settled, not stranded.
+      expect(await settled()).not.toBe("never settled");
+      await enterPlainMatch(replacement, events);
+      expect(late.decode).not.toHaveBeenCalled();
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  afterEach(() => { artIO.openCodec = null; });
+
+  it("captures a confirmation failure that lands before adoption, rejects the reattachment once and reattaches snapshot-only", async () => {
+    const session = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider, transport } = await startCodecDraft(session.session);
+    const early = draftCodecSession(decodeEnvelope);
+    provider.mockResolvedValueOnce(early.session);
+    const events: unknown[] = [];
+    const policyAtServerHello: unknown[] = [];
+    adapter.onEvent((event) => {
+      events.push(event);
+      // The reason must already be consumed when a serverHello listener runs.
+      if ((event as { type?: string }).type === "serverHello") policyAtServerHello.push(policyOf(adapter));
+    });
+    try {
+      const reattached = trackRejection(adapter.reconnectDraft());
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(ws));
+      const candidate = MockWebSocket.last!;
+      const adoptedAtFailure: boolean[] = [];
+      // The contradictory confirmation is delivered from inside the ClientHello
+      // send, i.e. after the wrapper is installed and before openPhaseSocket
+      // resolves: the failure is published before the adapter adopts the socket.
+      candidate.send.mockImplementation((text: unknown) => {
+        if (typeof text !== "string" || !text.includes('"type":"ClientHello"')) return;
+        adoptedAtFailure.push((adapter as unknown as { ws: unknown }).ws !== transport);
+        candidate.dispatchSynthetic("message", JSON.stringify({
+          type: "ServerHello",
+          data: { server_version: "0.0.0-test", selected_state_codec: "SomeOtherCodec" },
+        }));
+      });
+      candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+
+      expect(await reattached()).toMatchObject({
+        code: "WS_CLOSED", message: "Connection closed before draft started", recoverable: true,
+      });
+      // Reach guard: the codec really was offered, and no socket was adopted yet.
+      expect(offeredCodec(candidate)).toBe(true);
+      expect(adoptedAtFailure).toEqual([false]);
+      expect(provider).toHaveBeenCalledTimes(2);
+      // One wrapper failure: lease released once, no resync, one serverHello for the attachment.
+      expect(early.close).toHaveBeenCalledOnce();
+      expect(candidate.send.mock.calls.filter(([text]) => text === '{"type":"ResyncState"}')).toHaveLength(0);
+      expect(policyAtServerHello).toEqual([{ kind: "snapshotOnly", reason: "confirmationFailure" }]);
+      expect(events.filter((event) => (event as { type?: string }).type === "serverHello")).toHaveLength(1);
+
+      // The next explicit attachment of the same adapter is snapshot-only.
+      const next = await reattachSnapshotOnly(adapter, candidate);
+      expect(offeredCodec(next)).toBe(false);
+      expect(provider).toHaveBeenCalledTimes(2);
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("adopts an already-negotiated candidate when the current attachment degrades, then reattaches snapshot-only", async () => {
+    const first = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider } = await startCodecDraft(first.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    const second = draftCodecSession(decodeEnvelope);
+    provider.mockResolvedValueOnce(second.session);
+    try {
+      // B holds its lease and awaits its hello while A is still current.
+      const settled = trackRejection(adapter.reconnectDraft());
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(ws));
+      const candidate = MockWebSocket.last!;
+      expect(provider).toHaveBeenCalledTimes(2);
+
+      first.decode.mockImplementationOnce(async () => { throw new Error("decoder trapped"); });
+      ws.dispatchSynthetic("message", draftFrame("Delta", stateUpdate("never-applied")));
+      await vi.waitFor(() => expect(first.close).toHaveBeenCalledOnce());
+      expect(policyOf(adapter)).toEqual({ kind: "snapshotOnly", reason: "decodeFailure" });
+      // Reach guard: A is gone and B's lease and handshake are untouched.
+      expect(second.close).not.toHaveBeenCalled();
+      expect(candidate.close).not.toHaveBeenCalled();
+
+      // B is not retired for A's failure: it negotiates, answers the reattachment and bootstraps.
+      candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+      await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"ReconnectDraft"')));
+      expect(offeredCodec(candidate)).toBe(true);
+      candidate.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+      receive(candidate, "DraftStateUpdate", { view: createMockDraftView() });
+      // The attachment owner is settled by the authoritative reply, not stranded.
+      expect(await settled()).toEqual({ resolvedWith: undefined });
+      events.length = 0;
+      await enterCodecMatch(candidate, events);
+      await completeDraftCommand(adapter, candidate, "overlap-command", "codec");
+      expect(second.decode).toHaveBeenCalledTimes(3);
+      expect(second.close).not.toHaveBeenCalled();
+
+      // The next attachment (C) is plain.
+      candidate.dispatchSynthetic("close");
+      const plain = await reattachSnapshotOnly(adapter, candidate);
+      expect(offeredCodec(plain)).toBe(false);
+      expect(provider).toHaveBeenCalledTimes(2);
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("keeps negotiating across a recovery, a network reconnect and a second recovery on the replacement", async () => {
+    const first = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider } = await startCodecDraft(first.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    const seen = (label: string) => expect(events).toContainEqual(expect.objectContaining({
+      type: "gameStateUpdated", state: expect.objectContaining({ label }),
+    }));
+    const resyncs = (socket: MockWebSocket) =>
+      socket.send.mock.calls.filter(([text]) => text === '{"type":"ResyncState"}').length;
+    try {
+      // Recovery one completes without closing and admits a command.
+      first.decode.mockImplementationOnce(async () => ({ kind: "resyncRequired" }));
+      ws.dispatchSynthetic("message", draftFrame("Delta", stateUpdate("corrupt-1")));
+      await vi.waitFor(() => expect(resyncs(ws)).toBe(1));
+      ws.dispatchSynthetic("message", draftFrame("Full", stateUpdate("resync-1")));
+      await vi.waitFor(() => seen("resync-1"));
+      await completeDraftCommand(adapter, ws, "command-1", "codec");
+      expect(ws.close).not.toHaveBeenCalled();
+
+      // An explicit reattachment after a network loss still advertises the codec.
+      ws.dispatchSynthetic("close");
+      await vi.waitFor(() => expect(events).toContainEqual({ type: "disconnected" }));
+      const second = draftCodecSession(decodeEnvelope);
+      provider.mockResolvedValueOnce(second.session);
+      const reattached = adapter.reconnectDraft();
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(ws));
+      const replacement = MockWebSocket.last!;
+      replacement.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+      await vi.waitFor(() => expect(replacement.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"ReconnectDraft"')));
+      // Reach guard: the first recovery did not degrade the adapter.
+      expect(offeredCodec(replacement)).toBe(true);
+      replacement.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+      receive(replacement, "DraftStateUpdate", { view: createMockDraftView() });
+      await reattached;
+      events.length = 0;
+      await enterCodecMatch(replacement, events);
+
+      // One recovery on the replacement wrapper is the first for that wrapper.
+      second.decode.mockImplementationOnce(async () => ({ kind: "resyncRequired" }));
+      replacement.dispatchSynthetic("message", draftFrame("Delta", stateUpdate("corrupt-2")));
+      await vi.waitFor(() => expect(resyncs(replacement)).toBe(1));
+      replacement.dispatchSynthetic("message", draftFrame("Full", stateUpdate("resync-2")));
+      await vi.waitFor(() => seen("resync-2"));
+      await completeDraftCommand(adapter, replacement, "command-2", "codec");
+      expect(replacement.close).not.toHaveBeenCalled();
+      expect(second.close).not.toHaveBeenCalled();
+      expect(policyOf(adapter)).toEqual({ kind: "negotiate" });
+      expect(provider).toHaveBeenCalledTimes(2);
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("creates the degraded attachment's socket in the same turn, while a negotiating attachment still awaits its lease", async () => {
+    const first = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider } = await startCodecDraft(first.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    const second = draftCodecSession(decodeEnvelope);
+    provider.mockResolvedValueOnce(second.session);
+    try {
+      ws.dispatchSynthetic("close");
+      await vi.waitFor(() => expect(events).toContainEqual({ type: "disconnected" }));
+
+      // Positive provider case: a negotiating adapter creates no socket until
+      // its lease has been prepared.
+      const reattached = adapter.reconnectDraft();
+      expect(provider).toHaveBeenCalledTimes(2);
+      expect(MockWebSocket.last).toBe(ws);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(ws));
+      const candidate = MockWebSocket.last!;
+      candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+      await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"ReconnectDraft"')));
+      expect(offeredCodec(candidate)).toBe(true);
+      candidate.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+      receive(candidate, "DraftStateUpdate", { view: createMockDraftView() });
+      await reattached;
+
+      // A real qualifying failure degrades the adapter ...
+      second.decode.mockImplementationOnce(async () => { throw new Error("decoder trapped"); });
+      candidate.dispatchSynthetic("message", draftFrame("Delta", stateUpdate("never-applied")));
+      await vi.waitFor(() => expect(second.close).toHaveBeenCalledOnce());
+      expect(policyOf(adapter)).toEqual({ kind: "snapshotOnly", reason: "decodeFailure" });
+
+      // ... so the next attachment opens its socket without any await in between.
+      const again = adapter.reconnectDraft();
+      expect(MockWebSocket.last).not.toBe(candidate);
+      expect(provider).toHaveBeenCalledTimes(2);
+      const plain = MockWebSocket.last!;
+      plain.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+      await vi.waitFor(() => expect(plain.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"ReconnectDraft"')));
+      expect(offeredCodec(plain)).toBe(false);
+      receive(plain, "DraftStateUpdate", { view: createMockDraftView() });
+      await again;
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("settles an adopted candidate normally when the shared runtime traps on the retired attachment before the candidate's next decode", async () => {
+    const { runtime, script, provider: runtimeProvider } = realRuntimeCodec();
+    const lease = await runtimeProvider();
+    const { adapter, ws, provider } = await startCodecDraft(lease!);
+    provider.mockImplementation(async () => (await runtimeProvider())!);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    try {
+      expect(runtime.state).toEqual({ kind: "ready" });
+      // B bootstraps on its own session of the same runtime while A is retired but still live.
+      const reattached = adapter.reconnectDraft();
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(ws));
+      const candidate = MockWebSocket.last!;
+      candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+      await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"ReconnectDraft"')));
+      expect(offeredCodec(candidate)).toBe(true);
+      candidate.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+      receive(candidate, "DraftStateUpdate", { view: createMockDraftView() });
+      await reattached;
+      events.length = 0;
+      await enterCodecMatch(candidate, events);
+      expect(provider).toHaveBeenCalledTimes(2);
+      const pending = trackRejection(adapter.submitAction(pass, 0));
+      await vi.waitFor(() => expect(submissionTypes(candidate)).toHaveLength(1));
+
+      // A genuine wasm trap on the retired attachment poisons the shared runtime.
+      script.trapNext = true;
+      ws.dispatchSynthetic("message", draftFrame("Delta", stateUpdate("trap")));
+      await vi.waitFor(() => expect(runtime.state).toEqual({ kind: "poisoned", reason: "wasmTrap" }));
+      await vi.waitFor(() => expect(ws.close).toHaveBeenCalled());
+      // Reach guard: B already held a session and was neither closed nor degraded by A's trap.
+      expect(candidate.close).not.toHaveBeenCalled();
+      expect(policyOf(adapter)).toEqual({ kind: "negotiate" });
+
+      // B's next decode meets the poison: its owner settles, it is not abandoned.
+      events.length = 0;
+      candidate.dispatchSynthetic("message", draftFrame("Delta", stateUpdate("poisoned")));
+      expect(await pending()).toMatchObject({
+        code: "WS_CLOSED", message: "Connection closed during action", recoverable: true,
+      });
+      await vi.waitFor(() => expect(events).toContainEqual({ type: "disconnected" }));
+      expect(candidate.close).toHaveBeenCalled();
+      expect(policyOf(adapter)).toEqual({ kind: "snapshotOnly", reason: "decodeFailure" });
+
+      // The explicit reattachment continues on plain frames without the provider.
+      const plain = await reattachSnapshotOnly(adapter, candidate);
+      expect(offeredCodec(plain)).toBe(false);
+      expect(provider).toHaveBeenCalledTimes(2);
+      await enterPlainMatch(plain, events);
+      await completeDraftCommand(adapter, plain, "after-trap", "plain");
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("completes a command on a default-constructed fresh draft adapter after the trap, through the shared facade", async () => {
+    const { engine, runtime, script, provider } = realRuntimeCodec();
+    artIO.openCodec = provider;
+    const settings = { displayName: "Alice", setCodes: ["MKM"], kind: "Premier" as const,
+      public: true, tournamentFormat: "Swiss" as const, podPolicy: "Competitive" as const, podSize: 8 };
+    MockWebSocket.last = null;
+    const first = new ServerDraftAdapter("ws://localhost:9374/ws");
+    const firstEvents: unknown[] = [];
+    first.onEvent((event) => firstEvents.push(event));
+    const creating = first.createDraft(settings);
+    await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+    const trapped = MockWebSocket.last!;
+    trapped.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+    await vi.waitFor(() => expect(trapped.send).toHaveBeenCalledWith(
+      expect.stringContaining('"type":"CreateDraftWithSettings"')));
+    expect(offeredCodec(trapped)).toBe(true);
+    trapped.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+    receive(trapped, "DraftCreated", { draft_code: "ABCD12", player_token: "tok123", seat_index: 0 });
+    await creating;
+    receive(trapped, "DraftMatchStart", { match_id: "r1-t0", round: 1, game_code: FULL_KEY.game_code,
+      full_key: FULL_KEY, player_token: "match-token", your_player: 0, opponent_name: "Bob" });
+    script.trapNext = true;
+    trapped.dispatchSynthetic("message", draftFrame("Full", { type: "GameStarted",
+      data: { state: matchState("trap"), your_player: 0, full_key: FULL_KEY } }));
+    await vi.waitFor(() => expect(firstEvents).toContainEqual({ type: "disconnected" }));
+    expect(runtime.state).toEqual({ kind: "poisoned", reason: "wasmTrap" });
+    first.dispose();
+
+    const second = new ServerDraftAdapter("ws://localhost:9374/ws");
+    const events: unknown[] = [];
+    second.onEvent((event) => events.push(event));
+    try {
+      const creatingNext = second.createDraft(settings);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(trapped));
+      const plain = MockWebSocket.last!;
+      plain.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+      await vi.waitFor(() => expect(plain.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"CreateDraftWithSettings"')));
+      // The default route consulted the shared facade; the runtime itself refused the lease.
+      expect(provider).toHaveBeenCalledTimes(2);
+      expect(offeredCodec(plain)).toBe(false);
+      receive(plain, "DraftCreated", { draft_code: "ABCD12", player_token: "tok123", seat_index: 0 });
+      await creatingNext;
+
+      // A genuine plain match, then a correlated command completion.
+      await enterPlainMatch(plain, events);
+      await completeDraftCommand(second, plain, "plain-after-trap", "plain");
+      expect(engine.state_codec_decode).toHaveBeenCalledOnce();
+    } finally {
+      second.dispose();
+    }
+  });
+
+  it("offers no codec from a fresh draft adapter after a decoder trap on the shared runtime", async () => {
+    const engine = {
+      state_codec_decode: vi.fn(() => { throw new WebAssembly.RuntimeError("unreachable"); }),
+    };
+    const runtime = new StateCodecRuntime(engine as unknown as EngineModule);
+    const provider = vi.fn(async (): Promise<StateCodecSession | null> => {
+      const sessionId = runtime.open();
+      return {
+        decode: async (frame) => runtime.decode(sessionId, frame),
+        close: () => runtime.close(sessionId),
+      };
+    });
+    const create = (adapter: ServerDraftAdapter) => adapter.createDraft({
+      displayName: "Alice", setCodes: ["MKM"], kind: "Premier", public: true,
+      tournamentFormat: "Swiss", podPolicy: "Competitive", podSize: 8,
+    });
+
+    MockWebSocket.last = null;
+    const first = new ServerDraftAdapter("ws://localhost:9374/ws", { stateCodecSessionProvider: provider });
+    const firstEvents: unknown[] = [];
+    first.onEvent((event) => firstEvents.push(event));
+    const creating = create(first);
+    await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+    const trapped = MockWebSocket.last!;
+    trapped.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+    await vi.waitFor(() => expect(trapped.send).toHaveBeenCalledWith(
+      expect.stringContaining('"type":"CreateDraftWithSettings"')));
+    expect(offeredCodec(trapped)).toBe(true);
+    trapped.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+    receive(trapped, "DraftCreated", { draft_code: "ABCD12", player_token: "tok123", seat_index: 0 });
+    await creating;
+    receive(trapped, "DraftMatchStart", { match_id: "r1-t0", round: 1, game_code: FULL_KEY.game_code,
+      full_key: FULL_KEY, player_token: "match-token", your_player: 0, opponent_name: "Bob" });
+    trapped.dispatchSynthetic("message", draftFrame("Full", { type: "GameStarted",
+      data: { state: matchState("trap"), your_player: 0, full_key: FULL_KEY } }));
+    await vi.waitFor(() => expect(firstEvents).toContainEqual({ type: "disconnected" }));
+    expect(engine.state_codec_decode).toHaveBeenCalledOnce();
+    expect(runtime.state).toEqual({ kind: "poisoned", reason: "wasmTrap" });
+    first.dispose();
+
+    const second = new ServerDraftAdapter("ws://localhost:9374/ws", { stateCodecSessionProvider: provider });
+    try {
+      const creatingNext = create(second);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(trapped));
+      const plain = MockWebSocket.last!;
+      plain.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+      await vi.waitFor(() => expect(plain.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"CreateDraftWithSettings"')));
+      // The provider was consulted and refused by the runtime itself.
+      expect(provider).toHaveBeenCalledTimes(2);
+      expect(offeredCodec(plain)).toBe(false);
+      receive(plain, "DraftCreated", { draft_code: "ABCD12", player_token: "tok123", seat_index: 0 });
+      await creatingNext;
+      expect(engine.state_codec_decode).toHaveBeenCalledOnce();
+    } finally {
+      second.dispose();
+    }
+  });
+});
+
+describe("ServerDraftAdapter — bounded codec preparation", () => {
+  const settings = { displayName: "Alice", setCodes: ["MKM"], kind: "Premier" as const,
+    public: true, tournamentFormat: "Swiss" as const, podPolicy: "Competitive" as const, podSize: 8 };
+
+  it.each(["throw", "reject", "timeout", "before deadline"] as const)(
+    "connects through preparation %s with the selected transport", async (mode) => {
+      vi.useFakeTimers();
+      const session = draftCodecSession(decodeEnvelope);
+      let finish!: (value: StateCodecSession) => void;
+      const provider = () => {
+        if (mode === "throw") throw new Error("unavailable");
+        if (mode === "reject") return Promise.reject(new Error("unavailable"));
+        return new Promise<StateCodecSession>((resolve) => { finish = resolve; });
+      };
+      MockWebSocket.last = null;
+      const adapter = new ServerDraftAdapter("ws://localhost:9374/ws", { stateCodecSessionProvider: provider });
+      try {
+        const created = adapter.createDraft(settings);
+        if (mode === "before deadline") {
+          await vi.advanceTimersByTimeAsync(4999);
+          expect(MockWebSocket.last).toBeNull();
+          finish(session.session);
+        }
+        await vi.advanceTimersByTimeAsync(mode === "timeout" ? 5000 : 0);
+        const socket = MockWebSocket.last as MockWebSocket | null;
+        expect(socket).not.toBeNull();
+        socket!.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+        await vi.advanceTimersByTimeAsync(0);
+        const negotiated = mode === "before deadline";
+        expect(socket!.send.mock.calls.some(([text]) => text.includes("state_codecs"))).toBe(negotiated);
+        if (negotiated) socket!.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+        receive(socket!, "DraftCreated", { draft_code: "ABCD12", player_token: "tok", seat_index: 0 });
+        await vi.advanceTimersByTimeAsync(0);
+        await created;
+        if (mode === "timeout") {
+          finish(session.session);
+          await vi.advanceTimersByTimeAsync(0);
+          expect(session.close).toHaveBeenCalledOnce();
+          expect(MockWebSocket.last).toBe(socket);
+        }
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["dispose", "supersede", "resolved then dispose"] as const)(
+    "releases the late lease after %s without opening an abandoned socket", async (mode) => {
+      MockWebSocket.last = null;
+      const session = draftCodecSession(decodeEnvelope);
+      let finish!: (value: StateCodecSession) => void;
+      const provider = vi.fn(() => new Promise<StateCodecSession | null>((resolve) => { finish = resolve; }));
+      const adapter = new ServerDraftAdapter("ws://localhost:9374/ws", { stateCodecSessionProvider: provider });
+      const abandoned = adapter.createDraft(settings).catch((error: unknown) => error);
+      if (mode === "resolved then dispose") finish(session.session);
+      let replacement: Promise<unknown> | null = null;
+      if (mode === "supersede") {
+        provider.mockImplementationOnce(async () => null);
+        replacement = adapter.createDraft(settings).catch((error: unknown) => error);
+      } else adapter.dispose();
+      expect(await abandoned).toMatchObject({ code: "WS_CLOSED" });
+      if (mode !== "resolved then dispose") finish(session.session);
+      await vi.waitFor(() => expect(session.close).toHaveBeenCalledOnce());
+      if (mode === "supersede") {
+        const raw = MockWebSocket.last!;
+        expect(raw).not.toBeNull();
+        raw.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+        await vi.waitFor(() => expect(raw.send).toHaveBeenCalledWith(expect.stringContaining('"type":"CreateDraftWithSettings"')));
+        receive(raw, "DraftCreated", { draft_code: "ABCD12", player_token: "tok", seat_index: 0 });
+        await replacement;
+      } else expect(MockWebSocket.last).toBeNull();
+      adapter.dispose();
+    },
+  );
+});
+
+describe("ServerDraftAdapter — commands across socket replacement", () => {
+  async function replaceSocket(
+    adapter: ServerDraftAdapter,
+    provider: { mockResolvedValueOnce: (session: StateCodecSession) => unknown },
+    previous: MockWebSocket,
+  ) {
+    const replacementSession = draftCodecSession(decodeEnvelope);
+    provider.mockResolvedValueOnce(replacementSession.session);
+    const reattached = adapter.reconnectDraft();
+    await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(previous));
+    const replacement = MockWebSocket.last!;
+    replacement.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+    await vi.waitFor(() => expect(replacement.send).toHaveBeenCalledWith(
+      expect.stringContaining('"type":"ReconnectDraft"')));
+    replacement.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+    receive(replacement, "DraftStateUpdate", { view: createMockDraftView() });
+    await reattached;
+    return { replacement, replacementSession };
+  }
+
+  it.each(["is answered", "is closed"] as const)(
+    "settles a command claimed before reconnectDraft replaced the socket when the retired socket %s",
+    async (how) => {
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, ws, provider } = await startCodecDraft(session.session);
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      await enterCodecMatch(ws, events);
+
+      const claimed = trackRejection(adapter.submitAction({ type: "PassPriority" } as GameAction, 0));
+      const claimedId = lastSubmissionCommandId(ws);
+      const { replacement } = await replaceSocket(adapter, provider, ws);
+      // Reach guard: the replacement is current, yet the claimed command is
+      // still in flight, so a second submission is refused.
+      await expect(adapter.submitAction({ type: "PassPriority" } as GameAction, 0)).rejects
+        .toMatchObject({ code: "ACTION_NOT_SENT" });
+      events.length = 0;
+
+      if (how === "is answered") {
+        ws.dispatchSynthetic("message", draftFrame("Delta", {
+          type: "StateUpdate", command_id: claimedId,
+          data: { state: matchState("retired-answer"), events: [{ marker: "retired-answer" }], full_key: FULL_KEY },
+        }));
+        await expect(claimed()).resolves.toMatchObject({
+          resolvedWith: { events: [{ marker: "retired-answer" }] },
+        });
+        // The retired socket never replaces the replacement's state.
+        expect(events).not.toContainEqual(expect.objectContaining({ type: "gameStateUpdated" }));
+      } else {
+        ws.dispatchSynthetic("close");
+        await expect(claimed()).resolves.toMatchObject({
+          code: "WS_CLOSED", message: "Connection closed during action", recoverable: true,
+        });
+      }
+      expect(events).toContainEqual({ type: "actionPendingChanged", pending: false });
+
+      // The slot is free again: the replacement can carry the next command.
+      await enterCodecMatch(replacement, events);
+      void adapter.submitAction({ type: "PassPriority" } as GameAction, 0).catch(() => undefined);
+      await vi.waitFor(() => expect(submissionTypes(replacement)).toHaveLength(1));
+      adapter.dispose();
+    },
+  );
+
+  describe("snapshot paired with a retired socket's answer", () => {
+    const passPriority = { type: "PassPriority" } as GameAction;
+    const labelOf = async (adapter: ServerDraftAdapter) =>
+      (await adapter.getSnapshot()).state as unknown as { label: string };
+
+    it("caches the retired reply's state before the command resolves while the replacement has delivered none", async () => {
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, ws, provider } = await startCodecDraft(session.session);
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      await enterCodecMatch(ws, events);
+
+      const claimed = adapter.submitAction(passPriority, 0);
+      const observed = trackRejection(claimed);
+      const claimedId = lastSubmissionCommandId(ws);
+      await replaceSocket(adapter, provider, ws);
+      // Reach guard: the replacement delivered no game state, so the only
+      // snapshot is still the retired socket's earlier one.
+      expect(await labelOf(adapter)).toMatchObject({ label: "accepted-update" });
+      events.length = 0;
+
+      ws.dispatchSynthetic("message", draftFrame("Delta", {
+        type: "StateUpdate", command_id: claimedId,
+        data: {
+          state: matchState("retired-answer"), events: [{ marker: "retired-answer" }],
+          legal_actions: [passPriority], full_key: FULL_KEY,
+        },
+      }));
+      // The caller reads the snapshot in the same turn the command resolves.
+      const result = await claimed;
+      expect(result.events).toEqual([{ marker: "retired-answer" }]);
+      expect(await labelOf(adapter)).toMatchObject({ label: "retired-answer" });
+      expect((await adapter.getLegalActions()).actions).toEqual([passPriority]);
+      expect(await observed()).toMatchObject({ resolvedWith: { events: [{ marker: "retired-answer" }] } });
+      // The retired socket still never delivers game state.
+      expect(events).toContainEqual({ type: "actionPendingChanged", pending: false });
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "gameStateUpdated" }));
+      adapter.dispose();
+    });
+
+    it("keeps the replacement's own state when the retired reply arrives after it", async () => {
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, ws, provider } = await startCodecDraft(session.session);
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      await enterCodecMatch(ws, events);
+
+      const claimed = adapter.submitAction(passPriority, 0);
+      const claimedId = lastSubmissionCommandId(ws);
+      const { replacement } = await replaceSocket(adapter, provider, ws);
+      await enterCodecMatch(replacement, events);
+      replacement.dispatchSynthetic("message", draftFrame("Delta", {
+        type: "StateUpdate",
+        data: { state: matchState("replacement-own"), events: [], full_key: FULL_KEY },
+      }));
+      await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+        type: "gameStateUpdated", state: expect.objectContaining({ label: "replacement-own" }),
+      })));
+      // Reach guard: the replacement owns the snapshot before the retired reply.
+      expect(await labelOf(adapter)).toMatchObject({ label: "replacement-own" });
+      events.length = 0;
+
+      ws.dispatchSynthetic("message", draftFrame("Delta", {
+        type: "StateUpdate", command_id: claimedId,
+        data: { state: matchState("retired-answer"), events: [{ marker: "retired-answer" }], full_key: FULL_KEY },
+      }));
+      const result = await claimed;
+      // The command still resolves with the retired reply's events, positively
+      // proving the frame was processed, yet the snapshot does not roll back.
+      expect(result.events).toEqual([{ marker: "retired-answer" }]);
+      expect(await labelOf(adapter)).toMatchObject({ label: "replacement-own" });
+      expect(events).toContainEqual({ type: "actionPendingChanged", pending: false });
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "gameStateUpdated" }));
+      adapter.dispose();
+    });
+
+    it("lets the replacement's later state supersede the retired reply's cached state", async () => {
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, ws, provider } = await startCodecDraft(session.session);
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      await enterCodecMatch(ws, events);
+
+      const claimed = adapter.submitAction(passPriority, 0);
+      const claimedId = lastSubmissionCommandId(ws);
+      const { replacement } = await replaceSocket(adapter, provider, ws);
+      ws.dispatchSynthetic("message", draftFrame("Delta", {
+        type: "StateUpdate", command_id: claimedId,
+        data: { state: matchState("retired-answer"), events: [{ marker: "retired-answer" }], full_key: FULL_KEY },
+      }));
+      await claimed;
+      // Reach guard: the retired reply's state was cached.
+      expect(await labelOf(adapter)).toMatchObject({ label: "retired-answer" });
+      events.length = 0;
+
+      await enterCodecMatch(replacement, events);
+      expect(await labelOf(adapter)).toMatchObject({ label: "accepted-update" });
+      replacement.dispatchSynthetic("message", draftFrame("Delta", {
+        type: "StateUpdate",
+        data: { state: matchState("replacement-newer"), events: [{ marker: "newer" }], full_key: FULL_KEY },
+      }));
+      await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+        type: "gameStateUpdated",
+        state: expect.objectContaining({ label: "replacement-newer" }),
+        events: [{ marker: "newer" }],
+      })));
+      expect(await labelOf(adapter)).toMatchObject({ label: "replacement-newer" });
+      adapter.dispose();
+    });
+  });
+
+  it.each([
+    ["omits the Full-session key", undefined],
+    ["carries another generation's key", { ...FULL_KEY, generation: FULL_KEY.generation + 1 }],
+  ] as const)(
+    "leaves a command claimed on the retired socket pending when its completion %s",
+    async (_label, fullKey) => {
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, ws, provider } = await startCodecDraft(session.session);
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      await enterCodecMatch(ws, events);
+
+      const claimed = trackRejection(adapter.submitAction({ type: "PassPriority" } as GameAction, 0));
+      const claimedId = lastSubmissionCommandId(ws);
+      await replaceSocket(adapter, provider, ws);
+      events.length = 0;
+
+      // Reach guard source: the frame is decoded and routed by the retired
+      // wrapper (the decoder call count advances) before the identity fence.
+      const decodedBefore = session.decode.mock.calls.length;
+      ws.dispatchSynthetic("message", draftFrame("Delta", {
+        type: "StateUpdate", command_id: claimedId,
+        data: { state: matchState("wrong-match"), events: [{ marker: "wrong-match" }], full_key: fullKey },
+      }));
+      await vi.waitFor(() => expect(session.decode.mock.calls.length).toBeGreaterThan(decodedBefore));
+      // Drain the receive queue, then nothing may have settled or been emitted.
+      expect(await claimed()).toBe("never settled");
+      expect(events).not.toContainEqual({ type: "actionPendingChanged", pending: false });
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "gameStateUpdated" }));
+
+      // Positive control: a completion carrying the accepted key still settles
+      // the same command, with its own payload and not the rejected frame's.
+      ws.dispatchSynthetic("message", draftFrame("Delta", {
+        type: "StateUpdate", command_id: claimedId,
+        data: { state: matchState("right-match"), events: [{ marker: "right-match" }], full_key: FULL_KEY },
+      }));
+      await expect(claimed()).resolves.toMatchObject({
+        resolvedWith: { events: [{ marker: "right-match" }] },
+      });
+      expect(events).toContainEqual({ type: "actionPendingChanged", pending: false });
+      adapter.dispose();
+    },
+  );
+
+  it("leaves a command claimed on the replacement pending when the retired socket closes", async () => {
+    const session = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider } = await startCodecDraft(session.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    const { replacement } = await replaceSocket(adapter, provider, ws);
+    await enterCodecMatch(replacement, events);
+    events.length = 0;
+
+    const pending = adapter.submitAction({ type: "PassPriority" } as GameAction, 0);
+    const observed = trackRejection(pending);
+    const commandId = lastSubmissionCommandId(replacement);
+    ws.dispatchSynthetic("close");
+    // Reach guard: the retired transport's close was processed.
+    await vi.waitFor(() => expect(session.close).toHaveBeenCalledOnce());
+    expect(events).not.toContainEqual({ type: "actionPendingChanged", pending: false });
+
+    replacement.dispatchSynthetic("message", draftFrame("Delta", {
+      type: "StateUpdate", command_id: commandId,
+      data: { state: matchState("own"), events: [], full_key: FULL_KEY },
+    }));
+    await expect(observed()).resolves.toMatchObject({ resolvedWith: { events: [] } });
+    adapter.dispose();
+  });
+
+  it("leaves a command claimed on the retired socket pending when the current socket's codec recovers", async () => {
+    const session = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider } = await startCodecDraft(session.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+
+    const claimed = trackRejection(adapter.submitAction({ type: "PassPriority" } as GameAction, 0));
+    const claimedId = lastSubmissionCommandId(ws);
+    const { replacement, replacementSession } = await replaceSocket(adapter, provider, ws);
+    // Drop the retired socket's state events so the wait below observes the replacement's own GameStarted.
+    events.length = 0;
+    await enterCodecMatch(replacement, events);
+    events.length = 0;
+
+    // The replacement's codec stream rejects a frame: recovery of the CURRENT socket.
+    replacementSession.decode.mockImplementationOnce(async () => ({ kind: "resyncRequired" }));
+    replacement.dispatchSynthetic("message", draftFrame("Delta", {
+      type: "StateUpdate",
+      data: { state: matchState("corrupt"), events: [], full_key: FULL_KEY },
+    }));
+    await vi.waitFor(() => expect(replacement.send).toHaveBeenCalledWith('{"type":"ResyncState"}'));
+    // Reach guard: the recovery gate is set, so the interruption ran.
+    await vi.waitFor(() => expect(() => (adapter as unknown as { stateCodec: { assertNotRecovering(): void } }).stateCodec.assertNotRecovering())
+      .toThrow());
+    // The command belongs to the still-open retired socket: not rejected, not released.
+    expect(await claimed()).toBe("never settled");
+    expect(events).not.toContainEqual({ type: "actionPendingChanged", pending: false });
+
+    // The retired socket's valid-key completion still settles it.
+    ws.dispatchSynthetic("message", draftFrame("Delta", {
+      type: "StateUpdate", command_id: claimedId,
+      data: { state: matchState("retired-answer"), events: [{ marker: "retired-answer" }], full_key: FULL_KEY },
+    }));
+    await expect(claimed()).resolves.toMatchObject({
+      resolvedWith: { events: [{ marker: "retired-answer" }] },
+    });
+    expect(events).toContainEqual({ type: "actionPendingChanged", pending: false });
+    adapter.dispose();
+  });
+
+  it("still drops a command claimed on the current socket when that socket's codec recovers after a replacement", async () => {
+    const session = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider } = await startCodecDraft(session.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    const { replacement, replacementSession } = await replaceSocket(adapter, provider, ws);
+    // Drop the retired socket's state events so the wait below observes the replacement's own GameStarted.
+    events.length = 0;
+    await enterCodecMatch(replacement, events);
+    events.length = 0;
+
+    const claimed = trackRejection(adapter.submitAction({ type: "PassPriority" } as GameAction, 0));
+    lastSubmissionCommandId(replacement);
+    replacementSession.decode.mockImplementationOnce(async () => ({ kind: "resyncRequired" }));
+    replacement.dispatchSynthetic("message", draftFrame("Delta", {
+      type: "StateUpdate",
+      data: { state: matchState("corrupt"), events: [], full_key: FULL_KEY },
+    }));
+    await vi.waitFor(() => expect(replacement.send).toHaveBeenCalledWith('{"type":"ResyncState"}'));
+    await expect(claimed()).resolves.toMatchObject({
+      code: "WS_CLOSED", message: "State delivery interrupted during action", recoverable: true,
+    });
+    expect(events).toContainEqual({ type: "actionPendingChanged", pending: false });
+    adapter.dispose();
+  });
+
+  // A pending preview is owned by the socket it was sent on: a retired socket's
+  // close can no longer be answered for its own previews, and must not touch the
+  // replacement's.
+  const PREVIEW_KINDS = {
+    "mana-payment": {
+      frameType: "PreviewManaPayment",
+      closedMessage: "Connection closed during mana-payment preview",
+      start: (adapter: ServerDraftAdapter, _tag: string) =>
+        adapter.previewManaPayment({ type: "PassPriority" } as GameAction, 0),
+      answer: (target: MockWebSocket, _tag: string) => {
+        const calls = target.send.mock.calls
+          .map(([raw]) => JSON.parse(raw as string) as { type?: string; data?: { request_id: number } })
+          .filter((frame) => frame.type === "PreviewManaPayment");
+        receive(target, "ManaPaymentPreview", {
+          request_id: calls[calls.length - 1].data!.request_id,
+          source_ids: [7],
+        });
+        return [7];
+      },
+    },
+    interaction: {
+      frameType: "PreviewInteraction",
+      closedMessage: "Connection closed during interaction preview",
+      start: (adapter: ServerDraftAdapter, tag: string) =>
+        adapter.previewInteraction({
+          requestId: tag as PreviewRequestId,
+          interactionId: "interaction-1" as InteractionId,
+          response: {
+            type: "shortcut",
+            data: { decision: { type: "fixed", data: { iterations: 6 } }, pins: [] },
+          },
+        } satisfies InteractionPreviewRequest, 0),
+      answer: (target: MockWebSocket, tag: string) => {
+        receive(target, "InteractionPreview", { preview: { requestId: tag } });
+        return { requestId: tag };
+      },
+    },
+  } as const;
+
+  it.each(Object.keys(PREVIEW_KINDS) as (keyof typeof PREVIEW_KINDS)[])(
+    "rejects the %s preview sent on the retired socket when that socket closes after reconnectDraft",
+    async (kind) => {
+      const spec = PREVIEW_KINDS[kind];
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, ws, provider } = await startCodecDraft(session.session);
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      await enterCodecMatch(ws, events);
+      const retiredPreview = trackRejection(spec.start(adapter, "preview-retired"));
+      // Reach guard: the preview really went out on the soon-to-be-retired socket.
+      expect(ws.send.mock.calls.map(([raw]) => (JSON.parse(raw as string) as { type?: string }).type))
+        .toContain(spec.frameType);
+
+      await replaceSocket(adapter, provider, ws);
+      // Adopting the replacement does not settle it; only the retired close does.
+      await expect(retiredPreview()).resolves.toBe("never settled");
+
+      ws.dispatchSynthetic("close");
+      await expect(retiredPreview()).resolves.toMatchObject({
+        code: "WS_CLOSED", message: spec.closedMessage, recoverable: true,
+      });
+      adapter.dispose();
+    },
+  );
+
+  it.each(Object.keys(PREVIEW_KINDS) as (keyof typeof PREVIEW_KINDS)[])(
+    "leaves the %s preview sent on the replacement pending when the retired socket closes",
+    async (kind) => {
+      const spec = PREVIEW_KINDS[kind];
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, ws, provider } = await startCodecDraft(session.session);
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      await enterCodecMatch(ws, events);
+      const retiredPreview = trackRejection(spec.start(adapter, "preview-retired"));
+      const { replacement } = await replaceSocket(adapter, provider, ws);
+      await enterCodecMatch(replacement, events);
+      const ownPreview = trackRejection(spec.start(adapter, "preview-own"));
+      expect(replacement.send.mock.calls.map(([raw]) => (JSON.parse(raw as string) as { type?: string }).type))
+        .toContain(spec.frameType);
+
+      ws.dispatchSynthetic("close");
+      // Reach guard: the retired close was processed and rejected its own preview.
+      await expect(retiredPreview()).resolves.toMatchObject({
+        code: "WS_CLOSED", message: spec.closedMessage,
+      });
+      // The replacement's own preview is untouched, and still resolves.
+      await expect(ownPreview()).resolves.toBe("never settled");
+      const answer = spec.answer(replacement, "preview-own");
+      await expect(ownPreview()).resolves.toMatchObject({ resolvedWith: answer });
+      adapter.dispose();
+    },
+  );
+
+  it("keeps the still-current socket on the recovery path while a replacement attachment starts", async () => {
+    const session = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider } = await startCodecDraft(session.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+
+    // The replacement attachment is still preparing; the old socket is current.
+    let release!: (session: StateCodecSession | null) => void;
+    provider.mockImplementationOnce(() => new Promise<StateCodecSession>((resolve) => {
+      release = resolve as (session: StateCodecSession | null) => void;
+    }));
+    const reattached = adapter.reconnectDraft();
+    void reattached.catch(() => undefined);
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+
+    const claimed = trackRejection(adapter.submitAction({ type: "PassPriority" } as GameAction, 0));
+    session.decode.mockImplementationOnce(async () => ({ kind: "resyncRequired" }));
+    ws.dispatchSynthetic("message", draftFrame("Delta", {
+      type: "StateUpdate",
+      data: { state: matchState("corrupt"), events: [], full_key: FULL_KEY },
+    }));
+    await vi.waitFor(() => expect(ws.send).toHaveBeenCalledWith('{"type":"ResyncState"}'));
+    // Recovery path, not the pre-bootstrap fatal path.
+    await expect(claimed()).resolves.toMatchObject({
+      code: "WS_CLOSED", message: "State delivery interrupted during action", recoverable: true,
+    });
+    expect(ws.close).not.toHaveBeenCalled();
+    expect(session.close).not.toHaveBeenCalled();
+    await expect(adapter.submitAction({ type: "PassPriority" } as GameAction, 0)).rejects
+      .toMatchObject({ code: "ACTION_NOT_SENT" });
+
+    ws.dispatchSynthetic("message", draftFrame("Full", {
+      type: "StateUpdate",
+      data: { state: matchState("resync"), events: [], full_key: FULL_KEY },
+    }));
+    await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+      type: "gameStateUpdated", state: expect.objectContaining({ label: "resync" }),
+    })));
+    void adapter.submitAction({ type: "PassPriority" } as GameAction, 0).catch(() => undefined);
+    await vi.waitFor(() => expect(submissionTypes(ws)).toHaveLength(2));
+    adapter.dispose();
+    release(null);
+  });
+
+  it("reports an adapter dispose, not a lost connection, to a pending action in codec mode", async () => {
+    const session = draftCodecSession(decodeEnvelope);
+    const { adapter, ws } = await startCodecDraft(session.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    const pending = trackRejection(adapter.submitAction({ type: "PassPriority" } as GameAction, 0));
+    expect(submissionTypes(ws)).toHaveLength(1);
+
+    adapter.dispose();
+    await expect(pending()).resolves.toMatchObject({
+      code: "WS_CLOSED", message: "Adapter disposed during action", recoverable: true,
+    });
+    expect(session.close).toHaveBeenCalledOnce();
+    expect(ws.close).toHaveBeenCalled();
+  });
+});
+
+describe("ServerDraftAdapter — production codec provider default", () => {
+  afterEach(() => { artIO.openCodec = null; });
+
+  it("advertises StateCodecV1 and decodes through the shared engine's session when no provider is injected", async () => {
+    const codec = draftCodecSession(decodeEnvelope);
+    const open = vi.fn(() => Promise.resolve(codec.session));
+    artIO.openCodec = open;
+    MockWebSocket.last = null;
+    // No options at all: the adapter's default provider applies.
+    const adapter = new ServerDraftAdapter("ws://localhost:9374/ws");
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    try {
+      const createPromise = adapter.createDraft({
+        displayName: "Alice",
+        setCodes: ["MKM"],
+        kind: "Premier",
+        public: true,
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+        podSize: 8,
+      });
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+      const ws = MockWebSocket.last!;
+      ws.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+      await vi.waitFor(() => expect(ws.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"CreateDraftWithSettings"'),
+      ));
+      const hello = ws.send.mock.calls
+        .map(([text]) => JSON.parse(text as string) as { type?: string; data?: { state_codecs?: unknown } })
+        .find((frame) => frame.type === "ClientHello");
+      expect(hello?.data?.state_codecs).toEqual(["StateCodecV1"]);
+      expect(open).toHaveBeenCalledOnce();
+
+      ws.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+      receive(ws, "DraftCreated", { draft_code: "ABCD12", player_token: "tok123", seat_index: 0 });
+      await createPromise;
+      await enterCodecMatch(ws, events);
+      // The Full frames reached the adapter only through the shared engine's session.
+      expect(codec.decode).toHaveBeenCalledTimes(2);
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "gameStateUpdated", state: expect.objectContaining({ label: "accepted-update" }),
+      }));
+    } finally {
+      adapter.dispose();
+    }
   });
 });
