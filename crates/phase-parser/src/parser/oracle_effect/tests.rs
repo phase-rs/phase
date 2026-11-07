@@ -96614,6 +96614,11 @@ fn revealed_remainder_is_refused_across_an_intervening_reveal_writer() {
 /// the reveal population. Lookback must prove the ENTIRE crossed clause reveal-free
 /// (using visit_ability_def_scoped under OwnResolutionOnly), not just its deepest
 /// effect (GainLife), refusing to bind across the compound writer.
+///
+/// No printed card is known to exhibit this combined sequence. This synthetic
+/// refusal fixture composes Reviving Vapors' public-reveal selection with a
+/// multiplayer reveal nearest to Parker Luck; it tests a parser-produced
+/// preservation boundary, not support for fabricated Oracle text.
 #[test]
 fn revealed_remainder_is_refused_across_an_intervening_compound_reveal_writer() {
     let def = parse_effect_chain(
@@ -96693,6 +96698,11 @@ fn revealed_remainder_is_refused_across_an_intervening_compound_reveal_writer() 
 /// entire revealed population, so a library remainder cannot be inferred from
 /// LastRevealed without including the selected cards. The continuation must be
 /// refused unless selected departure from the library is proved.
+///
+/// No printed card is known to exhibit this combined sequence. This synthetic
+/// refusal fixture changes Zimone's Experiment's initial Look to Reveal and
+/// appends a remainder solely to test the destination-None boundary; it is not
+/// Zimone's printed Oracle text.
 #[test]
 fn revealed_remainder_is_refused_when_dig_selection_does_not_depart_library() {
     let def = parse_effect_chain(

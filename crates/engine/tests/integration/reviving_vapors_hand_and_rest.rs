@@ -147,8 +147,8 @@ fn reviving_vapors_parses_to_a_castable_reveal_chain() {
     );
 }
 
-/// CR 608.2c: the kept card reaches the hand, life rises by its mana value, and
-/// exactly the other revealed cards go to the graveyard.
+/// CR 608.2c: the kept card reaches Hand and life rises by its mana value;
+/// the graveyard remainder remains an explicit unsupported gap.
 #[test]
 fn reviving_vapors_puts_the_kept_card_in_hand_and_gains_its_mana_value() {
     let mut scenario = GameScenario::new();
