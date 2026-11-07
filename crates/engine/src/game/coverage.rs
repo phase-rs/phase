@@ -29,8 +29,8 @@ use crate::types::ability::{
     ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition, ManaProduction,
     MassLibraryShuffleMode, NameStickerSet, NumberQuality, ObjectProperty, ObjectScope,
     ObjectSelectionCardinality, ObjectSelectionEligibility, Parity, ParsedCondition,
-    PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValue,
-    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope, ProhibitedActivity, PtStat,
+    PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
     ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
     SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement, StackAbilityKind,
     StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TriggerCondition,
@@ -4527,6 +4527,20 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::HordePlayCard { count } => {
             d.push(("count".into(), format!("{count}")));
         }
+        Effect::AddRestriction { restriction } => {
+            // CR 508.1c: the defended scope of an attack ban is
+            // parse-significant — a Jace-only ban and an all-planeswalkers
+            // ban must not share one signature, or a scope-only fix diffs
+            // as "no changes". Same key as the trigger projection of the
+            // same axis ("attack target", not "target").
+            if let GameRestriction::ProhibitActivity {
+                activity: ProhibitedActivity::Attack { defended, .. },
+                ..
+            } = restriction
+            {
+                d.push(("attack target".into(), fmt_attack_target_filter(defended)));
+            }
+        }
         // Effects with no interesting parameters
         Effect::Unimplemented { .. }
         | Effect::Explore
@@ -4539,7 +4553,6 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::EndCombatPhase
         | Effect::SolveCase
         | Effect::Cleanup { .. }
-        | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
         | Effect::GrantNextSpellAbility { .. }
         | Effect::CreateEmblem { .. }
@@ -5663,6 +5676,12 @@ fn static_details(stat: &StaticDefinition) -> Vec<(String, String)> {
     }
     if let Some(zone) = &stat.affected_zone {
         d.push(("zone".into(), fmt_zone(zone)));
+    }
+    // CR 506.3 + CR 508.1c: the defended scope of a `CantAttack` static is
+    // parse-significant for the same reason as the `AddRestriction` arm
+    // above — a scope-only change must move the signature.
+    if let Some(defended) = &stat.attack_defended {
+        d.push(("attack target".into(), fmt_attack_target_filter(defended)));
     }
     d
 }
@@ -16685,6 +16704,91 @@ mod tests {
             labels.len(),
             10,
             "every AttackTargetFilter variant must map to a distinct label: {labels:?}"
+        );
+    }
+
+    /// The defended scope of an attack ban must reach the parse-diff
+    /// signature — both the floating `AddRestriction` form (Jace) and the
+    /// static `CantAttack` form.
+    ///
+    /// CR 508.1c: a Jace-only ban and an all-planeswalkers ban are different
+    /// parses, but while the signature was blind to the scope the two shared
+    /// one `AddRestriction` row and a scope-only fix produced ZERO
+    /// parse-diff rows. The non-attack / `None` rows pin the no-churn
+    /// requirement: a restriction with no attack scope emits no key at all.
+    #[test]
+    fn attack_ban_defended_scope_reaches_parse_details() {
+        use crate::types::ability::{RestrictionExpiry, RestrictionPlayerScope};
+        use crate::types::identifiers::ObjectId;
+        use crate::types::player::PlayerId;
+        use crate::types::triggers::AttackTargetFilter;
+
+        let prohibit = |activity: ProhibitedActivity| Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                source: ObjectId(1),
+                affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(1)),
+                expiry: RestrictionExpiry::EndOfTurn,
+                activity,
+            },
+        };
+        let attack_ban = |defended: AttackTargetFilter| {
+            prohibit(ProhibitedActivity::Attack {
+                defended,
+                protected_player: None,
+            })
+        };
+
+        // (1) The floating form renders the defended scope under its own key.
+        let jace_only = effect_details(&attack_ban(AttackTargetFilter::Planeswalker {
+            subtype: Some("Jace".to_string()),
+        }));
+        assert!(
+            jace_only
+                .iter()
+                .any(|(k, v)| k == "attack target" && v == "Jaces you control"),
+            "a Jace-only ban must render its defended scope: {jace_only:?}"
+        );
+
+        // (2) Jace-only and all-planeswalkers are different signatures.
+        let all_planeswalkers = effect_details(&attack_ban(AttackTargetFilter::Planeswalker {
+            subtype: None,
+        }));
+        assert_ne!(
+            jace_only, all_planeswalkers,
+            "two defended scopes are different parses and must not collapse \
+             to the same sticky signature"
+        );
+
+        // (3) A non-attack restriction emits no key, so unscoping signatures
+        // stay byte-identical.
+        let cast_ban = prohibit(ProhibitedActivity::CastSpells { spell_filter: None });
+        assert!(
+            !effect_details(&cast_ban)
+                .iter()
+                .any(|(k, _)| k == "attack target"),
+            "a cast ban carries no defended scope and must emit no key"
+        );
+
+        // (4) The static form renders `attack_defended`; an unscoped static
+        // emits no key.
+        let scoped = StaticDefinition::new(StaticMode::CantAttack).attack_defended(Some(
+            AttackTargetFilter::Planeswalker {
+                subtype: Some("Jace".to_string()),
+            },
+        ));
+        let scoped_details = static_details(&scoped);
+        assert!(
+            scoped_details
+                .iter()
+                .any(|(k, v)| k == "attack target" && v == "Jaces you control"),
+            "a scoped CantAttack static must render its defended scope: {scoped_details:?}"
+        );
+        let unscoped = StaticDefinition::new(StaticMode::CantAttack);
+        assert!(
+            !static_details(&unscoped)
+                .iter()
+                .any(|(k, _)| k == "attack target"),
+            "an unscoped CantAttack static must emit no key"
         );
     }
 

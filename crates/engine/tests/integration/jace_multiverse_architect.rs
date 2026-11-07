@@ -523,6 +523,10 @@ fn jace_ban_covers_stolen_late_and_animated_attackers() {
         !attack_is_legal(&runner, P1, stolen, AttackTarget::Planeswalker(jace)),
         "a creature stolen after resolution is still banned"
     );
+    assert!(
+        attack_is_legal(&runner, P1, stolen, AttackTarget::Player(P0)),
+        "reach-guard: the stolen creature is itself a legal attacker"
+    );
 
     // (b) A creature entering under P1 later that turn — still banned.
     let late_card = CardId(runner.state().next_object_id);
@@ -544,6 +548,10 @@ fn jace_ban_covers_stolen_late_and_animated_attackers() {
     assert!(
         !attack_is_legal(&runner, P1, late, AttackTarget::Planeswalker(jace)),
         "a creature entering under P1 later that turn is still banned"
+    );
+    assert!(
+        attack_is_legal(&runner, P1, late, AttackTarget::Player(P0)),
+        "reach-guard: the late-arriving creature is itself a legal attacker"
     );
 
     // (c) A noncreature animated under P1 mid-turn — still banned.
@@ -568,6 +576,10 @@ fn jace_ban_covers_stolen_late_and_animated_attackers() {
     assert!(
         !attack_is_legal(&runner, P1, vehicle, AttackTarget::Planeswalker(jace)),
         "an animated attacker under P1 is still banned"
+    );
+    assert!(
+        attack_is_legal(&runner, P1, vehicle, AttackTarget::Player(P0)),
+        "reach-guard: the animated vehicle is itself a legal attacker"
     );
 }
 
