@@ -40,6 +40,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use engine::starter_decks::DeckData;
 use engine::types::format::GameFormat;
 pub use engine::types::match_config::MatchType;
 
@@ -934,7 +935,12 @@ pub fn prior_opponents(player_key: &str, pairings: &[TournamentPairing]) -> Hash
 /// A registered entrant. `had_bye`/`had_short_pod` are deliberately absent as
 /// fields — they are derived queries over the pairing history (see
 /// [`had_bye`]), so there is nothing to fall out of sync with a correction.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `PartialEq` but not `Eq`: the submitted [`DeckData`] carries a
+/// `CommanderBracketTier`/`Vec<String>` payload that is only `PartialEq`, and
+/// nothing uses a `TournamentPlayer` as a hash-set/map key, so the stronger
+/// bound is neither available nor needed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TournamentPlayer {
     pub player_key: String,
     /// Minted at join via [`TournamentCredential::mint`], NOT socket-bound:
@@ -945,6 +951,20 @@ pub struct TournamentPlayer {
     pub player_token: TournamentCredential,
     pub display_name: String,
     pub dropped: bool,
+    /// The deck this entrant submitted for **server-hosted** play, or `None`
+    /// until they submit one (see [`TournamentManager::submit_deck`]). Held as
+    /// the raw client-submitted [`DeckData`] — the same shape a casual
+    /// `CreateGameWithSettings` carries — and resolved into a game deck only when
+    /// the server spawns the pairing's table (a later PR). The tournament itself
+    /// enforces no deck legality and never touches `GameState`; this is just the
+    /// deck to hand the hosted game.
+    ///
+    /// **Private, never projected.** A decklist must not leak to opponents before
+    /// the match, so this field is NOT carried on the wire `PlayerSummary` — only
+    /// a derived `deck_submitted: bool` is (readiness display). `#[serde(default)]`
+    /// so an entrant persisted before hosting existed deserializes cleanly.
+    #[serde(default)]
+    pub deck: Option<DeckData>,
 }
 
 /// The match structure an event runs at a given arity when the organizer names
@@ -1213,6 +1233,20 @@ impl TournamentMeta {
             && self.arity == MatchArity::HEAD_TO_HEAD
             && self.match_type == MatchType::Bo3
             && pairing.players.len() == 2
+    }
+
+    /// Whether every seat in `pairing` has submitted a deck
+    /// ([`TournamentManager::submit_deck`]) — the readiness gate the server
+    /// checks before it can host the pairing's game, since a player without a
+    /// deck cannot be seated at a server-authoritative table. Orthogonal to
+    /// [`Self::is_hosted_eligible`] (the bracket/arity/match-type shape check): a
+    /// pairing must pass BOTH to be hosted.
+    pub fn pairing_decks_submitted(&self, pairing: &TournamentPairing) -> bool {
+        pairing.players.iter().all(|key| {
+            self.players
+                .iter()
+                .any(|p| &p.player_key == key && p.deck.is_some())
+        })
     }
 
     pub fn report_gate(&self, pairing: &TournamentPairing) -> ReportGate {
@@ -2119,6 +2153,39 @@ pub enum TournamentExpiryEvent {
     Abandoned(String),
 }
 
+/// Aggregate budget for the card-name bytes of every persisted deck this manager
+/// holds, across all tournaments, enforced at [`TournamentManager::submit_deck`]
+/// admission. The lobby Durable Object serializes the ENTIRE broker — the lobby
+/// registry plus every tournament and its retained decks — as one JSON value
+/// under a single SQLite key, and Cloudflare caps a key+value at 2 MB. The
+/// per-deck wire bounds ([`crate::inbound_guard::validate_deck_payload`])
+/// individually accept decks whose *persisted* size sums far past that cap in
+/// aggregate: six maxed name lists are ~2.46 MB of names alone, and the
+/// separately-bounded `printings` sidecar independently admits
+/// [`MAX_DECK_PRINTING_ENTRIES`](engine::types::card_printing::MAX_DECK_PRINTING_ENTRIES)
+/// entries (~256 B name + 32 B set code + 32 B collector number each) per list
+/// with no matching name-list entry — so one empty-name deck can still serialize
+/// past 512 KiB. A per-deck bound therefore cannot bound the snapshot. This caps
+/// the summed *encoded* deck bytes (every persisted field, JSON escaping and
+/// per-entry overhead; see [`deck_encoded_bytes`]) well under 2 MB, leaving
+/// headroom for the rest of the broker snapshot. A refused submission leaves every
+/// retained deck and its readiness unchanged (the check precedes the single
+/// mutation).
+pub const MAX_AGGREGATE_DECK_ENCODED_BYTES: usize = 512 * 1024;
+
+/// The exact byte cost `deck` adds to the persisted broker snapshot: its
+/// `serde_json` encoding, the same codec the lobby Durable Object snapshots the
+/// whole broker with (`serde_json::to_string(&broker)` in `broker-wasm`). Charging
+/// the encoded form — not a hand-picked subset of fields — counts every persisted
+/// field (the `printings` sidecar included, which a name-list sum omits entirely),
+/// JSON string escaping and per-entry / collection overhead, and stays correct
+/// when `DeckData` grows a field. Serialization is infallible for `DeckData`; a
+/// hypothetical failure charges `usize::MAX`, so the aggregate check refuses rather
+/// than under-counts.
+fn deck_encoded_bytes(deck: &DeckData) -> usize {
+    serde_json::to_vec(deck).map_or(usize::MAX, |bytes| bytes.len())
+}
+
 /// The pure registry of tournaments, mirroring
 /// [`crate::lobby::LobbyManager`]'s manager-owns-state shape.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -2270,6 +2337,7 @@ impl TournamentManager {
             player_token,
             display_name: display_name.to_string(),
             dropped: false,
+            deck: None,
         });
         meta.last_activity_at = now;
         Ok(minted)
@@ -2642,6 +2710,78 @@ impl TournamentManager {
             ));
         }
         meta.pairings[index].outcome = Some(PairingOutcome::Reported(outcome));
+        meta.last_activity_at = now;
+        Ok(())
+    }
+
+    /// Records the deck an entrant submits for server-hosted play. The broker
+    /// authorizes the presented token down to `player_key` first
+    /// ([`crate::broker::Broker::authorize_player`]), exactly as it does for a
+    /// match report, so this takes an already-resolved, non-dropped `player_key`.
+    /// Refused once the tournament is terminal (nothing left to host); otherwise
+    /// it overwrites any prior submission — a player may resubmit until their
+    /// pairing is hosted. Pure registration data: no deck legality is enforced
+    /// and no `GameState` is touched.
+    pub fn submit_deck(
+        &mut self,
+        code: &str,
+        player_key: &str,
+        deck: DeckData,
+        env: &impl BrokerEnv,
+    ) -> Result<(), String> {
+        let now = env.now_ms() / 1000;
+        let incoming_bytes = deck_encoded_bytes(&deck);
+        // Sum the encoded bytes of every OTHER persisted deck — all tournaments,
+        // minus the (code, player_key) slot this submission overwrites — while the
+        // shared registry is still borrowed immutably, so the aggregate budget
+        // below can be checked before any mutation. A resubmission replaces its own
+        // deck, so its old bytes are excluded here rather than double-counted.
+        let retained_other_bytes: usize = self
+            .tournaments
+            .iter()
+            .flat_map(|(t_code, meta)| {
+                meta.players.iter().filter_map(move |p| {
+                    let is_overwritten_slot = t_code == code && p.player_key == player_key;
+                    p.deck
+                        .as_ref()
+                        .filter(|_| !is_overwritten_slot)
+                        .map(deck_encoded_bytes)
+                })
+            })
+            .sum();
+        let meta = self.meta_mut(code)?;
+        if meta.status.is_terminal() {
+            return Err(format!(
+                "Tournament {code} is no longer running (status {:?})",
+                meta.status
+            ));
+        }
+        if meta.pairings.iter().any(|pairing| {
+            meta.hosted.contains_key(&pairing.id)
+                && pairing.players.iter().any(|key| key == player_key)
+        }) {
+            return Err(format!(
+                "Player {player_key} cannot change their deck after their pairing is hosted"
+            ));
+        }
+        let player = meta
+            .players
+            .iter_mut()
+            .find(|p| p.player_key == player_key)
+            .ok_or_else(|| format!("Player {player_key} is not registered in {code}"))?;
+        // Aggregate persistence budget: the whole broker serializes under one
+        // 2 MB Durable Object key, so admit the deck only if the summed encoded
+        // bytes of all retained decks stay under the budget. `saturating_add` so a
+        // deck that failed to serialize (`usize::MAX`) refuses instead of
+        // overflowing. Checked last, right before the single mutation, so a refusal
+        // leaves every retained deck and its readiness unchanged.
+        if retained_other_bytes.saturating_add(incoming_bytes) > MAX_AGGREGATE_DECK_ENCODED_BYTES {
+            return Err(format!(
+                "Deck rejected: it would exceed the server's aggregate tournament deck \
+                 budget ({MAX_AGGREGATE_DECK_ENCODED_BYTES} encoded bytes across all events)"
+            ));
+        }
+        player.deck = Some(deck);
         meta.last_activity_at = now;
         Ok(())
     }
@@ -3118,6 +3258,7 @@ mod tests {
                 ),
                 display_name: (*k).to_string(),
                 dropped: false,
+                deck: None,
             })
             .collect()
     }
@@ -4081,6 +4222,163 @@ mod tests {
             mgr.get("T").expect("t").pairing(id).expect("p").outcome,
             Some(PairingOutcome::Reported(PodOutcome::Draw))
         );
+    }
+
+    fn deck_of(name: &str) -> DeckData {
+        DeckData {
+            main_deck: vec![name.to_string(); 40],
+            ..Default::default()
+        }
+    }
+
+    /// A deck with EMPTY name lists carrying `entries` printing annotations, each
+    /// at the per-entry string caps (256 B name, 32 B set code, 32 B collector
+    /// number). Models the review's witness: individually accepted by the per-deck
+    /// printing bound ([`MAX_DECK_PRINTING_ENTRIES`]), but a large *persisted*
+    /// contribution the superseded name-list sum charged as zero bytes.
+    fn printings_only_deck(entries: usize) -> DeckData {
+        use engine::types::card_printing::{
+            CardPrinting, DeckPrinting, DeckSection, MAX_DECK_CARD_NAME_LEN,
+            MAX_PRINTING_COLLECTOR_NUMBER_LEN, MAX_PRINTING_SET_CODE_LEN,
+        };
+        DeckData {
+            printings: (0..entries)
+                .map(|_| DeckPrinting {
+                    section: DeckSection::MainDeck,
+                    name: "x".repeat(MAX_DECK_CARD_NAME_LEN),
+                    count: 1,
+                    printing: CardPrinting {
+                        set_code: "s".repeat(MAX_PRINTING_SET_CODE_LEN),
+                        collector_number: "c".repeat(MAX_PRINTING_COLLECTOR_NUMBER_LEN),
+                    },
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// `submit_deck` charges the full *encoded* deck — the `printings` sidecar
+    /// included — against the aggregate budget, so a deck with EMPTY name lists but
+    /// a large, individually-accepted printings sidecar is still refused when it
+    /// would push the single-key broker snapshot past
+    /// [`MAX_AGGREGATE_DECK_ENCODED_BYTES`]; the refusal leaves the slot unchanged,
+    /// so a later modest deck is still admitted. REVERT-FAIL: charge only the ten
+    /// name lists (the superseded `deck_name_bytes`) and this zero-name deck scores
+    /// zero bytes and stores instead of erroring.
+    #[test]
+    fn submit_deck_charges_the_full_encoded_deck_against_the_aggregate_budget() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        // Empty name lists, but a printings sidecar whose encoded size alone clears
+        // the budget — the witness the name-only accounting scored as zero.
+        let over_budget = printings_only_deck(1600);
+        assert!(
+            over_budget.main_deck.is_empty() && over_budget.sideboard.is_empty(),
+            "witness must carry zero name-list bytes"
+        );
+        assert!(
+            deck_encoded_bytes(&over_budget) > MAX_AGGREGATE_DECK_ENCODED_BYTES,
+            "witness must exceed the budget by its encoded size alone"
+        );
+        assert!(mgr.submit_deck("T", &key(0), over_budget, &env).is_err());
+        // The refusal left the entrant's slot empty — state unchanged.
+        let stored = mgr
+            .get("T")
+            .expect("t")
+            .players
+            .iter()
+            .find(|p| p.player_key == key(0))
+            .and_then(|p| p.deck.clone());
+        assert_eq!(stored, None);
+        // A within-budget deck is still admitted afterwards.
+        mgr.submit_deck("T", &key(0), deck_of("Island"), &env)
+            .expect("a modest deck stays within budget");
+    }
+
+    /// `submit_deck` stores a per-entrant deck and `pairing_decks_submitted`
+    /// flips to `true` only once every seat has one; a resubmission overwrites.
+    #[test]
+    fn submit_deck_stores_and_readiness_needs_every_seat() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        let pairing = mgr.get("T").expect("t").pairings[0].clone();
+
+        assert!(!mgr.get("T").expect("t").pairing_decks_submitted(&pairing));
+        mgr.submit_deck("T", &key(0), deck_of("Island"), &env)
+            .expect("submit p0");
+        assert!(!mgr.get("T").expect("t").pairing_decks_submitted(&pairing));
+        mgr.submit_deck("T", &key(1), deck_of("Forest"), &env)
+            .expect("submit p1");
+        assert!(mgr.get("T").expect("t").pairing_decks_submitted(&pairing));
+
+        // Resubmission overwrites the held deck (a player may change it until the
+        // pairing is hosted).
+        mgr.submit_deck("T", &key(0), deck_of("Mountain"), &env)
+            .expect("resubmit p0");
+        let stored = mgr
+            .get("T")
+            .expect("t")
+            .players
+            .iter()
+            .find(|p| p.player_key == key(0))
+            .and_then(|p| p.deck.clone());
+        assert_eq!(stored, Some(deck_of("Mountain")));
+    }
+
+    #[test]
+    fn submit_deck_cannot_change_a_hosted_entrants_deck() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        let id = mgr.get("T").expect("t").pairings[0].id;
+        mgr.submit_deck("T", &key(0), deck_of("Island"), &env)
+            .expect("initial deck");
+        mgr.begin_hosting("T", id, &env).expect("host");
+
+        assert!(mgr
+            .submit_deck("T", &key(0), deck_of("Mountain"), &env)
+            .is_err());
+        mgr.begin_hosting("T", id, &env).expect("rehost");
+        assert!(mgr
+            .submit_deck("T", &key(0), deck_of("Mountain"), &env)
+            .is_err());
+        let player = mgr
+            .get("T")
+            .expect("t")
+            .players
+            .iter()
+            .find(|p| p.player_key == key(0))
+            .expect("player");
+        assert_eq!(player.deck, Some(deck_of("Island")));
+    }
+
+    /// `submit_deck` refuses an unregistered player and a terminal tournament.
+    #[test]
+    fn submit_deck_rejects_unregistered_and_terminal() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        assert!(mgr
+            .submit_deck("T", "ghost", deck_of("Swamp"), &env)
+            .is_err());
+
+        let id = mgr.get("T").expect("t").pairings[0].id;
+        mgr.report_result(
+            "T",
+            id,
+            PodOutcome::Decisive {
+                winner: key(0),
+                game_wins: HashMap::from([(key(0), 2), (key(1), 1)]),
+            },
+            &env,
+        )
+        .expect("report");
+        mgr.complete_tournament("T", &env).expect("complete");
+        assert!(mgr
+            .submit_deck("T", &key(0), deck_of("Plains"), &env)
+            .is_err());
     }
 
     // -- unit 7: drops --------------------------------------------------------

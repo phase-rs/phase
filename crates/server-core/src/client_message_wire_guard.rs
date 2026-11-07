@@ -22,9 +22,10 @@ use lobby_broker::validation::{
     validate_end_tournament_fields, validate_get_tournament_fields,
     validate_join_tournament_fields, validate_renew_tournament_credential_fields,
     validate_report_match_result_fields, validate_start_tournament_round_fields,
-    validate_unregister_lobby_fields, validate_update_lobby_metadata_fields,
-    CreateTournamentFields, DropFromTournamentFields, EndTournamentFields, JoinTournamentFields,
-    RenewTournamentCredentialFields, ReportMatchResultFields, StartTournamentRoundFields,
+    validate_submit_tournament_deck_fields, validate_unregister_lobby_fields,
+    validate_update_lobby_metadata_fields, CreateTournamentFields, DropFromTournamentFields,
+    EndTournamentFields, JoinTournamentFields, RenewTournamentCredentialFields,
+    ReportMatchResultFields, StartTournamentRoundFields, SubmitTournamentDeckFields,
     UpdateLobbyMetadataFields,
 };
 
@@ -264,6 +265,16 @@ pub fn guard_client_message_before_dispatch(
             player_token,
             outcome,
         }),
+        ClientMessage::SubmitTournamentDeck {
+            code,
+            player_token,
+            deck,
+            request_id: _,
+        } => validate_submit_tournament_deck_fields(SubmitTournamentDeckFields {
+            code,
+            player_token,
+            deck,
+        }),
         ClientMessage::DropFromTournament {
             code,
             player_token,
@@ -366,6 +377,22 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
             request_id: request.request_id.clone(),
             message: reason,
         },
+        // A `SubmitTournamentDeck` bounds failure IS routinely trippable by a
+        // non-hostile client: unlike the other tournament frames (a name or token
+        // field), its `DeckData` can legitimately approach the per-list caps, and
+        // an over-budget deck is a rejected submission rather than a malformed
+        // frame. It also adopts the optional tournament correlation contract, so a
+        // correlated submission settles as a correlated `TournamentActionRejected`
+        // — the client's correlated authority ignores a bare `Error`. An
+        // uncorrelated (`None`) submission keeps the operational-error disposal
+        // below, the same control the sibling tournament frames use.
+        ClientMessage::SubmitTournamentDeck {
+            request_id: Some(request_id),
+            ..
+        } => ServerMessage::TournamentActionRejected {
+            request_id: *request_id,
+            message: reason,
+        },
 
         // Every remaining variant keeps the operational-error behavior: a
         // bounds failure on these is a malformed frame, not a rejected game
@@ -413,6 +440,7 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
         | ClientMessage::GetTournament { .. }
         | ClientMessage::StartTournamentRound { .. }
         | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::SubmitTournamentDeck { .. }
         | ClientMessage::DropFromTournament { .. }
         | ClientMessage::EndTournament { .. }
         | ClientMessage::RenewTournamentCredential { .. } => ServerMessage::error(reason),
@@ -542,6 +570,16 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
             player_token,
             outcome,
         }),
+        ClientMessage::SubmitTournamentDeck {
+            code,
+            player_token,
+            deck,
+            request_id: _,
+        } => validate_submit_tournament_deck_fields(SubmitTournamentDeckFields {
+            code,
+            player_token,
+            deck,
+        }),
         ClientMessage::DropFromTournament {
             code,
             player_token,
@@ -647,6 +685,7 @@ mod tests {
         ManaSourceSelection, ManaType, TapsForManaSelection,
     };
     use engine::types::{GameAction, ObjectId};
+    use lobby_broker::inbound_guard::MAX_MAIN_DECK_ENTRIES;
     use lobby_broker::validation::MAX_CONSUMED_TOKENS;
 
     #[test]
@@ -1050,6 +1089,18 @@ mod tests {
                 },
             ),
             (
+                "deck.main_deck",
+                ClientMessage::SubmitTournamentDeck {
+                    code: "TOUR01".into(),
+                    player_token: "tok".into(),
+                    deck: crate::protocol::DeckData {
+                        main_deck: vec!["Forest".into(); MAX_MAIN_DECK_ENTRIES + 1],
+                        ..Default::default()
+                    },
+                    request_id: None,
+                },
+            ),
+            (
                 "player_token",
                 ClientMessage::DropFromTournament {
                     code: "TOUR01".into(),
@@ -1121,6 +1172,15 @@ mod tests {
                 pairing_id: 0,
                 player_token: "tok".into(),
                 outcome: PodOutcome::Draw,
+                request_id: None,
+            },
+            ClientMessage::SubmitTournamentDeck {
+                code: "TOUR01".into(),
+                player_token: "tok".into(),
+                deck: crate::protocol::DeckData {
+                    main_deck: vec!["Forest".into()],
+                    ..Default::default()
+                },
                 request_id: None,
             },
             ClientMessage::DropFromTournament {
@@ -1234,6 +1294,40 @@ mod tests {
                 }
                 other => panic!("a tournament frame must not answer as {other:?}"),
             }
+        }
+    }
+
+    /// A correlated `SubmitTournamentDeck` (its optional `request_id` present)
+    /// whose deck fails its bounds answers as a correlated
+    /// `TournamentActionRejected` carrying the EXACT request id, so the client's
+    /// correlated authority settles the pending submission rather than ignoring a
+    /// bare `Error`. The uncorrelated (`None`) frame in the control test above
+    /// keeps the operational-error channel. REVERT-FAIL: route the `Some` arm back
+    /// to `ServerMessage::error` and this exact-id assertion fails.
+    #[test]
+    fn correlated_submit_tournament_deck_rejection_preserves_the_request_id() {
+        let request_id = crate::protocol::TournamentRequestId(7);
+        let msg = ClientMessage::SubmitTournamentDeck {
+            code: "TOUR01".into(),
+            player_token: "tok".into(),
+            deck: crate::protocol::DeckData {
+                main_deck: vec!["Forest".into(); MAX_MAIN_DECK_ENTRIES + 1],
+                ..Default::default()
+            },
+            request_id: Some(request_id),
+        };
+        let reason = guard_client_message_before_dispatch(&msg, ServerMode::Full).unwrap_err();
+        match wire_rejection_message(&msg, reason.clone()) {
+            ServerMessage::TournamentActionRejected {
+                request_id: got,
+                message,
+            } => {
+                assert_eq!(got, request_id);
+                assert_eq!(message, reason);
+            }
+            other => panic!(
+                "a correlated deck submission must answer as TournamentActionRejected, got {other:?}"
+            ),
         }
     }
 
