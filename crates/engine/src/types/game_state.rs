@@ -16583,11 +16583,42 @@ impl GameState {
     /// single authority on inline `PendingCast` custody, rather than restating
     /// that owner list. It takes the assertion-free enumeration because this runs
     /// on untrusted restore input; the live-state drift check stays in
-    /// [`Self::live_pending_cast_owners`]. Only carriers that exist *after*
-    /// finalization began are refused: a `PendingCast` with no
-    /// `prepaid_finalization` is ignored, because it is also persisted during
-    /// pre-declaration prompts (CR 601.2a–b) where `committed_target_facts: None`
-    /// legitimately means "not latched yet".
+    /// [`Self::live_pending_cast_owners`].
+    ///
+    /// `prepaid_finalization` is not the only shape that parks a cast whose
+    /// targets may already have moved. A cast that pauses on the ordinary manual
+    /// `ManaPayment` / `PayCost` prompts carries neither `prepaid_finalization`
+    /// nor `committed_target_facts`, so a save written before the latch is resumed
+    /// into the raw-id fallback in `finalize_cast_pre_payment_checks`. Whether
+    /// that is *lossy* is provable from the save itself, so the second refusal
+    /// axis is the CR 400.7 evidence rather than the mere absence of a latch:
+    ///
+    /// * [`declared_target_entries_in_chain`] is the same reader the latch
+    ///   captures from. A cast that has not declared yet (CR 601.2a–b), one that
+    ///   declared nothing at all (`None` and `Some(vec![])` describe the same
+    ///   facts), and every activation (whose CR 601.2i-equivalent record is its
+    ///   `activation_record`) contribute no entry, so all of them stay admitted.
+    /// * Each declared object target carries its announcement-time incarnation
+    ///   pin. A pin that no longer [`is_current`] means the target changed zones
+    ///   (CR 400.7), so the raw-id capture would describe a different object than
+    ///   the one the caster announced (CR 115.1) and the facts are gone. That is
+    ///   exactly the state a save taken before the latch cannot repair, so it is
+    ///   refused.
+    /// * A pin that is still current re-reads the same object, and live play
+    ///   itself reaches unlatched parks of that shape — an additional cost that is
+    ///   still owed (`deferred_hand_discard_cost`, `deferred_sacrificed_permanents`)
+    ///   keeps the cast at `ManaPayment` without the latch — so refusing it would
+    ///   reject saves the engine produces. A save that carries no pin at all
+    ///   cannot prove movement either way and is likewise admitted rather than
+    ///   guessed at. The residual gap this leaves is a still-current target that a
+    ///   *later* cost moves before finalization; the save cannot prove that future
+    ///   move, and a park of that shape is refused today only through
+    ///   `move_unknown` / `sacrifice_unknown` when its completion carries the
+    ///   checks.
+    ///
+    /// [`declared_target_entries_in_chain`]:
+    ///     crate::game::ability_utils::declared_target_entries_in_chain
+    /// [`is_current`]: crate::game::game_object::ObjectIncarnationRefExt::is_current
     fn reject_unknown_pending_target_facts(&self) -> Result<(), PersistedRestoreError> {
         fn checks_unknown(checks: &Option<Box<FinalizePrePaymentChecks>>) -> bool {
             checks
@@ -16599,8 +16630,23 @@ impl GameState {
                 .as_deref()
                 .is_some_and(|prepared| checks_unknown(&prepared.pre_payment_checks))
         }
-        fn cast_unknown(pending: &PendingCast) -> bool {
-            prepared_unknown(&pending.prepaid_finalization)
+        /// CR 400.7 + CR 601.2c + CR 115.1: an unlatched spell whose declared
+        /// object target has already moved zones, so no later read can recover the
+        /// characteristics it was announced with.
+        ///
+        /// `activation_ability_index.is_none()` is the same typed spell/activation
+        /// discriminator the latch uses (`finish_pending_cast_cost_or_pay`): an
+        /// activation never writes this latch, its announced targets reaching the
+        /// CR 601.2i-equivalent history through `activation_record` instead.
+        fn declared_target_moved(state: &GameState, pending: &PendingCast) -> bool {
+            pending.activation_ability_index.is_none()
+                && pending.committed_target_facts.is_none()
+                && crate::game::ability_utils::declared_target_entries_in_chain(&pending.ability)
+                    .iter()
+                    .any(|entry| entry.pin.is_some_and(|pin| !pin.is_current(state)))
+        }
+        fn cast_unknown(state: &GameState, pending: &PendingCast) -> bool {
+            prepared_unknown(&pending.prepaid_finalization) || declared_target_moved(state, pending)
         }
         fn move_unknown(completion: &PendingCostMoveCompletion) -> bool {
             match completion {
@@ -16631,11 +16677,11 @@ impl GameState {
         // untrusted restore input, where a crafted save must be refused, not
         // panic on the live-state drift assertion. `cast_unknown` keeps the
         // legitimate pre-declaration `None`: only a cast whose finalization has
-        // begun but whose pre-payment checks never latched target facts is
-        // refused.
+        // begun, or whose declared target provably moved before the latch could be
+        // read, but whose pre-payment checks never latched target facts is refused.
         let custodial = self.pending_cast_owners().into_iter().find_map(|owner| {
             let pending = self.pending_cast_at(owner)?;
-            cast_unknown(pending).then_some(Some(pending.object_id))
+            cast_unknown(self, pending).then_some(Some(pending.object_id))
         });
 
         // CR 601.2h + CR 601.2i: these cost-move completion payloads are not
