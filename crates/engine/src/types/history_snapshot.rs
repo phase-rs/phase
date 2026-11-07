@@ -347,10 +347,14 @@ impl CompactLki {
 fn decode_snapshot(value: serde_json::Value) -> Result<LKISnapshot, serde_json::Error> {
     let compact_spelling = value.get("n").is_some();
     if !compact_spelling {
-        // The verbose `LKISnapshot` requires these; only the compact spelling may
-        // omit them. Accepting a verbose payload without them would turn a decode
-        // error into a silently defaulted characteristic.
-        for required in ["power", "toughness", "mana_value", "controller", "owner"] {
+        // Only the nonoptional verbose fields are required. `power` and
+        // `toughness` are `Option<i32>`, and serde's derive maps a missing field
+        // of that type to `None` (`serde::private::de::missing_field` visits
+        // `none` for an `Option`), so the verbose contract has always accepted
+        // their omission. Ordinary serialization writing `null` does not make a
+        // previously accepted omitted optional input invalid; requiring them
+        // here would narrow the input contract rather than protect it.
+        for required in ["mana_value", "controller", "owner"] {
             if value.get(required).is_none() {
                 return Err(serde::de::Error::custom(format!(
                     "verbose LKISnapshot is missing required field `{required}`"
@@ -481,6 +485,32 @@ mod tests {
         }
     }
 
+    /// Build the genuine VERBOSE spelling of `lki` and strip `removed`.
+    ///
+    /// The carrier's own `#[serde(with = compact_history_lki)]` field emits the
+    /// compact keys, so `serde_json::to_value(&carrier)` would hand back `bp`/`bt`
+    /// and removing the long names would strip nothing — an omission test that
+    /// never enters the omission branch. Serializing `LKISnapshot` directly does
+    /// emit the verbose spelling, and every removal is asserted to have actually
+    /// removed a field.
+    fn verbose_without(lki: &LKISnapshot, removed: &[&str]) -> serde_json::Value {
+        let mut verbose = serde_json::to_value(lki).expect("verbose to_value");
+        let object = verbose
+            .as_object_mut()
+            .expect("an LKISnapshot is an object");
+        assert!(
+            object.contains_key("name") && !object.contains_key("n"),
+            "reach: this payload really is the verbose spelling: {verbose}"
+        );
+        for key in removed {
+            assert!(
+                object.remove(*key).is_some(),
+                "reach: the verbose payload really carries `{key}` before removal: {verbose}"
+            );
+        }
+        verbose
+    }
+
     #[test]
     fn compact_lki_round_trips_every_field() {
         let original = CompactWrapper {
@@ -561,13 +591,13 @@ mod tests {
         no_base.base_toughness = None;
         let verbose_no_base = serde_json::to_value(&no_base).expect("to_value");
         assert_eq!(verbose_no_base["base_power"], serde_json::Value::Null);
-        let payload = format!(
-            "{{\"lki\":{}}}",
-            serde_json::to_string(&verbose_no_base).expect("to_string")
-        );
+        let payload = serde_json::json!({ "lki": verbose_no_base });
         let decoded: CompactWrapper =
-            serde_json::from_str(&payload).expect("verbose payload with a null base decodes");
+            serde_json::from_value(payload.clone()).expect("verbose null base decodes (owned)");
         assert_eq!(decoded.lki, no_base);
+        let boxed: BoxedCompactWrapper =
+            serde_json::from_value(payload).expect("verbose null base decodes (boxed)");
+        assert_eq!(boxed.lki.as_ref(), &no_base);
     }
 
     /// The compact form must be materially smaller than the verbose derived
@@ -632,27 +662,26 @@ mod tests {
         lki.base_toughness = None;
         lki.subtypes = Vec::new();
 
-        let mut verbose = serde_json::to_value(&lki).expect("to_value");
-        let object = verbose
-            .as_object_mut()
-            .expect("an LKISnapshot is an object");
         // Exactly what a payload predating those fields looks like.
-        object.remove("base_power");
-        object.remove("base_toughness");
-        object.remove("subtypes");
-        assert!(
-            !object.contains_key("n"),
-            "reach: this is the verbose spelling"
-        );
+        let verbose = verbose_without(&lki, &["base_power", "base_toughness", "subtypes"]);
+        let payload = serde_json::json!({ "lki": verbose });
 
-        let payload = format!("{{\"lki\":{}}}", verbose);
-        let decoded: CompactWrapper = serde_json::from_str(&payload).expect("decodes");
+        let owned: CompactWrapper = serde_json::from_value(payload.clone()).expect("owned decodes");
         assert_eq!(
-            decoded.lki, lki,
+            owned.lki, lki,
             "a legacy omission must stay absent, not become the current P/T or the name"
         );
-        assert_eq!(decoded.lki.base_power, None);
-        assert_eq!(decoded.lki.subtypes, Vec::<String>::new());
+        assert_eq!(owned.lki.base_power, None);
+        assert_eq!(owned.lki.subtypes, Vec::<String>::new());
+
+        let boxed: BoxedCompactWrapper = serde_json::from_value(payload).expect("boxed decodes");
+        assert_eq!(
+            boxed.lki.as_ref(),
+            &lki,
+            "the boxed adapter must take the same legacy defaults for the same omission"
+        );
+        assert_eq!(boxed.lki.base_power, None);
+        assert_eq!(boxed.lki.subtypes, Vec::<String>::new());
     }
 
     /// The same omission in the COMPACT spelling is a reconstruction, and must keep
@@ -699,19 +728,99 @@ mod tests {
             serde_json::from_str(&json).expect("compact decodes");
         assert_eq!(decoded, snapshot);
 
-        // Verbose spelling with the three legacy-omitted keys stripped.
-        let mut verbose = serde_json::to_value(&snapshot).expect("to_value");
-        let inner = verbose["lki"]
-            .as_object_mut()
-            .expect("the snapshot carries an LKI object");
-        inner.remove("base_power");
-        inner.remove("base_toughness");
-        inner.remove("subtypes");
+        // Verbose spelling with the three legacy-omitted keys stripped. The
+        // carrier's own `lki` field uses the compact adapter, so this payload is
+        // built from the verbose `LKISnapshot` directly and spliced into the
+        // carrier — `to_value(&snapshot)` would emit `bp`/`bt`/`st` and the
+        // removal would strip nothing.
+        let verbose_lki = verbose_without(&lki, &["base_power", "base_toughness", "subtypes"]);
+        let mut payload = serde_json::to_value(&snapshot).expect("to_value");
+        payload["lki"] = verbose_lki;
         let decoded: crate::types::game_state::ManaSpentSourceSnapshot =
-            serde_json::from_value(verbose).expect("verbose decodes");
+            serde_json::from_value(payload).expect("verbose decodes");
         assert_eq!(
             decoded, snapshot,
             "the non-cast carrier keeps the legacy defaults for verbose omissions"
         );
+    }
+
+    /// The verbose contract has always accepted an omitted `power`/`toughness`:
+    /// both are `Option<i32>`, and serde's `missing_field` helper maps a missing
+    /// `Option<T>` to `None`. The decode guard must not reject them, through
+    /// either adapter.
+    #[test]
+    fn verbose_omissions_of_optional_stats_decode_as_none_through_both_adapters() {
+        for (omitted, clear) in [
+            (
+                "power",
+                (|lki: &mut LKISnapshot| lki.power = None) as fn(&mut LKISnapshot),
+            ),
+            (
+                "toughness",
+                (|lki: &mut LKISnapshot| lki.toughness = None) as fn(&mut LKISnapshot),
+            ),
+        ] {
+            let lki = fully_populated_lki();
+            assert_eq!(lki.power, Some(3));
+            assert_eq!(lki.toughness, Some(4));
+            let verbose = verbose_without(&lki, &[omitted]);
+            let payload = serde_json::json!({ "lki": verbose });
+
+            let mut expected = lki.clone();
+            clear(&mut expected);
+            assert_ne!(expected, lki, "reach: `{omitted}` really left the payload");
+
+            let owned: CompactWrapper = serde_json::from_value(payload.clone())
+                .unwrap_or_else(|error| panic!("owned rejects an omitted `{omitted}`: {error}"));
+            assert_eq!(
+                owned.lki, expected,
+                "owned: omitted `{omitted}` decodes as None"
+            );
+
+            let boxed: BoxedCompactWrapper = serde_json::from_value(payload)
+                .unwrap_or_else(|error| panic!("boxed rejects an omitted `{omitted}`: {error}"));
+            assert_eq!(
+                boxed.lki.as_ref(),
+                &expected,
+                "boxed: omitted `{omitted}` decodes as None"
+            );
+        }
+
+        // Both stats absent at once is the same story.
+        let lki = fully_populated_lki();
+        let verbose = verbose_without(&lki, &["power", "toughness"]);
+        let payload = serde_json::json!({ "lki": verbose });
+        let mut expected = lki;
+        expected.power = None;
+        expected.toughness = None;
+        let owned: CompactWrapper =
+            serde_json::from_value(payload.clone()).expect("both omitted decode (owned)");
+        assert_eq!(owned.lki, expected);
+        let boxed: BoxedCompactWrapper =
+            serde_json::from_value(payload).expect("both omitted decode (boxed)");
+        assert_eq!(boxed.lki.as_ref(), &expected);
+    }
+
+    /// Dropping optional stats from the guard must not weaken the nonoptional
+    /// ones: `mana_value`, `controller`, `owner` (and the always-present `name`)
+    /// still error when a verbose payload omits them.
+    #[test]
+    fn verbose_payloads_missing_a_required_field_still_error() {
+        for missing in ["mana_value", "controller", "owner", "name"] {
+            let lki = fully_populated_lki();
+            let verbose = verbose_without(&lki, &[missing]);
+            let payload = serde_json::json!({ "lki": verbose });
+
+            let owned = serde_json::from_value::<CompactWrapper>(payload.clone());
+            assert!(
+                owned.is_err(),
+                "owned must reject a verbose payload missing `{missing}`"
+            );
+            let boxed = serde_json::from_value::<BoxedCompactWrapper>(payload);
+            assert!(
+                boxed.is_err(),
+                "boxed must reject a verbose payload missing `{missing}`"
+            );
+        }
     }
 }

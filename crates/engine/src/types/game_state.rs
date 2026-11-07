@@ -10318,12 +10318,29 @@ impl GameState {
     }
 
     /// Every typed owner currently holding a live [`PendingCast`], in custody
-    /// precedence order.
-    pub(crate) fn live_pending_cast_owners(&self) -> Vec<PendingCastOwner> {
-        let owners: Vec<PendingCastOwner> = PendingCastOwner::ALL
+    /// precedence order, **without** the single-announcement drift assertion.
+    ///
+    /// This is the enumeration itself. Live in-game callers use
+    /// [`Self::live_pending_cast_owners`], which adds the invariant check.
+    /// Restore admission reads untrusted state and must stay fallible, so it
+    /// enumerates here and refuses a disagreement
+    /// ([`Self::reject_conflicting_pending_cast_owners`]) instead of tripping the
+    /// `debug_assert!` at a library boundary.
+    pub(crate) fn pending_cast_owners(&self) -> Vec<PendingCastOwner> {
+        PendingCastOwner::ALL
             .into_iter()
             .filter(|owner| self.pending_cast_at(*owner).is_some())
-            .collect();
+            .collect()
+    }
+
+    /// Every typed owner currently holding a live [`PendingCast`], in custody
+    /// precedence order.
+    ///
+    /// Asserts the live-state invariant that one announcement is in flight at a
+    /// time. Do not call this on restored/untrusted state — use
+    /// [`Self::pending_cast_owners`] there.
+    pub(crate) fn live_pending_cast_owners(&self) -> Vec<PendingCastOwner> {
+        let owners = self.pending_cast_owners();
         // One announcement is in flight at a time (CR 601.2 / CR 602.2 do not
         // nest; mana abilities carry no `PendingCast`), so every owner that is
         // live names the same announcement.
@@ -16522,6 +16539,35 @@ impl GameState {
         }
     }
 
+    /// CR 601.2 / CR 602.2: at most one announcement is in flight, so every live
+    /// `PendingCast` owner names the same cast.
+    ///
+    /// Live state asserts that in [`Self::live_pending_cast_owners`]. A persisted
+    /// save can violate it, and admitting it would move the failure to that
+    /// assertion — a process panic at a library boundary — or, in release builds,
+    /// silently keep two announcements. Refuse the save here instead.
+    fn reject_conflicting_pending_cast_owners(&self) -> Result<(), PersistedRestoreError> {
+        let mut live = self
+            .pending_cast_owners()
+            .into_iter()
+            .filter_map(|owner| self.pending_cast_at(owner));
+        let Some(first) = live.next() else {
+            return Ok(());
+        };
+        match live.find(|pending| {
+            pending.object_id != first.object_id
+                || pending.activation_ability_index != first.activation_ability_index
+        }) {
+            Some(second) => Err(PersistedRestoreError::ConflictingPendingCastOwners {
+                first: first.object_id,
+                first_ability_index: first.activation_ability_index,
+                second: second.object_id,
+                second_ability_index: second.activation_ability_index,
+            }),
+            None => Ok(()),
+        }
+    }
+
     /// CR 601.2c + CR 115.1 + CR 400.7: refuse a playable save whose parked cast
     /// cannot prove what it declared.
     ///
@@ -16533,10 +16579,15 @@ impl GameState {
     /// already spent. The announced targets are gone, so the honest outcome is to
     /// refuse the save at the shared chokepoint rather than resume it.
     ///
-    /// Only carriers that exist *after* finalization began are inspected: they
-    /// are by construction past target declaration. A plain `PendingCast` is not,
-    /// because it is also persisted during pre-declaration prompts (CR 601.2a–b)
-    /// where `committed_target_facts: None` legitimately means "not latched yet".
+    /// The cast-carrier inspection reuses [`Self::pending_cast_owners`], the
+    /// single authority on inline `PendingCast` custody, rather than restating
+    /// that owner list. It takes the assertion-free enumeration because this runs
+    /// on untrusted restore input; the live-state drift check stays in
+    /// [`Self::live_pending_cast_owners`]. Only carriers that exist *after*
+    /// finalization began are refused: a `PendingCast` with no
+    /// `prepaid_finalization` is ignored, because it is also persisted during
+    /// pre-declaration prompts (CR 601.2a–b) where `committed_target_facts: None`
+    /// legitimately means "not latched yet".
     fn reject_unknown_pending_target_facts(&self) -> Result<(), PersistedRestoreError> {
         fn checks_unknown(checks: &Option<Box<FinalizePrePaymentChecks>>) -> bool {
             checks
@@ -16572,71 +16623,40 @@ impl GameState {
             }
         }
 
-        /// CR 601.2h: a commit-time cost prompt parks the cast on the prompt
-        /// itself — `CostResume::Spell` / `CostResume::SpellCost` carry the same
-        /// `PendingCast` whose `prepaid_finalization` holds the checks. This is the
-        /// commonest park, not an edge case: the sacrifice-arrangement and
-        /// hand-discard prompts both use it.
-        fn prompt_unknown(waiting_for: &WaitingFor) -> Option<Option<ObjectId>> {
-            let spell = match waiting_for {
-                WaitingFor::PayCost {
-                    resume: CostResume::Spell { spell },
-                    ..
-                }
-                | WaitingFor::PayCost {
-                    resume: CostResume::SpellCost { spell, .. },
-                    ..
-                } => Some(spell),
-                _ => None,
-            }?;
-            cast_unknown(spell).then_some(Some(spell.object_id))
-        }
+        // CR 601.2c: the cast-custody walk is the single authority on which
+        // carriers hold an inline `PendingCast` (`PendingCastOwner::ALL` via
+        // `pending_cast_at`). Read it rather than restating the owner list here,
+        // so a carrier added to the walk is admitted-checked for free.
+        // `pending_cast_owners` is the assertion-free enumeration: this runs on
+        // untrusted restore input, where a crafted save must be refused, not
+        // panic on the live-state drift assertion. `cast_unknown` keeps the
+        // legitimate pre-declaration `None`: only a cast whose finalization has
+        // begun but whose pre-payment checks never latched target facts is
+        // refused.
+        let custodial = self.pending_cast_owners().into_iter().find_map(|owner| {
+            let pending = self.pending_cast_at(owner)?;
+            cast_unknown(pending).then_some(Some(pending.object_id))
+        });
 
-        let mut offender: Option<Option<ObjectId>> = prompt_unknown(&self.waiting_for);
-        if offender.is_none() {
-            if let Some(pending) = self.pending_cast.as_deref() {
-                if cast_unknown(pending) {
-                    offender = Some(Some(pending.object_id));
-                }
-            }
-        }
-        if offender.is_none() {
-            if let Some(DeferredLifeCostResume::Cast {
-                pending: Some(pending),
+        // CR 601.2h + CR 601.2i: these cost-move completion payloads are not
+        // pending-cast owners — `FinalizeCast` / `FinalizeDelvedCast` /
+        // `FinalizeSpell` carry their own pre-payment checks on the resume root,
+        // so the custody walk cannot reach them and they keep their own check.
+        let completion = match self.pending_cost_move_resume.as_ref() {
+            Some(PendingCostMoveResume::Cast {
+                pending,
+                completion,
                 ..
-            }) = self.pending_deferred_life_cost_resume.as_ref()
-            {
-                if cast_unknown(pending) {
-                    offender = Some(Some(pending.object_id));
-                }
-            }
-        }
-        if offender.is_none() {
-            match self.pending_cost_move_resume.as_ref() {
-                // The nested `pending` carries its own `prepaid_finalization`, which
-                // is unchecked when `completion` is a variant this walk does not
-                // classify — so both are inspected.
-                Some(PendingCostMoveResume::Cast {
-                    pending,
-                    completion,
-                    ..
-                }) if move_unknown(completion) || pending.as_deref().is_some_and(cast_unknown) => {
-                    offender = Some(pending.as_ref().map(|p| p.object_id));
-                }
-                Some(PendingCostMoveResume::SacrificeForCost {
-                    pending,
-                    completion,
-                    ..
-                }) if sacrifice_unknown(completion)
-                    || pending.as_deref().is_some_and(cast_unknown) =>
-                {
-                    offender = Some(pending.as_ref().map(|p| p.object_id));
-                }
-                _ => {}
-            }
-        }
+            }) if move_unknown(completion) => Some(pending.as_ref().map(|p| p.object_id)),
+            Some(PendingCostMoveResume::SacrificeForCost {
+                pending,
+                completion,
+                ..
+            }) if sacrifice_unknown(completion) => Some(pending.as_ref().map(|p| p.object_id)),
+            _ => None,
+        };
 
-        match offender {
+        match custodial.or(completion) {
             Some(spell_object_id) => {
                 Err(PersistedRestoreError::UnknownPendingTargetFacts { spell_object_id })
             }
@@ -16859,6 +16879,22 @@ pub enum PersistedRestoreError {
          {spell_object_id:?} and cannot be resumed"
     )]
     UnknownPendingTargetFacts { spell_object_id: Option<ObjectId> },
+    /// CR 601.2 / CR 602.2: at most one announcement is in flight, so every live
+    /// `PendingCast` owner names the same cast. A persisted save that parks two
+    /// different announcements is corrupt; admitting it would move the failure to
+    /// the live-state drift assertion (a library-boundary panic in debug builds)
+    /// instead of refusing it here.
+    #[error(
+        "persisted state parks two live pending casts naming different announcements \
+         ({first:?} at ability {first_ability_index:?} and {second:?} at ability \
+         {second_ability_index:?}) and cannot be restored"
+    )]
+    ConflictingPendingCastOwners {
+        first: ObjectId,
+        first_ability_index: Option<usize>,
+        second: ObjectId,
+        second_ability_index: Option<usize>,
+    },
 }
 
 impl PreparedPersistedGameState {
@@ -17071,6 +17107,7 @@ impl PersistedGameState {
             .validate_payment_transaction()
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
         state.reject_unknown_cast_history_provenance()?;
+        state.reject_conflicting_pending_cast_owners()?;
         state.reject_unknown_pending_target_facts()?;
         crate::game::effects::choose_from_zone::migrate_legacy_per_player_frame_on_restore(
             &mut state,
@@ -53753,6 +53790,202 @@ mod tests {
             paused_at_index: 0,
         }));
         assert!(state.withholds_priority());
+    }
+
+    /// CR 601.2c + CR 601.2i: the three shapes a parked cast's target facts can
+    /// take, for the restore-guard unit tests below.
+    #[derive(Clone, Copy)]
+    enum ParkedFacts {
+        /// Pre-declaration (CR 601.2a–b): no `prepaid_finalization` at all.
+        PreDeclaration,
+        /// Finalization began but the pre-payment checks never latched facts.
+        Unknown,
+        /// A cast that declared no target (`Some(vec![])`).
+        Known,
+    }
+
+    fn parked_cast(object_id: ObjectId, facts: ParkedFacts) -> PendingCast {
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Controller,
+            },
+            Vec::new(),
+            object_id,
+            PlayerId(0),
+        );
+        let mut pending =
+            PendingCast::new(object_id, CardId(object_id.0), ability, ManaCost::zero());
+        if !matches!(facts, ParkedFacts::PreDeclaration) {
+            pending.prepaid_finalization = Some(Box::new(PrepaidSpellFinalization {
+                phyrexian_choices: None,
+                pre_payment_checks: Some(Box::new(FinalizePrePaymentChecks {
+                    early_waiting_for: None,
+                    cascade_cast_transformed: false,
+                    resolution_success_waiting_for: None,
+                    cast_this_way_etb_counter: None,
+                    cast_this_way_enters_mods: Default::default(),
+                    committed_target_facts: matches!(facts, ParkedFacts::Known).then(Vec::new),
+                })),
+            }));
+        }
+        pending
+    }
+
+    fn discard_for_cost(state: &mut GameState, pending: PendingCast) {
+        state.pending_discard_for_cost = Some(Box::new(PendingDiscardForCostResume::Chosen {
+            player: PlayerId(0),
+            pending,
+            chosen: vec![ObjectId(3)],
+            paused_at_index: 0,
+        }));
+    }
+
+    /// CR 601.2 / CR 602.2: restore admission reads untrusted state, so the
+    /// cast-custody walk it reuses must be the assertion-free enumeration. A
+    /// crafted save that parks two different announcements is refused with the
+    /// ordinary error — not a `debug_assert!` panic at a library boundary. Both
+    /// carriers here carry KNOWN facts, so only the owner-agreement check can
+    /// catch it; reverting the walk to `live_pending_cast_owners` would panic.
+    #[test]
+    fn reject_conflicting_pending_cast_owners_refuses_two_announcements_without_panicking() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_cast = Some(Box::new(parked_cast(ObjectId(2), ParkedFacts::Known)));
+        discard_for_cost(&mut state, parked_cast(ObjectId(9), ParkedFacts::Known));
+
+        let refused = state.reject_conflicting_pending_cast_owners();
+        assert!(
+            matches!(
+                refused,
+                Err(PersistedRestoreError::ConflictingPendingCastOwners {
+                    first: ObjectId(2),
+                    second: ObjectId(9),
+                    ..
+                })
+            ),
+            "two live announcements are refused, not panicked on: {refused:?}"
+        );
+
+        // Agreement is admitted: both owners name the same cast.
+        let mut agreeing = GameState::new_two_player(42);
+        agreeing.pending_cast = Some(Box::new(parked_cast(ObjectId(2), ParkedFacts::Known)));
+        discard_for_cost(&mut agreeing, parked_cast(ObjectId(2), ParkedFacts::Known));
+        assert!(agreeing.reject_conflicting_pending_cast_owners().is_ok());
+
+        // The diagnostic must describe an ability-index-only disagreement too,
+        // not collapse it to one object id.
+        let mut same_object = GameState::new_two_player(42);
+        let mut first = parked_cast(ObjectId(5), ParkedFacts::Known);
+        first.activation_ability_index = Some(0);
+        let mut second = parked_cast(ObjectId(5), ParkedFacts::Known);
+        second.activation_ability_index = Some(1);
+        same_object.pending_cast = Some(Box::new(first));
+        discard_for_cost(&mut same_object, second);
+        assert!(
+            matches!(
+                same_object.reject_conflicting_pending_cast_owners(),
+                Err(PersistedRestoreError::ConflictingPendingCastOwners {
+                    first: ObjectId(5),
+                    first_ability_index: Some(0),
+                    second: ObjectId(5),
+                    second_ability_index: Some(1),
+                })
+            ),
+            "an ability-index-only disagreement is described, not collapsed to one id"
+        );
+    }
+
+    /// The conflict guard must be wired into the production chokepoint, not just
+    /// callable. A persisted save that parks two different announcements is
+    /// refused by `PersistedGameState::into_game_state`, so deleting the
+    /// `prepare_for_restore` call fails this test.
+    #[test]
+    fn prepare_for_restore_refuses_two_announcements_on_the_persisted_path() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_cast = Some(Box::new(parked_cast(ObjectId(2), ParkedFacts::Known)));
+        // A different announcement on the prompt — a shape only a crafted save
+        // can carry, since live play keeps one announcement in flight.
+        state.waiting_for = WaitingFor::PayCost {
+            player: PlayerId(0),
+            kind: PayCostKind::Sacrifice,
+            choices: Vec::new(),
+            count: 0,
+            min_count: 0,
+            resume: CostResume::Spell {
+                spell: Box::new(parked_cast(ObjectId(9), ParkedFacts::Known)),
+            },
+        };
+
+        let json =
+            serde_json::to_value(PersistedGameState::capture(state)).expect("the park serializes");
+        let refused = serde_json::from_value::<PersistedGameState>(json)
+            .expect("the park decodes")
+            .into_game_state();
+        assert!(
+            matches!(
+                refused,
+                Err(PersistedRestoreError::ConflictingPendingCastOwners {
+                    first: ObjectId(2),
+                    second: ObjectId(9),
+                    ..
+                })
+            ),
+            "the persisted path refuses two announcements: {refused:?}"
+        );
+    }
+
+    /// CR 601.2c + CR 601.2i + CR 602.2b: the walk covers a serialized carrier the
+    /// old hand-written list never inspected
+    /// (`PendingCostMoveResume::ActivationMillPayment`, an activation cost move).
+    /// The refusal is reached through the production `into_game_state` chokepoint,
+    /// so a regression that drops this carrier from the walk fails here.
+    #[test]
+    fn prepare_for_restore_checks_the_activation_mill_carrier() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_cost_move_resume = Some(PendingCostMoveResume::ActivationMillPayment {
+            player: PlayerId(0),
+            pending: Box::new(parked_cast(ObjectId(9), ParkedFacts::Unknown)),
+        });
+
+        let json =
+            serde_json::to_value(PersistedGameState::capture(state)).expect("the park serializes");
+        let refused = serde_json::from_value::<PersistedGameState>(json)
+            .expect("the park decodes")
+            .into_game_state();
+        assert!(
+            matches!(
+                refused,
+                Err(PersistedRestoreError::UnknownPendingTargetFacts {
+                    spell_object_id: Some(ObjectId(9)),
+                })
+            ),
+            "the ActivationMill carrier's unknown facts are refused: {refused:?}"
+        );
+    }
+
+    /// Function-level reach pin for the `DiscardForCost` arm. That field is
+    /// `#[serde(skip)]`, so a restored save cannot carry it; the serialized
+    /// carrier above is the restore-path witness. This still fails if the walk is
+    /// narrowed to `External` only, which is what it guards.
+    #[test]
+    fn reject_unknown_pending_target_facts_checks_the_discard_for_cost_owner() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_cast = Some(Box::new(parked_cast(
+            ObjectId(2),
+            ParkedFacts::PreDeclaration,
+        )));
+        discard_for_cost(&mut state, parked_cast(ObjectId(9), ParkedFacts::Unknown));
+
+        let refused = state.reject_unknown_pending_target_facts();
+        assert!(
+            matches!(
+                refused,
+                Err(PersistedRestoreError::UnknownPendingTargetFacts {
+                    spell_object_id: Some(ObjectId(9)),
+                })
+            ),
+            "the DiscardForCost cast's unknown facts are refused: {refused:?}"
+        );
     }
 
     #[test]
