@@ -204,12 +204,16 @@ fn adjacent_copy_retarget_no_rider_unchanged() {
 /// to a free-standing `ChangeTargets { Any }`: the `CopySpell` kept
 /// `KeepOriginalTargets`, no copy ever opened a `CopyRetarget` prompt, and the
 /// trigger declared a bogus any-target slot. Reverting the fix makes the first
-/// `CopyRetarget` wait below never occur (the loop panics on its absence).
+/// `CopyRetarget` wait below never occur (without a `CopyRetarget` prompt the loop ends
+/// early and the `choosers` assertion fails).
 ///
 /// Reach guard: both copies are made (the loop sees one prompt per other player).
-/// P1 sends its copy to P2 and P2 keeps the original target, so the final life
-/// totals discriminate who decided: P0 takes the original 3 and the P2-copy 3,
-/// P2 takes the P1-copy 3, P1 takes nothing.
+/// The loop redirects whichever copying player is prompted first at P2 and the
+/// second keeps the original target, so the final life totals are the same
+/// whichever of P1/P2 is prompted first: P0 takes the original 3 and the kept
+/// copy's 3, P2 takes the one redirected copy's 3, P1 takes nothing. The totals
+/// show that exactly one copy was redirected at P2; the sorted `choosers`
+/// assertion shows who was asked.
 #[test]
 fn hive_mind_each_other_player_chooses_new_targets_for_their_own_copy() {
     const P2: PlayerId = PlayerId(2);
@@ -263,7 +267,11 @@ fn hive_mind_each_other_player_chooses_new_targets_for_their_own_copy() {
         vec![P1, P2],
         "each other player, and only they, is asked to retarget their own copy: {choosers:?}"
     );
-    assert_eq!(runner.life(P1), 20, "P1's copy was redirected away from P0");
+    assert_eq!(
+        runner.life(P1),
+        20,
+        "exactly one copy was redirected at P2 and none reached P1"
+    );
     assert_eq!(
         runner.life(P2),
         17,
