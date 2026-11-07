@@ -25070,6 +25070,63 @@ fn delayed_trigger_without_inner_condition_lift_is_noop() {
     );
 }
 
+/// CR 701.20e + CR 608.2c + CR 205.3a: Kaalia, Zenith Seeker (issue #8068).
+///
+/// "You may reveal an Angel card, a Demon card, and/or a Dragon card from among
+/// them" is a card-TYPE LIST. Each leg ends with the informational "card" noun
+/// immediately before the separator, and the redundant-noun scanner only
+/// recognized that noun before a SPACE — so the leftmost leg's noun stayed in
+/// the remainder, the type-union fold never saw its comma, and the keep filter
+/// collapsed to `Angel`. Every Demon and Dragon among the revealed six was
+/// therefore unselectable.
+#[test]
+fn kaalia_zenith_seeker_reveal_list_keeps_every_listed_type() {
+    let def = parse_effect_chain(
+        "Look at the top six cards of your library. You may reveal an Angel card, a Demon card, and/or a Dragon card from among them and put them into your hand. Put the rest on the bottom of your library in a random order.",
+        AbilityKind::Spell,
+    );
+    let Effect::Dig {
+        count,
+        keep_count,
+        up_to,
+        reveal,
+        filter,
+        destination,
+        rest_destination,
+        rest_order,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected Effect::Dig, got {:?}", def.effect);
+    };
+    assert_eq!(*count, QuantityExpr::Fixed { value: 6 });
+    assert_eq!(*keep_count, Some(1));
+    assert!(*up_to, "\"you may reveal\" is an optional (up to one) pick");
+    assert!(*reveal, "the instruction reveals the cards publicly");
+    assert_eq!(*destination, Some(Zone::Hand));
+    assert_eq!(*rest_destination, Some(Zone::Library));
+    assert_eq!(*rest_order, DigRestOrder::Random);
+
+    let TargetFilter::Or { filters } = filter else {
+        panic!("the reveal list must fold into one union filter (issue #8068), got {filter:?}");
+    };
+    let legs: Vec<&str> = filters
+        .iter()
+        .filter_map(|leg| match leg {
+            TargetFilter::Typed(tf) => match tf.type_filters.as_slice() {
+                [TypeFilter::Subtype(subtype)] => Some(subtype.as_str()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        legs,
+        vec!["Angel", "Demon", "Dragon"],
+        "every listed type must be selectable, got {filters:?}"
+    );
+}
+
 /// CR 701.20b + CR 608.2c + CR 608.2b: Zimone's Experiment end-to-end.
 ///
 /// `"Look at the top five cards of your library. You may reveal up to two
