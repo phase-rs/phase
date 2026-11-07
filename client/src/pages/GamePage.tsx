@@ -3916,6 +3916,15 @@ function formatUnlessCost(
   }
 }
 
+/** The authority did not apply the submission: its bytes never left this
+ *  host, or the authority refused it. Anything else may have been applied. */
+function isDefinitivePaymentRefusal(err: unknown): boolean {
+  return (
+    err instanceof AdapterError &&
+    (err.code === AdapterErrorCode.ACTION_NOT_SENT || err.code === AdapterErrorCode.ACTION_REJECTED)
+  );
+}
+
 /** How often a closed spoken-payment window is re-reported while the engine,
  *  judging on its own clock, has not yet lapsed it. */
 const SAY_PHRASE_EXPIRY_RETRY_MS = 250;
@@ -3974,6 +3983,10 @@ function SayPhrasePanel({
   // A phrase paid at the payer's own pace has no host stamps: its clicks are
   // counted locally until the engine's prompt closes.
   const [quietReported, setQuietReported] = useState(said);
+  // Identifies the latest untimed click. An untimed payment has no engine
+  // instance to fence by, so a completion only reconciles the count while its
+  // click is still the latest one this panel made for the current payment.
+  const quietAttempt = useRef(0);
   const reported =
     quickWindowMs === undefined ? quietReported : said + inFlight.size;
 
@@ -3984,6 +3997,7 @@ function SayPhrasePanel({
     lastSaidAt.current = null;
     setInFlight(new Map());
     setQuietReported(said);
+    quietAttempt.current += 1;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paymentId]);
 
@@ -4158,11 +4172,17 @@ function SayPhrasePanel({
     // requires (a rapid double click must not over-report).
     if (reported >= total) return;
     if (quickWindowMs === undefined) {
-      const attemptPayment = paymentId;
+      quietAttempt.current += 1;
+      const attempt = quietAttempt.current;
       setQuietReported((current) => current + 1);
       void dispatch({ type: "PayUnlessCost", data: { pay: true } }).catch((err) => {
-        if (paymentIdRef.current !== attemptPayment) return;
-        if (err instanceof AdapterError && err.code === AdapterErrorCode.ACTION_NOT_SENT) {
+        // A later click or a fresh payment owns the count now.
+        if (quietAttempt.current !== attempt) return;
+        // The payment was definitely not made — the bytes never left, or the
+        // authority refused it (e.g. while a takeback vote was pending) — so
+        // the prompt may still be current: reopen the saying. A rejection in
+        // doubt leaves the count, since the engine may have taken the saying.
+        if (isDefinitivePaymentRefusal(err)) {
           setQuietReported((current) => Math.max(said, current - 1));
         }
       });

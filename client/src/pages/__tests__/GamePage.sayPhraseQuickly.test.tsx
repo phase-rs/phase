@@ -323,6 +323,41 @@ function setup(repetitions: number) {
   });
 }
 
+const ROD_PHRASE = "Thank you, sir. May I have another?";
+
+/** Rod of Spanking's payment, as the engine publishes it: one untimed saying
+ *  of the phrase, with no engine-owned timed instance. */
+function setupRodOfSpanking() {
+  const state = gameStateFactory
+    .withPlayers(0, 1)
+    .waitingFor({
+      type: "UnlessPayment",
+      data: {
+        player: 0,
+        cost: { type: "SayPhrase", phrase: ROD_PHRASE, repetitions: 1 },
+        pending_effect: {},
+        effect_description: "Untap Rod of Spanking",
+      },
+    })
+    .build();
+  state.say_payment = null;
+  act(() => {
+    useGameStore.setState({
+      gameId: "say-phrase",
+      gameMode: "online",
+      gameState: state,
+      waitingFor: state.waiting_for,
+    });
+    useMultiplayerStore.setState({ activePlayerId: 0, isSpectator: false });
+  });
+}
+
+function payCalls() {
+  return dispatchMock.mock.calls.filter(
+    ([action]) => (action as SayPhraseAttempt).type === "PayUnlessCost",
+  );
+}
+
 describe("GamePage rapid say-it payment (Toy Boat)", () => {
   beforeEach(() => {
     dispatchMock.mockReset();
@@ -601,33 +636,7 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
   });
 
   it("retries an untimed saying after an ACTION_NOT_SENT rejection", async () => {
-    const ROD_PHRASE = "Thank you, sir. May I have another?";
-    const state = gameStateFactory
-      .withPlayers(0, 1)
-      .waitingFor({
-        type: "UnlessPayment",
-        data: {
-          player: 0,
-          cost: {
-            type: "SayPhrase",
-            phrase: ROD_PHRASE,
-            repetitions: 1,
-          },
-          pending_effect: {},
-          effect_description: "Untap Rod of Spanking",
-        },
-      })
-      .build();
-    state.say_payment = null;
-    act(() => {
-      useGameStore.setState({
-        gameId: "say-phrase",
-        gameMode: "online",
-        gameState: state,
-        waitingFor: state.waiting_for,
-      });
-      useMultiplayerStore.setState({ activePlayerId: 0, isSpectator: false });
-    });
+    setupRodOfSpanking();
 
     // First attempt rejects with definite no-send.
     dispatchMock.mockRejectedValueOnce(
@@ -657,5 +666,45 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
       type: "PayUnlessCost",
       data: { pay: true },
     });
+  });
+  it("reopens an untimed saying the authority definitively refused", async () => {
+    setupRodOfSpanking();
+    // While a takeback vote is pending the authority refuses ordinary actions;
+    // once the vote is declined the same one-saying prompt is still current.
+    dispatchMock.mockRejectedValueOnce(
+      new AdapterError(AdapterErrorCode.ACTION_REJECTED, "A takeback vote is pending", true),
+    );
+    dispatchMock.mockResolvedValueOnce(undefined);
+    render(gamePageTree());
+
+    const button = await screen.findByRole("button", { name: new RegExp(ROD_PHRASE) });
+    fireEvent.click(button);
+    await waitFor(() => expect(payCalls()).toHaveLength(1));
+
+    // The refusal reconciled the count: the payer can say it again.
+    await waitFor(() => {
+      fireEvent.click(button);
+      expect(payCalls()).toHaveLength(2);
+    });
+    expect(payCalls()[1][0]).toEqual({ type: "PayUnlessCost", data: { pay: true } });
+  });
+
+  it("keeps an untimed saying counted when its outcome is in doubt", async () => {
+    setupRodOfSpanking();
+    // The session dropped after the frame may have reached the authority: the
+    // saying may have been taken, so the panel must not offer it again.
+    dispatchMock.mockRejectedValueOnce(
+      new AdapterError("P2P_ERROR", "Host disconnected while submitting an action", true),
+    );
+    render(gamePageTree());
+
+    const button = await screen.findByRole("button", { name: new RegExp(ROD_PHRASE) });
+    fireEvent.click(button);
+    await waitFor(() => expect(payCalls()).toHaveLength(1));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(button);
+    expect(payCalls()).toHaveLength(1);
   });
 });
