@@ -7,14 +7,22 @@
  * `draftProtocol.test.ts` and `draftPersistence.test.ts`.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 import { DraftPodHostAdapter } from "../draftPodHostAdapter";
 import type { DraftPodHostConfig, DraftPodHostEvent, DraftPodListing } from "../draftPodHostAdapter";
 import { DraftPodGuestAdapter } from "../draftPodGuestAdapter";
 import type { DraftPodGuestEvent } from "../draftPodGuestAdapter";
-import type { DraftPlayerView } from "../draft-adapter";
-import { loadDraftHostSession } from "../../services/draftPersistence";
+import type { DraftPlayerView, RestorableDraftSessionVerdict } from "../draft-adapter";
+import { admitDraft27HostValue } from "../draft-compatibility";
+import {
+  loadDraftHostSession,
+  type DraftHostSessionLoadResult,
+  type PersistedDraftHostSession,
+} from "../../services/draftPersistence";
 import type { DraftWorkspaceState } from "../../components/draft/workspace/types";
 import type { BrokerClient } from "../../services/brokerClient";
 
@@ -22,13 +30,15 @@ import type { BrokerClient } from "../../services/brokerClient";
 
 // Mock the draft-adapter module — vitest cannot resolve the lazy
 // `@wasm/draft` import that DraftAdapter's `ensureDraftWasm` performs.
-// The host adapter only uses DraftAdapter to populate the cube CARD_DB;
-// the Set-mode tests below never exercise that path, so a no-op mock is
-// sufficient.
-vi.mock("../draft-adapter", () => ({
+// The host adapter uses DraftAdapter to populate the cube CARD_DB, which the
+// Set-mode tests below never exercise, and to check a recovered session with
+// the draft engine, whose answer `mockCheckRestorableSession` gives.
+vi.mock("../draft-adapter", async (importOriginal) => ({
+  draftViewPresentation: (await importOriginal<typeof import("../draft-adapter")>()).draftViewPresentation,
   DraftAdapter: vi.fn().mockImplementation(function () {
     return {
       loadCardDatabase: vi.fn(async () => 0),
+      checkRestorableSession: mockCheckRestorableSession,
     };
   }),
 }));
@@ -41,9 +51,13 @@ vi.mock("../../network/connection", () => ({
 
 // Mock persistence
 vi.mock("../../services/draftPersistence", () => ({
-  loadDraftHostSession: vi.fn(async () => null),
+  loadDraftHostSession: vi.fn(async () => ({ type: "absent" })),
   loadDraftGuestSession: vi.fn(async () => null),
 }));
+
+const mockCheckRestorableSession = vi.fn(
+  async (_json: string): Promise<RestorableDraftSessionVerdict> => ({ type: "Admitted" }),
+);
 
 // Mock P2PDraftHost
 const mockHostOnEvent = vi.fn((_handler: (event: Record<string, unknown>) => void) => vi.fn());
@@ -169,6 +183,25 @@ function mockView(status: string): DraftPlayerView {
   };
 }
 
+function admittedHostSession(session: PersistedDraftHostSession): DraftHostSessionLoadResult {
+  return { type: "admitted", session, raw: session };
+}
+
+/**
+ * A saved draft session from the fixture draft-wasm's own test checks:
+ * draft-core's serialization of a session, and the draft engine's answer to the
+ * saved-session check.
+ */
+function savedSession(name: string): { text: string; verdict: RestorableDraftSessionVerdict } {
+  const fixture = JSON.parse(readFileSync(resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "../../../../fixtures/draft-contract/fifo_legacy_admission.json",
+  ), "utf8")) as { saved_sessions: Record<string, { verdict: RestorableDraftSessionVerdict; session: unknown }> };
+  const saved = fixture.saved_sessions[name];
+  if (!saved) throw new Error(`The fixture has no saved session named ${name}`);
+  return { text: JSON.stringify(saved.session), verdict: saved.verdict };
+}
+
 const restoredWorkspace: DraftWorkspaceState = {
   schemaVersion: 1,
   placements: { card: { zone: "deck", row: 0, column: 1, order: 0 } },
@@ -234,6 +267,166 @@ describe("DraftPodHostAdapter", () => {
   it("starts in idle status", () => {
     expect(adapter.status).toBe("idle");
     expect(adapter.roomCode).toBeNull();
+  });
+
+  it.each([
+    ["FIFO flow", "fifo_drafting"],
+    ["Review", "legacy_review"],
+    ["residual FIFO", "legacy_carrying_fifo"],
+  ] as const)("refuses recovered %s before hostRoom, broker, CardDB, or host allocation", async (_label, name) => {
+    const { hostRoom } = await import("../../network/connection");
+    const saved = savedSession(name);
+    const session = {
+      persistenceId: "draft-1",
+      roomCode: "ABCDE",
+      kind: "Premier" as const,
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss" as const,
+      podPolicy: "Competitive" as const,
+      seatTokens: { 0: "host" },
+      seatNames: { 0: "Host" },
+      kickedTokens: [],
+      draftStarted: true,
+      draftCode: "draft-1",
+      draftSessionJson: saved.text,
+      poolInput: { type: "Set" as const, data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+    };
+    // The draft engine's recorded answer for this session, for this row alone.
+    mockCheckRestorableSession.mockResolvedValue(saved.verdict);
+    onTestFinished(() => {
+      mockCheckRestorableSession.mockReset();
+    });
+
+    await expect(adapter.initialize({
+      poolInput: session.poolInput,
+      kind: session.kind,
+      podSize: session.podSize,
+      hostDisplayName: session.hostDisplayName,
+      tournamentFormat: session.tournamentFormat,
+      podPolicy: session.podPolicy,
+      persistenceId: session.persistenceId,
+      recovery: { session, raw: session },
+    })).rejects.toMatchObject({ name: "Draft27IncompatibilityError" });
+
+    expect(hostRoom).not.toHaveBeenCalled();
+    expect(mockHostOnEvent).not.toHaveBeenCalled();
+    expect(mockHostInitialize).not.toHaveBeenCalled();
+  });
+
+  it("releases a superseded provisional recovery before peer allocation or publication", async () => {
+    const { hostRoom } = await import("../../network/connection");
+    const session: PersistedDraftHostSession = {
+      persistenceId: "draft-1",
+      roomCode: "ABCDE",
+      kind: "Premier",
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+      seatTokens: { 0: "host" },
+      seatNames: { 0: "Host" },
+      kickedTokens: [],
+      draftStarted: false,
+      draftCode: "",
+      draftSessionJson: null,
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+    };
+
+    await expect(adapter.initialize({
+      poolInput: session.poolInput,
+      kind: session.kind,
+      podSize: session.podSize,
+      hostDisplayName: session.hostDisplayName,
+      tournamentFormat: session.tournamentFormat,
+      podPolicy: session.podPolicy,
+      persistenceId: session.persistenceId,
+      recovery: { session, raw: session, isCurrent: () => false },
+    })).rejects.toThrow("initialization aborted");
+
+    expect(hostRoom).not.toHaveBeenCalled();
+    expect(mockHostOnEvent).not.toHaveBeenCalled();
+    expect(events).not.toContainEqual({ type: "roomCreated", roomCode: "ABCDE" });
+  });
+
+  describe("a started recovery the draft engine checks", () => {
+    const session: PersistedDraftHostSession = {
+      persistenceId: "draft-1",
+      roomCode: "ABCDE",
+      kind: "Premier",
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+      seatTokens: { 0: "host" },
+      seatNames: { 0: "Host" },
+      kickedTokens: [],
+      draftStarted: true,
+      draftCode: "draft-1",
+      draftSessionJson: JSON.stringify({ status: "Drafting", config: { rng_seed: 7 } }),
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+    };
+    const recovering = (signal?: AbortSignal): DraftPodHostConfig => ({
+      poolInput: session.poolInput,
+      kind: session.kind,
+      podSize: session.podSize,
+      hostDisplayName: session.hostDisplayName,
+      tournamentFormat: session.tournamentFormat,
+      podPolicy: session.podPolicy,
+      persistenceId: session.persistenceId,
+      recovery: { session, raw: session },
+      signal,
+    });
+
+    it("refuses a recovery the engine refuses before hostRoom or host allocation", async () => {
+      const { hostRoom } = await import("../../network/connection");
+      // Reach: the client's top-level check admits the saved session.
+      expect(admitDraft27HostValue(session).ok).toBe(true);
+      mockCheckRestorableSession.mockResolvedValueOnce({ type: "Incompatible" });
+
+      await expect(adapter.initialize(recovering())).rejects.toMatchObject({
+        name: "Draft27IncompatibilityError",
+        code: "engine_refusal",
+      });
+
+      expect(adapter.status).toBe("error");
+      expect(mockCheckRestorableSession).toHaveBeenCalledWith(session.draftSessionJson);
+      expect(hostRoom).not.toHaveBeenCalled();
+      expect(mockHostOnEvent).not.toHaveBeenCalled();
+    });
+
+    it("rejects with the check's own error before hostRoom when the engine cannot answer", async () => {
+      const { hostRoom } = await import("../../network/connection");
+      // Reach: the client's top-level check admits the saved session.
+      expect(admitDraft27HostValue(session).ok).toBe(true);
+      mockCheckRestorableSession.mockRejectedValueOnce(new Error("draft engine unavailable"));
+
+      await expect(adapter.initialize(recovering())).rejects.toThrow("draft engine unavailable");
+
+      expect(adapter.status).toBe("error");
+      expect(hostRoom).not.toHaveBeenCalled();
+      expect(mockHostOnEvent).not.toHaveBeenCalled();
+    });
+
+    it.each(["an abort", "a dispose"] as const)("does not call hostRoom when %s arrives while its engine check is pending", async (ending) => {
+      const { hostRoom } = await import("../../network/connection");
+      let answer: ((verdict: RestorableDraftSessionVerdict) => void) | undefined;
+      mockCheckRestorableSession.mockImplementationOnce(() => new Promise((resolve) => {
+        answer = resolve;
+      }));
+      const controller = new AbortController();
+      const initializing = adapter.initialize(recovering(controller.signal));
+      // Reach: initialization began.
+      expect(events).toContainEqual({ type: "statusChanged", status: "connecting" });
+
+      if (ending === "an abort") controller.abort();
+      else await adapter.dispose();
+      answer?.({ type: "Admitted" });
+
+      await expect(initializing).rejects.toThrow("initialization aborted");
+      expect(hostRoom).not.toHaveBeenCalled();
+      expect(mockHostOnEvent).not.toHaveBeenCalled();
+    });
   });
 
   it("transitions to lobby after initialization", async () => {
@@ -333,7 +526,7 @@ describe("DraftPodHostAdapter", () => {
   });
 
   it("restores MatchInProgress host sessions without falling back to drafting", async () => {
-    vi.mocked(loadDraftHostSession).mockResolvedValue({
+    vi.mocked(loadDraftHostSession).mockResolvedValue(admittedHostSession({
       persistenceId: "draft-1",
       roomCode: "ABCDE",
       kind: "Premier",
@@ -348,7 +541,7 @@ describe("DraftPodHostAdapter", () => {
       draftCode: "ABCDE",
       draftSessionJson: "{}",
       poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
-    });
+    }));
     const restoredView = mockView("MatchInProgress");
     mockHostRestoreFromPersisted.mockResolvedValue(restoredView);
     mockHostGetWorkspaceState.mockReturnValue(restoredWorkspace);
@@ -377,7 +570,7 @@ describe("DraftPodHostAdapter", () => {
     ["non-null", restoredWorkspace],
     ["null", null],
   ] as const)("emits %s restoration before view and host initialization resolves", async (_label, state) => {
-    vi.mocked(loadDraftHostSession).mockResolvedValue({
+    vi.mocked(loadDraftHostSession).mockResolvedValue(admittedHostSession({
       persistenceId: "draft-1",
       roomCode: "ABCDE",
       kind: "Premier",
@@ -393,7 +586,7 @@ describe("DraftPodHostAdapter", () => {
       draftSessionJson: "{}",
       poolInput: { type: "Set", data: { set_pool_json: "{}" } },
       perSeatWorkspaceSnapshots: {},
-    });
+    }));
     const restoredView = mockView("Drafting");
     mockHostRestoreFromPersisted.mockResolvedValue(restoredView);
     mockHostGetWorkspaceState.mockReturnValue(state);
@@ -402,10 +595,16 @@ describe("DraftPodHostAdapter", () => {
       resolveInitialize = resolve;
     }));
     const observed: string[] = [];
+    // The listener runs synchronously inside `initialize()`, so the rejection
+    // assertion is started there (attaching its handler immediately) and
+    // awaited in the test body once the restoration events have been seen.
+    const prematureUpdates: Promise<void>[] = [];
     adapter.onEvent((event) => {
       if (event.type === "workspaceRestored") {
         observed.push(`workspace:${event.workspaceState === null ? "null" : "state"}`);
-        void expect(adapter.updateWorkspace(restoredWorkspace)).rejects.toThrow("Host not initialized");
+        prematureUpdates.push(
+          expect(adapter.updateWorkspace(restoredWorkspace)).rejects.toThrow("Host not initialized"),
+        );
       }
       if (event.type === "viewUpdated") observed.push("view");
     });
@@ -423,6 +622,8 @@ describe("DraftPodHostAdapter", () => {
       `workspace:${state === null ? "null" : "state"}`,
       "view",
     ]));
+    expect(prematureUpdates).toHaveLength(1);
+    await Promise.all(prematureUpdates);
     expect(mockHostInitialize).toHaveBeenCalledOnce();
     expect(mockHostUpdateWorkspace).not.toHaveBeenCalled();
     resolveInitialize();
@@ -449,7 +650,7 @@ describe("DraftPodHostAdapter", () => {
     const { hostRoom } = await import("../../network/connection");
     const hostResult = mockHostResult();
     (hostRoom as ReturnType<typeof vi.fn>).mockResolvedValue(hostResult);
-    vi.mocked(loadDraftHostSession).mockResolvedValue({
+    vi.mocked(loadDraftHostSession).mockResolvedValue(admittedHostSession({
       persistenceId: "draft-1",
       roomCode: "ABCDE",
       kind: "Premier",
@@ -464,7 +665,7 @@ describe("DraftPodHostAdapter", () => {
       draftCode: "draft-1",
       draftSessionJson: "{}",
       poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
-    });
+    }));
     let resolveRestore!: (view: DraftPlayerView | null) => void;
     mockHostRestoreFromPersisted.mockImplementationOnce(() => new Promise((resolve) => {
       resolveRestore = resolve;
@@ -481,8 +682,7 @@ describe("DraftPodHostAdapter", () => {
       signal: controller.signal,
     });
 
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let turn = 0; turn < 50 && resolveRestore === undefined; turn++) await Promise.resolve();
     controller.abort();
     resolveRestore(mockView("Drafting"));
 
@@ -497,8 +697,8 @@ describe("DraftPodHostAdapter", () => {
     const { hostRoom } = await import("../../network/connection");
     const hostResult = mockHostResult();
     (hostRoom as ReturnType<typeof vi.fn>).mockResolvedValue(hostResult);
-    let resolveSession!: (session: null) => void;
-    vi.mocked(loadDraftHostSession).mockImplementationOnce(() => new Promise<null>((resolve) => {
+    let resolveSession!: (session: DraftHostSessionLoadResult) => void;
+    vi.mocked(loadDraftHostSession).mockImplementationOnce(() => new Promise<DraftHostSessionLoadResult>((resolve) => {
       resolveSession = resolve;
     }));
     const initializing = adapter.initialize({
@@ -514,7 +714,7 @@ describe("DraftPodHostAdapter", () => {
     await Promise.resolve();
     await Promise.resolve();
     const disposing = adapter.dispose({ preserveSession: true });
-    resolveSession(null);
+    resolveSession({ type: "absent" });
 
     await disposing;
     await expect(initializing).rejects.toThrow("initialization aborted");

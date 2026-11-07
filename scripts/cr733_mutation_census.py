@@ -477,13 +477,17 @@ def build_write_regexes(fields: list[str]) -> dict[str, re.Pattern]:
     """
     field_alt = "|".join(re.escape(f) for f in sorted(fields, key=len, reverse=True))
     return {
-        # `recv.field =` / `+=` / `-=`, including an indexed element
+        # `recv.field =` / compound assignment (`+=`, `-=`, `*=`, `/=`, `%=`,
+        # `&=`, `|=`, `^=`, `<<=`, `>>=`), including an indexed element
         # `recv.field[i] = ...` (and multi-index `[i][j]`). The `(?![=>])` rejects
         # both `==` (comparison) and `=>` (match-arm fat arrow); the op capture
-        # accepts only `=`, `+=`, `-=`, so `<=`, `>=`, `!=` never match (a `<`/`>`/`!`
-        # sits where the op alternation requires `=`/`+`/`-`).
+        # accepts the whole compound-assignment class, longest first so `<<=`/`>>=`
+        # are not shadowed by a shorter alternative, and contains no bare `<`/`>`/
+        # `!`, so `<=`, `>=`, `!=` never match (a `<`/`>`/`!` sits where the op
+        # alternation requires `=`/a compound operator).
         "assign": re.compile(
-            rf"\b(?P<recv>\w+)\.(?P<field>{field_alt})(?:\[[^\]]*\])*\s*(?P<op>\+=|-=|=)(?![=>])"
+            rf"\b(?P<recv>\w+)\.(?P<field>{field_alt})(?:\[[^\]]*\])*\s*"
+            rf"(?P<op><<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|=)(?![=>])"
         ),
         # `recv.field.<mut-method>(`.
         "mut_method": re.compile(

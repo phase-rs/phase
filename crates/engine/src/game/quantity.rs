@@ -1857,6 +1857,15 @@ fn quantity_expr_is_source_context_previewable(
         QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
         } => target_filter_is_source_context_free(filter),
+        // CR 119: the source's controller's current life total is bound by
+        // the source alone. Other players' totals need a recipient or an
+        // iteration the preview doesn't have.
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                },
+        } => true,
         QuantityExpr::Ref { .. } => false,
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
@@ -2414,6 +2423,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::SharedCardTypes { .. }
         | QuantityRef::DistinctSubtypes { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::BasicLandTypeCount { .. }
@@ -2433,6 +2443,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -2760,6 +2771,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::SelfManaValue
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::TrackedSetSize
@@ -2777,6 +2789,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -3054,6 +3067,11 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         // CR 400.7 + CR 613.1b: look-back attachment snapshot, optionally scoped
         // by a `ControllerRef` (payload rule 2).
         QuantityRef::AttachmentsOnLeavingObject { .. } => CharacteristicKinds::CONTROLLER,
+        // Turtle Team-Up (no CR section — casual product): the deployed-Boss census
+        // reads live card types (Boss membership) — a layer-4 change to a
+        // command-zone object perturbs the count.
+        QuantityRef::DeployedBossCount => CharacteristicKinds::CARD_TYPES,
+
 
         // ---- Reads no layer-writable characteristic. ----
         // Player-level totals, counters (CR 122.1 — counters are not
@@ -3100,6 +3118,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         // CR 701.16a: sacrifice-time characteristics.
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -3364,6 +3383,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::SelfManaValue
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::TrackedSetSize
@@ -3381,6 +3401,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -3569,7 +3590,7 @@ pub(crate) fn resolve_quantity_for_trigger_check(
         return resolve_quantity_with_ctx(state, expr, controller, ctx);
     }
     if let Some(event) = event {
-        if let Some(value) = resolve_event_scoped_ref(state, expr, event) {
+        if let Some(value) = resolve_event_scoped_ref(state, expr, event, source_context) {
             return value;
         }
         // CR 603.4: Make the triggering event visible to the resolver for
@@ -3842,6 +3863,7 @@ fn resolve_event_scoped_ref(
     state: &GameState,
     expr: &QuantityExpr,
     event: &crate::types::events::GameEvent,
+    source_context: Option<&TriggerSourceContext>,
 ) -> Option<i32> {
     match expr {
         QuantityExpr::Ref {
@@ -3852,13 +3874,18 @@ fn resolve_event_scoped_ref(
                 },
         } => {
             let id = crate::game::targeting::extract_source_from_event(event)?;
+            // CR 106.3 + CR 201.5: the payment record is the spell's, but a source
+            // filter is relative to the ability that reads it. "~" names the
+            // listener, never the spell.
+            let filter_source =
+                source_context.map_or(id, |source| source.identity.reference.object_id);
             // No latch routing: the read subject is the triggering SPELL from
             // the event, never the listener's own latched source.
             resolve_mana_spent_to_cast_metric(
                 state,
                 id,
                 metric,
-                &FilterContext::from_source(state, id),
+                &FilterContext::from_source(state, filter_source),
                 None,
             )
         }
@@ -5753,6 +5780,13 @@ fn resolve_ref(
         QuantityRef::CardsExiledBySource => {
             usize_to_i32_saturating(linked_exile_for_context(state, &ctx).len())
         }
+        // Turtle Team-Up (no CR section — casual product): the number of
+        // Bosses currently deployed. Delegates to the single authority so the
+        // count matches stage sizes, Krang's wave bonus, and Leatherhead's
+        // entry gain on every layer pass.
+        QuantityRef::DeployedBossCount => {
+            usize_to_i32_saturating(crate::game::boss::bosses_in_command_zone(state).len())
+        }
         // CR 607.2a: The power of a specific card exiled by the source, indexed by order.
         // Its only producer is The Mimeoplasm's entry replacement: the ordinal
         // "this way" reading over the per-turn ledger. "The exiled card" readers
@@ -6364,6 +6398,11 @@ fn resolve_ref(
         QuantityRef::CrimesCommittedThisTurn => {
             player.map_or(0, |p| u32_to_i32_saturating(p.crimes_committed_this_turn))
         }
+        // CR 107.14 + CR 122.1: Energy counters paid or lost this turn — uses
+        // the tracked counter on the player.
+        QuantityRef::EnergyPaidOrLostThisTurn => player.map_or(0, |p| {
+            u32_to_i32_saturating(p.energy_paid_or_lost_this_turn)
+        }),
         // CR 701.65b/701.66b/701.67c/702.189b: distinct bend types the controller
         // performed this turn — reads the tracked `HashSet<BendingType>` cardinality.
         QuantityRef::BendTypesThisTurn => player.map_or(0, |p| {
@@ -10964,6 +11003,68 @@ mod tests {
         };
 
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), spell), 2);
+    }
+
+    /// CR 106.3 + CR 201.5: the payment read is the triggering spell's, but `SelfRef`
+    /// in its source filter names the listening ability's source, never the spell.
+    #[test]
+    fn triggering_spell_source_filter_self_ref_binds_to_the_listener() {
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Savannah Lions".to_string(),
+            Zone::Stack,
+        );
+        let listener = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Barracks of the Thousand".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(0),
+            "Plains".to_string(),
+            Zone::Battlefield,
+        );
+        add_spent_mana_source_snapshot(&mut state, spell, listener);
+        add_spent_mana_source_snapshot(&mut state, spell, listener);
+        add_spent_mana_source_snapshot(&mut state, spell, other);
+
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::TriggeringSpell,
+                metric: CastManaSpentMetric::FromSource {
+                    source_filter: TargetFilter::SelfRef,
+                },
+            },
+        };
+        let event = crate::types::events::GameEvent::SpellCast {
+            card_id: CardId(100),
+            controller: PlayerId(0),
+            object_id: spell,
+            cast_mana_value: None,
+        };
+        let count_for = |source: ObjectId| {
+            let context = crate::game::triggers::trigger_source_context_for_latch(
+                &state,
+                &state.objects[&source],
+            );
+            resolve_quantity_for_trigger_check(
+                &state,
+                &qty,
+                PlayerId(0),
+                Some(&context),
+                Some(&event),
+            )
+        };
+
+        assert_eq!(count_for(listener), 2);
+        assert_eq!(count_for(other), 1);
     }
 
     #[test]
@@ -28244,8 +28345,13 @@ mod tests {
             source_id: spell,
             controller: root.controller,
             flipper: root.controller,
-            targets: Vec::new(),
-            win_effect: Some(Box::new(win_effect)),
+            win_effect: Some(Box::new(
+                crate::game::ability_utils::build_resolved_from_def(
+                    &win_effect,
+                    spell,
+                    root.controller,
+                ),
+            )),
             lose_effect: None,
             kind: crate::types::resolution::PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: root.context.chain_root_targets.clone(),
