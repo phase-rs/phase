@@ -5607,6 +5607,13 @@ mod r4b_staged_elimination_tests {
 
     fn member(state: &GameState, id: ObjectId, index: u32) -> StagedBatchMember {
         let object = &state.objects[&id];
+        let mut approved_event = ProposedEvent::zone_change(id, object.zone, Zone::Library, None);
+        if let ProposedEvent::ZoneChange {
+            library_placement, ..
+        } = &mut approved_event
+        {
+            *library_placement = Some(LibraryPosition::Bottom);
+        }
         StagedBatchMember {
             announcement_index: index,
             request: PendingBatchZoneMoveRequest {
@@ -5622,7 +5629,7 @@ mod r4b_staged_elimination_tests {
                 chain_referent: Default::default(),
                 attach_to: None,
                 performed_by: None,
-                library_placement: None,
+                library_placement: Some(LibraryPosition::Bottom),
                 exile_duration: None,
                 exile_controller: None,
                 exile_tracking: ZoneDeliveryExileTracking::None,
@@ -5632,12 +5639,7 @@ mod r4b_staged_elimination_tests {
             identity: ObjectIncarnationRef::from_object(object),
             owner: object.owner,
             state: StagedBatchMemberState::Approved,
-            approved_event: Some(ProposedEvent::zone_change(
-                id,
-                Zone::Library,
-                Zone::Library,
-                None,
-            )),
+            approved_event: Some(approved_event),
             pending_outcome: None,
             terminal: None,
             operation: StagedMemberOperation::ZoneMove,
@@ -5809,7 +5811,7 @@ mod r4b_staged_elimination_tests {
         }];
         let staged = StagedBatchDelivery {
             stage: BatchDeliveryStage::Arranging,
-            cursor: 2,
+            cursor: 0,
             members,
             arrangements,
             arrangement_cursor: 0,
@@ -5842,6 +5844,15 @@ mod r4b_staged_elimination_tests {
             None,
             group_id,
         );
+        state
+            .active_batch_delivery()
+            .unwrap()
+            .validate_staged()
+            .expect("the arranging fixture starts with completed consultations");
+        state
+            .resolution_stack
+            .validate_at_rest(&state.waiting_for)
+            .expect("the starting arrangement prompt is valid at rest");
 
         for id in [a, b] {
             let identity = ObjectIncarnationRef::from_object(&state.objects[&id]);
@@ -5944,7 +5955,7 @@ mod r4b_staged_elimination_tests {
             deferred_events: Vec::new(),
             staged: Some(StagedBatchDelivery {
                 stage: BatchDeliveryStage::Arranging,
-                cursor: 2,
+                cursor: 0,
                 members,
                 arrangements,
                 arrangement_cursor: 0,
@@ -5960,6 +5971,15 @@ mod r4b_staged_elimination_tests {
             None,
             group_id,
         );
+        state
+            .active_batch_delivery()
+            .unwrap()
+            .validate_staged()
+            .expect("the arranging fixture starts with completed consultations");
+        state
+            .resolution_stack
+            .validate_at_rest(&state.waiting_for)
+            .expect("the starting arrangement prompt is valid at rest");
 
         let mut events = Vec::new();
         eliminate_player(&mut state, PlayerId(1), &mut events);

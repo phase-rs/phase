@@ -625,6 +625,9 @@ fn gandalf_wandering_wizard_owner_shuffles_and_draws() {
         .collect();
     assert!(!shuffles.is_empty());
     assert!(shuffles.iter().all(|player| *player == P1), "{shuffles:?}");
+    assert_eq!(events.iter().filter(|event| matches!(event,
+        GameEvent::EffectResolved { kind: EffectKind::Shuffle, source_id, .. } if *source_id == gandalf
+    )).count(), 1);
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
@@ -918,6 +921,9 @@ fn alabaster_dragon_death_trigger_shuffles_owners_library() {
         .collect();
     assert!(!shuffles.is_empty());
     assert!(shuffles.iter().all(|player| *player == P1), "{shuffles:?}");
+    assert_eq!(events.iter().filter(|event| matches!(event,
+        GameEvent::EffectResolved { kind: EffectKind::Shuffle, source_id, .. } if *source_id == dragon
+    )).count(), 1);
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
@@ -1003,6 +1009,9 @@ fn watery_grasp_activation_shuffles_enchanted_creature_into_owners_library() {
         .collect();
     assert!(!shuffles.is_empty());
     assert!(shuffles.iter().all(|player| *player == P1), "{shuffles:?}");
+    assert_eq!(events.iter().filter(|event| matches!(event,
+        GameEvent::EffectResolved { kind: EffectKind::Shuffle, source_id, .. } if *source_id == aura
+    )).count(), 1);
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::Priority { .. }

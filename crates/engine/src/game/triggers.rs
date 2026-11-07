@@ -13708,7 +13708,9 @@ pub(crate) fn filter_consumed_trigger_events(
 ///    re-assembled it, so its ordinals use a re-ordered buffer. See the warning
 ///    on [`filter_consumed_trigger_events_from`]. Staged ChangeZone and Destroy
 ///    population completions claim ordinary collectors only; legacy drains and
-///    synchronous component batches claim all collectors.
+///    the shared synchronous arm of `move_arranged_batch_then` claim all
+///    collectors. Its callers are `move_owner_arranged_batch_then`,
+///    `move_objects_simultaneously_then`, and `move_component_batch_then`.
 /// 2. `state.deferred_triggers` — the `ZoneChanged` values carried by contexts
 ///    that [`complete_logical_zone_trigger_collection`] and
 ///    [`append_and_collect_logical_zone_trigger_segment`] already queued. This is

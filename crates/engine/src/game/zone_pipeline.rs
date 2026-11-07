@@ -13375,24 +13375,30 @@ mod staged_batch_tests {
         let source = effect_source(&mut state);
         let members = (1..=3)
             .map(|card| {
-                let id = graveyard_card(&mut state, card);
+                let id = create_object(
+                    &mut state,
+                    CardId(card),
+                    PlayerId(0),
+                    format!("Staged permanent {card}"),
+                    Zone::Battlefield,
+                );
                 let mut member = staged_member(
                     &state,
                     id,
                     Some(ProposedEvent::zone_change(
                         id,
+                        Zone::Battlefield,
                         Zone::Graveyard,
-                        Zone::Hand,
                         Some(source),
                     )),
                     StagedBatchMemberState::Approved,
-                    Zone::Hand,
+                    Zone::Graveyard,
                     None,
                 );
                 member.operation = StagedMemberOperation::Destroy(StagedDestroyOperation {
                     source,
                     cant_regenerate: false,
-                    outer: StagedDestroyOuterApproval::Unapproved,
+                    outer: StagedDestroyOuterApproval::Approved,
                 });
                 member
             })
@@ -13420,6 +13426,18 @@ mod staged_batch_tests {
         member.approved_event = None;
         member.pending_outcome = None;
         member.terminal = None;
+        if let StagedMemberOperation::Destroy(operation) = &mut member.operation {
+            operation.outer = match state {
+                StagedBatchMemberState::Unconsulted | StagedBatchMemberState::OuterConsulting => {
+                    StagedDestroyOuterApproval::Unapproved
+                }
+                StagedBatchMemberState::InnerConsulting
+                | StagedBatchMemberState::Approved
+                | StagedBatchMemberState::PreventedWithChild
+                | StagedBatchMemberState::Terminal
+                | StagedBatchMemberState::Abandoned => StagedDestroyOuterApproval::Approved,
+            };
+        }
         match state {
             StagedBatchMemberState::Unconsulted
             | StagedBatchMemberState::OuterConsulting
@@ -13428,8 +13446,8 @@ mod staged_batch_tests {
             StagedBatchMemberState::Approved => {
                 member.approved_event = Some(ProposedEvent::zone_change(
                     member.identity.object_id,
+                    Zone::Battlefield,
                     Zone::Graveyard,
-                    Zone::Hand,
                     None,
                 ));
             }
@@ -13542,37 +13560,57 @@ mod staged_batch_tests {
     }
 
     #[test]
-    fn staged_transport_accepts_every_consultation_state_at_approval_cursor() {
-        for current in [
-            StagedBatchMemberState::Unconsulted,
-            StagedBatchMemberState::OuterConsulting,
-            StagedBatchMemberState::InnerConsulting,
-            StagedBatchMemberState::Approved,
-            StagedBatchMemberState::PreventedWithChild,
-            StagedBatchMemberState::Terminal,
-            StagedBatchMemberState::Abandoned,
+    fn staged_transport_checks_every_state_at_approval_cursor() {
+        for (current, allowed) in [
+            (StagedBatchMemberState::Unconsulted, true),
+            (StagedBatchMemberState::OuterConsulting, true),
+            (StagedBatchMemberState::InnerConsulting, true),
+            (StagedBatchMemberState::Approved, false),
+            (StagedBatchMemberState::PreventedWithChild, true),
+            (StagedBatchMemberState::Terminal, false),
+            (StagedBatchMemberState::Abandoned, true),
         ] {
             let mut state = member_stage_fixture(BatchDeliveryStage::Approving);
+            let mut wire =
+                serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+                    .expect("valid baseline serializes");
             let owner = state.active_batch_delivery_mut().unwrap();
             set_fixture_member_state(&mut owner.staged.as_mut().unwrap().members[1], current);
             sync_staged_requests(owner);
-            owner
-                .validate_staged()
-                .expect("the approval cursor retains any coherent member state");
-            let wire = serde_json::to_value(&state).unwrap();
-            let restored: GameState =
-                serde_json::from_value(wire).expect("cursor consultation decodes");
-            assert_eq!(
-                restored
-                    .active_batch_delivery()
-                    .unwrap()
-                    .staged
-                    .as_ref()
-                    .unwrap()
-                    .members[1]
-                    .state,
-                current
-            );
+            let frames = wire["resolution_frames"]["frames"].as_array_mut().unwrap();
+            let batch = frames
+                .iter_mut()
+                .find(|frame| frame["type"] == "BatchDelivery")
+                .unwrap();
+            batch["data"] = serde_json::to_value(&*owner).unwrap();
+            let decoded = serde_json::from_value::<ResolutionStateWire>(wire);
+            if allowed {
+                owner
+                    .validate_staged()
+                    .expect("an unfinished consultation or abandonment is valid at the cursor");
+                let restored = decoded
+                    .expect("cursor consultation decodes")
+                    .into_game_state();
+                assert_eq!(
+                    restored
+                        .active_batch_delivery()
+                        .unwrap()
+                        .staged
+                        .as_ref()
+                        .unwrap()
+                        .members[1]
+                        .state,
+                    current
+                );
+            } else {
+                let expected = "a consulted staged member follows the approval cursor";
+                assert_eq!(owner.validate_staged().unwrap_err(), expected);
+                let error = match decoded {
+                    Ok(_) => panic!("approval cursor accepted {current:?}"),
+                    Err(error) => error.to_string(),
+                };
+                assert!(error.contains(expected), "{current:?}: {error}");
+            }
         }
     }
 
@@ -13584,7 +13622,7 @@ mod staged_batch_tests {
             (StagedBatchMemberState::InnerConsulting, false),
             (StagedBatchMemberState::Approved, false),
             (StagedBatchMemberState::PreventedWithChild, false),
-            (StagedBatchMemberState::Terminal, true),
+            (StagedBatchMemberState::Terminal, false),
             (StagedBatchMemberState::Abandoned, true),
         ] {
             let mut state = member_stage_fixture(BatchDeliveryStage::Approving);
@@ -13606,7 +13644,7 @@ mod staged_batch_tests {
             let decoded = serde_json::from_value::<ResolutionStateWire>(wire);
             if allowed {
                 let restored = decoded
-                    .expect("unconsulted, terminal or abandoned suffix decodes")
+                    .expect("unconsulted or abandoned suffix decodes")
                     .into_game_state();
                 assert_eq!(
                     restored
@@ -13628,6 +13666,57 @@ mod staged_batch_tests {
                     error.contains("a consulted staged member follows the approval cursor"),
                     "{state_after:?}: {error}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn staged_transport_requires_destroy_outer_approval_for_inner_consultation() {
+        for outer in [
+            StagedDestroyOuterApproval::Approved,
+            StagedDestroyOuterApproval::Unapproved,
+        ] {
+            let mut state = member_stage_fixture(BatchDeliveryStage::Approving);
+            let mut wire =
+                serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+                    .expect("valid baseline serializes");
+            let owner = state.active_batch_delivery_mut().unwrap();
+            let member = &mut owner.staged.as_mut().unwrap().members[1];
+            set_fixture_member_state(member, StagedBatchMemberState::InnerConsulting);
+            let StagedMemberOperation::Destroy(operation) = &mut member.operation else {
+                panic!("fixture member is a Destroy");
+            };
+            operation.outer = outer;
+            sync_staged_requests(owner);
+            let frames = wire["resolution_frames"]["frames"].as_array_mut().unwrap();
+            let batch = frames
+                .iter_mut()
+                .find(|frame| frame["type"] == "BatchDelivery")
+                .unwrap();
+            batch["data"] = serde_json::to_value(&*owner).unwrap();
+            let decoded = serde_json::from_value::<ResolutionStateWire>(wire);
+            match outer {
+                StagedDestroyOuterApproval::Approved => {
+                    owner
+                        .validate_staged()
+                        .expect("outer approval permits the inner consult");
+                    let restored = decoded
+                        .expect("approved inner consult decodes")
+                        .into_game_state();
+                    assert_eq!(
+                        restored.active_batch_delivery().unwrap().staged,
+                        owner.staged
+                    );
+                }
+                StagedDestroyOuterApproval::Unapproved => {
+                    let expected = "an inner-consulting destroy member has no outer approval";
+                    assert_eq!(owner.validate_staged().unwrap_err(), expected);
+                    let error = match decoded {
+                        Ok(_) => panic!("inner Destroy consult accepted an unapproved outer event"),
+                        Err(error) => error.to_string(),
+                    };
+                    assert!(error.contains(expected), "{error}");
+                }
             }
         }
     }
@@ -14223,7 +14312,13 @@ mod staged_batch_tests {
         let group_id = replacement_origin_group(&mut state, &[a], LibraryPosition::Top);
         let mut owner = take_owner(&mut state, group_id);
         begin_staged_arrangement(&state, &mut owner);
-        owner.staged.as_mut().unwrap().stage = BatchDeliveryStage::Approving;
+        let staged = owner.staged.as_mut().unwrap();
+        staged.stage = BatchDeliveryStage::Approving;
+        for member in &mut staged.members {
+            member.state = StagedBatchMemberState::Unconsulted;
+            member.approved_event = None;
+        }
+        sync_staged_requests(&mut owner);
         assert!(
             owner.validate_staged().is_err(),
             "approval cannot retain an unsubmitted arrangement"

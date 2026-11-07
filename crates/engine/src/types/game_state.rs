@@ -7171,10 +7171,19 @@ impl PendingBatchDeliveries {
                 }
             }
             StagedBatchMemberState::InnerConsulting => {
-                // F1: this keeps the accepted R4b meaning for BOTH operations —
-                // the single-consult state with no outcome while the choice is
-                // unresolved or a `ZoneChange` outcome. It must not require
-                // Destroy.
+                // CR 701.8a: a Destroy reaches its inner zone-change consult
+                // only after approval of the outer destruction event.
+                if matches!(
+                    member.operation,
+                    StagedMemberOperation::Destroy(StagedDestroyOperation {
+                        outer: StagedDestroyOuterApproval::Unapproved,
+                        ..
+                    })
+                ) {
+                    return Err(
+                        "an inner-consulting destroy member has no outer approval".to_string()
+                    );
+                }
                 if member.approved_event.is_some() || member.terminal.is_some() {
                     return Err(
                         "a consulting staged member already carries an approval or terminal"
@@ -7249,8 +7258,8 @@ impl PendingBatchDeliveries {
     /// | --- | --- | --- |
     /// | Unconsulted | no / yes / yes | no / no |
     /// | OuterConsulting, InnerConsulting, PreventedWithChild | no / yes / no | no / no |
-    /// | Approved | yes / yes / no | no / yes |
-    /// | Terminal, Abandoned | yes / yes / yes | yes / yes |
+    /// | Approved, Terminal | yes / no / no | Terminal only / yes |
+    /// | Abandoned | yes / yes / yes | yes / yes |
     ///
     /// Approval advances only after recording Approved or Terminal. A prevented
     /// member with a live child is unfinished: child settlement first changes
@@ -7271,12 +7280,15 @@ impl PendingBatchDeliveries {
                     staged.stage == BatchDeliveryStage::Approving && index == staged.cursor
                 }
                 StagedBatchMemberState::Approved => match staged.stage {
-                    BatchDeliveryStage::Approving => index <= staged.cursor,
+                    BatchDeliveryStage::Approving => index < staged.cursor,
                     BatchDeliveryStage::Arranging | BatchDeliveryStage::Delivering => {
                         index >= staged.cursor
                     }
                 },
-                StagedBatchMemberState::Terminal | StagedBatchMemberState::Abandoned => true,
+                StagedBatchMemberState::Terminal => {
+                    staged.stage != BatchDeliveryStage::Approving || index < staged.cursor
+                }
+                StagedBatchMemberState::Abandoned => true,
             };
             if !allowed {
                 let message = match staged.stage {
