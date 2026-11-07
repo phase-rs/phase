@@ -9958,20 +9958,23 @@ pub(crate) fn seed_batched_attack_parent_targets(
             .map(|id| TargetRef::Object(*id))
             .collect(),
     );
-    // CR 400.7: the attack event names the exact creatures that attacked; pin each at its
-    // declared incarnation so one that left (and maybe returned) before resolution is no longer
-    // "it" / "those creatures". Unstamped legacy records pin nothing.
-    let pins = attacker_ids
+    // CR 400.7 + CR 506.4: pin each attacker the declaration stamped at its declared
+    // incarnation, so one that left (and maybe returned) before resolution is no longer
+    // "it" / "those creatures". An attacker with no stamped record (a legacy save) stays
+    // unpinned and keeps its pre-pin reading; the keyed pin readers
+    // (`keyed_target_pin_is_current`) treat an absent pin as current. With no stamped
+    // record at all, nothing is written, exactly as before pins existed.
+    let pins: Vec<_> = attacker_ids
         .iter()
-        .map(|id| {
+        .filter_map(|id| {
             declaration_records
                 .iter()
                 .find(|record| record.object_id == *id)
                 .and_then(|record| record.incarnation)
                 .map(|incarnation| ObjectIncarnationRef::of(*id, incarnation))
         })
-        .collect::<Option<Vec<_>>>();
-    if let Some(pins) = pins {
+        .collect();
+    if !pins.is_empty() {
         ability.set_target_incarnations_recursive(pins);
     }
 }
@@ -24785,6 +24788,84 @@ pub mod tests {
         };
         super::seed_batched_attack_parent_targets(&mut ability, Some(&event));
         assert_eq!(ability.targets, vec![TargetRef::Object(attacker)]);
+    }
+
+    /// CR 400.7 + CR 506.4: attack-batch seeding pins every attacker its
+    /// declaration stamped, even when another record in the same event is
+    /// unstamped (a legacy record) or absent. The unstamped attacker stays
+    /// unpinned and keeps its pre-pin reading.
+    #[test]
+    fn seed_batched_attack_parent_targets_pins_stamped_attackers_beside_unstamped_ones() {
+        use crate::types::ability::ResolvedAbility;
+
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Record {
+            Stamped,
+            Unstamped,
+            Absent,
+        }
+
+        for b_record in [Record::Stamped, Record::Unstamped, Record::Absent] {
+            let mut state = setup();
+            let a = make_creature(&mut state, PlayerId(0), "Attacker A", 1, 1);
+            let b = make_creature(&mut state, PlayerId(0), "Attacker B", 1, 1);
+            let mut declaration_records =
+                vec![state.objects[&a].snapshot_for_attack_declaration(a)];
+            match b_record {
+                Record::Stamped => {
+                    declaration_records.push(state.objects[&b].snapshot_for_attack_declaration(b))
+                }
+                Record::Unstamped => {
+                    let mut record = state.objects[&b].snapshot_for_attack_declaration(b);
+                    record.incarnation = None;
+                    declaration_records.push(record);
+                }
+                Record::Absent => {}
+            }
+            let mut ability = ResolvedAbility::new(
+                Effect::Pump {
+                    power: PtValue::Quantity(QuantityExpr::Fixed { value: 4 }),
+                    toughness: PtValue::Quantity(QuantityExpr::Fixed { value: 4 }),
+                    target: TargetFilter::ParentTarget,
+                },
+                vec![],
+                ObjectId(99),
+                PlayerId(0),
+            );
+            let event = GameEvent::AttackersDeclared {
+                attacker_ids: vec![a, b],
+                defending_player: PlayerId(1),
+                attacks: vec![],
+                declaration_records,
+            };
+            super::seed_batched_attack_parent_targets(&mut ability, Some(&event));
+            assert_eq!(
+                ability.targets,
+                vec![TargetRef::Object(a), TargetRef::Object(b)],
+                "{b_record:?}: reach — both attackers are seeded"
+            );
+            let pin_a = ObjectIncarnationRef::of(a, state.objects[&a].incarnation);
+            let pin_b = ObjectIncarnationRef::of(b, state.objects[&b].incarnation);
+            let expected_pins = if b_record == Record::Stamped {
+                vec![pin_a, pin_b]
+            } else {
+                vec![pin_a]
+            };
+            assert_eq!(ability.target_incarnations, expected_pins, "{b_record:?}");
+
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(&mut state, a, Zone::Exile, &mut events);
+            crate::game::zones::move_to_zone(&mut state, a, Zone::Battlefield, &mut events);
+            assert_eq!(
+                ability.live_object_targets(&state),
+                vec![TargetRef::Object(b)],
+                "{b_record:?}: the blinked attacker is a new object (CR 400.7)"
+            );
+            assert!(
+                !ability.pinned_object_targets_all_stale(&state),
+                "{b_record:?}"
+            );
+        }
     }
 
     /// CR 508.4 + CR 608.2c + CR 113.6k: Senu, Keen-Eyed Protector — exile-zone

@@ -16653,8 +16653,8 @@ fn optional_pay_cost_affordability_is_decidable(cost: &AbilityCost) -> bool {
 /// whose only reachable outcome is a no-op must not be offered as a "you may"
 /// prompt at all. Each arm below proves infeasibility through its authoritative
 /// typed state: a missing chosen counter kind, no removable matching counter,
-/// an exact `ParentTarget` hand-off that records no produced object, a
-/// self-referent or event-referent move whose object can no longer move, an
+/// an exact `ParentTarget` hand-off (including a `ParentTarget` `Bounce`) that
+/// records no produced object, a self-referent or event-referent move whose object can no longer move, an
 /// untargeted "it" whose inferred referent is a source the ability can no
 /// longer find (CR 400.7), a reveal of a library top that would reveal no card, or an unbound
 /// linked-exile referent ("the exiled card") with no card in exile. Suppressing
@@ -16758,10 +16758,17 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         }
         // CR 608.2d + CR 400.7: "you may exile/return it" is impossible once the
         // source it names can no longer be found.
+        // CR 608.2d + CR 609.3: "you may return that card" is impossible when
+        // the parent hand-off records that no card was produced.
         Effect::Bounce {
             target: target @ (TargetFilter::ParentTarget | TargetFilter::None),
             ..
         } => {
+            if matches!(target, TargetFilter::ParentTarget)
+                && ability.parent_target_missing_reason.is_some()
+            {
+                return true;
+            }
             let effective = hydrate_event_context_targets(state, ability);
             crate::game::targeting::inferred_source_referent_is_unbound(
                 state,
@@ -23088,7 +23095,9 @@ fn resolve_chain_body(
     //
     // CR 118.12: `ChangeZone` covers every referent shape, so an impossible
     // self- or event-referent move declines and its "If you do" rider stays
-    // gated. `RevealTop` is deliberately absent (CR 608.2c): its resolver's
+    // gated. `Bounce` covers the same anaphor shapes ("you may return it/that
+    // card"), so an impossible return declines and its "If you do" rider stays
+    // gated (CR 608.2c + CR 608.2d). `RevealTop` is deliberately absent (CR 608.2c): its resolver's
     // empty-library no-op publishes the empty reveal and the `Dig` missing
     // reason that later "it"/revealed-card instructions read, which the decline
     // path would skip.
@@ -23096,6 +23105,7 @@ fn resolve_chain_body(
         &ability.effect,
         Effect::CastFromZone { .. }
             | Effect::ChangeZone { .. }
+            | Effect::Bounce { .. }
             | Effect::PutSticker { .. }
             | Effect::MoveCounters { .. }
             | Effect::Transform {
@@ -61191,6 +61201,164 @@ mod tests {
             optional_effect_is_infeasible(&state, &ability),
             "an ExileTop that exiled nothing leaves no card to put into hand"
         );
+    }
+
+    /// "You may return that card to its owner's hand. If you do, you gain 2
+    /// life. If you don't, you gain 1 life." Typed authority fixture: no
+    /// correctly parsed printed card reaches this optional shape (nearest:
+    /// Zurgo and Ojutai, whose Dig-bound parse is a known misparse).
+    fn optional_parent_target_bounce(
+        source: ObjectId,
+        missing: Option<ParentTargetMissingReason>,
+    ) -> ResolvedAbility {
+        let mut if_you_dont =
+            optional_gain_life(source, PlayerId(0), 1).condition(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed()),
+            });
+        if_you_dont.optional = false;
+        let mut if_you_do = optional_gain_life(source, PlayerId(0), 2)
+            .condition(AbilityCondition::effect_performed())
+            .sub_ability(if_you_dont);
+        if_you_do.optional = false;
+        let mut ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::ParentTarget,
+                destination: None,
+                selection: crate::types::ability::BounceSelection::Targeted,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(if_you_do);
+        ability.optional = true;
+        ability.parent_target_missing_reason = missing;
+        ability
+    }
+
+    /// CR 608.2d + CR 609.3: "you may return that card" is impossible when the
+    /// parent hand-off records that no card was produced, even while the
+    /// ability's own source is current (the unresolved `ParentTarget`
+    /// inference would otherwise name that source).
+    #[test]
+    fn optional_parent_target_bounce_is_infeasible_only_without_a_referent() {
+        let mut state = GameState::new_two_player(42);
+        let source = reflexive_test_creature(&mut state, PlayerId(0), "Bounce Source");
+
+        assert!(
+            optional_effect_is_infeasible(
+                &state,
+                &optional_parent_target_bounce(source, Some(ParentTargetMissingReason::Dig)),
+            ),
+            "a Dig that produced nothing leaves no card to return"
+        );
+        assert!(
+            !optional_effect_is_infeasible(&state, &optional_parent_target_bounce(source, None)),
+            "reach: with no missing reason the current source keeps the return offerable"
+        );
+
+        // The missing reason names the parent's result, not "~": a `Bounce`
+        // whose inferred referent is the source stays offerable.
+        let mut untargeted =
+            optional_parent_target_bounce(source, Some(ParentTargetMissingReason::Dig));
+        untargeted.effect = Effect::Bounce {
+            target: TargetFilter::None,
+            destination: None,
+            selection: crate::types::ability::BounceSelection::Targeted,
+        };
+        assert!(!optional_effect_is_infeasible(&state, &untargeted));
+
+        // CR 400.7: the existing unbound-source arm still holds — a triggered
+        // "return it" whose source left and came back names no object.
+        let mut departed = optional_parent_target_bounce(source, None);
+        departed.trigger_source = Some(crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        ));
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Exile, &mut events);
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Battlefield, &mut events);
+        assert!(optional_effect_is_infeasible(&state, &departed));
+    }
+
+    /// CR 608.2c + CR 609.3: a mandatory "return that card" whose parent
+    /// hand-off records that no card was produced does nothing. It must not
+    /// fall back to the ability's own source, which an untargeted "return it"
+    /// with no missing reason does name.
+    #[test]
+    fn mandatory_parent_target_bounce_without_a_referent_does_nothing() {
+        for missing in [Some(ParentTargetMissingReason::ChooseFromZone), None] {
+            let mut state = GameState::new_two_player(42);
+            let source = reflexive_test_creature(&mut state, PlayerId(0), "Bounce Source");
+            let mut ability = optional_parent_target_bounce(source, missing);
+            ability.optional = false;
+            ability.sub_ability = None;
+            let mut events = Vec::new();
+            resolve_effect(&mut state, &ability, &mut events).expect("the return resolves");
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::Bounce,
+                        ..
+                    }
+                )),
+                "{missing:?}: reach — the return resolved"
+            );
+            let expected = if missing.is_some() {
+                Zone::Battlefield
+            } else {
+                Zone::Hand
+            };
+            assert_eq!(state.objects[&source].zone, expected, "{missing:?}");
+        }
+    }
+
+    /// CR 608.2c + CR 608.2d: an impossible "you may return that card" is
+    /// declined through the decline authority, not offered and not resolved:
+    /// the source stays put, the "If you do" rider stays gated and the
+    /// "If you don't" branch runs.
+    #[test]
+    fn optional_parent_target_bounce_without_a_referent_declines() {
+        let mut state = GameState::new_two_player(42);
+        let source = reflexive_test_creature(&mut state, PlayerId(0), "Bounce Source");
+        let start_life = state.players[0].life;
+        let mut events = Vec::new();
+        resolve_ability_chain(
+            &mut state,
+            &optional_parent_target_bounce(source, Some(ParentTargetMissingReason::Dig)),
+            &mut events,
+            0,
+        )
+        .expect("an impossible optional return auto-declines");
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "an impossible return must not be offered"
+        );
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+        assert_eq!(
+            state.players[0].life,
+            start_life + 1,
+            "the \"If you do\" rider stays gated and the \"If you don't\" branch runs"
+        );
+
+        // Reach: with a referent the same chain stops at the "you may" prompt.
+        let mut state = GameState::new_two_player(42);
+        let source = reflexive_test_creature(&mut state, PlayerId(0), "Bounce Source");
+        let start_life = state.players[0].life;
+        resolve_ability_chain(
+            &mut state,
+            &optional_parent_target_bounce(source, None),
+            &mut events,
+            0,
+        )
+        .expect("a feasible optional return reaches its may gate");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+        assert_eq!(state.players[0].life, start_life);
     }
 
     /// CR 104.4b + CR 603.5: a stalled `UntilStopConditions` iteration whose

@@ -12,9 +12,10 @@ use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
-use engine::types::ability::Effect;
+use engine::types::ability::{Effect, EffectKind};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -33,6 +34,7 @@ const NACATL_WAR_PRIDE: &str = "This creature must be blocked by exactly one cre
 const ESOTERIC_DUPLICATOR: &str = "Whenever you sacrifice this artifact or another artifact, you may pay {2}. If you do, at the beginning of the next end step, create a token that's a copy of that artifact.\n{2}, Sacrifice this artifact: Draw a card.";
 const OBZEDAT: &str = "When Obzedat enters, target opponent loses 2 life and you gain 2 life.\nAt the beginning of your end step, you may exile Obzedat. If you do, return it to the battlefield under its owner's control at the beginning of your next upkeep. It gains haste.";
 const CHAMPIONS_FROM_BEYOND: &str = "When this enchantment enters, create X 1/1 colorless Hero creature tokens.\nLight Party — Whenever you attack with four or more creatures, scry 2, then draw a card.\nFull Party — Whenever you attack with eight or more creatures, those creatures get +4/+4 until end of turn.";
+const WAKE_TO_SLAUGHTER: &str = "Choose up to two target creature cards in your graveyard. An opponent chooses one of them. Return that card to your hand. Return the other to the battlefield under your control. It gains haste. Exile it at the beginning of the next end step.\nFlashback {4}{B}{R} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
 const MURDER: &str = "Destroy target creature.";
 const SHATTER: &str = "Destroy target artifact.";
 const CLOUDSHIFT: &str =
@@ -915,4 +917,99 @@ fn champions_full_party_skips_an_attacker_blinked_in_response() {
     for &attacker in &attackers[1..] {
         assert_eq!(power_toughness(&runner, attacker), (5, 5));
     }
+}
+
+// --- Wake to Slaughter: "return that card" after an empty choice (T1) ---
+
+/// Cast Wake to Slaughter from hand with no targets (CR 115.6 allows zero for
+/// "up to two") and resolve it. Returns the runner, the spell, a creature card
+/// left in P0's graveyard, every card set the opponent was offered to choose
+/// from, and the events emitted while resolving.
+fn wake_to_slaughter_with_no_targets() -> (
+    GameRunner,
+    ObjectId,
+    ObjectId,
+    Vec<Vec<ObjectId>>,
+    Vec<GameEvent>,
+) {
+    let mut scenario = scenario();
+    scenario.add_basic_land(P0, ManaColor::Black);
+    scenario.add_basic_land(P0, ManaColor::Red);
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Black);
+    }
+    let creature = scenario
+        .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .id();
+    let wake = add_spell(
+        &mut scenario,
+        "Wake to Slaughter",
+        WAKE_TO_SLAUGHTER,
+        vec![ManaCostShard::Black, ManaCostShard::Red],
+        3,
+    );
+    let mut runner = scenario.build();
+    // Reach: the opponent's choice has no earlier tracked set and no card in
+    // P0's exile to fall back on, so with no targets nothing can be chosen.
+    assert!(runner.state().exile.is_empty(), "reach: exile starts empty");
+    assert!(
+        runner.state().tracked_object_sets.is_empty(),
+        "reach: no earlier tracked set"
+    );
+
+    let _ = runner.cast(wake).commit();
+    assert_eq!(zone(&runner, wake), Zone::Stack, "reach: the spell is cast");
+    assert!(
+        runner.state().stack.iter().any(|entry| matches!(
+            &entry.kind,
+            StackEntryKind::Spell { ability: Some(ability), .. }
+                if entry.id == wake && ability.targets.is_empty()
+        )),
+        "reach: the spell is cast with no targets"
+    );
+
+    let mut offered = Vec::new();
+    let mut events = Vec::new();
+    for _ in 0..64 {
+        if settled(&runner) {
+            return (runner, wake, creature, offered, events);
+        }
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::ChooseFromZoneChoice {
+                player,
+                cards,
+                count,
+                ..
+            } => {
+                assert_eq!(player, P1, "an opponent chooses");
+                offered.push(cards.clone());
+                GameAction::SelectCards {
+                    cards: cards.into_iter().take(count).collect(),
+                }
+            }
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            other => panic!("unexpected prompt {other:?}"),
+        };
+        events.extend(runner.act(action).expect("the answer is legal").events);
+    }
+    panic!("Wake to Slaughter never finished resolving");
+}
+
+fn effect_resolved(events: &[GameEvent], kind: EffectKind) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event, GameEvent::EffectResolved { kind: k, .. } if *k == kind))
+}
+
+#[test]
+fn wake_to_slaughter_with_no_targets_returns_nothing_to_hand() {
+    let (runner, wake, creature, offered, events) = wake_to_slaughter_with_no_targets();
+    // Reach: no card was chosen, and "return that card" still resolved.
+    assert!(offered.is_empty(), "nothing to choose from: {offered:?}");
+    assert!(effect_resolved(&events, EffectKind::ChooseFromZone));
+    assert!(effect_resolved(&events, EffectKind::Bounce));
+    // CR 608.2c + CR 609.3: "that card" names no card, so the return does
+    // nothing; the spell goes to its owner's graveyard as it finishes resolving.
+    assert_eq!(zone(&runner, wake), Zone::Graveyard);
+    assert_eq!(zone(&runner, creature), Zone::Graveyard);
 }
