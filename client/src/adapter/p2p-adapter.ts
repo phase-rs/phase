@@ -4978,7 +4978,14 @@ export class P2PHostAdapter implements EngineAdapter {
     if (pid === null) return;
     const session = sourceSession;
     if (this.concedingSeats.has(pid) && (msg.type === "action" || msg.type === "interaction")) {
-      void this.send(sourceSession, { type: "action_failed", message: "Player departure is in progress" });
+      if (msg.type === "action") {
+        this.sendSayingFailure(sourceSession, msg.action, "Player departure is in progress");
+      } else {
+        void this.send(sourceSession, {
+          type: "action_failed",
+          message: "Player departure is in progress",
+        });
+      }
       return;
     }
     switch (msg.type) {

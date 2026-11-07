@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { P2PGuestAdapter } from "../p2p-adapter.ts";
+import { P2PGuestAdapter, P2PHostAdapter } from "../p2p-adapter.ts";
 import {
   AdapterErrorCode,
   type GameAction,
@@ -48,6 +48,45 @@ type GuestInternals = {
 
 const EMPTY: SubmitResult = { events: [], log_entries: [] };
 
+type HostInternals = {
+  disposed: boolean;
+  ownsAuthority: () => boolean;
+  nativeBridge: {
+    getState: () => Promise<{
+      say_payment: { id: number; deadline_ms: number };
+      waiting_for: { type: "UnlessPayment"; data: { player: number } };
+    }>;
+    submitAction: (action: SayingAction, player: number) => Promise<{ result: SubmitResult }>;
+  };
+  applyBrowserMutation: <T>(run: () => Promise<T>) => Promise<T>;
+  publishHostSnapshot: (result: SubmitResult) => Promise<boolean>;
+  broadcastStateUpdate: (transition: unknown) => Promise<void>;
+  runAiLoop: () => Promise<void>;
+  persistAuthoritativeState: () => void;
+  scheduleSayPhraseExpiry: () => void;
+  expireSayPhrase: (paymentId: number) => Promise<void>;
+};
+
+function makeHost(submitAction: HostInternals["nativeBridge"]["submitAction"]) {
+  const host = Object.create(P2PHostAdapter.prototype) as unknown as HostInternals;
+  host.disposed = false;
+  host.ownsAuthority = () => true;
+  host.nativeBridge = {
+    getState: async () => ({
+      say_payment: { id: 7, deadline_ms: Date.now() - 1 },
+      waiting_for: { type: "UnlessPayment", data: { player: 0 } },
+    }),
+    submitAction,
+  };
+  host.applyBrowserMutation = (run) => run();
+  host.publishHostSnapshot = vi.fn(async () => true);
+  host.broadcastStateUpdate = vi.fn(async () => {});
+  host.runAiLoop = vi.fn(async () => {});
+  host.persistAuthoritativeState = vi.fn();
+  host.scheduleSayPhraseExpiry = vi.fn();
+  return host;
+}
+
 function makeGuest(sendAccepted: boolean): GuestInternals {
   const adapter = Object.create(
     P2PGuestAdapter.prototype,
@@ -77,6 +116,28 @@ describe("P2P saying reply lane", () => {
       code: AdapterErrorCode.ACTION_NOT_SENT,
     });
     expect(guest.pendingSayings.size).toBe(0);
+  });
+
+  it("submits the host's own lapse report when the payment deadline passes", async () => {
+    const submitAction = vi.fn(async () => ({ result: EMPTY }));
+    const host = makeHost(submitAction);
+
+    await host.expireSayPhrase(7);
+
+    expect(submitAction).toHaveBeenCalledTimes(1);
+    expect(submitAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "SayPhrase",
+        data: expect.objectContaining({
+          payment: 7,
+          seq: 0,
+          report: "Expiry",
+        }),
+      }),
+      0,
+    );
+    expect(host.publishHostSnapshot).toHaveBeenCalledWith(EMPTY);
+    expect(host.runAiLoop).toHaveBeenCalledTimes(1);
   });
 
   it("settles a saying without consuming a parked ordinary command", async () => {
