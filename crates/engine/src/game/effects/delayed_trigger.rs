@@ -1092,23 +1092,28 @@ fn condition_uses_creation_time_provenance(condition: &DelayedTriggerCondition) 
 ///
 /// DO NOT hoist tier 5 into `parent_chain_referents`, and DO NOT unify this function with
 /// `effects::bind_detached_continuation_to_parent` — see that function's note.
+///
+/// CR 400.7 + CR 603.7e: the delayed ability's source is the creating ability's source, so an
+/// own-source referent the creating ability can no longer find is not snapshotted.
 fn parent_target_snapshot(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
-    crate::game::targeting::parent_chain_referents(state, ability).unwrap_or_else(|| {
-        crate::game::targeting::resolve_event_context_target(
-            state,
-            &TargetFilter::ParentTarget,
-            ability.source_id,
-        )
-        .or_else(|| {
+    let referents =
+        crate::game::targeting::parent_chain_referents(state, ability).unwrap_or_else(|| {
             crate::game::targeting::resolve_event_context_target(
                 state,
-                &TargetFilter::TriggeringSource,
+                &TargetFilter::ParentTarget,
                 ability.source_id,
             )
-        })
-        .map(|target| vec![target])
-        .unwrap_or_default()
-    })
+            .or_else(|| {
+                crate::game::targeting::resolve_event_context_target(
+                    state,
+                    &TargetFilter::TriggeringSource,
+                    ability.source_id,
+                )
+            })
+            .map(|target| vec![target])
+            .unwrap_or_default()
+        });
+    crate::game::targeting::admit_inferred_source_referents(state, ability, referents)
 }
 
 fn triggering_source_destination_zone(state: &GameState) -> Option<Zone> {

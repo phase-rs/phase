@@ -16654,8 +16654,9 @@ fn optional_pay_cost_affordability_is_decidable(cost: &AbilityCost) -> bool {
 /// prompt at all. Each arm below proves infeasibility through its authoritative
 /// typed state: a missing chosen counter kind, no removable matching counter,
 /// an exact `ParentTarget` hand-off that records no produced object, a
-/// self-referent or event-referent move whose object can no longer move, a
-/// reveal of a library top that would reveal no card, or an unbound
+/// self-referent or event-referent move whose object can no longer move, an
+/// untargeted "it" whose inferred referent is a source the ability can no
+/// longer find (CR 400.7), a reveal of a library top that would reveal no card, or an unbound
 /// linked-exile referent ("the exiled card") with no card in exile. Suppressing
 /// the prompt lets the effect resolve as its defined no-op instead.
 fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
@@ -16740,10 +16741,34 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         // produced (Tainted Pact's ExileTop on an empty library). Offering it
         // would let the player "choose" to move nothing, and accepting would
         // reach `change_zone::resolve`'s missing-referent no-op anyway.
+        // CR 608.2d + CR 400.7: "you may exile/return it" is impossible once the
+        // source it names can no longer be found. Hydrate event-context targets
+        // first, exactly as resolution does.
         Effect::ChangeZone {
             target: TargetFilter::ParentTarget,
             ..
-        } => ability.parent_target_missing_reason.is_some(),
+        } => {
+            let effective = hydrate_event_context_targets(state, ability);
+            ability.parent_target_missing_reason.is_some()
+                || crate::game::targeting::inferred_source_referent_is_unbound(
+                    state,
+                    effective.as_ref(),
+                    &TargetFilter::ParentTarget,
+                )
+        }
+        // CR 608.2d + CR 400.7: "you may exile/return it" is impossible once the
+        // source it names can no longer be found.
+        Effect::Bounce {
+            target: target @ (TargetFilter::ParentTarget | TargetFilter::None),
+            ..
+        } => {
+            let effective = hydrate_event_context_targets(state, ability);
+            crate::game::targeting::inferred_source_referent_is_unbound(
+                state,
+                effective.as_ref(),
+                target,
+            )
+        }
         // CR 608.2d + CR 400.7: "you may return this card from your graveyard to
         // the battlefield" is impossible once the source can no longer move.
         // Hydrate event-context targets first, exactly as resolution does.
@@ -18014,11 +18039,24 @@ fn hydrate_event_context_targets<'a>(
                 ) || !ability.has_authoritative_empty_binding()
             })
             .and_then(|filter| {
-                crate::game::targeting::resolve_event_context_target(
+                let target = crate::game::targeting::resolve_event_context_target(
                     state,
                     filter,
                     ability.source_id,
-                )
+                )?;
+                // CR 400.7: hydration is an inference seam too; it admits an
+                // own-source referent only through the self-reference authority.
+                if matches!(filter, TargetFilter::ParentTarget) {
+                    crate::game::targeting::admit_inferred_source_referents(
+                        state,
+                        ability,
+                        vec![target],
+                    )
+                    .into_iter()
+                    .next()
+                } else {
+                    Some(target)
+                }
             })
     } else {
         None

@@ -70,6 +70,7 @@ mod debug_move_to_zone_simulated_priority;
 mod deferred_card_type_reflexive_guard;
 mod delayed_event_subject_anaphor_snapshot;
 mod delayed_that_many_resolution_scope;
+mod departed_source_anaphor;
 mod derived_target_carriers;
 mod descendants_fury_sacrificed_referent_4795;
 mod do_this_only_once_each_turn;

@@ -9934,7 +9934,12 @@ pub(crate) fn seed_batched_attack_parent_targets(
     ability: &mut ResolvedAbility,
     trigger_event: Option<&GameEvent>,
 ) {
-    let Some(GameEvent::AttackersDeclared { attacker_ids, .. }) = trigger_event else {
+    let Some(GameEvent::AttackersDeclared {
+        attacker_ids,
+        declaration_records,
+        ..
+    }) = trigger_event
+    else {
         return;
     };
     if attacker_ids.is_empty() {
@@ -9953,6 +9958,22 @@ pub(crate) fn seed_batched_attack_parent_targets(
             .map(|id| TargetRef::Object(*id))
             .collect(),
     );
+    // CR 400.7: the attack event names the exact creatures that attacked; pin each at its
+    // declared incarnation so one that left (and maybe returned) before resolution is no longer
+    // "it" / "those creatures". Unstamped legacy records pin nothing.
+    let pins = attacker_ids
+        .iter()
+        .map(|id| {
+            declaration_records
+                .iter()
+                .find(|record| record.object_id == *id)
+                .and_then(|record| record.incarnation)
+                .map(|incarnation| ObjectIncarnationRef::of(*id, incarnation))
+        })
+        .collect::<Option<Vec<_>>>();
+    if let Some(pins) = pins {
+        ability.set_target_incarnations_recursive(pins);
+    }
 }
 
 /// CR 603.6 + CR 608.2c + CR 702.184a/702.122/702.171: Zone-change and

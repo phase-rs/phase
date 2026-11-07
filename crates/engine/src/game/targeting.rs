@@ -1264,10 +1264,14 @@ pub(crate) fn resolve_event_referent_permanents(
 ///    "Exile ~" was self-exiling whichever object the parent bounce had
 ///    targeted instead of the spell itself).
 /// 2. **None / ParentTarget fallback**: when these filters appear and
-///    `ability.targets` is empty, the subject is the source object (the
-///    "it" anaphor on top-level LTB triggers — Rancor, Spirit Loop). When
-///    `ability.targets` is non-empty, `ParentTarget` semantically inherits
-///    the parent's chosen targets, so fall through to tier 3.
+///    `ability.targets` is empty, the subject is inferred: the attack batch,
+///    the triggering spell's targets, or the event referent, else the source
+///    object (the "it" anaphor on top-level LTB triggers — Rancor, Spirit
+///    Loop). The source is named only through the self-reference authority
+///    (CR 400.7): one that has since changed zones is a new object and names
+///    nothing. When `ability.targets` is non-empty, `ParentTarget`
+///    semantically inherits the parent's chosen targets, so fall through to
+///    tier 3.
 /// 3. **Pre-selected targets that satisfy this filter**: the ability's chosen
 ///    targets from CR 601.2c casting / CR 603.3d trigger placement. Matching
 ///    chosen targets override event-context fallbacks so player-chosen stack
@@ -1438,26 +1442,11 @@ pub fn resolved_targets(
             .map(TargetRef::Object)
             .collect();
     }
-    if matches!(target_filter, TargetFilter::ParentTarget) && ability.targets.is_empty() {
-        if let Some(targets) = parent_target_refs_from_attack_trigger_context(state) {
-            return targets;
-        }
-        if let Some(targets) = parent_target_refs_from_spell_cast_event(state) {
-            return targets;
-        }
-        if let Some(target) = resolve_event_context_target(state, target_filter, ability.source_id)
-        {
-            return vec![target];
-        }
-    }
-    // CR 608.2c: `None` and unresolved `ParentTarget` (no event referent, no
-    // propagated targets) fall back to the source object.
-    let use_self = matches!(
-        target_filter,
-        TargetFilter::None | TargetFilter::ParentTarget
-    ) && ability.targets.is_empty();
-    if use_self {
-        return vec![TargetRef::Object(ability.source_id)];
+    // CR 400.7 + CR 608.2c: an untargeted `ParentTarget` / `None` with no
+    // propagated targets names the referent inferred below; the ability's own
+    // source is admitted only through the self-reference authority.
+    if let Some(refs) = inferred_anaphor_referents(state, ability, target_filter) {
+        return admit_inferred_source_referents(state, ability, refs);
     }
     // CR 603.7c: Pure event-context filters always resolve from the trigger
     // event / combat state, even when parent chain propagation populated
@@ -2872,6 +2861,77 @@ fn parent_target_refs_from_spell_cast_event(state: &GameState) -> Option<Vec<Tar
         .filter(|target| matches!(target, TargetRef::Object(_)))
         .collect();
     (!object_targets.is_empty()).then_some(object_targets)
+}
+
+/// CR 608.2c: the referents an untargeted `ParentTarget` / `None` anaphor with
+/// no propagated targets infers, before admission: for `ParentTarget` the
+/// attack batch, then the triggering spell's object targets, then the event
+/// referent; failing those (and always for `None`), the ability's own source.
+/// `None` when `filter` is not such an anaphor.
+fn inferred_anaphor_referents(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Option<Vec<TargetRef>> {
+    if !matches!(filter, TargetFilter::ParentTarget | TargetFilter::None)
+        || !ability.targets.is_empty()
+    {
+        return None;
+    }
+    if matches!(filter, TargetFilter::ParentTarget) {
+        if let Some(targets) = parent_target_refs_from_attack_trigger_context(state) {
+            return Some(targets);
+        }
+        if let Some(targets) = parent_target_refs_from_spell_cast_event(state) {
+            return Some(targets);
+        }
+        if let Some(target) = resolve_event_context_target(state, filter, ability.source_id) {
+            return Some(vec![target]);
+        }
+    }
+    Some(vec![TargetRef::Object(ability.source_id)])
+}
+
+/// CR 400.7 + CR 608.2c: an untargeted anaphor whose referent this resolver
+/// infers to be the ability's own source names it only while the ability can
+/// still find it (`ResolvedAbility::self_ref_binding`: the exact source, or a
+/// CR 400.7e/f/j successor). A source that has since changed zones is a new
+/// object, so the reference names nothing; other referents are unaffected.
+pub(crate) fn admit_inferred_source_referents(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    mut refs: Vec<TargetRef>,
+) -> Vec<TargetRef> {
+    if ability.self_ref_binding(state).is_none() {
+        let source = TargetRef::Object(ability.source_id);
+        refs.retain(|r| *r != source);
+    }
+    refs
+}
+
+/// CR 608.2h + CR 707.2: whether the untargeted anaphor `filter` infers exactly
+/// the ability's own source, so an information reader (a copy) can read the
+/// source's last known information instead of losing the referent.
+pub(crate) fn infers_own_source(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> bool {
+    inferred_anaphor_referents(state, ability, filter)
+        .is_some_and(|refs| refs == [TargetRef::Object(ability.source_id)])
+}
+
+/// CR 400.7: whether the untargeted anaphor `filter` infers the ability's own
+/// source and the ability can no longer find it, so the instruction has no
+/// such referent.
+pub(crate) fn inferred_source_referent_is_unbound(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> bool {
+    inferred_anaphor_referents(state, ability, filter)
+        .is_some_and(|refs| refs.contains(&TargetRef::Object(ability.source_id)))
+        && ability.self_ref_binding(state).is_none()
 }
 
 fn blocked_attacker_from_event(
@@ -9705,5 +9765,236 @@ mod parser_oracle_effect_tests {
         for id in [wrong, creature, battlefield] {
             assert!(!legal.contains(&TargetRef::Object(id)));
         }
+    }
+}
+
+/// CR 400.7 + CR 608.2c: an untargeted anaphor (`ParentTarget` / `None`) whose
+/// referent `resolved_targets` infers to be the ability's own source names it
+/// only while the ability can still find it.
+#[cfg(test)]
+mod inferred_source_anaphor_tests {
+    use super::*;
+    use crate::game::zones::{create_object, move_to_zone};
+    use crate::types::ability::{Effect, QuantityExpr};
+    use crate::types::card_type::CoreType;
+    use crate::types::game_state::{
+        CastingVariant, ResolutionSourceRelatch, StackEntry, StackEntryKind,
+    };
+    use crate::types::identifiers::CardId;
+
+    const INFERRED: [TargetFilter; 2] = [TargetFilter::ParentTarget, TargetFilter::None];
+
+    fn creature(state: &mut GameState, card: u64) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            PlayerId(0),
+            format!("Creature {card}"),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        id
+    }
+
+    fn untargeted(source: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+    }
+
+    /// A triggered ability whose source was latched where it is now.
+    fn triggered(state: &GameState, source: ObjectId) -> ResolvedAbility {
+        let mut ability = untargeted(source);
+        ability.trigger_source = Some(crate::game::triggers::trigger_source_context_for_latch(
+            state,
+            &state.objects[&source],
+        ));
+        ability
+    }
+
+    fn blink(state: &mut GameState, id: ObjectId) {
+        let mut events = Vec::new();
+        move_to_zone(state, id, Zone::Exile, &mut events);
+        move_to_zone(state, id, Zone::Battlefield, &mut events);
+    }
+
+    fn referents(
+        state: &GameState,
+        ability: &ResolvedAbility,
+        filter: &TargetFilter,
+    ) -> Vec<TargetRef> {
+        resolved_targets(ability, filter, state)
+    }
+
+    #[test]
+    fn a_current_source_is_the_inferred_referent() {
+        let mut state = GameState::new_two_player(7);
+        let source = creature(&mut state, 1);
+        let ability = triggered(&state, source);
+        for filter in &INFERRED {
+            assert_eq!(
+                referents(&state, &ability, filter),
+                vec![TargetRef::Object(source)],
+                "{filter:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_departed_source_is_no_referent() {
+        let mut state = GameState::new_two_player(7);
+        let source = creature(&mut state, 1);
+        let ability = triggered(&state, source);
+        let mut events = Vec::new();
+        move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+        for filter in &INFERRED {
+            assert_eq!(referents(&state, &ability, filter), vec![], "{filter:?}");
+        }
+    }
+
+    #[test]
+    fn a_same_id_return_is_no_referent() {
+        let mut state = GameState::new_two_player(7);
+        let source = creature(&mut state, 1);
+        let ability = triggered(&state, source);
+        blink(&mut state, source);
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield, "reach");
+        for filter in &INFERRED {
+            assert_eq!(referents(&state, &ability, filter), vec![], "{filter:?}");
+        }
+    }
+
+    /// CR 400.7j: the object this ability's own resolution moved the source to.
+    #[test]
+    fn the_resolution_relatch_keeps_the_source() {
+        let mut state = GameState::new_two_player(7);
+        let source = creature(&mut state, 1);
+        let ability = triggered(&state, source);
+        let captured = state.objects[&source].incarnation;
+        blink(&mut state, source);
+        state.resolution_source_relatch = Some(ResolutionSourceRelatch {
+            object_id: source,
+            original_stamp: captured,
+            current_incarnation: state.objects[&source].incarnation,
+        });
+        for filter in &INFERRED {
+            assert_eq!(
+                referents(&state, &ability, filter),
+                vec![TargetRef::Object(source)],
+                "{filter:?}"
+            );
+        }
+    }
+
+    /// CR 400.7: an activated ability captured its source incarnation at activation.
+    #[test]
+    fn an_activated_ability_reads_its_captured_incarnation() {
+        let mut state = GameState::new_two_player(7);
+        let source = creature(&mut state, 1);
+        let mut ability = untargeted(source);
+        ability.source_incarnation = Some(state.objects[&source].incarnation);
+        for filter in &INFERRED {
+            assert_eq!(
+                referents(&state, &ability, filter),
+                vec![TargetRef::Object(source)],
+                "current: {filter:?}"
+            );
+        }
+        blink(&mut state, source);
+        for filter in &INFERRED {
+            assert_eq!(referents(&state, &ability, filter), vec![], "{filter:?}");
+        }
+    }
+
+    /// CR 603.2c + CR 400.7: the attack tier names every declared attacker, but
+    /// the ability's own departed source is no longer one of them.
+    #[test]
+    fn the_attack_tier_drops_only_the_departed_source() {
+        let mut state = GameState::new_two_player(7);
+        let source = creature(&mut state, 1);
+        let other = creature(&mut state, 2);
+        let ability = triggered(&state, source);
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![source, other],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+            declaration_records: vec![],
+        });
+        assert_eq!(
+            referents(&state, &ability, &TargetFilter::ParentTarget),
+            vec![TargetRef::Object(source), TargetRef::Object(other)],
+            "reach: both attackers"
+        );
+        let mut events = Vec::new();
+        move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+        assert_eq!(
+            referents(&state, &ability, &TargetFilter::ParentTarget),
+            vec![TargetRef::Object(other)]
+        );
+    }
+
+    /// CR 603.2c + CR 400.7: Loki, God of Lies ("Whenever you cast a spell that
+    /// targets only a single creature, gain control of that creature until end
+    /// of turn. ..."): the spell-cast tier names the spell's target, but not
+    /// Loki itself once Loki left and returned.
+    #[test]
+    fn the_spell_cast_tier_drops_a_departed_source() {
+        let mut state = GameState::new_two_player(7);
+        let loki = creature(&mut state, 1);
+        let ability = triggered(&state, loki);
+        let spell = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Targeting Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(50),
+                ability: Some(Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    vec![TargetRef::Object(loki)],
+                    spell,
+                    PlayerId(0),
+                ))),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(50),
+            controller: PlayerId(0),
+            object_id: spell,
+            cast_mana_value: None,
+        });
+        assert_eq!(
+            referents(&state, &ability, &TargetFilter::ParentTarget),
+            vec![TargetRef::Object(loki)],
+            "reach: the spell's target"
+        );
+        blink(&mut state, loki);
+        assert_eq!(
+            referents(&state, &ability, &TargetFilter::ParentTarget),
+            vec![]
+        );
     }
 }
