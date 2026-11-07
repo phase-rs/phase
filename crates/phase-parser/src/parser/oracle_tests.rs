@@ -18580,18 +18580,6 @@ fn tree_has_say_phrase(def: &AbilityDefinition, phrase: &str) -> bool {
             .is_some_and(|alt| tree_has_say_phrase(alt, phrase))
 }
 
-fn tree_has_change_targets(def: &AbilityDefinition) -> bool {
-    matches!(def.effect.as_ref(), Effect::ChangeTargets { .. })
-        || def
-            .sub_ability
-            .as_deref()
-            .is_some_and(tree_has_change_targets)
-        || def
-            .else_ability
-            .as_deref()
-            .is_some_and(tree_has_change_targets)
-}
-
 /// The description of the first `Unimplemented` gap in the tree, if any.
 fn tree_unimplemented_description(def: &AbilityDefinition) -> Option<&str> {
     match def.effect.as_ref() {
@@ -18627,8 +18615,12 @@ fn tree_has_unimplemented(def: &AbilityDefinition) -> bool {
 /// a supported payoff. The quoted sentence is the cost of the saying
 /// ability, and the effect it introduces is the ordinary `ChangeTargets` that
 /// "Change the target ... that targets only you" already parses.
+/// CR 115.1 + CR 115.9c: I'm Rubber, You're Glue preserves its spoken cost while
+/// the restricted retarget activation ("Change the target of target spell or ability
+/// that targets only you") remains an honest Unsupported gap until stack-ability
+/// target restrictions are implemented in the engine.
 #[test]
-fn parse_say_phrase_scope_im_rubber_exposes_change_targets() {
+fn parse_say_phrase_scope_im_rubber_exposes_spoken_cost_and_defers_retarget() {
     let r = parse(
         "When you speak in non-rhyming sentences, sacrifice this enchantment.\nSay \"I'm rubber, you're glue. Everything bounces off me and sticks to you\": Change the target of target spell or ability that targets only you.",
         "I'm Rubber, You're Glue",
@@ -18645,8 +18637,11 @@ fn parse_say_phrase_scope_im_rubber_exposes_change_targets() {
         r.abilities
     );
     assert!(
-        r.abilities.iter().any(tree_has_change_targets),
-        "the saying introduces the exposed ChangeTargets effect: {:?}",
+        r.abilities.iter().any(|ability| matches!(
+            ability.effect.as_ref(),
+            Effect::Unimplemented { name, .. } if name == "ChangeTargets"
+        )),
+        "the restricted change-target activation remains an honest unsupported gap: {:?}",
         r.abilities
     );
 }
