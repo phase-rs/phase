@@ -299,6 +299,7 @@ mod mandatory_loop_draws;
 mod omnath_unspent_green_mana_2887;
 mod swords_target_legality_recheck;
 mod three_opponent_drain_shortcut;
+mod toy_boat_say_quickly;
 mod tromokratis;
 mod veteran_bodyguard_tap_redirect;
 mod yurlok_of_scorch_thrash;

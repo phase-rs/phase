@@ -19867,6 +19867,23 @@ mod game_submission_tests {
     use tokio_tungstenite::MaybeTlsStream;
     use tokio_tungstenite::WebSocketStream;
 
+    /// The receipt instant must survive the application queue. A handler that
+    /// finally runs after earlier publication, broadcast and AI work must not
+    /// stamp the observation with its own later clock, or two timely packets
+    /// can be judged late.
+    #[test]
+    fn ingress_instant_survives_a_delayed_handler() {
+        let received_at = std::time::Instant::now()
+            .checked_sub(Duration::from_secs(30))
+            .expect("the test clock supports a 30s interval");
+        let stamped = epoch_ms_at_ingress(received_at);
+        let handler_time = epoch_ms_at_ingress(std::time::Instant::now());
+        assert!(
+            handler_time.saturating_sub(stamped) >= 29_000,
+            "queued work kept the receipt instant: stamped={stamped}, handler={handler_time}"
+        );
+    }
+
     #[test]
     fn zero_count_debug_create_is_the_only_submission_no_op() {
         let create_card = |count| {
