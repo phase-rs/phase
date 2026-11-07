@@ -59,12 +59,12 @@ type HostInternals = {
   disposed: boolean;
   ownsAuthority: () => boolean;
   nativeBridge: {
-    getState: () => Promise<any>;
+    getState: () => Promise<unknown>;
     submitAction: (action: SayingAction, player: number) => Promise<{ result: SubmitResult }>;
   };
   applyBrowserMutation: <T>(run: () => Promise<T>) => Promise<T>;
   publishHostSnapshot: (result: SubmitResult) => Promise<boolean>;
-  broadcastStateUpdate: (transition: any, terminalReason?: string, saying?: boolean) => Promise<void>;
+  broadcastStateUpdate: (transition: unknown, terminalReason?: string, saying?: boolean) => Promise<void>;
   runAiLoop: () => Promise<void>;
   persistAuthoritativeState: () => void;
   scheduleSayPhraseExpiry: () => void;
@@ -573,7 +573,9 @@ describe("P2P saying reply lane", () => {
       events: [{ marker: "host-said" } as unknown as GameEvent],
       fresh: true,
     }));
-    host.broadcastStateUpdate = P2PHostAdapter.prototype["broadcastStateUpdate"] as any;
+    host.broadcastStateUpdate = P2PHostAdapter.prototype[
+      "broadcastStateUpdate"
+    ] as unknown as HostInternals["broadcastStateUpdate"];
     (host as unknown as { broadcastStateUpdateInner: unknown }).broadcastStateUpdateInner =
       P2PHostAdapter.prototype["broadcastStateUpdateInner"];
     (host as unknown as { enqueueDelivery: (fn: () => Promise<void>) => Promise<void> }).enqueueDelivery =
