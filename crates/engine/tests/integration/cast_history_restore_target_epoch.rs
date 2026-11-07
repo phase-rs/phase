@@ -25,14 +25,34 @@
 //!   CR 601.2c, legitimately has no facts and must still be admitted (the
 //!   over-rejection guard), and resuming it still records the announced target.
 //!
+//! A fourth pack covers the case that divides a latch from a live read. The
+//! **mid-payment characteristics change** pack is the same kind of cast parked
+//! later, after CR 601.2g mana payment changed the announced target's
+//! characteristics without moving it (CR 613.1 layers 4/6/7): Lightning Bolt
+//! announced against Heliod, Sun-Crowned at five devotion, then Savannah Lions
+//! sacrificed to Ashnod's Altar during the payment window, which drops devotion
+//! to four so Heliod's own static stops making it a creature. Its incarnation pin
+//! still matches — nothing changed zones — so identity alone cannot tell the
+//! announcement from the post-payment state, and the stripped shape is refused.
+//!
 //! The distinction between "not declared yet" and "declared, unlatched, and
-//! unrecoverable" is carried by the cast's own declared-target record and its
-//! announcement-time incarnation pin — the same authorities the latch captures
-//! from — not by a new flag: the refusal fires exactly when a declared object
-//! target's pin no longer names the live object (CR 400.7).
+//! unrecoverable" is carried by the cast's own declared-target record and the
+//! announcement latch, not by a new flag. An incarnation pin is NOT enough: the
+//! pin proves which OBJECT was announced (CR 400.7), while an object's
+//! characteristics are derived continuously from its printed values plus every
+//! applicable continuous effect (CR 613.1), so a live read at restore time can
+//! describe a different creature-shaped thing than the caster announced. The
+//! guard therefore refuses every declared-but-unlatched park rather than
+//! manufacturing facts from the board.
 
+use crate::support::shared_card_db;
+use engine::ai_support::legal_actions_full;
+use engine::game::devotion::count_devotion;
 use engine::game::game_object::ObjectIncarnationRefExt;
+use engine::game::mana_abilities::is_mana_ability;
+use engine::game::printed_cards::rehydrate_game_from_card_db;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -41,7 +61,7 @@ use engine::types::game_state::{
     SpellCastRecord, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -288,6 +308,16 @@ fn recorded_cast(state: &GameState, spell: ObjectId) -> &SpellCastRecord {
         .flat_map(|records| records.iter())
         .find(|record| record.spell_object_id == Some(spell))
         .expect("reach: the committed cast is recorded in the turn history")
+}
+
+/// CR 601.2i: has `spell` become cast yet? The spell is on the stack from
+/// CR 601.2a, so the stack entry cannot answer this — only the ledger can.
+fn has_cast_record(state: &GameState, spell: ObjectId) -> bool {
+    state
+        .spells_cast_this_turn_by_player
+        .values()
+        .flat_map(|records| records.iter())
+        .any(|record| record.spell_object_id == Some(spell))
 }
 
 /// The serialized pack a save of `state` produces.
@@ -547,23 +577,25 @@ fn a_pre_declaration_pack_is_admitted_and_still_records_its_target() {
     );
 }
 
-/// CR 601.2c + CR 115.1 + CR 400.7: the gap the narrowing above leaves open, and
-/// why admission RECOVERS instead of only refusing.
+/// CR 601.2c + CR 115.1 + CR 400.7: the pre-return positive retained by the
+/// narrowing. Same Devour in Flames fixture, parked one prompt earlier at the
+/// return-a-land `PayCost` prompt with the target declared and no cost paid yet.
 ///
-/// Same Devour in Flames fixture, one prompt earlier: parked at the
-/// return-a-land `PayCost` prompt, the target is declared and nothing has been
-/// paid, so the animated Factory is still on the battlefield and the cast's
-/// declaration pins still name it. A save written before the latch existed (every
-/// latch stripped) therefore still proves exactly what was announced, and the
-/// honest outcome is to recover it. Merely admitting the pack resumes into the
-/// raw-id fallback and records the printed **Land**; merely refusing it rejects a
-/// park the engine itself produces.
+/// Nothing is owed here beyond what the engine already wrote: the park carries
+/// the announced-target latch taken at the declaration boundary, so the save is
+/// admitted and the RESUMED SAVE writes the announced creature. That latch is the
+/// point — the animated Factory's incarnation pin is still current at this park
+/// too, yet a current pin is exactly what a post-payment park also has (see
+/// `a_mid_payment_characteristics_change_without_a_latch_is_refused`), so the pin
+/// proves identity and never characteristics. What makes this park recoverable is
+/// the latch, not the live board.
 #[test]
-fn a_return_cost_park_recovers_its_announced_target_and_records_the_creature() {
+fn a_return_cost_park_keeps_its_announced_target_through_resume() {
     let (runner, spell, land) = devour_parked_at_return_cost();
 
-    // Reach guard: the announced target's pin is CURRENT, so the announcement is
-    // readable from the save — this is the state the refusal-only rule let through.
+    // Reach guard: the announced target's incarnation pin is CURRENT at this park.
+    // It is recorded here because it is emphatically NOT the reason the park is
+    // admitted — the latch below is.
     let parked = runner
         .state()
         .pending_cast
@@ -579,55 +611,31 @@ fn a_return_cost_park_recovers_its_announced_target_and_records_the_creature() {
         .expect("reach guard: the announced target carries an incarnation pin");
     assert!(
         pin.is_current(runner.state()),
-        "reach guard: the announced target has not moved yet, so its facts are recoverable"
+        "reach guard: the announced target has not moved yet"
     );
 
-    let json = persisted_json(runner.state());
-    // Reach guard: the fixture really does carry the undo journal, which is why
-    // the strip below is scoped to the admission carriers rather than the whole
-    // document.
-    assert!(
-        serde_json::to_string(&json)
-            .expect("the pack serializes")
-            .contains("spell_cast_reversal"),
-        "reach guard: a parked cast carries its undo journal, which the strip must not touch"
-    );
-    let mut legacy = json.clone();
-    assert!(
-        strip_admission_latches(&mut legacy) > 0,
-        "reach: the fixture really carried a latch to strip"
-    );
-
-    let restored_state = admitted(legacy).map_err(|error| {
-        format!(
-            "a return-cost park that still proves its announcement is recovered, not refused: \
-             {error:?}"
-        )
-    });
-    let restored_state =
-        restored_state.expect("reach: the recoverable park is admitted with recovered facts");
-
-    // The recovered latch is on the admitted park itself, which is what the
-    // resumed continuation carries to the CR 601.2i write.
-    let recovered = restored_state
-        .pending_cast
-        .as_deref()
-        .or_else(|| restored_state.waiting_for.pending_cast_ref())
-        .expect("reach guard: the restored park still owns its cast")
+    // Reach guard: the park the engine writes carries the announcement latch, and
+    // it describes the animated creature.
+    let latched = parked
         .committed_target_facts
         .as_deref()
-        .expect("the admission recovered the announced-target latch");
-    let recovered_fact = recovered
+        .expect("reach guard: the pre-return park carries its announced-target latch");
+    let latched_fact = latched
         .iter()
         .find(|fact| matches!(fact, ActivationTargetFact::Object { id, .. } if *id == land))
         .unwrap_or_else(|| {
-            panic!("the recovered latch names the announced Factory; got {recovered:?}")
+            panic!("reach guard: the latch names the announced Factory; got {latched:?}")
         });
     assert!(
-        fact_core_types(recovered_fact).contains(&CoreType::Creature),
-        "the recovered latch describes the announcement-time creature: {:?}",
-        fact_core_types(recovered_fact)
+        fact_core_types(latched_fact).contains(&CoreType::Creature),
+        "reach guard: the latch recorded the animated creature: {:?}",
+        fact_core_types(latched_fact)
     );
+
+    let restored_state = admitted(persisted_json(runner.state())).map_err(|error| {
+        format!("a return-cost park carrying its announcement must be admitted: {error:?}")
+    });
+    let restored_state = restored_state.expect("reach: the latched park is admitted");
 
     let mut resumed = GameRunner::from_state(restored_state);
     let prompts = drive(&mut resumed, land, land, None);
@@ -657,6 +665,345 @@ fn a_return_cost_park_recovers_its_announced_target_and_records_the_creature() {
          returned card's printed type line: {:?}",
         fact_core_types(&fact)
     );
+}
+
+/// CR 601.2c + CR 115.1 + CR 400.7 + CR 613.1: the same pre-return park with the
+/// latch stripped — the shape a save written before the latch existed has.
+///
+/// It is refused, and the narrowing is deliberate. Before this guard was narrowed,
+/// a still-current incarnation pin was taken as proof and the live object was read
+/// on the theory that nothing had been paid yet. That inference is about engine
+/// flow, not about the save: a park this shape proves only that the target object
+/// still exists in the same incarnation, and an object's characteristics are
+/// recomputed continuously (CR 613.1). A declaration without its latch has no
+/// record of what CR 601.2c announced, so the honest outcome is refusal rather
+/// than a fabricated announcement.
+#[test]
+fn a_return_cost_park_without_the_latch_is_refused() {
+    let (runner, spell, _land) = devour_parked_at_return_cost();
+
+    let json = persisted_json(runner.state());
+    // Reach guard: the fixture really does carry the undo journal, which is why
+    // the strip below is scoped to the admission carriers rather than the whole
+    // document.
+    assert!(
+        serde_json::to_string(&json)
+            .expect("the pack serializes")
+            .contains("spell_cast_reversal"),
+        "reach guard: a parked cast carries its undo journal, which the strip must not touch"
+    );
+    let mut legacy = json.clone();
+    assert!(
+        strip_admission_latches(&mut legacy) > 0,
+        "reach: the fixture really carried a latch to strip"
+    );
+
+    let refused = admitted(legacy);
+    assert!(
+        matches!(
+            refused,
+            Err(PersistedRestoreError::UnknownPendingTargetFacts {
+                spell_object_id: Some(id),
+            }) if id == spell
+        ),
+        "a declared park without its announcement latch is refused, naming the spell: {:?}",
+        refused.err()
+    );
+}
+
+/// Oracle text for the mid-payment witness, read from the checked-in
+/// `tests/fixtures/integration_cards.json.gz` (a strict subset of the
+/// Scryfall/MTGJSON export the client ships):
+///
+/// * **Lightning Bolt** — `{R}`, Instant — "Lightning Bolt deals 3 damage to any
+///   target."
+/// * **Heliod, Sun-Crowned** — `{2}{W}`, Legendary Enchantment Creature — God,
+///   5/5, Indestructible — "As long as your devotion to white is less than five,
+///   Heliod isn't a creature. / Whenever you gain life, put a +1/+1 counter on
+///   target creature or enchantment you control. / {1}{W}: Another target creature
+///   gains lifelink until end of turn."
+/// * **Benalish Marshal** — `{W}{W}{W}`, 3/3 Human Knight — "Other creatures you
+///   control get +1/+1."
+/// * **Savannah Lions** — `{W}`, 2/1 Cat.
+/// * **Ashnod's Altar** — `{3}`, Artifact — "Sacrifice a creature: Add {C}{C}."
+struct MidPaymentBoard {
+    runner: GameRunner,
+    spell: ObjectId,
+    heliod: ObjectId,
+    mountain: ObjectId,
+}
+
+/// CR 700.5: does `object` have the creature card type right now?
+fn is_creature(state: &GameState, object: ObjectId) -> bool {
+    state.objects[&object]
+        .card_types
+        .core_types
+        .contains(&CoreType::Creature)
+}
+
+/// Tap `land` for mana through the action the manual payment window offers.
+fn tap_land_for_mana(runner: &mut GameRunner, land: ObjectId) {
+    let (_, _, grouped) = legal_actions_full(runner.state());
+    let selection = grouped
+        .get(&land)
+        .into_iter()
+        .flatten()
+        .find_map(|action| match action {
+            GameAction::TapLandForMana { selection } => Some(selection.clone()),
+            _ => None,
+        })
+        .expect("the payment window offers the land's mana ability");
+    runner
+        .act(GameAction::TapLandForMana { selection })
+        .expect("the land taps for its mana");
+}
+
+/// CR 601.2c + CR 613.1d + CR 400.7: cast Lightning Bolt targeting Heliod,
+/// Sun-Crowned as a creature at five devotion (Heliod + Benalish Marshal +
+/// Savannah Lions all with white pips in their mana costs), then pay CR 601.2g
+/// mana by sacrificing the Lions to Ashnod's Altar. Devotion drops to four, so
+/// Heliod's own static stops applying a creature type in layer 4 — the announced
+/// target keeps its storage id and its incarnation, and stops being the creature
+/// that was announced.
+///
+/// Only two colorless mana are produced, so `{R}` is still owed and the cast
+/// stays parked on the ordinary manual `ManaPayment` prompt: a save taken here is
+/// mid-payment, with a characteristics change already behind it and the payment
+/// boundary already crossed.
+fn bolt_announced_at_a_creature_heliod_mid_payment() -> MidPaymentBoard {
+    let db = shared_card_db().expect("the checked-in card fixture contains these cards");
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let spell = sc.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
+    let heliod = sc.add_real_card(P0, "Heliod, Sun-Crowned", Zone::Battlefield, db);
+    sc.add_real_card(P0, "Benalish Marshal", Zone::Battlefield, db);
+    let lion = sc.add_real_card(P0, "Savannah Lions", Zone::Battlefield, db);
+    let altar = sc.add_real_card(P0, "Ashnod's Altar", Zone::Battlefield, db);
+    let mountain = sc.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+    let mut runner = sc.build();
+    rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    // CR 700.5: three white permanents' mana symbols put devotion at exactly five,
+    // so Heliod is a creature — and a legal Bolt target — at announcement.
+    assert_eq!(
+        count_devotion(runner.state(), P0, &[ManaColor::White]),
+        5,
+        "reach guard: devotion to white is five at announcement"
+    );
+    assert!(
+        is_creature(runner.state(), heliod),
+        "reach guard: Heliod is a creature at announcement"
+    );
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the cast is announced");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "reach guard: the cast asks for its target, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(heliod)],
+        })
+        .expect("Heliod is a legal target for Lightning Bolt");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "reach guard: the cast parks on the manual mana payment, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // CR 601.2g: mana abilities are activated before costs are paid, and the
+    // Altar's own cost moves a white permanent off the battlefield.
+    let altar_index = runner.state().objects[&altar]
+        .abilities
+        .iter()
+        .position(is_mana_ability)
+        .expect("Ashnod's Altar has its mana ability");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: altar,
+            ability_index: altar_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the Altar's mana ability begins");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::PayCost { .. }),
+        "reach guard: the Altar asks for the creature it sacrifices, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards { cards: vec![lion] })
+        .expect("Savannah Lions pays the Altar's cost");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "reach guard: only {{C}}{{C}} were produced, so the red payment is still open and the \
+         cast is still parked on the payment window; got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        count_devotion(runner.state(), P0, &[ManaColor::White]),
+        4,
+        "reach guard: the sacrifice dropped devotion to four"
+    );
+    assert!(
+        !is_creature(runner.state(), heliod),
+        "anti-vacuity: Heliod's own static has removed its creature type, so a live read here \
+         describes an enchantment and not the announced creature"
+    );
+
+    // CR 400.7: nothing changed zones, so the announcement pin still matches and
+    // says nothing about the characteristics change above.
+    let parked = runner
+        .state()
+        .pending_cast
+        .as_deref()
+        .expect("reach guard: the ManaPayment prompt owns the cast");
+    let pin = parked
+        .ability
+        .target_pins
+        .first()
+        .copied()
+        .flatten()
+        .expect("reach guard: the announced target carries an incarnation pin");
+    assert!(
+        pin.is_current(runner.state()),
+        "reach guard: the announced target never changed zones, so its pin still matches"
+    );
+
+    MidPaymentBoard {
+        runner,
+        spell,
+        heliod,
+        mountain,
+    }
+}
+
+/// CR 601.2c + CR 115.1 + CR 601.2i: the mid-payment positive. The park the
+/// engine writes carries the announcement latch taken at the declaration
+/// boundary — before the Altar's sacrifice — so the save is admitted and the
+/// RESUMED SAVE records the creature the caster announced, even though the object
+/// is no longer a creature by the time the cast commits.
+#[test]
+fn a_mid_payment_characteristics_change_keeps_the_announcement_through_resume() {
+    let MidPaymentBoard {
+        runner,
+        spell,
+        heliod,
+        mountain,
+    } = bolt_announced_at_a_creature_heliod_mid_payment();
+
+    // Reach guard: the announcement latch was taken before the sacrifice and holds
+    // the creature Heliod was at CR 601.2c.
+    let parked = runner
+        .state()
+        .pending_cast
+        .as_deref()
+        .expect("reach guard: the ManaPayment prompt owns the cast");
+    let latched = parked
+        .committed_target_facts
+        .as_deref()
+        .expect("reach guard: the engine-written park carries its announced-target latch");
+    let latched_fact = latched
+        .iter()
+        .find(|fact| matches!(fact, ActivationTargetFact::Object { id, .. } if *id == heliod))
+        .unwrap_or_else(|| {
+            panic!("reach guard: the latch names Heliod as the announced target; got {latched:?}")
+        });
+    assert!(
+        fact_core_types(latched_fact).contains(&CoreType::Creature),
+        "reach guard: the latch holds the announcement-time creature: {:?}",
+        fact_core_types(latched_fact)
+    );
+
+    let restored_state = admitted(persisted_json(runner.state())).map_err(|error| {
+        format!("a mid-payment park carrying its announcement must be admitted: {error:?}")
+    });
+    let restored_state = restored_state.expect("reach: the latched park is admitted");
+
+    // The positive continuation resumes the RESTORED state and pays the red mana.
+    let mut resumed = GameRunner::from_state(restored_state);
+    assert!(
+        matches!(resumed.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "reach guard: the restored state still owes the mana payment, got {:?}",
+        resumed.state().waiting_for
+    );
+    tap_land_for_mana(&mut resumed, mountain);
+    for _ in 0..8 {
+        if has_cast_record(resumed.state(), spell) {
+            break;
+        }
+        resumed
+            .act(GameAction::PassPriority)
+            .expect("the restored save pays its total cost");
+    }
+    assert!(
+        has_cast_record(resumed.state(), spell),
+        "reach guard: the resumed save completed the cast, got {:?}",
+        resumed.state().waiting_for
+    );
+
+    let fact = declared_object_fact(resumed.state(), spell);
+    assert_eq!(
+        fact_object_id(&fact),
+        heliod,
+        "the resumed save's record names the announced target"
+    );
+    assert!(
+        fact_core_types(&fact).contains(&CoreType::Creature),
+        "the resumed save records the announcement-time creature the caster announced, not \
+         Heliod's post-sacrifice type line: {:?}",
+        fact_core_types(&fact)
+    );
+}
+
+/// CR 601.2c + CR 613.1 + CR 400.7: the same mid-payment pack with the latch
+/// stripped — the shape a save written before the latch existed has.
+///
+/// This is the case that pins the narrowing. The declared target's incarnation pin
+/// is still current, so the identity-only check admits the pack and reads the live
+/// object; but the live object is an enchantment at four devotion, so the recovered
+/// "announcement" would be post-payment characteristics wearing the announcement's
+/// name. The announcement is simply not in the save, so the save is refused.
+#[test]
+fn a_mid_payment_characteristics_change_without_a_latch_is_refused() {
+    let MidPaymentBoard { runner, spell, .. } = bolt_announced_at_a_creature_heliod_mid_payment();
+
+    let mut legacy = persisted_json(runner.state());
+    assert!(
+        strip_admission_latches(&mut legacy) > 0,
+        "reach: the fixture really carried a latch to strip"
+    );
+
+    let refused = admitted(legacy);
+    match refused {
+        Ok(admitted) => {
+            // A regression to a live read shows up here as an admission wearing the
+            // announcement's name, so name the fabricated facts in the failure.
+            let stamped = admitted
+                .pending_cast
+                .as_deref()
+                .and_then(|pending| pending.committed_target_facts.as_deref());
+            panic!(
+                "a mid-payment park that cannot prove its announcement must be refused; it was \
+                 admitted and stamped with {stamped:?}"
+            );
+        }
+        Err(PersistedRestoreError::UnknownPendingTargetFacts {
+            spell_object_id: Some(id),
+        }) if id == spell => {}
+        Err(other) => panic!("the mid-payment park was refused for the wrong reason: {other:?}"),
+    }
 }
 
 /// CR 601.2d: Printed **Violent Eruption** is "{1}{R}{R}{R} — Violent Eruption
@@ -798,28 +1145,24 @@ fn a_distribution_park_is_latched_and_records_its_announced_target() {
     );
 
     // (b) A pre-latch pack of the same park — every latch stripped, pins still
-    // current — is recovered at admission and records the same facts.
+    // current — cannot prove what CR 601.2c announced, so it is refused. A current
+    // pin is identity only (CR 400.7); characteristics come from printed values
+    // plus every continuous effect (CR 613.1), so a live read is not the
+    // announcement.
     let mut legacy = persisted_json(runner.state());
     assert!(
         strip_admission_latches(&mut legacy) > 0,
         "reach: the fixture really carried a latch to strip"
     );
-    let recovered_state = admitted(legacy).map_err(|error| {
-        format!("a division park that still proves its announcement is recovered: {error:?}")
-    });
-    let recovered_state =
-        recovered_state.expect("reach: the recoverable division park is admitted");
-    let mut resumed = GameRunner::from_state(recovered_state);
-    resumed
-        .act(GameAction::DistributeAmong {
-            distribution: vec![(TargetRef::Object(land), 4)],
-        })
-        .expect("the recovered save commits its division");
-    drive(&mut resumed, land, land, None);
-    let fact = declared_object_fact(resumed.state(), spell);
+    let refused = admitted(legacy);
     assert!(
-        fact_core_types(&fact).contains(&CoreType::Creature),
-        "the recovered division save keeps the announcement-time creature: {:?}",
-        fact_core_types(&fact)
+        matches!(
+            refused,
+            Err(PersistedRestoreError::UnknownPendingTargetFacts {
+                spell_object_id: Some(id),
+            }) if id == spell
+        ),
+        "a division park without its announcement is refused, naming the spell: {:?}",
+        refused.err()
     );
 }
