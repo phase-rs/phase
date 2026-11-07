@@ -12820,6 +12820,7 @@ fidelity = "Full"
 source_card_names = [
     "Bovine Intervention",
     "Bruse Tarl, Roving Rancher",
+    "Oko, Lord of the Fae",
 ]
 set_code = "OTJ"
 set_name = "Outlaws of Thunder Junction"
@@ -28930,6 +28931,7 @@ fidelity = "Full"
 source_card_names = [
     "Bovine Intervention",
     "Bruse Tarl, Roving Rancher",
+    "Oko, Lord of the Fae",
 ]
 set_code = "PLST"
 set_name = "The List"
@@ -58338,32 +58340,50 @@ category = "Creature"
 fidelity = "Full"
 source_card_names = [
     "Beast",
-    "Bestial Incursion",
-    "Garruk, Curse Breaker",
-    "Garruk, Veiled Butcher",
-    "Way of the Deathbringer",
-    "Way of the Wildspeaker",
+    "Beast Within",
+    "Bringer of the Green Dawn",
+    "Curious Herd",
+    "Druid of Horns",
+    "Elder Gargaroth",
+    "Feral Incarnation",
+    "Fresh Meat",
+    "Garruk Wildspeaker",
+    "Garruk, Primal Hunter",
+    "Garruk, Unleashed",
+    "Herd Migration",
+    "Midsummer Revel",
+    "Primeval Bounty",
+    "Pulse of the Tangle",
+    "Radagast, Wizard of Wilds",
+    "Savage Conception",
+    "Sawtusk Demolisher",
+    "Somberwald Beastmaster",
+    "Soul of Zendikar",
+    "The Huntsman's Redemption",
+    "Thragtusk",
+    "Trumpeting Gnarr",
+    "Vivien, Monsters' Advocate",
+    "Wild Endeavor",
 ]
 set_code = "TRC"
 set_name = "Star Trek Commander"
 collector_number = "4"
 released_at = "2026-11-13"
 type_line = "Token Creature — Beast"
-rules_text = "Trample"
 
 [token.body]
 display_name = "Beast"
-power = 4
-toughness = 4
+power = 3
+toughness = 3
 core_types = ["Creature"]
 subtypes = ["Beast"]
 supertypes = []
 colors = ["Green"]
-keywords = ["Trample"]
+keywords = []
 
 [token.token_image_ref]
 scryfall_id = "215c8aec-f26f-4777-aa90-252e537f5df9"
-scryfall_oracle_id = "7ed8a016-a259-4fda-aae5-02f8df94f2de"
+scryfall_oracle_id = "6bb61f34-5d57-4eaa-a02c-f5d08c1ee920"
 preset_id = "430fd6aa-cf47-596e-b11c-65179e9543ca"
 
 [[token]]
@@ -89192,32 +89212,55 @@ id = "6273f391-1a23-5c79-94b2-0789961a30f6"
 category = "Creature"
 fidelity = "Full"
 source_card_names = [
-    "Bestial Incursion",
-    "Garruk, Curse Breaker",
-    "Garruk, Veiled Butcher",
-    "Way of the Deathbringer",
-    "Way of the Wildspeaker",
+    "Beast Within",
+    "Bringer of the Green Dawn",
+    "Curious Herd",
+    "Druid of Horns",
+    "Elder Gargaroth",
+    "Feral Incarnation",
+    "Fresh Meat",
+    "Garruk Wildspeaker",
+    "Garruk, Primal Hunter",
+    "Garruk, Unleashed",
+    "Herd Migration",
+    "Midsummer Revel",
+    "Primeval Bounty",
+    "Pulse of the Tangle",
+    "Radagast, Wizard of Wilds",
+    "Savage Conception",
+    "Sawtusk Demolisher",
+    "Somberwald Beastmaster",
+    "Soul of Zendikar",
+    "The Huntsman's Redemption",
+    "Thragtusk",
+    "Trumpeting Gnarr",
+    "Vivien, Monsters' Advocate",
+    "Wild Endeavor",
 ]
 set_code = "TRC"
 set_name = "Star Trek Commander"
 collector_number = "11"
 released_at = "2026-11-13"
 type_line = "Token Creature — Beast"
-rules_text = "Trample"
 
 [token.body]
 display_name = "Beast"
-power = 4
-toughness = 4
+power = 3
+toughness = 3
 core_types = ["Creature"]
 subtypes = ["Beast"]
 supertypes = []
 colors = ["Green"]
-keywords = ["Trample"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Beast Within"
+scryfall_oracle_id = "7735eeba-693b-47e2-bd51-414379cf1016"
+scryfall_id = "1929cf4b-0d18-4f7d-a631-621a378ff015"
 
 [token.token_image_ref]
 scryfall_id = "ca8e8a9a-d673-4644-9eec-f4f549307d9b"
-scryfall_oracle_id = "7ed8a016-a259-4fda-aae5-02f8df94f2de"
+scryfall_oracle_id = "6bb61f34-5d57-4eaa-a02c-f5d08c1ee920"
 preset_id = "6273f391-1a23-5c79-94b2-0789961a30f6"
 
 [[token]]
@@ -89654,6 +89697,7 @@ source_card_names = [
     "Avatar of Burgeoning Echoes",
     "Campus Crier",
     "Countersculpt",
+    "Crux of the Theory",
     "Fatehold Charm",
     "Hexhaven Battalion",
     "Inspired Tethermage",
@@ -89665,6 +89709,7 @@ source_card_names = [
     "Overwrite the Multiverse",
     "Plan for All Outcomes",
     "Protege's Awakening",
+    "Remnants of Beleren",
     "Repurposed Enforcer",
     "Rewrite Regrets",
     "Sanctum Lurker",
@@ -166360,6 +166405,7 @@ fidelity = "Full"
 source_card_names = [
     "Bovine Intervention",
     "Bruse Tarl, Roving Rancher",
+    "Oko, Lord of the Fae",
     "Ox",
 ]
 set_code = "MSC"
@@ -219997,6 +220043,7 @@ fidelity = "Full"
 source_card_names = [
     "Bovine Intervention",
     "Bruse Tarl, Roving Rancher",
+    "Oko, Lord of the Fae",
 ]
 set_code = "MSC"
 set_name = "Marvel Super Heroes Commander"
@@ -226355,6 +226402,7 @@ source_card_names = [
     "Craftwork Crusher",
     "Fatehold Chronologist",
     "Fatehold Chronologist // Peer Review",
+    "Flourishing Forces",
     "Germinate Recruits",
     "Heartstring Puller",
     "Hexhaven Battalion",
@@ -226362,6 +226410,7 @@ source_card_names = [
     "Peer Review",
     "Prudent Fateseer",
     "Prudent Fateseer // Peer Review",
+    "Quintorius, Fate Splitter",
     "Recursive Recruitment",
     "Semester Foreseer",
     "Semester Foreseer // Peer Review",
@@ -232875,11 +232924,6 @@ subtypes = ["Beast"]
 supertypes = []
 colors = ["Green"]
 keywords = []
-
-[[token.source_card_refs]]
-card_name = "Beast Within"
-scryfall_oracle_id = "7735eeba-693b-47e2-bd51-414379cf1016"
-scryfall_id = "1929cf4b-0d18-4f7d-a631-621a378ff015"
 
 [[token.source_card_refs]]
 card_name = "Fresh Meat"
