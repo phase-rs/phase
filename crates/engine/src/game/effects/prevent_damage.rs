@@ -1,5 +1,5 @@
 use crate::game::effects::choose_damage_source;
-use crate::game::quantity::resolve_quantity;
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{prevention_shield_is_refused, ReplacementDurationExpiry};
 use crate::types::ability::{
     CombatDamageScope, DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectError,
@@ -417,11 +417,14 @@ pub fn resolve(
         )
     );
 
-    // CR 615.11: A dynamic prevention amount is resolved to a concrete depletion
-    // count at effect-resolution time; the Next(n) shield itself is always static.
+    // CR 615.7 + CR 107.3a + CR 602.2b + CR 107.3i: the shield size is the
+    // announced value of X, snapshotted at effect resolution. `chosen_x` is the
+    // object's single X channel (`ability_utils::publish_announced_x`);
+    // `resolve_quantity_with_targets` is the resolver that reads it — the bare
+    // `resolve_quantity` passes `chosen_x = None` and would resolve "X" to 0.
     let amount = match amount_dynamic {
         Some(expr) => {
-            let n = resolve_quantity(state, &expr, ability.controller, ability.source_id);
+            let n = resolve_quantity_with_targets(state, &expr, ability);
             PreventionAmount::Next(u32::try_from(n.max(0)).unwrap_or(0))
         }
         None => amount,
@@ -1049,6 +1052,64 @@ mod tests {
             state.pending_damage_replacements[0].source_object,
             Some(source)
         );
+    }
+
+    #[test]
+    fn dynamic_variable_x_amount_uses_announced_chosen_x() {
+        // CR 107.3a + CR 615.7: the announced X of a counted prevention clause
+        // must size the shield. `resolve_quantity_with_targets` reads the
+        // resolving ability's `chosen_x`; the bare `resolve_quantity` passed
+        // `chosen_x = None` and resolved "X" to 0.
+        for (chosen_x, expected) in [(3u32, 3u32), (0u32, 0u32)] {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Alabaster Potion".to_string(),
+                Zone::Battlefield,
+            );
+
+            let mut ability = ResolvedAbility::new(
+                Effect::PreventDamage {
+                    amount: PreventionAmount::Next(1),
+                    amount_dynamic: Some(QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    }),
+                    target: TargetFilter::Any,
+                    recipient_scope: EffectScope::All,
+                    scope: PreventionScope::AllDamage,
+                    damage_source_filter: None,
+                    prevention_duration: None,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            ability.chosen_x = Some(chosen_x);
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+
+            // Reach guard: the dynamic branch installed exactly one shield,
+            // anchored to the resolving source.
+            assert_eq!(state.pending_damage_replacements.len(), 1);
+            assert_eq!(
+                state.pending_damage_replacements[0].source_object,
+                Some(source)
+            );
+            assert!(
+                matches!(
+                    state.pending_damage_replacements[0].shield_kind,
+                    ShieldKind::Prevention {
+                        amount: PreventionAmount::Next(n)
+                    } if n == expected
+                ),
+                "chosen_x {chosen_x} should install a Next({expected}) shield, got {:?}",
+                state.pending_damage_replacements[0].shield_kind
+            );
+        }
     }
 
     #[test]

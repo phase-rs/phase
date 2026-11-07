@@ -8345,33 +8345,93 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
     }
 }
 
-/// CR 615.1a: decompose the prevention amount from the LOCAL parser stream
-/// (`rest`, positioned just past "prevent ") with nom combinators. "all but "
-/// must be tried before the bare "all " arm because it shares that prefix.
+/// CR 615.7: Strip the optional "the next "/"next " count quantifier and parse
+/// the counted shield quantity with the shared `parse_count_expr` grammar,
+/// returning the quantity and the remaining stream. Single authority for the
+/// quantifier axis shared by [`parse_prevention_amount`] and
+/// `lower::try_parse_prevent_distribute`; a determiner-less "prevent <qty>
+/// damage" is left untouched.
+///
+/// The two callers keep different static placeholders for a dynamic quantity —
+/// `Next(1)` here, `All` in the distribute path (whose shield is natively
+/// expressed as "all damage, split among the targets") — because
+/// `prevent_damage::resolve` never reads the placeholder once `amount_dynamic`
+/// is `Some` — it resolves the dynamic quantity and overwrites `amount` with it.
+/// (`apply_where_x_effect_expression` does read it at parse time: an `All`
+/// placeholder opts the distribute path out of a trailing where-X binder.)
+pub(super) fn parse_counted_prevention_quantity(rest: &str) -> Option<(QuantityExpr, &str)> {
+    let after_quantifier = opt(alt((
+        tag::<_, _, OracleError<'_>>("the next "),
+        tag("next "),
+    )))
+    .parse(rest)
+    .map_or(rest, |(after, _)| after);
+    parse_count_expr(after_quantifier)
+}
+
+/// CR 615.1a + CR 615.7 + CR 107.3a: decompose the prevention amount from the
+/// LOCAL parser stream (`rest`, positioned just past "prevent ") with nom
+/// combinators. Returns the static `amount` plus the dynamic quantity that
+/// overrides it at effect resolution (CR 615.7), so callers carry both into
+/// `Effect::PreventDamage` and never silently drop the counted form.
+///
+/// "all but " is tried before bare "all " (shared prefix). The counted forms
+/// ("prevent [the] next <qty> damage", "prevent <qty> damage") strip the
+/// optional quantifier and delegate to `parse_count_expr`, the shared
+/// effect-quantity grammar: a literal yields `Next(n)` (CR 615.7); the
+/// announced `X` (CR 107.3a) or any composed dynamic count is carried in the
+/// dynamic slot with `Next(1)` as the static placeholder.
+///
+/// `None` means the clause names a dynamic count the prevention grammar does
+/// not fully own: the shared count grammar left an operand unconsumed ("the
+/// next X plus X damage") or the quantity is followed by the out-of-model
+/// "noncombat damage". Callers report it as an explicit gap
+/// ([`PREVENT_UNCONSUMED_QUANTITY_GAP`]) instead of publishing a shield sized
+/// from a partial quantity. The boundary applies to the dynamic form only; the
+/// literal-count form keeps its established prefix acceptance.
+///
+/// `amount_dynamic` is later overwritten when the clause also prints a
+/// trailing "where X is <quantity>" binder (CR 107.3c), which DEFINES X.
+///
 /// Shared by `parse_prevent_effect` and `try_parse_bidirectional_prevent`
 /// (issue #1094) so amount detection lives in one authority.
-pub(super) fn parse_prevention_amount(rest: &str) -> PreventionAmount {
+pub(super) fn parse_prevention_amount(
+    rest: &str,
+) -> Option<(PreventionAmount, Option<QuantityExpr>)> {
     if let Ok((after_all_but, _)) = tag::<_, _, OracleError<'_>>("all but ").parse(rest) {
         let n = nom_primitives::parse_number
             .parse(after_all_but)
             .map(|(_, n)| n)
             .unwrap_or(1);
-        PreventionAmount::AllBut(n)
-    } else if tag::<_, _, OracleError<'_>>("all ").parse(rest).is_ok() {
-        PreventionAmount::All
-    } else if let Ok((after_next, _)) = tag::<_, _, OracleError<'_>>("the next ").parse(rest) {
-        let n = nom_primitives::parse_number
-            .parse(after_next)
-            .map(|(_, n)| n)
-            .unwrap_or(1);
-        PreventionAmount::Next(n)
-    } else {
-        // Fallback: try to extract a number.
-        let n = nom_primitives::parse_number
-            .parse(rest)
-            .map(|(_, n)| n)
-            .unwrap_or(1);
-        PreventionAmount::Next(n)
+        return Some((PreventionAmount::AllBut(n), None));
+    }
+    if tag::<_, _, OracleError<'_>>("all ").parse(rest).is_ok() {
+        return Some((PreventionAmount::All, None));
+    }
+    // CR 615.7: counted shield. One quantifier axis for "the next" and the
+    // determiner-less "next" (the form `try_parse_prevent_distribute` accepts);
+    // a bare "prevent <qty> damage" is left untouched.
+    match parse_counted_prevention_quantity(rest) {
+        Some((QuantityExpr::Fixed { value }, _)) => Some((
+            PreventionAmount::Next(u32::try_from(value).unwrap_or(0)),
+            None,
+        )),
+        // CR 615.7 + CR 107.3a + CR 120.2a: publish a dynamic shield only when the
+        // count grammar consumed the whole quantity, i.e. its remainder opens on the
+        // prevention damage noun ("[combat] damage", or the event-relative "of that
+        // damage" whose X a trailing where-X binder defines). An unconsumed
+        // connective ("X plus X damage") must not become a one-operand shield.
+        Some((quantity, remainder)) => peek(alt((
+            crate::parser::oracle_replacement::parse_prevention_damage_noun,
+            preceded(
+                tag("of that "),
+                crate::parser::oracle_replacement::parse_prevention_damage_noun,
+            ),
+        )))
+        .parse(remainder)
+        .ok()
+        .map(|_| (PreventionAmount::Next(1), Some(quantity))),
+        None => Some((PreventionAmount::Next(1), None)),
     }
 }
 
@@ -8564,7 +8624,11 @@ fn parse_prevent_effect_with_context(
             .map(|(_, d, _)| d);
 
     // Determine amount: "all damage" vs "all but N" vs "the next N damage".
-    let amount = parse_prevention_amount(rest);
+    // CR 615.7 + CR 107.3a: an unconsumed dynamic quantity is an explicit receipt,
+    // reported before any emitter below so no shield is published for it.
+    let Some((amount, amount_dynamic)) = parse_prevention_amount(rest) else {
+        return Effect::unimplemented(PREVENT_UNCONSUMED_QUANTITY_GAP, text);
+    };
 
     // CR 609.7 + CR 615.2: prevention scoped to a chosen source (a targeted
     // spell). "Prevent all damage target instant or sorcery spell would deal
@@ -8579,7 +8643,7 @@ fn parse_prevent_effect_with_context(
         // shield captures it via `ParentTargetSlot { index: 0 }`.
         return Effect::PreventDamage {
             amount,
-            amount_dynamic: None,
+            amount_dynamic: amount_dynamic.clone(),
             target: TargetFilter::Any,
             recipient_scope: EffectScope::Single,
             scope,
@@ -8599,7 +8663,7 @@ fn parse_prevent_effect_with_context(
         return match dealt_by {
             Ok(source_filter) => Effect::PreventDamage {
                 amount,
-                amount_dynamic: None,
+                amount_dynamic: amount_dynamic.clone(),
                 target: TargetFilter::Any,
                 recipient_scope: EffectScope::Single,
                 scope,
@@ -8719,15 +8783,15 @@ fn parse_prevent_effect_with_context(
         recipient_scope = EffectScope::All;
     }
 
-    // CR 615.11 + CR 107.3i: `amount_dynamic` (the "prevent X … where X is
-    // <quantity>" override) is populated at chunk level by
-    // `apply_where_x_effect_expression`, not here — the chunk machinery
-    // strips the trailing "where x is …" binding before this parser ever
-    // sees it. `amount` is the Next(1) fallback used when no dynamic clause
-    // is present (or when the binding fails to resolve to a known quantity).
+    // CR 615.7 + CR 107.3a + CR 107.3c: `amount_dynamic` is populated here from
+    // the announced `{X}` of a counted prevention clause (CR 107.3a), and is
+    // later overwritten at chunk level by `apply_where_x_effect_expression`
+    // when the clause also prints a trailing "where x is …" binder (CR 107.3c).
+    // `amount` is the Next(1) fallback used when no dynamic clause is present
+    // (or when the binding fails to resolve to a known quantity).
     Effect::PreventDamage {
         amount,
-        amount_dynamic: None,
+        amount_dynamic,
         target,
         recipient_scope,
         scope,
@@ -8743,6 +8807,10 @@ pub(crate) const PREVENT_DEALT_BY_TARGET_GAP: &str = "prevent_damage_dealt_by_ta
 /// Gap for prevention target roles this recipient route cannot bind. Preserve
 /// it on the spell route rather than retrying a weaker replacement reading.
 pub(crate) const PREVENT_RECIPIENT_TARGET_ROLE_GAP: &str = "prevent_damage_recipient_target_role";
+/// Gap for a counted prevention whose dynamic quantity does not reach the damage noun
+/// (the shared count grammar left an operand such as "plus X" unconsumed). Held on the
+/// spell route so a weaker priority cannot re-read the line with X as 0.
+pub(crate) const PREVENT_UNCONSUMED_QUANTITY_GAP: &str = "prevent_damage_unconsumed_quantity";
 
 /// Gap for a bidirectional prevent whose "to" half names a declared "target
 /// <X>" recipient; no representation scopes both halves to the one chosen
@@ -12521,7 +12589,11 @@ fn counter_unless_where_x_quantity(rest: &str) -> Option<&str> {
     Some(qty_text.trim_end_matches('.').trim())
 }
 
-pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
+pub(super) fn parse_counter_ast(
+    text: &str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ZoneCounterImperativeAst> {
     // CR 701.6 + CR 405.1: "Counter all/each [filter] spells/abilities"
     // mass-counter precheck. Mirrors the `parse_destroy_ast` precheck +
     // `BounceAll` precedent: consume the verb plus an optional `all`/`each`
@@ -12601,15 +12673,21 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
     // `oracle_effect::try_parse_put_zone_change_parts`).
     let (without_where_tp, where_x_expression) =
         super::strip_trailing_where_x(crate::parser::oracle_util::TextPair::new(rest_orig, rest));
+    // CR 608.2c: parse the stack-target phrase with the context-free entry (the
+    // same one this parser used before the anaphor fix, so diagnostics stay put),
+    // then refine a bare "that spell" for a non-trigger instruction to the spell's
+    // earlier announced target.
     let (target, _rem) = parse_target(without_where_tp.original);
+    let target = crate::parser::oracle_target::bind_spell_anaphor_to_context(ctx, target);
     #[cfg(debug_assertions)]
     assert_no_compound_remainder(_rem, text);
     // `parse_target("... spell with mana value X or less")` already scopes
     // the spell phrase to the stack through the shared target parser. Keep this
     // path on that building block and only apply the trailing X definition.
     // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
-    // `parse_counter_ast` takes no `ParseContext`, so there is no antecedent to
-    // supply here; the filter bound keeps the legacy seeds.
+    // `WhereXBinding::bare` binds the where-X count with no player antecedents:
+    // this path does not hand the parse context's antecedents to the count, so
+    // the filter bound keeps the legacy seeds.
     let target =
         super::apply_where_x_to_filter(target, WhereXBinding::bare(where_x_expression.as_deref()))?;
     // CR 118.12: Parse "unless its controller pays {X}" for conditional counters
@@ -18484,7 +18562,7 @@ pub(super) fn parse_zone_counter_ast<'a>(
     if let Some(ast) = parse_exile_ast(text, lower, ctx) {
         return Some(Ok(ast));
     }
-    if let Some(ast) = parse_counter_ast(text, lower) {
+    if let Some(ast) = parse_counter_ast(text, lower, ctx) {
         return Some(Ok(ast));
     }
     if tag::<_, _, OracleError<'_>>("put ").parse(lower).is_ok()
@@ -20542,7 +20620,7 @@ mod tests {
     #[test]
     fn parse_counter_louisoix_three_way_disjunction() {
         let text = "Counter target activated ability, triggered ability, or noncreature spell.";
-        let ast = parse_counter_ast(text, &text.to_lowercase())
+        let ast = parse_counter_ast(text, &text.to_lowercase(), &mut ParseContext::default())
             .expect("Louisoix's Sacrifice counter clause should parse");
         let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
             panic!("expected a Counter AST");
@@ -20583,7 +20661,7 @@ mod tests {
     #[test]
     fn parse_counter_spider_sense_spell_first_disjunction() {
         let text = "Counter target instant spell, sorcery spell, or triggered ability.";
-        let ast = parse_counter_ast(text, &text.to_lowercase())
+        let ast = parse_counter_ast(text, &text.to_lowercase(), &mut ParseContext::default())
             .expect("Spider-Sense counter clause should parse");
         let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
             panic!("expected a Counter AST");
@@ -20636,7 +20714,7 @@ mod tests {
     #[test]
     fn parse_counter_disallow_three_way_disjunction() {
         let text = "Counter target spell, activated ability, or triggered ability.";
-        let ast = parse_counter_ast(text, &text.to_lowercase())
+        let ast = parse_counter_ast(text, &text.to_lowercase(), &mut ParseContext::default())
             .expect("Disallow counter clause should parse");
         let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
             panic!("expected a Counter AST");
@@ -20691,7 +20769,7 @@ mod tests {
     #[test]
     fn parse_counter_target_spell_with_where_x_cmc_bound() {
         let text = "counter target spell with mana value X or less, where X is the number of Faeries you control.";
-        let ast = parse_counter_ast(text, &text.to_lowercase())
+        let ast = parse_counter_ast(text, &text.to_lowercase(), &mut ParseContext::default())
             .expect("Spellstutter Sprite counter clause should parse");
         let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
             panic!("expected a Counter AST");
@@ -20743,7 +20821,7 @@ mod tests {
     #[test]
     fn parse_counter_plain_spell_unchanged() {
         let text = "Counter target spell.";
-        let ast = parse_counter_ast(text, &text.to_lowercase())
+        let ast = parse_counter_ast(text, &text.to_lowercase(), &mut ParseContext::default())
             .expect("\"Counter target spell\" should parse");
         let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
             panic!("expected a Counter AST");
@@ -29281,6 +29359,7 @@ mod tests {
         );
         let Effect::PreventDamage {
             amount,
+            amount_dynamic,
             target,
             damage_source_filter,
             ..
@@ -29289,6 +29368,10 @@ mod tests {
             panic!("expected PreventDamage, got {effect:?}");
         };
         assert_eq!(amount, PreventionAmount::Next(3));
+        assert_eq!(
+            amount_dynamic, None,
+            "the fixed counted form carries no dynamic amount"
+        );
         assert!(
             typed_leg(&target).is_some_and(|tf| has_type(tf, TypeFilter::Creature)),
             "recipient target must stay Typed(creature), got {target:?}"
@@ -29297,6 +29380,196 @@ mod tests {
             damage_source_filter, None,
             "recipient prevent must not carry a source filter"
         );
+    }
+
+    /// CR 615.7 + CR 107.3a: the shared prevention-amount authority
+    /// decomposes every form of the amount axis from the stream just past
+    /// "prevent ". The blanket forms carry no dynamic quantity; a literal counted
+    /// form yields `Next(n)` (the `2` row proves the literal path still fires);
+    /// the announced `X` is carried in the dynamic slot with `Next(1)` as the
+    /// static placeholder instead of being silently dropped. A dynamic quantity
+    /// whose remainder does not open on the prevention damage noun (an
+    /// unconsumed "plus X" / "minus X" connective, or the out-of-model
+    /// "noncombat damage") is `None`: it never becomes the fallback `Next(1)`.
+    ///
+    /// No printed card prints a counted dynamic prevention other than "the next
+    /// X damage" (Festival of the Guildpact: "Prevent the next X damage that
+    /// would be dealt to you this turn.") or "X of that damage" (Errant Minion /
+    /// Power Leak: "Prevent X of that damage, where X is the amount of mana that
+    /// player paid this way."). The determiner-less "next" rows, the combat-noun,
+    /// offset, connective and noncombat rows are synthetic boundary probes (no
+    /// printed card prints "prevent next …"); the nearest printed combat
+    /// form is Decorated Griffin ("{1}{W}: Prevent the next 1 combat damage that
+    /// would be dealt to you this turn.").
+    #[test]
+    fn prevention_amount_covers_counted_and_blanket_forms() {
+        let variable_x = Some(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        });
+        type Decomposition = Option<(PreventionAmount, Option<QuantityExpr>)>;
+        let cases: &[(&str, Decomposition)] = &[
+            (
+                "all damage that would be dealt this turn",
+                Some((PreventionAmount::All, None)),
+            ),
+            (
+                "all but 2 damage that would be dealt this turn",
+                Some((PreventionAmount::AllBut(2), None)),
+            ),
+            (
+                "the next 3 damage that would be dealt this turn",
+                Some((PreventionAmount::Next(3), None)),
+            ),
+            (
+                "next 3 damage that would be dealt this turn",
+                Some((PreventionAmount::Next(3), None)),
+            ),
+            (
+                "the next x damage that would be dealt this turn",
+                Some((PreventionAmount::Next(1), variable_x.clone())),
+            ),
+            (
+                "next x damage that would be dealt this turn",
+                Some((PreventionAmount::Next(1), variable_x.clone())),
+            ),
+            (
+                "x damage that would be dealt this turn",
+                Some((PreventionAmount::Next(1), variable_x.clone())),
+            ),
+            (
+                "2 damage that would be dealt this turn",
+                Some((PreventionAmount::Next(2), None)),
+            ),
+            (
+                "damage that would be dealt this turn",
+                Some((PreventionAmount::Next(1), None)),
+            ),
+            // Reach guards for the dynamic boundary: every accepted continuation
+            // of a dynamic quantity (bare / combat damage noun, the event-relative
+            // "of that damage", a fully consumed composed count) still publishes.
+            (
+                "the next x combat damage that would be dealt this turn",
+                Some((PreventionAmount::Next(1), variable_x.clone())),
+            ),
+            (
+                "x of that damage, where x is the amount of mana that player paid this way",
+                Some((PreventionAmount::Next(1), variable_x.clone())),
+            ),
+            (
+                "the next x plus 1 damage that would be dealt this turn",
+                Some((
+                    PreventionAmount::Next(1),
+                    Some(QuantityExpr::Offset {
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::Variable {
+                                name: "X".to_string(),
+                            },
+                        }),
+                        offset: 1,
+                    }),
+                )),
+            ),
+            // The Fixed arm is untouched: Save Life's "2\u{bd} damage" keeps the
+            // integer prefix and the unconsumed remainder, exactly as before.
+            (
+                "the next 2\u{bd} damage that would be dealt to target creature this turn",
+                Some((PreventionAmount::Next(2), None)),
+            ),
+            // The dynamic boundary: a quantity that does not reach the damage noun
+            // is not a shield.
+            ("the next x plus x damage that would be dealt this turn", None),
+            ("x minus x damage that would be dealt this turn", None),
+            (
+                "the next x plus the number of creatures you control damage that would be dealt this turn",
+                None,
+            ),
+            (
+                "the next x noncombat damage that would be dealt this turn",
+                None,
+            ),
+        ];
+        for (rest, expected) in cases {
+            assert_eq!(
+                parse_prevention_amount(rest),
+                *expected,
+                "amount decomposition for {rest:?}"
+            );
+        }
+    }
+
+    /// CR 615.7 + CR 107.3a: an unconsumed dynamic quantity is an explicit receipt
+    /// from the imperative parser, ahead of every `PreventDamage` emitter and ahead
+    /// of the dealt-by gap. A clause that also fails another authority ("dealt by
+    /// target creature" is the dealt-by gap) is reported for its quantity first.
+    ///
+    /// The "the next X damage" forms are the reach guards: the clause got past the
+    /// quantity gate and reached the dealt-by emitter, which publishes the
+    /// source-scoped announced-X shield for "target blocked creature" and the
+    /// dealt-by gap for "target creature". The bidirectional gate-off reach guard
+    /// (`parent_target_available == false`) lives here too, because
+    /// `parse_prevent_effect` is a private test-only function.
+    ///
+    /// No printed card prints a counted (X) prevention dealt by a target source;
+    /// the nearest is Benalish Missionary ("{1}{W}, {T}: Prevent all combat
+    /// damage that would be dealt by target blocked creature this turn."). No
+    /// printed card has the "X plus X" connective either (the corpus has no
+    /// "prevent the next X plus …" head); the nearest printed cards are Festival
+    /// of the Guildpact ("Prevent the next X damage that would be dealt to you
+    /// this turn.") for the "to you" row and Maze of Ith ("Prevent all combat
+    /// damage that would be dealt to and dealt by that creature this turn.") for
+    /// the bidirectional row.
+    #[test]
+    fn unconsumed_prevention_quantity_is_a_receipt_ahead_of_every_emitter() {
+        let announced_x = Some(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        });
+        let assert_gap = |text: &str, gap: &str| {
+            let effect = parse_prevent_effect(text, false);
+            assert!(
+                matches!(&effect, Effect::Unimplemented { name, .. } if name == gap),
+                "{text:?} must be the {gap:?} gap, got {effect:?}"
+            );
+        };
+
+        // Reach guards: with the quantity consumed, each clause is judged by its own
+        // dealt-by / recipient authority.
+        let effect = parse_prevent_effect(
+            "Prevent the next X damage that would be dealt by target blocked creature this turn.",
+            false,
+        );
+        let Effect::PreventDamage {
+            amount,
+            amount_dynamic,
+            damage_source_filter,
+            ..
+        } = &effect
+        else {
+            panic!("expected the dealt-by shield, got {effect:?}");
+        };
+        assert_eq!(*amount, PreventionAmount::Next(1));
+        assert_eq!(*amount_dynamic, announced_x);
+        assert!(
+            damage_source_filter.is_some(),
+            "the dealt-by emitter scopes the shield to its source, got {effect:?}"
+        );
+        assert_gap(
+            "Prevent the next X damage that would be dealt by target creature this turn.",
+            PREVENT_DEALT_BY_TARGET_GAP,
+        );
+
+        // The unconsumed quantity wins over every downstream authority.
+        for text in [
+            "Prevent the next X plus X damage that would be dealt by target blocked creature this turn.",
+            "Prevent the next X plus X damage that would be dealt by target creature this turn.",
+            "Prevent the next X plus X damage that would be dealt to you this turn.",
+            "Prevent the next X plus X damage that would be dealt to and dealt by that creature this turn.",
+        ] {
+            assert_gap(text, PREVENT_UNCONSUMED_QUANTITY_GAP);
+        }
     }
 
     /// CR 615.2 + CR 109.4: Haze Frog — "prevent all combat damage that other
