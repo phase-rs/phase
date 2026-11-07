@@ -2131,10 +2131,13 @@ impl HostProvenance {
 ///   while it has had no zone change since that departure — then its current
 ///   incarnation is the one the source was attached to. When the host left
 ///   later, its first departure after the source's is the host's last known
-///   information (`Departed`). When the source left attached to nothing
+///   information (`Departed`). When an Aura left attached to nothing
 ///   because the host left first (CR 704.5m), the host is the latest
 ///   battlefield departure whose attachment snapshot lists this exact source
 ///   incarnation (CR 400.7: a record without an incarnation never matches).
+///   Any other source that left attached to nothing names nothing: an
+///   Equipment stays on the battlefield after its creature leaves
+///   (CR 704.5n), so its last known information is "attached to nothing".
 ///   An explicit attachment to a player names no object.
 pub(crate) fn source_attachment_host_provenance(
     state: &GameState,
@@ -2163,7 +2166,8 @@ pub(crate) fn source_attachment_host_provenance(
     }) else {
         return HostProvenance::Unknown;
     };
-    if let Some(attached) = records[departure].attached_to {
+    let source_departure = &records[departure];
+    if let Some(attached) = source_departure.attached_to {
         let Some(host) = attached.as_object() else {
             return HostProvenance::Unknown;
         };
@@ -2183,6 +2187,17 @@ pub(crate) fn source_attachment_host_provenance(
             }
             Some(_) => return HostProvenance::Unknown,
         }
+    } else if !source_departure
+        .subtypes
+        .iter()
+        .any(|subtype| subtype == "Aura")
+    {
+        // CR 301.5c + CR 704.5n + CR 608.2h: an Equipment whose creature left
+        // stays on the battlefield unattached, so when it leaves attached to
+        // nothing its last known information names no host. Only an Aura
+        // (CR 704.5m) leaves because its host left first; a bestowed Aura that
+        // became unattached stopped being an Aura (CR 702.103f).
+        return HostProvenance::Unknown;
     }
     // The host left first (or in the same event) with the source still
     // attached: its departure snapshot lists the exact source incarnation.
@@ -2321,16 +2336,9 @@ pub(crate) fn bind_resolution_attachment_hosts(
         HostProvenance::Live(_) | HostProvenance::Unknown => ResolutionHostBinding::Absent,
         HostProvenance::Departed { host, record } => {
             let record = &state.zone_changes_this_turn[record];
+            debug_assert_eq!(record.object_id, host, "a host departure names the host");
             ResolutionHostBinding::Departed(Box::new(
-                crate::types::ability::CostPaidObjectSnapshot {
-                    object_id: host,
-                    lki: crate::game::effects::lki_snapshot_from_zone_change_record(record),
-                    incarnation: record
-                        .trigger_source_context()
-                        .map_or(crate::types::identifiers::LEGACY_INCARNATION, |context| {
-                            context.identity.reference.incarnation
-                        }),
-                },
+                crate::types::ability::CostPaidObjectSnapshot::from_departure_record(record),
             ))
         }
     }
