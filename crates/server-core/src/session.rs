@@ -4906,6 +4906,46 @@ mod tests {
         );
     }
 
+    /// The transport-supplied ingress instant is the observation's time, not
+    /// the instant its queued handler finally reaches the engine.
+    #[test]
+    fn say_phrase_uses_supplied_ingress_instant() {
+        let (mgr, code, token0, _token1) = setup_two_player_game();
+        let runner = toy_boat_at_upkeep_runner();
+        let mut session = mgr.try_session(&code).unwrap();
+        session.state = runner.state().clone();
+        drop(session);
+
+        let ingress = now_ms().saturating_sub(60_000);
+        let outcome = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome_at(
+                &token0,
+                GameAction::SayPhrase {
+                    at_ms: 999_999_999,
+                    seq: 1,
+                    payment: 1,
+                    report: Default::default(),
+                },
+                None,
+                ingress,
+            );
+        assert!(
+            outcome.is_ok(),
+            "say phrase action should be handled: {outcome:?}"
+        );
+
+        let session = mgr.try_session(&code).unwrap();
+        let payment = session.state.say_payment.as_ref().expect("payment exists");
+        assert_eq!(
+            payment.last_said_ms,
+            Some(ingress),
+            "the saying must be judged at the transport's receipt instant"
+        );
+        assert_eq!(payment.clock_ms, ingress);
+    }
+
     #[test]
     fn approved_takeback_rekeys_say_phrase_payment() {
         let (mgr, code, token0, _token1) = setup_two_player_game();
