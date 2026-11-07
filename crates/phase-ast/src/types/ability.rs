@@ -26283,7 +26283,13 @@ fn phase_out_or_in_filter_is_mass(filter: &TargetFilter) -> bool {
 
 /// CR 115.10a: a PhaseOut union of already-bound references declares no new
 /// target. This does not prove that any reference resolves to a live object.
-fn phase_out_filter_is_context_union(filter: &TargetFilter) -> bool {
+///
+/// The runtime collector (`collect_object_targets` in the engine's
+/// `effects::phase_out`) shares this predicate: only a context union is
+/// collected leg by leg. A mixed union such as `Or[SelfRef, Typed(Creature)]`
+/// is a single stack-target declaration ("target creature or this permanent"),
+/// so the announced target keeps explicit-target precedence.
+pub fn phase_out_filter_is_context_union(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Or { filters } => filters.iter().all(phase_out_filter_is_context_union),
         other => other.is_context_ref(),
