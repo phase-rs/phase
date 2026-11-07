@@ -87,7 +87,7 @@ fn add_legions_end(scenario: &mut GameScenario) -> ObjectId {
 
 fn add_hour_of_glory(scenario: &mut GameScenario) -> ObjectId {
     scenario
-        .add_spell_to_hand_from_oracle(P0, "Hour of Glory", false, HOUR_OF_GLORY)
+        .add_spell_to_hand_from_oracle(P0, "Hour of Glory", true, HOUR_OF_GLORY)
         .with_mana_cost(free())
         .id()
 }
@@ -159,7 +159,7 @@ fn legions_end_exiles_same_name_cards_from_that_players_hand_and_graveyard() {
     );
 }
 
-/// T2. CR 108.3 + CR 608.2c: "that player" is the target's controller as it last
+/// T2. CR 108.3 + CR 109.4 + CR 608.2c + CR 608.2h: "that player" is the target's controller as it last
 /// existed on the battlefield, not its owner. The target is owned by P2 and
 /// controlled by P1.
 #[test]

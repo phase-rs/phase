@@ -97493,9 +97493,12 @@ fn legions_end_chain_exiles_from_hand_and_graveyard_after_the_reveal() {
 /// continues the God-gated reveal, so a false condition stops it too.
 #[test]
 fn hour_of_glory_chain_gates_the_hand_exile_on_the_reveal() {
-    let parsed = sorcery_defs(
-        "Hour of Glory",
+    let parsed = parse_oracle_text(
         "Exile target creature. If that creature was a God, its controller reveals their hand and exiles all cards from it with the same name as that creature.",
+        "Hour of Glory",
+        &[],
+        &["Instant".to_string()],
+        &[],
     );
     assert_eq!(parsed.abilities.len(), 1);
     let spine = reveal_conjunct_spine(&parsed.abilities[0]);
@@ -97645,7 +97648,7 @@ fn rag_man_reveal_conjunct_is_a_real_random_discard() {
         "Rag Man",
         &[],
         &["Creature".to_string()],
-        &["Human".to_string(), "Cleric".to_string()],
+        &["Human".to_string(), "Minion".to_string()],
     );
     assert_eq!(parsed.abilities.len(), 1);
     let spine = reveal_conjunct_spine(&parsed.abilities[0]);
