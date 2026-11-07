@@ -148,6 +148,8 @@ struct Board {
     tremors: bool,
     /// Synthetic prevention-shield creature on P0's battlefield; not a printed-card witness.
     synthetic_shield: bool,
+    /// Gibbering Fiend on P0's battlefield and Shieldmate's Blessing cast at P1 before kickoff.
+    finite_prevention: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -352,6 +354,10 @@ fn build(board: Board, mode: LoopDetectionMode) -> Option<Built> {
     if board.wood_elves.is_some() {
         scenario.add_real_card(P0, "Wood Elves", Zone::Battlefield, db);
     }
+    let blessing = board.finite_prevention.then(|| {
+        scenario.add_real_card(P0, "Gibbering Fiend", Zone::Battlefield, db);
+        scenario.add_real_card(P0, "Shieldmate's Blessing", Zone::Hand, db)
+    });
     for (seat, swamps) in [(P0, board.wood_elves.unwrap_or(10)), (P1, 10)] {
         for _ in 0..swamps {
             scenario.add_real_card(seat, "Swamp", Zone::Library, db);
@@ -367,6 +373,11 @@ fn build(board: Board, mode: LoopDetectionMode) -> Option<Built> {
             .expect("the sink is on the battlefield")
             .counters
             .insert(CounterType::Minus1Minus1, counters);
+    }
+    if let Some(blessing) = blessing {
+        add_mana(&mut runner, P0, &[ManaType::White]);
+        drop(runner.cast(blessing).target_player(P1).commit());
+        settle(&mut runner, |state| holds_priority(state, P0));
     }
     let (mut watched, animate) = kickoff;
     match animate {
@@ -684,6 +695,7 @@ const PLAIN: Board = Board {
     wood_elves: None,
     tremors: false,
     synthetic_shield: false,
+    finite_prevention: false,
 };
 
 const ANCHOR: Board = Board {
@@ -776,6 +788,36 @@ fn worldgorger_with_a_synthetic_prevention_shield_accumulates_identical_shields(
         shields.iter().all(|def| def.runtime_execute.is_none()),
         "the synthetic shield has no rider, so the arena is not in play"
     );
+}
+
+/// CR 615.7 + CR 104.4b: Shieldmate's Blessing absorbs only the first three Fiend ETBs.
+/// Its remaining capacity is progress even while P1's life stays unchanged; the mandatory
+/// Worldgorger / Animate Dead cycle eventually exhausts it and kills P1, rather than drawing.
+#[test]
+fn worldgorger_with_a_finite_player_prevention_shield_is_not_a_draw() {
+    let board = Board {
+        finite_prevention: true,
+        first: Some("Gibbering Fiend"),
+        ..PLAIN
+    };
+    for mode in [LoopDetectionMode::Off, LoopDetectionMode::Interactive] {
+        for drive in EVERY_DRIVE {
+            let result = run(board, mode, drive, 1800).expect("the integration fixture exists");
+            assert_eq!(
+                result.terminal,
+                Terminal::GameOver(Some(P0)),
+                "{mode:?}, {drive:?}: finite prevention must not turn a lethal loop into a draw"
+            );
+            if mode == LoopDetectionMode::Off {
+                // CR 615.7: three prevented points, then twenty points of lethal damage.
+                assert_eq!(
+                    result.entries, 23,
+                    "{drive:?}: the finite shield was exhausted"
+                );
+                assert_eq!(result.life(P1), 0, "{drive:?}: P1 naturally reached lethal");
+            }
+        }
+    }
 }
 
 /// CR 603.3b + CR 732.4: Brain Maggot's forced reveal of P1's only nonland card repeats each
