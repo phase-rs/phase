@@ -30534,12 +30534,10 @@ fn lower_subject_predicate_ast_body(
             // cannot declare resolution timing, because TargetOnly's resolution chooser
             // only prompts the controller. The producer reads the subject from the
             // context, and the compound splitter hands it on to the conjuncts this
-            // predicate splits into. `SelfRef` is exempt because a source object is
-            // never a player chooser.
+            // predicate splits into.
             let enclosing_subject_chooser = std::mem::replace(
                 &mut ctx.clause_subject_chooser,
-                (!matches!(affected, TargetFilter::Controller | TargetFilter::SelfRef))
-                    .then(|| affected.clone()),
+                non_controller_subject_chooser(&affected),
             );
             let mut clause = lower_imperative_clause(&text, ctx, damage_context);
             ctx.clause_subject_chooser = enclosing_subject_chooser;
@@ -32209,6 +32207,14 @@ impl CarriedPlayerSubject {
             player_anaphor: None,
         }
     }
+}
+
+/// CR 608.2d + CR 115.10a: the chooser a player subject records in
+/// `ParseContext::clause_subject_chooser`. `None` for the controller (the
+/// resolution chooser already prompts them) and for `SelfRef` (a source object
+/// is never a player chooser).
+fn non_controller_subject_chooser(subject: &TargetFilter) -> Option<TargetFilter> {
+    (!matches!(subject, TargetFilter::Controller | TargetFilter::SelfRef)).then(|| subject.clone())
 }
 
 /// CR 608.2c: true when `head`'s leading subject establishes a
@@ -48746,6 +48752,16 @@ fn parse_effect_chain_ir_body(
         {
             ctx.object_pronoun_ref = Some(TargetFilter::SelfRef);
         }
+        // CR 608.2c + CR 608.2d + CR 115.10a: a conjugated continuation's elided
+        // subject is the carried player, who announces this chunk's choices while
+        // the effect is applied. Record it as the clause's subject chooser so the
+        // controller-only resolution-choice producers do not declare Resolution
+        // for it, exactly as for a printed non-controller subject. `chunk_ctx` is
+        // rebuilt per chunk, so the seed ends with this chunk; a nested printed
+        // subject overrides it for its own predicate and restores it.
+        ctx.clause_subject_chooser = inherited_player_subject
+            .as_ref()
+            .and_then(|carried| non_controller_subject_chooser(carried.reference()));
 
         let rejected_search_guard =
             if player_scope.is_none() && opponent_may_scope.is_none() && repeat_for.is_none() {

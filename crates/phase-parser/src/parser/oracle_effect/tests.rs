@@ -79564,6 +79564,176 @@ fn compound_choice_non_controller_subject_object_and_player_keeps_stack_timing()
     );
 }
 
+/// The lowered two-clause chain of an `<head>, then <choice>` text, after guarding
+/// the head's own `Draw.target` (the clause whose subject the continuation may
+/// inherit) and the continuation's fully consumed `TargetOnly { creature you control }`
+/// (the shape both resolution-choice producers lower to). Returns the continuation's
+/// declared timing and the chain's `TargetOnly` timings.
+fn head_then_choice_timings(
+    text: &str,
+    head_target: &TargetFilter,
+) -> (Option<TargetChoiceTiming>, Vec<TargetChoiceTiming>) {
+    let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+    assert_eq!(
+        ir.clauses.len(),
+        2,
+        "{text}: head and choice clauses: {ir:#?}"
+    );
+    let Effect::Draw { target, .. } = &ir.clauses[0].parsed.effect else {
+        panic!(
+            "{text}: the head must lower to Draw: {:#?}",
+            ir.clauses[0].parsed.effect
+        );
+    };
+    assert_eq!(target, head_target, "{text}: the head's player target");
+    assert_eq!(
+        ir.clauses[1].parsed.effect,
+        Effect::TargetOnly {
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        },
+        "{text}: the continuation must reach the TargetOnly producers' output"
+    );
+    let chain = parse_effect_chain(text, AbilityKind::Spell);
+    (
+        ir.clauses[1].declared_target_choice_timing,
+        target_only_chain_timings(&chain),
+    )
+}
+
+/// The opponent filter the parser lowers "Target opponent draws a card" to.
+fn target_opponent_head() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+}
+
+/// SHAPE: the carried player subject of a conjugated continuation is the carry
+/// every row below depends on. Printed card: Cephalid Looter ("{T}: Target player
+/// draws a card, then discards a card."), whose "discards" inherits the declared
+/// player of "Target player draws". A reach guard for the comma-then grammar.
+#[test]
+fn inherited_player_subject_carry_reaches_comma_then_grammar() {
+    let def = parse_effect_chain(
+        "Target player draws a card, then discards a card.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            def.effect.as_ref(),
+            Effect::Draw {
+                target: TargetFilter::Player,
+                ..
+            }
+        ),
+        "the head must be the declared player draw: {def:#?}"
+    );
+    let sub = def
+        .sub_ability
+        .as_deref()
+        .expect("the discard continuation");
+    assert!(
+        matches!(
+            sub.effect.as_ref(),
+            Effect::Discard {
+                target: TargetFilter::DeclaredPlayer { .. },
+                ..
+            }
+        ),
+        "the elided subject must carry the declared player: {sub:#?}"
+    );
+}
+
+/// SHAPE: a conjugated continuation's elided subject is the preceding non-controller
+/// subject (CR 608.2c), who announces the choice (CR 608.2d); the choice is not a
+/// target (CR 115.10a). `TargetOnly`'s resolution chooser prompts only the
+/// controller, so the Resolution declaration must not apply to the continuation.
+/// `Stack` is the value the base (4990f024e) lowered this bare choice to; it is
+/// pinned as that restoration, not as a rules claim: the target opponent should
+/// choose, which `TargetOnly` cannot express (third-party chooser limitation).
+/// Synthetic Oracle: no printed card continues a non-controller subject with
+/// "chooses a creature you control". The nearest printed cards are Arcane Artisan
+/// ("{2}{U}, {T}: Target player draws a card, then exiles a card from their hand.
+/// ...") for the shape and Cephalid Looter for the carry (guarded above).
+#[test]
+fn bare_choose_inherited_non_controller_subject_keeps_stack_timing() {
+    let mut mismatches = Vec::new();
+    for (text, head) in [
+        (
+            "Target opponent draws a card, then chooses a creature you control.",
+            target_opponent_head(),
+        ),
+        (
+            "Target player draws a card, then chooses a creature you control.",
+            TargetFilter::Player,
+        ),
+    ] {
+        let observed = head_then_choice_timings(text, &head);
+        if observed != (None, vec![TargetChoiceTiming::Stack]) {
+            mismatches.push(format!("{text}: {observed:?}"));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "the inherited subject owns the choice, so no Resolution is declared \
+         (expected (None, [Stack])): {mismatches:#?}"
+    );
+}
+
+/// SHAPE: a controller-owned bare choice keeps its Resolution declaration, whether
+/// the controller is the default subject or re-asserted after a third-party head.
+/// Printed controller choice: Final Showdown ("Choose a creature you control. It
+/// gains indestructible until end of turn."); the rows are synthetic chains of it.
+/// The second row carries a player-target head, so only the explicit "you" ends the
+/// carry (CR 608.2c).
+#[test]
+fn bare_choose_controller_subject_chain_keeps_resolution_timing() {
+    for (text, head) in [
+        (
+            "Draw a card, then choose a creature you control.",
+            TargetFilter::Controller,
+        ),
+        (
+            "Target opponent draws a card, then you choose a creature you control.",
+            target_opponent_head(),
+        ),
+    ] {
+        let (declared, chain) = head_then_choice_timings(text, &head);
+        assert_eq!(declared, Some(TargetChoiceTiming::Resolution), "{text}");
+        assert_eq!(chain, vec![TargetChoiceTiming::Resolution], "{text}");
+    }
+}
+
+/// SHAPE: an inherited non-controller subject's object-and-player choice. Unlike the
+/// bare choice above, the base declared Resolution here unconditionally; the
+/// `clause_subject_chooser` gate on this producer was added by round 8 for printed
+/// subjects. This row extends that withdrawal to the inherited subject, matching
+/// `compound_choice_non_controller_subject_object_and_player_keeps_stack_timing`
+/// ("An opponent chooses a creature you control and an opponent." -> Stack). It is a
+/// deliberate departure from the base and pins no rules claim: the target opponent
+/// should make both choices, which `TargetOnly` cannot express (third-party chooser
+/// limitation). Synthetic Oracle: no printed card reaches the shape; the nearest
+/// printed card for the choice is Risky Move ("choose a creature you control and an
+/// opponent").
+#[test]
+fn compound_choice_inherited_non_controller_subject_object_and_player_departs_to_stack_timing() {
+    let text = "Target opponent draws a card, then chooses a creature you control and an opponent.";
+    let (declared, chain) = head_then_choice_timings(text, &target_opponent_head());
+    assert_eq!(
+        declared, None,
+        "{text}: the inherited subject owns the object-and-player choice"
+    );
+    assert_eq!(chain, vec![TargetChoiceTiming::Stack], "{text}");
+}
+
+/// SHAPE: the controller's object-and-player choice keeps Resolution under the same
+/// chain shape (the matched control of the row above). Synthetic chain of Risky
+/// Move's "choose a creature you control and an opponent".
+#[test]
+fn compound_choice_controller_object_and_player_chain_keeps_resolution_timing() {
+    let text = "Draw a card, then choose a creature you control and an opponent.";
+    let (declared, chain) = head_then_choice_timings(text, &TargetFilter::Controller);
+    assert_eq!(declared, Some(TargetChoiceTiming::Resolution), "{text}");
+    assert_eq!(chain, vec![TargetChoiceTiming::Resolution], "{text}");
+}
+
 /// SHAPE: Log Flume's printed Visit choice cannot enter the single-object chooser.
 #[test]
 fn bare_choose_stripped_quantifier_does_not_declare_resolution_timing() {
