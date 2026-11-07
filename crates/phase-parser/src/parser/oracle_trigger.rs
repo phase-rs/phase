@@ -55,6 +55,7 @@ use super::oracle_nom::primitives::{
 use super::oracle_nom::quantity::parse_using_mana_produced_by_self;
 use super::oracle_nom::target::parse_chosen_object_reference;
 use super::oracle_nom::target::parse_type_phrase as parse_type_phrase_nom;
+use super::oracle_nom::target::CostChannel;
 use super::oracle_nom::target::{controller_phrase_among, ControllerPhrase};
 use super::oracle_nom::target::{
     parse_owner_hand_possessive, split_counted_return_to_hand_object, CountedReturnObject,
@@ -2064,8 +2065,14 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // the condition introduced, not a transient nested-clause value.
     let relative_player_scope = effect_ctx.relative_player_scope.clone();
 
-    // Constraint from full text (parsed during IR production so lowering has it)
-    let constraint = parse_trigger_constraint(&lower);
+    // Constraint from full text (parsed during IR production so lowering has it).
+    // CR 603.2 + CR 602.5c: a quoted ability the trigger GRANTS carries its own
+    // restrictions ("Activate only during your turn" on Q, Stacking the Deck's
+    // granted ability); they restrict that ability, never this trigger, so the
+    // quoted spans are masked before the constraint scan.
+    let constraint = parse_trigger_constraint(
+        &super::oracle_nom::primitives::strip_double_quoted_spans(&lower),
+    );
 
     // Parse the effect body
     let effect_for_parse_lower = effect_for_parse.to_lowercase();
@@ -5099,50 +5106,22 @@ fn has_single_indicated_action_instruction(def: &AbilityDefinition) -> bool {
 
 /// Strip constraint sentences from effect text so they don't produce spurious sub-abilities.
 /// The constraint itself is already extracted by `parse_trigger_constraint` from the full text.
+///
+/// CR 113.1a + CR 603.1: a quoted ability the effect GRANTS ("It perpetually
+/// gains \"Whenever this creature becomes the target …, draw a card. This ability
+/// triggers only once each turn.\"" on Niambi, Beloved Protector) carries its own
+/// restriction as part of its own text. Only an unquoted sentence restricts this
+/// trigger; a quoted one is left in place so the granted ability's own parser
+/// reads it.
 fn strip_constraint_sentences(text: &str) -> String {
-    let patterns = [
-        "this ability triggers only once each turn.",
-        "this ability triggers only once each turn",
-        "triggers only once each turn.",
-        "triggers only once each turn",
-        "this ability triggers only once.",
-        "this ability triggers only once",
-        "this ability triggers only during your turn.",
-        "this ability triggers only during your turn",
-        "do this only once each turn.",
-        "do this only once each turn",
-    ];
     let mut result = text.to_string();
-    // Case-insensitive match: Oracle text is mixed-case ("This ability triggers...")
-    // but patterns are lowercase, so find on lowered text and remove from original.
-    let lower_for_static = result.to_lowercase();
-    for pattern in &patterns {
-        if let Some(pos) = lower_for_static.find(pattern) {
-            result.replace_range(pos..pos + pattern.len(), "");
-            break; // At most one constraint sentence per trigger
-        }
+    // At most one fixed-form constraint sentence per trigger.
+    if let Some(span) = unquoted_phrase_span(&result, parse_fixed_constraint_sentence) {
+        result.replace_range(span, "");
     }
-    // Dynamic pattern: "this ability triggers only the first N time(s) each turn."
-    // Uses scan_split_at_phrase + split_once_on instead of raw .find() for dispatch.
-    let lower = result.to_lowercase();
-    if let Some((prefix_text, matched_start)) = scan_split_at_phrase(&lower, |i| {
-        tag::<_, _, OracleError<'_>>("this ability triggers only the first ").parse(i)
-    }) {
-        let start = prefix_text.len();
-        if let Ok((_, (_, after_each_turn))) =
-            nom_primitives::split_once_on(matched_start, "each turn")
-        {
-            let end_pos = lower.len() - after_each_turn.len();
-            let end_pos = if tag::<_, _, OracleError<'_>>(".")
-                .parse(after_each_turn)
-                .is_ok()
-            {
-                end_pos + 1
-            } else {
-                end_pos
-            };
-            result = format!("{}{}", &result[..start], &result[end_pos..]);
-        }
+    // Dynamic form: "this ability triggers only the first N time(s) each turn."
+    if let Some(span) = unquoted_phrase_span(&result, parse_first_n_times_constraint_sentence) {
+        result.replace_range(span, "");
     }
     let result = result.trim().to_string();
     if result.ends_with('.') {
@@ -5150,6 +5129,56 @@ fn strip_constraint_sentences(text: &str) -> String {
     } else {
         result
     }
+}
+
+/// Byte range in `text` of the first word-boundary match of `combinator` that
+/// lies outside every double-quoted span. Matching runs on a lowercased,
+/// length-preserving quote mask, so the range indexes the original text.
+fn unquoted_phrase_span<O>(
+    text: &str,
+    mut combinator: impl for<'a> FnMut(&'a str) -> OracleResult<'a, O>,
+) -> Option<std::ops::Range<usize>> {
+    // ASCII lowercasing preserves byte length (the matched phrases are ASCII),
+    // so offsets in the mask index `text` directly.
+    let masked_lower =
+        nom_primitives::mask_double_quoted_spans_preserving_len(text).to_ascii_lowercase();
+    let (before, _, rest) = scan_preceded(&masked_lower, &mut combinator)?;
+    Some(before.len()..masked_lower.len() - rest.len())
+}
+
+/// A fixed-form trigger frequency sentence, with its terminal period if present.
+fn parse_fixed_constraint_sentence(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        terminated(
+            alt((
+                preceded(
+                    tag("this ability triggers only "),
+                    alt((tag("once each turn"), tag("once"), tag("during your turn"))),
+                ),
+                tag("triggers only once each turn"),
+                // CR 603.2h: "Do this only once each turn."
+                tag("do this only once each turn"),
+            )),
+            opt(tag(".")),
+        ),
+    )
+    .parse(input)
+}
+
+/// "this ability triggers only the first N time(s) each turn", with its
+/// terminal period if present.
+fn parse_first_n_times_constraint_sentence(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag("this ability triggers only the first "),
+            take_until("each turn"),
+            tag("each turn"),
+            opt(tag(".")),
+        ),
+    )
+    .parse(input)
 }
 
 /// CR 118.12a + CR 107.4: Parse mana / energy unless-payment tails after
@@ -5241,6 +5270,27 @@ fn extract_unless_pay_modifier(
     }
 }
 
+/// The sentence of `lower` that directly contains the " unless " at
+/// `unless_pos`: forward-scans past each preceding sentence boundary.
+fn unless_enclosing_sentence(lower: &str, unless_pos: usize) -> &str {
+    let mut enclosing = &lower[..unless_pos];
+    while let Ok((_, (_, after))) = nom_primitives::split_once_on(enclosing, ". ") {
+        enclosing = after;
+    }
+    enclosing
+}
+
+/// CR 608.2c: instructions are followed in the order written, and an "unless"
+/// binds to the instruction that carries it. True when an earlier instruction
+/// precedes that one — a previous sentence, or a ", then " sequencer inside the
+/// unless-bearing sentence — so hoisting the "unless" onto the whole trigger
+/// would wrongly gate the earlier instructions too. Single authority shared by
+/// the unless-payment hoist and the game-state unless hoist.
+fn unless_binds_to_later_instruction(lower: &str, unless_pos: usize) -> bool {
+    let enclosing = unless_enclosing_sentence(lower, unless_pos);
+    enclosing.len() < unless_pos || nom_primitives::split_once_on(enclosing, ", then ").is_ok()
+}
+
 /// CR 118.12: Detect "unless [player] pays {cost}" in trigger effect text.
 /// Returns (cleaned effect text without the unless clause, optional UnlessPayModifier).
 ///
@@ -5275,34 +5325,21 @@ fn hoist_unless_pay_modifier(
     // `split_once_on` combinator) so `enclosing` is just the sentence that
     // directly contains it; the byte offset back into `text` preserves original
     // case for `strip_temporal_prefix`.
-    let mut enclosing = &lower[..unless_pos];
-    while let Ok((_, (_, after))) = nom_primitives::split_once_on(enclosing, ". ") {
-        enclosing = after;
-    }
-    let unless_sentence_start = unless_pos - enclosing.len();
-    // CR 118.12a + CR 608.2c: an "unless" binds to the sentence that contains it.
-    // Hoisting one from a later sentence would gate the whole trigger — including
-    // the earlier sentences' instructions — on the payment (Delaying Shield: paying
-    // {1}{W} would skip removing the delay counters). Decline; the per-clause path
-    // (`extract_resolution_unless_pay_modifier`) attaches the cost to its own clause.
-    if unless_sentence_start > 0 {
+    let enclosing = unless_enclosing_sentence(&lower, unless_pos);
+    // CR 118.12a + CR 608.2c: an "unless" binds to its own instruction. Hoisting
+    // one from a later sentence (Delaying Shield: paying {1}{W} would skip
+    // removing the delay counters) or from after a ", then " sequencer (Cyclone,
+    // Phantasmal Sphere: the prompt must follow the counter) would gate the
+    // earlier instructions on the payment. Decline; the per-clause path
+    // (`extract_resolution_unless_pay_modifier`) attaches the cost to its own
+    // clause.
+    if unless_binds_to_later_instruction(&lower, unless_pos) {
         return (text.to_string(), None);
     }
-    if crate::parser::oracle_effect::lower::strip_temporal_prefix(
-        text[unless_sentence_start..].trim_start(),
-    )
-    .1
-    .is_some()
+    if crate::parser::oracle_effect::lower::strip_temporal_prefix(text.trim_start())
+        .1
+        .is_some()
     {
-        return (text.to_string(), None);
-    }
-    // CR 608.2c + CR 118.12a: instructions are followed in the order written, and an
-    // "unless" binds to its own instruction. When the unless-bearing sentence sequences
-    // instructions with ", then ", hoisting the unless to the trigger root would ask for
-    // the payment before the earlier instructions run (Cyclone, Phantasmal Sphere: the
-    // prompt must follow the counter). Decline; the per-clause path
-    // (`extract_resolution_unless_pay_modifier`) attaches it to its own clause.
-    if nom_primitives::split_once_on(enclosing, ", then ").is_ok() {
         return (text.to_string(), None);
     }
 
@@ -5636,7 +5673,10 @@ fn split_reflexive_optional_payment(
     }
     let cost_text = effect_text.get(cost_start..cost_start + cost_len)?.trim();
     let body_text = effect_text.get(body_start..)?.trim();
-    let cost = super::oracle_cost::parse_oracle_cost(cost_text);
+    // CR 118.12 + CR 603.12: the optional payment is made as the ability
+    // resolves, so its sacrifice and self-exile legs leave a bare "it" unbound
+    // (see `CostChannel::ResolutionPayment` for the return-to-hand leg).
+    let cost = super::oracle_cost::parse_oracle_cost_in(cost_text, CostChannel::ResolutionPayment);
     if matches!(cost, AbilityCost::Unimplemented { .. })
         || !reflexive_optional_cost_payable_by_resolution_prompt(&cost)
     {
@@ -5726,7 +5766,12 @@ fn is_unsupported_disjunctive_reflexive_optional_payment(effect_text: &str) -> b
     let Some(cost_text) = effect_text.get(cost_start..cost_start + cost_len) else {
         return false;
     };
-    cost_contains_one_of(&super::oracle_cost::parse_oracle_cost(cost_text.trim()))
+    // CR 118.12 + CR 603.12: resolution-time optional payment (see
+    // `split_reflexive_optional_payment`).
+    cost_contains_one_of(&super::oracle_cost::parse_oracle_cost_in(
+        cost_text.trim(),
+        CostChannel::ResolutionPayment,
+    ))
 }
 
 fn cost_contains_one_of(cost: &AbilityCost) -> bool {
@@ -9102,13 +9147,13 @@ fn extract_if_condition_with_card_name(
     // downstream re-homer (`strip_suffix_conditional`) can attach it as a
     // clause-level `AbilityCondition`, hoisted only when it cannot be re-homed.
     //
-    // CR 603.5: A trailing `unless` is NOT a CR 603.4 intervening predicate —
-    // it is resolution-checked, not trigger-gated. We hoist it via
-    // `PostEffectPolicy::AlwaysHoist` as a pragmatic engine simplification:
-    // there is no reachable downstream re-homer for `unless`, and the guard at
-    // the head of trigger-effect lowering turns any leftover "unless" into
-    // `Effect::Unimplemented`. `unless` is the negation of `if`, so wrap the
-    // parsed predicate in `Not`. Cost-form `unless` ("unless you pay {2}",
+    // CR 608.2c: A trailing `unless` is NOT a CR 603.4 intervening predicate —
+    // it is resolution-checked, not trigger-gated. When it binds to the
+    // trigger's first instruction we hoist it via
+    // `PostEffectPolicy::DeferIfLaterInstruction` as a pragmatic engine
+    // simplification; one bound to a later instruction (CR 608.2c) stays in the
+    // effect text for `strip_unless_entered_suffix` to attach to that clause.
+    // `unless` is the negation of `if`, so wrap the parsed predicate in `Not`. Cost-form `unless` ("unless you pay {2}",
     // "unless you sacrifice a creature") is already stripped upstream by
     // `extract_unless_pay_modifier`.
     if let Some((stripped, cond)) = try_extract_spell_targets_intervening_if(&tp, &lower, text) {
@@ -9165,7 +9210,7 @@ fn extract_if_condition_with_card_name(
         &lower,
         text,
         " unless ",
-        PostEffectPolicy::AlwaysHoist,
+        PostEffectPolicy::DeferIfLaterInstruction,
         source_is_self,
         |c| TriggerCondition::Not {
             condition: Box::new(c),
@@ -10502,10 +10547,11 @@ enum PostEffectPolicy {
     /// `strip_suffix_conditional` to re-home onto a clause-level
     /// `AbilityCondition`; hoist only non-re-homeable (source-referential) ones.
     DeferIfRehomeable,
-    /// `unless`: always hoist. `unless` has no reachable downstream re-homer —
-    /// the trigger-effect lowering guard turns any leftover "unless" into
-    /// `Effect::Unimplemented` before `parse_effect_chain_ir` runs.
-    AlwaysHoist,
+    /// `unless`: hoist when the "unless" binds to the trigger's first
+    /// instruction; defer when it binds to a later one (CR 608.2c), leaving it
+    /// in the effect text for the clause-level re-homer
+    /// (`strip_unless_entered_suffix`) to attach to its own instruction.
+    DeferIfLaterInstruction,
 }
 
 /// Try to extract an intervening predicate introduced by `keyword`.
@@ -10532,8 +10578,11 @@ enum PostEffectPolicy {
 ///   Wilds' "if its power is greater than each other creature's power") has no
 ///   `AbilityCondition` form, so it is hoisted to the trigger-level condition
 ///   instead. Re-homeability is decided by `condition_text_is_rehomeable`.
-/// - `PostEffectPolicy::AlwaysHoist` (the `unless` path): always hoist. There
-///   is no reachable downstream re-homer for `unless`.
+/// - `PostEffectPolicy::DeferIfLaterInstruction` (the `unless` path): hoist
+///   only when the "unless" binds to the first instruction. One bound to a
+///   later instruction (Seven of Nine, Unassimilated: "draw a card. Then
+///   discard a card unless ...") is left for the clause-level re-homer so the
+///   earlier instructions stay unconditional (CR 608.2c).
 fn try_extract_spell_targets_intervening_if(
     _tp: &TextPair<'_>,
     lower: &str,
@@ -10641,14 +10690,22 @@ fn try_extract_intervening(
     // true intervening predicate; always hoist. A post-effect occurrence is
     // gated by policy.
     if !is_leading {
-        if let PostEffectPolicy::DeferIfRehomeable = policy {
-            let condition_text = lower[pos + keyword.len()..].trim_end_matches('.').trim();
-            if condition_text_is_rehomeable(condition_text) {
-                // leave it for strip_suffix_conditional to re-home
-                return InterveningExtraction::Absent;
+        match policy {
+            PostEffectPolicy::DeferIfRehomeable => {
+                let condition_text = lower[pos + keyword.len()..].trim_end_matches('.').trim();
+                if condition_text_is_rehomeable(condition_text) {
+                    // leave it for strip_suffix_conditional to re-home
+                    return InterveningExtraction::Absent;
+                }
+            }
+            PostEffectPolicy::DeferIfLaterInstruction => {
+                if unless_binds_to_later_instruction(lower, pos) {
+                    // leave it for strip_unless_entered_suffix to re-home
+                    return InterveningExtraction::Absent;
+                }
             }
         }
-        // AlwaysHoist, or non-re-homeable: fall through and hoist as before.
+        // Non-re-homeable, or bound to the first instruction: hoist.
     }
     let cond_fragment = &lower[pos + keyword.len()..];
     // CR 113.6b: the source-bound contraction in a leading intervening-if
@@ -25279,6 +25336,45 @@ mod grenzo_bullet_modal_tests {
             TargetFilter::TriggeringPlayer,
             "BULLET ExileTop player must be TriggeringPlayer (damaged player), got {exile_player:?}",
         );
+    }
+
+    /// Thada Adel, Acquisitor: the controller searches the DAMAGED player's library
+    /// (not their own), and that same player shuffles.
+    #[test]
+    fn thada_adel_searches_damaged_players_library() {
+        let parsed = parse_oracle_text(
+            "Islandwalk (This creature can't be blocked as long as defending player controls an Island.)\nWhenever Thada Adel deals combat damage to a player, search that player's library for an artifact card and exile it. Then that player shuffles. Until end of turn, you may play that card.",
+            "Thada Adel, Acquisitor",
+            &[],
+            &["Creature".into()],
+            &["Merfolk".into()],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::DamageDone))
+            .expect("DamageDone trigger must parse");
+        let execute = trigger.execute.as_ref().expect("execute must be Some");
+        let effects = flatten_effects(execute);
+        let target_player = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::SearchLibrary { target_player, .. } => Some(target_player.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("must contain SearchLibrary, got {effects:?}"));
+        let Some(TargetFilter::Typed(tf)) = target_player else {
+            panic!(
+                "SearchLibrary must name the triggering player's library, got {target_player:?}"
+            );
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::TriggeringPlayer));
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::Shuffle {
+                target: TargetFilter::TriggeringPlayer
+            }
+        )));
     }
 }
 

@@ -5563,6 +5563,12 @@ pub enum PermissionGrantee {
     /// of Hospitality), read through `TargetFilter::TriggeringSourceController`
     /// with its last-known-information fallback (CR 608.2h).
     TriggeringSourceController,
+    /// CR 406.3a + CR 608.2c — each object's recorded exiling player (the
+    /// player who performed the exile that put it there, which need not be
+    /// its owner or the ability's controller): "For each card exiled this way,
+    /// the player who exiled it may play it" (Vulcan Mind-Meld). A card whose
+    /// exile was not attributed to a player is granted to nobody.
+    ObjectExiler,
 }
 
 /// Returns true when `grantee` is the default (`AbilityController`). Used as a
@@ -7463,10 +7469,16 @@ pub enum FilterProp {
     /// Differs from `SameName` (which reads the source object's name): this
     /// reads from `ability.targets[0]` when that target is `TargetRef::Object`,
     /// looking up the name from `state.objects` (or `lki_cache` if the target
-    /// has already left its zone).
+    /// has already left its zone). A nameless object (a face-down permanent,
+    /// CR 708.2a) shares no name — not with another nameless object and not with
+    /// itself (CR 201.2a); the evaluator compares through the shared
+    /// `names_shared` rule.
     SameNameAsParentTarget,
     /// CR 607.2a + CR 201.2: Matches an object whose name equals a card durably
     /// exiled by this ability's source. Used by the Extraplanar Lens class.
+    /// A nameless object (a face-down permanent, CR 708.2a) shares no name —
+    /// not with another nameless object and not with itself (CR 201.2a); the
+    /// evaluator compares through the shared `names_shared` rule.
     SameNameAsExiledBySource,
     /// CR 201.2 + CR 201.2a: Matches objects whose name equals the name of any
     /// permanent currently on the battlefield. `controller` optionally narrows
@@ -7474,11 +7486,21 @@ pub enum FilterProp {
     /// i.e. "shares a name with a permanent" unqualified). Used by "put a card
     /// onto the battlefield if it has the same name as a permanent" patterns
     /// (Mitotic Manipulation, and any analogous dig-with-name-match effect).
+    /// A nameless object (a face-down permanent, CR 708.2a) shares no name —
+    /// not with another nameless object and not with itself (CR 201.2a); the
+    /// evaluator compares through the shared `names_shared` rule.
     NameMatchesAnyPermanent {
         controller: Option<ControllerRef>,
     },
-    /// CR 903.3 + CR 903.3d: Matches permanents on the battlefield that are a
-    /// commander. Reads `GameObject::is_commander`, set during deck construction
+    /// CR 903.3 + CR 903.3d: Matches an object that is a commander. It checks no zone
+    /// itself; whatever reads the filter supplies the zone. A population reads the
+    /// zones `FilterProp::InZone` / `FilterProp::InAnyZone` name (Cloudkill's "a
+    /// commander you own on the battlefield or in the command zone"; every zone for
+    /// Tangleweave Armor's "your commanders", CR 903.3e), or the battlefield when the
+    /// filter names none (Command Chair's "commanders you control"). Other readers
+    /// look where their effect does: Command Beacon's "Put your commander into your
+    /// hand from the command zone" is a move whose `origin` names that zone.
+    /// Reads `GameObject::is_commander`, set during deck construction
     /// per CR 903.3 (the legendary card designated as that deck's commander).
     /// Used for "commander(s) you control", "your commander" subject phrases
     /// and for "target commander" in commander-format effects (Codsworth, Falthis,
@@ -8995,19 +9017,23 @@ pub fn filter_contains_filter_prop(
 ) -> bool {
     filter_grammar_any(filter, &|node| match node {
         FilterGrammarNode::Prop(prop) => predicate(prop),
-        FilterGrammarNode::Filter(_) => false,
+        FilterGrammarNode::Filter(_) | FilterGrammarNode::Player(_) => false,
     })
 }
 
 /// One node of the filter grammar as the grammar walkers below reach it: a
-/// `TargetFilter` at its entry, or a `FilterProp` at its entry. The walkers are
-/// generic over what a caller looks for; each entry that calls them names the
-/// node kind it tests (`filter_contains_filter_prop` above, and
-/// `crate::game::filter`'s `*_operands_contain` family).
+/// `TargetFilter`, a `FilterProp` or a `PlayerFilter` at its entry. The walkers
+/// are generic over what a caller looks for; each entry that calls them names
+/// the node kind it tests (`filter_contains_filter_prop` above, and
+/// `crate::game::filter`'s `*_operands_contain` family). A player filter is a
+/// node in its own right because some of its variants read state themselves
+/// (`TrackedSetPossessor` reads the chain's tracked set) rather than only
+/// through the target filters they nest.
 #[derive(Clone, Copy)]
 pub enum FilterGrammarNode<'a> {
     Filter(&'a TargetFilter),
     Prop(&'a FilterProp),
+    Player(&'a PlayerFilter),
 }
 
 /// The complete target → property → player → quantity topology of the filter
@@ -9234,6 +9260,9 @@ pub fn player_filter_grammar_any(
     filter: &PlayerFilter,
     visit: &dyn Fn(FilterGrammarNode<'_>) -> bool,
 ) -> bool {
+    if visit(FilterGrammarNode::Player(filter)) {
+        return true;
+    }
     match filter {
         PlayerFilter::OpponentDealtDamage { source, .. } => source
             .as_deref()
@@ -9397,6 +9426,7 @@ pub fn quantity_ref_grammar_any(
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -10257,6 +10287,7 @@ fn rewrite_quantity_ref_filter_props<C>(
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -10594,8 +10625,8 @@ pub fn names_resolution_chosen_recipient(target: &TargetFilter) -> bool {
     }
 }
 
-/// Recurse into compound filters so a wrapped `ParentTargetController` is
-/// detected wherever it appears (`Or { filters: [..., ParentTargetController, ...] }`).
+/// Recurse into compound filters so parent-object, controller, and owner
+/// dependencies remain visible to inheritance and delayed snapshotting.
 pub fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
     match filter {
         // CR 603.7c + CR 608.2c: a `ParentTargetSlot { index }` delayed effect
@@ -10607,7 +10638,10 @@ pub fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. } => true,
         TargetFilter::Typed(typed) => {
-            matches!(typed.controller, Some(ControllerRef::ParentTargetController))
+            matches!(
+                typed.controller,
+                Some(ControllerRef::ParentTargetController | ControllerRef::ParentTargetOwner)
+            )
                 // CR 608.2c + CR 109.1: a `DistinctFrom { reference: ParentTarget }`
                 // property (Jodah's "put the rest ..." exclusion of the declined
                 // hit, Radiance's "each OTHER creature that shares a color with it")
@@ -11070,7 +11104,7 @@ pub fn effect_requires_parent_target_object(effect: &Effect) -> bool {
 
 /// CR 608.2c + CR 608.2h: Recursively identify the filter forms that require
 /// the parent's object referent rather than its last-known identity metadata.
-fn filter_requires_parent_target_object(filter: &TargetFilter) -> bool {
+pub fn filter_requires_parent_target_object(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => true,
         TargetFilter::Typed(typed) => typed.properties.iter().any(|property| {
@@ -11690,7 +11724,11 @@ pub enum CardTypeSetSource {
     Zone { zone: ZoneRef, scope: CountScope },
     /// CR 607.2a + CR 406.6: Cards exiled by the source's linked ability.
     ExiledBySource,
-    /// CR 109.2: Objects matching a battlefield-style filter.
+    /// Objects matching `filter`. A typed filter that names no zone reads the
+    /// battlefield; `FilterProp::InZone` / `FilterProp::InAnyZone` name the zones
+    /// it reads otherwise. When the Oracle description has a card type or subtype,
+    /// names no zone and doesn't say "card", "spell", "source" or "scheme", that
+    /// default is CR 109.2's reading: a permanent of that type on the battlefield.
     Objects { filter: TargetFilter },
     /// CR 608.2c + CR 205.2a: distinct card types among the current chain
     /// tracked set, optionally restricted to members produced by `caused_by`.
@@ -12430,6 +12468,7 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         | QuantityRef::Devotion { .. }
         | QuantityRef::VoteCount { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::TurnsTaken
         | QuantityRef::EventContextSourceCostX
@@ -13778,6 +13817,13 @@ pub enum QuantityRef {
     },
     /// CR 700.13: Number of crimes the controller has committed this turn.
     CrimesCommittedThisTurn,
+    /// CR 107.14 + CR 122.1: Number of energy counters the controller has paid
+    /// or lost this turn. Reads `Player::energy_paid_or_lost_this_turn`, bumped
+    /// on every energy decrement (cost payment or any other removal) and reset
+    /// at turn start. Backs "for each {E} you've paid or lost this turn"
+    /// (Blaster Hulk). Controller-scoped, mirroring the bare
+    /// `CrimesCommittedThisTurn` per-turn accumulator sibling.
+    EnergyPaidOrLostThisTurn,
     /// CR 701.65b / 701.66b / 701.67c / 702.189b: count of distinct bend types
     /// (air/earth/water/fire) the controller has performed this turn — these are
     /// the "whenever a player [airbends/earthbends/waterbends/firebends]" trigger
@@ -14269,6 +14315,7 @@ impl QuantityRef {
             | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
             | QuantityRef::EnteredThisTurn { .. }
             | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::EnergyPaidOrLostThisTurn
             | QuantityRef::BendTypesThisTurn
             | QuantityRef::TurnsTaken
             | QuantityRef::ZoneChangeCountThisTurn { .. }
@@ -14426,6 +14473,7 @@ impl QuantityRef {
             | QuantityRef::EventContextSourceCostX
             | QuantityRef::EventContextSourceModesChosen
             | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::EnergyPaidOrLostThisTurn
             | QuantityRef::BendTypesThisTurn
             | QuantityRef::LifeGainedThisTurn { .. }
             | QuantityRef::CardsDrawnThisTurn { .. }
@@ -14537,6 +14585,7 @@ impl QuantityRef {
             | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
             | QuantityRef::EnteredThisTurn { .. }
             | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::EnergyPaidOrLostThisTurn
             | QuantityRef::BendTypesThisTurn
             | QuantityRef::TurnsTaken
             | QuantityRef::ZoneChangeCountThisTurn { .. }
@@ -14659,7 +14708,7 @@ pub enum ObjectProperty {
     Toughness,
     ManaValue,
     /// CR 107.4a + CR 202.1: The number of colored mana symbols of `color` in
-    /// this object's mana cost. Summed (via `QuantityRef::Aggregate`) over a
+    /// this object's mana cost. Summed (via `QuantityRef::PropertyAggregate`) over a
     /// zone-scoped filter, this expresses chroma in any zone — "the number of
     /// black mana symbols in the mana costs of cards in your graveyard" (Umbra
     /// Stalker) is `Sum` of `ManaSymbolCount(Black)` over cards in your
@@ -15410,6 +15459,7 @@ pub fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRead {
         | QuantityRef::PreviousEffectCount | QuantityRef::UnspentMana { .. }
         | QuantityRef::EventContextAmount | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn | QuantityRef::TurnsTaken | QuantityRef::NotedNumber
         | QuantityRef::ChosenNumber | QuantityRef::DescendedThisTurn | QuantityRef::SpellsCastLastTurn
         | QuantityRef::DungeonsCompleted | QuantityRef::CostXPaid | QuantityRef::KickerCount
@@ -20440,7 +20490,7 @@ impl LegacyPaymentCost {
 /// The controller of the spell or ability follows its instructions, unless the
 /// instruction names its subject — and a subject acting on "their library" is
 /// the player whose library it is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum LibraryInstructionActor {
     /// "Exile the top card of target player's library" — the controller acts.
     #[default]
@@ -20448,12 +20498,37 @@ pub enum LibraryInstructionActor {
     /// "That player exiles the top card of their library" — the player whose
     /// library it is acts (Uba Mask, Ingest, Crumbling Sanctuary).
     LibraryPlayer,
+    /// CR 608.2c: the instruction's named subject is a player other than the
+    /// library's owner — "Target opponent looks at the top card of your
+    /// library, then exiles it face down" (Vulcan Mind-Meld). CR 115.1: a
+    /// targeting subject (`player` not a context ref) is the instruction's
+    /// declared player target, surfaced by [`Effect::target_filter`] when the
+    /// library owner is itself a context ref.
+    Player { player: TargetFilter },
 }
 
 impl LibraryInstructionActor {
     /// Serde skip-helper: `Controller` is the default and is omitted from JSON.
     pub fn is_controller(&self) -> bool {
         matches!(self, Self::Controller)
+    }
+
+    /// CR 115.1: the subject's player filter when it names a target, so the
+    /// instruction can declare it. `None` for the controller, the library
+    /// owner, and context-ref subjects ("its controller").
+    pub fn declared_target(&self) -> Option<&TargetFilter> {
+        match self {
+            Self::Player { player } if !player.is_context_ref() => Some(player),
+            Self::Controller | Self::LibraryPlayer | Self::Player { .. } => None,
+        }
+    }
+
+    /// Mutable form of [`Self::declared_target`].
+    pub fn declared_target_mut(&mut self) -> Option<&mut TargetFilter> {
+        match self {
+            Self::Player { player } if !player.is_context_ref() => Some(player),
+            Self::Controller | Self::LibraryPlayer | Self::Player { .. } => None,
+        }
     }
 }
 
@@ -21564,6 +21639,35 @@ impl DigRestOrder {
     }
 }
 
+/// CR 701.20e + CR 608.2c: what happens to the cards a look-at Dig did NOT keep.
+///
+/// Looking at cards never moves them (CR 701.20e). An instruction that routes
+/// its chosen cards out of the library and stays silent about the others ("put
+/// any number of land cards from among them onto the battlefield tapped") leaves
+/// those others exactly where they are. That outcome is neither of the two
+/// states `rest_destination: Option<Zone>` can name: its `None` means the
+/// historical graveyard default (a move), and `Some(Zone::Library)` means an
+/// explicit "put the rest on the bottom" (also a move, and one that reorders
+/// the library under CR 401.4, changing the next draw of any such dig that has
+/// no later shuffle).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DigRestRemainder {
+    /// Move the unkept cards to `rest_destination` (`None` = graveyard).
+    #[default]
+    Route,
+    /// The instruction named no destination for the unkept cards, so they are
+    /// never moved: they were only looked at and stay in the library in their
+    /// existing order.
+    StayInLibrary,
+}
+
+impl DigRestRemainder {
+    pub fn is_route(&self) -> bool {
+        matches!(self, DigRestRemainder::Route)
+    }
+}
+
 /// CR 701.20e + CR 608.2c: Discriminates where `Effect::Dig` reads its
 /// card set from. `Library` (the default) reads from the top of the library;
 /// `PriorLook` reads from `GameState::private_look_ids`, which was populated
@@ -22468,9 +22572,17 @@ pub enum Effect {
         /// Filter for keepable cards (Any = no filter).
         #[serde(default = "default_target_filter_any")]
         filter: TargetFilter,
-        /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom).
+        /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom
+        /// unless `rest_split_top_count` names a top position).
         #[serde(default)]
         rest_destination: Option<Zone>,
+        /// CR 701.20e: whether the unkept cards are moved at all. A silent
+        /// remainder ("… put any number of land cards from among them onto the
+        /// battlefield", with no clause naming the rest) stays in the library
+        /// untouched — `RestRemainder::StayInLibrary` — rather than being routed
+        /// to `rest_destination`'s graveyard default or to the library bottom.
+        #[serde(default, skip_serializing_if = "DigRestRemainder::is_route")]
+        rest_remainder: DigRestRemainder,
         /// CR 401.2 + CR 701.20e + CR 608.2c: Telling Time-class split of the
         /// unkept remainder between the two rules-legal positions of ONE
         /// library ("...one on top of your library, and one on the bottom of
@@ -22481,9 +22593,14 @@ pub enum Effect {
         /// is known only to them).
         ///
         /// `Some(n)` = exactly `n` of the remainder go on top and the rest go
-        /// to the bottom, via a `WaitingFor::DigRestSplitChoice` pause.
-        /// `None` = unchanged behavior: the whole remainder goes uniformly to
-        /// `rest_destination` (defaulting to Graveyard). Note CR 701.20d: the
+        /// to the bottom, via a `WaitingFor::DigRestSplitChoice` pause. `n` is
+        /// clamped to the actual remainder, so a value at or beyond the pile
+        /// size is the DEGENERATE all-top remainder the parser emits for "…
+        /// and the rest on top of your library" (Diabolic Vision) — the whole
+        /// pile goes on top and its CR 401.4 arrangement
+        /// is still the owner's choice. `None` = unchanged behavior: the whole
+        /// remainder goes uniformly to `rest_destination` (defaulting to
+        /// Graveyard). Note CR 701.20d: the
         /// remainder cards are reordered within the library by this split, so
         /// they stop being revealed and become new objects — the shared
         /// `reorder_within_library` primitive that performs the move already
@@ -24165,6 +24282,12 @@ pub enum Effect {
         /// `PaymentCost::ScaledMana`). When `Some(times)` the mana `cost` base
         /// is multiplied by `times` at payment ("pay {N} for each object chosen
         /// this way"); `times == 0` yields `{0}`, a trivial no-op success.
+        /// That first producer is the per-object `TrackedSetSize` payment
+        /// (Thelon's Curse; CR 118.1). The second producer is a `times` that
+        /// still carries the unannounced X (`times.contains_x()`): the
+        /// multiplier is then the player-chosen amount of a resolution-time
+        /// prompt (`pay::resolve` → `PayableResource::Mana { composition:
+        /// PerUnit }`, CR 107.1c; "pay any amount of {R}", Leyline Tyrant).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scale: Option<QuantityExpr>,
         /// CR 608.2c: Player who pays the resolution-time cost. Defaults to
@@ -24366,11 +24489,13 @@ pub enum Effect {
     /// `recipient_scope`.
     PreventDamage {
         amount: PreventionAmount,
-        /// CR 615.11 + CR 107.3i: When present, overrides `amount` at effect
-        /// resolution — the dynamic quantity is resolved to a concrete count and
-        /// the prevention shield is created as a static `Next(n)` depletion shield.
-        /// Set by "prevent X … where X is <quantity>" clauses. `None` for the
-        /// common fixed/All forms.
+        /// CR 615.7 + CR 107.3a + CR 107.3c: when present, overrides `amount` at
+        /// effect resolution — the quantity is resolved to a concrete count and
+        /// the shield is created as a static `Next(n)` depletion shield (CR 615.7).
+        /// Set by the announced `{X}` of a counted prevention clause ('prevent the
+        /// next X damage …', CR 107.3a) or by a trailing 'where X is <quantity>'
+        /// binder (CR 107.3c), which overwrites the announced-X reading. `None`
+        /// for the fixed/All forms.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         amount_dynamic: Option<QuantityExpr>,
         #[serde(default = "default_target_filter_any")]
@@ -27657,6 +27782,7 @@ pub fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
@@ -29389,6 +29515,18 @@ impl TargetFilter {
         if self.chosen_player_index().is_some() {
             return true;
         }
+        // CR 603.2 + CR 701.23a: a contentless player-scoped filter controlled by the
+        // triggering player ("search that player's library") reads the player from the
+        // trigger event at resolution; it is never announced as a target.
+        if matches!(
+            self,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.is_empty()
+                    && tf.properties.is_empty()
+                    && matches!(tf.controller, Some(ControllerRef::TriggeringPlayer))
+        ) {
+            return true;
+        }
         matches!(
             self,
             TargetFilter::None
@@ -30656,6 +30794,12 @@ impl Effect {
                 }
             }
 
+            // CR 115.1 + CR 608.2c: "Target opponent looks at the top card of
+            // your library, then exiles it face down" — the library owner is a
+            // context ref, so the targeting subject is the declared player.
+            Effect::ExileTop { player, actor, .. } if player.is_context_ref() => {
+                Some(actor.declared_target().unwrap_or(player))
+            }
             Effect::Dig { player, .. }
             | Effect::ExileTop { player, .. }
             | Effect::ExileFaceDownPile { player, .. }
@@ -31247,6 +31391,13 @@ impl Effect {
                 }
             }
 
+            // CR 115.1 + CR 608.2c: mirrors `target_filter` — a targeting
+            // subject of a context-ref library owner is the declared player.
+            Effect::ExileTop { player, actor, .. }
+                if player.is_context_ref() && actor.declared_target().is_some() =>
+            {
+                actor.declared_target_mut()
+            }
             Effect::Dig { player, .. }
             | Effect::ExileTop { player, .. }
             | Effect::ExileFaceDownPile { player, .. }
@@ -37518,6 +37669,107 @@ impl AbilityCondition {
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
             | AbilityCondition::ScopedPlayerMatches { .. } => false,
+        }
+    }
+
+    /// CR 608.2c: whether any filter-grammar node this condition carries — a
+    /// `TargetFilter`, a `PlayerFilter`'s nested filters, a `FilterProp`, or a
+    /// filter inside a compared quantity — satisfies `visit`, through the `Not`
+    /// / `ConditionInstead` / `And` / `Or` wrappers. The filter-axis companion of
+    /// [`Self::any_quantity_expr`]: a gate that tests membership in the chain's
+    /// tracked set ("if it was put into your graveyard this way") reads it as
+    /// surely as one that counts it. Exhaustive, no wildcard arm, so a new
+    /// filter-bearing condition must say what it carries.
+    pub fn any_filter_grammar(&self, visit: &dyn Fn(FilterGrammarNode<'_>) -> bool) -> bool {
+        match self {
+            AbilityCondition::RevealedHasCardType {
+                additional_filter,
+                subtype_filter,
+                ..
+            } => {
+                additional_filter
+                    .as_ref()
+                    .is_some_and(|prop| filter_prop_grammar_any(prop, visit))
+                    || subtype_filter
+                        .as_deref()
+                        .is_some_and(|filter| filter_grammar_any(filter, visit))
+            }
+            AbilityCondition::ObjectsShareQuality {
+                subject, reference, ..
+            } => filter_grammar_any(subject, visit) || filter_grammar_any(reference, visit),
+            AbilityCondition::TargetSharesNameWithOtherExiledThisWay { target: filter }
+            | AbilityCondition::DiscardedCardMatchesFilter { filter }
+            | AbilityCondition::TargetMatchesFilter { filter, .. }
+            | AbilityCondition::TriggeringSpellTargetsFilter { filter }
+            | AbilityCondition::SourceMatchesFilter { filter }
+            | AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter }
+            | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
+            | AbilityCondition::ControllerControlsMatching { filter }
+            | AbilityCondition::ControllerControlledMatchingAsCast { filter }
+            | AbilityCondition::ZoneChangedThisWay { filter, .. }
+            | AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
+                filter_grammar_any(filter, visit)
+            }
+            AbilityCondition::ScopedPlayerMatches { filter } => {
+                player_filter_grammar_any(filter, visit)
+            }
+            AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+                quantity_expr_grammar_any(lhs, visit) || quantity_expr_grammar_any(rhs, visit)
+            }
+            AbilityCondition::QuantityQuality { quantity, .. } => {
+                quantity_expr_grammar_any(quantity, visit)
+            }
+            AbilityCondition::PreviousEffectAmount { rhs, .. } => {
+                quantity_expr_grammar_any(rhs, visit)
+            }
+            AbilityCondition::Not { condition }
+            | AbilityCondition::ConditionInstead { inner: condition } => {
+                condition.any_filter_grammar(visit)
+            }
+            AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+                conditions
+                    .iter()
+                    .any(|condition| condition.any_filter_grammar(visit))
+            }
+            AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+            | AbilityCondition::TriggerEventTargetExploitedBySource
+            | AbilityCondition::AdditionalCostPaid { .. }
+            | AbilityCondition::AdditionalCostPaidInstead
+            | AbilityCondition::AlternativeManaCostPaid
+            | AbilityCondition::EffectOutcome { .. }
+            | AbilityCondition::EventOutcomeWon
+            | AbilityCondition::CoinFlipOutcome { .. }
+            | AbilityCondition::ChosenLabelIs { .. }
+            | AbilityCondition::WhenYouDo
+            | AbilityCondition::WasCast { .. }
+            | AbilityCondition::CastDuringPhase { .. }
+            | AbilityCondition::CurrentPhaseIs { .. }
+            | AbilityCondition::CastTimingPermission { .. }
+            | AbilityCondition::ManaColorSpent { .. }
+            | AbilityCondition::SourceEnteredThisTurn
+            | AbilityCondition::CastVariantPaid { .. }
+            | AbilityCondition::CastVariantPaidInstead { .. }
+            | AbilityCondition::HasMaxSpeed
+            | AbilityCondition::IsMonarch
+            | AbilityCondition::IsInitiative
+            | AbilityCondition::HasCityBlessing
+            | AbilityCondition::HasEnduringStory
+            | AbilityCondition::ControlsCommander { .. }
+            | AbilityCondition::IsRingBearer
+            | AbilityCondition::CompletedDungeon { .. }
+            | AbilityCondition::TargetHasKeywordInstead { .. }
+            | AbilityCondition::HasObjectTarget
+            | AbilityCondition::IsYourTurn
+            | AbilityCondition::WasStartingPlayer { .. }
+            | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+            | AbilityCondition::FirstCombatPhaseOfTurn
+            | AbilityCondition::FirstEndStepOfTurn
+            | AbilityCondition::SourceIsTapped
+            | AbilityCondition::SourceAttachedToCreature
+            | AbilityCondition::DayNightIsNeither
+            | AbilityCondition::DayNightIs { .. }
+            | AbilityCondition::AbilityUseCountThisTurn { .. }
+            | AbilityCondition::SourceLacksKeyword { .. } => false,
         }
     }
 

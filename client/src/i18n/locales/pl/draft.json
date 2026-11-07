@@ -654,6 +654,7 @@
     "kicked": "Zostałeś wyrzucony z grupy",
     "hostLeft": "Gospodarz opuścił draft",
     "connection": "Błąd połączenia",
+    "incompatible": "Ten draft nie jest zgodny z twoją wersją protokołu.",
     "retry": "Spróbuj połączyć ponownie"
   },
   "winston": {

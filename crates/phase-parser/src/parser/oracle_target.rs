@@ -26,7 +26,9 @@ use super::oracle_effect::{
     is_bare_object_pronoun, parse_multi_target_count_expr, parse_search_name_reference_suffix,
     resolve_it_pronoun,
 };
-use super::oracle_ir::context::{bind_controller_phrase, ChosenColorQualifierScope, ParseContext};
+use super::oracle_ir::context::{
+    bind_controller_phrase, ChosenColorQualifierScope, ParseContext, SpellAnaphorBinding,
+};
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use super::oracle_nom::filter as nom_filter;
@@ -140,6 +142,32 @@ pub(crate) fn resolve_pronoun_target(ctx: &mut ParseContext, pronoun: &str) -> T
             resolve_it_pronoun(ctx)
         }
         _ => TargetFilter::ParentTarget,
+    }
+}
+
+/// CR 608.2c + CR 608.2k: Refine a bare "that spell" binding for a caller that
+/// threaded the parse context.
+///
+/// The arm itself defaults to `TriggeringSource` because most callers parse
+/// without a context. When `effective_spell_anaphor_binding()` is `ParentTarget`
+/// (a NON-trigger instruction) the same anaphor names the spell mentioned
+/// earlier in the instruction sequence — the announced target of the resolving spell/ability ("Counter
+/// target spell. … counter that spell": Denied!, Mages' Contest, the "… instead"
+/// counter bodies; "… counter the spell": Split Decision's vote outcome). Only
+/// the consumers that both thread `ctx` and can carry a bare anaphor apply this
+/// refinement — today the counter and change-targets parsers — so a
+/// context-dropping parser (and the copy / gain-control consumers) keeps the
+/// historical event-source reading instead of silently re-binding.
+pub(crate) fn bind_spell_anaphor_to_context(
+    ctx: &ParseContext,
+    filter: TargetFilter,
+) -> TargetFilter {
+    if !matches!(filter, TargetFilter::TriggeringSource) {
+        return filter;
+    }
+    match ctx.effective_spell_anaphor_binding() {
+        SpellAnaphorBinding::ParentTarget => TargetFilter::ParentTarget,
+        SpellAnaphorBinding::EventSource => TargetFilter::TriggeringSource,
     }
 }
 
@@ -1072,13 +1100,17 @@ pub fn parse_target_with_syntax<'a>(
             return parse_target_with_syntax(original_rest, ctx);
         }
     }
-    // CR 608.2k: Bare "that spell" refers to the triggering spell object
-    // (Krark, the Thumbless; Spellchain Scatter). "that card" is NOT included —
-    // it stays on the ParentTarget arm below and is rewritten to TrackedSet when
-    // a prior sibling publishes an affected set (Sin, Spira's Punishment). Predicate
-    // continuations ("that spell is countered this way") keep ParentTarget because
-    // text remains after the noun; comma continuations ("copy that spell, and …")
-    // still name the triggering spell.
+    // CR 608.2k: Bare "that spell" defaults to the triggering spell object
+    // (Krark, the Thumbless; Spellchain Scatter). A caller that threads the parse
+    // context refines this for a non-trigger instruction via
+    // `bind_spell_anaphor_to_context` (the earlier announced target, CR 608.2c).
+    // "that card" is NOT included — it stays on the ParentTarget arm below and is
+    // rewritten to TrackedSet when a prior sibling publishes an affected set (Sin,
+    // Spira's Punishment). Predicate continuations ("that spell is countered this
+    // way") keep ParentTarget because text remains after the noun. The counter and
+    // change-targets consumers refine the binding through
+    // `bind_spell_anaphor_to_context`; the copy and gain-control consumers keep
+    // this event-source default (recorded residual, follow-up).
     if let Ok((rest_subject, _)) = tag::<_, _, OracleError<'_>>("that ").parse(lower.as_str()) {
         let original_rest = &text[lower.len() - rest_subject.len()..];
         if let Ok((after, _)) = parse_word_bounded(rest_subject, "spell") {
@@ -16114,10 +16146,45 @@ mod tests {
 
     #[test]
     fn parse_target_standalone_that_spell_is_triggering_source() {
+        // CR 608.2k: the arm's own default. Consumers that thread a non-trigger
+        // context refine it through `bind_spell_anaphor_to_context`.
         let (filter, rest, _) =
             parse_target_with_syntax("that spell", &mut ParseContext::default());
         assert_eq!(filter, TargetFilter::TriggeringSource);
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn bind_spell_anaphor_to_context_refines_only_non_trigger_contexts() {
+        let default_ctx = ParseContext::default();
+        assert_eq!(
+            bind_spell_anaphor_to_context(&default_ctx, TargetFilter::TriggeringSource),
+            TargetFilter::ParentTarget,
+            "CR 608.2c: a non-trigger instruction names its earlier announced target"
+        );
+        let trigger_ctx = ParseContext {
+            in_trigger: true,
+            ..ParseContext::default()
+        };
+        assert_eq!(
+            bind_spell_anaphor_to_context(&trigger_ctx, TargetFilter::TriggeringSource),
+            TargetFilter::TriggeringSource,
+            "CR 608.2k: a triggered ability names the event's spell object"
+        );
+        let delayed_ctx = ParseContext {
+            spell_anaphor_binding: SpellAnaphorBinding::EventSource,
+            ..ParseContext::default()
+        };
+        assert_eq!(
+            bind_spell_anaphor_to_context(&delayed_ctx, TargetFilter::TriggeringSource),
+            TargetFilter::TriggeringSource,
+            "CR 603.7 + CR 608.2k: a default-context delayed body has no parent target"
+        );
+        assert_eq!(
+            bind_spell_anaphor_to_context(&default_ctx, TargetFilter::StackSpell),
+            TargetFilter::StackSpell,
+            "only the bare anaphor binding is refined"
+        );
     }
 
     #[test]
