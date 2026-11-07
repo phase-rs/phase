@@ -2631,7 +2631,11 @@ pub fn translate_response(
                 // CR 701.43d: pay or decline the exert cost.
                 WaitingFor::ExertChoice { .. } => Ok(GameAction::ChooseExert { exert: value }),
                 // CR 118.12: pay the unless-cost or let the effect happen.
-                WaitingFor::UnlessPayment { .. } => Ok(GameAction::PayUnlessCost { pay: value }),
+                WaitingFor::UnlessPayment { cost, .. }
+                    if !engine::game::un_actions::is_timed_saying(cost) =>
+                {
+                    Ok(GameAction::PayUnlessCost { pay: value })
+                }
                 _ => Err(AdapterError::IllegalResponseForPrompt {
                     response_kind: "chooseBoolean",
                 }),
@@ -4325,14 +4329,17 @@ fn output_family_matches_upstream(
             waiting_for,
             WaitingFor::ScryChoice { .. } | WaitingFor::SurveilChoice { .. }
         ),
-        UpstreamPromptOutput::ChooseBoolean(_) => matches!(
-            waiting_for,
+        UpstreamPromptOutput::ChooseBoolean(_) => match waiting_for {
             WaitingFor::OptionalEffectChoice { .. }
-                | WaitingFor::OpponentMayChoice { .. }
-                | WaitingFor::MiracleReveal { .. }
-                | WaitingFor::ExertChoice { .. }
-                | WaitingFor::UnlessPayment { .. }
-        ),
+            | WaitingFor::OpponentMayChoice { .. }
+            | WaitingFor::MiracleReveal { .. }
+            | WaitingFor::ExertChoice { .. } => true,
+            // A timed spoken payment is offered only as a selection.
+            WaitingFor::UnlessPayment { cost, .. } => {
+                !engine::game::un_actions::is_timed_saying(cost)
+            }
+            _ => false,
+        },
         // Reachable both bespoke (discard, CR 701.9b) and generically, so the
         // bespoke match stays primary and the open-prompt check carries the rest
         // rather than a list that would rot as the engine reclassifies states.
@@ -4959,7 +4966,8 @@ mod tests {
     use engine::game::interaction::bind_interaction_authority;
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        CounterTriggerFilter, Effect, EffectKind, ResolvedAbility, TargetFilter, TriggerDefinition,
+        AbilityCost, CounterTriggerFilter, Effect, EffectKind, ResolvedAbility, TargetFilter,
+        TriggerDefinition,
     };
     use engine::types::card::LayoutKind;
     use engine::types::card_type::CoreType;
@@ -4972,6 +4980,7 @@ mod tests {
     use engine::types::identifiers::CardId;
     use engine::types::interaction::InteractionSessionId;
     use engine::types::triggers::TriggerMode;
+    use engine::types::un_actions::PhrasePace;
     use pretty_assertions::assert_eq;
 
     fn lookup(_: &GameObject) -> Option<String> {
@@ -6657,9 +6666,6 @@ mod tests {
     /// engine's exact candidates, which are the decline alone.
     #[test]
     fn a_timed_spoken_payment_offers_only_the_decline() {
-        use engine::types::ability::{AbilityCost, Effect, ResolvedAbility, TargetFilter};
-        use engine::types::un_actions::PhrasePace;
-
         let mut state = GameState::new_two_player(7);
         let source = create_object(
             &mut state,
@@ -6709,6 +6715,30 @@ mod tests {
         )
         .expect("the decline resolves back through the engine");
         assert_eq!(action, GameAction::PayUnlessCost { pay: false });
+
+        let err_true = translate_response(
+            42,
+            PromptOutput::ChooseBoolean(ChooseBooleanOutput::Decision { value: true }),
+            &prepared.prompt_context(),
+            &state,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err_true, AdapterError::IllegalResponseForPrompt { .. }),
+            "expected IllegalResponseForPrompt, got {err_true:?}"
+        );
+
+        let err_false = translate_response(
+            42,
+            PromptOutput::ChooseBoolean(ChooseBooleanOutput::Decision { value: false }),
+            &prepared.prompt_context(),
+            &state,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err_false, AdapterError::IllegalResponseForPrompt { .. }),
+            "expected IllegalResponseForPrompt, got {err_false:?}"
+        );
     }
 
     /// The `Select` half of the generic path: a subset choice, not a one-of.
