@@ -12189,6 +12189,12 @@ fn parse_effect_clause_inner_with_damage_context(
         return clause;
     }
 
+    // CR 603.2d: "if a triggered ability of that creature triggers, that ability
+    // triggers an additional time" — a resolved trigger-doubling grant.
+    if let Some(clause) = try_parse_object_trigger_doubling(tp) {
+        return clause;
+    }
+
     // CR 603.12: "When [you] <event> this way, ..." — reflexive delayed trigger
     // (Prishe's Wanderings, Rhino's Rampage). Checked before the CR 603.7b
     // "this turn" / inline delayed-trigger arms so the " this way, " reflexive
@@ -17708,6 +17714,59 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
         },
         target: tracked_set_filter(),
         grantee: Default::default(),
+    }))
+}
+
+/// CR 603.2d: "if a triggered ability of <object> triggers, that ability
+/// triggers an additional time" — the object-scoped trigger doubler a resolving
+/// ability establishes (Lwaxana Troi, Charming Guest: "Choose another target
+/// creature you control. For as long as ~ remains tapped, if a triggered
+/// ability of that creature triggers, that ability triggers an additional
+/// time."). Returns the referenced object's filter: the anaphor names the
+/// parent ability's chosen target (CR 608.2c).
+fn parse_object_trigger_doubling(lower: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, object) = delimited(
+        tag("if a triggered ability of "),
+        value(
+            TargetFilter::ParentTarget,
+            alt((tag("that creature"), tag("that permanent"), tag("it"))),
+        ),
+        tag(" triggers, "),
+    )
+    .parse(lower)?;
+    let (rest, _) = (
+        tag("that ability triggers an additional time"),
+        opt(tag(".")),
+        eof,
+    )
+        .parse(rest)?;
+    Ok((rest, object))
+}
+
+fn is_object_trigger_doubling_clause(lower: &str) -> bool {
+    parse_object_trigger_doubling(lower.trim()).is_ok()
+}
+
+/// CR 603.2d + CR 611.2a + CR 611.2c: lower the object-scoped doubler to a
+/// rule-modifying continuous effect from a resolved ability, bound to the
+/// referenced object: an unrestricted `DoubleTriggers { cause: Any }` covering
+/// that object's own triggered abilities. The engine reads it off the resolved
+/// effect (one doubler per resolution) rather than grafting it onto the object.
+/// Its duration comes from the surrounding clause ("for as long as ~ remains
+/// tapped", CR 611.2b).
+fn try_parse_object_trigger_doubling(tp: TextPair) -> Option<ParsedEffectClause> {
+    let (_, affected) = parse_object_trigger_doubling(tp.lower.trim()).ok()?;
+    let mode = StaticMode::DoubleTriggers {
+        cause: crate::types::statics::TriggerCause::Any,
+    };
+    let def = StaticDefinition::new(mode.clone())
+        .affected(affected)
+        .modifications(vec![ContinuousModification::AddStaticMode { mode }]);
+    Some(parsed_clause(Effect::GenericEffect {
+        static_abilities: vec![def],
+        duration: None,
+        target: None,
+        end_cost: None,
     }))
 }
 
@@ -47235,11 +47294,15 @@ fn parse_effect_chain_ir_body(
         // CR 608.2c: General leading conditional — "if [condition], [effect]".
         // Runs only when no dedicated leading stripper matched. Handles patterns like
         // "if you control 3 or more creatures, draw a card".
-        let (leading_cond, text) = if condition.is_none() {
-            strip_routed_leading_general_conditional(&text, ctx)
-        } else {
-            (None, text)
-        };
+        // CR 603.2d: the doubling grant's "if a triggered ability of … triggers"
+        // is the doubler's own trigger-event qualifier, not a gate on the clause;
+        // the clause parser owns the whole sentence.
+        let (leading_cond, text) =
+            if condition.is_none() && !is_object_trigger_doubling_clause(&text.to_lowercase()) {
+                strip_routed_leading_general_conditional(&text, ctx)
+            } else {
+                (None, text)
+            };
         let leading_route = leading_cond.as_ref().map(|(_, route)| *route);
         let condition = condition.or(leading_cond.map(|(condition, _)| condition));
         // CR 608.2c + CR 708.7: a generic "if you can't" rider attached to a

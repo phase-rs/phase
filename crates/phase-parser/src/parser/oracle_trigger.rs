@@ -10864,6 +10864,19 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
         person: SubjectPerson,
     ) -> OracleResult<'_, Option<TargetFilter>> {
         let (rest, _) = (tag("an "), opt(tag("activated ")), tag("ability")).parse(input)?;
+        // CR 113.7 + CR 201.2a: "of a source with the chosen name" (Kai Winn,
+        // Faithless Leader) narrows the activated source to an object whose name
+        // equals the name this permanent chose (`ChosenAttribute::CardName`). "A
+        // source" names no zone, so no zone restriction is added: an ability
+        // activated from a graveyard or hand qualifies too.
+        if let Ok((rest, filter)) = value(
+            TargetFilter::HasChosenName,
+            tag::<_, _, OracleError<'_>>(" of a source with the chosen name"),
+        )
+        .parse(rest)
+        {
+            return Ok((rest, Some(filter)));
+        }
         // CR 602.1a + CR 113.7: Optional source-object filter narrows the
         // trigger to abilities whose source matches a type filter ("of an
         // artifact or creature", "of a creature or land", "of a permanent").
@@ -14660,6 +14673,31 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
             }
         }
 
+        // CR 608.2c + CR 603.7c: the neuter pronoun "it" in a delayed damage
+        // rider created by a targeted instruction names that instruction's
+        // target ("Choose target creature. Whenever it deals combat damage to a
+        // player this turn, …" — The Inner Light; "Target Giant you control gets
+        // +2/+2 … Whenever it deals combat damage to a player this turn, …" —
+        // Fire Giant's Fury), the same referent "that creature" binds above. A
+        // self-reference is normalized to `~` before this runs, so "it" here is
+        // never the source. Guarded on the following damage verb, mirroring the
+        // gendered-pronoun arm, so other delayed shapes ("whenever it next
+        // becomes tapped") are not claimed; `rest` keeps the verb for the
+        // subject-led damage arm. If the creating instruction declared no
+        // target, `ParentTarget` binds to nothing and the delayed trigger
+        // cannot fire (fail closed).
+        if let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>("it ")).parse(text) {
+            if alt((
+                value((), tag::<_, _, OracleError<'_>>("deals ")),
+                value((), tag("deal ")),
+            ))
+            .parse(rest)
+            .is_ok()
+            {
+                return (TargetFilter::ParentTarget, rest);
+            }
+        }
+
         // Plural-set anaphora → `ParentTarget` (parser heuristic, no CR citation).
         // Compose the quantifier axis (one `alt`) with the noun axis (one `alt`), per the
         // "compose, don't enumerate permutations" convention. "those creatures" /
@@ -14957,6 +14995,26 @@ fn parse_spell_designation_adjective(i: &str) -> OracleResult<'_, FilterProp> {
         value(FilterProp::PrepareSpell, tag("prepared ")),
     ))
     .parse(i)
+}
+
+/// CR 601.2 + CR 603.2: Does a cast trigger's parsed spell filter narrow which
+/// spells qualify? A bare "a spell" folds to an unconstrained `Typed` filter and
+/// is left off `valid_card` (every spell matches). A disjunction ("instant or
+/// sorcery spell") always narrows. A conjunction carries a refinement leg the
+/// type-phrase parser attached after the type word — "a spell with the chosen
+/// name" (CR 201.2a: `And[Typed, HasChosenName]`, Kai Winn) — so it narrows
+/// whenever any leg does; dropping it would fire the trigger on every spell.
+fn spell_filter_constrains(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
+        TargetFilter::Or { .. } => true,
+        TargetFilter::And { filters } => filters.iter().any(|leg| match leg {
+            TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
+            TargetFilter::Any => false,
+            _ => true,
+        }),
+        _ => false,
+    }
 }
 
 /// CR 700.2 + CR 722.3d: re-attach the optional designation adjective peeled by
@@ -21189,13 +21247,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         } else {
             filter
         };
-        let is_meaningful = match &filter {
-            TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
-            // Or-filters are always meaningful (e.g. "instant or sorcery spell")
-            TargetFilter::Or { .. } => true,
-            _ => false,
-        };
-        if is_meaningful || spell_not_owned_by_you {
+        if spell_filter_constrains(&filter) || spell_not_owned_by_you {
             def.valid_card = Some(filter);
         }
         return Some((TriggerMode::SpellCast, def));
@@ -21312,11 +21364,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             } else {
                 let (filter, _rest) = parse_type_phrase_folding(spell_clause);
                 let filter = with_spell_designation(filter, designation);
-                let is_meaningful = match &filter {
-                    TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
-                    TargetFilter::Or { .. } => true,
-                    _ => false,
-                };
+                let is_meaningful = spell_filter_constrains(&filter);
                 let filter = if spell_not_owned_by_caster {
                     with_owner_scope(filter, ControllerRef::Opponent)
                 } else {

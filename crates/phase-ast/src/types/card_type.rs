@@ -258,6 +258,9 @@ pub const ARTIFACT_SUBTYPES: &[&str] = &[
     "Bobblehead",
     "Book",
     "Clue",
+    // Artifact type printed in Star Trek (TRK: Combadge, Starfleet Communicator);
+    // listed by MTGJSON's CardTypes catalog, newer than the CR 205.3g list.
+    "Communicator",
     "Contraption",
     "Equipment",
     "Food",

@@ -397,10 +397,8 @@ pub fn resolve_all(
     // CR 701.19a/b: a regenerated member (and any other Prevented destruction)
     // stays on the battlefield, so `departed_subset` excludes it from every
     // survivor's co-departed group.
-    crate::game::zones::mark_simultaneous_departures(
-        events,
-        &crate::game::zones::departed_subset(state, &matching),
-    );
+    let departed = crate::game::zones::departed_subset(state, &matching);
+    crate::game::zones::stamp_simultaneous_departures(state, events, &departed);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),

@@ -6417,6 +6417,7 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         // source's intervening-if recheck (CR 603.4).
         was_prepared: lki.was_prepared,
         departure: crate::types::game_state::ZoneDeparture::Moved,
+        trigger_doublers: Vec::new(),
     };
     matches_target_filter_on_zone_change_record(state, &record, filter, ctx)
 }
@@ -24527,6 +24528,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             departure: crate::types::game_state::ZoneDeparture::Moved,
+            trigger_doublers: Vec::new(),
         };
         let goblin_filter = make_subtype_filter("Goblin");
         let plains_filter = make_subtype_filter("Plains");

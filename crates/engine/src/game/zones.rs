@@ -1203,6 +1203,30 @@ fn clear_hand_or_graveyard_casting_permissions_on_exit(
     }
 }
 
+/// CR 603.10a + CR 603.2d: latch onto a battlefield departure's record the
+/// live resolved trigger-doubling effects the departing object is involved in
+/// (bound to it, or created by its ability), before exit cleanup ends them
+/// (`prune_object_bound_effects_on_exit`, CR 400.7; a source-bound duration).
+/// The bound object's leaves-the-battlefield abilities look back in time, so
+/// they still trigger the additional times those effects called for, even when
+/// the effect's source left first in the same simultaneous event.
+fn latch_departure_trigger_doublers(
+    state: &GameState,
+    record: &mut crate::types::game_state::ZoneChangeRecord,
+) {
+    if record.from_zone != Some(Zone::Battlefield) {
+        return;
+    }
+    let Some(object) = record
+        .trigger_source_context()
+        .map(|context| context.identity.reference)
+    else {
+        return;
+    };
+    record.trigger_doublers =
+        super::triggers::resolved_effect_trigger_doublers_involving(state, object);
+}
+
 /// CR 400.7: an object that moves to a new zone is a new object, so a
 /// continuous effect a resolved spell or ability bound to THIS object
 /// (`SpecificObject`) ends with it on every zone exit (issue #8795: Delay's
@@ -1759,6 +1783,7 @@ pub(crate) fn move_to_zone_with_entry_flags(
         capture_combat_status(state, object_id)
     };
     zone_change_record.sync_trigger_source_context();
+    latch_departure_trigger_doublers(state, &mut zone_change_record);
 
     let severed_attachments = sever_battlefield_attachment_graph_on_exit(state, object_id);
     // CR 730.2d + CR 111.7: for a merged permanent whose topmost component
@@ -2243,6 +2268,39 @@ pub fn mark_simultaneous_departures(events: &mut [GameEvent], group: &[ObjectId]
     }
 }
 
+/// CR 603.10a: Stamp one simultaneous departure on both views of it: the
+/// event records `events` carries (`mark_simultaneous_departures`) and the
+/// per-turn ledger rows those records were committed as
+/// (`mark_simultaneous_departure_records`), matched by each record's own
+/// per-turn index. The ledger is what a departed source's later look-back
+/// reads (`GameState::incarnation_departure_record`), so a producer that
+/// stamps only the events leaves those reads without the group.
+pub fn stamp_simultaneous_departures(
+    state: &mut GameState,
+    events: &mut [GameEvent],
+    group: &[ObjectId],
+) {
+    mark_simultaneous_departures(events, group);
+    let turn = state.turn_number;
+    let record_indices: Vec<usize> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                record,
+                ..
+            } if group.contains(object_id) && record.recorded_turn_number == turn => state
+                .zone_changes_this_turn
+                .get(record.turn_zone_change_index)
+                .filter(|row| row.object_id == *object_id)
+                .map(|_| record.turn_zone_change_index),
+            _ => None,
+        })
+        .collect();
+    mark_simultaneous_departure_records(state, &record_indices, group);
+}
+
 /// CR 603.10a: Mirror a simultaneous-departure stamp into the authoritative
 /// per-turn LKI records. A replacement-choice pause can split one logical
 /// simultaneous action across two action-result event buffers; the prior
@@ -2413,7 +2471,7 @@ pub fn departed_subset(state: &GameState, ids: &[ObjectId]) -> Vec<ObjectId> {
 /// *assigns* `co_departed` rather than merging, under-counting here *overwrites*
 /// correct groups stamped by earlier sub-sweeps, breaking the mutual-record
 /// relation the CR 603.10a observer arm requires.
-pub fn stamp_simultaneous_from_slice(state: &GameState, slice: &mut [GameEvent]) {
+pub fn stamp_simultaneous_from_slice(state: &mut GameState, slice: &mut [GameEvent]) {
     let departed: Vec<ObjectId> = slice
         .iter()
         .filter_map(|event| match event {
@@ -2425,7 +2483,7 @@ pub fn stamp_simultaneous_from_slice(state: &GameState, slice: &mut [GameEvent])
             _ => None,
         })
         .collect();
-    mark_simultaneous_departures(slice, &departed);
+    stamp_simultaneous_departures(state, slice, &departed);
 }
 
 /// CR 406.6 + CR 607.2a (issue #6437): Snapshot `source_id`'s linked exiles at
@@ -2794,6 +2852,7 @@ pub fn move_to_library_at_index(
             .unwrap_or_default(),
     );
     zone_change_record.sync_trigger_source_context();
+    latch_departure_trigger_doublers(state, &mut zone_change_record);
 
     let severed_attachments = sever_battlefield_attachment_graph_on_exit(state, object_id);
 
