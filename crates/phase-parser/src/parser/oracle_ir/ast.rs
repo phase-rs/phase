@@ -567,7 +567,10 @@ pub(crate) enum ContinuationAst {
         /// name, so the bottom count is implied rather than stored twice.
         /// Always accompanied by `rest_destination: Some(Zone::Library)`.
         /// `None` for every uniform-remainder form, including the plain
-        /// "... and the rest on the bottom of your library".
+        /// "... and the rest on the bottom of your library". The all-top
+        /// remainder form ("… and the rest on top of your library") instead
+        /// sets this to the dig's own count, which the resolver clamps to the
+        /// actual pile size (see `rest_library_position`).
         ///
         /// Boxed only to keep `clippy::large_enum_variant` satisfied:
         /// `DigFromAmong` is already this enum's largest variant, and an
@@ -579,6 +582,19 @@ pub(crate) enum ContinuationAst {
         /// `Random`; every other accepted form preserves existing behavior.
         #[serde(default)]
         rest_order: DigRestOrder,
+        /// CR 401.4 + CR 701.20e: The library POSITION the same clause names
+        /// for the remainder — `Top` for "… and the rest on top of your
+        /// library in any order" (Diabolic Vision).
+        /// `Zone::Library` alone cannot express that position — the uniform
+        /// rest route defaults to the bottom — so the patch arm turns this into
+        /// the degenerate all-top remainder split the Dig resolver already
+        /// routes (and, for a 2+ card pile, hands to the owner for the CR 401.4
+        /// arrangement). `None` (no position named) and `Some(Bottom)` keep the
+        /// uniform bottom route; only `Some(Top)` lowers to the all-top split.
+        /// Boxed only to keep `clippy::large_enum_variant` satisfied
+        /// (`LibraryPosition` carries a `QuantityExpr`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rest_library_position: Option<Box<LibraryPosition>>,
         /// CR 110.2a: Controller override for the kept cards' battlefield entry
         /// ("... onto the battlefield ... under your control"). `None` leaves
         /// them under their owner's control.
@@ -2098,12 +2114,15 @@ pub(crate) enum CostResourceImperativeAst {
     /// in the CostResource AST (DamageSource, DamageEachPlayer, etc.).
     /// The Effect is already fully constructed by try_parse_damage.
     DamageEffect(Box<Effect>),
-    /// CR 118.1: "pay {cost}" as an effect verb (mana, life, energy, …).
-    /// Carries the unified `AbilityCost` taxonomy directly (lowered to
-    /// `Effect::PayCost { cost, scale: None, .. }`); this IR path never emits a
-    /// per-object scaled mana cost.
+    /// CR 118.1: `pay {cost}` as an effect verb (mana, life, energy, …) carrying
+    /// the unified `AbilityCost`, plus the resolution-time multiplier when the
+    /// clause scales the cost by a player-chosen amount (`pay any amount of {R}`,
+    /// CR 107.1c + CR 107.3f): lowered to `Effect::PayCost { cost, scale, .. }`;
+    /// `scale` is `Some(Ref(Variable "X"))` only for that clause and `None` for
+    /// every other payment.
     Pay {
         cost: AbilityCost,
+        scale: Option<QuantityExpr>,
     },
 }
 
