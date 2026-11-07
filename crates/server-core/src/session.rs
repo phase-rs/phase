@@ -648,9 +648,29 @@ pub struct GameSession {
     /// Runtime state for the online sustained-clicking contests (Eye to Eye,
     /// Mouth to Mouth). Never persisted; see `crate::contest`.
     pub contest: crate::contest::ContestRuntime,
+    /// Payment ID of the live background expiry task for spoken payments, if one is running.
+    pub active_say_expiry_task: Option<u64>,
 }
 
 impl GameSession {
+    /// Try to claim the background expiry task for a spoken payment. Returns `true`
+    /// if this caller claimed it (no task was running for this payment), or `false`
+    /// if a task for this payment ID is already live.
+    pub fn claim_say_phrase_expiry(&mut self, payment_id: u64) -> bool {
+        if self.active_say_expiry_task == Some(payment_id) {
+            false
+        } else {
+            self.active_say_expiry_task = Some(payment_id);
+            true
+        }
+    }
+
+    /// Releases the active background expiry task claim if it matches `payment_id`.
+    pub fn release_say_phrase_expiry(&mut self, payment_id: u64) {
+        if self.active_say_expiry_task == Some(payment_id) {
+            self.active_say_expiry_task = None;
+        }
+    }
     pub fn ai_driver_fault(&self) -> Option<&AiDriverFault> {
         self.ai_driver_fault.as_ref()
     }
@@ -1727,6 +1747,7 @@ impl GameSession {
             takeback,
             deck_pools_cache: None,
             contest: Default::default(),
+            active_say_expiry_task: None,
         })
     }
 
@@ -2763,6 +2784,7 @@ impl SessionManager {
             takeback,
             deck_pools_cache: None,
             contest: Default::default(),
+            active_say_expiry_task: None,
         };
         // Seat 0 is installed the way every other seat is, through the
         // per-seat setter, rather than seeded into the struct literal.
@@ -8250,6 +8272,7 @@ mod tests {
             takeback: TakebackLedger::new(1),
             deck_pools_cache: None,
             contest: Default::default(),
+            active_say_expiry_task: None,
         };
 
         let game_started_before = session.game_started;

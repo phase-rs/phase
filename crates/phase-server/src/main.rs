@@ -569,6 +569,105 @@ fn restored_say_phrase_expiry(
         .and_then(|session| say_phrase_expiry_target(session))
 }
 
+/// Restores persisted game sessions from disk for Full mode and arms any restored
+/// spoken payment expiries.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn restore_active_full_sessions(
+    game_db: &SharedGameDb,
+    state: &SharedState,
+    lobby: &SharedLobby,
+    db: &SharedDb,
+    server_context: &ServerContext,
+    draft_sessions: &SharedDraftState,
+    connections: &SharedConnections,
+    game_spectators: &SharedGameSpectators,
+) {
+    match game_db.load_active_full_sessions() {
+        Ok(persisted_games) => {
+            let mut mgr = state.lock().await;
+            let mut lob_guard = lobby.lock().await;
+            let lob = lob_guard.lobby_mut();
+            let mut restored = 0u32;
+            // Timed spoken payments restored mid-window. Their lapse is
+            // observed on the server's clock, so it is re-armed here: a
+            // payer who never reconnects must still see it lapse.
+            let mut restored_expiries = Vec::new();
+
+            for snapshot in persisted_games {
+                // The reader already decoded this value; re-serializing it
+                // and decoding it again would drop `deck_pools`, which is
+                // `skip_serializing`, and still return `Ok`.
+                let runtime = FullRuntime {
+                    key: snapshot.key,
+                    activation_epoch: snapshot.activation_epoch,
+                };
+                let game_code = &runtime.key.game_code;
+                info!(game = %game_code, "restoring persisted session");
+                match GameSession::from_persisted(snapshot.persisted, db) {
+                    Ok(mut session) => {
+                        // The column's own string, so the first persist
+                        // after a restart re-serializes nothing.
+                        session.seed_deck_pools_encoding(snapshot.deck_pools_json);
+                        match finish_restored_full_startup(&mut mgr, game_db, &runtime, session) {
+                            Ok(RestoredFullStartup::Terminal) => {
+                                info!(game = %game_code, "terminalized restored Full session");
+                            }
+                            Ok(RestoredFullStartup::Active) => {
+                                let expiry = restored_say_phrase_expiry(&mut mgr, game_code);
+                                publish_restored_full_session(&mut mgr, lob, game_code);
+                                restored += 1;
+                                if expiry.is_some() {
+                                    restored_expiries.push((game_code.clone(), expiry));
+                                }
+                            }
+                            Err(error) => {
+                                warn!(game = %game_code, %error, "restored Full session remains private for recovery");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(game = %game_code, error = %e, "failed to restore active session; retaining fenced row for recovery");
+                    }
+                }
+            }
+
+            // Unconditional, so every boot leaves one line saying the
+            // pass ran: a restore that found nothing and a restore that
+            // could read nothing print the same count and are told apart
+            // by the warn below.
+            info!(count = restored, "restored active games from disk");
+            drop(lob_guard);
+            drop(mgr);
+            for (game_code, expiry) in restored_expiries {
+                schedule_say_phrase_expiry(
+                    expiry,
+                    &server_context.game_executor,
+                    state,
+                    db,
+                    draft_sessions,
+                    connections,
+                    game_db,
+                    game_spectators,
+                    &game_code,
+                );
+            }
+            match game_db.count_legacy_full_sessions() {
+                Ok(0) => {}
+                Ok(dropped) => warn!(
+                    count = dropped,
+                    "active games written by an earlier build cannot be restored by this one"
+                ),
+                Err(error) => {
+                    warn!(%error, "failed to count active games an earlier build wrote")
+                }
+            }
+        }
+        Err(e) => {
+            error!(error = %e, "failed to load persisted sessions");
+        }
+    }
+}
+
 async fn reserve_lobby_subscriber_slot(
     lobby_subscribers: &SharedLobbySubscribers,
     tx: &crate::socket_mailbox::Sender,
@@ -3188,92 +3287,17 @@ async fn serve() {
     // replayed — skip the restore pass entirely and let SQLite ignore the
     // stale rows until operators clean them up manually.
     if matches!(mode, ServerMode::Full) {
-        match game_db.load_active_full_sessions() {
-            Ok(persisted_games) => {
-                let mut mgr = state.lock().await;
-                let mut lob_guard = lobby.lock().await;
-                let lob = lob_guard.lobby_mut();
-                let mut restored = 0u32;
-                // Timed spoken payments restored mid-window. Their lapse is
-                // observed on the server's clock, so it is re-armed here: a
-                // payer who never reconnects must still see it lapse.
-                let mut restored_expiries = Vec::new();
-
-                for snapshot in persisted_games {
-                    // The reader already decoded this value; re-serializing it
-                    // and decoding it again would drop `deck_pools`, which is
-                    // `skip_serializing`, and still return `Ok`.
-                    let runtime = FullRuntime {
-                        key: snapshot.key,
-                        activation_epoch: snapshot.activation_epoch,
-                    };
-                    let game_code = &runtime.key.game_code;
-                    info!(game = %game_code, "restoring persisted session");
-                    match GameSession::from_persisted(snapshot.persisted, &db) {
-                        Ok(mut session) => {
-                            // The column's own string, so the first persist
-                            // after a restart re-serializes nothing.
-                            session.seed_deck_pools_encoding(snapshot.deck_pools_json);
-                            match finish_restored_full_startup(
-                                &mut mgr, &game_db, &runtime, session,
-                            ) {
-                                Ok(RestoredFullStartup::Terminal) => {
-                                    info!(game = %game_code, "terminalized restored Full session");
-                                }
-                                Ok(RestoredFullStartup::Active) => {
-                                    let expiry = restored_say_phrase_expiry(&mut mgr, game_code);
-                                    publish_restored_full_session(&mut mgr, lob, game_code);
-                                    restored += 1;
-                                    if expiry.is_some() {
-                                        restored_expiries.push((game_code.clone(), expiry));
-                                    }
-                                }
-                                Err(error) => {
-                                    warn!(game = %game_code, %error, "restored Full session remains private for recovery");
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!(game = %game_code, error = %e, "failed to restore active session; retaining fenced row for recovery");
-                        }
-                    }
-                }
-
-                // Unconditional, so every boot leaves one line saying the
-                // pass ran: a restore that found nothing and a restore that
-                // could read nothing print the same count and are told apart
-                // by the warn below.
-                info!(count = restored, "restored active games from disk");
-                drop(lob_guard);
-                drop(mgr);
-                for (game_code, expiry) in restored_expiries {
-                    schedule_say_phrase_expiry(
-                        expiry,
-                        &server_context.game_executor,
-                        &state,
-                        &db,
-                        &draft_sessions,
-                        &connections,
-                        &game_db,
-                        &game_spectators,
-                        &game_code,
-                    );
-                }
-                match game_db.count_legacy_full_sessions() {
-                    Ok(0) => {}
-                    Ok(dropped) => warn!(
-                        count = dropped,
-                        "active games written by an earlier build cannot be restored by this one"
-                    ),
-                    Err(error) => {
-                        warn!(%error, "failed to count active games an earlier build wrote")
-                    }
-                }
-            }
-            Err(e) => {
-                error!(error = %e, "failed to load persisted sessions");
-            }
-        }
+        restore_active_full_sessions(
+            &game_db,
+            &state,
+            &lobby,
+            &db,
+            &server_context,
+            &draft_sessions,
+            &connections,
+            &game_spectators,
+        )
+        .await;
 
         restore_persisted_drafts(
             &game_db,
@@ -10229,6 +10253,14 @@ pub(crate) fn schedule_say_phrase_expiry(
     let game_spectators = game_spectators.clone();
     let game_code = game_code.to_string();
     tokio::spawn(async move {
+        {
+            let Ok(mut session) = lock_session(&state, &game_code).await else {
+                return;
+            };
+            if !session.claim_say_phrase_expiry(payment_id) {
+                return;
+            }
+        }
         let mut sleep_for = Duration::from_millis(
             deadline_ms.saturating_sub(epoch_ms_at_ingress(Instant::now())) + 1,
         );
@@ -10260,8 +10292,16 @@ pub(crate) fn schedule_say_phrase_expiry(
                     break;
                 }
                 // The payment was answered, replaced, or this session retired.
-                _ => return,
+                _ => {
+                    if let Ok(mut session) = lock_session(&state, &game_code).await {
+                        session.release_say_phrase_expiry(payment_id);
+                    }
+                    return;
+                }
             }
+        }
+        if let Ok(mut session) = lock_session(&state, &game_code).await {
+            session.release_say_phrase_expiry(payment_id);
         }
         apply_say_phrase_expiry(
             &game_code,

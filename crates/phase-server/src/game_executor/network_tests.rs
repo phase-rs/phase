@@ -7361,61 +7361,39 @@ mod oversized_publication {
                 ));
 
                 // Restart: retire the live session and restore it from disk
-                // exactly as the startup pass does.
-                let row = table
-                    .app
-                    .game_db
-                    .load_active_full_sessions()
-                    .expect("load rows")
-                    .into_iter()
-                    .find(|row| row.key.game_code == code)
-                    .expect("the payment's session was persisted");
-                let expiry = {
+                // through the production startup restore pass.
+                {
                     let mut mgr = table.app.sessions.lock().await;
                     assert!(mgr.remove_game(&code));
                     mgr.reconnect.remove_game(&code);
                     let mut broker = table.app.lobby.lock().await;
                     broker.lobby_mut().unregister_game(&code);
-                    let runtime = server_core::session::FullRuntime {
-                        key: row.key.clone(),
-                        activation_epoch: row.activation_epoch,
-                    };
-                    let mut session =
-                        GameSession::from_persisted(row.persisted, &table.app.db).expect("restore");
-                    session.seed_deck_pools_encoding(row.deck_pools_json);
-                    assert!(matches!(
-                        crate::finish_restored_full_startup(
-                            &mut mgr,
-                            &table.app.game_db,
-                            &runtime,
-                            session
-                        ),
-                        Ok(crate::RestoredFullStartup::Active)
-                    ));
-                    let expiry = crate::restored_say_phrase_expiry(&mut mgr, &code);
-                    crate::publish_restored_full_session(&mut mgr, broker.lobby_mut(), &code);
-                    expiry
-                };
+                }
+                crate::restore_active_full_sessions(
+                    &table.app.game_db,
+                    &table.app.sessions,
+                    &table.app.lobby,
+                    &table.app.db,
+                    &table.app.context,
+                    &table.app.draft_sessions,
+                    &table.app.connections,
+                    &table.app.game_spectators,
+                )
+                .await;
+
+                let restored_payment_id = session_read(&table, |session| {
+                    session.state.say_payment.as_deref().map(|p| p.id)
+                })
+                .await;
                 // The restore boundary rekeys the payment, so a frame delayed
                 // from before the restart can never be taken for this one.
                 assert!(
-                    matches!(expiry, Some((P0, _, id, _)) if id != payment_id),
-                    "reach guard: the rekeyed payment is live for its payer: {expiry:?}"
+                    restored_payment_id.is_some() && restored_payment_id != Some(payment_id),
+                    "reach guard: the rekeyed payment is live for its payer: {restored_payment_id:?}"
                 );
 
                 // Only the opponent returns; the payer stays away.
                 let mut p1 = table.connect(P1).await;
-                crate::schedule_say_phrase_expiry(
-                    expiry,
-                    &table.app.context.game_executor,
-                    &table.app.sessions,
-                    &table.app.db,
-                    &table.app.draft_sessions,
-                    &table.app.connections,
-                    &table.app.game_db,
-                    &table.app.game_spectators,
-                    &code,
-                );
                 let outcome = tokio::time::timeout(Duration::from_secs(10), async {
                     loop {
                         let update = until_type(&mut p1, "StateUpdate").await;
@@ -7664,6 +7642,56 @@ mod oversized_publication {
                 .await;
                 table.server.abort();
                 outcome.expect("timely saying held before decode was processed before expiry");
+            });
+        }
+
+        #[test]
+        fn say_phrase_coalesces_redundant_expiry_tasks() {
+            run_async_test(|| async {
+                let table = NativeTable::duel().await;
+                let now = crate::epoch_ms_at_ingress(std::time::Instant::now());
+                let (state, payment_id) = toy_boat_state(Some(now + 200));
+                install(&table, state, &[]).await;
+                let _p0 = table.connect(P0).await;
+                let target = {
+                    let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                        .await
+                        .unwrap();
+                    crate::say_phrase_expiry_target(&session)
+                };
+                // Schedule multiple times for the same live payment:
+                for _ in 0..5 {
+                    crate::schedule_say_phrase_expiry(
+                        target.clone(),
+                        &table.app.context.game_executor,
+                        &table.app.sessions,
+                        &table.app.db,
+                        &table.app.draft_sessions,
+                        &table.app.connections,
+                        &table.app.game_db,
+                        &table.app.game_spectators,
+                        &table.key.game_code,
+                    );
+                }
+                // Yield so spawned task can acquire session lock and claim:
+                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+
+                // Verify that active_say_expiry_task is set to payment_id:
+                let active_task = session_read(&table, |s| s.active_say_expiry_task).await;
+                assert_eq!(active_task, Some(payment_id));
+
+                // Wait for the single coalesced task to complete expiry:
+                tokio::time::sleep(Duration::from_millis(350)).await;
+
+                let state = session_read(&table, |s| s.state.clone()).await;
+                let final_active = session_read(&table, |s| s.active_say_expiry_task).await;
+                table.server.abort();
+                assert_eq!(
+                    final_active, None,
+                    "expiry task claim released upon termination"
+                );
+                assert!(state.say_payment.is_none(), "payment expired");
             });
         }
     }
