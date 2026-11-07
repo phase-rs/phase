@@ -4826,6 +4826,200 @@ mod tests {
         .is_err());
     }
 
+    fn toy_boat_at_upkeep_runner() -> GameRunner {
+        use engine::types::counter::CounterType;
+        const TOY_BOAT_ORACLE: &str = "Cumulative upkeep\u{2014}Say \"Toy Boat\" quickly. (At the beginning of your upkeep, put an age counter on this creature, then sacrifice it unless you say \"Toy Boat\" once for each age counter on it\u{2014}without pausing between or fumbling it.)";
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Untap);
+        let toy_boat = scenario
+            .add_creature_from_oracle(P0, "Toy Boat", 3, 3, TOY_BOAT_ORACLE)
+            .with_mana_cost(ManaCost::generic(3))
+            .id();
+        scenario.with_counter(toy_boat, CounterType::Age, 1);
+        let filler = ["Filler"; 4];
+        scenario.with_library_top(P0, &filler);
+        scenario.with_library_top(P1, &filler);
+        let mut runner = scenario.build();
+        runner.state_mut().un_actions.set_enabled(P0, true);
+        runner.advance_to_upkeep();
+        runner.resolve_top();
+        runner
+    }
+
+    #[test]
+    fn say_phrase_action_is_stamped_with_server_clock_rather_than_client_instant() {
+        let (mgr, code, token0, _token1) = setup_two_player_game();
+        let runner = toy_boat_at_upkeep_runner();
+        let mut session = mgr.try_session(&code).unwrap();
+        session.state = runner.state().clone();
+        drop(session);
+
+        let forged_at_ms = 999_999_999;
+        let before = now_ms();
+        let outcome = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome(
+                &token0,
+                GameAction::SayPhrase {
+                    at_ms: forged_at_ms,
+                    seq: 1,
+                    payment: 1,
+                    report: Default::default(),
+                },
+                None,
+            );
+        let after = now_ms();
+        assert!(
+            outcome.is_ok(),
+            "say phrase action should be handled: {outcome:?}"
+        );
+
+        let session = mgr.try_session(&code).unwrap();
+        let payment = session.state.say_payment.as_ref().expect("payment exists");
+        let last_said_ms = payment.last_said_ms.expect("last_said_ms is recorded");
+        assert_ne!(
+            last_said_ms, forged_at_ms,
+            "session must overwrite forged client timestamp with server receipt time"
+        );
+        assert!(
+            last_said_ms >= before && last_said_ms <= after,
+            "server receipt time {last_said_ms} should be within [{before}, {after}]"
+        );
+    }
+
+    #[test]
+    fn approved_takeback_rekeys_say_phrase_payment() {
+        let (mgr, code, token0, _token1) = setup_two_player_game();
+        let runner = toy_boat_at_upkeep_runner();
+        let mut session = mgr.try_session(&code).unwrap();
+        session.state = runner.state().clone();
+        assert_eq!(session.state.say_payment.as_ref().unwrap().id, 1);
+        session.push_takeback_snapshot(P0);
+        drop(session);
+
+        let outcome = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome(
+                &token0,
+                GameAction::SayPhrase {
+                    at_ms: now_ms(),
+                    seq: 1,
+                    payment: 1,
+                    report: Default::default(),
+                },
+                None,
+            );
+        assert!(outcome.is_ok(), "say phrase action 1: {outcome:?}");
+        assert_eq!(
+            mgr.try_session(&code)
+                .unwrap()
+                .state
+                .say_payment
+                .as_ref()
+                .unwrap()
+                .said,
+            1
+        );
+
+        let mut session = mgr.try_session(&code).unwrap();
+        assert_eq!(
+            session.request_takeback(P0, RewindTarget::LastAction),
+            Ok(TakebackOutcome::Pending)
+        );
+        assert_eq!(
+            session.respond_takeback(P1, true),
+            Ok(TakebackOutcome::Resolved(TakebackResolution::Approved))
+        );
+
+        let current_payment_id = session.state.say_payment.as_ref().unwrap().id;
+        assert_eq!(current_payment_id, 2);
+        assert_eq!(session.state.say_payment.as_ref().unwrap().said, 0);
+        drop(session);
+
+        // Frame with payment: 1 (stale) is ignored
+        let _ = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome(
+                &token0,
+                GameAction::SayPhrase {
+                    at_ms: now_ms(),
+                    seq: 2,
+                    payment: 1,
+                    report: Default::default(),
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            mgr.try_session(&code)
+                .unwrap()
+                .state
+                .say_payment
+                .as_ref()
+                .unwrap()
+                .said,
+            0,
+            "stale payment id 1 must not advance said count"
+        );
+
+        // Frame with payment: 0 (not accepted as an alias) is ignored
+        let _ = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome(
+                &token0,
+                GameAction::SayPhrase {
+                    at_ms: now_ms(),
+                    seq: 3,
+                    payment: 0,
+                    report: Default::default(),
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            mgr.try_session(&code)
+                .unwrap()
+                .state
+                .say_payment
+                .as_ref()
+                .unwrap()
+                .said,
+            0,
+            "payment id 0 must not be accepted as an alias"
+        );
+
+        // Frame with payment: 2 (current) is accepted
+        let _ = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome(
+                &token0,
+                GameAction::SayPhrase {
+                    at_ms: now_ms(),
+                    seq: 4,
+                    payment: 2,
+                    report: Default::default(),
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            mgr.try_session(&code)
+                .unwrap()
+                .state
+                .say_payment
+                .as_ref()
+                .unwrap()
+                .said,
+            1,
+            "valid payment id 2 must advance said count"
+        );
+    }
+
     /// An approved rollback must rotate the interaction namespace as well as
     /// the precast epoch. Replaying the same action after rollback must mint a
     /// fresh successor id, so a response captured from the abandoned branch is
