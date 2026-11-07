@@ -182,7 +182,16 @@ pub enum TriggerEventKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AttackTargetFilter {
     Player,
-    Planeswalker,
+    /// CR 508.1c: "can't attack planeswalkers you control" — attacks against
+    /// planeswalkers the protected player controls. Controller-anchored (the
+    /// matcher compares against `source_controller`, never `source_owner`).
+    /// CR 205.3j: `subtype: Some(_)` narrows to planeswalkers bearing the
+    /// named subtype (a planeswalker subtype, canonicalized by
+    /// `parse_subtype`), e.g. "can't attack Jaces you control"; `None`
+    /// defends all of them.
+    Planeswalker {
+        subtype: Option<String>,
+    },
     PlayerOrPlaneswalker,
     Battle,
     /// CR 506.2 + CR 508.1a: "can't attack its owner" — the permanent may not

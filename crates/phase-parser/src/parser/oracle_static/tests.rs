@@ -30963,7 +30963,7 @@ fn combat_tax_onakke_oathkeeper_defended_planeswalker_only() {
     };
     assert_eq!(
         defended.as_ref(),
-        Some(&crate::types::triggers::AttackTargetFilter::Planeswalker),
+        Some(&crate::types::triggers::AttackTargetFilter::Planeswalker { subtype: None }),
         "Onakke Oathkeeper must defend only planeswalkers controlled by its controller",
     );
 }
@@ -30978,7 +30978,7 @@ fn planeswalker_only_defended_scope_reaches_every_static_consumer() {
         .expect("subject combat rule should parse");
     assert_eq!(
         subject.attack_defended,
-        Some(crate::types::triggers::AttackTargetFilter::Planeswalker)
+        Some(crate::types::triggers::AttackTargetFilter::Planeswalker { subtype: None })
     );
 
     let split = parse_static_line_multi(
@@ -30986,7 +30986,8 @@ fn planeswalker_only_defended_scope_reaches_every_static_consumer() {
     );
     assert!(split.iter().any(|def| {
         def.mode == StaticMode::CantAttack
-            && def.attack_defended == Some(crate::types::triggers::AttackTargetFilter::Planeswalker)
+            && def.attack_defended
+                == Some(crate::types::triggers::AttackTargetFilter::Planeswalker { subtype: None })
     }));
 
     let combined = parse_static_line_multi(
@@ -30994,7 +30995,8 @@ fn planeswalker_only_defended_scope_reaches_every_static_consumer() {
     );
     assert!(combined.iter().any(|def| {
         def.mode == StaticMode::CantAttack
-            && def.attack_defended == Some(crate::types::triggers::AttackTargetFilter::Planeswalker)
+            && def.attack_defended
+                == Some(crate::types::triggers::AttackTargetFilter::Planeswalker { subtype: None })
     }));
 }
 
@@ -31014,7 +31016,7 @@ fn mixed_case_planeswalker_only_combat_tax_preserves_scaling() {
     };
     assert_eq!(
         defended.as_ref(),
-        Some(&crate::types::triggers::AttackTargetFilter::Planeswalker)
+        Some(&crate::types::triggers::AttackTargetFilter::Planeswalker { subtype: None })
     );
 }
 
