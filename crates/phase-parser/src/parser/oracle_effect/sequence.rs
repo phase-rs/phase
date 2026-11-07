@@ -587,26 +587,53 @@ fn parse_reveal_until_matched_set_to_zone<'a>(
 /// - "put all cards revealed this way into exile"
 /// - "put the revealed cards on the bottom of your library in any order"
 fn parse_reveal_until_all_to_zone_continuation(input: &str) -> OracleResult<'_, ContinuationAst> {
+    alt((
+        parse_reveal_until_all_to_zone_standard,
+        parse_reveal_until_all_to_zone_that_player,
+    ))
+    .parse(input)
+}
+
+fn parse_reveal_until_put_verb(input: &str) -> OracleResult<'_, &str> {
+    type E<'a> = OracleError<'a>;
+    alt((tag::<_, _, E>("puts "), tag("put "))).parse(input)
+}
+
+fn parse_reveal_until_whole_pile_ref(input: &str) -> OracleResult<'_, &str> {
+    type E<'a> = OracleError<'a>;
+    alt((
+        tag::<_, _, E>("all cards revealed this way"),
+        tag("all cards revealed in this way"),
+        tag("those cards"),
+    ))
+    .parse(input)
+}
+
+fn parse_reveal_until_graveyard_destination(input: &str) -> OracleResult<'_, Zone> {
+    type E<'a> = OracleError<'a>;
+    value(
+        Zone::Graveyard,
+        alt((
+            tag::<_, _, E>(" into your graveyard"),
+            tag(" into their graveyard"),
+            tag(" into their owners' graveyards"),
+            tag(" into its owner's graveyard"),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_reveal_until_all_to_zone_standard(input: &str) -> OracleResult<'_, ContinuationAst> {
     type E<'a> = OracleError<'a>;
     let (input, _) = opt(alt((tag::<_, _, E>("then "), tag("and ")))).parse(input)?;
-    let (input, _) = alt((tag::<_, _, E>("puts "), tag("put "))).parse(input)?;
+    let (input, _) = parse_reveal_until_put_verb(input)?;
     let (input, _) = alt((
-        tag::<_, _, E>("those cards"),
-        tag("all cards revealed this way"),
-        tag("all cards revealed in this way"),
-        tag("the revealed cards"),
+        tag::<_, _, E>("the revealed cards"),
+        parse_reveal_until_whole_pile_ref,
     ))
     .parse(input)?;
     let (input, destination) = alt((
-        value(
-            Zone::Graveyard,
-            alt((
-                tag::<_, _, E>(" into your graveyard"),
-                tag(" into their graveyard"),
-                tag(" into their owners' graveyards"),
-                tag(" into its owner's graveyard"),
-            )),
-        ),
+        parse_reveal_until_graveyard_destination,
         value(
             Zone::Hand,
             alt((tag::<_, _, E>(" into your hand"), tag(" into their hand"))),
@@ -654,6 +681,28 @@ fn parse_reveal_until_all_to_zone_continuation(input: &str) -> OracleResult<'_, 
         ContinuationAst::RevealUntilAllToZone {
             destination,
             rest_order,
+        },
+    ))
+}
+
+/// CR 701.20a: Parse third-person "that player puts [whole pile] into their graveyard"
+/// continuation (Mind Funeral). Scoped to graveyard destination and whole-pile cards,
+/// excluding cards with intervening instructions like Trepanation Blade ("that player
+/// puts the revealed cards...") and Nascent Metamorph ("...on the bottom of their library...")
+/// so their pile placement does not fold ahead of intervening instructions (CR 608.2c).
+fn parse_reveal_until_all_to_zone_that_player(input: &str) -> OracleResult<'_, ContinuationAst> {
+    type E<'a> = OracleError<'a>;
+    let (input, _) = tag::<_, _, E>("that player ").parse(input)?;
+    let (input, _) = parse_reveal_until_put_verb(input)?;
+    let (input, _) = parse_reveal_until_whole_pile_ref(input)?;
+    let (input, destination) = parse_reveal_until_graveyard_destination(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    let (input, _) = eof(input)?;
+    Ok((
+        input,
+        ContinuationAst::RevealUntilAllToZone {
+            destination,
+            rest_order: DigRestOrder::Preserve,
         },
     ))
 }
@@ -6977,8 +7026,8 @@ pub(super) fn apply_clause_continuation(
         // CR 701.20a: "puts those cards into [zone]" / "put all cards revealed this way
         // into [zone]" — both the matching card and the non-matching cards go to the
         // same zone. Resolves back to the nearest DigOrRevealUntil antecedent via env
-        // so that intervening transparent instructions (such as Pump on Erratic Mutation
-        // or DealDamage on Explosive Revelation) do not block destination patching.
+        // so that intervening instructions (such as Pump on Erratic Mutation) still
+        // bind the placement to that reveal's pile.
         ContinuationAst::RevealUntilAllToZone {
             destination,
             rest_order,
@@ -6995,18 +7044,13 @@ pub(super) fn apply_clause_continuation(
                 .or_else(|| defs.len().checked_sub(1));
             if let Some(target_idx) = target_idx {
                 // CR 608.2c: instructions are followed in the order written. When
-                // another instruction sits between the reveal and this pile
-                // placement (Goblin Charbelcher's damage), folding the placement
-                // into the reveal would move the pile BEFORE that instruction.
-                // Leave the cards where the reveal found them and emit the
-                // placement as a later chain instruction over the revealed set.
-                // Scoped to an intervening damage instruction: damage is the
-                // replaceable event whose replacement effects (CR 615.5) act on the
-                // revealed cards before the placement.
-                let intervening_damage = defs[target_idx + 1..]
-                    .iter()
-                    .any(super::def_is_damage_dealer);
-                if intervening_damage && defs[target_idx].sub_ability.is_none() {
+                // any instruction sits between the reveal and this pile placement
+                // (Goblin Charbelcher's damage, Erratic Mutation's pump, a Draw),
+                // folding the placement into the reveal would move the pile BEFORE
+                // that instruction. Leave the cards where the reveal found them and
+                // emit the placement as a later chain instruction over the revealed set.
+                let has_intervening_instruction = target_idx + 1 < defs.len();
+                if has_intervening_instruction && defs[target_idx].sub_ability.is_none() {
                     if let Effect::RevealUntil {
                         matched_disposition,
                         ..

@@ -45800,6 +45800,285 @@ fn reveal_until_puts_those_cards_to_graveyard() {
     );
 }
 
+/// CR 701.20a: Mind Funeral — "Target opponent reveals cards from the top of their
+/// library until four land cards are revealed. That player puts all cards revealed
+/// this way into their graveyard."
+///
+/// Passive-voice reveal-until with count > 1 ("until four land cards are revealed")
+/// and third-person continuation ("That player puts all cards revealed this way into their graveyard").
+#[test]
+fn reveal_until_passive_count_mind_funeral() {
+    let def = parse_effect_chain(
+        "Target opponent reveals cards from the top of their library until four land cards are revealed. That player puts all cards revealed this way into their graveyard.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        player,
+        filter,
+        count,
+        kept_destination,
+        rest_destination,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+
+    assert!(
+        matches!(
+            player,
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::Opponent),
+                ..
+            })
+        ),
+        "expected opponent player filter, got: {player:?}"
+    );
+    assert!(
+        matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter { type_filters, .. })
+                if type_filters.contains(&TypeFilter::Land)
+        ),
+        "expected land filter, got: {filter:?}"
+    );
+    assert_eq!(*count, QuantityExpr::Fixed { value: 4 });
+    assert_eq!(*kept_destination, Zone::Graveyard);
+    assert_eq!(*rest_destination, Zone::Graveyard);
+}
+
+/// CR 608.2c / CR 701.20a: Trepanation Blade — "Whenever equipped creature attacks,
+/// defending player reveals cards from the top of their library until they reveal a
+/// land card. The creature gets +1/+0 until end of turn for each card revealed this way.
+/// That player puts the revealed cards into their graveyard.\nEquip {2}"
+///
+/// Because an intervening instruction ("The creature gets +1/+0...") sits between the
+/// reveal and the pile placement, "That player puts the revealed cards..." must NOT fold
+/// into RevealUntil's destination (which would move the cards before the intermediate
+/// instruction executes, violating CR 608.2c order of instructions).
+#[test]
+fn reveal_until_trepanation_blade_does_not_fold_across_intervening_instruction() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Whenever equipped creature attacks, defending player reveals cards from the top of their library until they reveal a land card. The creature gets +1/+0 until end of turn for each card revealed this way. That player puts the revealed cards into their graveyard.\nEquip {2}",
+        "Trepanation Blade",
+        &[],
+        &["Artifact".to_string()],
+        &["Equipment".to_string()],
+    );
+    assert_eq!(parsed.triggers.len(), 1);
+    let trigger = &parsed.triggers[0];
+    let exec = trigger.execute.as_ref().expect("trigger execute");
+    let Effect::RevealUntil {
+        kept_destination,
+        rest_destination,
+        ..
+    } = &*exec.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", exec.effect);
+    };
+    assert_eq!(*kept_destination, Zone::Hand);
+    assert_eq!(*rest_destination, Zone::Library);
+}
+
+/// CR 608.2c / CR 701.20a: Nascent Metamorph — "Whenever this creature attacks or
+/// blocks, target opponent reveals cards from the top of their library until they
+/// reveal a creature card. This creature becomes a copy of that card until end of turn.
+/// Then that player puts all cards revealed this way on the bottom of their library in a random order."
+///
+/// Because an intervening instruction ("This creature becomes a copy...") sits between
+/// the reveal and the pile placement, "Then that player puts..." must NOT fold into
+/// RevealUntil's destination (CR 608.2c).
+#[test]
+fn reveal_until_nascent_metamorph_does_not_fold_across_intervening_instruction() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Whenever this creature attacks or blocks, target opponent reveals cards from the top of their library until they reveal a creature card. This creature becomes a copy of that card until end of turn. Then that player puts all cards revealed this way on the bottom of their library in a random order.",
+        "Nascent Metamorph",
+        &[],
+        &["Creature".to_string()],
+        &["Shapeshifter".to_string()],
+    );
+    assert_eq!(parsed.triggers.len(), 1);
+    let trigger = &parsed.triggers[0];
+    let exec = trigger.execute.as_ref().expect("trigger execute");
+    let Effect::RevealUntil {
+        kept_destination, ..
+    } = &*exec.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", exec.effect);
+    };
+    assert_eq!(*kept_destination, Zone::Hand);
+}
+
+/// CR 608.2c / CR 701.20a: Thought Dissector — "{X}, {T}: Target opponent reveals
+/// cards from the top of their library until an artifact card or X cards are revealed,
+/// whichever comes first. If an artifact card is revealed this way, put it onto the
+/// battlefield under your control and sacrifice this artifact. Put the rest of the
+/// revealed cards into that player's graveyard."
+///
+/// Compound stopping conditions ("until an artifact card or X cards are revealed,
+/// whichever comes first") cannot be represented by RevealUntil (which accepts only
+/// a single stopping filter/count and would drop the "or X cards" second condition).
+/// The passive reveal-until parser must reject this compound condition, failing closed
+/// as Effect::Unimplemented rather than falling into a partial RevealTop execution.
+#[test]
+fn reveal_until_passive_compound_stopping_rejected_thought_dissector() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "{X}, {T}: Target opponent reveals cards from the top of their library until an artifact card or X cards are revealed, whichever comes first. If an artifact card is revealed this way, put it onto the battlefield under your control and sacrifice this artifact. Put the rest of the revealed cards into that player's graveyard.",
+        "Thought Dissector",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1, "expected 1 activated ability");
+    let ability = &parsed.abilities[0];
+    assert_eq!(ability.kind, AbilityKind::Activated);
+
+    // Positive reach guard: cost is {X}, {T}
+    assert!(
+        matches!(
+            &ability.cost,
+            Some(AbilityCost::Composite { costs }) if costs.len() == 2
+        ),
+        "expected composite cost {{X}}, {{T}}, got {:?}",
+        ability.cost
+    );
+
+    // Compound reveal-until must NOT parse as RevealUntil (which would drop "or X cards")
+    assert!(
+        !matches!(&*ability.effect, Effect::RevealUntil { .. }),
+        "compound reveal-until must not be accepted by single-condition RevealUntil"
+    );
+
+    // Fail closed: must return Effect::Unimplemented for the unsupported compound stopping condition
+    assert!(
+        matches!(&*ability.effect, Effect::Unimplemented { .. }),
+        "expected Effect::Unimplemented for compound reveal-until, got {:?}",
+        ability.effect
+    );
+}
+
+/// CR 701.20a: Passive-voice reveal-until with article-prefixed disjuncts
+/// ("until a creature or a land card is revealed") must build the supported
+/// TargetFilter::Or rather than mis-classifying "a land" as a compound count.
+#[test]
+fn reveal_until_passive_disjunctive_filter_with_articles() {
+    let def = parse_effect_chain(
+        "Target opponent reveals cards from the top of their library until a creature or a land card is revealed, then puts those cards into their graveyard.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        count,
+        filter,
+        kept_destination,
+        rest_destination,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+    assert_eq!(*kept_destination, Zone::Graveyard);
+    assert_eq!(*rest_destination, Zone::Graveyard);
+
+    let TargetFilter::Or { filters } = filter else {
+        panic!("expected TargetFilter::Or, got {:?}", filter);
+    };
+    assert_eq!(filters.len(), 2);
+    assert!(
+        matches!(
+            &filters[0],
+            TargetFilter::Typed(TypedFilter { type_filters, .. })
+                if type_filters.contains(&TypeFilter::Creature)
+        ),
+        "expected creature filter in disjunct 0, got {:?}",
+        filters[0]
+    );
+    assert!(
+        matches!(
+            &filters[1],
+            TargetFilter::Typed(TypedFilter { type_filters, .. })
+                if type_filters.contains(&TypeFilter::Land)
+        ),
+        "expected land filter in disjunct 1, got {:?}",
+        filters[1]
+    );
+}
+
+/// CR 608.2c / CR 701.20a: Compound stopping conditions with spelled or numeric counts
+/// ("until a creature card or two cards are revealed") must fail closed as Effect::Unimplemented.
+#[test]
+fn reveal_until_passive_compound_stopping_rejected_counted_variants() {
+    for text in [
+        "Target opponent reveals cards from the top of their library until a creature card or two cards are revealed.",
+        "Target opponent reveals cards from the top of their library until a creature card or 5 cards are revealed.",
+        // A counted disjunct that also carries a card filter has its own threshold.
+        "Target opponent reveals cards from the top of their library until a land card or two creature cards are revealed.",
+        "Target opponent reveals cards from the top of their library until four cards or a land card are revealed.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::Unimplemented { name, .. } if name == "compound_reveal_until"
+            ),
+            "expected Effect::Unimplemented(compound_reveal_until) for {text}, got {:?}",
+            def.effect
+        );
+    }
+}
+
+/// CR 608.2c / CR 701.20a: An intervening instruction (such as Draw) between RevealUntil
+/// and whole-pile placement must preserve the placement as a separate SequentialSibling
+/// instruction rather than folding it into RevealUntil.
+#[test]
+fn reveal_until_all_to_zone_does_not_fold_across_intervening_draw() {
+    let def = parse_effect_chain(
+        "Reveal cards from the top of your library until you reveal a land card. That player draws a card. Put the revealed cards into your graveyard.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        matched_disposition,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    assert_eq!(
+        *matched_disposition,
+        RevealUntilDisposition::RevealOnly,
+        "RevealUntil must retain RevealOnly disposition when intervening instruction exists"
+    );
+
+    let draw = def
+        .sub_ability
+        .as_ref()
+        .expect("expected chained draw sub-ability");
+    assert!(
+        matches!(&*draw.effect, Effect::Draw { .. }),
+        "expected Draw effect, got {:?}",
+        draw.effect
+    );
+
+    let placement = draw
+        .sub_ability
+        .as_ref()
+        .expect("expected sequential sibling placement sub-ability");
+    assert_eq!(placement.sub_link, SubAbilityLink::SequentialSibling);
+    assert!(
+        matches!(
+            &*placement.effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Library),
+                destination: Zone::Graveyard,
+                target: TargetFilter::LastRevealed,
+                ..
+            }
+        ),
+        "expected ChangeZoneAll placement, got {:?}",
+        placement.effect
+    );
+}
+
 /// CR 701.20a: Treasure Hunt — "then put all cards revealed this way into your hand."
 /// The entire revealed pile goes to hand (kept_destination=Hand, rest_destination=Hand).
 #[test]
@@ -46841,10 +47120,9 @@ fn reveal_until_rest_pile_after_intervening_damage_is_absorbed() {
 
 /// CR 701.20a + CR 608.2c + CR 401.4: Erratic Mutation has a pump instruction between
 /// the RevealUntil and "Put all cards revealed this way on the bottom of your library in any order."
-/// The entire revealed pile (matching nonland card + preceding lands) goes to the bottom of the library
-/// (kept_destination=Library, rest_destination=Library); CR 401.4 lets its owner arrange that pile.
-/// The placement clause must be absorbed into
-/// RevealUntil, NOT emitted as a trailing PutAtLibraryPosition sibling that prompts for a second target.
+/// The entire revealed pile (matching nonland card + preceding lands) goes to the bottom of the library;
+/// CR 401.4 lets its owner arrange that pile. Because the pump is written between them, the placement
+/// stays a later ChangeZoneAll over the revealed cards rather than folding into RevealUntil.
 #[test]
 fn reveal_until_all_cards_revealed_this_way_erratic_mutation() {
     let def = parse_effect_chain(
@@ -46864,17 +47142,13 @@ fn reveal_until_all_cards_revealed_this_way_erratic_mutation() {
         .as_ref()
         .expect("TargetOnly head must chain into RevealUntil");
     let Effect::RevealUntil {
-        kept_destination,
-        rest_destination,
-        rest_order,
+        matched_disposition,
         ..
     } = &*reveal.effect
     else {
         panic!("expected RevealUntil, got {:?}", reveal.effect);
     };
-    assert_eq!(*kept_destination, Zone::Library);
-    assert_eq!(*rest_destination, Zone::Library);
-    assert_eq!(*rest_order, DigRestOrder::PlayerChoice);
+    assert_eq!(*matched_disposition, RevealUntilDisposition::RevealOnly);
 
     let pump = reveal
         .sub_ability
@@ -46909,11 +47183,27 @@ fn reveal_until_all_cards_revealed_this_way_erratic_mutation() {
             }),
         })
     );
+    let placement = pump
+        .sub_ability
+        .as_ref()
+        .expect("pump must chain into the whole-pile placement");
+    assert_eq!(placement.sub_link, SubAbilityLink::SequentialSibling);
     assert!(
-        pump.sub_ability.is_none(),
-        "all-revealed-cards placement must be absorbed by RevealUntil, not emitted as {:?}",
-        pump.sub_ability
+        matches!(
+            &*placement.effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Library),
+                destination: Zone::Library,
+                target: TargetFilter::LastRevealed,
+                library_position: Some(LibraryPosition::Bottom),
+                random_order: false,
+                ..
+            }
+        ),
+        "expected bottom-of-library ChangeZoneAll placement, got {:?}",
+        placement.effect
     );
+    assert!(placement.sub_ability.is_none());
 }
 
 /// CR 701.24a: A trailing shuffle instruction after RevealUntil must be emitted
