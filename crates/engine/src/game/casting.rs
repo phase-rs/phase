@@ -31878,6 +31878,29 @@ pub(crate) fn capture_target_facts(
         .collect()
 }
 
+/// CR 115.1 + CR 601.2c + CR 400.7: latch the spell's just-declared targets onto
+/// its own `PendingCast`, at the shared target-declaration→payment boundary —
+/// the last moment before CR 601.2h moves anything. The latch is the cast's
+/// answer for the CR 601.2i history write; every later reader prefers it over a
+/// fresh raw-id capture, because a cost that moves a target (the ordinary
+/// return-to-hand additional cost, Bone Splinters' sacrifice) makes the same
+/// storage id a different object whose printed baseline CR 400.7 restores on the
+/// zone change. First capture wins: a spell declares its targets once, and a
+/// continuation that re-enters the boundary must not restate them from the
+/// moved object.
+pub(crate) fn latch_committed_target_facts(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    pending: &mut PendingCast,
+) {
+    if pending.committed_target_facts.is_none() {
+        pending.committed_target_facts = Some(capture_target_facts(
+            state,
+            &declared_targets_in_chain(ability),
+        ));
+    }
+}
+
 /// [`capture_activation_record`] from an ability definition and its committed
 /// targets.
 pub(crate) fn capture_activation_record_from(

@@ -27,6 +27,24 @@
 //! sacrifices inside the paying frame, and manual payment parks the cast on the
 //! `ManaPayment` prompt and resumes it, which is the re-entry path that used to
 //! recapture after the sacrifice.
+//!
+//! **Devour in Flames** is the ORDINARY return-to-hand arm of the same class:
+//! `{2}{R}` for "As an additional cost to cast this spell, return a land you
+//! control to its owner's hand. / Devour in Flames deals 5 damage to target
+//! creature or planeswalker." Returning the very land it targets is legal and is
+//! the cheapest way to pay, and the pair below disagrees on the type axis for the
+//! same reason the sacrifice pair does — but through the hand, not the graveyard:
+//!
+//! * **Dryad Arbor**'s printed type line is "Land Creature — Forest Dryad", so
+//!   after being returned it is still a Creature in hand and a post-payment
+//!   re-read happens to agree.
+//! * **Mishra's Factory** returned the same way reverts to its printed "Land" and
+//!   is no longer a creature, so a re-read records a non-creature for a cast
+//!   whose announced target was a 2/2 artifact creature.
+//!
+//! The return-to-hand path moves the target *before* the payment frame resumes,
+//! so it is the path on which an unlatched capture cannot be correct by accident
+//! for both witnesses.
 
 use engine::game::filter::{spell_record_matches_filter, FilterContext};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -413,5 +431,237 @@ fn a_persisted_first_cast_sacrifice_pause_keeps_its_announced_targets_or_is_refu
     assert!(
         record_answers_targets_a_creature(restored.state(), spell),
         "the resumed save's record answers `targets a creature`"
+    );
+}
+
+const DEVOUR_IN_FLAMES: &str =
+    "As an additional cost to cast this spell, return a land you control to its owner's hand.\nDevour in Flames deals 5 damage to target creature or planeswalker.";
+
+/// Dryad Arbor's mana ability, which its printed reminder text states verbatim as
+/// `"{T}: Add {G}."`. Its printed type line — "Land Creature — Forest Dryad" — is
+/// half of what makes it a witness: it is a legal "land you control" to return and
+/// a legal "target creature" at the same time.
+const DRYAD_ARBOR: &str = "{T}: Add {G}.";
+
+fn devour_in_flames(sc: &mut GameScenario) -> ObjectId {
+    sc.add_spell_to_hand_from_oracle(P0, "Devour in Flames", false, DEVOUR_IN_FLAMES)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 2,
+        })
+        .id()
+}
+
+/// Give Dryad Arbor its printed Land half. `add_creature_from_oracle` supplies
+/// the Creature half (type, power, toughness); the engine's other Dryad-Arbor
+/// fixtures complete the printed type line the same way.
+fn add_printed_land_type(runner: &mut GameRunner, land: ObjectId) {
+    let arbor = runner
+        .state_mut()
+        .objects
+        .get_mut(&land)
+        .expect("reach: the Dryad Arbor fixture exists");
+    arbor.card_types.core_types.push(CoreType::Land);
+    arbor.base_card_types = arbor.card_types.clone();
+}
+
+/// CR 601.2c + CR 601.2h: announce Devour in Flames, announce `land` as its
+/// target through the public `SelectTargets` prompt, then pay the additional
+/// cost by returning that same land through the public `SelectCards` prompt.
+/// Mana is supplied up front so the return is the only cost prompt. Returns the
+/// prompts the announcement answered, in order.
+fn cast_devour_returning_its_target(
+    runner: &mut GameRunner,
+    spell: ObjectId,
+    land: ObjectId,
+) -> Vec<String> {
+    cast(runner, spell, CastPaymentMode::Auto);
+    let prompts = drive_to_priority(runner, land, land);
+    assert!(
+        prompts.iter().any(|prompt| prompt == "TargetSelection"),
+        "reach guard: the target was announced through the public `SelectTargets` prompt; \
+         prompts {prompts:?}"
+    );
+    assert!(
+        prompts.iter().any(|prompt| prompt == "PayCost"),
+        "reach guard: the return-to-hand additional cost was paid through the public \
+         `SelectCards` prompt; prompts {prompts:?}"
+    );
+    assert_eq!(
+        runner.state().objects[&land].zone,
+        Zone::Hand,
+        "reach guard: the additional cost returned the targeted land to its owner's hand \
+         before the cast finished; prompts {prompts:?}"
+    );
+    assert!(
+        recorded_cast(runner.state(), spell)
+            .declared_targets()
+            .len()
+            == 1,
+        "reach guard: the committed cast declared exactly one target"
+    );
+    prompts
+}
+
+/// What the cast history says about one returned-land witness.
+struct RecordedReturnedTarget {
+    /// The recorded target's type line, as the record latched it.
+    types: Vec<CoreType>,
+    /// `FilterProp::Targets { Typed(Creature) }` — the shape Head of the Class's
+    /// first-spell gate carries over the spell history.
+    answers_targets_a_creature: bool,
+}
+
+/// Run one Devour in Flames witness end to end and read back what the cast
+/// history recorded for it.
+fn devour_witness(kind: ReturnedLand) -> RecordedReturnedTarget {
+    let mut sc = board();
+    let land = match kind {
+        ReturnedLand::DryadArbor => sc
+            .add_creature_from_oracle(P0, "Dryad Arbor", 1, 1, DRYAD_ARBOR)
+            .id(),
+        ReturnedLand::AnimatedFactory => sc
+            .add_land_from_oracle(P0, "Mishra's Factory", MISHRA_S_FACTORY)
+            .id(),
+    };
+    let spell = devour_in_flames(&mut sc);
+    // A second legal target (an opponent's creature) keeps the engine from
+    // auto-selecting the only one, so the caster really announces the land
+    // through the public `SelectTargets` prompt.
+    sc.add_creature(P1, "Grizzly Bears", 2, 2);
+    // CR 601.2h: mana is supplied separately so the additional cost is the only
+    // thing the cast has to ask for. An animated Factory also owes the `{1}`
+    // animation below, hence the fourth unit.
+    sc.with_mana_pool(
+        P0,
+        pool(&[
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Red,
+        ]),
+    );
+    let mut runner = sc.build();
+
+    match kind {
+        ReturnedLand::DryadArbor => add_printed_land_type(&mut runner, land),
+        ReturnedLand::AnimatedFactory => {
+            // CR 613.1d: the printed `{1}` animation's AddType Creature applies in
+            // layer 4, so it becomes a 2/2 artifact creature while its own "It's
+            // still a land." keeps the Land type.
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: land,
+                    ability_index: 1,
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .expect("reach: Mishra's Factory activates its animation");
+            settle_stack(&mut runner);
+        }
+    }
+    assert!(
+        runner.state().objects[&land]
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature),
+        "reach guard ({}): the announced target is a creature",
+        kind.label()
+    );
+
+    cast_devour_returning_its_target(&mut runner, spell, land);
+
+    // Anti-vacuity: once the cost has returned it, the card's own type line no
+    // longer says creature for the animated Factory, so the recorded fact can
+    // only come from the announcement-time latch.
+    if kind == ReturnedLand::AnimatedFactory {
+        assert!(
+            !runner.state().objects[&land]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "anti-vacuity: the returned card is no longer a creature, so a \
+             post-payment raw-id capture would record Land"
+        );
+    }
+
+    let fact = declared_object_fact(runner.state(), spell);
+    RecordedReturnedTarget {
+        types: fact_core_types(&fact),
+        answers_targets_a_creature: record_answers_targets_a_creature(runner.state(), spell),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ReturnedLand {
+    DryadArbor,
+    AnimatedFactory,
+}
+
+impl ReturnedLand {
+    fn label(self) -> &'static str {
+        match self {
+            ReturnedLand::DryadArbor => "Dryad Arbor",
+            ReturnedLand::AnimatedFactory => "animated Mishra's Factory",
+        }
+    }
+}
+
+/// Printed Dryad Arbor reads "Land Creature — Forest Dryad", so returning it
+/// leaves it a creature in hand: the witness a coincidentally-correct re-read
+/// cannot tell apart from a latched one.
+#[test]
+fn devour_in_flames_records_a_returned_dryad_arbor_as_the_creature_it_was() {
+    let recorded = devour_witness(ReturnedLand::DryadArbor);
+    assert!(
+        recorded.types.contains(&CoreType::Creature),
+        "Dryad Arbor: the record keeps the announced creature: {:?}",
+        recorded.types
+    );
+    assert!(
+        recorded.answers_targets_a_creature,
+        "Dryad Arbor: the record answers `targets a creature`"
+    );
+}
+
+/// An animated Mishra's Factory returned as Devour in Flames' own additional
+/// cost reverts to its printed "Land" type line the moment it leaves the
+/// battlefield. The record must keep the creature the caster announced.
+#[test]
+fn devour_in_flames_records_a_returned_animated_factory_as_the_creature_it_was() {
+    let recorded = devour_witness(ReturnedLand::AnimatedFactory);
+    assert!(
+        recorded.types.contains(&CoreType::Creature),
+        "animated Mishra's Factory: the record keeps the selection-time creature the \
+         caster announced, not the returned card's printed type line: {:?}",
+        recorded.types
+    );
+    assert!(
+        recorded.answers_targets_a_creature,
+        "animated Mishra's Factory: the record answers `targets a creature`, which is \
+         what Head of the Class's first-spell gate counts"
+    );
+}
+
+/// CR 115.1 + CR 115.9: the two returned creature lands are the same declared
+/// fact — "this cast targeted a creature" — so the history query must answer them
+/// alike. A capture taken after the return splits them: Dryad Arbor keeps its
+/// printed creature type in hand, the Factory does not.
+#[test]
+fn devour_in_flames_answers_the_targets_a_creature_query_alike_for_both_returned_lands() {
+    let dryad = devour_witness(ReturnedLand::DryadArbor);
+    let factory = devour_witness(ReturnedLand::AnimatedFactory);
+    assert_eq!(
+        dryad.answers_targets_a_creature,
+        factory.answers_targets_a_creature,
+        "the history query answers the two declared creature targets alike: \
+         Dryad Arbor {:?} (types {:?}) vs animated Mishra's Factory {:?} (types {:?})",
+        dryad.answers_targets_a_creature,
+        dryad.types,
+        factory.answers_targets_a_creature,
+        factory.types
+    );
+    assert!(
+        dryad.answers_targets_a_creature,
+        "both returned creature lands answer `targets a creature`"
     );
 }

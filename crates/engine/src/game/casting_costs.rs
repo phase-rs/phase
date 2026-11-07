@@ -8505,6 +8505,19 @@ pub(super) fn finish_pending_cast_cost_or_pay(
             player,
         );
     }
+    // CR 115.1 + CR 601.2c + CR 400.7: this is the shared target-declaration →
+    // payment boundary — every route that finishes announcing targets for a spell
+    // funnels through here, and no cost has been paid yet (CR 601.2h). Latch what
+    // was announced now, while the targets are still the objects the caster
+    // chose: an additional cost that moves one of them (the ordinary
+    // return-to-hand cost returning the land it also targets) makes the same
+    // storage id a new object whose printed baseline the zone change restores,
+    // so a capture taken later would describe the moved card instead of the
+    // announced target. A cast whose targets are still deferred has not declared
+    // anything yet and latches on the pass that follows its declaration.
+    if pending.activation_ability_index.is_none() && !pending.deferred_target_selection {
+        super::casting::latch_committed_target_facts(state, &ability, &mut pending);
+    }
     pending.ability = Box::new(ability);
     pending.cost = cost;
     // If an optional additional cost was already decided (paid or declined) in the
@@ -13061,6 +13074,13 @@ pub(super) fn can_pay_jumpstart_additional_cost(
 /// exploded parameters has to be carried here, or the probe silently drops its
 /// contribution from the locked total. Build it with
 /// [`CostLockInput::from_pending`] whenever a real `PendingCast` is in hand.
+///
+/// This is also the pipeline's one carrier for a `PendingCast` fact that the
+/// rebuild must not lose even though no total depends on it — see
+/// [`Self::committed_target_facts`]. Every rebuild site in the payment pipeline
+/// funnels through [`Self::apply_to`], so a fact placed here survives the whole
+/// exploded-parameter chain by construction rather than by remembering to add a
+/// parameter at each hop.
 #[derive(Debug, Clone, Default)]
 pub(super) struct CostLockInput {
     /// CR 601.2b + CR 601.2f: the mana components of additional costs already
@@ -13081,18 +13101,29 @@ pub(super) struct CostLockInput {
     /// re-analyze", which is what keeps the resume from prompting forever.
     pub election: Option<CostReductionElection>,
     pub alternative_cost_election: crate::types::game_state::SpellAlternativeCostElection,
+    /// CR 115.1 + CR 601.2c + CR 400.7: the announced-target latch
+    /// (`PendingCast::committed_target_facts`), captured at the shared
+    /// declaration→payment boundary and carried across every rebuild so the
+    /// CR 601.2i history write records the targets the caster announced rather
+    /// than the objects that later share their storage ids. It is `None` on a
+    /// cast that has not declared its targets yet (a deferred declaration pays
+    /// its costs first) and on the test-only `Default` carrier; the boundary
+    /// that declares them is what fills it.
+    pub committed_target_facts: Option<Vec<crate::types::game_state::ActivationTargetFact>>,
 }
 
 impl CostLockInput {
     /// Carry a live cast's cost-determination state into the seam. Use this in
     /// preference to building the struct field-by-field: it is the single place
-    /// a newly added `PendingCast` cost input has to be wired up.
+    /// a newly added `PendingCast` field this carrier must preserve has to be
+    /// wired up.
     pub(super) fn from_pending(pending: &PendingCast) -> Self {
         Self {
             declared_mana_additions: pending.declared_mana_additions.clone(),
             accepted: pending.accepted_cost_reductions.clone(),
             election: pending.cost_reduction_election.clone(),
             alternative_cost_election: pending.alternative_cost_election,
+            committed_target_facts: pending.committed_target_facts.clone(),
         }
     }
 
@@ -13100,7 +13131,8 @@ impl CostLockInput {
     /// builds from exploded fields, so the cast that is stashed in
     /// `state.pending_cast` can still recompute its own total (CR 601.2f) —
     /// the `{X}` re-derivation in `apply_post_x_cost_modifiers` reads exactly
-    /// these fields.
+    /// these fields — and still reach the CR 601.2i history write with the
+    /// targets it announced.
     fn apply_to(&self, pending: &mut PendingCast) {
         pending
             .declared_mana_additions
@@ -13108,6 +13140,9 @@ impl CostLockInput {
         pending.accepted_cost_reductions.clone_from(&self.accepted);
         pending.cost_reduction_election.clone_from(&self.election);
         pending.alternative_cost_election = self.alternative_cost_election;
+        pending
+            .committed_target_facts
+            .clone_from(&self.committed_target_facts);
     }
 }
 
@@ -13428,22 +13463,31 @@ fn finalize_cast_pre_payment_checks(
     casting_variant: CastingVariant,
     casting_permission_index: Option<CastingPermissionIndex>,
     cast_timing_permission: Option<CastTimingPermission>,
+    committed_target_facts: Option<Vec<crate::types::game_state::ActivationTargetFact>>,
     events: &mut Vec<GameEvent>,
 ) -> Result<FinalizePrePaymentChecks, EngineError> {
-    // CR 115.1 + CR 601.2c + CR 400.7: latch the declared targets HERE, once,
-    // before this frame pays any cost. `FinalizePrePaymentChecks` is the carrier
-    // every parked payment continuation re-enters with, so the CR 601.2i write
-    // reads selection-time facts even when the cast suspends on an additional-cost
-    // move that removes a target (Bone Splinters sacrificing the creature it also
+    // CR 115.1 + CR 601.2c + CR 400.7: the declared-target facts for the CR 601.2i
+    // write. `committed_target_facts` is the latch the shared declaration→payment
+    // boundary already took (`finish_pending_cast_cost_or_pay`) and that the
+    // payment pipeline carried here — it is the authority whenever it exists, and
+    // it MUST be, because on a resumed continuation this frame runs after CR 601.2h
+    // has already moved the cost's objects. The capture below is only for a cast
+    // that reached payment without passing that boundary; it is the pre-payment
+    // moment for every route that takes it. `FinalizePrePaymentChecks` is then the
+    // carrier every parked payment continuation re-enters with, so the write reads
+    // selection-time facts even when the cast suspends on an additional-cost move
+    // that removes a target (Bone Splinters sacrificing the creature it also
     // targets). Re-reading by raw id after payment would describe the target's new
-    // incarnation under CR 400.7 — a graveyard Land for an animated Mishra's
-    // Factory, a graveyard Creature for a Grizzly Bears — which is neither the
-    // CR 115.9 selection-time reading the history predicates are defined over nor
-    // the CR 115.9b completed-cast reading that ignores a departed target.
-    let committed_target_facts = Some(super::casting::capture_target_facts(
-        state,
-        &declared_targets_in_chain(ability),
-    ));
+    // incarnation under CR 400.7: the returned Dryad Arbor keeps its printed
+    // "Land Creature" type line in hand, while an animated Mishra's Factory
+    // returned the same way reverts to its printed "Land" and a sacrificed one is
+    // a graveyard Land — and a sacrificed Grizzly Bears stays a graveyard
+    // Creature. None of those later readings is the CR 115.9 selection-time
+    // reading the history predicates are defined over, nor the CR 115.9b
+    // completed-cast reading that ignores a departed target.
+    let committed_target_facts = Some(committed_target_facts.unwrap_or_else(|| {
+        super::casting::capture_target_facts(state, &declared_targets_in_chain(ability))
+    }));
 
     // CR 614.1c + CR 122.1 + CR 205.1b + CR 613.1d: Snapshot the exact
     // cast-this-way ETB riders before resulting-MV evaluation consumes the
@@ -13745,6 +13789,10 @@ fn finalize_cast_with_phyrexian_choices_inner(
             casting_variant,
             casting_permission_index,
             cast_timing_permission,
+            // CR 115.1 + CR 601.2c + CR 400.7: the resume root is where the
+            // announced-target latch lives on this path; hand it to the checks so
+            // they never re-derive the targets from a post-payment raw-id lookup.
+            deferred_life_resume_pending.and_then(|pending| pending.committed_target_facts.clone()),
             events,
         )?,
     };
@@ -18149,6 +18197,11 @@ fn finalize_mana_payment_with_resume(
                 pending.casting_variant,
                 pending.casting_permission_index,
                 pending.cast_timing_permission,
+                // CR 115.1 + CR 601.2c + CR 400.7: the latch the declaration
+                // boundary already took rides this pending; reusing it is what
+                // keeps a cost that moves a target (the returned land) from
+                // rewriting the announced facts.
+                pending.committed_target_facts.clone(),
                 events,
             )?)
         };
@@ -18307,6 +18360,12 @@ fn finalize_mana_payment_with_resume(
             pending_resumed.origin_zone = pending.origin_zone;
             pending_resumed.convoked_creatures = pending.convoked_creatures.clone();
             pending_resumed.delved_cards = pending.delved_cards.clone();
+            // CR 115.1 + CR 601.2c + CR 400.7: this rebuild is the last stop before
+            // the distribution resume reaches the CR 601.2i write, and it happens
+            // after the total cost was paid — so the announced-target latch must
+            // ride along here too, or a paid cost that moved a target would be
+            // re-read from the moved object.
+            pending_resumed.committed_target_facts = pending.committed_target_facts.clone();
 
             // CR 601.2d: "divided evenly, rounded down" — EvenSplitDamage bypasses
             // interactive distribution. Remainder is intentionally lost per Oracle text.
@@ -18607,6 +18666,11 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                 pending.casting_variant,
                 pending.casting_permission_index,
                 pending.cast_timing_permission,
+                // CR 115.1 + CR 601.2c + CR 400.7: the latch the declaration
+                // boundary already took rides this pending; reusing it is what
+                // keeps a cost that moves a target (the returned land) from
+                // rewriting the announced facts.
+                pending.committed_target_facts.clone(),
                 events,
             )?)
         };
@@ -18760,6 +18824,12 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             pending_resumed.origin_zone = pending.origin_zone;
             pending_resumed.convoked_creatures = pending.convoked_creatures.clone();
             pending_resumed.delved_cards = pending.delved_cards.clone();
+            // CR 115.1 + CR 601.2c + CR 400.7: this rebuild is the last stop before
+            // the distribution resume reaches the CR 601.2i write, and it happens
+            // after the total cost was paid — so the announced-target latch must
+            // ride along here too, or a paid cost that moved a target would be
+            // re-read from the moved object.
+            pending_resumed.committed_target_facts = pending.committed_target_facts.clone();
 
             if unit == DistributionUnit::EvenSplitDamage && !targets.is_empty() {
                 let num = targets.len() as u32;
