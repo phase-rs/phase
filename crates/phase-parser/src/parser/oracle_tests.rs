@@ -18592,6 +18592,24 @@ fn tree_has_change_targets(def: &AbilityDefinition) -> bool {
             .is_some_and(tree_has_change_targets)
 }
 
+/// The description of the first `Unimplemented` gap in the tree, if any.
+fn tree_unimplemented_description(def: &AbilityDefinition) -> Option<&str> {
+    match def.effect.as_ref() {
+        Effect::Unimplemented { description, .. } => description.as_deref(),
+        _ => None,
+    }
+    .or_else(|| {
+        def.sub_ability
+            .as_deref()
+            .and_then(tree_unimplemented_description)
+    })
+    .or_else(|| {
+        def.else_ability
+            .as_deref()
+            .and_then(tree_unimplemented_description)
+    })
+}
+
 fn tree_has_unimplemented(def: &AbilityDefinition) -> bool {
     matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
         || def
@@ -18604,8 +18622,9 @@ fn tree_has_unimplemented(def: &AbilityDefinition) -> bool {
             .is_some_and(tree_has_unimplemented)
 }
 
-/// Un-card (no CR entry) + CR 114.1: preserving the exact speech literal newly
-/// exposes a supported payoff. The quoted sentence is the cost of the saying
+/// Un-card (no CR entry) + CR 115.1 (targets change only through an ability
+/// that explicitly says so): preserving the exact speech literal newly exposes
+/// a supported payoff. The quoted sentence is the cost of the saying
 /// ability, and the effect it introduces is the ordinary `ChangeTargets` that
 /// "Change the target ... that targets only you" already parses.
 #[test]
@@ -18644,17 +18663,18 @@ fn parse_say_phrase_scope_ow_preserves_speech() {
         &["Enchantment"],
         &[],
     );
-    assert!(
-        !r.triggers.is_empty() || !r.abilities.is_empty(),
-        "the trigger still parses: triggers={:?} abilities={:?}",
-        r.triggers,
-        r.abilities
-    );
-    assert!(
-        format!("{:?}{:?}", r.abilities, r.triggers).contains("say \\\"Ow\\\""),
-        "the exact speech literal survives: triggers={:?} abilities={:?}",
-        r.triggers,
-        r.abilities
+    let [trigger] = r.triggers.as_slice() else {
+        panic!("exactly the damage trigger parses: {:?}", r.triggers);
+    };
+    assert_eq!(trigger.mode, TriggerMode::DamageDone);
+    let execute = trigger.execute.as_deref().expect("the trigger has a body");
+    // The per-permanent spoken payment is an honest gap, not a `SayPhrase`
+    // cost approximation, and the gap carries the speech verbatim.
+    assert!(!tree_has_say_phrase(execute, "Ow"));
+    assert_eq!(
+        tree_unimplemented_description(execute),
+        Some("that player may say \"Ow\" once for each permanent named Ow"),
+        "the gap names the exact speech: {execute:?}"
     );
 }
 
@@ -18669,17 +18689,21 @@ fn parse_say_phrase_scope_ach_hans_preserves_speech() {
         &["Enchantment"],
         &[],
     );
-    assert!(
-        !r.triggers.is_empty() || !r.abilities.is_empty(),
-        "the upkeep trigger still parses: triggers={:?} abilities={:?}",
-        r.triggers,
-        r.abilities
-    );
-    assert!(
-        format!("{:?}{:?}", r.abilities, r.triggers).contains("Ach! Hans, run! It's the . . ."),
-        "the exact speech literal survives: triggers={:?} abilities={:?}",
-        r.triggers,
-        r.abilities
+    let [trigger] = r.triggers.as_slice() else {
+        panic!("exactly the upkeep trigger parses: {:?}", r.triggers);
+    };
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    let execute = trigger.execute.as_deref().expect("the trigger has a body");
+    // Saying a phrase AND a card name is not a `SayPhrase` cost the engine can
+    // pay, so it stays an honest gap whose text keeps the speech verbatim.
+    assert!(!tree_has_say_phrase(
+        execute,
+        "Ach! Hans, run! It's the . . ."
+    ));
+    assert_eq!(
+        tree_unimplemented_description(execute),
+        Some("say \"Ach! Hans, run! It's the . . .\" and the name of a creature card"),
+        "the gap names the exact speech: {execute:?}"
     );
 }
 

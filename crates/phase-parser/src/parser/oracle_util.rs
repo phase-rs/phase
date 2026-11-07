@@ -3167,8 +3167,11 @@ pub fn normalize_card_name_refs_reporting(
     result = result.replace("named ~", &format!("named {effective_name_str}"));
 
     result = unmask_keyword_action_walker_names(result, &walker_originals);
-    result = unmask_card_named_literal_spans(result, &card_named_originals);
+    // Restore in reverse masking order: a spoken phrase is masked after the
+    // named literals, so its captured body can hold a named-literal placeholder
+    // that only resolves once the phrase itself is back.
     result = unmask_say_phrase_literal_spans(result, &say_phrase_originals);
+    result = unmask_card_named_literal_spans(result, &card_named_originals);
     result = unmask_card_name_keyword_action(result, &kw_action_originals);
     (unmask_ring_tempts_you_phrase(result), refused_lines)
 }
@@ -3558,6 +3561,15 @@ mod tests {
             normalize_card_name_refs("Cumulative upkeep—Say \"Toy Boat\" quickly.", "Toy Boat"),
             "Cumulative upkeep—Say \"Toy Boat\" quickly."
         );
+    }
+
+    #[test]
+    fn normalize_say_phrase_restores_a_named_literal_inside_the_speech() {
+        // The named literal (ending at the sentence's period, inside the
+        // quote) is masked first and the spoken phrase around it second; both
+        // must come back, in that nesting, verbatim.
+        let text = "Say \"Find a card named Grizzly Bears. Now!\": Draw a card.";
+        assert_eq!(normalize_card_name_refs(text, "Talking Sign"), text);
     }
 
     #[test]
