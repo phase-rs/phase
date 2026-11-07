@@ -419,6 +419,8 @@ fn continuous_modification_quantity(
         | CM::GrantTrigger { .. }
         | CM::GrantReplacement { .. }
         | CM::RemoveAllAbilities
+        // CR 613.1f: a printed-slot index, not a dynamic quantity.
+        | CM::RemoveSourceAbility { .. }
         | CM::AddType { .. }
         | CM::RemoveType { .. }
         | CM::AddSubtype { .. }
