@@ -119,6 +119,11 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::TopOfLibraryHasPlot
             | StaticMode::TopOfLibraryPlotPermission
             | StaticMode::CastFromHandFree { .. }
+            // CR 601.2a + CR 116.2a: HandPlayPermission carries `play_mode`; it
+            // lives only on a resolution-created player-scoped TCE. Runtime:
+            // casting.rs::other_hand_play_permission_source (cast discovery and
+            // admission, land discovery) and engine.rs::handle_play_land.
+            | StaticMode::HandPlayPermission { .. }
             // CR 601.2a + CR 113.6b: ExileCastPermission carries frequency,
             // play_mode, and the `without_paying_mana_cost` flag. Runtime
             // enforcement is in casting.rs::exile_objects_castable_by_permission

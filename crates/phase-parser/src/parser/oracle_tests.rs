@@ -35831,3 +35831,172 @@ fn corpus_oracle_text(name: &str) -> String {
     }
     .to_string()
 }
+
+/// CR 101.2 + CR 602.5 + CR 400.2 + CR 601.2a + CR 116.2a: Sen Triplets lowers
+/// every clause — the "This turn," prefixed cast-and-activate ban, the conjoined
+/// hand reveal bound to the targeted player, and the coordinated permission to
+/// play lands and cast spells from that player's hand — with nothing left
+/// unimplemented and the permission's "may" not lowered as a resolution choice.
+#[test]
+fn sen_triplets_lowers_restrictions_reveal_and_other_hand_permission() {
+    use crate::types::ability::{
+        GameRestriction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
+    };
+    use crate::types::statics::{ActivationExemption, ProhibitionScope};
+    let parsed = parse(
+        "At the beginning of your upkeep, choose target opponent. This turn, that player can't cast spells or activate abilities and plays with their hand revealed. You may play lands and cast spells from that player's hand this turn.",
+        "Sen Triplets",
+        &[],
+        &["Artifact", "Creature"],
+        &["Human", "Wizard"],
+    );
+    assert!(
+        diagnostic_parse_time(&parsed).is_empty(),
+        "{:?}",
+        parsed.parse_warnings
+    );
+    let [trigger] = parsed.triggers.as_slice() else {
+        panic!("expected one trigger, got {:?}", parsed.triggers);
+    };
+    let mut effects = Vec::new();
+    let mut link = trigger.execute.as_deref();
+    while let Some(def) = link {
+        assert!(
+            !def.optional,
+            "no link is a resolution-time choice: {def:?}"
+        );
+        effects.push((*def.effect).clone());
+        link = def.sub_ability.as_deref();
+    }
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Unimplemented { .. })),
+        "{effects:?}"
+    );
+    let prohibits = |wanted: &ProhibitedActivity| {
+        effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::AddRestriction {
+                    restriction: GameRestriction::ProhibitActivity {
+                        affected_players: RestrictionPlayerScope::ParentTargetedPlayer,
+                        expiry: RestrictionExpiry::EndOfTurn,
+                        activity,
+                        ..
+                    },
+                } if activity == wanted
+            )
+        })
+    };
+    assert!(prohibits(&ProhibitedActivity::CastSpells {
+        spell_filter: None
+    }));
+    assert!(prohibits(&ProhibitedActivity::ActivateAbilities {
+        exemption: ActivationExemption::None,
+        only_tag: None,
+    }));
+    let grants = |wanted: &StaticMode| {
+        effects.iter().find_map(|effect| match effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration: Some(Duration::UntilEndOfTurn),
+                ..
+            } => static_abilities.iter().find(|def| {
+                def.modifications.iter().any(|m| {
+                    matches!(m, ContinuousModification::AddStaticMode { mode } if mode == wanted)
+                })
+            }),
+            _ => None,
+        })
+    };
+    let reveal = grants(&StaticMode::RevealHand {
+        who: ProhibitionScope::Controller,
+    })
+    .expect("reveal-hand grant");
+    assert_eq!(reveal.affected, Some(TargetFilter::ParentTarget));
+    let permission = grants(&StaticMode::HandPlayPermission {
+        play_mode: CardPlayMode::Play,
+    })
+    .expect("other-hand play permission");
+    let Some(TargetFilter::Typed(pool)) = &permission.affected else {
+        panic!("permission pool must be a typed card filter: {permission:?}");
+    };
+    assert!(pool
+        .properties
+        .contains(&FilterProp::InZone { zone: Zone::Hand }));
+    assert!(pool.properties.contains(&FilterProp::Owned {
+        controller: ControllerRef::ParentTargetController,
+    }));
+}
+
+/// CR 400.11 + CR 400.11a: a "play/cast … from outside the game" permission
+/// that the outside-game authority does not model is refused at the shared
+/// cast seam rather than lowered to an in-game `CastFromZone`. Covers the
+/// plural form (Sovereign's Realm, reached through its leading "This turn,"
+/// duration) and the quantified singular form (Frontier Explorer, reached
+/// through "Until end of turn,") and the "from among cards you own outside the
+/// game" pool form (Spawnsire of Ulamog); Wish's modeled singular form keeps
+/// its `SearchOutsideGame` lowering.
+#[test]
+fn unmodeled_outside_game_play_permissions_stay_unsupported() {
+    fn effects_of(parsed: &ParsedAbilities) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        for ability in &parsed.abilities {
+            let mut link = Some(ability);
+            while let Some(def) = link {
+                effects.push((*def.effect).clone());
+                link = def.sub_ability.as_deref();
+            }
+        }
+        effects
+    }
+    for (name, oracle, types) in [
+        (
+            "Sovereign's Realm",
+            "(Start the game with this conspiracy face up in the command zone.)\nYour starting deck can't have basic land cards and your starting hand size is five.\nExile a card from your hand: This turn, you may play basic lands from outside the game.\nBasic lands you control have \"{T}: Add one mana of any color.\"",
+            &["Conspiracy"][..],
+        ),
+        (
+            "Frontier Explorer",
+            "{3}, {T}: Until end of turn, you may play one basic Plains card from outside the game.",
+            &["Creature"][..],
+        ),
+        (
+            "Spawnsire of Ulamog",
+            "Annihilator 1 (Whenever this creature attacks, defending player sacrifices a permanent of their choice.)\n{4}: Create two 0/1 colorless Eldrazi Spawn creature tokens. They have \"Sacrifice this token: Add {C}.\"\n{20}: Cast any number of Eldrazi spells from among cards you own outside the game without paying their mana costs.",
+            &["Creature"][..],
+        ),
+    ] {
+        let parsed = parse(oracle, name, &[], types, &[]);
+        let effects = effects_of(&parsed);
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::CastFromZone { .. })),
+            "{name}: an outside-game permission must not become an in-game cast: {effects:?}"
+        );
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Unimplemented { name, .. } if name == "cast_from_outside_the_game"
+            )),
+            "{name}: the outside-game permission must be named as unsupported: {effects:?}"
+        );
+    }
+
+    let wish = parse(
+        "You may play a card you own from outside the game this turn.",
+        "Wish",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert!(
+        effects_of(&wish)
+            .iter()
+            .any(|effect| matches!(effect, Effect::SearchOutsideGame { .. })),
+        "Wish keeps the modeled outside-game lowering: {:?}",
+        effects_of(&wish)
+    );
+}

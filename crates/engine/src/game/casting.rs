@@ -1638,6 +1638,12 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
         }
     }
 
+    // CR 601.2a + CR 611.2c: cards in another player's hand under a
+    // resolution-created `HandPlayPermission` (Sen Triplets).
+    objects.extend(other_hand_spell_objects_castable_by_permission(
+        state, player,
+    ));
+
     objects
         .into_iter()
         .filter(|obj_id| {
@@ -2184,6 +2190,15 @@ pub(in crate::game) fn priority_play_land_announcements(
         }
     }
     for (object_id, _) in exile_lands_playable_by_permission(state, land_resource_owner) {
+        if let Some(object) = state.objects.get(&object_id) {
+            if land_play_is_permitted_by_restrictions(state, land_resource_owner, object) {
+                announcements.push(PriorityPlayLandAnnouncement::new(object_id, object.card_id));
+            }
+        }
+    }
+    // CR 116.2a + CR 305.1: lands in another player's hand under a `Play`-mode
+    // `HandPlayPermission` (Sen Triplets).
+    for (object_id, _) in other_hand_lands_playable_by_permission(state, land_resource_owner) {
         if let Some(object) = state.objects.get(&object_id) {
             if land_play_is_permitted_by_restrictions(state, land_resource_owner, object) {
                 announcements.push(PriorityPlayLandAnnouncement::new(object_id, object.card_id));
@@ -4282,6 +4297,10 @@ pub(crate) fn castable_from_current_zone(
         // entitled to it.) `hand_alt_cost_permission_names_caster` resolves the entitlement:
         // a named grantee must be this player, and an unnamed one falls back to the owner.
         || (has_hand_alt_cost_permission(state, obj, player) && normal_cost_route())
+        // CR 601.2a + CR 611.2c: a resolution-created permission to cast spells
+        // from another player's hand (Sen Triplets). The caster pays the card's
+        // normal costs and becomes the spell's controller (CR 601.2a).
+        || other_hand_play_permission_source(state, player, obj, CardPlayMode::Cast).is_some()
         // CR 601.2a + CR 601.3: Graveyard cast via static permission (Lurrus,
         // etc.). Whose turn it must be is the permission's own condition, not a
         // blanket gate here. Outside the owner block below because the
@@ -7724,6 +7743,118 @@ pub(super) fn exile_land_play_authorization(
     Some(ExileLandPlayAuthorization::Static { source, frequency })
 }
 
+/// CR 601.2a + CR 116.2a + CR 611.2c: the source of a resolution-created
+/// `StaticMode::HandPlayPermission` (Sen Triplets: "You may play lands and cast
+/// spells from that player's hand this turn") that lets `player` take `obj` from
+/// ANOTHER player's hand in `mode`.
+///
+/// The single authority every surface asks — cast discovery, cast admission,
+/// land discovery and the land-play gate — so offering and accepting can never
+/// disagree. Read directly off the player-scoped transient effect: its
+/// `controller` is the permission's holder and its `affected` filter (frozen at
+/// resolution to the named player's hand) is re-evaluated at each attempt, so a
+/// card that reaches that hand later in the duration is covered (CR 611.2c).
+/// A card in `player`'s own hand needs no permission and is never admitted here.
+pub(crate) fn other_hand_play_permission_source(
+    state: &GameState,
+    player: PlayerId,
+    obj: &GameObject,
+    mode: CardPlayMode,
+) -> Option<ObjectId> {
+    if obj.zone != Zone::Hand || obj.owner == player {
+        return None;
+    }
+    state
+        .transient_continuous_effects
+        .iter()
+        .filter(|tce| tce.controller == player)
+        .filter(|tce| {
+            tce.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::HandPlayPermission { play_mode },
+                    } if graveyard_permission_play_mode_matches(*play_mode, Some(mode))
+                )
+            })
+        })
+        // CR 611.2b: every gate of a resolution-created effect must hold.
+        .filter(|tce| {
+            super::layers::transient_gate_conditions(tce).all(|condition| {
+                super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id)
+            })
+        })
+        .find(|tce| {
+            super::filter::matches_target_filter(
+                state,
+                obj.id,
+                &tce.affected,
+                &super::filter::FilterContext::from_source_with_controller(tce.source_id, player),
+            )
+        })
+        .map(|tce| tce.source_id)
+}
+
+/// CR 601.2a + CR 611.2c: cards `player` may try to cast from other players'
+/// hands under a `HandPlayPermission` (see [`other_hand_play_permission_source`]).
+///
+/// CR 305.9 + CR 702.37a/c: like the caster's own hand, printed lands are NOT
+/// dropped here. A land with morph, megamorph or disguise (Zoetic Cavern) can be
+/// cast face down from any zone it could be played from, and the face-down cast
+/// is judged on the 2/2 characteristics; the castability verdict owns that
+/// projection, so the plain land falls out there instead.
+fn other_hand_spell_objects_castable_by_permission(
+    state: &GameState,
+    player: PlayerId,
+) -> Vec<ObjectId> {
+    state
+        .players
+        .iter()
+        .filter(|other| other.id != player)
+        .flat_map(|other| other.hand.iter().copied())
+        .filter(|obj_id| {
+            state.objects.get(obj_id).is_some_and(|obj| {
+                other_hand_play_permission_source(state, player, obj, CardPlayMode::Cast).is_some()
+            })
+        })
+        .collect()
+}
+
+/// CR 116.2a + CR 305.1: land cards `player` may play from other players' hands
+/// under a `Play`-mode `HandPlayPermission`, paired with the granting source.
+/// The play is `player`'s own land play (CR 305.2), so the caller's land-drop
+/// and restriction gates apply unchanged.
+pub fn other_hand_lands_playable_by_permission(
+    state: &GameState,
+    player: PlayerId,
+) -> Vec<(ObjectId, ObjectId)> {
+    state
+        .players
+        .iter()
+        .filter(|other| other.id != player)
+        .flat_map(|other| other.hand.iter().copied())
+        .filter_map(|obj_id| {
+            let obj = state.objects.get(&obj_id)?;
+            let is_playable_land = obj
+                .card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Land)
+                || obj.back_face.as_ref().is_some_and(|back_face| {
+                    back_face.layout_kind == Some(LayoutKind::Modal)
+                        && back_face
+                            .card_types
+                            .core_types
+                            .contains(&crate::types::card_type::CoreType::Land)
+                });
+            if !is_playable_land {
+                return None;
+            }
+            other_hand_play_permission_source(state, player, obj, CardPlayMode::Play)
+                .map(|source| (obj_id, source))
+        })
+        .collect()
+}
+
 /// CR 305.1 + CR 601.2a + CR 113.6b: Find exiled lands `player` may play, via
 /// either the object-tagged `CastingPermission::PlayFromExile` (impulse draw) or
 /// a battlefield `StaticMode::ExileCastPermission { play_mode: Play }` static
@@ -8789,19 +8920,35 @@ fn prepare_casting_variant_on_face(
     }
 }
 
+/// CR 702.102a: whether `player` may cast `obj` as a fused split spell. Fuse
+/// functions only while the card is in a hand, and only "a player [who] casts a
+/// split card with fuse from their hand" may cast both halves — so a permission
+/// to cast from ANOTHER player's hand (Sen Triplets) lets that player cast
+/// either half, never the fused spell. The single gate for both offering the
+/// Fuse candidate and admitting a `CastingVariant::Fuse` preparation.
+fn fuse_route_open(state: &GameState, obj: &GameObject, player: PlayerId) -> bool {
+    is_hand_fuse_split(obj) && state.object_in_players_zone(obj, Zone::Hand, player)
+}
+
+/// CR 702.102a + CR 709.3: a split card with fuse sitting in some player's hand
+/// — the zone where fuse functions and its halves are offered per face.
+fn is_hand_fuse_split(obj: &GameObject) -> bool {
+    obj.zone == Zone::Hand
+        && obj
+            .keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Fuse))
+        && obj
+            .back_face
+            .as_ref()
+            .is_some_and(|back| back.layout_kind == Some(LayoutKind::Split))
+}
+
 fn is_uncommitted_hand_fuse_pair(state: &GameState, object_id: ObjectId) -> bool {
-    state.objects.get(&object_id).is_some_and(|object| {
-        object.zone == Zone::Hand
-            && object
-                .keywords
-                .iter()
-                .any(|keyword| matches!(keyword, Keyword::Fuse))
-            && object
-                .back_face
-                .as_ref()
-                .is_some_and(|back| back.layout_kind == Some(LayoutKind::Split))
-            && !object.cast_face_committed
-    })
+    state
+        .objects
+        .get(&object_id)
+        .is_some_and(|object| is_hand_fuse_split(object) && !object.cast_face_committed)
 }
 
 fn casting_variant_choice_set(
@@ -9163,7 +9310,7 @@ fn casting_candidates(
     // characteristics would surface an option the later non-fused preparation can't
     // honor (the granted keyword no longer matches the front half), wrongly falling
     // back to the printed cost. The Fuse candidate itself is gated intrinsically by
-    // `has_fuse_candidate` (printed Fuse keyword + Split back face) below.
+    // `fuse_route_open` (printed Fuse keyword + Split back face, own hand) below.
 
     if graveyard_keyword_routes_open(state, obj, player) {
         if super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Escape)
@@ -9440,18 +9587,17 @@ fn casting_candidates(
     // the card is in a player's hand. It lets the caster cast both halves as a
     // fused split spell. Only offered when the back face is the right (Split)
     // half so single-faced cards never surface it.
-    let has_fuse_candidate = obj.zone == Zone::Hand
-        && obj
-            .keywords
-            .iter()
-            .any(|k| matches!(k, crate::types::keywords::Keyword::Fuse))
-        && obj
-            .back_face
-            .as_ref()
-            .is_some_and(|bf| bf.layout_kind == Some(LayoutKind::Split));
-    if has_fuse_candidate {
+    //
+    // A fuse split card in ANOTHER player's hand (cast under a borrowed-hand
+    // permission — Sen Triplets) keeps its per-half `Normal` menu: either half
+    // may be cast (CR 709.3), but the fused spell is offered only from the
+    // caster's own hand (`fuse_route_open`).
+    let hand_fuse_split = is_hand_fuse_split(obj);
+    if hand_fuse_split {
         candidates.push(CastingVariant::Normal);
-        candidates.push(CastingVariant::Fuse);
+        if fuse_route_open(state, obj, player) {
+            candidates.push(CastingVariant::Fuse);
+        }
     }
 
     // CR 118.9 + CR 118.9a + CR 601.2b: When an `Unlimited` `CastFromHandFree`
@@ -9480,7 +9626,7 @@ fn casting_candidates(
             // with consecutive-only `Vec::dedup` (no preceding sort), so pushing
             // `Normal` again here would leave two identical "Cast Normally" options
             // in the menu. Only offer `Normal` when the Fuse block didn't.
-            if !has_fuse_candidate {
+            if !hand_fuse_split {
                 candidates.push(CastingVariant::Normal);
             }
 
@@ -9587,6 +9733,14 @@ fn prepare_spell_cast_announced(
     // cost seams must derive fusion from this override. If a future change ever
     // infers Fuse elsewhere, this discriminator must be revisited.
     let is_fuse_variant = variant_override == Some(CastingVariant::Fuse);
+    // CR 702.102a: a fused split spell is cast only from the caster's own hand.
+    // Admission mirrors the offer (`fuse_route_open`), so a direct Fuse request
+    // for a card in another player's hand is refused, not merely unoffered.
+    if is_fuse_variant && !fuse_route_open(state, obj, player) {
+        return Err(EngineError::ActionNotAllowed(
+            "Fuse can only be used to cast a split card from your own hand".to_string(),
+        ));
+    }
     // CR 702.34 / CR 702.81 / CR 702.138 / CR 702.180: Cards in graveyard with
     // graveyard-cast keywords.
     let graveyard_keywords_open = graveyard_keyword_routes_open(state, obj, player);

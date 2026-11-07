@@ -9365,7 +9365,8 @@ fn gather_transient_continuous_effects_with(
             // `casting::unlimited_hand_cast_free_source` — and grafting it onto
             // every affected object would additionally expose it to
             // `iter_cast_free_permission_source_ids`, giving one grant two
-            // sources. CR 701.15b: `Goaded` is likewise a designation, not
+            // sources. CR 601.2a: `HandPlayPermission` is read the same way by
+            // `casting::other_hand_play_permission_source`. CR 701.15b: `Goaded` is likewise a designation, not
             // an ability on the recipient; combat reads the live TCE directly.
             if matches!(
                 modification,
@@ -9373,6 +9374,7 @@ fn gather_transient_continuous_effects_with(
                     mode: StaticMode::MayLookAtFaceDown
                         | StaticMode::ReduceAbilityCost { .. }
                         | StaticMode::CastFromHandFree { .. }
+                        | StaticMode::HandPlayPermission { .. }
                         | StaticMode::Goaded,
                 }
             ) {
