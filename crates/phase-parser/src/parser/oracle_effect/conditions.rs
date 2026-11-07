@@ -6005,8 +6005,12 @@ fn build_instead_def(
         };
     };
 
-    let instead_def =
-        super::parse_child_ability_with_parent_target(&effect_text, kind, parent_target_available);
+    let instead_def = super::parse_child_ability_with_parent_target(
+        &effect_text,
+        kind,
+        parent_target_available,
+        ctx.effective_spell_anaphor_binding(),
+    );
     let mut result = super::instead_override_definition(
         instead_def,
         AbilityCondition::ConditionInstead {
