@@ -2668,19 +2668,49 @@ mod tests {
     use crate::types::counter::CounterMatch;
     use crate::types::mana::{ManaCost, ManaCostShard};
 
+    /// Toy Boat's printed cumulative upkeep cost is the spoken phrase alone:
+    /// `Say "Toy Boat" quickly.` It parses to one saying with its casing kept.
     #[test]
-    fn spoken_alternative_splits_the_outer_or_and_preserves_phrase_casing() {
-        let AbilityCost::OneOf { costs } = parse_oracle_cost("Say \"Toy Boat\" quickly or pay {2}")
-        else {
+    fn printed_spoken_cost_keeps_phrase_casing() {
+        assert!(
+            matches!(
+                parse_oracle_cost("Say \"Toy Boat\" quickly"),
+                AbilityCost::SayPhrase { ref phrase, .. } if phrase == "Toy Boat"
+            ),
+            "Toy Boat's printed cost is one quick saying"
+        );
+    }
+
+    /// Synthetic, not printed: no card offers a spoken leg as an alternative.
+    /// The quoted phrase itself contains the ` or ` separator, so only quote
+    /// tracking selects the real separator outside the quotation; matching the
+    /// casing alone would split inside the phrase.
+    #[test]
+    fn alternative_splitter_skips_a_delimiter_inside_a_quotation() {
+        let text = "Say \"Red or Blue\" quickly or pay {2}";
+        let outer = text.rfind(" or ").expect("outer separator");
+        assert_eq!(find_unquoted_delimiter(text, " or "), Some(outer));
+        assert_eq!(
+            split_binary_cost_legs(text, " or "),
+            Some(("Say \"Red or Blue\" quickly", "pay {2}"))
+        );
+
+        let AbilityCost::OneOf { costs } = parse_oracle_cost(text) else {
             panic!("expected two alternative cost legs");
         };
         assert!(
-            matches!(&costs[0], AbilityCost::SayPhrase { phrase, .. } if phrase == "Toy Boat"),
-            "the spoken leg must keep its original casing: {costs:?}"
+            matches!(&costs[0], AbilityCost::SayPhrase { phrase, .. } if phrase == "Red or Blue"),
+            "the spoken leg keeps its whole phrase and casing: {costs:?}"
         );
         assert!(
             matches!(&costs[1], AbilityCost::Mana { .. }),
-            "the second leg is the printed mana alternative: {costs:?}"
+            "the second leg is the mana alternative: {costs:?}"
+        );
+
+        // A delimiter that appears only inside a quotation is no separator.
+        assert_eq!(
+            find_unquoted_delimiter("Say \"Red or Blue\" quickly", " or "),
+            None
         );
     }
 
