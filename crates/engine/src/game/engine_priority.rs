@@ -886,6 +886,23 @@ fn place_priority_batch(
         .filter(|wf| !matches!(wf, WaitingFor::Priority { .. }))
 }
 
+/// CR 603.2 + CR 603.3: abilities triggered by `events` while no player is
+/// receiving priority wait in the deferred queue and are put on the stack the
+/// next time a player would receive priority — with the batch the current wait
+/// parks, exactly as that wait's own triggers would.
+///
+/// CR 603.2c: the events are claimed for the ordinary collector so that a
+/// paused announcement's carrier does not collect them a second time. The
+/// caller must ensure `events` is the exact slice that will be appended to the
+/// action's event buffer (as is the case for `UnAction::TouchObject`).
+pub(crate) fn park_triggers_until_priority(state: &mut GameState, events: &[GameEvent]) {
+    let origin = parked_batch_origin(&state.waiting_for);
+    triggers::collect_parked_triggers_into_deferred(state, events, origin);
+    // Claim for the ordinary collector so a paused announcement carrier
+    // does not re-collect these events (CR 603.2c, CR 733.1).
+    super::announcement_triggers::claim_ordinary_collected_span(state, events, 0, events.len());
+}
+
 /// The origin a boundary batch parks with behind `waiting_for`: SBA-owned
 /// choices merge with their answer; any other wait keeps the batch its own.
 fn parked_batch_origin(waiting_for: &WaitingFor) -> triggers::DeferredTriggerBatchOrigin {

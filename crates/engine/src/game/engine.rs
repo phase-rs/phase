@@ -1541,7 +1541,7 @@ fn apply_action_boundary_core(
     } else {
         Some(semantic_owner)
     };
-    let preserve_interaction = interaction::action_preserves_interaction(&action);
+    let preserve_interaction = interaction::action_preserves_interaction(state, &action);
     // Clear transient inter-effect state at the start of each player action.
     // last_effect_count is set by interactive handlers (e.g., DiscardChoice) and
     // consumed by sub_ability continuations via EventContextAmount fallback.
@@ -2334,6 +2334,26 @@ fn finish_action_boundary_with_lifecycle(
     // closed its window before handing the raw application over.
     let mut prior_window = state.ingress_life_window.take();
     state.ingress_life_window = Some(crate::types::game_state::IngressLifeWindow::default());
+    // CR 603.3: only once the action's own wait has settled into the state.
+    let settled = state.waiting_for == result.waiting_for;
+    let touch_placement = if settled {
+        super::un_actions::place_parked_touch_triggers(state, &mut result.events)
+    } else {
+        Ok(())
+    };
+    if let Err(err) = touch_placement {
+        let life_failure = close_ingress_window(state, &mut prior_window);
+        lifecycle.discard();
+        *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
+        return Err(
+            life_failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
+                player,
+            }),
+        );
+    }
+    if settled {
+        result.waiting_for = state.waiting_for.clone();
+    }
     if let Err(err) = reconcile_terminal_result_completing_resolution(
         state,
         &mut result,

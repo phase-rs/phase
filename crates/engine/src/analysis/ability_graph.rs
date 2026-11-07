@@ -1319,6 +1319,7 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         | TriggerMode::Evolve
         | TriggerMode::Evolved
         | TriggerMode::GotchaSaid
+        | TriggerMode::Touched
         | TriggerMode::Explored
         | TriggerMode::Exploited
         | TriggerMode::Enlisted

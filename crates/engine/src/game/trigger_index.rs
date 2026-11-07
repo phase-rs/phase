@@ -180,6 +180,8 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         TriggerMode::Evolved => return (keys, true),
         // Un-card Gotcha: consumes the dedicated `GameEvent::GotchaSaid`; rare, so unclassified.
         TriggerMode::GotchaSaid => return (keys, true),
+        // Un-card touch: consumes the dedicated `GameEvent::ObjectTouched`; rare, so unclassified.
+        TriggerMode::Touched => return (keys, true),
         TriggerMode::ChangesController { .. } => push(TriggerEventKey::ChangesController),
         TriggerMode::LeavesBattlefield => push(TriggerEventKey::LeaveBattlefield(narrow)),
 
@@ -638,7 +640,8 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::Evolved { .. } => {}
         GameEvent::UnTellPerformed { .. }
         | GameEvent::PhraseSaid { .. }
-        | GameEvent::GotchaSaid { .. } => {}
+        | GameEvent::GotchaSaid { .. }
+        | GameEvent::ObjectTouched { .. } => {}
         GameEvent::ObjectIntensified { .. } => {}
         GameEvent::CounterRemoved { .. } => push(TriggerEventKey::CounterRemoved),
         GameEvent::TokenCreated { .. } | GameEvent::ObjectConjured { .. } => {

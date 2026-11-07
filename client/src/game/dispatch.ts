@@ -311,6 +311,12 @@ function releaseDispatchMutex(generation: number): void {
 }
 
 /** Structural equality for GameAction — action objects are small plain JSON. */
+/** Actions that report a physical event (an Un-card touch) rather than answer
+ *  a prompt: every submission is a separate instance. */
+function isRepeatableEvent(action: GameAction): boolean {
+  return action.type === "UnAction" && action.data.action.type === "TouchObject";
+}
+
 function actionsEqual(a: GameAction, b: GameAction): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
@@ -882,8 +888,12 @@ async function dispatchActionInternal(
 
   if (isAnimating) {
     // Same action + same actor + same prompt is a duplicate. A changed prompt
-    // is a new decision even when the payload is structurally identical.
+    // is a new decision even when the payload is structurally identical. An
+    // Un-card touch is an event, not a decision: each one is its own instance,
+    // so a repeat while an earlier touch is in flight is never a duplicate.
+    const repeatable = isRepeatableEvent(submittedAction);
     if (
+      !repeatable &&
       inFlightLocalAction &&
       inFlightLocalAction.actor === actor &&
       sameBoundGameSession(inFlightLocalAction.session, session) &&
@@ -892,7 +902,7 @@ async function dispatchActionInternal(
     ) {
       return;
     }
-    for (const pending of pendingQueue) {
+    for (const pending of repeatable ? [] : pendingQueue) {
       if (
         pending.kind === "local" &&
         pending.actor === actor &&

@@ -22,6 +22,7 @@ const NON_VISUAL_EVENTS = new Set([
   "UnTellPerformed",
   "PhraseSaid",
   "GotchaSaid",
+  "ObjectTouched",
   "PriorityPassed",
   "MulliganStarted",
   "GameStarted",

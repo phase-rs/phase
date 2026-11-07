@@ -15,10 +15,11 @@
 //!   return ..." clause (CR 603.12 reflexive trigger shape) puts the return on
 //!   the stack through the ordinary trigger pipeline.
 
-use crate::game::game_object::ObjectIdentityBindingExt;
+use crate::game::game_object::{GameObject, ObjectIdentityBindingExt};
+use crate::game::triggers::PendingTriggerContext;
 use crate::types::ability::{AbilityCost, Effect, TriggerDefinition};
 use crate::types::events::GameEvent;
-use crate::types::game_state::{ActionResult, GameState, WaitingFor};
+use crate::types::game_state::{ActionResult, GameState, StackEntryKind, WaitingFor};
 use crate::types::identifiers::{ObjectId, ObjectIdentityBinding};
 use crate::types::player::PlayerId;
 use crate::types::triggers::TriggerMode;
@@ -304,11 +305,121 @@ fn offer_is_still_valid(state: &GameState, offer: &GotchaOffer) -> bool {
         && offer.returns.is_current(state)
 }
 
+/// Whether `object_id` has a functioning `TriggerMode::Touched` ability in its
+/// current zone — something happens when a player touches it.
+///
+/// CR 730.2 + CR 702.26b: only an object that is itself a member of its zone
+/// can be touched. A merged permanent's absorbed components are one permanent
+/// with the survivor, not separate objects on the battlefield, and a
+/// phased-out permanent is treated as though it does not exist; neither is in
+/// the zone's membership although each still records `Zone::Battlefield`.
+fn responds_to_touch(state: &GameState, object_id: ObjectId) -> bool {
+    state.objects.get(&object_id).is_some_and(|obj| {
+        super::targeting::zone_object_ids(state, obj.zone).contains(&object_id)
+            && has_functioning_touch_ability(state, obj)
+    })
+}
+
+/// Whether `obj` carries a `TriggerMode::Touched` ability that functions in its
+/// current zone (CR 113.6).
+fn has_functioning_touch_ability(state: &GameState, obj: &GameObject) -> bool {
+    super::functioning_abilities::active_trigger_definitions(state, obj)
+        .map(|active| active.definition)
+        .any(|def| {
+            def.mode == TriggerMode::Touched
+                && super::triggers::trigger_definition_functions_in_zone(def, obj.zone)
+        })
+}
+
+/// The most touch triggers one player may have waiting at once — on the stack,
+/// parked in the deferred queue, or held by a CR 603.3b ordering pass. Each
+/// touch is its own trigger instance, but a touch is free and legal at any
+/// time, so without a bound one player could grow the stack without limit.
+/// The bound covers those three queues together, so alternating the entry
+/// points that feed them (a priority boundary and a pending decision) buys
+/// nothing. An engine resource guard, not a rule: a touch costs Vile Bile's
+/// toucher 2 life, so this many waiting touches is already more life than any
+/// ordinary game holds.
+///
+/// A touch that triggers nothing adds no engine state to bound — its cost is
+/// one ordinary action, which the server's action rate limiter already covers.
+pub const MAX_PENDING_TOUCH_TRIGGERS: usize = 64;
+
+/// Whether `event` records `player` touching an object.
+fn touched_by(event: &GameEvent, player: PlayerId) -> bool {
+    matches!(event, GameEvent::ObjectTouched { player: toucher, .. } if *toucher == player)
+}
+
+/// Whether `context` is a trigger `player` caused by touching an object. A
+/// context counts once even when its firing event also appears in the batched
+/// `trigger_events`.
+fn is_touch_context_of(context: &PendingTriggerContext, player: PlayerId) -> bool {
+    context
+        .pending
+        .trigger_event
+        .as_ref()
+        .is_some_and(|event| touched_by(event, player))
+        || context
+            .trigger_events
+            .iter()
+            .any(|event| touched_by(event, player))
+}
+
+/// How many touch triggers `player` caused that have not yet resolved: the ones
+/// already on the stack, the ones parked in the deferred queue, and the ones a
+/// CR 603.3b ordering pass is holding. A parked touch moves out of
+/// `deferred_triggers` into `pending_trigger_order` while an ordering prompt is
+/// open, so both queues are counted; a context is in exactly one of them.
+fn pending_touch_triggers(state: &GameState, player: PlayerId) -> usize {
+    let on_stack = state
+        .stack
+        .iter()
+        .filter(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility { trigger_event, .. } => trigger_event
+                .as_ref()
+                .is_some_and(|event| touched_by(event, player)),
+            _ => false,
+        })
+        .count();
+    let parked = state
+        .deferred_triggers
+        .iter()
+        .filter(|context| is_touch_context_of(context, player))
+        .count();
+    let ordered = state
+        .pending_trigger_order
+        .iter()
+        .flat_map(|order| order.groups.iter())
+        .flat_map(|group| group.triggers.iter())
+        .filter(|context| is_touch_context_of(context, player))
+        .count();
+    on_stack + parked + ordered
+}
+
 /// Recompute the Un-actions menu: the gesture kinds that some functioning Gotcha
-/// ability anywhere in the game responds to. Empty (and free) unless a player
-/// opted in. Called after every action, since a Gotcha card can reach a
-/// graveyard at any time.
+/// ability anywhere in the game responds to, and the objects whose touch
+/// abilities function. Empty (and free) unless a player opted in. Called after
+/// every action, since a Gotcha card can reach a graveyard at any time.
 pub fn refresh_menu(state: &mut GameState) {
+    let touchable = if state.un_actions.enabled_players.is_empty() {
+        Vec::new()
+    } else {
+        let mut ids: Vec<ObjectId> = Zone::ALL
+            .iter()
+            .flat_map(|&zone| super::targeting::zone_object_ids(state, zone))
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| has_functioning_touch_ability(state, obj))
+            })
+            .collect();
+        ids.sort();
+        ids
+    };
+    if state.un_actions.touchable != touchable {
+        state.un_actions.touchable = touchable;
+    }
     let menu = if state.un_actions.enabled_players.is_empty() {
         Vec::new()
     } else {
@@ -369,6 +480,7 @@ pub fn apply_un_action(
             record_tell(state, actor, &tell);
             Ok(ActionResult::applied(events, state.waiting_for.clone()))
         }
+        UnAction::TouchObject { object_id } => touch_object(state, actor, object_id),
         UnAction::SayGotcha { source_id, returns } => {
             // CR 102.1, CR 800.4: an eliminated player has left the game and
             // cannot take game actions.
@@ -402,15 +514,124 @@ pub fn apply_un_action(
                 source: offer.source,
                 returns: offer.returns,
             }];
-            let waiting_for = state.waiting_for.clone();
-            let settled = super::engine_priority::run_post_action_pipeline_from_settled_priority(
-                state,
-                &mut events,
-                0,
-                &waiting_for,
-            )?;
-            state.waiting_for = settled.clone();
+            let settled = settle_triggers_at_priority(state, &mut events)?;
             Ok(ActionResult::applied(events, settled))
         }
     }
+}
+
+/// Put the triggers `events` caused on the stack from a settled Priority wait,
+/// through the settled-priority trigger pipeline, and return the wait that
+/// follows.
+///
+/// CR 117.4: the spell or ability on top of the stack resolves only when all
+/// players pass in succession. A pass made before a new triggered ability
+/// joined the stack was not a pass on it, so when this puts anything on the
+/// stack the consecutive-pass record starts over and every player gets to
+/// respond to it.
+fn settle_triggers_at_priority(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let stack_before = state.stack.len();
+    let waiting_for = state.waiting_for.clone();
+    let settled = super::engine_priority::run_post_action_pipeline_from_settled_priority(
+        state,
+        events,
+        0,
+        &waiting_for,
+    )?;
+    state.waiting_for = settled.clone();
+    if state.stack.len() > stack_before {
+        super::priority::clear_priority_passes(state);
+    }
+    Ok(settled)
+}
+
+/// `actor` touched `object_id` (the client reports the player's cursor entering
+/// the card). The touch is an event like any other: abilities that trigger on it
+/// (`TriggerMode::Touched`) trigger the moment it happens (CR 603.2). At a
+/// priority boundary they go on the stack at once through the ordinary trigger
+/// pipeline; during any other decision they wait until a player would next
+/// receive priority (CR 603.3), and the pending decision stays untouched.
+fn touch_object(
+    state: &mut GameState,
+    actor: PlayerId,
+    object_id: ObjectId,
+) -> Result<ActionResult, EngineError> {
+    // CR 102.1, CR 800.4: an eliminated player has left the game.
+    if !super::players::is_alive(state, actor) {
+        return Err(EngineError::InvalidAction(
+            "Player has left the game".to_string(),
+        ));
+    }
+    if !state.un_actions.is_enabled(actor) {
+        return Err(EngineError::InvalidAction(
+            "Player has not opted in to Un-card actions".to_string(),
+        ));
+    }
+    // CR 104.1: once the game has ended nothing more triggers.
+    if state.game_end.is_some() {
+        return Err(EngineError::InvalidAction("The game is over".to_string()));
+    }
+    if !responds_to_touch(state, object_id) {
+        return Err(EngineError::InvalidAction(
+            "Nothing happens when that object is touched".to_string(),
+        ));
+    }
+    if pending_touch_triggers(state, actor) >= MAX_PENDING_TOUCH_TRIGGERS {
+        return Err(EngineError::InvalidAction(
+            "Too many of your touches are still waiting to resolve".to_string(),
+        ));
+    }
+    let mut events = vec![GameEvent::ObjectTouched {
+        player: actor,
+        object_id,
+    }];
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        let settled = settle_triggers_at_priority(state, &mut events)?;
+        Ok(ActionResult::applied(events, settled))
+    } else {
+        // CR 603.2c: the touch triggers once. It parks in the deferred queue
+        // here, so it is claimed for the ordinary collector: a spell or ability
+        // announcement paused under this decision must not stage the same
+        // touch into its own carrier at the end of the action. The touch is
+        // not part of that announcement either — cancelling the announcement
+        // (CR 733.1) must not undo it.
+        super::engine_priority::park_triggers_until_priority(state, &events);
+        Ok(ActionResult::applied(events, state.waiting_for.clone()))
+    }
+}
+
+/// CR 603.3: a touch made while a decision was pending parked its triggers until
+/// a player would next receive priority. Most answers put the deferred queue on
+/// the stack in their own priority pass, but an answer that hands priority back
+/// without one (a paid unless-cost with nothing after it) leaves the queue
+/// parked. Put it on the stack now, before any player acts on that priority.
+pub(crate) fn place_parked_touch_triggers(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let WaitingFor::Priority { .. } = state.waiting_for else {
+        return Ok(());
+    };
+    let touch_parked = state.deferred_triggers.iter().any(|context| {
+        context
+            .trigger_events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ObjectTouched { .. }))
+    });
+    // CR 104.1: once the game has ended nothing more triggers.
+    if state.game_end.is_some()
+        || !touch_parked
+        || !super::triggers::should_drain_deferred_triggers_now(state)
+    {
+        return Ok(());
+    }
+    // A fresh event buffer: this pass places only the parked queue and must not
+    // rescan the action's already-collected events for delayed triggers.
+    let mut placed = Vec::new();
+    settle_triggers_at_priority(state, &mut placed)?;
+    events.extend(placed);
+    Ok(())
 }

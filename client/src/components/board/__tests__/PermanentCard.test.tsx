@@ -641,6 +641,126 @@ describe("PermanentCard", () => {
     expect(host.style.zIndex).toBe("80");
   });
 
+  describe("Un-card touch (Vile Bile)", () => {
+    const touchAction: GameAction = {
+      type: "UnAction",
+      data: { action: { type: "TouchObject", data: { object_id: 1 } } },
+    };
+
+    function setUnActions(enabledPlayers: number[], touchable: number[]) {
+      const gameState = makeState();
+      gameState.un_actions = { enabled_players: enabledPlayers, touchable };
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    }
+
+    it("reports one touch per pointer entry on an engine-listed touchable object", () => {
+      setUnActions([0], [1]);
+      const { container } = renderPermanent();
+      const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+
+      fireEvent.pointerEnter(host, { pointerType: "mouse" });
+      fireEvent.pointerLeave(host, { pointerType: "mouse" });
+      fireEvent.pointerEnter(host, { pointerType: "mouse" });
+
+      const touches = vi.mocked(dispatchAction).mock.calls.filter(
+        ([action]) => action.type === "UnAction",
+      );
+      expect(touches).toEqual([[touchAction], [touchAction]]);
+    });
+
+    it("counts a finger on a touchscreen as a touch", () => {
+      setUnActions([0], [1]);
+      const { container } = renderPermanent();
+      fireEvent.pointerEnter(container.querySelector('[data-object-id="1"]') as HTMLElement, {
+        pointerType: "touch",
+      });
+      expect(dispatchAction).toHaveBeenCalledWith(touchAction);
+    });
+
+    it("reports a pressed pointer captured elsewhere when it slides onto the card", () => {
+      setUnActions([0], [1]);
+      const { container } = renderPermanent();
+      const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+      const elsewhere = document.createElement("div");
+      document.body.appendChild(elsewhere);
+      // jsdom has no layout: the hit-test reads whatever is "under" the pointer.
+      let under: Element = elsewhere;
+      const elementFromPoint = vi.fn(() => under);
+      Object.defineProperty(document, "elementFromPoint", { value: elementFromPoint, configurable: true });
+      const touches = () =>
+        vi.mocked(dispatchAction).mock.calls.filter(([action]) => action.type === "UnAction");
+
+      try {
+        // The pointer went down elsewhere (a long press on another card captures
+        // it), so this card never sees `pointerenter`; only document moves.
+        fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch" });
+        expect(touches()).toEqual([]);
+        under = host.firstElementChild ?? host;
+        fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch" });
+        fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch" });
+        expect(touches()).toEqual([[touchAction]]);
+
+        // The card's own enter for the same contact is the same entry, not a second.
+        fireEvent.pointerEnter(host, { pointerId: 5, pointerType: "touch" });
+        expect(touches()).toHaveLength(1);
+
+        // Sliding off and back on is a second touch; so is a fresh contact
+        // after the finger lifts.
+        under = elsewhere;
+        fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch" });
+        under = host;
+        fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch" });
+        expect(touches()).toHaveLength(2);
+        fireEvent.pointerUp(document, { pointerId: 5, pointerType: "touch" });
+        fireEvent.pointerEnter(host, { pointerId: 5, pointerType: "touch" });
+        expect(touches()).toEqual([[touchAction], [touchAction], [touchAction]]);
+
+        // An unpressed pointer is not hit-tested; its own enter events report it.
+        fireEvent.pointerMove(document, { pointerId: 6, buttons: 0, pointerType: "mouse" });
+        expect(touches()).toHaveLength(3);
+      } finally {
+        // Remove the own property so `document` falls back to jsdom's prototype.
+        delete (document as { elementFromPoint?: unknown }).elementFromPoint;
+        elsewhere.remove();
+      }
+    });
+
+    it("does not mark or hit-test a card that is not touchable", () => {
+      setUnActions([0], [2]);
+      const { container } = renderPermanent();
+      const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+      expect(host.hasAttribute("data-un-touch-object-id")).toBe(false);
+      Object.defineProperty(document, "elementFromPoint", { value: () => host, configurable: true });
+      try {
+        fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch" });
+      } finally {
+        delete (document as { elementFromPoint?: unknown }).elementFromPoint;
+      }
+      expect(
+        vi.mocked(dispatchAction).mock.calls.filter(([action]) => action.type === "UnAction"),
+      ).toEqual([]);
+    });
+
+    it("reports nothing for an object the engine does not list or a player who did not opt in", () => {
+      setUnActions([0], [2]);
+      const first = renderPermanent();
+      fireEvent.pointerEnter(first.container.querySelector('[data-object-id="1"]') as HTMLElement, {
+        pointerType: "mouse",
+      });
+      first.unmount();
+
+      setUnActions([1], [1]);
+      const second = renderPermanent();
+      fireEvent.pointerEnter(second.container.querySelector('[data-object-id="1"]') as HTMLElement, {
+        pointerType: "mouse",
+      });
+
+      expect(
+        vi.mocked(dispatchAction).mock.calls.filter(([action]) => action.type === "UnAction"),
+      ).toEqual([]);
+    });
+  });
+
   it("does not recursively render cyclic attachment graphs", () => {
     const gameState = makeState();
     gameState.objects[1].attached_to = { type: "Object", data: 2 };
