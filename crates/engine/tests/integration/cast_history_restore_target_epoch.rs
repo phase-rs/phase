@@ -650,7 +650,7 @@ fn a_return_cost_park_recovers_its_announced_target_and_records_the_creature() {
     );
     assert!(
         fact_core_types(&fact).contains(&CoreType::Creature),
-        "the resumed save records the modification-time creature the caster announced, not the \
+        "the resumed save records the announcement-time creature the caster announced, not the \
          returned card's printed type line: {:?}",
         fact_core_types(&fact)
     );
