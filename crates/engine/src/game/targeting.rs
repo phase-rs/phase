@@ -5059,6 +5059,7 @@ mod tests {
                 event_source: Some(c0),
                 event_target: None,
                 controller: None,
+                event_amount: None,
             },
             ResidentDrainPolicy::Replace,
         );
@@ -5106,6 +5107,7 @@ mod tests {
                 event_target: Some(TargetRef::Object(c1)),
                 event_source: None,
                 controller: None,
+                event_amount: None,
             },
             ResidentDrainPolicy::Replace,
         );

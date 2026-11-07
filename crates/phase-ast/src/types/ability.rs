@@ -2413,7 +2413,7 @@ pub enum DamageRedirectTarget {
 }
 
 /// Classification of WHAT a damage-affecting replacement effect does —
-/// regenerate, prevent, modify a damage amount, or redirect.
+/// regenerate, prevent, modify a damage amount, redirect, or substitute.
 ///
 /// **Carries no lifetime meaning.** The lifetime lives in
 /// [`ReplacementDefinition::expiry`] and nowhere else: CR 611.2a bounds a
@@ -2464,6 +2464,13 @@ pub enum ShieldKind {
     /// `Prevention { All }` (Fog), which stays active for every matching damage
     /// event in its lifetime.
     PreventionOneShot,
+    /// CR 614.1a + CR 614.6: "If damage would be dealt to X, <Y> that many … instead"
+    /// (Phytohydra, Lichenthrope, Dralnu, Force Bubble, Delaying Shield, Nefarious Lich,
+    /// Crumbling Sanctuary). The damage event is replaced wholesale by `execute`, which
+    /// reads the would-be amount. Not a CR 615 prevention effect (CR 615.1a), so CR 615.12
+    /// doesn't reach it: damage that can't be prevented is still replaced, and nothing counts
+    /// as prevented, so "when damage is prevented" triggers don't fire (CR 615.13).
+    Substitution,
 }
 
 /// CR 614.5 vs CR 611.2a: how many damage events one `ShieldKind::Redirection`
@@ -39415,6 +39422,11 @@ pub enum ReplacementCondition {
         minimum: u32,
         filter: TargetFilter,
     },
+    /// CR 604.2 + CR 611.3a: a printed "while <state>" gate read live by the static
+    /// condition authority. Admitted only through `replacement_condition_from_static`.
+    /// Jared Carthalion, True Heir: "If damage would be dealt to Jared Carthalion while
+    /// you're the monarch, prevent that damage and put that many +1/+1 counters on it."
+    OnlyIfStatic { condition: Box<StaticCondition> },
     /// CR 716.2a: Replacement effect granted by a Class enchantment level —
     /// applies only while the source Class is at `level` or higher. Parallels
     /// `StaticCondition::ClassLevelGE`. Innkeeper's Talent level 3 (the
@@ -42226,6 +42238,13 @@ impl ReplacementDefinition {
     ///   for the engine's turn-window fallback.
     pub fn prevention_shield(mut self, amount: PreventionAmount) -> Self {
         self.shield_kind = ShieldKind::Prevention { amount };
+        self
+    }
+
+    /// CR 614.1a: Mark this replacement as a damage substitution. See
+    /// [`ShieldKind::Substitution`]. A printed line, so `expiry` stays `None`.
+    pub fn substitution_shield(mut self) -> Self {
+        self.shield_kind = ShieldKind::Substitution;
         self
     }
 

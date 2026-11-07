@@ -1921,6 +1921,9 @@ pub(super) fn parse_targeted_action_ast(
         if matches!(count_word, CountWord::SourceExclusion) {
             add_another_to_filter_recursive(&mut target);
         }
+        // CR 301.5a + CR 701.21a: "sacrifice an Equipment attached to ~" names a population,
+        // not every Equipment you control (Outfitted Jouster; Three Dog, Galaxy News DJ).
+        let (target, rem) = crate::parser::oracle_cost::fold_attached_to_source_rider(target, rem);
         let base_was_typed = matches!(target, TargetFilter::Typed(_));
         let (target, folded_rest) = fold_article_led_type_union(target, rem);
         // CR 608.2c: A union can leave a third leg whether the base is already

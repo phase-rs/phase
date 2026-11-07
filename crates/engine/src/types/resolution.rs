@@ -1229,6 +1229,28 @@ impl IdentifiedPostReplacementDispatch {
     }
 }
 
+/// How much resolution work is left: the stack depth, then the drain count of the active
+/// post-replacement frame (or its paired parent), compared lexicographically. Positional on
+/// purpose: a resume loop only needs a measure that strictly decreases while it makes progress,
+/// not the subtree's identity (that is `ReplacementSubtreeBoundary`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResolutionPosition {
+    resolution_depth: usize,
+    active_post_replacement_drains: usize,
+}
+
+impl ResolutionPosition {
+    /// Strictly less work remains than at `before`: the stack is lower, or as high with fewer
+    /// drains in the active post-replacement frame (lexicographic on ℕ×ℕ).
+    pub(crate) fn is_strictly_inside(&self, before: &Self) -> bool {
+        (self.resolution_depth, self.active_post_replacement_drains)
+            < (
+                before.resolution_depth,
+                before.active_post_replacement_drains,
+            )
+    }
+}
+
 impl ResolutionStack {
     pub fn is_empty(&self) -> bool {
         self.frames.is_empty()
@@ -3269,6 +3291,16 @@ impl ResolutionStack {
         }
     }
 
+    /// How much resolution work is left (see [`ResolutionPosition`]).
+    pub(crate) fn position(&self) -> ResolutionPosition {
+        ResolutionPosition {
+            resolution_depth: self.len(),
+            active_post_replacement_drains: self
+                .active_post_replacement_or_paired_parent()
+                .map_or(0, PostReplacementDrainStack::len),
+        }
+    }
+
     /// Mutably accesses the active general drain or its exact immediate parent.
     pub fn active_post_replacement_or_paired_parent_mut(
         &mut self,
@@ -3412,6 +3444,19 @@ impl ResolutionStack {
     ) -> Option<usize> {
         self.post_replacement_frame(id)
             .map(PostReplacementDrainStack::len)
+    }
+
+    /// CR 615.5 + CR 608.2c: queue `drain` behind the paused resident of the frame `id` names.
+    /// Identity-addressed, like the dispatcher's own cleanup.
+    pub(crate) fn install_post_replacement_drain_behind_paused(
+        &mut self,
+        id: PostReplacementFrameId,
+        drain: PostReplacementDrain,
+    ) -> Option<PostReplacementDrain> {
+        match self.post_replacement_frame_mut(id) {
+            Some(drains) => drains.install_behind_paused_resident(drain),
+            None => Some(drain),
+        }
     }
 
     /// The mutable twin of [`Self::post_replacement_frame`].
@@ -6378,6 +6423,7 @@ impl LegacyReplacementTailsWire {
                         // to the affected object's controller, exactly as it did
                         // before the field existed.
                         controller: None,
+                        event_amount: None,
                     },
                     ResidentDrainPolicy::Replace,
                 );
@@ -10032,6 +10078,7 @@ mod tests {
             convoked_creatures: Vec::new(),
         };
         spell.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Destroy {
                 object_id: bear,
                 source: None,

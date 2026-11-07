@@ -3732,30 +3732,119 @@ pub fn detection_trigger_event() -> Option<crate::types::events::GameEvent> {
 // ~7 `resolve_quantity*` entry points either path happens to use, because the
 // gate lives in the `EventContextAmount` cascade (`event_context_amount`) — the
 // single shared consumption point all of them funnel into.
+//
+// CR 614.6 + CR 615.5: a replacement's own action is the other nested scope. It
+// suppresses the same enclosing-trigger tiers and also owns the amount its
+// "that many" names: the amount of the event it replaced or prevented.
 std::thread_local! {
-    static SUPPRESS_ENCLOSING_TRIGGER_EVENT_AMOUNT: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
+    static NESTED_AMOUNT_SCOPE: std::cell::Cell<NestedAmountScope> =
+        const { std::cell::Cell::new(NestedAmountScope::Enclosing) };
+}
+
+/// Which nested ability, if any, the `EventContextAmount` cascade is resolving for.
+#[derive(Clone, Copy)]
+enum NestedAmountScope {
+    /// Outside any nested scope: every tier of the cascade is live.
+    Enclosing,
+    /// CR 603.12: a reflexive triggered ability's own target slots and frozen count.
+    Reflexive,
+    /// CR 614.6 + CR 615.5: a replacement's own action, with the amount of the event it
+    /// replaced or prevented (`None` when that event had no amount).
+    ReplacementAction { amount: Option<i32> },
+}
+
+/// Run `f` in `scope`, restoring the previous scope afterwards. Mirrors
+/// `with_detection_trigger_event`'s save/restore-previous-value discipline
+/// (not a hard reset) so nested scopes compose: a reflexive ability created
+/// inside a replacement's action, or a replacement applying inside either.
+fn with_nested_amount_scope<R>(scope: NestedAmountScope, f: impl FnOnce() -> R) -> R {
+    // The guard restores the previous scope on unwind too: a native server reuses its
+    // threads, so a leaked replacement-action amount would answer every later "that many".
+    let _restore = ResumedReplacementAction {
+        previous: Some(NESTED_AMOUNT_SCOPE.with(|c| c.replace(scope))),
+    };
+    f()
 }
 
 /// CR 603.12: Run `f` with the enclosing trigger's own event context
-/// suppressed from the `EventContextAmount` cascade. Mirrors
-/// `with_detection_trigger_event`'s save/restore-previous-value discipline
-/// (not a hard reset to `false`) so nested reflexive-in-reflexive
-/// construction, if it ever occurs, composes correctly.
+/// suppressed from the `EventContextAmount` cascade.
 pub(crate) fn with_reflexive_resolution_scope<R>(f: impl FnOnce() -> R) -> R {
-    let prev = SUPPRESS_ENCLOSING_TRIGGER_EVENT_AMOUNT.with(|c| c.replace(true));
-    let result = f();
-    SUPPRESS_ENCLOSING_TRIGGER_EVENT_AMOUNT.with(|c| c.set(prev));
-    result
+    with_nested_amount_scope(NestedAmountScope::Reflexive, f)
+}
+
+/// CR 614.6 + CR 615.5: Run a replacement's own action (a post-replacement continuation,
+/// `engine_replacement::dispatch_pending_post_replacement_effect`) with `amount`, the amount
+/// of the event it replaced or prevented, as its "that many". The amount outranks the die
+/// result and every enclosing-trigger tier of the cascade, because the action is part of the
+/// modified event that occurs instead (CR 614.1a), not one of the instructions of the spell
+/// or ability resolving around it (CR 608.2c). The enclosing-trigger tiers stay suppressed
+/// when `amount` is `None`, as in the reflexive scope.
+pub(crate) fn with_replacement_action_scope<R>(amount: Option<i32>, f: impl FnOnce() -> R) -> R {
+    with_nested_amount_scope(NestedAmountScope::ReplacementAction { amount }, f)
 }
 
 fn enclosing_trigger_event_amount_suppressed() -> bool {
-    SUPPRESS_ENCLOSING_TRIGGER_EVENT_AMOUNT.with(|c| c.get())
+    NESTED_AMOUNT_SCOPE.with(|c| !matches!(c.get(), NestedAmountScope::Enclosing))
+}
+
+/// CR 614.6 + CR 615.5: the amount the replacement action now running owns, if any.
+/// `None` outside a replacement's action, and inside a reflexive ability created within one.
+fn replacement_action_amount() -> Option<i32> {
+    current_replacement_action().map(|action| action.amount)
+}
+
+/// CR 614.6 + CR 615.5: the replacement action whose work is running now, if it owns an amount —
+/// what work it leaves for a later `apply()` carries (`PendingContinuation::replacement_action`).
+/// `None` outside a replacement's action, inside one that owns no amount, and inside a reflexive
+/// ability created within one.
+pub(crate) fn current_replacement_action(
+) -> Option<crate::types::game_state::ReplacementActionScope> {
+    NESTED_AMOUNT_SCOPE.with(|c| match c.get() {
+        NestedAmountScope::ReplacementAction {
+            amount: Some(amount),
+        } => Some(crate::types::game_state::ReplacementActionScope { amount }),
+        NestedAmountScope::ReplacementAction { amount: None }
+        | NestedAmountScope::Enclosing
+        | NestedAmountScope::Reflexive => None,
+    })
+}
+
+/// Restores the scope that was current when [`resume_replacement_action`] entered.
+#[must_use = "the replacement action's scope lasts only while the guard is held"]
+pub(crate) struct ResumedReplacementAction {
+    previous: Option<NestedAmountScope>,
+}
+
+impl Drop for ResumedReplacementAction {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous {
+            NESTED_AMOUNT_SCOPE.with(|c| c.set(previous));
+        }
+    }
+}
+
+/// CR 614.6 + CR 615.5 + CR 608.2c: re-enter the replacement action that left `action`'s work
+/// for a later `apply()`, so a step after a child prompt reads the amount the action owns, as
+/// it would have read it had nothing paused. `None` (ordinary work) leaves the current scope
+/// as it is.
+pub(crate) fn resume_replacement_action(
+    action: Option<crate::types::game_state::ReplacementActionScope>,
+) -> ResumedReplacementAction {
+    ResumedReplacementAction {
+        previous: action.map(|action| {
+            NESTED_AMOUNT_SCOPE.with(|c| {
+                c.replace(NestedAmountScope::ReplacementAction {
+                    amount: Some(action.amount),
+                })
+            })
+        }),
+    }
 }
 
 /// CR 603.12 + CR 603.2c: The enclosing trigger's filtered subject count.
-/// Suppressed inside `with_reflexive_resolution_scope` so a reflexive trigger
-/// cannot inherit its enclosing trigger's batched-event count.
+/// Suppressed inside `with_reflexive_resolution_scope` and
+/// `with_replacement_action_scope` so a reflexive trigger or a replacement's
+/// action cannot inherit its enclosing trigger's batched-event count.
 fn enclosing_trigger_match_count(state: &GameState) -> Option<i32> {
     if enclosing_trigger_event_amount_suppressed() {
         return None;
@@ -3765,7 +3854,8 @@ fn enclosing_trigger_match_count(state: &GameState) -> Option<i32> {
 
 /// CR 603.12 + CR 603.2c/603.4: The enclosing trigger's scalar event amount.
 /// Suppressed inside `with_reflexive_resolution_scope` so a reflexive trigger
-/// falls through to the action that created it.
+/// falls through to the action that created it, and inside
+/// `with_replacement_action_scope` (CR 614.6).
 fn enclosing_trigger_event_amount(state: &GameState) -> Option<i32> {
     if enclosing_trigger_event_amount_suppressed() {
         return None;
@@ -7853,8 +7943,13 @@ fn battlefield_departure_counter_context(
 /// tier determined one. `resolve_ref` reads `None` as 0; callers that must tell an
 /// undetermined amount from a determined zero (a delayed trigger freezing its
 /// creation-time amount, CR 603.7a) use `determined_event_context_amount`.
-/// Resolution-precedence ordered:
+/// Resolution-precedence ordered, after the proposed event's own amount
+/// (`ctx.event_amount`) and the Moonlit copy count:
 ///
+///   0. CR 614.6 + CR 615.5: the amount a replacement's own action owns
+///      (`with_replacement_action_scope`) — the amount of the event it
+///      replaced or prevented. Inside that scope the enclosing-trigger tiers
+///      (1 and 4) are suppressed as well.
 ///   1. `current_trigger_match_count` — the filtered subject count of a
 ///      batched trigger ("one or more <FILTER> <verb>"), set by
 ///      `stack::resolve_top` for the resolution. This is the canonical
@@ -7895,6 +7990,12 @@ fn event_context_amount(
         // Meditation); `None` otherwise, so it falls straight through to the
         // existing trigger/effect cascade.
         .or(state.post_replacement_token_substitution_count)
+        // CR 614.6 + CR 615.5: a replacement's own action reads the amount of the
+        // event it replaced or prevented, ahead of the die result and the trigger
+        // tiers of the resolution around it. Farideh's Fireball's "deals 2 damage to
+        // each opponent" under Delaying Shield puts 2 delay counters on it, not the
+        // d20 face. `None` outside that scope, so every other reader is unchanged.
+        .or_else(replacement_action_amount)
         .or_else(|| enclosing_trigger_match_count(state))
         // CR 706.4: Die results recorded earlier in THIS resolution
         // outrank the triggering event's own amount, so "roll one or more
@@ -7921,9 +8022,10 @@ fn event_context_amount(
         // life change, cards drawn, counters, die results), plus the CR
         // 603.4 detection-time fallback for intervening-`if` re-checks
         // where `current_trigger_event` is still `None`. Both tiers are
-        // suppressed inside `with_reflexive_resolution_scope` (CR 603.12) so
-        // a reflexive ability's "that many" never reads the enclosing
-        // trigger's event while that trigger's resolution is paused.
+        // suppressed inside `with_reflexive_resolution_scope` (CR 603.12) and
+        // `with_replacement_action_scope` (CR 614.6) so neither a reflexive
+        // ability's nor a replacement action's "that many" reads the event of
+        // the trigger resolving around it.
         .or_else(|| enclosing_trigger_event_amount(state))
         .or(state.last_effect_count)
         .or(state.last_effect_amount)
@@ -24434,6 +24536,58 @@ mod tests {
             inner, 2,
             "inside reflexive scope the enclosing batched trigger count must not \
              shadow the count from the reflexive action"
+        );
+    }
+
+    /// CR 614.6 + CR 615.5 + CR 706.4: a replacement's own action reads the amount
+    /// it owns ahead of a die result, the enclosing trigger's match count and event
+    /// amount, and the resolution's `last_effect_count`, all live at once. Outside
+    /// the scope the die result still wins, and a reflexive ability created inside
+    /// the action does not inherit the owned amount. With no owned amount the
+    /// trigger tiers stay suppressed and the die result is read.
+    #[test]
+    fn event_context_amount_inside_replacement_action_scope_reads_the_owned_amount() {
+        let mut state = GameState::new_two_player(42);
+        state.die_result_this_resolution = Some(17);
+        state.current_trigger_match_count = Some(3);
+        state.current_trigger_event = Some(crate::types::events::GameEvent::DamageDealt {
+            source_id: ObjectId(1),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 6,
+            is_combat: true,
+            excess: 0,
+            source_incarnation: None,
+        });
+        state.last_effect_count = Some(5);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        let read = |state: &GameState| resolve_quantity(state, &expr, PlayerId(0), ObjectId(1));
+
+        assert_eq!(read(&state), 3, "outside any scope the match count wins");
+        assert_eq!(
+            with_replacement_action_scope(Some(2), || read(&state)),
+            2,
+            "the action's owned amount outranks every ambient tier"
+        );
+        assert_eq!(
+            with_replacement_action_scope(Some(2), || {
+                with_reflexive_resolution_scope(|| read(&state))
+            }),
+            17,
+            "a reflexive ability inside the action reads its own cascade"
+        );
+        assert_eq!(
+            with_replacement_action_scope(None, || read(&state)),
+            17,
+            "no owned amount: the trigger tiers stay suppressed"
+        );
+
+        state.current_trigger_match_count = None;
+        assert_eq!(
+            read(&state),
+            17,
+            "outside the scope the die result is unchanged"
         );
     }
 

@@ -13,8 +13,8 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     names_resolution_chosen_recipient, quantity_expr_uses_recipient, DamageContextSnapshot,
     DamageSource, EachDamageRecipient, Effect, EffectError, EffectKind, ExcessRecipient,
-    PlayerFilter, QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetDamageSourceBinding,
-    TargetFilter, TargetRef,
+    PlayerFilter, QuantityExpr, ResolvedAbility, SubAbilityLink, TargetChoiceTiming,
+    TargetDamageSourceBinding, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -643,9 +643,7 @@ pub(crate) fn apply_damage_to_target(
                 // can resolve against the prevented event's damage source. Clear
                 // after the call to prevent leakage into unrelated later
                 // replacements.
-                let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                    state, None, None, None, events,
-                );
+                crate::game::replacement::drain_damage_rider(state, events);
             }
             Ok(DamageResult::Applied(0))
         }
@@ -1194,13 +1192,12 @@ fn stash_remaining_post_replacement_damage(
 ) {
     let mut iter = remaining
         .iter()
-        .filter_map(|(ctx, event)| build_post_replacement_damage_node(ctx, event));
+        .filter_map(|(ctx, event)| build_post_replacement_damage_node(ctx, event))
+        .map(|node| keep_chain_identity(state, node, ability));
     let Some(mut head) = iter.next() else {
         if let Some(sub) = ability.sub_ability.as_ref() {
-            append_to_pending_continuation(
-                state,
-                Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
-            );
+            let tail = cast_tail_with_parent_targets(state, sub, ability);
+            append_to_pending_continuation(state, Some(Box::new(tail)));
         }
         return;
     };
@@ -1209,7 +1206,10 @@ fn stash_remaining_post_replacement_damage(
         append_to_sub_chain(&mut head, node);
     }
     if let Some(sub) = ability.sub_ability.as_ref() {
-        append_to_sub_chain(&mut head, cast_tail_with_parent_targets(sub, ability));
+        append_to_sub_chain(
+            &mut head,
+            cast_tail_with_parent_targets(state, sub, ability),
+        );
     }
     append_to_pending_continuation(state, Some(Box::new(head)));
 }
@@ -1225,7 +1225,7 @@ fn stash_remaining_damage_chain(
     damage_source_id: ObjectId,
     remaining: impl IntoIterator<Item = (TargetRef, u32)>,
 ) {
-    if let Some(head) = remaining_damage_head(ability, damage_source_id, remaining) {
+    if let Some(head) = remaining_damage_head(state, ability, damage_source_id, remaining) {
         append_to_pending_continuation(state, Some(Box::new(head)));
     }
 }
@@ -1234,17 +1234,22 @@ fn stash_remaining_damage_chain(
 /// one node per remaining (target, amount) pair, in order, followed by the
 /// parent's `sub_ability` tail. With no remaining batch work the chain is just
 /// the tail, so the downstream chain still resumes after the pending
-/// replacement choice. `None` when there is neither.
+/// replacement choice. `None` when there is neither. Each remaining node keeps
+/// the chain's identity and the batch's settled guards
+/// ([`keep_chain_identity`]); the tail takes the chain-context hand-off
+/// ([`cast_tail_with_parent_targets`]).
 fn remaining_damage_head(
+    state: &mut GameState,
     ability: &ResolvedAbility,
     damage_source_id: ObjectId,
     remaining: impl IntoIterator<Item = (TargetRef, u32)>,
 ) -> Option<ResolvedAbility> {
+    let head = remaining_damage_chain(state, ability, damage_source_id, remaining);
     let tail = ability
         .sub_ability
         .as_ref()
-        .map(|sub| cast_tail_with_parent_targets(sub, ability));
-    match remaining_damage_chain(ability, damage_source_id, remaining) {
+        .map(|sub| cast_tail_with_parent_targets(state, sub, ability));
+    match head {
         Some(mut head) => {
             if let Some(tail) = tail {
                 append_to_sub_chain(&mut head, tail);
@@ -1259,6 +1264,7 @@ fn remaining_damage_head(
 /// `sub_ability` chain. Every node keeps the parent's latched trigger source so a
 /// departed source is still evaluated by its last known information.
 fn remaining_damage_chain(
+    state: &GameState,
     ability: &ResolvedAbility,
     damage_source_id: ObjectId,
     remaining: impl IntoIterator<Item = (TargetRef, u32)>,
@@ -1267,7 +1273,7 @@ fn remaining_damage_chain(
         let mut node =
             build_remaining_damage_node(damage_source_id, ability.controller, target, amount);
         node.trigger_source = ability.trigger_source.clone();
-        node
+        keep_chain_identity(state, node, ability)
     };
     let mut iter = remaining.into_iter();
     let (first_target, first_amount) = iter.next()?;
@@ -1290,7 +1296,13 @@ fn remaining_damage_chain(
 /// false and no object target leaks; for Lady Loki's `CastFromZone
 /// { target: ParentTarget }` tail (empty targets, non-`Resolution` timing) it
 /// returns true and the hit is preserved so the free cast still addresses it.
+///
+/// The tail also takes the same chain-context hand-off as the generic pause path, so
+/// a kicker survives the park (Hurloon Battle Hymn, "If this spell was kicked, you
+/// gain 4 life."). The context object is `None` because `resolve_chain_body` has
+/// already set it recursively on `ability`.
 fn cast_tail_with_parent_targets(
+    state: &mut GameState,
     sub: &ResolvedAbility,
     ability: &ResolvedAbility,
 ) -> ResolvedAbility {
@@ -1298,7 +1310,114 @@ fn cast_tail_with_parent_targets(
     if crate::game::effects::should_propagate_parent_targets(ability, &tail) {
         tail.mirror_targets_from(ability);
     }
+    crate::game::effects::apply_parent_chain_context(&mut tail, ability, None, state);
     tail
+}
+
+/// CR 608.2c: a node parked for a remaining recipient is the same instruction of the same
+/// spell or ability. `resolve_chain_body` evaluates the next node's gate against this node
+/// and hands this node's context on, so it carries the chain's (Nibelheim Aflame, "If this
+/// spell was cast from a graveyard"; Tannuk, "the second time this ability has resolved").
+/// A drain runs at depth 1, so the index counts no resolution.
+fn keep_chain_identity(
+    state: &GameState,
+    mut node: ResolvedAbility,
+    ability: &ResolvedAbility,
+) -> ResolvedAbility {
+    node.context = ability.context.clone();
+    node.ability_index = ability.ability_index;
+    // CR 608.2f + CR 700.1: a remaining portion of a simultaneous batch keeps the guards
+    // the batch read; nothing else is such a portion (`apply_parent_chain_context`).
+    node.context.settled_damage_guards = replacement::settled_damage_guards(state);
+    node
+}
+
+/// CR 120.2b: the one object a damage node names as the dealer: `Some(None)` for the
+/// spell or ability itself. `None` for any other effect, and for a node with several
+/// sources.
+fn named_damage_dealer(effect: &Effect) -> Option<Option<DamageSource>> {
+    match effect {
+        Effect::DealDamage { damage_source, .. } | Effect::DamageAll { damage_source, .. } => {
+            Some(*damage_source)
+        }
+        Effect::DamageEachPlayer { .. } => Some(None),
+        _ => None,
+    }
+}
+
+/// CR 608.2c: the node holding this clause's next instruction, when it is unconditional: a
+/// `ContinuationStep` sub, or the base clause of an unswapped "instead" sub (Searing Blaze
+/// lowers its printed second clause to that sub's `else_ability`).
+fn next_damage_clause(node: &ResolvedAbility) -> Option<&ResolvedAbility> {
+    let sub = node
+        .sub_ability
+        .as_deref()
+        .filter(|sub| sub.sub_link == SubAbilityLink::ContinuationStep)?;
+    match &sub.condition {
+        None => Some(sub),
+        Some(condition) if condition.is_instead_override() => sub.else_ability.as_deref(),
+        Some(_) => None,
+    }
+}
+
+/// CR 608.2f: does this node's clause and the next one form one simultaneous action? One
+/// dealer, one sentence: Chandra's Outrage, "deals 4 damage to target creature and 2 damage
+/// to that creature's controller." A `SequentialSibling` or a conditioned node is a later
+/// instruction (Misthios's Fury). A different dealer is too: the AST doesn't mark Alpha
+/// Brawl's "then each of those creatures deals damage", and that card's ruling says "The
+/// two parts of Alpha Brawl's effect happen sequentially".
+fn joins_next_damage_clause(node: &ResolvedAbility) -> bool {
+    next_damage_clause(node).is_some_and(|next| {
+        named_damage_dealer(&node.effect).is_some()
+            && named_damage_dealer(&node.effect) == named_damage_dealer(&next.effect)
+    })
+}
+
+/// CR 608.2f + CR 700.1: read the guards once for a joined run of damage clauses
+/// and stamp every clause of the run, so each opens its batch under the same reading
+/// (Undergrowth Champion ruling: "its prevention effect will apply once to all that damage").
+/// `None` when this node starts no run, or when nothing on the board has a guard. The stamp
+/// is the carrier a remaining portion already uses, so a pause inside the run composes.
+pub(super) fn settle_joined_damage_run(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<ResolvedAbility> {
+    if !ability.context.settled_damage_guards.is_empty() || !joins_next_damage_clause(ability) {
+        return None;
+    }
+    let guards = replacement::read_damage_guards(state);
+    if guards.is_empty() {
+        return None;
+    }
+    let mut stamped = ability.clone();
+    let mut node = &mut stamped;
+    loop {
+        node.context.settled_damage_guards = guards.clone();
+        if !joins_next_damage_clause(node) {
+            return Some(stamped);
+        }
+        // `joins_next_damage_clause` held, so this is `next_damage_clause`'s node. An
+        // unswapped "instead" sub is stamped too: a pause in the head forwards it, and its
+        // else clause resolves under its context (Searing Blaze under Furnace of Rath).
+        let sub = node.sub_ability.as_deref_mut()?;
+        node = match sub.condition {
+            None => sub,
+            Some(_) => {
+                sub.context.settled_damage_guards = guards.clone();
+                sub.else_ability.as_deref_mut()?
+            }
+        };
+    }
+}
+
+/// CR 608.2c: tell `resolve_chain_body` that this pause parked the node's later
+/// instructions behind its remaining recipients, so the generic pause path must not run
+/// them again ahead of those recipients. A node with no tail tags nothing: the mark
+/// writes to whatever frame is active, and this node may have parked none.
+fn report_parked_tail(state: &mut GameState, ability: &ResolvedAbility) {
+    if ability.sub_ability.is_some() {
+        mark_pending_continuation_parent(state, EffectKind::from(&ability.effect));
+    }
 }
 
 /// CR 120.4b + CR 616.1e: Stash a two-part continuation for an
@@ -1323,6 +1442,7 @@ fn stash_each_source_combined_continuation(
 
     for (ctx, event) in already_replaced {
         if let Some(node) = build_post_replacement_damage_node(ctx, event) {
+            let node = keep_chain_identity(state, node, ability);
             match head_opt.as_mut() {
                 None => head_opt = Some(node),
                 Some(h) => append_to_sub_chain(h, node),
@@ -1331,7 +1451,11 @@ fn stash_each_source_combined_continuation(
     }
 
     for (source_id, target, amount) in raw_remaining {
-        let node = build_remaining_damage_node(source_id, controller, target, amount);
+        let node = keep_chain_identity(
+            state,
+            build_remaining_damage_node(source_id, controller, target, amount),
+            ability,
+        );
         match head_opt.as_mut() {
             None => head_opt = Some(node),
             Some(h) => append_to_sub_chain(h, node),
@@ -1342,13 +1466,11 @@ fn stash_each_source_combined_continuation(
         match head_opt.as_mut() {
             None => {
                 // Nothing to stash — forward sub_ability so downstream fires.
-                append_to_pending_continuation(
-                    state,
-                    Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
-                );
+                let tail = cast_tail_with_parent_targets(state, sub, ability);
+                append_to_pending_continuation(state, Some(Box::new(tail)));
                 return;
             }
-            Some(h) => append_to_sub_chain(h, cast_tail_with_parent_targets(sub, ability)),
+            Some(h) => append_to_sub_chain(h, cast_tail_with_parent_targets(state, sub, ability)),
         }
     }
 
@@ -1376,22 +1498,30 @@ fn stash_remaining_each_source_damage(
         // No remaining batch work — forward the parent's sub_ability so the
         // downstream chain resumes after the pending replacement choice resolves.
         if let Some(sub) = ability.sub_ability.as_ref() {
-            append_to_pending_continuation(
-                state,
-                Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
-            );
+            let tail = cast_tail_with_parent_targets(state, sub, ability);
+            append_to_pending_continuation(state, Some(Box::new(tail)));
         }
         return;
     };
 
-    let mut head =
-        build_remaining_damage_node(first_source, controller, first_target, first_amount);
+    let mut head = keep_chain_identity(
+        state,
+        build_remaining_damage_node(first_source, controller, first_target, first_amount),
+        ability,
+    );
     for (source_id, target, amount) in iter {
-        let node = build_remaining_damage_node(source_id, controller, target, amount);
+        let node = keep_chain_identity(
+            state,
+            build_remaining_damage_node(source_id, controller, target, amount),
+            ability,
+        );
         append_to_sub_chain(&mut head, node);
     }
     if let Some(sub) = ability.sub_ability.as_ref() {
-        append_to_sub_chain(&mut head, cast_tail_with_parent_targets(sub, ability));
+        append_to_sub_chain(
+            &mut head,
+            cast_tail_with_parent_targets(state, sub, ability),
+        );
     }
     append_to_pending_continuation(state, Some(Box::new(head)));
 }
@@ -1442,18 +1572,24 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    resolve_with_splice(
-        state,
-        ability,
-        RemainingDamageSplice::AfterContinuation,
-        events,
-    )
+    replacement::with_damage_batch(state, ability, |state| {
+        resolve_with_splice(
+            state,
+            ability,
+            RemainingDamageSplice::AfterContinuation,
+            events,
+        )
+    })
 }
 
 /// CR 608.2d + CR 608.2c: resume a resolution-time division paused by
 /// [`pause_for_resolution_division`]. The chosen portions are stamped into the
 /// stored node's `distribution`; no player receives priority between the choice
 /// and the damage (the division is part of applying the effect).
+///
+/// CR 608.2f + CR 700.1: the chosen portions are one simultaneous batch, opened
+/// here as `resolve` opens one — under the guards the stored node carries, else
+/// a fresh read — because the resume re-enters below `resolve`.
 pub(crate) fn resume_resolution_division(
     state: &mut GameState,
     pending_effect: &ResolvedAbility,
@@ -1462,12 +1598,14 @@ pub(crate) fn resume_resolution_division(
 ) -> Result<(), EffectError> {
     let mut stamped = pending_effect.clone();
     stamped.distribution = Some(distribution.to_vec());
-    resolve_with_splice(
-        state,
-        &stamped,
-        RemainingDamageSplice::BeforeContinuation,
-        events,
-    )
+    replacement::with_damage_batch(state, &stamped, |state| {
+        resolve_with_splice(
+            state,
+            &stamped,
+            RemainingDamageSplice::BeforeContinuation,
+            events,
+        )
+    })
 }
 
 /// CR 608.2d + CR 115.10a: the objects an untargeted resolution-time division
@@ -1564,13 +1702,16 @@ fn stash_remaining_distribution(
             stash_remaining_damage_chain(state, ability, damage_source_id, remaining);
         }
         RemainingDamageSplice::BeforeContinuation => {
-            if let Some(head) = remaining_damage_head(ability, damage_source_id, remaining) {
+            if let Some(head) = remaining_damage_head(state, ability, damage_source_id, remaining) {
                 super::prepend_to_pending_continuation(state, head);
             }
         }
     }
 }
 
+/// The body of [`resolve`] and [`resume_resolution_division`], run inside the
+/// damage batch each opens; `splice` says where a pause parks the remaining
+/// portions of a division.
 fn resolve_with_splice(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -1652,6 +1793,10 @@ fn resolve_with_splice(
                     // DealDamage continuation keyed to the same damage-source id.
                     let remaining = distribution[i + 1..].iter().map(|(t, a)| (t.clone(), *a));
                     stash_remaining_distribution(state, ability, ctx.source_id, remaining, splice);
+                    // A resumed CR 608.2d division and a single-candidate one carry
+                    // no tail (their pause cleared it), so this reports nothing for
+                    // them: the enclosing chain still owns their later instructions.
+                    report_parked_tail(state, ability);
                     return Ok(());
                 }
             }
@@ -1667,6 +1812,7 @@ fn resolve_with_splice(
                         .iter()
                         .map(|t| (t.clone(), num_dmg));
                     stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                    report_parked_tail(state, ability);
                     return Ok(());
                 }
             }
@@ -2183,9 +2329,7 @@ fn resolve_each_target_power_damage(
                 // CR 615.5: A prevention rider (e.g. "for each 1 damage prevented
                 // this way") resolves immediately afterward for non-combat damage.
                 if state.has_post_replacement_drain() {
-                    let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                        state, None, None, None, events,
-                    );
+                    crate::game::replacement::drain_damage_rider(state, events);
                 }
             }
             ReplacementResult::NeedsChoice(player) => {
@@ -2206,6 +2350,7 @@ fn resolve_each_target_power_damage(
                     .skip(idx + 1)
                     .map(|(src, _, amt)| (*src, recipient.clone(), *amt));
                 stash_remaining_each_source_damage(state, ability, remaining);
+                report_parked_tail(state, ability);
                 return Ok(());
             }
         }
@@ -2245,6 +2390,7 @@ fn apply_batch_survivors(
             DamageResult::NeedsChoice
         ) {
             stash_remaining_post_replacement_damage(state, ability, &survivors[idx + 1..]);
+            report_parked_tail(state, ability);
             return false;
         }
     }
@@ -2283,6 +2429,16 @@ fn apply_batch_survivors_before_replacement_pause(
 /// pipeline individually (see `apply_damage_to_target`), but all share the same
 /// `DamageContext` (single source, single set of keywords) and the same effect.
 pub fn resolve_all(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    replacement::with_damage_batch(state, ability, |state| {
+        resolve_all_portions(state, ability, events)
+    })
+}
+
+fn resolve_all_portions(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
@@ -2758,6 +2914,16 @@ pub fn resolve_each_player(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    replacement::with_damage_batch(state, ability, |state| {
+        resolve_each_player_portions(state, ability, events)
+    })
+}
+
+fn resolve_each_player_portions(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
     let (amount_expr, player_filter) = match &ability.effect {
         Effect::DamageEachPlayer {
             amount,
@@ -3125,6 +3291,16 @@ pub fn resolve_each_deals_equal_to_power(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    replacement::with_damage_batch(state, ability, |state| {
+        resolve_each_deals_equal_to_power_portions(state, ability, events)
+    })
+}
+
+fn resolve_each_deals_equal_to_power_portions(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
     if !matches!(ability.effect, Effect::EachDealsDamageEqualToPower { .. }) {
         return Err(EffectError::MissingParam(
             "EachDealsDamageEqualToPower".to_string(),
@@ -3213,6 +3389,16 @@ pub fn resolve_each_deals_equal_to_power(
 /// remaining sources with PER-SOURCE identity preserved
 /// (`stash_remaining_each_source_damage`).
 pub fn resolve_each_source_deals_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    replacement::with_damage_batch(state, ability, |state| {
+        resolve_each_source_deals_damage_portions(state, ability, events)
+    })
+}
+
+fn resolve_each_source_deals_damage_portions(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
@@ -3384,9 +3570,7 @@ pub fn resolve_each_source_deals_damage(
                 // "-1/-1 counter for each 1 damage prevented") inline so it
                 // resolves "immediately afterward" as the rule requires.
                 if state.has_post_replacement_drain() {
-                    let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                        state, None, None, None, events,
-                    );
+                    crate::game::replacement::drain_damage_rider(state, events);
                 }
             }
             ReplacementResult::NeedsChoice(player) => {
@@ -3480,11 +3664,15 @@ fn stash_remaining_each_deals_chain(
         if power <= 0 {
             continue;
         }
-        let node = build_remaining_damage_node(
-            source_id,
-            ability.controller,
-            TargetRef::Object(recipient_id),
-            power as u32,
+        let node = keep_chain_identity(
+            state,
+            build_remaining_damage_node(
+                source_id,
+                ability.controller,
+                TargetRef::Object(recipient_id),
+                power as u32,
+            ),
+            ability,
         );
         match head.as_mut() {
             Some(h) => append_to_sub_chain(h, node),
@@ -3494,16 +3682,14 @@ fn stash_remaining_each_deals_chain(
     match head {
         Some(mut h) => {
             if let Some(sub) = ability.sub_ability.as_ref() {
-                append_to_sub_chain(&mut h, cast_tail_with_parent_targets(sub, ability));
+                append_to_sub_chain(&mut h, cast_tail_with_parent_targets(state, sub, ability));
             }
             append_to_pending_continuation(state, Some(Box::new(h)));
         }
         None => {
             if let Some(sub) = ability.sub_ability.as_ref() {
-                append_to_pending_continuation(
-                    state,
-                    Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
-                );
+                let tail = cast_tail_with_parent_targets(state, sub, ability);
+                append_to_pending_continuation(state, Some(Box::new(tail)));
             }
         }
     }
@@ -5609,14 +5795,14 @@ mod tests {
         );
     }
 
-    /// CR 615.5: Crumbling Sanctuary-class prevention follow-ups resolve "that
-    /// player" from the prevented damage event's target and "that many" from
-    /// the prevented damage amount.
+    /// CR 614.1a: Crumbling Sanctuary's substitution resolves "that player" from
+    /// the replaced damage event's target and "that many" from the amount that
+    /// would have been dealt. Nothing is prevented.
     #[test]
     fn damage_to_player_prevention_exiles_from_that_players_library() {
         use crate::types::ability::{
             AbilityDefinition, AbilityKind, DamageTargetFilter, DamageTargetPlayerScope,
-            PreventionAmount, QuantityExpr, QuantityRef, ReplacementDefinition,
+            QuantityExpr, QuantityRef, ReplacementDefinition,
         };
         use crate::types::replacements::ReplacementEvent;
 
@@ -5635,7 +5821,7 @@ mod tests {
             .replacement_definitions
             .push(
                 ReplacementDefinition::new(ReplacementEvent::DamageDone)
-                    .prevention_shield(PreventionAmount::All)
+                    .substitution_shield()
                     .damage_target_filter(DamageTargetFilter::Player {
                         player: DamageTargetPlayerScope::Any,
                     })
@@ -5651,7 +5837,7 @@ mod tests {
                             actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
                         },
                     ))
-                    .description("Crumbling Sanctuary prevention shield".to_string()),
+                    .description("Crumbling Sanctuary substitution".to_string()),
             );
 
         let first = create_object(
@@ -5695,16 +5881,9 @@ mod tests {
             state.objects.get(&third).map(|obj| obj.zone),
             Some(Zone::Library)
         );
-        assert!(events.iter().any(|event| {
-            matches!(
-                event,
-                GameEvent::DamagePrevented {
-                    target: TargetRef::Player(PlayerId(1)),
-                    amount: 2,
-                    ..
-                }
-            )
-        }));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::DamagePrevented { .. })));
         assert!(!events
             .iter()
             .any(|event| matches!(event, GameEvent::DamageDealt { .. })));
@@ -9505,6 +9684,7 @@ mod attacked_referent_recipient_tests {
         ability.trigger_source = Some(latched);
 
         let head = remaining_damage_chain(
+            &state,
             &ability,
             token,
             [

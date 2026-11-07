@@ -3215,6 +3215,26 @@ pub struct PendingContinuation {
     /// owned the payment cannot be identified from the old payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) x_announcement: Option<ContinuationXAnnouncement>,
+    /// CR 614.6 + CR 615.5 + CR 608.2c: `Some` when this is work a replacement's own action left
+    /// for a later `apply()` (a step after a child prompt), and that action owns an amount. The
+    /// drain re-enters the action's scope, so its "that many" is still that amount, not the die
+    /// result or trigger event of the resolution around it. Captured at stash time from the
+    /// running scope (`quantity::current_replacement_action`), like `trigger_context`. A chain of
+    /// another owner never merges into this frame (`effects::append_to_pending_continuation`,
+    /// `prepend_to_pending_continuation_with_producer`). An action that owns no amount (an
+    /// entering object's as-enters choices) leaves its work ordinary. Serde-defaulted: a save
+    /// taken mid-prompt before this field existed resumes as ordinary work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) replacement_action: Option<ReplacementActionScope>,
+}
+
+/// CR 614.6 + CR 615.5: the replacement action a paused continuation belongs to
+/// ([`PendingContinuation::replacement_action`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplacementActionScope {
+    /// The amount of the event the replacement replaced or prevented, bound when the
+    /// replacement applied.
+    pub amount: i32,
 }
 
 /// CR 107.3f: the resolution-time announcement that defines X for the rider a
@@ -3274,6 +3294,7 @@ impl PendingContinuation {
             player_scope_tail: state.resolving_player_scope_tail.clone(),
             player_scope_queue_end: false,
             x_announcement: None,
+            replacement_action: crate::game::quantity::current_replacement_action(),
         }
     }
 
@@ -3299,6 +3320,7 @@ impl PendingContinuation {
             player_scope_tail: state.resolving_player_scope_tail.clone(),
             player_scope_queue_end: false,
             x_announcement: None,
+            replacement_action: crate::game::quantity::current_replacement_action(),
         }
     }
 }
@@ -26241,15 +26263,14 @@ declare_game_state! {
     /// is excluded from serialization and structural equality.
     #[serde(skip)]
     pub combat_prevention_tally: Option<HashMap<AppliedReplacementKey, i32>>,
-    /// CR 510.2 + CR 700.1 + CR 615.8: Successful one-shot applications to a
-    /// damage source's current simultaneous combat-damage instance. A consumed
-    /// replacement stays eligible only for that same source inside this batch.
-    /// Only this ledger is suspended during independent follow-ups, then restored
-    /// before the next portion; the prevention tally remains active.
-    /// Restored to its prior value before returning; excluded from serialization
-    /// and equality like the prevention tally.
+    /// CR 510.2 + CR 700.1 + CR 615.8 + CR 611.3a: what one simultaneous damage batch has
+    /// settled. Only this ledger is suspended during independent follow-ups, then restored
+    /// before the next portion; the prevention tally remains active. Restored to its prior
+    /// value before returning; excluded from serialization and equality like the
+    /// prevention tally. A batch that pauses hands its guards to `PendingReplacement` and
+    /// to its remaining portions (`SpellContext::settled_damage_guards`).
     #[serde(skip)]
-    pub(crate) combat_one_shot_applications: Option<Vec<(AppliedReplacementKey, ObjectId)>>,
+    pub(crate) damage_batch_ledger: Option<DamageBatchLedger>,
 }
 
 /// The map-backed history entries `copy` does not share with `original`, a nested causes map
@@ -28195,6 +28216,15 @@ pub struct PostReplacementDrain {
     /// where the affected object's controller remains the fallback.
     #[serde(default)]
     pub controller: Option<crate::types::player::PlayerId>,
+
+    /// CR 614.6 + CR 615.5: the amount of the event this drain's replacement replaced or
+    /// prevented, as its applier stamped it (`replacement::stamp_replacement_amount`), or the
+    /// amount captured with the paused rider it waits behind. Dispatch binds it as the action's
+    /// owned "that many" (`quantity::with_replacement_action_scope`), ahead of the die result and
+    /// the enclosing trigger's amounts. `None` when the applier stamped no amount (an entering
+    /// object's continuation, an optional branch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_amount: Option<u32>,
 }
 
 /// CR 616.1g: what an install does when a continuation is already resident.
@@ -28319,6 +28349,7 @@ impl PostReplacementDrain {
             event_source: None,
             event_target: None,
             controller: None,
+            event_amount: None,
         }
     }
 
@@ -28353,10 +28384,50 @@ impl PostReplacementDrainStack {
     /// and a nested check taken during that dispatch must not try to re-drain it.
     /// This is exactly what `post_replacement_continuation.is_some()` meant, since
     /// the old code took the continuation out of the slot before dispatching.
+    ///
+    /// Only the resident can run, so only the resident counts. A Ready entry beneath a paused
+    /// resident (`install_behind_paused_resident`) is work that waits for that resident to
+    /// retire; until then nothing may dispatch it, and a nested install must not collide with it.
     pub fn has_ready(&self) -> bool {
         self.drains
-            .iter()
-            .any(|drain| matches!(drain.status, DrainStatus::Ready(_)))
+            .last()
+            .is_some_and(|drain| matches!(drain.status, DrainStatus::Ready(_)))
+    }
+
+    /// CR 615.5 + CR 608.2c: whether work waits directly beneath the resident
+    /// (`install_behind_paused_resident`), to run once the resident retires.
+    pub fn has_ready_behind_resident(&self) -> bool {
+        self.drains
+            .len()
+            .checked_sub(2)
+            .and_then(|depth| self.drains.get(depth))
+            .is_some_and(|drain| matches!(drain.status, DrainStatus::Ready(_)))
+    }
+
+    /// CR 615.5 + CR 608.2c: queue `drain` beneath a paused resident, so it becomes the
+    /// resident, and runs, only once that paused work retires
+    /// (`finish_paused_dispatch`). Hands `drain` back, not installed, when the resident is not
+    /// paused.
+    ///
+    /// The queue is first in, first out: `drain` goes beneath the run of Ready entries already
+    /// queued directly under the resident, so work queued earlier runs earlier.
+    pub fn install_behind_paused_resident(
+        &mut self,
+        drain: PostReplacementDrain,
+    ) -> Option<PostReplacementDrain> {
+        match self.drains.last().map(|resident| &resident.status) {
+            Some(DrainStatus::Paused) => {
+                let resident = self.drains.len() - 1;
+                let queued = self.drains[..resident]
+                    .iter()
+                    .rev()
+                    .take_while(|queued| matches!(queued.status, DrainStatus::Ready(_)))
+                    .count();
+                self.drains.insert(resident - queued, drain);
+                None
+            }
+            Some(DrainStatus::Ready(_) | DrainStatus::Dispatching) | None => Some(drain),
+        }
     }
 
     /// The innermost drain, whatever its status. Event-context reads (CR 615.5)
@@ -29051,6 +29122,10 @@ fn validate_draw_dealer(frame: &DrawSequenceFrame, dealer: &DrawDealer) -> Resul
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingReplacement {
     pub proposed: ProposedEvent,
+    /// CR 608.2f + CR 700.1: the guards of the simultaneous damage batch this portion
+    /// belongs to, read again when the answer re-scans this portion.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settled_damage_guards: Vec<crate::types::ability::SettledDamageGuard>,
     /// CR 701.21a + CR 614.1: An inner Battlefield→graveyard `ZoneChange`
     /// can pause for a `Moved` replacement after its enclosing sacrifice was
     /// already accepted. Preserve that action's subject and controller until
@@ -29141,6 +29216,23 @@ pub struct PendingReplacement {
         skip_serializing_if = "UnrepresentablePolicy::is_ignore_impossible"
     )]
     pub unrepresentable_life_change: UnrepresentablePolicy,
+}
+
+/// CR 510.2 + CR 700.1 + CR 615.8 + CR 611.3a: what one simultaneous damage batch has
+/// settled so far.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct DamageBatchLedger {
+    /// A consumed one-shot stays eligible only for the same source's portions of a combat
+    /// batch.
+    pub(crate) applications: Vec<(AppliedReplacementKey, ObjectId)>,
+    /// A printed guard reads once for the whole batch (Undergrowth Champion ruling: "its
+    /// prevention effect will apply once to all that damage").
+    pub(crate) settled_guards: Vec<crate::types::ability::SettledDamageGuard>,
+    /// CR 615.5 + CR 608.2c: the frame of the first noncombat rider in this batch that left its
+    /// prompt standing. The batch's later riders queue behind it
+    /// (`replacement::damage_rider_placement`). Combat settles every rider pause in the batch
+    /// (`drain_combat_damage_rider`), so it is never set there.
+    pub(crate) paused_rider: Option<PostReplacementFrameId>,
 }
 
 /// Who owns a player-resource change (life, player counter, energy) whose final
@@ -31388,6 +31480,18 @@ impl GameState {
             self.resolution_stack.push_post_replacement(drains);
         }
         installed
+    }
+
+    /// CR 615.5 + CR 608.2c: install `drain` behind the paused resident of the frame `owner`
+    /// names, found by identity. Hands `drain` back, not installed, when that frame is gone or
+    /// its resident is not paused.
+    pub(crate) fn install_post_replacement_drain_behind_paused(
+        &mut self,
+        owner: PostReplacementFrameId,
+        drain: PostReplacementDrain,
+    ) -> Option<PostReplacementDrain> {
+        self.resolution_stack
+            .install_post_replacement_drain_behind_paused(owner, drain)
     }
 
     /// True when the exact active general drain has ready continuation work.
@@ -33642,7 +33746,7 @@ impl GameState {
             archenemy,
             initiative: None,
             combat_prevention_tally: None,
-            combat_one_shot_applications: None,
+            damage_batch_ledger: None,
             cancelled_casts: Vec::new(),
             pending_activations: Vec::new(),
             commander_declined_zone_return: HashSet::new(),
@@ -37451,7 +37555,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         archenemy: _,
         initiative: _,
         combat_prevention_tally: _,
-        combat_one_shot_applications: _,
+        damage_batch_ledger: _,
         // Post-rebase upstream additions (v0.21.x: #5515 discover + liminal mechanic).
         // Strict-compared by eq_except_growable's GameState PartialEq reuse (fail-safe:
         // a differing value is correctly not a fixed-point repeat); object-growth loops
@@ -38858,6 +38962,65 @@ mod drain_stack_reentrancy_tests {
             "the nested post-effect must be visible as pending work — \
              draw_through_replacement gates its drain on exactly this predicate"
         );
+    }
+
+    /// CR 615.5 + CR 608.2c: work queued behind a paused resident is not pending work until
+    /// that resident retires, so a nested stash still installs above it; then it is the
+    /// resident, and runs next. Two queued drains run in the order they were queued.
+    #[test]
+    fn work_queued_behind_a_paused_resident_waits_for_it() {
+        let mut stack = PostReplacementDrainStack::default();
+        let queued = ready_drain("queued");
+        let second = ready_drain("second");
+        assert!(
+            stack
+                .install_behind_paused_resident(queued.clone())
+                .is_some(),
+            "an empty stack has no paused resident to wait behind"
+        );
+        assert!(stack.install(ready_drain("earlier"), ResidentDrainPolicy::KeepResident));
+        assert!(
+            stack
+                .install_behind_paused_resident(queued.clone())
+                .is_some(),
+            "a Ready resident is not paused work"
+        );
+        let (_, earlier) = stack
+            .begin_dispatch()
+            .expect("the earlier rider dispatches");
+        assert!(stack.pause_dispatch(earlier));
+
+        assert!(stack
+            .install_behind_paused_resident(queued.clone())
+            .is_none());
+        assert!(stack
+            .install_behind_paused_resident(second.clone())
+            .is_none());
+        assert!(!stack.has_ready(), "only the resident can run");
+        assert!(stack.has_ready_behind_resident());
+        assert!(
+            stack.install(ready_drain("nested"), ResidentDrainPolicy::KeepResident),
+            "a nested stash is not dropped by work waiting behind the paused resident"
+        );
+        let (_, nested) = stack.begin_dispatch().expect("the nested drain dispatches");
+        assert!(stack.finish_dispatch(nested).is_some());
+
+        assert!(stack.finish_paused_dispatch().is_some());
+        assert!(stack.has_ready(), "the queued work is now the resident");
+        assert_eq!(
+            stack.resident(),
+            Some(&queued),
+            "the work queued first runs first"
+        );
+        assert!(stack.has_ready_behind_resident());
+        let (_, first) = stack.begin_dispatch().expect("the first queued drain runs");
+        assert!(stack.finish_dispatch(first).is_some());
+        assert_eq!(
+            stack.resident(),
+            Some(&second),
+            "the work queued second runs next"
+        );
+        assert!(!stack.has_ready_behind_resident());
     }
 
     /// CR 615.5 + CR 616.1g: nested pausing replacement continuations own
@@ -56952,6 +57115,7 @@ mod tests {
 
     fn pending_life_gain_replacement(policy: UnrepresentablePolicy) -> PendingReplacement {
         PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::LifeGain {
                 player_id: PlayerId(0),
                 amount: 1,
@@ -57006,6 +57170,53 @@ mod tests {
             legacy.unrepresentable_life_change,
             UnrepresentablePolicy::IgnoreImpossible
         );
+    }
+
+    /// Wire shape of the settled damage-guard carrier (CR 608.2f + CR 700.1): omitted
+    /// when empty, absent in older payloads, and a non-empty value round-trips on both
+    /// `PendingReplacement` and `SpellContext`.
+    #[test]
+    fn settled_damage_guards_wire_shape() {
+        use crate::types::ability::{
+            DamageGuardReading, ReplacementCondition, SettledDamageGuard, SpellContext,
+            StaticCondition,
+        };
+        use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+
+        let guard = SettledDamageGuard {
+            source: ObjectIncarnationRef::of(ObjectId(7), 2),
+            condition: ReplacementCondition::OnlyIfStatic {
+                condition: Box::new(StaticCondition::SourceIsEquipped),
+            },
+            reading: DamageGuardReading::Holds,
+        };
+
+        let empty = pending_life_gain_replacement(UnrepresentablePolicy::IgnoreImpossible);
+        let json = serde_json::to_value(&empty).expect("record must serialize");
+        assert!(json.get("settled_damage_guards").is_none(), "{json}");
+        let legacy: PendingReplacement =
+            serde_json::from_value(json).expect("legacy record must deserialize");
+        assert!(legacy.settled_damage_guards.is_empty());
+
+        let mut carried = empty;
+        carried.settled_damage_guards = vec![guard.clone()];
+        let json = serde_json::to_value(&carried).expect("record must serialize");
+        assert!(json.get("settled_damage_guards").is_some(), "{json}");
+        let round_trip: PendingReplacement =
+            serde_json::from_value(json).expect("record must deserialize");
+        assert_eq!(round_trip, carried);
+
+        let legacy_context: SpellContext =
+            serde_json::from_value(serde_json::json!({})).expect("legacy context");
+        assert!(legacy_context.settled_damage_guards.is_empty());
+        let context = SpellContext {
+            settled_damage_guards: vec![guard],
+            ..SpellContext::default()
+        };
+        let round_trip: SpellContext =
+            serde_json::from_value(serde_json::to_value(&context).expect("context serializes"))
+                .expect("context deserializes");
+        assert_eq!(round_trip, context);
     }
 
     /// CR 616.1f: a re-parked record copies a `Reject` stamp from its
