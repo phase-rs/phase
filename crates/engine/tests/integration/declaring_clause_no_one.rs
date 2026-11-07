@@ -360,6 +360,7 @@ fn classes(f: TargetFilter) -> Vec<(&'static str, Effect)> {
                 selection: Default::default(),
                 choice_optional: false,
                 reveal: false,
+                cardinality: engine::types::ability::ObjectSelectionCardinality::SINGLE,
             },
         ),
         (

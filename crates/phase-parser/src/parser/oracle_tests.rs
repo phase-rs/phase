@@ -35354,6 +35354,55 @@ fn lich_as_enters_life_loss_parses_as_moved_self_replacement() {
         .any(|def| matches!(def.mode, StaticMode::CantLoseTheGame)));
 }
 
+#[test]
+fn metalworker_reveal_any_number_and_add_mana() {
+    let oracle = "{T}: Reveal any number of artifact cards in your hand. Add {C}{C} for each card revealed this way.";
+    let parsed = parse_oracle_text(
+        oracle,
+        "Metalworker",
+        &[],
+        &["Artifact".into(), "Creature".into()],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{:?}", parsed.abilities);
+    let ability = &parsed.abilities[0];
+    assert_eq!(ability.cost, Some(AbilityCost::Tap));
+    assert!(
+        matches!(
+            ability.effect.as_ref(),
+            Effect::RevealHand {
+                target: TargetFilter::Controller,
+                card_filter: TargetFilter::Typed(ref tf),
+                cardinality: crate::types::ability::ObjectSelectionCardinality::AnyNumber,
+                choice_optional: false,
+                ..
+            } if tf.type_filters.contains(&TypeFilter::Artifact)
+        ),
+        "expected an any-number artifact RevealHand, got {:?}",
+        ability.effect
+    );
+    let sub = ability
+        .sub_ability
+        .as_deref()
+        .expect("has sub_ability for mana addition");
+    assert!(
+        matches!(
+            sub.effect.as_ref(),
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: ref inner_expr,
+                    }
+                },
+                ..
+            } if matches!(**inner_expr, QuantityExpr::Ref { qty: QuantityRef::FilteredTrackedSetSize { .. } })
+        ),
+        "expected Effect::Mana producing {{C}}{{C}} for each revealed card, got {:?}",
+        sub.effect
+    );
+}
+
 /// CR 201.5a: the two-layer IR facade lowers a refused quoted granter name to the same
 /// unsupported residual as the production pipeline.
 #[test]

@@ -7,8 +7,8 @@ use crate::types::ability::{
     cost_has_component, is_chosen_remove_counter_cost_count, produces_mana_on_activation,
     AbilityCondition, AbilityCost, AbilityDefinition, CardSelectionMode, ChoiceValue,
     ChosenAttribute, ContinuousModification, CostPaidObjectSnapshot, Effect, ManaProduction,
-    QuantityExpr, QuantityRef, ResolvedAbility, TapCreaturesSelectionMode, TargetFilter,
-    REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_X,
+    ObjectSelectionCardinality, QuantityExpr, QuantityRef, ResolvedAbility,
+    TapCreaturesSelectionMode, TargetFilter, REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::{ActivatedAbilityKind, BoundActivationCost, GameEvent, ManaTapState};
@@ -570,6 +570,18 @@ pub(super) fn resolve_mana_ability_excluding(
     Ok(())
 }
 
+/// Find the `Effect::Mana` node within an ability's root or sub_ability chain.
+fn find_mana_effect(ability: &ResolvedAbility) -> Option<&ResolvedAbility> {
+    let mut curr = Some(ability);
+    while let Some(node) = curr {
+        if matches!(node.effect, Effect::Mana { .. }) {
+            return Some(node);
+        }
+        curr = node.sub_ability.as_deref();
+    }
+    None
+}
+
 /// Produce mana from a resolved mana ability without paying costs.
 /// Shared by `resolve_mana_ability` (cost paid inline) and `handle_choose_mana_color`
 /// (cost already paid during the `TapCreaturesForManaAbility` phase).
@@ -709,24 +721,30 @@ fn produce_mana_from_bound_ability(
 
         // CR 106.6: Resolve spend-restriction templates, grants, and expiry so
         // they attach to each produced `ManaUnit`.
+        let mana_node = find_mana_effect(&scoped);
         let (produced_mana, restrictions, grants, expiry, source_could_produce_two_or_more_colors) =
-            match &scoped.effect {
-                Effect::Mana {
-                    produced,
-                    restrictions,
-                    grants,
-                    expiry,
-                    target: None,
-                } => {
+            match mana_node.map(|n| (&n.effect, n)) {
+                Some((
+                    Effect::Mana {
+                        produced,
+                        restrictions,
+                        grants,
+                        expiry,
+                        target: None,
+                    },
+                    mana_resolved,
+                )) => {
                     let mana = match color_override.clone() {
                         // `Combination` is pre-chosen — skip `resolve_mana_types`
                         // so the exact sequence lands in the pool (CR 605.3b).
                         Some(ProductionOverride::Combination(types)) => types,
                         Some(ProductionOverride::SingleColor(color)) => {
-                            resolve_single_color_override(state, produced, &scoped, color)
+                            resolve_single_color_override(state, produced, mana_resolved, color)
                         }
                         None => super::effects::mana::resolve_mana_types_for_ability(
-                            produced, state, &scoped,
+                            produced,
+                            state,
+                            mana_resolved,
                         ),
                     };
                     let concrete = resolve_restrictions(restrictions, state, source_id);
@@ -1465,6 +1483,79 @@ pub fn handle_choose_mana_color(
     }
 
     resume_mana_ability_root(state, pending.player, pending.resume.clone(), events)
+}
+
+/// CR 605.3b + CR 701.20a: Complete an activated mana ability that paused for an interactive
+/// reveal choice (e.g. Metalworker).
+pub(crate) fn handle_reveal_choice_for_mana_ability(
+    state: &mut GameState,
+    pending: PendingManaAbility,
+    eligible_cards: &[ObjectId],
+    filter: &TargetFilter,
+    cardinality: ObjectSelectionCardinality,
+    chosen: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    super::effects::reveal_hand::validate_reveal_selection(
+        state,
+        eligible_cards,
+        filter,
+        cardinality,
+        &chosen,
+    )?;
+    super::effects::reveal_hand::reveal_selected_hand_cards(state, pending.player, &chosen, events);
+
+    // Each independent activation of a mana ability owns a fresh tracked set.
+    // Reset `chain_tracked_set_id` before publishing so this activation does not union
+    // into the population of any prior activation or resolution chain.
+    state.chain_tracked_set_id = None;
+    super::effects::publish_tracked_set(state, chosen);
+
+    let ability_def = mana_ability_definition(state, &pending)?;
+
+    let node = pending
+        .rules_execution_node
+        .unwrap_or_else(|| state.begin_activated_mana_journal_node(pending.source_id));
+    let choice_action_start = events.len();
+    state.with_rules_execution_node(node, |state| {
+        produce_mana_from_ability(
+            state,
+            pending.source_id,
+            pending.player,
+            &ability_def,
+            events,
+            pending.color_override.clone(),
+            pending.chosen_x,
+            pending.cost_paid_object.clone(),
+            pending.announced_source_incarnation,
+            pending.cost_removed_counters,
+        );
+        complete_mana_ability_activation(
+            state,
+            pending.source_id,
+            pending.ability_index,
+            pending.player,
+            events,
+        );
+    });
+
+    state.chain_tracked_set_id = None;
+
+    if let Some(pause) = collect_completed_mana_frame_events(
+        state,
+        Vec::new(),
+        events,
+        choice_action_start,
+        ManaTriggerFixedPointResume::Root {
+            player: pending.player,
+            resume: Box::new(pending.resume.clone()),
+        },
+    ) {
+        return Ok(pause);
+    }
+
+    let resume = resume_mana_ability_root(state, pending.player, pending.resume, events)?;
+    Ok(super::triggers::preserve_order_triggers_resume(state, resume.clone()).unwrap_or(resume))
 }
 
 /// CR 605.3a: Bulk-activate the controller's other identical, choice-free mana
@@ -3668,6 +3759,62 @@ fn finish_mana_ability_cost_payment(
             }
             return Ok(resume);
         }
+
+        // CR 605.3b + CR 107.1c + CR 701.20a: a mana ability that reveals "any
+        // number of [filter] cards in your hand" (Metalworker) asks for that
+        // selection while it resolves; production resumes from the choice.
+        if let Effect::RevealHand {
+            card_filter,
+            cardinality: cardinality @ ObjectSelectionCardinality::AnyNumber,
+            ..
+        } = &*ability_def.effect
+        {
+            // The filter is evaluated from the activated ability's source, as
+            // the resolver evaluates it from the resolving ability.
+            let ctx = FilterContext::from_source_with_controller(pending.source_id, pending.player);
+            let eligible: Vec<ObjectId> = state.players[pending.player.0 as usize]
+                .hand
+                .iter()
+                .copied()
+                .filter(|&id| matches_target_filter(state, id, card_filter, &ctx))
+                .collect();
+            if !eligible.is_empty() {
+                let resume = WaitingFor::RevealChoice {
+                    player: pending.player,
+                    cards: eligible,
+                    filter: card_filter.clone(),
+                    optional: false,
+                    decline_runs_continuation: false,
+                    cardinality: *cardinality,
+                    pending_mana_ability: Some(Box::new(pending.clone())),
+                };
+                if settles_completed_frame {
+                    debug_assert!(cursor.parent.is_none());
+                    if let Some(pause) = collect_completed_mana_frame_events(
+                        state,
+                        cursor.deferred_cost_events,
+                        events,
+                        cost_event_start,
+                        ManaTriggerFixedPointResume::Root {
+                            player: pending.player,
+                            resume: Box::new(pending.resume.clone()),
+                        },
+                    ) {
+                        return Ok(pause);
+                    }
+                    if let Some(order_wf) =
+                        super::triggers::preserve_order_triggers_resume(state, resume.clone())
+                    {
+                        return Ok(order_wf);
+                    }
+                }
+                return Ok(resume);
+            } else {
+                state.chain_tracked_set_id = None;
+                super::effects::publish_tracked_set(state, Vec::new());
+                state.chain_tracked_set_id = None;
+            }
+        }
     }
 
     let production_events_start = events.len();
@@ -4428,11 +4575,17 @@ pub(crate) fn resume_mana_ability_cost_move(
     continue_mana_ability_cost_payment(state, *pending, cursor, events, 0)
 }
 
-/// CR 605.3b + CR 605.1a: Run a mana ability's `sub_ability` chain inline.
-/// Mana abilities don't use the stack, so non-mana clauses ("This land deals
-/// 1 damage to you.") resolve atomically with the mana production. Walks the
-/// full chain via `resolve_ability_chain` so nested effects (DealDamage on
-/// controller, GainLife, etc.) route through the standard effect handlers.
+/// CR 605.3b + CR 605.1a: A mana ability with a non-mana clause in its
+/// effect chain (e.g. painlands' "This land deals 1 damage to you.")
+/// resolves that chain inline — mana abilities don't use the stack, so
+/// the sub-ability runs as part of the same atomic resolution.
+///
+/// When the root ability is `Effect::Mana`, root production consumed only the root,
+/// so its `sub_ability` (which may contain conditional `Effect::Mana` additions like
+/// Urza's Tower or Ugin's Labyrinth) must execute. When the root is a non-Mana effect
+/// (e.g. `Effect::RevealHand` for Metalworker), `produce_mana_from_ability` already
+/// consumed the `Effect::Mana` sub-node, so we skip only that consumed node and resolve
+/// any remaining sub-ability tail.
 fn resolve_mana_ability_sub_chain(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -4440,6 +4593,19 @@ fn resolve_mana_ability_sub_chain(
 ) {
     let Some(sub) = ability.sub_ability.as_deref() else {
         return;
+    };
+    // A non-Mana root (Metalworker's `RevealHand`) has already had its
+    // `Effect::Mana` sub-node consumed by `produce_mana_from_ability`; only the
+    // tail after that node remains to resolve.
+    let sub = if !matches!(ability.effect, Effect::Mana { .. })
+        && matches!(sub.effect, Effect::Mana { .. })
+    {
+        match sub.sub_ability.as_deref() {
+            Some(tail) => tail,
+            None => return,
+        }
+    } else {
+        sub
     };
     // CR 605.3b + CR 608.2c: the sub-chain resolves as its own depth-0 chain,
     // whose prelude resets `last_effect_amount`; carry the head's cost-removed

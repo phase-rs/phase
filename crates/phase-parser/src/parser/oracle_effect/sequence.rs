@@ -5468,6 +5468,7 @@ pub(super) fn apply_clause_continuation(
                             selection: crate::types::ability::CardSelectionMode::Chosen,
                             choice_optional,
                             reveal: false,
+                            cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
                         },
                     );
                     choice.player_scope = Some(scope);

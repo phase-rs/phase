@@ -10,7 +10,8 @@ use crate::game::keywords;
 use crate::game::mana_sources;
 use crate::game::mulligan;
 use crate::types::ability::{
-    ChoiceType, CounterCostSelection, TapCreaturesSelectionMode, TargetRef,
+    ChoiceType, CounterCostSelection, ObjectSelectionCardinality, TapCreaturesSelectionMode,
+    TargetRef,
 };
 use crate::types::actions::{
     CastChoice, GameAction, LearnOption, MulliganChoice, OutsideGameSelection,
@@ -1446,13 +1447,25 @@ pub fn candidate_actions_broad_with_probe(
             player,
             cards,
             optional,
+            cardinality,
             ..
         } => {
-            // CR 701.20a: Normal reveal forces exactly one pick. Optional reveal
-            // (e.g., reveal-lands) additionally permits an empty selection to
-            // signal "I decline to reveal" — the source's decline branch fires.
-            let mut variants = select_cards_variants(*player, cards, Some(1));
-            if *optional {
+            // CR 608.2d: issue the selections the prompt's published cardinality
+            // admits. Normal post-reveal choices take exactly one card; CR 107.1c
+            // "any number" (Metalworker) admits every subset, which the shared
+            // any-size enumerator covers with none, all, and each single card.
+            let mut variants = match cardinality {
+                ObjectSelectionCardinality::Exactly { count } => {
+                    select_cards_variants(*player, cards, Some(*count as usize))
+                }
+                ObjectSelectionCardinality::AnyNumber => {
+                    select_cards_variants(*player, cards, None)
+                }
+            };
+            // CR 701.20a: an optional reveal (e.g., reveal-lands) additionally
+            // permits an empty selection to signal "I decline to reveal" — the
+            // source's decline branch fires.
+            if *optional && !matches!(cardinality, ObjectSelectionCardinality::AnyNumber) {
                 variants.push(candidate(
                     GameAction::SelectCards { cards: vec![] },
                     TacticalClass::Selection,

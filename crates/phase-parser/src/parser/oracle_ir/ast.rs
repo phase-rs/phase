@@ -1777,6 +1777,9 @@ pub(crate) enum HandRevealImperativeAst {
     RevealAll {
         target: TargetFilter,
         card_filter: TargetFilter,
+        /// CR 608.2d + CR 107.1c: how many `card_filter` cards are selected
+        /// (`AnyNumber` for "reveal any number of [type] cards").
+        cardinality: crate::types::ability::ObjectSelectionCardinality,
     },
     /// CR 701.20a: a counted reveal from a hand — "reveals X cards from their
     /// hand, where X is …", "reveals a card at random from their hand". `target`

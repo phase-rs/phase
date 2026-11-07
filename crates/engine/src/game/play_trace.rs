@@ -2423,6 +2423,8 @@ mod tests {
             filter: TargetFilter::Any,
             optional: false,
             decline_runs_continuation: false,
+            cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
+            pending_mana_ability: None,
         };
         let may = WaitingFor::OptionalEffectChoice {
             player,

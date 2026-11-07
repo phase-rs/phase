@@ -5393,9 +5393,47 @@ pub(super) fn handle_resolution_choice(
                 filter,
                 optional,
                 decline_runs_continuation,
+                cardinality,
+                pending_mana_ability,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
+            // CR 605.3b: a reveal inside an activated mana ability's immediate
+            // resolution (Metalworker) completes that activation.
+            if let Some(pending) = pending_mana_ability {
+                return super::mana_abilities::handle_reveal_choice_for_mana_ability(
+                    state,
+                    *pending,
+                    &cards,
+                    &filter,
+                    cardinality,
+                    chosen,
+                    events,
+                )
+                .map(ResolutionChoiceOutcome::WaitingFor);
+            }
+            // CR 107.1c + CR 701.20a: "reveal any number of [filter] cards" —
+            // the selection is the reveal. Any subset (including none) is legal;
+            // the chosen cards are revealed and become the tracked set the
+            // continuation counts ("for each card revealed this way").
+            if cardinality == crate::types::ability::ObjectSelectionCardinality::AnyNumber {
+                effects::reveal_hand::validate_reveal_selection(
+                    state,
+                    &cards,
+                    &filter,
+                    cardinality,
+                    &chosen,
+                )?;
+                effects::reveal_hand::reveal_selected_hand_cards(state, player, &chosen, events);
+                effects::publish_tracked_set(state, chosen);
+                set_priority(state, player);
+                super::engine::resume_pending_continuation_if_priority(state, events)
+                    .expect("a settled reveal choice must resume its continuation");
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
+
             // CR 701.20a: Optional reveal prompts (e.g., reveal-lands like Port Town)
             // accept an empty selection to signal "I decline to reveal." The source
             // replacement's decline ability runs via `pending_continuation`, which the
@@ -5424,30 +5462,15 @@ pub(super) fn handle_resolution_choice(
                     state.waiting_for.clone(),
                 ));
             }
-            if chosen.len() != 1 {
-                return Err(EngineError::InvalidAction(format!(
-                    "Must select exactly 1 card, got {}",
-                    chosen.len()
-                )));
-            }
-            let chosen_id = chosen[0];
-            if !cards.contains(&chosen_id) {
-                return Err(EngineError::InvalidAction(
-                    "Selected card not in revealed hand".to_string(),
-                ));
-            }
-            if !matches!(filter, crate::types::ability::TargetFilter::Any)
-                && !super::filter::matches_target_filter(
-                    state,
-                    chosen_id,
-                    &filter,
-                    &super::filter::FilterContext::from_source(state, chosen_id),
-                )
-            {
-                return Err(EngineError::InvalidAction(
-                    "Selected card does not match the required filter".to_string(),
-                ));
-            }
+            // CR 608.2d: a post-reveal choice takes exactly the published
+            // number of distinct eligible cards (one, historically).
+            effects::reveal_hand::validate_reveal_selection(
+                state,
+                &cards,
+                &filter,
+                cardinality,
+                &chosen,
+            )?;
 
             state
                 .resolve_and_apply_information(
@@ -5474,7 +5497,7 @@ pub(super) fn handle_resolution_choice(
                 frame
                     .pending
                     .chain
-                    .set_unpinned_targets(vec![TargetRef::Object(chosen_id)]);
+                    .set_unpinned_targets(chosen.iter().copied().map(TargetRef::Object).collect());
                 if optional {
                     frame.pending.chain.context.optional_effect_performed = true;
                 }

@@ -33315,6 +33315,8 @@ pub mod tests {
                                 selection: crate::types::ability::CardSelectionMode::Chosen,
                                 choice_optional: false,
                                 reveal: true,
+                                cardinality:
+                                    crate::types::ability::ObjectSelectionCardinality::SINGLE,
                             },
                         )
                         .sub_ability(

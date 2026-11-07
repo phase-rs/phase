@@ -1552,7 +1552,9 @@
       "titleReveal": "Reveal from Hand",
       "titleOpponentHand": "Opponent's Hand",
       "subtitleReveal": "Choose a card to reveal, or decline",
-      "subtitleChoose": "Choose a card"
+      "subtitleRevealAnyNumber": "Choose any number of cards to reveal",
+      "subtitleChoose": "Choose a card",
+      "subtitleChooseCount": "Choose {{count}} cards"
     },
     "search": {
       "title": "Search Library",
