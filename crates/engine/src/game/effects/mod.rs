@@ -26740,18 +26740,8 @@ fn unless_payment_prompt(
     resolved_cost: AbilityCost,
 ) -> WaitingFor {
     // Un-card (no CR entry): a TIMED spoken payment gets its engine-authored
-    // instance when the prompt surfaces, so the client can name it in its first
-    // `SayPhrase` observation and its deadline survives a reconnect. Any other
-    // prompt supersedes a spoken one, so the slot is cleared here too.
-    state.say_payment = match &resolved_cost {
-        AbilityCost::SayPhrase {
-            pace, repetitions, ..
-        } if pace.is_quick() => Some(Box::new(crate::types::un_actions::SayPhrasePayment::new(
-            state.un_actions.mint_say_payment_id(),
-            (*repetitions).max(1),
-        ))),
-        _ => None,
-    };
+    // instance when the prompt surfaces; any other prompt clears it.
+    crate::game::un_actions::arm_say_payment(state, &resolved_cost);
     let mut pending = ability.clone();
     pending.unless_pay = None;
     // CR 118.12a: A disjunctive unless-cost (`OneOf`) surfaces a

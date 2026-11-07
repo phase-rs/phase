@@ -18,6 +18,7 @@ use crate::types::mana::ManaSourceSelection;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::resolution::OptionalEffectFrame;
+use crate::types::un_actions::{SayPhraseDisposition, SayPhraseObservation, SayPhrasePayment};
 use crate::types::zones::Zone;
 use crate::types::ResolutionOptionalPaymentChoice;
 
@@ -759,6 +760,19 @@ pub(super) fn handle_unless_payment_choose_cost(
                     "Player has not opted in to Un-card spoken actions".to_string(),
                 ));
             }
+            // strict-failure: Un-card (no CR entry) + CR 702.24a: a TIMED spoken
+            // branch is paid only through its own timed prompt, one host-stamped
+            // saying at a time. It cannot ride inside a `Composite` collapse with
+            // other picks (the whole set is paid at once, CR 702.24a), so it is
+            // refused at the pick when this prompt is one of several or follows
+            // an earlier pick, rather than accepted and then silently unpaid.
+            if crate::game::un_actions::is_timed_saying(&picked)
+                && (!chosen.is_empty() || !remaining_choices.is_empty())
+            {
+                return Err(EngineError::InvalidAction(
+                    "A timed spoken payment cannot be combined with other unless-costs".to_string(),
+                ));
+            }
             // strict-failure: CR 118.12a disjunctive unless-costs with a counter branch are
             // refused at the pick, not removed from the offered `costs` list;
             // `legal_actions` already excludes the refused index.
@@ -791,6 +805,14 @@ pub(super) fn handle_unless_payment_choose_cost(
             } else {
                 AbilityCost::Composite { costs: chosen }
             };
+            // Un-card (no CR entry): a TIMED spoken branch cannot be paid with
+            // a boolean answer (`handle_unless_payment` treats that as unpaid),
+            // so it surfaces its own timed prompt — the same one a top-level
+            // quick phrase gets — and is paid by host-stamped sayings.
+            let timed = crate::game::un_actions::is_timed_saying(&final_cost);
+            if timed {
+                crate::game::un_actions::arm_say_payment(state, &final_cost);
+            }
             let next = WaitingFor::UnlessPayment {
                 player,
                 cost: final_cost,
@@ -801,6 +823,10 @@ pub(super) fn handle_unless_payment_choose_cost(
                 // "any player" poll never co-occurs with a sub-cost choice.
                 remaining: Vec::new(),
             };
+            if timed {
+                state.waiting_for = next;
+                return Ok(action_result(events, state.waiting_for.clone()));
+            }
             handle_unless_payment(state, next, true, events)
         }
         UnlessCostBranch::Decline => {
@@ -2029,17 +2055,13 @@ pub(super) fn handle_unless_payment(
 /// saying after the deadline is a pause, so the cost is unpaid and the ordinary
 /// unless-branch (the sacrifice) happens. The decision does not depend on
 /// delivery latency: the gap is measured between the host's stamps.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_say_phrase(
     state: &mut GameState,
     waiting_for: WaitingFor,
     payment_id: u64,
-    seq: u32,
-    at_ms: u64,
+    observation: SayPhraseObservation,
     events: &mut Vec<GameEvent>,
 ) -> Result<ActionResult, EngineError> {
-    use crate::types::un_actions::{SayPhraseDisposition, SayPhraseObservation, SayPhrasePayment};
-
     let WaitingFor::UnlessPayment {
         player,
         cost,
@@ -2104,13 +2126,11 @@ pub(super) fn handle_say_phrase(
     }
 
     let payment = state.say_payment.as_mut().expect("spoken payment ensured");
-    let disposition = payment.observe(
-        SayPhraseObservation { seq, at_ms },
-        pace.max_gap_ms().map(u64::from),
-    );
+    let disposition = payment.observe(observation, pace.max_gap_ms().map(u64::from));
     match disposition {
         SayPhraseDisposition::Stale => {
-            // Duplicate or reordered delivery: the payment does not move.
+            // Duplicate or reordered delivery, or an expiry report that arrived
+            // before the window closed: the payment does not move.
             return Ok(action_result(events, state.waiting_for.clone()));
         }
         SayPhraseDisposition::Lapsed => {

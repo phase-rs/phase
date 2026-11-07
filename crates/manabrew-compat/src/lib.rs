@@ -1721,6 +1721,16 @@ fn build_prompt_input(
         // happen — a yes/no. `UnlessPaymentChooseCost` is deliberately NOT
         // folded in: it picks *among several costs*, which is a selection, not
         // a boolean, and mapping it here would misreport the question.
+        // Un-card (no CR entry): a TIMED spoken payment (Toy Boat) is not a
+        // yes/no — its "pay" answer is a stream of host-stamped sayings, which a
+        // relay client cannot author. The engine's exact candidates for it are
+        // the decline alone, so it rides the generic projection rather than
+        // advertising a "Pay" the engine would judge unpaid.
+        WaitingFor::UnlessPayment { cost, .. }
+            if engine::game::un_actions::is_timed_saying(cost) =>
+        {
+            interaction_prompt(prepared, card_lookup)
+        }
         WaitingFor::UnlessPayment {
             effect_description, ..
         } => Ok(PromptInput::ChooseBoolean(ChooseBooleanInput {
@@ -2965,6 +2975,11 @@ pub fn convert_available_action(
         }
         // Answered through the ChooseBoolean prompt for `WaitingFor::UnlessPayment`.
         GameAction::PayUnlessCost { .. } => AvailableActionConversion::Skip,
+        // Un-card (no CR entry): a host-stamped observation of a timed spoken
+        // unless-payment (Toy Boat). It answers `WaitingFor::UnlessPayment`, is
+        // never a priority action, and carries a host instant no relay client
+        // can author — same contract as `PayUnlessCost`.
+        GameAction::SayPhrase { .. } => AvailableActionConversion::Skip,
         // Still unmapped: picking among several sub-costs is a selection, not a
         // boolean (CR 118.12a), so it does not share the UnlessPayment prompt.
         GameAction::ChooseUnlessCostBranch { .. } => {
@@ -6633,6 +6648,67 @@ mod tests {
                 && !labels.iter().any(|l| l == "top"),
             "got {labels:?}"
         );
+    }
+
+    /// Un-card (no CR entry): a TIMED spoken payment (Toy Boat) is not a
+    /// yes/no. Its "pay" is a stream of host-stamped sayings no relay client
+    /// can author, so it must not ride the `ChooseBoolean` unless prompt —
+    /// whose "Pay" the engine would judge unpaid. The projection serves the
+    /// engine's exact candidates, which are the decline alone.
+    #[test]
+    fn a_timed_spoken_payment_offers_only_the_decline() {
+        use engine::types::ability::{AbilityCost, Effect, ResolvedAbility, TargetFilter};
+        use engine::types::un_actions::PhrasePace;
+
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Toy Boat".to_string(),
+            Zone::Battlefield,
+        );
+        state.un_actions.set_enabled(PlayerId(0), true);
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: AbilityCost::SayPhrase {
+                phrase: "Toy Boat".to_string(),
+                pace: PhrasePace::quickly(),
+                repetitions: 2,
+            },
+            pending_effect: Box::new(ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Any,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )),
+            trigger_event: None,
+            effect_description: Some("Sacrifice Toy Boat".to_string()),
+            remaining: Vec::new(),
+        };
+        bind_interaction_authority(&mut state, InteractionSessionId("timed-say".to_string()))
+            .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup)
+            .expect("the timed spoken payment is served by the projection");
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
+            panic!("a timed spoken payment is not a ChooseBoolean, got {prompt:?}");
+        };
+        assert_eq!(input.options.len(), 1, "only the decline is offered");
+
+        let action = translate_response(
+            42,
+            PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
+                chosen_indices: vec![0],
+            }),
+            &prepared.prompt_context(),
+            &state,
+        )
+        .expect("the decline resolves back through the engine");
+        assert_eq!(action, GameAction::PayUnlessCost { pay: false });
     }
 
     /// The `Select` half of the generic path: a subset choice, not a one-of.

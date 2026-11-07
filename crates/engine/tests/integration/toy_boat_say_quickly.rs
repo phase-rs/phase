@@ -25,6 +25,7 @@
 //! upkeep trigger, and advancing to the upkeep resolves it so the age counter is
 //! added and the unless-payment prompt surfaces with its engine-minted instance.
 
+use engine::ai_support::legal_actions;
 use engine::game::scenario::{GameRunner, GameScenario};
 use engine::types::ability::AbilityCost;
 use engine::types::actions::GameAction;
@@ -36,7 +37,7 @@ use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::un_actions::{
-    PhrasePace, SayPhraseDisposition, SayPhraseObservation, SayPhrasePayment,
+    PhrasePace, SayPhraseDisposition, SayPhraseObservation, SayPhrasePayment, SayPhraseReport,
 };
 use engine::types::zones::Zone;
 
@@ -65,6 +66,11 @@ fn setup_at_unless_prompt(preloaded_age: u32, opted_in: bool) -> (GameRunner, Ob
     if preloaded_age > 0 {
         scenario.with_counter(toy_boat, CounterType::Age, preloaded_age);
     }
+    // Library cards so a test can play through to a later upkeep without a
+    // player losing to an empty-library draw (CR 704.5b).
+    let filler = ["Filler"; 4];
+    scenario.with_library_top(P0, &filler);
+    scenario.with_library_top(PlayerId(1), &filler);
 
     let mut runner = scenario.build();
     if opted_in {
@@ -106,8 +112,30 @@ fn say(runner: &mut GameRunner, seq: u32, at_ms: u64) -> engine::types::game_sta
             payment,
             seq,
             at_ms,
+            report: SayPhraseReport::Saying,
         })
         .expect("the host-stamped saying is accepted")
+}
+
+fn saying_at(seq: u32, at_ms: u64) -> SayPhraseObservation {
+    SayPhraseObservation {
+        seq,
+        at_ms,
+        report: SayPhraseReport::Saying,
+    }
+}
+
+/// The host reports that its clock read `at_ms` with no saying.
+fn expire(runner: &mut GameRunner, at_ms: u64) -> engine::types::game_state::ActionResult {
+    let payment = payment_id(runner);
+    runner
+        .act(GameAction::SayPhrase {
+            payment,
+            seq: 0,
+            at_ms,
+            report: SayPhraseReport::Expiry,
+        })
+        .expect("the host-stamped expiry report is accepted")
 }
 
 /// The phrases announced in `events`, in order.
@@ -333,6 +361,7 @@ fn an_observation_for_another_payment_is_ignored() {
             payment: live + 10,
             seq: 1,
             at_ms: 0,
+            report: SayPhraseReport::Saying,
         })
         .expect("a stale frame is ignored, not an error");
     assert!(
@@ -411,36 +440,18 @@ fn the_payment_instance_survives_a_serialize_round_trip() {
     // inside it pays, past it does not.
     let mut inside = payment.as_ref().clone();
     assert_eq!(
-        inside.observe(
-            SayPhraseObservation {
-                seq: 2,
-                at_ms: 1_999
-            },
-            Some(1_000)
-        ),
+        inside.observe(saying_at(2, 1_999), Some(1_000)),
         SayPhraseDisposition::Accepted
     );
     let mut late = payment.as_ref().clone();
     assert_eq!(
-        late.observe(
-            SayPhraseObservation {
-                seq: 2,
-                at_ms: 2_001
-            },
-            Some(1_000)
-        ),
+        late.observe(saying_at(2, 2_001), Some(1_000)),
         SayPhraseDisposition::Lapsed
     );
     // A duplicate of the accepted first saying is inert after the restore too.
     let mut duplicate = payment.as_ref().clone();
     assert_eq!(
-        duplicate.observe(
-            SayPhraseObservation {
-                seq: 1,
-                at_ms: 1_000
-            },
-            Some(1_000)
-        ),
+        duplicate.observe(saying_at(1, 1_000), Some(1_000)),
         SayPhraseDisposition::Stale
     );
     assert_eq!(
@@ -477,20 +488,204 @@ fn a_single_required_saying_never_expires_before_it_is_made() {
 /// from a previous upkeep cannot bind to a later one.
 #[test]
 fn successive_payments_have_distinct_identities() {
-    let (mut runner, _toy_boat) = setup_at_unless_prompt(1, true);
+    let (mut runner, toy_boat) = setup_at_unless_prompt(1, true);
     let first = payment_id(&runner);
+    let start_turn = runner.state().turn_number;
 
-    // Decline this upkeep and start the next one.
-    runner
-        .act(GameAction::PayUnlessCost { pay: false })
-        .expect("declining is accepted");
-    runner.advance_to_upkeep();
+    // Pay this upkeep in full so Toy Boat survives to the next one.
+    say(&mut runner, 1, 1_000);
+    say(&mut runner, 2, 1_500);
+    assert_eq!(runner.state().objects[&toy_boat].zone, Zone::Battlefield);
+
+    // Play through the opponent's turn to the controller's NEXT upkeep, passing
+    // every priority window (and declaring no attackers) on the way.
+    for _ in 0..200 {
+        let state = runner.state();
+        if state.turn_number == start_turn + 2
+            && state.phase == Phase::Upkeep
+            && !state.stack.is_empty()
+        {
+            break;
+        }
+        match state.waiting_for {
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority is legal");
+            }
+            WaitingFor::DeclareAttackers { .. } => {
+                runner
+                    .declare_attackers(&[])
+                    .expect("declaring no attackers is legal");
+            }
+            ref other => panic!("unexpected prompt on the way to the next upkeep: {other:?}"),
+        }
+    }
+    assert_eq!(
+        runner.state().turn_number,
+        start_turn + 2,
+        "stalled at {:?} waiting on {:?}",
+        runner.state().phase,
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.state().active_player, P0);
+    assert_eq!(runner.state().phase, Phase::Upkeep);
     runner.resolve_top();
 
-    if matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { .. }) {
-        let second = payment_id(&runner);
-        assert_ne!(first, second, "each payment mints a fresh identity");
-    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { .. }),
+        "the next upkeep asks again, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(owed(&runner), 3, "a third age counter means three sayings");
+    let second = payment_id(&runner);
+    assert_ne!(first, second, "each payment mints a fresh identity");
+
+    // A delayed frame from the retired payment does not count here.
+    let stale = runner
+        .act(GameAction::SayPhrase {
+            payment: first,
+            seq: 3,
+            at_ms: 2_000,
+            report: SayPhraseReport::Saying,
+        })
+        .expect("a frame for the retired payment is ignored");
+    assert!(phrases_said(&stale.events).is_empty());
+    assert_eq!(owed(&runner), 3);
+}
+
+/// CR 118.12a + Un-card (no CR entry): the host's report that its clock passed
+/// the window is not a saying. At the inclusive deadline it changes nothing; one
+/// millisecond later it lapses the payment and Toy Boat is sacrificed — without
+/// any phrase being announced.
+#[test]
+fn an_expiry_report_lapses_the_payment_but_never_pays_it() {
+    let (mut runner, toy_boat) = setup_at_unless_prompt(1, true);
+    say(&mut runner, 1, 1_000);
+
+    let early = expire(&mut runner, 2_000);
+    assert!(
+        phrases_said(&early.events).is_empty(),
+        "an expiry report is never a saying: {:?}",
+        early.events
+    );
+    assert_eq!(owed(&runner), 1, "the deadline itself is still in time");
+    assert_eq!(runner.state().say_payment.as_ref().unwrap().said, 1);
+    assert_eq!(runner.state().objects[&toy_boat].zone, Zone::Battlefield);
+
+    let lapse = expire(&mut runner, 2_001);
+    assert!(phrases_said(&lapse.events).is_empty());
+    assert_eq!(
+        runner.state().objects[&toy_boat].zone,
+        Zone::Graveyard,
+        "the clock passing the window is a pause: the cost is unpaid"
+    );
+    assert!(runner.state().say_payment.is_none());
+}
+
+/// An expiry report before the first saying has no window to close: a single
+/// owed saying can still be made afterwards.
+#[test]
+fn an_expiry_report_before_the_first_saying_changes_nothing() {
+    let (mut runner, toy_boat) = setup_at_unless_prompt(0, true);
+    expire(&mut runner, 90_000);
+    assert_eq!(owed(&runner), 1);
+    say(&mut runner, 1, 95_000);
+    assert_eq!(runner.state().objects[&toy_boat].zone, Zone::Battlefield);
+}
+
+/// A payment restored from a save keeps its deadline. A host that resumes with
+/// a clock already past it reports the expiry immediately and the restored
+/// payment lapses; a saying stamped lower than the restored clock (a new time
+/// origin) is judged at the retained clock and cannot slip under the deadline.
+#[test]
+fn a_restored_payment_lapses_on_its_retained_clock() {
+    let (mut runner, toy_boat) = setup_at_unless_prompt(1, true);
+    say(&mut runner, 1, 1_000);
+    let wire = serde_json::to_string(runner.state()).expect("state serializes");
+    let restored: GameState = serde_json::from_str(&wire).expect("state deserializes");
+    *runner.state_mut() = restored;
+
+    // An expiry check after the reload advances the payment's clock past the
+    // retained deadline, so the restored payment lapses.
+    expire(&mut runner, 2_500);
+    assert_eq!(runner.state().objects[&toy_boat].zone, Zone::Graveyard);
+
+    // The same restored payment, but the next saying is stamped from a host
+    // clock that restarted near zero. It is judged at the payment's retained
+    // clock (1_800, from the last expiry check), not at its raw stamp — here
+    // inside the window, so it counts and the restarted origin gains nothing.
+    let (mut runner, toy_boat) = setup_at_unless_prompt(1, true);
+    say(&mut runner, 1, 1_000);
+    let wire = serde_json::to_string(runner.state()).expect("state serializes");
+    *runner.state_mut() = serde_json::from_str(&wire).expect("state deserializes");
+    expire(&mut runner, 1_800);
+    let restarted = say(&mut runner, 2, 50);
+    assert_eq!(
+        phrases_said(&restarted.events).len(),
+        1,
+        "inside the retained window the saying counts"
+    );
+    assert_eq!(runner.state().objects[&toy_boat].zone, Zone::Battlefield);
+}
+
+/// The exact-candidate surface (AI and the interaction API) never advertises a
+/// boolean "pay" for a timed spoken cost — the engine would judge it unpaid —
+/// and offers the decline, which is the only answer a candidate list can
+/// author. The saying itself arrives as a host-stamped observation.
+#[test]
+fn timed_spoken_prompt_advertises_only_the_decline() {
+    let (runner, _toy_boat) = setup_at_unless_prompt(1, true);
+    let actions = legal_actions(runner.state());
+    assert_eq!(
+        actions,
+        vec![GameAction::PayUnlessCost { pay: false }],
+        "only the decline is an exact response to a timed spoken payment"
+    );
+}
+
+/// A host relaying a remote seat's observation replaces the claimed instant
+/// with its own clock, keeping the payment identity, sequence and report.
+#[test]
+fn a_relaying_host_restamps_the_observation() {
+    let claimed = GameAction::SayPhrase {
+        payment: 7,
+        seq: 3,
+        at_ms: 1,
+        report: SayPhraseReport::Saying,
+    };
+    assert_eq!(
+        claimed.stamped_by_host(1_730_000_000_000),
+        GameAction::SayPhrase {
+            payment: 7,
+            seq: 3,
+            at_ms: 1_730_000_000_000,
+            report: SayPhraseReport::Saying,
+        }
+    );
+    assert_eq!(
+        GameAction::PassPriority.stamped_by_host(5),
+        GameAction::PassPriority
+    );
+}
+
+/// The wire contract floors a fractional host instant (a browser
+/// `performance.now()`-derived clock) instead of rejecting the saying.
+#[test]
+fn a_fractional_host_instant_decodes_as_whole_milliseconds() {
+    let action: GameAction = serde_json::from_str(
+        r#"{"type":"SayPhrase","data":{"payment":4,"seq":2,"at_ms":1730000000123.75}}"#,
+    )
+    .expect("a fractional instant is a valid observation");
+    assert_eq!(
+        action,
+        GameAction::SayPhrase {
+            payment: 4,
+            seq: 2,
+            at_ms: 1_730_000_000_123,
+            report: SayPhraseReport::Saying,
+        }
+    );
 }
 
 /// A prompt directly replaced by a NEW payment with the SAME number of sayings
@@ -516,6 +711,7 @@ fn a_replaced_payment_rejects_the_retired_instance() {
             payment: retired,
             seq: 1,
             at_ms: 1_000,
+            report: SayPhraseReport::Saying,
         })
         .expect("a frame for the retired instance is ignored, not an error");
     assert!(
@@ -530,6 +726,7 @@ fn a_replaced_payment_rejects_the_retired_instance() {
             payment: retired + 1,
             seq: 1,
             at_ms: 1_100,
+            report: SayPhraseReport::Saying,
         })
         .expect("the live instance accepts its own observation");
     assert_eq!(phrases_said(&fresh.events).len(), 1);
@@ -548,6 +745,7 @@ fn a_zero_payment_id_binds_to_the_live_instance() {
             payment: 0,
             seq: 1,
             at_ms: 1_000,
+            report: SayPhraseReport::Saying,
         })
         .expect("the advertised payment accepts an unnamed observation");
     assert_eq!(
@@ -564,6 +762,7 @@ fn a_zero_payment_id_binds_to_the_live_instance() {
             payment: 0,
             seq: 2,
             at_ms: 1_500,
+            report: SayPhraseReport::Saying,
         })
         .expect("the remaining saying is accepted");
     assert!(runner.state().say_payment.is_none());
@@ -576,24 +775,12 @@ fn a_zero_payment_id_binds_to_the_live_instance() {
 fn the_window_is_measured_between_host_stamps() {
     let mut payment = SayPhrasePayment::new(1, 3);
     assert_eq!(
-        payment.observe(
-            SayPhraseObservation {
-                seq: 1,
-                at_ms: 10_000
-            },
-            Some(1_000)
-        ),
+        payment.observe(saying_at(1, 10_000), Some(1_000)),
         SayPhraseDisposition::Accepted
     );
     assert_eq!(payment.deadline_ms, Some(11_000));
     assert_eq!(
-        payment.observe(
-            SayPhraseObservation {
-                seq: 2,
-                at_ms: 10_999
-            },
-            Some(1_000)
-        ),
+        payment.observe(saying_at(2, 10_999), Some(1_000)),
         SayPhraseDisposition::Accepted
     );
     assert_eq!(
@@ -605,13 +792,7 @@ fn the_window_is_measured_between_host_stamps() {
     // A re-delivery of an accepted sequence is stale even when its instant is
     // newer: the host sequence, not the timestamp, is the duplicate authority.
     assert_eq!(
-        payment.observe(
-            SayPhraseObservation {
-                seq: 2,
-                at_ms: 11_500
-            },
-            Some(1_000)
-        ),
+        payment.observe(saying_at(2, 11_500), Some(1_000)),
         SayPhraseDisposition::Stale
     );
     assert_eq!((payment.owed, payment.said), (3, 2));

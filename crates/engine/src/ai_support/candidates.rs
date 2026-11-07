@@ -2905,6 +2905,23 @@ pub fn candidate_actions_broad_with_probe(
                 Some(*player),
             )))
             .collect(),
+        // Un-card (no CR entry) + CR 118.12a: a TIMED spoken payment (Toy
+        // Boat's "Say \"Toy Boat\" quickly") is paid only by host-stamped
+        // `GameAction::SayPhrase` observations, which carry a real-time instant
+        // no candidate list can author — the same reason a
+        // `WaitingFor::PhysicalContest` offers no candidates. The boolean pay
+        // answer would be judged unpaid, so it is not advertised; declining is
+        // the only exact response, and the saying itself arrives through the
+        // host's input channel.
+        WaitingFor::UnlessPayment { player, cost, .. }
+            if crate::game::un_actions::is_timed_saying(cost) =>
+        {
+            vec![candidate(
+                GameAction::PayUnlessCost { pay: false },
+                TacticalClass::Selection,
+                Some(*player),
+            )]
+        }
         // CR 118.12: "Counter unless pays" — opponent chooses pay or decline.
         WaitingFor::UnlessPayment { player, .. } => {
             vec![

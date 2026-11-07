@@ -1810,6 +1810,12 @@ impl GameSession {
             .player_for_token(player_token)
             .ok_or_else(|| "Invalid player token".to_string())?;
 
+        // Un-card (no CR entry): the instant of a spoken-payment observation is
+        // evidence the engine judges, so the server never trusts the one a
+        // client claims — it stamps the observation at its own receipt, in the
+        // epoch-millisecond domain every host uses (`GameAction::stamped_by_host`).
+        let action = action.stamped_by_host(now_ms());
+
         // GH #1507: while a takeback request is awaiting approval, the
         // authoritative state must not move out from under it — a new
         // action here would either invalidate the snapshot the table is

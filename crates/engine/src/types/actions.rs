@@ -14,6 +14,7 @@ use super::mana::{ManaPipId, ManaSourceSelection, ManaType};
 use super::match_config::DeckCardCount;
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
+use super::un_actions::SayPhraseReport;
 use super::zones::Zone;
 use crate::analysis::decision_template::{
     AnnouncementSubject, DecisionSlot, DecisionTemplate, PinnedDecision, Ranking, TargetPin,
@@ -643,11 +644,19 @@ pub enum GameAction {
     /// is the one `WaitingFor::PhysicalContest` uses: the host observes the
     /// human's wall clock, the deterministic engine decides. `payment` names
     /// the engine-authored instance (a delayed frame from an earlier payment is
-    /// ignored), and `seq`/`at_ms` are the host's monotonic observation.
+    /// ignored), `seq`/`at_ms` are the host's observation (epoch milliseconds),
+    /// and `report` says whether the host observed a saying or only that its
+    /// clock passed the window — an expiry can lapse the payment but never pay
+    /// it. A host that relays this action from a remote seat replaces `at_ms`
+    /// with its own clock ([`GameAction::stamped_by_host`]).
     SayPhrase {
         payment: u64,
+        #[serde(default)]
         seq: u32,
+        #[serde(deserialize_with = "super::un_actions::deserialize_host_ms")]
         at_ms: u64,
+        #[serde(default)]
+        report: SayPhraseReport,
     },
     /// CR 118.12a: Choose **which** sub-cost branch to pay from a disjunctive
     /// unless-cost ("unless they X or Y"). The `UnlessCostBranch` discriminant
@@ -2066,6 +2075,31 @@ fn push_decision_template(ids: &mut Vec<ObjectId>, template: &DecisionTemplate) 
 }
 
 impl GameAction {
+    /// Un-card (no CR entry): stamp a host-observed action with the host's own
+    /// clock (epoch milliseconds).
+    ///
+    /// The instant of a spoken observation is evidence the engine judges, so a
+    /// host must never trust one supplied by a remote seat: it relays the
+    /// action stamped at its own receipt, exactly as a contest click is
+    /// stamped at the host. Every other action carries no host instant and is
+    /// returned unchanged.
+    pub fn stamped_by_host(self, now_ms: u64) -> Self {
+        match self {
+            Self::SayPhrase {
+                payment,
+                seq,
+                report,
+                ..
+            } => Self::SayPhrase {
+                payment,
+                seq,
+                at_ms: now_ms,
+                report,
+            },
+            other => other,
+        }
+    }
+
     /// Returns the enum variant name as a static string (e.g., `"CastSpell"`, `"PassPriority"`).
     /// Useful for structured logging without the full `Debug` representation.
     pub fn variant_name(&self) -> &'static str {
