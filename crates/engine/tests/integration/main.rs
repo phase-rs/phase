@@ -279,6 +279,7 @@ mod koh_chosen_card_still_requires_exile;
 mod koh_face_stealer_grants;
 mod life_magnitude_display;
 mod loop_counter_growth;
+mod loop_offer_life_crossing_walk;
 mod loop_period_accessor_answers;
 mod loop_period_performs;
 mod loop_period_remade_token_source;
