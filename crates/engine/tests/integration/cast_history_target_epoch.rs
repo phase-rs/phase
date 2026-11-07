@@ -45,6 +45,13 @@
 //! The return-to-hand path moves the target *before* the payment frame resumes,
 //! so it is the path on which an unlatched capture cannot be correct by accident
 //! for both witnesses.
+//!
+//! CR 601.2c is satisfied either way: the caster announces the target through the
+//! public `SelectTargets` prompt when several objects are legal, and the engine
+//! announces the single legal one itself when there is only one. Both are the
+//! caster's CR 601.2c announcement, so both must reach the CR 601.2i write with
+//! the same facts — the pairs below run each witness down the automatic branch as
+//! well as the interactive one.
 
 use engine::game::filter::{spell_record_matches_filter, FilterContext};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -483,23 +490,47 @@ fn add_printed_land_type(runner: &mut GameRunner, land: ObjectId) {
     arbor.base_card_types = arbor.card_types.clone();
 }
 
-/// CR 601.2c + CR 601.2h: announce Devour in Flames, announce `land` as its
-/// target through the public `SelectTargets` prompt, then pay the additional
-/// cost by returning that same land through the public `SelectCards` prompt.
-/// Mana is supplied up front so the return is the only cost prompt. Returns the
-/// prompts the announcement answered, in order.
+/// CR 601.2c: which of the two announcement branches the witness takes. Both are
+/// the caster's announcement; they differ only in who resolves the choice when
+/// exactly one object is legal.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TargetDeclaration {
+    /// A second legal target (an opponent's Grizzly Bears) forces the public
+    /// `SelectTargets` prompt, so the caster announces the target themselves and
+    /// the boundary that latches it is `finish_pending_cast_cost_or_pay`.
+    Interactive,
+    /// The returned land is the only legal target, so the engine announces it
+    /// without a prompt. This branch hands the cast straight to cost payment and
+    /// never passes that boundary, so it must latch the announcement on the way.
+    Automatic,
+}
+
+/// CR 601.2c + CR 601.2h: announce Devour in Flames with `land` as its target —
+/// through the public `SelectTargets` prompt or by the engine's automatic
+/// announcement, per `declaration` — then pay the additional cost by returning
+/// that same land through the public `SelectCards` prompt. Mana is supplied up
+/// front so the return is the only cost prompt. Returns the prompts the
+/// announcement answered, in order.
 fn cast_devour_returning_its_target(
     runner: &mut GameRunner,
     spell: ObjectId,
     land: ObjectId,
+    declaration: TargetDeclaration,
 ) -> Vec<String> {
     cast(runner, spell, CastPaymentMode::Auto);
     let prompts = drive_to_priority(runner, land, land);
-    assert!(
-        prompts.iter().any(|prompt| prompt == "TargetSelection"),
-        "reach guard: the target was announced through the public `SelectTargets` prompt; \
-         prompts {prompts:?}"
-    );
+    match declaration {
+        TargetDeclaration::Interactive => assert!(
+            prompts.iter().any(|prompt| prompt == "TargetSelection"),
+            "reach guard: the target was announced through the public `SelectTargets` prompt; \
+             prompts {prompts:?}"
+        ),
+        TargetDeclaration::Automatic => assert!(
+            !prompts.iter().any(|prompt| prompt == "TargetSelection"),
+            "reach guard: the sole legal target was announced by the engine's automatic \
+             branch (CR 601.2c), with no `SelectTargets` prompt; prompts {prompts:?}"
+        ),
+    }
     assert!(
         prompts.iter().any(|prompt| prompt == "PayCost"),
         "reach guard: the return-to-hand additional cost was paid through the public \
@@ -532,7 +563,7 @@ struct RecordedReturnedTarget {
 
 /// Run one Devour in Flames witness end to end and read back what the cast
 /// history recorded for it.
-fn devour_witness(kind: ReturnedLand) -> RecordedReturnedTarget {
+fn devour_witness(kind: ReturnedLand, declaration: TargetDeclaration) -> RecordedReturnedTarget {
     let mut sc = board();
     let land = match kind {
         ReturnedLand::DryadArbor => sc
@@ -545,8 +576,11 @@ fn devour_witness(kind: ReturnedLand) -> RecordedReturnedTarget {
     let spell = devour_in_flames(&mut sc);
     // A second legal target (an opponent's creature) keeps the engine from
     // auto-selecting the only one, so the caster really announces the land
-    // through the public `SelectTargets` prompt.
-    sc.add_creature(P1, "Grizzly Bears", 2, 2);
+    // through the public `SelectTargets` prompt. The automatic row omits it: the
+    // returned land is then the only legal target and the engine announces it.
+    if declaration == TargetDeclaration::Interactive {
+        sc.add_creature(P1, "Grizzly Bears", 2, 2);
+    }
     // CR 601.2h: mana is supplied separately so the additional cost is the only
     // thing the cast has to ask for. An animated Factory also owes the `{1}`
     // animation below, hence the fourth unit.
@@ -586,7 +620,7 @@ fn devour_witness(kind: ReturnedLand) -> RecordedReturnedTarget {
         kind.label()
     );
 
-    cast_devour_returning_its_target(&mut runner, spell, land);
+    cast_devour_returning_its_target(&mut runner, spell, land, declaration);
 
     // Anti-vacuity: once the cost has returned it, the card's own type line no
     // longer says creature for the animated Factory, so the recorded fact can
@@ -629,7 +663,7 @@ impl ReturnedLand {
 /// cannot tell apart from a latched one.
 #[test]
 fn devour_in_flames_records_a_returned_dryad_arbor_as_the_creature_it_was() {
-    let recorded = devour_witness(ReturnedLand::DryadArbor);
+    let recorded = devour_witness(ReturnedLand::DryadArbor, TargetDeclaration::Interactive);
     assert!(
         recorded.types.contains(&CoreType::Creature),
         "Dryad Arbor: the record keeps the announced creature: {:?}",
@@ -646,7 +680,10 @@ fn devour_in_flames_records_a_returned_dryad_arbor_as_the_creature_it_was() {
 /// battlefield. The record must keep the creature the caster announced.
 #[test]
 fn devour_in_flames_records_a_returned_animated_factory_as_the_creature_it_was() {
-    let recorded = devour_witness(ReturnedLand::AnimatedFactory);
+    let recorded = devour_witness(
+        ReturnedLand::AnimatedFactory,
+        TargetDeclaration::Interactive,
+    );
     assert!(
         recorded.types.contains(&CoreType::Creature),
         "animated Mishra's Factory: the record keeps the selection-time creature the \
@@ -666,8 +703,11 @@ fn devour_in_flames_records_a_returned_animated_factory_as_the_creature_it_was()
 /// printed creature type in hand, the Factory does not.
 #[test]
 fn devour_in_flames_answers_the_targets_a_creature_query_alike_for_both_returned_lands() {
-    let dryad = devour_witness(ReturnedLand::DryadArbor);
-    let factory = devour_witness(ReturnedLand::AnimatedFactory);
+    let dryad = devour_witness(ReturnedLand::DryadArbor, TargetDeclaration::Interactive);
+    let factory = devour_witness(
+        ReturnedLand::AnimatedFactory,
+        TargetDeclaration::Interactive,
+    );
     assert_eq!(
         dryad.answers_targets_a_creature,
         factory.answers_targets_a_creature,
@@ -681,5 +721,69 @@ fn devour_in_flames_answers_the_targets_a_creature_query_alike_for_both_returned
     assert!(
         dryad.answers_targets_a_creature,
         "both returned creature lands answer `targets a creature`"
+    );
+}
+
+/// CR 601.2c + CR 601.2h: the automatic-announcement sibling of the animated
+/// Factory row. With no second legal target the engine announces the sole one
+/// itself and hands the cast straight to cost payment, so the target facts have
+/// to be latched on that branch — otherwise the return-to-hand cost moves the
+/// land and the CR 601.2i write records the printed Land it became in hand.
+#[test]
+fn devour_in_flames_records_an_automatically_announced_animated_factory_as_the_creature_it_was() {
+    let recorded = devour_witness(ReturnedLand::AnimatedFactory, TargetDeclaration::Automatic);
+    assert!(
+        recorded.types.contains(&CoreType::Creature),
+        "animated Mishra's Factory (automatic announcement): the record keeps the \
+         selection-time creature the caster announced, not the returned card's printed \
+         type line: {:?}",
+        recorded.types
+    );
+    assert!(
+        recorded.answers_targets_a_creature,
+        "animated Mishra's Factory (automatic announcement): the record answers \
+         `targets a creature`, which is what Head of the Class's first-spell gate counts"
+    );
+}
+
+/// CR 115.1 + CR 115.9: a sole legal Dryad Arbor announced by the engine is the
+/// same declared fact as one announced through the prompt, so the automatic
+/// branch must answer the history query the same way.
+#[test]
+fn devour_in_flames_records_an_automatically_announced_dryad_arbor_as_the_creature_it_was() {
+    let recorded = devour_witness(ReturnedLand::DryadArbor, TargetDeclaration::Automatic);
+    assert!(
+        recorded.types.contains(&CoreType::Creature),
+        "Dryad Arbor (automatic announcement): the record keeps the announced creature: {:?}",
+        recorded.types
+    );
+    assert!(
+        recorded.answers_targets_a_creature,
+        "Dryad Arbor (automatic announcement): the record answers `targets a creature`"
+    );
+}
+
+/// CR 115.1 + CR 115.9: the two announcement branches are one CR 601.2c fact, so
+/// the same witness must record the same answer whichever branch announced it.
+#[test]
+fn devour_in_flames_answers_the_targets_a_creature_query_alike_across_both_announcement_branches() {
+    let interactive = devour_witness(
+        ReturnedLand::AnimatedFactory,
+        TargetDeclaration::Interactive,
+    );
+    let automatic = devour_witness(ReturnedLand::AnimatedFactory, TargetDeclaration::Automatic);
+    assert_eq!(
+        interactive.answers_targets_a_creature,
+        automatic.answers_targets_a_creature,
+        "the history query answers the two announcement branches alike: interactive {:?} \
+         (types {:?}) vs automatic {:?} (types {:?})",
+        interactive.answers_targets_a_creature,
+        interactive.types,
+        automatic.answers_targets_a_creature,
+        automatic.types
+    );
+    assert!(
+        automatic.answers_targets_a_creature,
+        "the automatically announced animated Factory answers `targets a creature`"
     );
 }

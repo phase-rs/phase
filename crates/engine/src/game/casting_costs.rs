@@ -8455,6 +8455,13 @@ pub(super) fn push_ability_entry(
 ///
 /// This function sits between targeting and payment in the casting pipeline:
 /// `CastSpell → [ModeChoice] → [TargetSelection] → [AdditionalCostChoice] → pay_and_push_with_lock → Stack`
+///
+/// CR 115.1 + CR 601.2c + CR 400.7: `lock` is the caller's cost-determination
+/// state, and it is the only way a route that announced its targets without
+/// passing `finish_pending_cast_cost_or_pay` (the automatic-announcement
+/// branches in `casting`) can carry the announced-target latch to the CR 601.2i
+/// write. A caller that has not declared targets — or a spell with none —
+/// passes [`CostLockInput::default`].
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_additional_cost_or_pay(
     state: &mut GameState,
@@ -8469,6 +8476,7 @@ pub(super) fn check_additional_cost_or_pay(
     cast_timing_permission: Option<CastTimingPermission>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
+    lock: CostLockInput,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     check_additional_cost_or_pay_with_distribute(
@@ -8485,7 +8493,7 @@ pub(super) fn check_additional_cost_or_pay(
         None,
         origin_zone,
         payment_mode,
-        CostLockInput::default(),
+        lock,
         events,
     )
 }
