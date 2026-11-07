@@ -97521,21 +97521,25 @@ fn hour_of_glory_chain_gates_the_hand_exile_on_the_reveal() {
 /// drop, so these cards stay honestly red. Semantics remain unsupported.
 #[test]
 fn reveal_hand_conjunct_without_grammar_is_an_explicit_gap() {
-    let cases: &[(&str, &str, &[&str], &[&str])] = &[
+    type GapCase<'a> = (&'a str, &'a str, &'a str, &'a [&'a str], &'a [&'a str]);
+    let cases: &[GapCase] = &[
         (
             "Amnesia",
+            "Sorcery",
             "Target player reveals their hand and discards all nonland cards.",
             &[],
             &["discard all nonland cards"],
         ),
         (
             "Trapfinder's Trick",
+            "Sorcery",
             "Target player reveals their hand and discards all Trap cards.",
             &[],
             &["discard all Trap cards"],
         ),
         (
             "Shatter Assumptions",
+            "Sorcery",
             "Choose one —\n• Target opponent reveals their hand and discards all colorless nonland cards.\n• Target opponent reveals their hand and discards all multicolored cards.",
             &[],
             &[
@@ -97545,66 +97549,77 @@ fn reveal_hand_conjunct_without_grammar_is_an_explicit_gap() {
         ),
         (
             "Cabal Therapy",
+            "Sorcery",
             "Choose a nonland card name. Target player reveals their hand and discards all cards with that name.\nFlashback—Sacrifice a creature. (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
             &["Flashback"],
             &["discard all cards with that name"],
         ),
         (
             "Cabal Therapist",
+            "Creature",
             "Menace\nAt the beginning of your first main phase, you may sacrifice a creature. When you do, choose a nonland card name, then target player reveals their hand and discards all cards with that name.",
             &["Menace"],
             &["discard all cards with that name"],
         ),
         (
             "Persecute",
+            "Sorcery",
             "Choose a color. Target player reveals their hand and discards all cards of that color.",
             &[],
             &["discard all cards of that color"],
         ),
         (
             "Crosis, the Purger",
+            "Creature",
             "Flying\nWhenever Crosis deals combat damage to a player, you may pay {2}{B}. If you do, choose a color, then that player reveals their hand and discards all cards of that color.",
             &["Flying"],
             &["discard all cards of that color"],
         ),
         (
             "Tsabo's Decree",
+            "Instant",
             "Choose a creature type. Target player reveals their hand and discards all creature cards of that type. Then destroy all creatures of that type that player controls. They can't be regenerated.",
             &[],
             &["discard all creature cards of that type"],
         ),
         (
             "Mind Extraction",
+            "Sorcery",
             "As an additional cost to cast this spell, sacrifice a creature.\nTarget player reveals their hand and discards all cards of each of the sacrificed creature's colors.",
             &[],
             &["discard all cards of each of the sacrificed creature's colors"],
         ),
         (
             "Persecute Artist",
+            "Sorcery",
             "Choose an artist other than Rebecca Guay. Target player reveals their hand and discards all nonland cards with art by the chosen artist.",
             &[],
             &["discard all nonland cards with art by the chosen artist"],
         ),
         (
             "Rare-B-Gone",
+            "Sorcery",
             "Each player sacrifices all permanents that are rare or mythic rare, then each player reveals their hand and discards all cards that are rare or mythic rare.",
             &[],
             &["discard all cards that are rare or mythic rare"],
         ),
         (
             "Infernal Kirin",
+            "Creature",
             "Flying\nWhenever you cast a Spirit or Arcane spell, target player reveals their hand and discards all cards with that spell's mana value.",
             &["Flying"],
             &["discard all cards with that spell's mana value"],
         ),
         (
             "Void",
+            "Sorcery",
             "Choose a number. Destroy all artifacts and creatures with mana value equal to that number. Then target player reveals their hand and discards all nonland cards with mana value equal to the number.",
             &[],
             &["discard all nonland cards with mana value equal to the number"],
         ),
         (
             "Rakdos Augermage",
+            "Creature",
             "First strike\n{T}: Reveal your hand and discard a card of target opponent's choice. Then that player reveals their hand and discards a card of your choice. Activate only as a sorcery.",
             &["First strike"],
             &[
@@ -97613,9 +97628,9 @@ fn reveal_hand_conjunct_without_grammar_is_an_explicit_gap() {
             ],
         ),
     ];
-    for (name, text, keywords, expected) in cases {
+    for (name, card_type, text, keywords, expected) in cases {
         let keywords: Vec<String> = keywords.iter().map(|k| k.to_string()).collect();
-        let parsed = parse_oracle_text(text, name, &keywords, &["Sorcery".to_string()], &[]);
+        let parsed = parse_oracle_text(text, name, &keywords, &[card_type.to_string()], &[]);
         // Each reveal node's immediate child is the gap; the walk covers every
         // ability, trigger and mode surface.
         let gaps: Vec<&str> = all_card_defs(&parsed)
@@ -97660,6 +97675,7 @@ fn rag_man_reveal_conjunct_is_a_real_random_discard() {
             Effect::Discard {
                 selection: CardSelectionMode::Random,
                 target: TargetFilter::DeclaredPlayer { .. },
+                filter: Some(TargetFilter::Typed(_)),
                 ..
             }
         ),
@@ -97673,9 +97689,12 @@ fn rag_man_reveal_conjunct_is_a_real_random_discard() {
 /// rather than falling back to the caster.
 #[test]
 fn tsabos_decree_that_player_reads_through_the_discard_gap() {
-    let parsed = sorcery_defs(
-        "Tsabo's Decree",
+    let parsed = parse_oracle_text(
         "Choose a creature type. Target player reveals their hand and discards all creature cards of that type. Then destroy all creatures of that type that player controls. They can't be regenerated.",
+        "Tsabo's Decree",
+        &[],
+        &["Instant".to_string()],
+        &[],
     );
     let nodes = all_card_defs(&parsed);
     assert!(nodes

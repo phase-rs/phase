@@ -27873,6 +27873,7 @@ mod tests {
                 ControllerRef::TargetPlayer,
                 vec![Zone::Hand, Zone::Graveyard],
             ),
+            // No printed card exhibits these owner/word-order combinations; nearest printed cards: Legion's End, Hour of Glory.
             (
                 "cards with the same name as that creature from its controller's graveyard, hand, and library",
                 ControllerRef::ParentTargetController,
