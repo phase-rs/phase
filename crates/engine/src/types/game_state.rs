@@ -36697,7 +36697,9 @@ fn live_shields(state: &GameState) -> impl Iterator<Item = &ReplacementDefinitio
 /// that also SHORTENS the live sequence. The comparison is symmetric: it tolerates a change
 /// in identical live-shield multiplicity in either direction. This is a loop-comparison
 /// policy, not a claim that different shield counts have equal future damage capacity;
-/// callers must still establish the loop's decision and recurrence conditions. A new
+/// callers must still establish the loop's decision and recurrence conditions. In the shrink
+/// direction, spending one of several identical applicable shields passes through the
+/// CR 616.1 replacement-order choice, so it does not by itself yield a forced loop. A new
 /// mid-phase registry REMOVAL site would invalidate the phase-transition
 /// half of this argument. A LIVE shield whose amount, expiry, source anchors
 /// or rider differ is still content (CR 615.7 for amounts; CR 615.5 for riders): the
@@ -36755,7 +36757,7 @@ pub(crate) fn pending_shields_loop_eq(a: &GameState, b: &GameState) -> bool {
 /// is content and breaks equality. `is_consumed` is compared by the derived `PartialEq` too,
 /// but both entries reaching here are live by construction ([`live_shields`] filters the
 /// spent ones out first), so that field never distinguishes them.
-pub(crate) fn shield_content_eq(
+fn shield_content_eq(
     a: &GameState,
     x: &ReplacementDefinition,
     b: &GameState,

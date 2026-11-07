@@ -474,7 +474,13 @@ fn run_observed(
         observe(state);
         let mut yield_first = None;
         max_ring = max_ring.max(state.loop_detect_ring.len());
-        max_shields = max_shields.max(state.pending_damage_replacements.len());
+        max_shields = max_shields.max(
+            state
+                .pending_damage_replacements
+                .iter()
+                .filter(|shield| !shield.is_consumed)
+                .count(),
+        );
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             *prompts.entry(state.waiting_for.variant_name()).or_insert(0) += 1;
         }

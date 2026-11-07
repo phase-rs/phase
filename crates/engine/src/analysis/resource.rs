@@ -29642,7 +29642,8 @@ mod tests {
         assert_shield_frames_differ(&a, &b);
     }
 
-    /// CR 113.7a + CR 109.4: the installing source is content.
+    /// Loop-comparison policy: the installing source anchors the shield's attribution, so it is
+    /// compared as content (no single rule requires the anchor; CR 615.5 keeps the rider with it).
     #[test]
     fn loop_comparators_refuse_a_differing_floating_shield_source() {
         let mut from_first = prevention_shield(5);
