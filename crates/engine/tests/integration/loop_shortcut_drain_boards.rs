@@ -481,12 +481,11 @@ fn assert_live_offer_is_self_consistent(state: &GameState, offer: LiveOffer) {
         "the published declaration pins the seat the drive aimed at"
     );
 
-    // Row 9 — the three published quantifiers, and the ORDER they stand in. The SUGGESTION is
-    // the count this offer's own declaration drives: the cascade it implies, cut where that
-    // declaration stops charging the seat it pinned. The CEILING is CR 732.2a's existential —
-    // the widest count SOME legal declaration may specify — so it never falls below the
-    // suggestion. And the DIVISOR (`rederive_live_offer_bound`) answers a third question, the
-    // FIRST crossing under any declaration, which is why it is no longer either published field.
+    // Row 9 — the three published quantifiers, and the ORDER they stand in. The declaration's own
+    // count is the cascade it implies, cut where it stops charging the seat it pinned. The CEILING
+    // is CR 732.2a's existential — the widest count SOME legal declaration may specify. And the
+    // DIVISOR (`rederive_live_offer_bound`) answers a third question, the FIRST crossing under any
+    // declaration, which is why it is neither published field.
     let bound = schema.deliverable_capacity;
     assert_eq!(schema.measured_repetition_bound, Some(bound));
 
@@ -498,19 +497,27 @@ fn assert_live_offer_is_self_consistent(state: &GameState, offer: LiveOffer) {
         &schema.points,
     );
     let pinned = pinned_seats(&declaration.decisions);
-    assert!(
-        !pinned.is_empty(),
-        "reach-guard: the published declaration pins a seat (row 8), so the cut below is a real \
-         truncation rather than the untargeted identity"
-    );
-    // CR 732.2a: inclusive at the entry the pinned seat departs on — that entry the declaration
-    // still drives; the ones after it charge a seat this declaration no longer names.
-    let own = entries
+    let (cut, cut_seats) = entries
         .iter()
         .find(|(_, seats)| seats.iter().any(|seat| pinned.contains(seat)))
         .or_else(|| entries.last())
-        .map(|(repetition, _)| *repetition)
         .expect("a bounded offer's cascade carries at least one entry");
+    // CR 104.2a: the offer's count eliminates every opponent, each taking ceil(life / loss)
+    // repetitions, the trigger already on the stack (CR 603.3d) being one of its seat's.
+    let winning: u32 = state
+        .players
+        .iter()
+        .filter(|player| player.id != *proposer && !player.is_eliminated)
+        .map(|player| (player.life as u32).div_ceil(loss as u32))
+        .sum();
+    // CR 603.3d + CR 601.2c: a cut that leaves one opponent leaves the trigger one legal target,
+    // announced unasked, so the declaration drives on to the count that ends the game.
+    let remaining = state
+        .players
+        .iter()
+        .filter(|p| p.id != *proposer && !p.is_eliminated && !cut_seats.contains(&p.id))
+        .count();
+    let own = if remaining == 1 { winning } else { *cut };
     assert_eq!(
         declaration.replay,
         engine::analysis::decision_template::ReplayMode::Scheduled {
@@ -519,31 +526,23 @@ fn assert_live_offer_is_self_consistent(state: &GameState, offer: LiveOffer) {
         "CR 732.2a: the published declaration is stamped at the count it drives; cascade \
          {entries:?} cut at the seats it pins {pinned:?}"
     );
-    // CR 104.2a: the suggestion eliminates every opponent, each taking ceil(life / loss)
-    // repetitions, the trigger already on the stack (CR 603.3d) being one of its seat's.
-    let winning: u32 = state
-        .players
-        .iter()
-        .filter(|player| player.id != *proposer && !player.is_eliminated)
-        .map(|player| (player.life as u32).div_ceil(loss as u32))
-        .sum();
     assert_eq!(schema.iteration_count, IterationCount::Fixed(winning));
     assert_eq!(
         schema
             .suggested_declaration
             .as_ref()
             .map(|suggestion| suggestion.replay.clone()),
-        Some(engine::analysis::decision_template::ReplayMode::Scheduled {
+        (own < winning).then_some(engine::analysis::decision_template::ReplayMode::Scheduled {
             count: IterationCount::Fixed(winning)
         }),
-        "the suggestion is stamped at the count the offer suggests"
+        "a suggestion is published only where the declaration's own count falls short of it"
     );
 
     let divisor = rederive_live_offer_bound(state, offer.aimed_at);
     assert!(
-        own < winning && winning <= bound,
-        "the suggestion drives past the declaration's own count and within the ceiling; \
-         own {own}, suggestion {winning}, ceiling {bound}"
+        own <= winning && winning <= bound,
+        "the offer's count reaches the declaration's own and stays within the ceiling; \
+         own {own}, offered {winning}, ceiling {bound}"
     );
     assert!(
         divisor <= own && own <= bound,
@@ -727,34 +726,21 @@ fn only_a_published_targets_slot_off_the_charged_set_is_unbacked() {
     .is_empty());
 }
 
-/// **The suggestion-count ingress route reaches the same refusal.**
-/// [`InteractionShortcutDecision`] is closed at three variants and this row accounts for all
-/// three: `Decline` returns `GameAction::DeclineShortcut` above the pin loop and reaches no
-/// conjunct at all, while `AcceptSuggested` and `Fixed` fall through the SAME pin loop into the
-/// same `declaration_conforms` call. `AcceptSuggested`'s count is the offer's own published
-/// SUGGESTION while its pins are CLIENT-submitted, so "the offer cannot refuse its own published
-/// declaration" does not reach it — the suggestion's own segments in reverse order aim the
-/// seat that crosses first for a segment longer than its crossing.
-///
-/// # What attributes the refusal
-///
-/// `ConstraintUnsatisfied` is not by itself proof this conjunct fired — the ingress returns it
-/// from several places — so the two halves differ in NOTHING but the order of the same
-/// segments, at the same count, on the same board, in the same invocation.
-///
-/// REVERT-PROBE: delete `declaration_conforms`' aim conjunct ⇒ the first half is accepted and
-/// this row fails on its refusal assertion.
+/// CR 603.3d + CR 601.2c: once a seat leaves, the trigger whose segment outlives it has one legal
+/// target, announced as a spell's targets are, so a pin naming the departed seat contradicts no
+/// game choice. The suggested allocation's segments in either order mint a declaration at the
+/// published count, through `AcceptSuggested` and `Fixed` alike.
 #[test]
-fn an_accept_suggested_pin_whose_segment_outlives_its_seat_is_refused() {
+fn an_accept_suggested_pin_outliving_its_seat_names_no_choice_and_is_accepted() {
     use engine::game::interaction::{
         bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
     };
     use engine::game::visibility::filter_state_for_viewer;
     use engine::types::interaction::{
-        AmountAssignment, InteractionOpportunityResponse, InteractionReasonCode,
-        InteractionResponse, InteractionResponseSpec, InteractionSessionId,
-        InteractionShortcutCountSpec, InteractionShortcutDecision, InteractionShortcutPin,
-        InteractionShortcutPointKind, InteractionSubmission,
+        AmountAssignment, InteractionOpportunityResponse, InteractionResponse,
+        InteractionResponseSpec, InteractionSessionId, InteractionShortcutCountSpec,
+        InteractionShortcutDecision, InteractionShortcutPin, InteractionShortcutPointKind,
+        InteractionSubmission,
     };
 
     let mut state = weird_drain_board();
@@ -917,49 +903,36 @@ fn an_accept_suggested_pin_whose_segment_outlives_its_seat_is_refused() {
         )
     };
 
-    // ── The paired positive: the SAME variant, the SAME count, the suggestion's own segments.
-    let accepted = submit_decision(InteractionShortcutDecision::AcceptSuggested, &suggestion)
-        .expect("CR 732.2a: every aim survives, so this submission mints its declaration");
-    match &accepted {
-        GameAction::DeclareShortcut { count, template } => {
-            assert_eq!(
-                *count,
-                IterationCount::Fixed(suggested),
-                "`AcceptSuggested` declares the count the OFFER published"
-            );
-            assert!(
-                template.is_some(),
-                "and it mints the client's own pins as the declaration"
-            );
-        }
-        other => panic!("the ingress mints a DeclareShortcut, got {other:?}"),
-    }
-
-    // ── The refusal: the same variant, the same count, the same segments in reverse order, so
-    //    the seat that crosses first is aimed at first and its segment outlives it.
-    assert_eq!(
-        submit_decision(InteractionShortcutDecision::AcceptSuggested, &reversed)
-            .map_err(|error| error.code),
-        Err(InteractionReasonCode::ConstraintUnsatisfied),
-        "CR 732.2a + CR 608.2b: an aim lands after its own seat's crossing, so the ingress \
-         refuses the declaration and mints NO action. The two halves differ in nothing but which \
-         published victim each segment names"
-    );
-
-    // ── The adjacent enum variant, which shows the refusal belongs to the shared authority
-    //    rather than to the `AcceptSuggested` arm.
-    assert_eq!(
-        submit_decision(
+    for (label, decision, allocation) in [
+        (
+            "suggested order",
+            InteractionShortcutDecision::AcceptSuggested,
+            &suggestion,
+        ),
+        (
+            "reversed",
+            InteractionShortcutDecision::AcceptSuggested,
+            &reversed,
+        ),
+        (
+            "reversed, Fixed",
             InteractionShortcutDecision::Fixed {
-                iterations: suggested
+                iterations: suggested,
             },
-            &reversed
-        )
-        .map_err(|error| error.code),
-        Err(InteractionReasonCode::ConstraintUnsatisfied),
-        "`Fixed` at that same published count with those same pins is refused too — both \
-         variants fall through one pin loop into one `declaration_conforms` call"
-    );
+            &reversed,
+        ),
+    ] {
+        let action = submit_decision(decision, allocation)
+            .unwrap_or_else(|error| panic!("{label}: CR 732.2a: refused with {:?}", error.code));
+        let GameAction::DeclareShortcut { count, template } = &action else {
+            panic!("{label}: the ingress mints a DeclareShortcut, got {action:?}");
+        };
+        assert_eq!(*count, IterationCount::Fixed(suggested), "{label}");
+        assert!(
+            template.is_some(),
+            "{label}: the client's pins are the declaration"
+        );
+    }
 }
 
 /// The seats an offer publishes as aimable — the player targets its `Targets` points admit.
@@ -1135,22 +1108,13 @@ fn the_committed_dumps_that_restore_at_a_certified_offer_are_the_aim_independent
 
 /// CR 800.4a: P1 stole a creature P0 owns, with a +1/+1 counter on it. P1's departure ends that
 /// control effect and the creature stays under P0, so the repetition P1 leaves on conforms and
-/// accepting the weird-drain board's suggestion still eliminates every opponent.
+/// accepting the weird-drain board's published declaration still eliminates every opponent.
 #[test]
-fn a_creature_the_departing_seat_stole_returns_and_the_suggested_take_still_wins() {
-    use engine::game::interaction::{
-        bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
-    };
-    use engine::game::visibility::filter_state_for_viewer;
+fn a_creature_the_departing_seat_stole_returns_and_the_published_take_still_wins() {
     use engine::types::ability::{ContinuousModification, Duration, TargetFilter};
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
     use engine::types::identifiers::CardId;
-    use engine::types::interaction::{
-        InteractionOpportunityResponse, InteractionResponse, InteractionResponseSpec,
-        InteractionSessionId, InteractionShortcutDecision, InteractionShortcutPin,
-        InteractionSubmission,
-    };
     use engine::types::zones::Zone;
 
     for stolen in [false, true] {
@@ -1183,64 +1147,24 @@ fn a_creature_the_departing_seat_stole_returns_and_the_suggested_take_still_wins
             if stolen { PlayerId(1) } else { live.proposer }
         );
 
-        bind_interaction_authority(&mut state, InteractionSessionId("stolen".into()))
-            .expect("valid interaction authority binding");
-        let filtered = filter_state_for_viewer(&state, live.proposer);
-        let view = derive_viewer_interaction(&state, &filtered, live.proposer);
-        let opportunity = view
-            .opportunities
-            .iter()
-            .find(|o| {
-                matches!(
-                    &o.response,
-                    InteractionOpportunityResponse::Schema {
-                        spec: InteractionResponseSpec::Shortcut { .. },
-                        ..
-                    }
-                )
-            })
-            .expect("the offer is published as a shortcut schema");
-        let InteractionOpportunityResponse::Schema {
-            spec: InteractionResponseSpec::Shortcut { points, .. },
-            ..
-        } = &opportunity.response
-        else {
-            unreachable!();
+        let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for else {
+            panic!("the board stands at its offer: {:?}", state.waiting_for);
         };
-        let pins = points
-            .iter()
-            .filter(|point| !point.read_only)
-            .map(|point| InteractionShortcutPin {
-                group: point.group,
-                choice_ids: if matches!(
-                    point.kind,
-                    engine::types::interaction::InteractionShortcutPointKind::Targets
-                ) {
-                    Vec::new()
-                } else {
-                    point
-                        .candidate_ids
-                        .iter()
-                        .take(point.min as usize)
-                        .cloned()
-                        .collect()
-                },
-                amounts: Vec::new(),
-            })
-            .collect();
-        let action = resolve_interaction_response(
-            &state,
+        assert!(
+            schema.suggested_declaration.is_none(),
+            "stolen={stolen}: the published declaration already reaches the count, so no \
+             suggestion is published"
+        );
+        let count = schema.iteration_count.clone();
+        apply(
+            &mut state,
             live.proposer,
-            &InteractionSubmission {
-                interaction_id: opportunity.interaction_id.clone(),
-                response: InteractionResponse::Shortcut {
-                    decision: InteractionShortcutDecision::AcceptSuggested,
-                    pins,
-                },
+            GameAction::DeclareShortcut {
+                count,
+                template: None,
             },
         )
-        .expect("AcceptSuggested with an empty pin is admitted");
-        apply(&mut state, live.proposer, action).expect("the declaration is dispatched");
+        .expect("the declaration is dispatched");
         while let WaitingFor::RespondToShortcut { player, .. } = state.waiting_for.clone() {
             apply(
                 &mut state,

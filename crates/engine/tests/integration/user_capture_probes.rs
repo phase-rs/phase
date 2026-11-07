@@ -36,6 +36,7 @@
 //! puts the opponent's activation back into the window's trace — what the running game held. They
 //! differ in exactly that play.
 
+use engine::analysis::decision_template::IterationCount;
 use engine::game::engine::apply;
 use engine::game::{EntryKind, PlayLocus};
 use engine::types::actions::GameAction;
@@ -353,9 +354,9 @@ fn the_user_captures_offer_is_reached_with_its_driving_period_cleared() {
         )
     };
     assert_eq!(
-        predicted_winner, &None,
-        "this capture reaches the BOUNDED mint (CR 732.2a), not Path A's crowned offer — the \
-         whole file is about the bounded mint"
+        (predicted_winner, &schema.iteration_count),
+        (&Some(PlayerId(0)), &IterationCount::Fixed(35)),
+        "CR 104.2a: this capture's offer is the count that eliminates every opponent"
     );
     assert!(
         schema.points.is_empty(),

@@ -5979,16 +5979,24 @@ fn above_floor_reads_buried(state: &GameState, buried: &[ObjectId]) -> bool {
 }
 
 /// CR 405.5 + CR 608.1: the pair covers when no fewer entries are buried in `current`, nothing
-/// above them reads them, and the frames compare equal with them set aside.
+/// above them reads them, and the frames with them set aside are covered by whichever no-mint arm
+/// that pair needs (CR 121.1: `caster`'s draws among them).
 fn buried_growth_covers(
     prior: &GameState,
     current: &GameState,
+    caster: PlayerId,
     (bp, bc): &(Vec<ObjectId>, Vec<ObjectId>),
 ) -> bool {
     bp.len() <= bc.len()
         && !above_floor_reads_buried(prior, bp)
         && !above_floor_reads_buried(current, bc)
-        && covers_modulo_resources(&without_buried(prior, bp), &without_buried(current, bc))
+        && certifying_cover(
+            &without_buried(prior, bp),
+            &without_buried(current, bc),
+            caster,
+            None,
+        )
+        .is_some()
 }
 
 /// CR 701.21a + CR 701.26a: the pair with what `caster` spent across it set aside: a permanent of
@@ -6085,7 +6093,7 @@ fn certifying_cover(
         ));
     }
     buried
-        .filter(|buried| buried_growth_covers(prior, current, buried))
+        .filter(|buried| buried_growth_covers(prior, current, caster, buried))
         .map(|_| (CoveredGrowth::PerformedOnly, RecurrenceCover::StackGrowth))
 }
 
@@ -10731,48 +10739,6 @@ mod tests {
             }
             if dump_drive_one_beat(&mut state).is_err() {
                 return None;
-            }
-        }
-        None
-    }
-
-    /// PRODUCTION'S OWN CANDIDATE WALK, CONSUMED rather than imitated: this asks
-    /// [`crate::game::engine::candidate_windows`] — the very iterator
-    /// `certified_bounded_cycle_offer` walks — so the ORDER (newest-first), the span
-    /// arithmetic and the degenerate-pair filter are production's by construction. Returns
-    /// the first `idx` whose window drives item (4) AT ALL, with that window's certified
-    /// touch and its measured span.
-    ///
-    /// CR 732.2a: `frames_per_period` is a measured span, so a row that hard-codes
-    /// `&live[live.len() - 2..]` asserts `span == 1` without saying so and reads a HALF
-    /// PERIOD whenever the sampler retains extra frames.
-    ///
-    /// **PRECONDITION, NOT CONCLUSION.** `conjunct4_scans() > 0` says items (1)/(2)/(3)
-    /// passed on SOME production-shaped window so item (4) RAN; it admits `scans ∈ {1, 2}`,
-    /// which FAILS the caller's `scans > non_exempt` assertion. The search can therefore land
-    /// on a beat whose assertion fails — that is what keeps the caller non-vacuous.
-    ///
-    /// One FRESH container per candidate: the counter is cumulative, so a shared container
-    /// (which is what production carries) would make `> 0` unattributable after the first
-    /// candidate that scans.
-    fn newest_item4_window<'a>(
-        live: &[&'a GameState],
-        current: &'a GameState,
-        proposer: PlayerId,
-    ) -> Option<(usize, PeriodTouch<'a>, u32)> {
-        for (idx, span, window) in crate::game::engine::candidate_windows(live) {
-            let touch = certified_period_touch(window, current, PeriodCertification::BoardCovered);
-            let mut verdicts = PeriodVerdicts::for_period(live, current, proposer);
-            let _ = loop_states_cover_modulo_growth_pinned(
-                window[0],
-                current,
-                proposer,
-                &[],
-                &touch,
-                &mut verdicts,
-            );
-            if verdicts.conjunct4_scans() > 0 {
-                return Some((idx, touch, span));
             }
         }
         None
@@ -23491,129 +23457,6 @@ mod tests {
         );
     }
 
-    /// R21 (b) + (b-unproven) — THE EXEMPTION NARROWS CONJUNCT (6)'s POPULATION BY EXACTLY
-    /// THE FROZEN SET, AND "NO PROOF" NARROWS IT BY NOTHING.
-    ///
-    /// CR 732.2a + CR 608.1. Both TRACKED dumps, driven through `apply()` to the first beat
-    /// carrying a real certified window with a non-empty observed-frozen prefix.
-    ///
-    /// THE SUM IDENTITY IS THE ASSERTION, not a bare ask count. The predicate's domain is
-    /// `touch.announced ∪ (stack \ frozen)`, so `asks + skips == announced + stack.len()`,
-    /// NOT `stack.len()` alone — the announced pairs are asks too. The identity is what
-    /// fails if a future edit exempts an entry without counting it, which a bare
-    /// `asks == 2..4` would not see.
-    ///
-    /// (b-unproven): the shipped meaning of NO PROOF is `touch == None`, and it must exempt
-    /// NOTHING — `skips == 0` on both dumps, and where the sweep completes, the ask count is
-    /// the UNCONDITIONED `current.stack`. Without this arm the exemption could be made
-    /// unconditional and nothing would fail.
-    ///
-    /// REVERT-PROBE: delete the `frozen_ids` skip from `stack_choices_are_all_specified`'s
-    /// current-stack loop ⇒ `skips` drops to 0 while `frozen_ids` stays non-empty ⇒ the
-    /// `skips == frozen_ids.len()` arm FLIPS on both dumps.
-    #[test]
-    fn r21_b_the_exemption_narrows_conjunct_six_by_exactly_the_frozen_set() {
-        // Set by whichever dump's UNPROVEN sweep runs to completion, so the population claim
-        // below is asserted against a COMPLETE count and never against a truncated one.
-        let mut unproven_population_witness: Option<(&str, usize, usize)> = None;
-
-        for (name, gz) in TRACKED_DUMPS {
-            let (beat, board) = drive_dump_until(gz, 80, has_frozen_window).unwrap_or_else(|| {
-                panic!(
-                    "REACH-GUARD [{name}]: no driven beat carried a ring >= 2 frames AND a \
-                     window with a non-empty observed-frozen prefix; every arm below would be \
-                     vacuous on such a beat"
-                )
-            });
-            let live: Vec<&GameState> = board.loop_detect_ring.iter().map(|f| &f.live).collect();
-            let window = &live[live.len() - 2..];
-            let proposer = board.active_player;
-            let cover = certified_period_touch(window, &board, PeriodCertification::BoardCovered);
-
-            // ── reach-guards: neither half of the domain may be empty ────────────────────
-            assert!(
-                !cover.frozen_ids.is_empty(),
-                "[{name}] beat {beat}: the exemption must have something to remove"
-            );
-            assert!(
-                !cover.announced.is_empty(),
-                "[{name}] beat {beat}: the announced half must be non-empty, else the sum \
-                 identity below degenerates into a statement about `current.stack` alone"
-            );
-            assert!(
-                cover.frozen_ids.len() < board.stack.len(),
-                "[{name}] beat {beat}: a fully-frozen stack would make `asks` zero and the \
-                 narrowing unobservable; frozen {} of {}",
-                cover.frozen_ids.len(),
-                board.stack.len()
-            );
-
-            let measure = |touch: Option<&PeriodTouch<'_>>| {
-                let mut v = PeriodVerdicts::for_period(&live, &board, proposer);
-                let r = stack_choices_are_all_specified(&board, proposer, &[], touch, &mut v);
-                (
-                    r,
-                    v.conjunct6_asks() as usize,
-                    v.conjunct6_frozen_skips() as usize,
-                    v.spent(),
-                    v.denied(),
-                )
-            };
-
-            // ── (b) the exempting certificate ────────────────────────────────────────────
-            let (r_cov, asks_cov, skips_cov, spent_cov, denied_cov) = measure(Some(&cover));
-            assert!(
-                r_cov,
-                "[{name}] beat {beat}: the exempted sweep must RUN TO COMPLETION, else every \
-                 count below is a truncation rather than a population. asks={asks_cov} \
-                 skips={skips_cov} spent={spent_cov} denied={denied_cov}"
-            );
-            assert_eq!(
-                skips_cov,
-                cover.frozen_ids.len(),
-                "[{name}] beat {beat}: conjunct (6) must skip EXACTLY the proven-frozen ids — \
-                 no more (an over-skip is the fail-open direction) and no fewer"
-            );
-            assert_eq!(
-                asks_cov + skips_cov,
-                cover.announced.len() + board.stack.len(),
-                "[{name}] beat {beat}: THE SUM IDENTITY. Every member of the derived domain \
-                 `announced ∪ current.stack` is either ASKED or COUNTED as exempt; an entry \
-                 exempted without being counted would land here. asks={asks_cov} \
-                 skips={skips_cov} announced={} stack={}",
-                cover.announced.len(),
-                board.stack.len()
-            );
-
-            // ── (b-unproven) NO PROOF exempts NOTHING ────────────────────────────────────
-            let (r_none, asks_none, skips_none, spent_none, denied_none) = measure(None);
-            assert_eq!(
-                skips_none, 0,
-                "[{name}] beat {beat}: (b-unproven) a caller that proved no period gets \
-                 byte-identical pre-change behaviour — the subtraction is not merely smaller, \
-                 it is WITHDRAWN. asks={asks_none} spent={spent_none} denied={denied_none}"
-            );
-            if r_none {
-                unproven_population_witness = Some((name, asks_none, board.stack.len()));
-            }
-            assert!(
-                skips_cov > 0,
-                "[{name}] beat {beat}: the two arms must actually DIFFER on this board"
-            );
-        }
-
-        let (name, asks_none, stack_len) = unproven_population_witness.expect(
-            "REACH-GUARD: neither dump's UNPROVEN sweep ran to completion, so the population \
-             claim below would be asserted against a budget-truncated count. The row FAILS \
-             rather than silently weakening to `skips == 0`",
-        );
-        assert_eq!(
-            asks_none, stack_len,
-            "[{name}] (b-unproven) POPULATION: with no period proof the resolution gate scans \
-             the UNCONDITIONED `current.stack`, element for element"
-        );
-    }
-
     /// R21 (b-placement-S) — THE FROZEN SKIP IS READ AT EXACTLY ONE SITE, AND THAT SITE IS
     /// BELOW ITEM (6)'s LOOP HEAD.
     ///
@@ -23709,118 +23552,6 @@ mod tests {
                 .count(),
             0,
             "…and must not find one that is not"
-        );
-    }
-
-    /// R21 (b-placement-B) — THE BEHAVIOURAL HALF, ON THE REAL DELLIAN WINDOW: ITEM (4) SCANS
-    /// THE UNEXEMPTED STACK WHILE CONJUNCT (6) SKIPS IT.
-    ///
-    /// CR 732.2a. The matched pair is on ONE board and ONE touch, one predicate apart, so the
-    /// difference is attributable to the placement and to nothing else.
-    ///
-    /// ⚠ NO MUTATED TWIN. The unmutated dellian board does NOT offer — the mint returns
-    /// `NoCertification`, because item (4) already trips on a projected-resource reader and
-    /// basis B's `ring_delta_signature` finds no signature at that ring — so a
-    /// mutated/unmutated pair would be two refusals and discriminate nothing. None is needed:
-    /// the entry item (4) trips on IS ITSELF a frozen one, so the unmutated board already
-    /// witnesses that item (4) does not consult the exemption.
-    ///
-    /// ⚠ THE WINDOW IS PRODUCTION'S, NOT `len - 2`. A hard-coded newest pair asserts
-    /// `span == 1` silently and reads a HALF PERIOD wherever the answer-beat sampler retains
-    /// extra frames, which on this dump scans nothing at all. Both the search and the window
-    /// come from [`newest_item4_window`], i.e. from `game::engine::candidate_windows`.
-    ///
-    /// REVERT-PROBE: add a `frozen_ids` skip to item (4)'s closure ⇒ the scan can no longer
-    /// reach index 35 and `conjunct4_scans` collapses to at most the non-exempt population
-    /// (2 on this board) ⇒ FLIPS **while the search still succeeds and lands on the same
-    /// beat** — which is what proves the search is a precondition and not the assertion.
-    #[test]
-    fn r21_b_placement_b_item_four_scans_frozen_entries_that_conjunct_six_skips() {
-        let (beat, board) = drive_dump_until(TRACKED_DUMPS[1].1, 80, |s| {
-            let live: Vec<&GameState> = s.loop_detect_ring.iter().map(|f| &f.live).collect();
-            newest_item4_window(&live, s, s.active_player).is_some()
-        })
-        .expect(
-            "REACH-GUARD: the dellian drive must reach a beat whose production candidate window \
-             runs item (4) at all",
-        );
-        let live: Vec<&GameState> = board.loop_detect_ring.iter().map(|f| &f.live).collect();
-        let proposer = board.active_player;
-        let (idx, cover, span) = newest_item4_window(&live, &board, proposer)
-            .expect("the search predicate accepted this very board one line ago");
-        let window = &live[idx..];
-        let prior = window[0];
-        let non_exempt = board.stack.len() - cover.frozen_ids.len();
-        assert!(
-            cover.frozen_ids.len() > non_exempt,
-            "REACH-GUARD beat {beat}: the frozen prefix must DOMINATE the stack, else \
-             `scans > non_exempt` is satisfiable without ever touching a frozen entry; \
-             frozen {} non-exempt {non_exempt}",
-            cover.frozen_ids.len()
-        );
-
-        // ── ITEM (4): the scan population is the UNEXEMPTED current stack ────────────────
-        let mut v4 = PeriodVerdicts::for_period(&live, &board, proposer);
-        let covered =
-            loop_states_cover_modulo_growth_pinned(prior, &board, proposer, &[], &cover, &mut v4);
-        let scans = v4.conjunct4_scans() as usize;
-        assert!(
-            scans > non_exempt,
-            "R21(b-placement-B) beat {beat} (window idx {idx}, span {span}): item (4) scanned \
-             {scans} entries, which must EXCEED the {non_exempt} non-exempt ones — a scan that \
-             consulted `frozen_ids` could never get past them"
-        );
-        assert!(
-            scans > 0 && scans < board.stack.len(),
-            "attribution: item (4)'s `.any()` must have SHORT-CIRCUITED inside the stack \
-             ({scans} of {}), which is what makes it the refuser rather than a later item",
-            board.stack.len()
-        );
-        assert!(
-            cover.frozen_ids.contains(&board.stack[scans - 1].id),
-            "R21(b-placement-B): the entry item (4) refused on (stack index {}) must itself \
-             be PROVEN FROZEN — that is the whole content of `the skip lives in item (6) and \
-             nowhere earlier`",
-            scans - 1
-        );
-        assert!(
-            !covered,
-            "attribution: with a projected-resource reader inside the scanned population the \
-             cover disjunct must fail; a `true` here would mean the scan found nothing and \
-             the index assertion above was about the wrong entry"
-        );
-        assert_eq!(
-            v4.conjunct6_frozen_skips(),
-            0,
-            "the cover predicate returned at item (4), so item (6) never ran and can have \
-             taken no exemption — the two counters below come from the OTHER arm"
-        );
-
-        // ── MATCHED PAIR: the SAME touch, at the gate the skip actually lives in ─────────
-        let mut v6 = PeriodVerdicts::for_period(&live, &board, proposer);
-        let specified =
-            stack_choices_are_all_specified(&board, proposer, &[], Some(&cover), &mut v6);
-        // The guard states what it actually needs: a gate that ASKED must have COMPLETED, and no
-        // answer was denied. On production's own span-2 window the gate returns false
-        // with `denied=false` and `conjunct6_asks=0` — a structural refusal at a pre-ask
-        // conjunct, AFTER taking every one of the frozen skips. The exemption's COMPLETENESS is
-        // checked by the verbatim equality below, not here. (A truncation of the skip count is
-        // not a reachable failure mode: `note_conjunct6_frozen_skip`'s loop has no break and no
-        // early return — the gate's `return false`s live in the NEXT loop, which runs only after
-        // the counting loop has finished.)
-        assert!(
-            !v6.denied() && specified == (v6.conjunct6_asks() > 0),
-            "REACH-GUARD: no answer may be denied, and a gate that ASKED must have completed. \
-             specified={specified} denied={} asks={}",
-            v6.denied(),
-            v6.conjunct6_asks()
-        );
-        assert_eq!(
-            v6.conjunct6_frozen_skips() as usize,
-            cover.frozen_ids.len(),
-            "R21(b-placement-B) matched pair: the SAME {} proven-frozen ids item (4) scanned \
-             are the ones the resolution gate exempts",
-            cover.frozen_ids.len()
         );
     }
 
@@ -24018,109 +23749,6 @@ mod tests {
                  would be true of any board and would prove nothing"
             );
         }
-    }
-
-    /// R16 (ii-b) — THE MAX SPEND ACROSS MINTABLE BEATS SATURATES THE CAP, AND IT DOES SO
-    /// AWAY FROM THE BEAT THE CORPUS OFFERS ON.
-    ///
-    /// CR 732.2a. (ii-a)'s companion, and the reason the two are SPLIT: exhaustion at a
-    /// non-offering beat is a fail-closed refusal on a beat that was refusing anyway — the
-    /// budget's stall-bounding job — while exhaustion at an OFFERING beat is a starved
-    /// acceptance and a defect. This arm records the first half on a real driven board.
-    ///
-    /// On the dellian dump the mint spends the FULL cap and refuses `NoCertification`; the
-    /// corpus's one offering beat is the integration row
-    /// `r16_the_offering_beats_probe_demand_is_exactly_measured`, where the mint is NOT
-    /// denied. Same seam, same cap, opposite sides of the budget.
-    ///
-    /// ⚠ THE SEARCH IS THE ROW'S OWN CONSTRUCTION REQUIREMENT, NOT `has_frozen_window`.
-    /// "Mintable" means the walk reached the METERED CLASSIFIER, i.e. `meter.spent > 0`; a
-    /// predicate that only asserts `span == 1` on the newest pair lands on the first
-    /// ring-bearing beat, where the mint spends 0 and never reaches the classifier at all.
-    /// `meter.denied` cannot serve as the search predicate: `denied` can only latch after
-    /// exhaustion, so `denied ⇒ spent == cap` and the assertion would assert itself.
-    ///
-    /// REVERT-PROBE: raise `PROBE_BUDGET` above dellian's unexempted demand ⇒ `denied` goes
-    /// false ⇒ FLIPS. Lowering it cannot flip this arm, which
-    /// is exactly why the offering-beat row is a separate one. **That revert-probe is SHIPPED
-    /// IN-ROW as a positive control** ([`ProbeCap::RaisedTwiceLinks`], the same board, one
-    /// argument apart): the meter provably returns `(x, false)` here, so `(cap, true)` is a
-    /// verdict about the SHIPPED cap and not a property of the instrument. Self-checking — if
-    /// the raised cap were still insufficient, `!raised.denied` fails loudly.
-    #[test]
-    fn r16_ii_b_a_non_offering_mintable_beat_saturates_the_probe_budget() {
-        use crate::game::engine::{try_offer_bounded_cycle_shortcut_metered, ProbeCap};
-        use crate::types::game_state::WaitingFor;
-
-        /// The row's board construction, shared by the SEARCH and the measurement so the beat
-        /// the search accepted is byte-identically the beat the assertions read.
-        fn at_priority_of(s: &GameState) -> GameState {
-            let mut at_priority = s.clone();
-            at_priority.waiting_for = WaitingFor::Priority {
-                player: s.active_player,
-            };
-            at_priority
-        }
-
-        let (beat, board) = drive_dump_until(TRACKED_DUMPS[1].1, 80, |s| {
-            let (_, meter) = try_offer_bounded_cycle_shortcut_metered(
-                &at_priority_of(s),
-                false,
-                ProbeCap::Shipped,
-            );
-            meter.spent > 0
-        })
-        .expect("REACH-GUARD: the dellian drive must reach a beat the metered classifier runs on");
-        assert!(
-            beat > 0,
-            "ANTI-VACUITY: the search must have REJECTED at least one beat, else `spent > 0` is \
-             a tautology satisfied by beat 0 rather than a filter"
-        );
-        let at_priority = at_priority_of(&board);
-        assert!(
-            at_priority.loop_detect_ring.len() >= 2,
-            "REACH-GUARD beat {beat}: steps (1)/(2)/(2b) must all pass, else the mint \
-             refuses above the classifier and spends nothing for a reason unrelated to cost"
-        );
-        assert!(
-            at_priority.stack.len() > PROBE_BUDGET as usize,
-            "REACH-GUARD beat {beat}: the beat must carry more entries than the cap can pay \
-             for, else saturation is not reachable at all; stack {} cap {PROBE_BUDGET}",
-            at_priority.stack.len()
-        );
-
-        let (outcome, meter) =
-            try_offer_bounded_cycle_shortcut_metered(&at_priority, false, ProbeCap::Shipped);
-        assert!(
-            outcome.is_err(),
-            "R16(ii-b): this beat must NOT offer — the whole point of the split is that \
-             saturation here is a refusal on a beat that was refusing anyway. Got {outcome:?}"
-        );
-        assert_eq!(
-            (meter.spent, meter.denied),
-            (PROBE_BUDGET, true),
-            "R16(ii-b) beat {beat}: the max observable spend at the shipped cap IS the cap, \
-             and the exhaustion is LATCHED so it can be attributed rather than inferred. \
-             meter {meter:?}, stack {}",
-            at_priority.stack.len()
-        );
-
-        // ── ANTI-VACUITY: `spent > 0` does NOT imply saturation, proven ON THIS BOARD ───────
-        // The row's own revert-probe, shipped. One argument apart from the measurement above:
-        // same board, same seam, a cap of twice the board's link count.
-        let (_, raised) = try_offer_bounded_cycle_shortcut_metered(
-            &at_priority,
-            false,
-            ProbeCap::RaisedTwiceLinks,
-        );
-        assert!(
-            raised.spent > PROBE_BUDGET && !raised.denied,
-            "POSITIVE CONTROL: at a cap of twice the link count the SAME board must spend past \
-             the shipped cap WITHOUT latching exhaustion — otherwise `(cap, true)` above is a \
-             property of the instrument rather than a verdict about the shipped cap. \
-             raised {raised:?}, shipped cap {PROBE_BUDGET}, stack {}",
-            at_priority.stack.len()
-        );
     }
 
     // ───────────────────────────────────────────────────────────────────────────────────
@@ -31309,6 +30937,7 @@ mod tests {
         buried_growth_covers(
             prior,
             current,
+            PlayerId(0),
             &(buried_ids(prior, fp), buried_ids(current, fc)),
         )
     }
@@ -31326,6 +30955,51 @@ mod tests {
             ),
             (true, false)
         );
+    }
+
+    /// CR 405.5 + CR 608.1 + CR 121.1: a pair whose stack grew only by the entries the period
+    /// buried and whose caster drew between the frames is covered as stack growth; the same pair with
+    /// an entry above the floor targeting a buried one is not.
+    #[test]
+    fn buried_growth_beside_a_caster_draw_is_covered_as_stack_growth() {
+        use crate::types::ability::TargetRef;
+        let aimed = |entry_id: u64| {
+            let mut ability = gain_ability(1);
+            ability.targets = vec![TargetRef::Object(ObjectId(101))];
+            named_entry(entry_id, "Working", Some(ability))
+        };
+        let with_draw = |above: Option<(u64, u64)>| {
+            let (mut prior, mut current) = in_step_draw(0);
+            let mut prior_stack = vec![buried(101)];
+            let mut current_stack = vec![buried(101), buried(103)];
+            if let Some((p, c)) = above {
+                prior_stack.push(aimed(p));
+                current_stack.push(aimed(c));
+            }
+            for (state, entries) in [(&mut prior, prior_stack), (&mut current, current_stack)] {
+                for entry in &entries {
+                    state.stack_trigger_firings.insert(
+                        entry.id,
+                        crate::types::identifiers::TriggerFiring::UnknownLegacy,
+                    );
+                }
+                state.stack.extend(entries);
+            }
+            let floors = (buried_ids(&prior, 1), buried_ids(&current, 2));
+            (prior, current, floors)
+        };
+        let (prior, current, floors) = with_draw(None);
+        assert_eq!(
+            certifying_cover(&prior, &current, PlayerId(0), Some(&floors)).map(|(_, cover)| cover),
+            Some(RecurrenceCover::StackGrowth)
+        );
+        let (prior, current, floors) = with_draw(Some((102, 104)));
+        assert!(!buried_growth_covers(
+            &prior,
+            &current,
+            PlayerId(0),
+            &floors
+        ));
     }
 
     /// The spend retry sets aside the entries the floors named, though the spent permanent's own

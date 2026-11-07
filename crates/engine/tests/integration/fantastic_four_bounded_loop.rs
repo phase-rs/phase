@@ -9172,8 +9172,17 @@ fn a_period_whose_target_set_shrinks_to_one_performs_past_the_shrink() {
         Some(77),
         "CR 104.2a: P2 leaving at 77 leaves P0 alone, so P0's library crossing at 89 never comes"
     );
+    assert!(
+        schema.suggested_declaration.is_none(),
+        "the published declaration already reaches the count, so no suggestion is published"
+    );
 
-    f4_accept_suggested(&mut state);
+    let (proposer, _, _) = offer_parts(&state);
+    let mut state = declare_template_free(&state, proposer, 77);
+    assert!(
+        accept_all_opponents(&mut state) > 0,
+        "the respond window opens"
+    );
     assert!(
         matches!(
             &state.waiting_for,
@@ -9386,11 +9395,11 @@ fn a_fallback_offer_publishes_its_own_declaration_at_the_count_the_proposer_surv
     }
 }
 
-/// CR 732.2b: a template-free declaration resolves to the offer's suggestion, and a responder
-/// reads a statement of it at the proposal's count — a schedule step that count never reaches is
-/// no part of it. Each seat's stated life line is what accepting the declaration does to it, at
-/// counts below a later step's start and exactly on one, and after an earlier responder shortened
-/// the suggestion below a later start.
+/// CR 732.2b: a template-free declaration resolves to the offer's suggestion (its own declaration
+/// where it publishes none), and a responder reads a statement of it at the proposal's count — a
+/// schedule step that count never reaches is no part of it. Each seat's stated life line is what
+/// accepting the declaration does to it, at counts below a later step's start and exactly on one,
+/// and after an earlier responder shortened the suggestion below a later start.
 ///
 /// # Discrimination
 ///
@@ -9410,9 +9419,9 @@ fn a_template_free_declarations_responder_statement_is_what_the_take_does() {
         crate::loop_shortcut_drain_boards::drive_to_live_declarable_offer(&mut state);
         state
     };
-    for (label, mut offer, counts, shortened_to) in [
-        ("F4", f4_at_offer(), &[37u32, 76, 87][..], 50),
-        ("weird drain", weird, &[5, 30][..], 10),
+    for (label, mut offer, suggests, counts, shortened_to) in [
+        ("F4", f4_at_offer(), true, &[37u32, 76, 87][..], Some(50)),
+        ("weird drain", weird, false, &[5, 30][..], None),
     ] {
         bind_interaction_authority(&mut offer, InteractionSessionId(label.into()))
             .expect("valid interaction authority binding");
@@ -9423,37 +9432,39 @@ fn a_template_free_declarations_responder_statement_is_what_the_take_does() {
             panic!("[{label}] the board stands at its CR 732.2a offer");
         };
         let (proposer, suggested) = (*proposer, published_suggestion(schema));
-        let starts: Vec<u32> = schema
-            .suggested_declaration
-            .as_ref()
-            .and_then(|suggestion| {
-                suggestion
-                    .decisions
-                    .iter()
-                    .find_map(|decision| match decision {
-                        PinnedDecision::Targets { targets, .. } => match targets.as_slice() {
-                            [TargetPin::Scheduled(TargetSchedule::Piecewise(steps))] => {
-                                Some(steps.iter().map(|(start, _)| *start).collect())
-                            }
-                            _ => None,
-                        },
-                        _ => None,
-                    })
-            })
-            .unwrap_or_else(|| panic!("[{label}] the offer suggests a re-aiming schedule"));
-        assert!(
-            counts.iter().any(|k| starts.iter().any(|start| start > k))
-                && counts.iter().any(|k| starts.contains(k))
-                && starts.iter().any(|start| *start > shortened_to),
-            "[{label}] reach-guard: some count lies below a later step's start, some count is \
-             exactly a start, and the shortened count lies below one; starts={starts:?} \
-             counts={counts:?} shortened_to={shortened_to}"
+        assert_eq!(
+            schema.suggested_declaration.is_some(),
+            suggests,
+            "[{label}] a suggestion is published only past the declaration's own count"
         );
+        if let Some(suggestion) = schema.suggested_declaration.as_ref() {
+            let starts: Vec<u32> = suggestion
+                .decisions
+                .iter()
+                .find_map(|decision| match decision {
+                    PinnedDecision::Targets { targets, .. } => match targets.as_slice() {
+                        [TargetPin::Scheduled(TargetSchedule::Piecewise(steps))] => {
+                            Some(steps.iter().map(|(start, _)| *start).collect())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("[{label}] the offer suggests a re-aiming schedule"));
+            assert!(
+                counts.iter().any(|k| starts.iter().any(|start| start > k))
+                    && counts.iter().any(|k| starts.contains(k))
+                    && shortened_to.is_some_and(|to| starts.iter().any(|start| *start > to)),
+                "[{label}] reach-guard: some count lies below a later step's start, some count is \
+                 exactly a start, and the shortened count lies below one; starts={starts:?} \
+                 counts={counts:?} shortened_to={shortened_to:?}"
+            );
+        }
 
         let declared = counts
             .iter()
             .map(|&k| (k, declare_template_free(&offer, proposer, k)));
-        let shortened = {
+        let shortened = shortened_to.map(|shortened_to| {
             let mut state = declare_template_free(&offer, proposer, suggested);
             let WaitingFor::RespondToShortcut { player, .. } = state.waiting_for else {
                 panic!("[{label}] the suggestion opens the CR 732.2b window");
@@ -9469,8 +9480,8 @@ fn a_template_free_declarations_responder_statement_is_what_the_take_does() {
             )
             .expect("CR 732.2b: a place inside the proposed sequence is a legal shortening");
             (shortened_to, state)
-        };
-        for (k, mut state) in declared.chain(std::iter::once(shortened)) {
+        });
+        for (k, mut state) in declared.chain(shortened) {
             let WaitingFor::RespondToShortcut {
                 player: responder, ..
             } = state.waiting_for

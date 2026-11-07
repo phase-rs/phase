@@ -453,49 +453,49 @@ const ROWS: &[Row] = &[
         label: "R0",
         answers: &[P1, P2, P1],
         min_answers: 0,
-        board: [10, 9, 1],
-        lead: Some(P2),
+        board: [13, 9, 1],
+        lead: Some(P1),
         own: Some(5),
     },
     Row {
         label: "T-ALT2",
         answers: &[P2, P1, P2],
         min_answers: 0,
-        board: [13, 6, 1],
-        lead: Some(P1),
+        board: [13, 9, 1],
+        lead: Some(P2),
         own: Some(3),
     },
     Row {
         label: "T-ALT3",
         answers: &[P1, P3, P1],
         min_answers: 0,
-        board: [10, 9, 1],
-        lead: Some(P3),
+        board: [13, 9, 1],
+        lead: Some(P1),
         own: None,
-    },
-    Row {
-        label: "T-LEADKILL",
-        answers: &[P2, P1, P2],
-        min_answers: 3,
-        board: [10, 3, 1],
-        lead: Some(P2),
-        own: Some(1),
     },
     Row {
         label: "T-UNI",
         answers: &[P1],
         min_answers: 0,
-        board: [10, 9, 1],
+        board: [13, 9, 1],
         lead: Some(P1),
-        own: Some(4),
+        own: Some(5),
     },
     Row {
         label: "T-OFF",
         answers: &[P1],
         min_answers: 3,
-        board: [4, 9, 1],
-        lead: None,
-        own: None,
+        board: [7, 9, 1],
+        lead: Some(P1),
+        own: Some(3),
+    },
+    Row {
+        label: "T-LEADKILL",
+        answers: &[P2, P1, P2],
+        min_answers: 3,
+        board: [10, 6, 1],
+        lead: Some(P2),
+        own: Some(2),
     },
 ];
 
@@ -596,17 +596,17 @@ fn every_answer_pattern_offers_the_card_count_and_each_take_eliminates_every_opp
 fn the_alternating_offer_publishes_its_observation_and_an_eliminating_suggestion() {
     let r0 = drive_to_offer(load_s(), &[P1, P2, P1], 0);
     let (schema, declaration) = offer(&r0);
-    assert_eq!(schema.deliverable_capacity, 8);
+    assert_eq!(schema.deliverable_capacity, 9);
     assert_eq!(
         schedule(declaration.expect("published")),
         (TargetSchedule::Constant(rank(P1)), IterationCount::Fixed(5)),
-        "P2's in-flight hit, then P1's four, P1 crossing at the fifth"
+        "P1's in-flight hit, then four more, P1 crossing at the fifth"
     );
     assert_eq!(
         schedule(schema.suggested_declaration.as_ref().expect("suggested")),
         (
-            TargetSchedule::Piecewise(vec![(0, rank(P1)), (4, rank(P2)), (6, rank(P3))]),
-            IterationCount::Fixed(8)
+            TargetSchedule::Piecewise(vec![(0, rank(P1)), (4, rank(P2)), (7, rank(P3))]),
+            IterationCount::Fixed(9)
         )
     );
     match &r0.waiting_for {
@@ -617,8 +617,8 @@ fn the_alternating_offer_publishes_its_observation_and_an_eliminating_suggestion
                 .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
                 .expect("a bounded period");
             assert_eq!(
-                per_cycle.frames_per_period, 2,
-                "CR 732.2a: one repetition, the target answers aside"
+                per_cycle.frames_per_period, 8,
+                "a PERIOD-WIDTH tripwire on the recorded period"
             );
         }
         _ => unreachable!(),
@@ -640,7 +640,7 @@ fn the_published_declaration_is_taken_at_its_own_count() {
     };
     assert!(take(&mut state, action, accept) > 0);
     assert!(state.players[1].is_eliminated, "CR 800.4a: P1 left");
-    assert_eq!([state.players[2].life, state.players[3].life], [6, 1]);
+    assert_eq!([state.players[2].life, state.players[3].life], [9, 1]);
     assert_eq!(state.waiting_for, WaitingFor::Priority { player: P0 });
 }
 
@@ -649,29 +649,29 @@ fn accepting_the_suggestion_eliminates_every_opponent() {
     assert_game_over(&accept_suggested(&load_fc()), "AcceptSuggested");
 }
 
-/// CR 732.2a + CR 608.2b: an authored order is admitted at the card count wherever each aim lands
-/// on a seat still in the game, refused one repetition past it and wherever an aim outlives its
-/// seat.
+/// CR 732.2a + CR 603.3d + CR 601.2c: an authored order is admitted at the card count wherever each
+/// aim is announced at a seat still in the game, refused one repetition past it and wherever an aim
+/// outlives its seat.
 #[test]
 fn authored_orders_are_admitted_exactly_where_every_aim_lands() {
     let state = load_fc();
     for (label, allocation) in [
-        ("candidate order", [(P1, 4), (P2, 2), (P3, 2)]),
-        ("opens away from the lead", [(P3, 1), (P1, 4), (P2, 3)]),
-        ("opens on the lead", [(P2, 2), (P3, 1), (P1, 5)]),
+        ("candidate order", [(P1, 4), (P2, 3), (P3, 2)]),
+        ("opens away from the lead", [(P3, 1), (P1, 4), (P2, 4)]),
+        ("opens on the lead", [(P1, 4), (P3, 1), (P2, 4)]),
     ] {
         let taken = declare_fixed(&state, &allocation).expect(label);
         assert_game_over(&taken, label);
     }
     assert_eq!(
-        declare_fixed(&state, &[(P1, 5), (P2, 2), (P3, 2)]).err(),
+        declare_fixed(&state, &[(P1, 5), (P2, 3), (P3, 2)]).err(),
         Some(InteractionReasonCode::ConstraintUnsatisfied),
-        "nine repetitions"
+        "ten repetitions"
     );
     assert_eq!(
-        declare_fixed(&state, &[(P2, 3), (P1, 4), (P3, 1)]).err(),
+        declare_fixed(&state, &[(P2, 4), (P1, 4), (P3, 1)]).err(),
         Some(InteractionReasonCode::ConstraintUnsatisfied),
-        "the third P2 aim resolves after P2 has left"
+        "the fourth P2 aim is announced after P2 has left"
     );
 }
 
@@ -698,22 +698,23 @@ fn drained(preview: &InteractionShortcutPreview) -> Vec<(u8, i32)> {
 fn each_preview_element_states_the_suggestions_prefix_and_its_victims() {
     let mut state = load_fc();
     let dialog = dialog(&mut state);
-    let expected: [ExpectedElement; 8] = [
-        (1, &[(P1, 1)], &[(2, -3)]),
-        (2, &[(P1, 2)], &[(1, -3), (2, -3)]),
-        (3, &[(P1, 3)], &[(1, -6), (2, -3)]),
-        (4, &[(P1, 4)], &[(1, -9), (2, -3)]),
-        (5, &[(P1, 4), (P2, 1)], &[(1, -12), (2, -3)]),
-        (6, &[(P1, 4), (P2, 2)], &[(1, -12), (2, -6)]),
-        (7, &[(P1, 4), (P2, 2), (P3, 1)], &[(1, -12), (2, -9)]),
+    let expected: [ExpectedElement; 9] = [
+        (1, &[(P1, 1)], &[(1, -3)]),
+        (2, &[(P1, 2)], &[(1, -6)]),
+        (3, &[(P1, 3)], &[(1, -9)]),
+        (4, &[(P1, 4)], &[(1, -12)]),
+        (5, &[(P1, 4), (P2, 1)], &[(1, -15)]),
+        (6, &[(P1, 4), (P2, 2)], &[(1, -15), (2, -3)]),
+        (7, &[(P1, 4), (P2, 3)], &[(1, -15), (2, -6)]),
+        (8, &[(P1, 4), (P2, 3), (P3, 1)], &[(1, -15), (2, -9)]),
         (
-            8,
-            &[(P1, 4), (P2, 2), (P3, 2)],
-            &[(1, -12), (2, -9), (3, -3)],
+            9,
+            &[(P1, 4), (P2, 3), (P3, 2)],
+            &[(1, -15), (2, -9), (3, -3)],
         ),
     ];
     let counts: Vec<u32> = dialog.preview.iter().map(|p| p.count).collect();
-    assert_eq!(counts, (1..=8).collect::<Vec<_>>(), "one element per count");
+    assert_eq!(counts, (1..=9).collect::<Vec<_>>(), "one element per count");
     for (preview, (count, allocation, victims)) in dialog.preview.iter().zip(expected) {
         assert_eq!(preview.count, count);
         let stated: Vec<(PlayerId, u32)> = preview
@@ -744,7 +745,7 @@ fn the_ai_declares_the_suggestion_and_ends_the_game() {
     assert_eq!(
         ai,
         vec![GameAction::DeclareShortcut {
-            count: IterationCount::Fixed(8),
+            count: IterationCount::Fixed(9),
             template: suggestion,
         }]
     );
@@ -760,8 +761,8 @@ fn a_responder_shortening_the_eliminating_order_stops_at_its_iteration() {
     let action = submit(
         &state,
         &dialog,
-        InteractionShortcutDecision::Fixed { iterations: 8 },
-        &[(P1, 4), (P2, 2), (P3, 2)],
+        InteractionShortcutDecision::Fixed { iterations: 9 },
+        &[(P1, 4), (P2, 3), (P3, 2)],
     )
     .expect("admitted");
     let shortened = std::cell::Cell::new(false);
@@ -775,7 +776,7 @@ fn a_responder_shortening_the_eliminating_order_stops_at_its_iteration() {
     });
     assert!(shortened.get(), "P1 answered the window");
     assert!(state.players[1].is_eliminated);
-    assert_eq!([state.players[2].life, state.players[3].life], [6, 1]);
+    assert_eq!([state.players[2].life, state.players[3].life], [9, 1]);
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 }
 

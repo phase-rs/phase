@@ -197,13 +197,12 @@ fn optional_cascade(decorate: impl FnOnce(&mut GameScenario)) -> (GameRunner, Ob
 fn respond_window_at(runner: &mut GameRunner, kickoff: ObjectId, seat: PlayerId) {
     let _ = runner.cast(kickoff).resolve();
     let wf = drive_collect(runner, 500);
-    assert!(
-        matches!(wf, WaitingFor::LoopShortcut { .. }),
-        "reach-guard: the optional cascade must OFFER a shortcut, got {wf:?}"
-    );
+    let WaitingFor::LoopShortcut { schema, .. } = wf else {
+        panic!("reach-guard: the optional cascade must OFFER a shortcut, got {wf:?}");
+    };
     runner
         .act(GameAction::DeclareShortcut {
-            count: IterationCount::UntilLethal,
+            count: schema.iteration_count,
             template: None,
         })
         .expect("the proposer declares");
@@ -869,9 +868,10 @@ fn v1_live_path_fetchland_seat_accepts_on_the_real_4p_board() {
 
     // ── V5's premise, read off the live offer rather than assumed ──
     assert_eq!(
-        predicted_winner, None,
-        "V5: the BOUNDED class mints no crown — so arm (A) is structurally unable to produce \
-         the Accept below, and only arm (B) can (offer beat {beat})"
+        predicted_winner,
+        Some(P0),
+        "V5: the offer crowns P0, not the polled P2 — so arm (A) is structurally unable to \
+         produce P2's Accept below, and only arm (B) can (offer beat {beat})"
     );
     assert!(
         matches!(schema.iteration_count, IterationCount::Fixed(_)),
@@ -996,8 +996,9 @@ fn v1_positive_control_interactive_seat_still_shortens_on_the_real_4p_board() {
 
     assert_eq!(
         engine::ai_support::smart_shortcut_response(&polled, P2),
-        ShortcutResponse::Accept,
-        "the take to place 1 never seats P2 at priority, so shortening there buys P2 no window"
+        ShortcutResponse::Shorten { at_iteration: 1 },
+        "CR 732.2b: the take to place 1 seats P2 at priority, so this window takes the \
+         pre-cast answer"
     );
     assert_eq!(
         precast_response(&polled, P2),
@@ -1037,7 +1038,11 @@ fn v1_control_quiet_board_is_unchanged_and_cannot_discriminate() {
     else {
         unreachable!()
     };
-    assert_eq!(predicted_winner, None, "bounded class (offer beat {beat})");
+    assert_eq!(
+        predicted_winner,
+        Some(P0),
+        "CR 104.2a: the count crowns P0, none of the polled seats (offer beat {beat})"
+    );
     assert!(
         matches!(schema.iteration_count, IterationCount::Fixed(_)),
         "the bounded producer publishes a FINITE count; its VALUE is that producer's own \
@@ -1832,8 +1837,9 @@ fn v10a_a_cast_mana_spell_that_funds_an_unaffordable_answer_keeps_its_window() {
     );
     assert_eq!(
         engine::ai_support::smart_shortcut_response(&shorten_arm, P2),
-        ShortcutResponse::Accept,
-        "the take to place 1 never seats P2 at priority, so shortening there buys P2 no window"
+        ShortcutResponse::Shorten { at_iteration: 1 },
+        "CR 732.2b: the take to place 1 seats P2 at priority, so this window takes the \
+         pre-cast answer"
     );
     assert_eq!(
         precast_response(&shorten_arm, P2),
@@ -2009,8 +2015,9 @@ fn v10b_an_actor_owned_sacrifice_for_mana_seat_keeps_its_window() {
     );
     assert_eq!(
         engine::ai_support::smart_shortcut_response(&shorten_arm, P2),
-        ShortcutResponse::Accept,
-        "the take to place 1 never seats P2 at priority, so shortening there buys P2 no window"
+        ShortcutResponse::Shorten { at_iteration: 1 },
+        "CR 732.2b: the take to place 1 seats P2 at priority, so this window takes the \
+         pre-cast answer"
     );
     assert_eq!(
         precast_response(&shorten_arm, P2),
@@ -2258,8 +2265,9 @@ fn v10c_an_untapped_fetch_that_funds_an_unaffordable_answer_keeps_its_window() {
     );
     assert_eq!(
         engine::ai_support::smart_shortcut_response(&shorten_arm, P2),
-        ShortcutResponse::Accept,
-        "the take to place 1 never seats P2 at priority, so shortening there buys P2 no window"
+        ShortcutResponse::Shorten { at_iteration: 1 },
+        "CR 732.2b: the take to place 1 seats P2 at priority, so this window takes the \
+         pre-cast answer"
     );
     assert_eq!(
         precast_response(&shorten_arm, P2),
@@ -2500,8 +2508,9 @@ fn t1_2_a_controlled_but_unowned_fetchland_is_not_confined() {
     polled.objects.get_mut(&fetch).expect("just read").owner = P1;
     assert_eq!(
         engine::ai_support::smart_shortcut_response(&polled, P2),
-        ShortcutResponse::Accept,
-        "the take to place 1 never seats P2 at priority, so shortening there buys P2 no window"
+        ShortcutResponse::Shorten { at_iteration: 1 },
+        "CR 732.2b: the take to place 1 seats P2 at priority, so this window takes the \
+         pre-cast answer"
     );
     assert_eq!(
         precast_response(&polled, P2),
@@ -2585,8 +2594,9 @@ fn t2_1_an_opponent_owned_landfall_observer_defeats_a_confined_fetch() {
     );
     assert_eq!(
         engine::ai_support::smart_shortcut_response(&polled, P2),
-        ShortcutResponse::Accept,
-        "the take to place 1 never seats P2 at priority, so shortening there buys P2 no window"
+        ShortcutResponse::Shorten { at_iteration: 1 },
+        "CR 732.2b: the take to place 1 seats P2 at priority, so this window takes the \
+         pre-cast answer"
     );
     assert_eq!(
         precast_response(&polled, P2),
@@ -2647,9 +2657,9 @@ fn t2_4_a_landfall_observer_in_hand_does_not_veto_but_in_its_own_zone_it_does() 
         );
         assert_eq!(
             engine::ai_support::smart_shortcut_response(&polled, P2),
-            ShortcutResponse::Accept,
-            "the take to place 1 never seats P2 at priority, so shortening there buys P2 no \
-             window; at {zone:?}"
+            expected,
+            "CR 732.2b: the take to place 1 seats P2 at priority, so this window takes the \
+             pre-cast answer; at {zone:?}"
         );
         assert_eq!(
             precast_response(&polled, P2),
@@ -2709,8 +2719,9 @@ fn t2_8_a_command_zone_emblem_observer_is_scanned() {
     );
     assert_eq!(
         engine::ai_support::smart_shortcut_response(&polled, P2),
-        ShortcutResponse::Accept,
-        "the take to place 1 never seats P2 at priority, so shortening there buys P2 no window"
+        ShortcutResponse::Shorten { at_iteration: 1 },
+        "CR 732.2b: the take to place 1 seats P2 at priority, so this window takes the \
+         pre-cast answer"
     );
     assert_eq!(
         precast_response(&polled, P2),
@@ -2778,8 +2789,9 @@ fn t2_9_the_actors_own_self_referential_observer_keeps_the_veto() {
     }
     assert_eq!(
         engine::ai_support::smart_shortcut_response(&polled, P2),
-        ShortcutResponse::Accept,
-        "the take to place 1 never seats P2 at priority, so shortening there buys P2 no window"
+        ShortcutResponse::Shorten { at_iteration: 1 },
+        "CR 732.2b: the take to place 1 seats P2 at priority, so this window takes the \
+         pre-cast answer"
     );
     assert_eq!(
         precast_response(&polled, P2),
@@ -3002,8 +3014,9 @@ fn v10d_a_tapped_graveyard_return_keeps_its_window_and_the_library_sibling_accep
     );
     assert_eq!(
         engine::ai_support::smart_shortcut_response(&shorten_arm, P2),
-        ShortcutResponse::Accept,
-        "the take to place 1 never seats P2 at priority, so shortening there buys P2 no window"
+        ShortcutResponse::Shorten { at_iteration: 1 },
+        "CR 732.2b: the take to place 1 seats P2 at priority, so this window takes the \
+         pre-cast answer"
     );
     assert_eq!(
         precast_response(&shorten_arm, P2),
@@ -3217,8 +3230,9 @@ fn v10e_an_unrestricted_land_fetch_that_can_select_bojuka_bog_keeps_its_window()
 
     assert_eq!(
         engine::ai_support::smart_shortcut_response(&shorten_arm, P2),
-        ShortcutResponse::Accept,
-        "the take to place 1 never seats P2 at priority, so shortening there buys P2 no window"
+        ShortcutResponse::Shorten { at_iteration: 1 },
+        "CR 732.2b: the take to place 1 seats P2 at priority, so this window takes the \
+         pre-cast answer"
     );
     assert_eq!(
         precast_response(&shorten_arm, P2),

@@ -48,9 +48,7 @@ use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
-use crate::loop_period_remade_token_source::{
-    activate, markers, repetitions, settle, take_recorded, Answers,
-};
+use crate::loop_period_remade_token_source::{activate, markers, settle, take_recorded, Answers};
 
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
@@ -749,33 +747,6 @@ fn setup_3p_bystander_winner(mode: LoopDetectionMode) -> (GameRunner, ObjectId) 
     (runner, kickoff)
 }
 
-/// Two seats, both bleeding, at equal life and an equal per-cycle charge: P0's plague engine
-/// charges EVERY player once per life-loss event, so the crossing cycle takes both seats in one
-/// state-based sweep and the drive's verdict is a draw rather than a seat.
-///
-/// The life total is a construction parameter with two jobs, and 10 does both: the seats must be
-/// EQUAL so the crossing is simultaneous, and low enough that the crossing falls inside the
-/// number of cycles this board sustains before the drive gives up. At 1000 the drive stops far
-/// short of any crossing, so every leg would read a handback no proposal produced.
-///
-/// P1's land + Bolt are LOAD-BEARING for the same reason they are on the three-seat board: they
-/// make the loop OPTIONAL, so the engine offers instead of settling the game itself.
-fn setup_2p_symmetric_plague(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
-    let mut scenario = GameScenario::new_n_player(2, 7);
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_life(P0, 10);
-    scenario.with_life(P1, 10);
-    scenario.add_creature_from_oracle(P0, "Test Plague Engine", 2, 2, PLAGUE_ENGINE);
-    scenario.add_basic_land(P1, ManaColor::Red);
-    scenario.add_bolt_to_hand(P1);
-    let kickoff = scenario
-        .add_spell_to_hand_from_oracle(P0, "Test Symmetric Kickoff", false, LOSE_ALL_KICKOFF)
-        .id();
-    let mut runner = scenario.build();
-    runner.state_mut().loop_detection = mode;
-    (runner, kickoff)
-}
-
 /// Drive PassPriority/OrderTriggers beats, accumulating events, until a state OTHER than
 /// `Priority`/`OrderTriggers` (a `LoopShortcut`/`RespondToShortcut`/`GameOver`/…) or the
 /// cap. Returns accumulated events + the terminal `waiting_for`.
@@ -1086,7 +1057,7 @@ fn interactive_3p_optional_cascade_apnap_accept_win() {
     // Proposer declares the shortcut.
     runner
         .act(GameAction::DeclareShortcut {
-            count: IterationCount::UntilLethal,
+            count: offered(runner.state()).1,
             template: None,
         })
         .expect("P0 declares the shortcut");
@@ -1128,72 +1099,6 @@ fn interactive_3p_optional_cascade_apnap_accept_win() {
         runner.state().waiting_for,
         WaitingFor::GameOver { winner: Some(P0) },
         "both accepted ⇒ the shortcut resolves to P0's win"
-    );
-}
-
-/// SITE D (CR 732.2a) — the `UntilLethal` drive dispatch: an opponent's play in the window's trace
-/// must not divert an accepted Path-A grant away from the drain it was certified on.
-///
-/// **WHY THIS SCENARIO AND NOT A CAPTURE.** Site D is only reachable through a proposal whose count
-/// is `UntilLethal`, and `handle_declare_shortcut` rejects `UntilLethal` against any offer that
-/// narrowed its bound, so the only route in is a Path-A offer — which is exactly what
-/// [`interactive_3p_optional_cascade_apnap_accept_win`] directly above raises. This row is that row
-/// plus one injected play, so any divergence attributes to the play alone.
-#[test]
-fn an_accepted_until_lethal_grant_drains_even_with_a_foreign_period_in_state() {
-    let (mut runner, kickoff) = setup_3p_optional_cascade(LoopDetectionMode::Interactive);
-    let _ = runner.cast(kickoff).resolve();
-    let (_events, wf) = drive_collect(&mut runner, 500);
-    let WaitingFor::LoopShortcut {
-        proposer,
-        predicted_winner,
-        ..
-    } = wf.clone()
-    else {
-        panic!("REACH-GUARD: every assertion below needs the engine's own offer, got {wf:?}");
-    };
-    assert_eq!(
-        predicted_winner,
-        Some(P0),
-        "REACH-GUARD: site D is reachable only through a Path-A offer — a bounded one rejects \
-         `UntilLethal` at the declare seam and this row would measure that rejection instead"
-    );
-
-    runner
-        .act(GameAction::DeclareShortcut {
-            count: IterationCount::UntilLethal,
-            template: None,
-        })
-        .expect("the proposer declares UntilLethal on the Path-A offer");
-
-    // An opponent's play, standing in the trace at the moment the last acceptance hands the
-    // proposal to `apply_until_lethal_shortcut`.
-    let opp = runner
-        .state()
-        .players
-        .iter()
-        .map(|p| p.id)
-        .find(|p| *p != proposer)
-        .expect("REACH-GUARD: the foreign play needs a second seat to belong to");
-    let any_object = *runner
-        .state()
-        .objects
-        .keys()
-        .next()
-        .expect("the scenario has objects");
-    engine::game::install_plays_for_tests(
-        runner.state_mut(),
-        &[(opp, engine::game::PlayLocus::Cast(any_object))],
-    );
-
-    accept_all_opponents(&mut runner);
-
-    assert_eq!(
-        runner.state().waiting_for,
-        WaitingFor::GameOver { winner: Some(P0) },
-        "CR 732.2a SITE D: an opponent's play describes no sequence this proposer can take, so \
-         the accepted `UntilLethal` grant must still drive the DRAIN it was certified on. A \
-         `Priority` handback here is the defect: the drive fell into `until_lethal_fallback`"
     );
 }
 
@@ -1482,12 +1387,13 @@ fn declare_and_respond_authorization() {
     let (_events, wf) = drive_collect(&mut runner, 500);
     assert!(matches!(wf, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0));
 
+    let count = offered(runner.state()).1;
     // Wrong actor for DeclareShortcut (an opponent) → rejected.
     let wrong = apply(
         runner.state_mut(),
         P1,
         GameAction::DeclareShortcut {
-            count: IterationCount::UntilLethal,
+            count: count.clone(),
             template: None,
         },
     );
@@ -1501,7 +1407,7 @@ fn declare_and_respond_authorization() {
         runner.state_mut(),
         P0,
         GameAction::DeclareShortcut {
-            count: IterationCount::UntilLethal,
+            count,
             template: None,
         },
     )
@@ -1684,7 +1590,7 @@ fn interactive_proposer_concede_mid_apnap_does_not_crown_departed() {
     // P0 declares → APNAP window opens on P1, with P2 queued behind.
     runner
         .act(GameAction::DeclareShortcut {
-            count: IterationCount::UntilLethal,
+            count: offered(runner.state()).1,
             template: None,
         })
         .expect("P0 declares");
@@ -1807,7 +1713,7 @@ fn interactive_queued_opponent_concede_no_deadlock() {
 
     runner
         .act(GameAction::DeclareShortcut {
-            count: IterationCount::UntilLethal,
+            count: offered(runner.state()).1,
             template: None,
         })
         .expect("P0 declares");
@@ -2090,32 +1996,6 @@ fn setup_2p_vito_optional(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
     scenario.add_creature_from_oracle(P0, "Bloodthirsty Conqueror", 3, 4, BLOODTHIRSTY_CONQUEROR);
     scenario.add_basic_land(P1, ManaColor::Red);
     scenario.add_bolt_to_hand(P1);
-    let kickoff = scenario
-        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
-        .id();
-    let mut runner = scenario.build();
-    runner.state_mut().loop_detection = mode;
-    (runner, kickoff)
-}
-
-/// 3p DRAIN_CLERIC/BLOOD_SIPPER loop where BOTH opponents drain equally (CR 119.3 "each
-/// opponent loses 1"). Configurable opponent life for the F2 ≥2-faller hardening tests: the
-/// per-cycle delta is EQUAL for both (so `live_mandatory_loop_winner`'s ≥2-faller floor
-/// passes), while the ABSOLUTE lives differ iff `p1_life != p2_life` (so the offer's own
-/// `fallers_lives_pairwise_equal` distinguishes them). Started very high so the drive never
-/// crosses lethal within one measured cycle (measure path, not cross-lethal).
-fn setup_3p_both_fall(
-    mode: LoopDetectionMode,
-    p1_life: i32,
-    p2_life: i32,
-) -> (GameRunner, ObjectId) {
-    let mut scenario = GameScenario::new_n_player(3, 7);
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_life(P0, 20);
-    scenario.with_life(P1, p1_life);
-    scenario.with_life(P2, p2_life);
-    scenario.add_creature_from_oracle(P0, "Test Drain Cleric", 2, 2, DRAIN_CLERIC);
-    scenario.add_creature_from_oracle(P0, "Test Blood Sipper", 2, 2, BLOOD_SIPPER);
     let kickoff = scenario
         .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
         .id();
@@ -2440,118 +2320,6 @@ fn declare_illegal_pin_falls_back_legal_ingests() {
     );
 }
 
-/// Test G ⭐ (F2 HARDENING, item 5 ≥2-faller re-verification): a >2p drain that drops TWO
-/// opponents by EQUAL per-cycle deltas but at UNEQUAL absolute life does NOT crown — the
-/// ≥2-faller `fallers_lives_pairwise_equal` re-check on the pre-drive boundary fails
-/// (staggered CR 704.3 lethal). The EQUAL-life sibling DOES crown (reach-guard proving the
-/// check is not always-reject). REVERT-PROBE: removing the F2 check wrongly crowns the
-/// unequal-life half.
-///
-/// PR-7 Phase 5b: this class now raises a natural bounded CR 732.2a offer mid-drive, which
-/// would end the drive before the recurrence witness accumulates. [`drive_collect_primed`]
-/// declines it and keeps driving, so the reach-guard is grounded THROUGH the offer.
-/// REVERT-PROBE (MEASURED, not predicted): delete that decline arm ⇒ the UNEQUAL half's
-/// `primed` goes false and this row FAILS, while the equal half is untouched (it does not use
-/// that drive) — so the probe flips exactly one half, which is the proof the two halves are
-/// independently grounded.
-#[test]
-fn injected_3p_unequal_life_pin_all_no_crown() {
-    // Drive one primed cycle of a confirmed 3p both-fall drain and report the terminal
-    // waiting_for.
-    fn drive_confirmed(p1_life: i32, p2_life: i32) -> (WaitingFor, bool, usize) {
-        let (mut runner, kickoff) =
-            setup_3p_both_fall(LoopDetectionMode::Interactive, p1_life, p2_life);
-        let _ = runner.cast(kickoff).resolve();
-        let (_events, _wf, primed, declined) = drive_collect_primed(&mut runner, PRIMED_LOOP_BEATS);
-        // Reach-guard: both opponents bled equally (loop primed, both are fallers) and stay
-        // pairwise-offset by the initial gap (equal deltas preserve the difference).
-        assert!(
-            life(&runner, P1) < p1_life && life(&runner, P2) < p2_life,
-            "both opponents must have bled (≥2-faller regime primed)"
-        );
-        assert_eq!(
-            p2_life - p1_life,
-            life(&runner, P2) - life(&runner, P1),
-            "equal per-cycle deltas preserve the pairwise life gap"
-        );
-        runner.state_mut().waiting_for = WaitingFor::LoopShortcut {
-            proposer: P0,
-            predicted_winner: Some(P0),
-            certificate: synthetic_lethal_cert(),
-            schema: ShortcutDecisionSchema::default(),
-            declaration: None,
-            road: engine::analysis::loop_check::OfferRoad::Ring,
-            counted_take: Default::default(),
-            period: Default::default(),
-        };
-        runner
-            .act(GameAction::DeclareShortcut {
-                count: IterationCount::UntilLethal,
-                template: None,
-            })
-            .expect("P0 declares UntilLethal");
-        accept_all_opponents(&mut runner);
-        (runner.state().waiting_for.clone(), primed, declined.len())
-    }
-
-    // UNEQUAL absolute life (gap 50) ⇒ NO crown (F2 staggered-death veto).
-    let (unequal, unequal_primed, unequal_declines) = drive_confirmed(1000, 1050);
-    // Reach-guard on the regime (see `drive_collect_primed`), asserted on this half: it is the
-    // half the F2 revert-probe flips, so the whole discriminator lives on the guarded side.
-    //
-    // PR-7 Phase 5b: RE-GROUNDED THROUGH the bounded offers this class now raises — declined,
-    // not avoided.
-    assert!(
-        unequal_primed,
-        "the loop never reached a board-recurrent state within {PRIMED_LOOP_BEATS} beats \
-         ({unequal_declines} bounded offers declined en route) — this is not the ≥2-faller \
-         primed regime the assertions below assume"
-    );
-    assert!(
-        !matches!(unequal, WaitingFor::GameOver { winner: Some(_) }),
-        "unequal-life ≥2-faller drain must NOT crown (CR 704.3 simultaneity), got {unequal:?}"
-    );
-    // MEASURED, not assumed (PA-2B.0b was a HYPOTHESIS that the materialized settle would now
-    // raise a natural bounded offer here and turn this green assertion red): on this tree the
-    // post-settle state IS `Priority`, so the assertion stands VERBATIM and needs no
-    // decline-and-re-read pass-through. Do not relax it to an `||` over two `WaitingFor`
-    // variants — that would make it pass on a state this row exists to exclude.
-    assert!(
-        matches!(unequal, WaitingFor::Priority { .. }),
-        "the F2 veto hands back to manual play, got {unequal:?}"
-    );
-
-    // EQUAL absolute life on a live offer ⇒ CROWN (reach-guard: the F2 check is not
-    // always-reject).
-    let (mut runner, kickoff) = setup_3p_optional_cascade(LoopDetectionMode::Interactive);
-    let (p1_start, p2_start) = (life(&runner, P1), life(&runner, P2));
-    let _ = runner.cast(kickoff).resolve();
-    let (_events, offer) = drive_collect(&mut runner, 500);
-    assert!(
-        matches!(offer, WaitingFor::LoopShortcut { .. }),
-        "the equal-life drain is offered, got {offer:?}"
-    );
-    assert_eq!(p1_start, p2_start, "the two opponents start level");
-    let (p1_lost, p2_lost) = (p1_start - life(&runner, P1), p2_start - life(&runner, P2));
-    assert!(
-        p1_lost > 0 && p2_lost > 0,
-        "both opponents had lost life when the offer stood (≥2-faller regime)"
-    );
-    assert_eq!(p1_lost, p2_lost, "…and by the same amount");
-    runner
-        .act(GameAction::DeclareShortcut {
-            count: IterationCount::UntilLethal,
-            template: None,
-        })
-        .expect("P0 declares UntilLethal");
-    accept_all_opponents(&mut runner);
-    assert_eq!(
-        runner.state().waiting_for,
-        WaitingFor::GameOver { winner: Some(P0) },
-        "equal-life ≥2-faller drain still crowns P0 (F2 pairwise-equal passes)"
-    );
-}
-
 // ─────────────────── T-B3-materialize (Phase 4b) ───────────────────────
 
 /// Reach `LoopShortcut{P0}` on a fresh `setup_2p_optional_drain(Interactive)` fixture.
@@ -2791,12 +2559,11 @@ fn over_cap_fixed_count_hands_back_with_no_drive() {
         "no crown — the drive never ran, got {:?}",
         runner.state().waiting_for
     );
-    // SANITY CHECK ONLY (not the discriminator — see the vacuity trap in the doc): the handback
-    // lands on the living seat, mirroring the stop-short manual fallback.
-    assert_eq!(
-        runner.state().waiting_for,
-        WaitingFor::Priority { player: P0 },
-        "handback to living_priority_seat (P0)"
+    // CR 732.2a: the handback lands on the living seat, which may suggest the shortcut again.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
+        "handback to living_priority_seat (P0), offered again; got {:?}",
+        runner.state().waiting_for
     );
 }
 
@@ -3060,11 +2827,12 @@ fn b3_declare_refuses_a_schedule_breaking_inside_the_declared_count() {
          verdict: nothing may commit before the handback"
     );
     assert!(!is_eliminated(&runner, P1));
-    assert_eq!(
-        runner.state().waiting_for,
-        WaitingFor::Priority { player: P0 },
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
         "CR 732.2a: an unresolvable choice inside the declared count hands priority back to \
-         living_priority_seat (P0) — no APNAP window opens"
+         living_priority_seat (P0), which may suggest the shortcut again — no APNAP window \
+         opens; got {:?}",
+        runner.state().waiting_for
     );
 }
 
@@ -3277,7 +3045,7 @@ fn low2_smart_shortcut_self_preservation() {
     assert_eq!(proposer, P0);
     runner
         .act(GameAction::DeclareShortcut {
-            count: IterationCount::UntilLethal,
+            count: offered(runner.state()).1,
             template: None,
         })
         .expect("P0 declares");
@@ -3334,7 +3102,7 @@ fn low2_smart_shortcut_self_preservation() {
     assert!(matches!(cwf, WaitingFor::LoopShortcut { .. }));
     crunner
         .act(GameAction::DeclareShortcut {
-            count: IterationCount::UntilLethal,
+            count: offered(crunner.state()).1,
             template: None,
         })
         .expect("declare");
@@ -7229,155 +6997,6 @@ fn dump_drive_one_beat(
         .map_err(|e| format!("apply err ({action:?}): {e:?}"))
 }
 
-/// Phase 1b, BOTH clear sites. The CR 732.2a ring must survive (i) the forced
-/// pre-priority window itself — the sampler's clear arm, which BASE took for every
-/// window except `OrderTriggers` — and (ii) the action that ANSWERS that window, which
-/// `apply_action`'s deliberate-break clear discarded unconditionally.
-///
-/// Fixture: `dellian_emblem_conqueror_4p.json.gz`, the real 4p Delianfel/Bloodthirsty
-/// Conqueror drain (P0 69 / P1 12 / P2 13 / P3 28, all four living, stack 152, ring 0,
-/// `loop_detection: Interactive`). It ships AT a `TriggerTargetSelection` window, which is
-/// precisely the window class BASE wiped.
-///
-/// NON-VACUITY: the fixture drives hundreds of real beats (it is NOT a saved-offer board
-/// that halts at beat 0), and the BASE measurement is the positive control that the
-/// instrument CAN report a large ring — it reports 16 once only ONE opponent is left
-/// alive, while measuring exactly 1 over the whole ≥2-living stretch. A `>= 5` assertion
-/// over that same stretch cannot pass on a BASE tree.
-///
-/// REVERT-PROBES (MEASURED outcomes, not predicted ones):
-/// ⓐ restore `apply_action`'s clear to its action-only form (drop the
-///   `!state.waiting_for.is_forced_cascade_window()` conjunct) ⇒ (i) FAILS FIRST — and (ii)
-///   and (iii) are never reached. The prediction that ⓐ would leave (i) passing was WRONG,
-///   and the reason is the interlock between the two sites: with the answer clearing the
-///   ring, the drive can never carry >= 2 frames INTO a forced window either, so the
-///   sampler half has nothing left to retain. The two clear sites are therefore not
-///   independently observable on this fixture — ⓐ still proves a one-site fix is inert,
-///   just at (i) rather than at (ii).
-/// ⓑ restore the sampler's `!matches!(wf, WaitingFor::OrderTriggers { .. })` arm ⇒ (i)
-///   FAILS.
-///
-/// DISCRIMINANT GUARD on (ii): `apply_action` has a PRE-EXISTING action-side exemption for
-/// `GameAction::OrderTriggers`, so if the window (ii) happens to catch were an
-/// `OrderTriggers` window, (ii) would be satisfied without the new window-keyed conjunct
-/// being consulted at all. The window's discriminant is therefore captured alongside
-/// `(before, after)` and asserted to be something else — a fixture or engine change that
-/// drifts (ii) onto an `OrderTriggers` window fails loudly instead of going quietly
-/// vacuous.
-#[test]
-fn two_site_retention_survives_a_prompt_and_its_answer() {
-    let json = gunzip_dump(include_bytes!(
-        "../fixtures/dellian_emblem_conqueror_4p.json.gz"
-    ));
-    let mut state = restore_dump(&json);
-
-    // Reach guards on the loaded board — every assertion below is meaningless without them.
-    assert!(
-        state.loop_detection.samples(),
-        "reach-guard: the dump must load with a SAMPLING loop-detection mode, else the \
-         ring is never populated and every retention assertion is vacuous; got {:?}",
-        state.loop_detection
-    );
-    assert_eq!(
-        engine_live_opponents(&state, P0).len(),
-        3,
-        "reach-guard: the dump must load with 3 living opponents"
-    );
-    assert_eq!(
-        state.loop_detect_ring.len(),
-        0,
-        "reach-guard: the dump ships with an EMPTY ring — every frame below was accumulated \
-         by this drive, not restored"
-    );
-    assert!(
-        matches!(state.waiting_for, WaitingFor::TriggerTargetSelection { .. }),
-        "reach-guard: the dump ships AT a TriggerTargetSelection window (CR 603.3d), the \
-         window class BASE wiped; got {:?}",
-        state.waiting_for
-    );
-
-    let pin = engine_live_opponents(&state, P0).first().copied();
-
-    // (i) the `pass_priority_once_with_pipeline` sampler half (its `is_forced_cascade_window`
-    //     clear arm): a forced pre-priority window observed with an
-    //     ALREADY-ACCUMULATED ring (>= 2 frames, so a single fresh sample cannot explain it).
-    let mut prompt_ring: Option<usize> = None;
-    // (ii) the `apply_action` half: the ring across the ANSWER to such a window, with the
-    //      window itself so the row can prove it was not the pre-exempt `OrderTriggers`.
-    let mut answer_ring: Option<(WaitingFor, usize, usize)> = None;
-    // (iii) the ≥2-living stretch, where BASE measured a maximum of exactly 1.
-    let mut max_ring_two_or_more_living = 0usize;
-
-    for _ in 0..400 {
-        if engine_live_opponents(&state, P0).len() >= 2 {
-            max_ring_two_or_more_living =
-                max_ring_two_or_more_living.max(state.loop_detect_ring.len());
-        }
-        if matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }) {
-            break;
-        }
-        let forced = state.waiting_for.is_forced_cascade_window();
-        let before = state.loop_detect_ring.len();
-        let window = (forced && before >= 2).then(|| state.waiting_for.clone());
-        if forced && before >= 2 {
-            prompt_ring.get_or_insert(before);
-        }
-        if dump_drive_one_beat(&mut state, pin).is_err() {
-            break;
-        }
-        if let (Some(window), None) = (window, answer_ring.as_ref()) {
-            answer_ring = Some((window, before, state.loop_detect_ring.len()));
-        }
-        // Every assertion below is already satisfiable — stop driving. The drive is the
-        // expensive part of this row (a per-beat legal-action enumeration on a 152-entry
-        // stack), and continuing past the evidence buys nothing.
-        if prompt_ring.is_some() && answer_ring.is_some() && max_ring_two_or_more_living >= 5 {
-            break;
-        }
-    }
-
-    let observed = prompt_ring.unwrap_or_else(|| {
-        panic!(
-            "(i) CR 603.3d: no forced pre-priority window was ever reached carrying an \
-             accumulated ring of >= 2 frames. BASE behaviour (the sampler clearing at every \
-             non-OrderTriggers window) is exactly this; max ring seen at >= 2 living was {max_ring_two_or_more_living}"
-        )
-    });
-    assert!(
-        observed >= 2,
-        "(i) the ring must be RETAINED across the forced window itself"
-    );
-
-    let (window, before, after) = answer_ring.expect(
-        "(ii) the drive must have applied the answer to a forced window that carried an \
-         accumulated ring — otherwise the apply_action half is untested",
-    );
-    assert!(
-        !matches!(window, WaitingFor::OrderTriggers { .. }),
-        "(ii) DISCRIMINANT GUARD: `apply_action` already exempts `GameAction::OrderTriggers` \
-         on the ACTION side, so an OrderTriggers window would satisfy the survival assertion \
-         below without the window-keyed conjunct ever being consulted. The window measured \
-         here must be one of the newly exempt classes; got {}",
-        window.variant_name()
-    );
-    assert!(
-        after >= before,
-        "(ii) CR 603.3d + CR 732.2a: answering a forced pre-priority window is not a \
-         deliberate break, so the accumulated ring must SURVIVE the answer; \
-         ring went {before} -> {after}. Dropping the \
-         `!state.waiting_for.is_forced_cascade_window()` conjunct at apply_action's clear \
-         reproduces this failure — measured, it takes (i) down first, because the answer-side \
-         clear also stops the ring ever reaching a forced window with >= 2 frames."
-    );
-
-    assert!(
-        max_ring_two_or_more_living >= 5,
-        "(iii) two full periods of the drain need 2k+1 = 5 retained frames while >= 2 \
-         opponents are still alive; BASE measured exactly 1 over that stretch. Got \
-         {max_ring_two_or_more_living}"
-    );
-}
-
 /// PR-7 Phase 5a — CR 732.2a per-iteration pin enumeration, on a REAL 4p board.
 ///
 /// `bounded_cycle_pin_slots` is the single authority for the choice slots a bounded cycle
@@ -7620,8 +7239,8 @@ fn dump_c_still_crowns_at_one_living_opponent_after_pause_retention() {
     // exact count is reported (not just `> 0`) so a change in how far the detector has
     // to drive to re-derive the crown surfaces as a diff rather than passing silently.
     assert_eq!(
-        beats, 8,
-        "the `c decline` arm re-derives the crown after a measured 8 driven beats — a 0 here \
+        beats, 4,
+        "the `c decline` arm re-derives the crown after a measured 4 driven beats — a 0 here \
          would mean the row read the dump's saved offer back instead of re-deriving one, \
          which is what makes both revert-probes above live"
     );
@@ -7649,7 +7268,12 @@ fn dump_c_still_crowns_at_one_living_opponent_after_pause_retention() {
         schema.points.is_empty(),
         "a choice-free drain publishes no decision points"
     );
-    assert_eq!(schema.iteration_count, IterationCount::UntilLethal);
+    // CR 119.3 + CR 704.5a + CR 104.2a: P3, the one living opponent, loses 1 per repetition from
+    // 15, so the fifteenth crowns P0.
+    assert_eq!(
+        (schema.iteration_count, state.players[3].life),
+        (IterationCount::Fixed(15), 15)
+    );
 }
 
 /// A one-item confirmed period, for offers built by hand.
@@ -10167,20 +9791,12 @@ fn the_collapse_candidate_is_clamped_to_a_bound_restored_from_an_older_save() {
 // synthetic `GameScenario` reproduces.
 // ===========================================================================
 
-/// Drive the loaded dump until the ENGINE ITSELF writes a bounded offer, and return the
-/// state at that beat. Reads `state.waiting_for` — i.e. the production Path D write inside
-/// `interactive_loop_bridge` — NEVER an out-of-band call to the offer predicate, which
-/// would prove only that the predicate agrees with itself.
+/// Drive the loaded dump until the engine itself writes its first loop-shortcut offer, and
+/// return the beat. Reads `state.waiting_for`, never an out-of-band call to the offer predicate.
 pub(crate) fn drive_to_bounded_offer(state: &mut GameState, cap: usize) -> Option<usize> {
     let pin = engine_live_opponents(state, P0).first().copied();
     for beat in 0..cap {
-        if matches!(
-            state.waiting_for,
-            WaitingFor::LoopShortcut {
-                predicted_winner: None,
-                ..
-            }
-        ) {
+        if matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }) {
             return Some(beat);
         }
         if dump_drive_one_beat(state, pin).is_err() {
@@ -10200,7 +9816,7 @@ fn bounded_offer_parts(
     match &state.waiting_for {
         WaitingFor::LoopShortcut {
             proposer,
-            predicted_winner: None,
+            predicted_winner: _,
             certificate,
             schema,
             declaration: _,
@@ -10351,8 +9967,8 @@ fn dina_untargeted_drain_4p_offers_at_three_live_opponents() {
          active player the ring sampler gates on"
     );
     assert!(
-        matches!(&state.waiting_for, WaitingFor::LoopShortcut { period, .. } if period.is_empty()),
-        "the bounded offer carries no confirmed period, so its take is the ring drain (beat {beat})"
+        matches!(&state.waiting_for, WaitingFor::LoopShortcut { period, .. } if !period.is_empty()),
+        "the recorded offer carries the confirmed period its take performs (beat {beat})"
     );
     assert!(
         schema.points.is_empty(),
@@ -10464,6 +10080,20 @@ fn dina_untargeted_drain_4p_offers_at_three_live_opponents() {
         "CR 732.1b: the offer's own declaration drives the whole cascade here, and with no \
          charged slot there is nothing for a witness declaration to re-aim, so the SUGGESTION \
          and the CEILING coincide on this class"
+    );
+    assert_eq!(
+        (
+            &schema.iteration_count,
+            offered(&state).2,
+            seat_lives(&state)
+        ),
+        (
+            &IterationCount::Fixed(37),
+            Some(P0),
+            vec![(P0, 47), (P1, 36), (P2, 32), (P3, 37)]
+        ),
+        "CR 119.3 + CR 104.2a: each opponent loses 1 a repetition, so the last, P3 at 37, leaves \
+         at the 37th and P0 wins"
     );
     assert!(
         schema.is_bounded(),
@@ -10628,31 +10258,6 @@ fn dina_untargeted_drain_4p_offers_at_three_live_opponents() {
     }
 }
 
-/// The dina 4p drain DRIVEN through `apply()` to the beat the engine itself raises the
-/// bounded offer on, with that beat's index. Shared by every row that has to observe the
-/// mint at the ONE beat this corpus offers on.
-fn dina_driven_to_bounded_offer() -> (GameState, usize) {
-    let mut state = restore_dump(&gunzip_dump(include_bytes!(
-        "../fixtures/dina_conqueror_4p.json.gz"
-    )));
-    let beat = drive_to_bounded_offer(&mut state, 400).expect(
-        "CR 732.2a: the bounded offer must FIRE on this real 4p drain. BASE (no Path D) drove \
-         326 beats on this same dump and reached zero LoopShortcut beats, so a failure here is \
-         the offer never being raised, not a fixture accident.",
-    );
-    (state, beat)
-}
-
-/// Restore the `Priority` window the bridge consumed when it raised the offer, so the mint can
-/// be re-run on the offer beat's own board. Everything else the mint reads — the ring, the
-/// stack, the resources, the play trace — is untouched, and each caller proves
-/// the reconstruction faithful by requiring the SAME outcome the production path produced.
-fn replay_at_priority(state: &GameState, proposer: PlayerId) -> GameState {
-    let mut replay = state.clone();
-    replay.waiting_for = WaitingFor::Priority { player: proposer };
-    replay
-}
-
 /// R16 (v) — THE SEQUENCING PIN: NOTHING SPENDS BEFORE THE RING GATE, BECAUSE NOTHING ASKS.
 ///
 /// CR 732.2a. At a ring-WARM-UP beat (`loop_detect_ring.len() < 2`) there is no window, hence
@@ -10737,270 +10342,6 @@ fn r16v_a_ring_warmup_beat_spends_nothing() {
     );
 }
 
-/// R15 — A BUDGET-EXCEEDED MINT IS A REFUSAL, NEVER A STALL AND NEVER A CERTIFICATE.
-///
-/// CR 732.2a. This is the row that makes *"cost is a coverage knob, never a soundness knob"* a
-/// measurement instead of a sentence: with the per-mint cap forced to zero, the classifier can
-/// afford nothing, `probe_resolution` returns `Prompted`, and the offer is REFUSED — the mint
-/// does not fall through to a clone-and-resolve, and it does not hang.
-///
-/// The two arms are the SAME BOARD one argument apart — the real dina offer beat, replayed
-/// through the only cap channel the seam admits. The `Shipped` arm is the matched positive
-/// reach-guard: without it a starved refusal proves nothing, because a board that never offers
-/// refuses at zero budget too.
-///
-/// REVERT-PROBE: delete `probe_resolution`'s `try_charge_one` arm (`resolution_prompt.rs`) ⇒
-/// the exhausted budget falls through to the clone-and-resolve ⇒ the starved arm OFFERS ⇒
-/// FLIPS.
-#[test]
-fn r15_a_zero_probe_budget_refuses_the_bounded_offer() {
-    use engine::game::engine::{try_offer_bounded_cycle_shortcut_metered, ProbeCap};
-
-    let (state, beat) = dina_driven_to_bounded_offer();
-    let (proposer, _, _) = bounded_offer_parts(&state);
-    let replay = replay_at_priority(&state, proposer);
-
-    // MATCHED POSITIVE, first so a starved refusal below can never pass vacuously.
-    let (healthy, healthy_meter) =
-        try_offer_bounded_cycle_shortcut_metered(&replay, false, ProbeCap::Shipped);
-    assert!(
-        healthy.is_ok(),
-        "REACH-GUARD: at the shipped cap this beat must OFFER, else the starved arm is not \
-         keyed to the budget. beat {beat}, meter {healthy_meter:?}"
-    );
-    assert!(
-        !healthy_meter.denied,
-        "REACH-GUARD: the positive arm must not itself be exhausted; meter {healthy_meter:?}"
-    );
-
-    // THE ROW: the same board, the same beat, the cap forced to zero.
-    let (starved, meter) =
-        try_offer_bounded_cycle_shortcut_metered(&replay, false, ProbeCap::Lowered(0));
-    assert!(
-        starved.is_err(),
-        "CR 732.2a: an unaffordable probe degrades to honest-red — no certificate and no \
-         offer. Got {starved:?}, meter {meter:?}"
-    );
-    assert!(
-        meter.denied && meter.spent == 0,
-        "the refusal must be the BUDGET's: a zero cap denies the very first charge, so \
-         nothing is spent and the denial flag is what carries the cause. meter {meter:?}"
-    );
-    // WHERE the denial lands, MEASURED rather than assumed — and it is not the intuitive
-    // answer. Basis B consults NO board predicate, so it certifies for FREE even at a zero cap
-    // (`certification == Some(ResourceSignatureOnly)` at `spent == 0`); the first gate that
-    // must actually PAY is conjunct (6), which asks the door, is denied, and therefore reads
-    // `Prompted`. Exhaustion surfaces as an UNSPECIFIED WINDOW, not as a missing certificate.
-    assert!(
-        meter.conjunct6_asks > 0,
-        "REACH-GUARD: the starved mint must have REACHED the paying gate, else `denied` is \
-         about a charge nobody ever attempted. meter {meter:?}"
-    );
-    assert!(
-        matches!(
-            starved,
-            Err(engine::game::engine::BoundedOfferRefusal::UnspecifiedChoiceWindow)
-        ),
-        "an exhausted classifier reads `Prompted`, so the step-6 predicate goes false and the \
-         mint REFUSES — never a stall, never a certified offer. Got {starved:?}, \
-         meter {meter:?}"
-    );
-}
-
-/// R33 arm (d) — THE CORPUS'S ONE OFFERING BEAT CERTIFIES THROUGH BASIS B, AND THE FROZEN
-/// EXEMPTION IS THEREFORE WITHDRAWN THERE.
-///
-/// CR 732.2a. The row R33 (a)/(b)/(a′) prove at the constructor and the selection site; this
-/// arm proves it on the REAL board the engine actually offers on, because the plan's cost
-/// argument (the frozen subtraction, and the speed-up that rests on it) was measured at
-/// *dellian-shaped* beats and this is the beat the corpus *offers* at. Escalated to the lead
-/// and ruled on before this test was written; the figures are in the commit message.
-///
-/// MEASUREMENT, not re-assertion of a design: the certifying disjunct has no other surface.
-/// Both bases publish `frames_per_period`, so `LoopCertificate` discriminates in NEITHER
-/// direction — hence [`MintMeter::certification`].
-///
-/// FIDELITY OF THE OBSERVATION, which is this row's real risk. The production mint runs
-/// INSIDE the offering beat's `apply()`, from a `Priority` window the bridge has already
-/// consumed by the time the drive returns, so the beat's own meter is unreachable from a
-/// test. The mint is re-run here on the offer beat's state with that window restored, and
-/// the reconstruction is PROVEN faithful rather than assumed: it must (1) offer at all and
-/// (2) publish a `per_cycle` EQUAL to the one the production path wrote into `waiting_for`.
-/// A reconstruction that drifted would fail (1) or (2) before the basis assertion is reached.
-#[test]
-fn dina_offering_beat_certifies_through_basis_b_and_exempts_nothing() {
-    use engine::analysis::resource::PeriodCertification;
-    use engine::game::engine::{try_offer_bounded_cycle_shortcut_metered, ProbeCap};
-
-    let (state, beat) = dina_driven_to_bounded_offer();
-    let (proposer, certificate, _) = bounded_offer_parts(&state);
-    let published = certificate
-        .per_cycle
-        .as_ref()
-        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
-        .cloned()
-        .expect("the bounded offer publishes a per-cycle signature");
-
-    let replay = replay_at_priority(&state, proposer);
-    let (outcome, meter) =
-        try_offer_bounded_cycle_shortcut_metered(&replay, false, ProbeCap::Shipped);
-
-    // (1) reconstruction fidelity, part one
-    assert!(
-        outcome.is_ok(),
-        "REACH-GUARD: the replayed mint must reach the same OFFER the production path raised \
-         at beat {beat}; a refusal here means this row measures a different board than the \
-         engine did, and the basis assertion below would be about nothing. Got {outcome:?}, \
-         meter {meter:?}"
-    );
-    // (1) reconstruction fidelity, part two — the same certificate, not merely some offer
-    let WaitingFor::LoopShortcut {
-        certificate: replayed,
-        ..
-    } = outcome.expect("asserted Ok above")
-    else {
-        panic!("the bounded offer is a LoopShortcut window");
-    };
-    assert_eq!(
-        replayed
-            .per_cycle
-            .as_ref()
-            .and_then(engine::analysis::resource::PeriodSignature::every_repetition),
-        Some(&published),
-        "REACH-GUARD: the replayed mint must publish the SAME per-cycle signature as the \
-         production offer at beat {beat}"
-    );
-
-    // (2) THE MEASURED AXIS. Basis A certified NOTHING corpus-wide (0 of 129 certifications
-    // across the three 4p dumps); this beat takes `ring_delta_signature`, which by its own
-    // doc consults no board predicate.
-    assert_eq!(
-        meter.certification,
-        Some(PeriodCertification::ResourceSignatureOnly),
-        "R33: the corpus's one offering beat (beat {beat}) certifies through BASIS B. If this \
-         ever reads `BoardCovered`, the frozen exemption became available at an offering beat \
-         and the plan's exempted-cost row must be re-derived before that is relied on"
-    );
-
-    // (3) THE CONSEQUENCE, which is the half that makes this arm about the exemption rather
-    // than about a label: under a non-`BoardCovered` certificate `frozen_ids` is empty, so
-    // conjunct (6) skips NOTHING and scans every non-exempt entry it is handed.
-    assert_eq!(
-        meter.conjunct6_frozen_skips, 0,
-        "R33: `ResourceSignatureOnly` supplies neither P2 nor P4, so the subtraction is \
-         withdrawn and conjunct (6) exempts nothing at this beat"
-    );
-    assert!(
-        meter.conjunct6_asks > 0,
-        "REACH-GUARD against a vacuous skip count: conjunct (6) must actually have RUN at \
-         this beat, else `frozen_skips == 0` is trivially true; meter {meter:?}"
-    );
-
-    // (4) THE BUDGET, re-derived from this very beat (R16(ii-a)). The offer fires WITH the
-    // cap binding, not because the cap stopped mattering.
-    assert!(
-        !meter.denied,
-        "R16(ii-a): the shipped cap must not starve the corpus's acceptance offer; measured \
-         demand at this beat is 13 charges. meter {meter:?}"
-    );
-}
-
-/// R16 (i) + (ii-a) + (iv) — THE BUDGET DOES NOT STARVE THE CORPUS'S ACCEPTANCE BEAT, ITS
-/// DEMAND THERE IS EXACTLY MEASURED, AND THE MINT DOES NOT STALL.
-///
-/// CR 732.2a. Without this row the per-mint probe cap is a number nobody checked against the
-/// fixture it has to serve — which is exactly how the shipped `12` came to starve this beat by
-/// one charge.
-///
-/// (i) the offer still fires at the shipped cap. (ii-a) the cap does NOT bind there
-/// (`denied == false`) — note that `spent <= cap` is true by construction of the budget, so
-/// the non-vacuous form of (ii-a) is the denial flag, not the inequality.
-///
-/// THE EXACT-DEMAND PIN is what makes (ii-a) discriminating rather than a restatement. The
-/// demand `D` is SEARCHED through the seam's own closed cap domain, from zero upward, so it
-/// is measured on this run instead of copied from a log: every cap below `D` must REFUSE and
-/// `D` itself must OFFER. A budget re-derivation that drifts the true demand fails here with
-/// the new number in the message.
-///
-/// (iv) THE WALL-CLOCK. The whole mint — memo construction, the D2 window work
-/// (`certified_period_touch` + `bounded_cycle_pin_slots_for_window` over up to
-/// `LOOP_DETECT_RING_CAP` windows) and the budgeted classification — is timed end to end.
-/// ⚠ THE CEILING IS DEBUG-SCALED AND SAYS SO: the plan's ~1 s figure is a player-facing
-/// RELEASE budget, and this binary is `-C opt-level=0`. The measured figure is carried in the
-/// message so the release claim is derived from a number rather than asserted.
-///
-/// REVERT-PROBE: lower `PROBE_BUDGET` below the measured `D` ⇒ (i) fails
-/// (`dina_driven_to_bounded_offer` cannot reach an offer) ⇒ FLIPS. Round 2 measured exactly
-/// that: at `12` this row and six shipped siblings go red together.
-#[test]
-fn r16_the_offering_beats_probe_demand_is_exactly_measured() {
-    use engine::game::engine::{
-        try_offer_bounded_cycle_shortcut_metered, BoundedOfferRefusal, ProbeCap,
-    };
-
-    let (state, beat) = dina_driven_to_bounded_offer();
-    let (proposer, _, _) = bounded_offer_parts(&state);
-    let replay = replay_at_priority(&state, proposer);
-
-    // ── (i) + (iv): the shipped cap, timed ───────────────────────────────────────────────
-    let started = std::time::Instant::now();
-    let (shipped, meter) =
-        try_offer_bounded_cycle_shortcut_metered(&replay, false, ProbeCap::Shipped);
-    let elapsed = started.elapsed();
-    assert!(
-        shipped.is_ok(),
-        "R16(i) beat {beat}: the corpus's acceptance offer must FIRE at the shipped cap. \
-         Got {shipped:?}, meter {meter:?}"
-    );
-    assert!(
-        !meter.denied,
-        "R16(ii-a) beat {beat}: the cap must not BIND at the beat that offers — `spent <= cap` \
-         is true of every mint by construction, so the denial flag is the only non-vacuous \
-         form of this claim. meter {meter:?}"
-    );
-    assert!(
-        meter.spent > 0,
-        "REACH-GUARD: the mint must have CLASSIFIED something, else `!denied` is true for \
-         want of anything to charge. meter {meter:?}"
-    );
-    assert!(
-        elapsed < std::time::Duration::from_secs(10),
-        "R16(iv) beat {beat}: the whole mint took {elapsed:?}, which is past even the \
-         debug-scaled stall ceiling. Measured at the time of writing: ~12 ms for this beat's \
-         `ring=3 stack=10` mint in an unoptimized build. meter {meter:?}"
-    );
-
-    // ── THE EXACT-DEMAND PIN ─────────────────────────────────────────────────────────────
-    let demand = meter.spent;
-    let (at_demand, demand_meter) =
-        try_offer_bounded_cycle_shortcut_metered(&replay, false, ProbeCap::Lowered(demand));
-    assert!(
-        at_demand.is_ok() && !demand_meter.denied,
-        "R16: a cap of exactly the measured demand ({demand}) must still OFFER — that is what \
-         makes {demand} the DEMAND rather than an upper bound. Got {at_demand:?}, \
-         meter {demand_meter:?}"
-    );
-    for lowered in 0..demand {
-        let (starved, starved_meter) =
-            try_offer_bounded_cycle_shortcut_metered(&replay, false, ProbeCap::Lowered(lowered));
-        assert!(
-            matches!(starved, Err(BoundedOfferRefusal::UnspecifiedChoiceWindow)),
-            "R16: every cap below the measured demand must refuse fail-CLOSED at the choice \
-             gate. cap {lowered} of {demand} gave {starved:?}, meter {starved_meter:?}"
-        );
-        assert!(
-            starved_meter.denied,
-            "R16: …and the refusal must be attributable to the BUDGET, not to an unrelated \
-             conjunct. cap {lowered}, meter {starved_meter:?}"
-        );
-    }
-    assert!(
-        demand > 1,
-        "REACH-GUARD: a demand of 0 or 1 would make the starvation sweep above empty or \
-         trivial; measured {demand} at beat {beat}"
-    );
-}
-
 /// Drive a `GameScenario`-built board until the ENGINE writes a bounded offer, declining
 /// nothing and injecting nothing. Returns the beat, or `None` if the cap ran out. Reads
 /// `state.waiting_for` — the production Path D write — never an out-of-band predicate call.
@@ -11020,219 +10361,6 @@ fn drive_scenario_to_bounded_offer(runner: &mut GameRunner, cap: usize) -> Optio
         }
     }
     None
-}
-
-/// PR-7 Phase 5b — THE BASIS-B POSITIVE CONTROL, at the offer level.
-///
-/// This is the row whose WHOLE PURPOSE is detecting a back-door deletion of certification
-/// basis B. It is **not** the only row that detects one — an earlier revision of this doc said
-/// it was ("every other bounded-offer row in this file certifies on basis A") and that was
-/// MEASURABLY FALSE, and it licenses exactly the overread that the ⚠ SCOPE note on
-/// [`basis_a_bounded_fixed_count_commits_exactly_n_periods`] exists to prevent — which a reader
-/// reaches much later in this file than this sentence.
-///
-/// RE-MEASURED in fix round 4 at `025015135`, using this file's own prescribed attribution
-/// probe (force `ring_delta_signature` to return `None` unconditionally — basis-B rows lose
-/// their offer, basis-A rows keep it), runner
-/// `cargo test -p phase-engine --test integration -- loop_shortcut::` (module filter on the
-/// `integration` binary): **74 passed / 11 failed / 4090 filtered out**, against a clean
-/// **85 passed / 0 failed / 4090 filtered out**. ELEVEN rows flip. This one, plus these ten:
-/// `dina_untargeted_drain_4p_offers_at_three_live_opponents`,
-/// `bloodloop_mandatory_draw_cascade_offers_at_2p_3p_and_4p`,
-/// `ai_bounded_declare_candidate_is_generated_legal_and_drives`,
-/// `bounded_fixed_count_commits_exactly_n_periods`,
-/// `bounded_fixed_drive_stops_at_the_first_lethal_cycle`,
-/// `bounded_fixed_drive_commits_the_terminal_cycle_that_eliminates_one_seat`,
-/// `a_cycle_that_does_not_match_the_published_period_is_dropped`,
-/// `declared_count_above_the_offered_bound_is_handed_back`,
-/// `until_lethal_against_a_bounded_offer_is_rejected`,
-/// `a_proposers_own_driving_period_mints_no_bounded_offer`.
-///
-/// FIXTURE PROVENANCE of those eleven, RE-COUNTED in fix round 5 over the whole set rather
-/// than asserted of one row (an earlier revision annotated dina alone as "the real 4p dump",
-/// which reads as an exclusivity it does not have). SIX load the real `dina_conqueror_4p`
-/// 4-player capture from `tests/fixtures`, through the same gunzip → restore loader:
-/// `dina_untargeted_drain_4p_offers_at_three_live_opponents`,
-/// `a_proposers_own_driving_period_mints_no_bounded_offer`,
-/// `declared_count_above_the_offered_bound_is_handed_back`,
-/// `until_lethal_against_a_bounded_offer_is_rejected`,
-/// `bounded_fixed_count_commits_exactly_n_periods` (which loops that dump AND two
-/// `bloodloop_state` boards, so it is the one MIXED row), and
-/// `bounded_fixed_drive_commits_the_terminal_cycle_that_eliminates_one_seat`. The remaining five are
-/// `GameScenario` builds only — this row inline, the other four via `bloodloop_state`. Counted
-/// by resolving every fixture-loading call site in this file to its enclosing test fn, NOT by
-/// grep hit count: these very sentences add doc-comment hits for the names they list.
-/// Consistent with the plural "the file's real 4p dumps" at the ⚠ SCOPE note on
-/// [`basis_a_bounded_fixed_count_commits_exactly_n_periods`].
-///
-/// What is distinctive here is INTENT and DIAGNOSIS, not exclusivity: NINE of those ten fail
-/// for a reason their own docs do not name, whereas this row says so in the failure text
-/// ("A failure here means basis B minted nothing"). The tenth,
-/// `dina_untargeted_drain_4p_offers_at_three_live_opponents`, is the EXCEPTION and was
-/// mis-covered by an earlier "each of those ten" — its ⚠ CERTIFICATION BASIS note documents
-/// this very probe as measurement (ii), down to the drive running its full 400-beat cap and
-/// its `expect` firing. Checked against all ten doc blocks in fix round 5: no other one
-/// mentions `ring_delta_signature` or basis B at all. Nor is the list a basis census: it is the
-/// set of rows that cannot reach their assertions once basis B stops minting, which includes
-/// rows whose subject is the DRIVE rather than the basis.
-///
-/// FIXTURE — a fully mandatory two-card draw↔drain cascade. What it shares with the class
-/// basis B exists for is the one property that matters: **it draws a card every cycle**, so a
-/// card moves library→hand each period, the board never recurs, and basis A's
-/// `loop_states_equal_modulo_resources` (library and hand are board, not projected resources)
-/// and its cover disjunct must BOTH refuse. The `None =>` arm is then the only way an offer
-/// can be minted here.
-///
-/// ORACLE-TEXT PROVENANCE, verified against the Scryfall API, and deliberately honest:
-/// * *"Whenever you draw a card, each opponent loses 1 life."* is **real** — Psychosis
-///   Crawler's second ability, verbatim.
-/// * *"Whenever an opponent loses life, draw a card."* matches **no printing**. The two
-///   nearest real cards are both GATED — Kefka, Ruler of Ruin (*"…during your turn"*) and
-///   Valgavoth, Harrower of Souls (*"…for the first time during each of their turns"*) — and
-///   that gating is precisely what would stop the cascade. This fixture is therefore
-///   SYNTHETIC and deliberately stronger than any printed card. It must not be described as a
-///   real-card loop. Its matched negative control
-///   (`drawgo_ring_spans_turns_but_never_offers`) is a `GameScenario` too, which is the
-///   precedent for a synthetic matched control pair for one predicate.
-///
-/// MEASURED at the seam (not from an out-of-band predicate call): the engine writes the offer
-/// at beat 31, turn 4, `Draw`, with a derived `frames_per_period == 2`, δ =
-/// `life{P1:-1} lib{P0:-1}` and a bound of 16; the whole ring sits at `turns[4×6]`
-/// `phases[Draw×6]` `extra[0×6]`, so every consecutive pair is turn-position invariant and the
-/// CR 703.1 conjunct passes. Note δ carries `lib{P0:-1}` ONLY — P1's library is untouched, so
-/// no second draw step is inside the period. Contrast drawgo (`lib{P0:-1,P1:-1}`), whose
-/// "period" is one 2-player turn cycle.
-///
-/// REVERT-PROBE ⓐ (MEASURED, not predicted): make `ring_delta_signature` return `None`
-/// unconditionally ⇒ the `None =>` arm converts that into `Err(NoCertification)` ⇒ no offer is
-/// written ⇒ the `expect` below FAILS.
-///
-/// ⚠ SCOPE, stated so it is not overread: this SYNTHETIC control fires at TWO players. The
-/// same cascade built at 3 and 4 players certifies but mints zero offers (they refuse
-/// downstream, at step (6) `stack_choices_are_all_specified`, because `Effect::Draw` is
-/// outside that gate's allow-list). `multiplayer_pure_life_drain_offers_at_three_and_four_players`
-/// is NOT a substitute — it is measured basis A. The ≥3-player basis-B coverage this file DOES
-/// carry is `dina_untargeted_drain_4p_offers_at_three_live_opponents`, which is measured basis
-/// B (k == 1) on a real 4p dump; see that row's doc for the measurement and for why its
-/// published payload cannot assert the basis on its own.
-#[test]
-fn bounded_offer_on_a_within_turn_draw_drain_is_basis_b() {
-    let mut scenario = GameScenario::new_n_player(2, 7);
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_life(P0, 20);
-    scenario.with_life(P1, 20);
-    scenario.add_creature_from_oracle(
-        P0,
-        "Test Bleeder",
-        2,
-        2,
-        "Whenever you draw a card, each opponent loses 1 life.",
-    );
-    scenario.add_creature_from_oracle(
-        P0,
-        "Test Chronicler",
-        2,
-        2,
-        "Whenever an opponent loses life, draw a card.",
-    );
-    // CR 504.1: the libraries must outlast the drive — a deck-out would end the game and
-    // silently truncate every assertion below.
-    let names: Vec<String> = (0..60).map(|i| format!("Filler {i}")).collect();
-    let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-    scenario.with_library_top(P0, &refs);
-    scenario.with_library_top(P1, &refs);
-    let mut runner = scenario.build();
-    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
-
-    assert!(
-        runner.state().loop_detection.samples(),
-        "reach-guard: a non-sampling mode never populates the ring, so no offer could ever be \
-         raised and this row would be vacuous"
-    );
-    assert_eq!(
-        runner.state().loop_detect_ring.len(),
-        0,
-        "reach-guard: every frame the offer certifies against is accumulated by THIS drive"
-    );
-
-    let beat = drive_scenario_to_bounded_offer(&mut runner, 200).expect(
-        "CR 732.2a: the within-turn mandatory draw↔drain cascade must raise a bounded offer. \
-         A failure here means basis B minted nothing — which is exactly what revert-probe ⓐ \
-         (make `ring_delta_signature` return None) produces.",
-    );
-
-    let state = runner.state();
-    let (proposer, certificate, schema) = bounded_offer_parts(state);
-
-    // (i) the binding field-value discriminator.
-    assert_eq!(
-        proposer, state.active_player,
-        "CR 732.2a: the proposer is the priority holder, and step (2) requires that to be the \
-         active player the ring sampler gates on"
-    );
-
-    // (ii) the period, bound FROM the returned value — no literal `2` appears in this row.
-    let per_cycle = certificate
-        .per_cycle
-        .as_ref()
-        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
-        .expect("a bounded offer publishes the per-period signature its bound was divided by");
-    let k = per_cycle.frames_per_period;
-    assert!(
-        k >= 1,
-        "a period spans at least one retained frame; got {k}"
-    );
-    // Bound to a local rather than inlined: `2k + 1` is the CONTRACT expression (2k deltas ⇒
-    // the period was observed twice), and clippy's `int_plus_one` would otherwise push it to a
-    // `> 2k` that no longer reads as the rule.
-    let frames_needed = 2 * k as usize + 1;
-    assert!(
-        state.loop_detect_ring.len() >= frames_needed,
-        "the structural invariant every certified period satisfies: a period seen TWICE needs \
-         2k+1 frames. k = {k}, ring = {} (beat {beat})",
-        state.loop_detect_ring.len()
-    );
-    assert!(
-        per_cycle.delta != engine::analysis::resource::ResourceVector::default(),
-        "a zero-delta cycle states no CR 704 threshold and must never be offered"
-    );
-
-    // (iii) A PERIOD-WIDTH TRIPWIRE — no longer a basis attribution (fix round 2). The older
-    // wording read `!= 1` as sufficient for "not basis A" on the premise that basis A published
-    // a hardcoded `1`. Fix round 1 replaced that hardcode with a MEASURED span, so basis A now
-    // publishes 2 on at least one shipped fixture
-    // (`interactive_3p_subset_lethal_does_not_crown`) and the inference is dead in both
-    // directions. The basis attribution this row actually stands on is its named revert-probe ⓐ
-    // — force `ring_delta_signature` to return `None` and this row loses its offer entirely,
-    // which no basis-A row does. The assertion is KEPT as a width tripwire: this cascade draws a
-    // card every cycle, so its period genuinely spans more than one retained frame, and a drift
-    // to 1 means the fixture stopped being what the row describes.
-    assert_ne!(
-        k, 1,
-        "this cascade draws a card every cycle, so one repetition spans more than one retained \
-         ring frame; a k of 1 means the fixture no longer has the shape this row asserts"
-    );
-
-    // (iv) the bound is narrowed, asked of the single authority. `MAX_SHORTCUT_CYCLES` is
-    // `pub(crate)` and unnameable from an integration test; `is_bounded()` is the shipped
-    // `pub` predicate for exactly this question.
-    assert!(
-        schema.deliverable_capacity >= 1,
-        "a capacity of 0 states no repetition and must not be offered"
-    );
-    assert!(
-        schema.is_bounded(),
-        "the whole claim of this producer is that it NARROWED the repetition bound below the \
-         engine-wide safety cap; capacity = {}",
-        schema.deliverable_capacity
-    );
-
-    // (v) the untargeted class publishes no per-iteration choice.
-    assert!(
-        schema.points.is_empty(),
-        "the UNTARGETED class exposes no decision points; got {:?}",
-        schema.points
-    );
 }
 
 /// PR-7 Phase 5b — the MULTIPLAYER offer control: the untargeted every-opponent drain raises a
@@ -11369,16 +10497,15 @@ fn multiplayer_pure_life_drain_offers_at_three_and_four_players() {
             .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
             .expect("a bounded offer publishes its per-period signature");
         assert_eq!(
-            per_cycle.frames_per_period, 2,
-            "{seats}p: a PERIOD-WIDTH tripwire, not a basis attribution. This cascade puts its \
-             two same-controller triggers on the stack through a CR 603.3b `OrderTriggers` \
-             window, and the answer-beat sampling site retains a frame there as well as at the \
-             settle — so ONE repetition now spans 2 retained frames. A drift \
-             means the fixture changed shape and the row must be re-derived, not relaxed. It \
-             establishes nothing about the basis in either direction: basis B derives k from 1 \
-             upward, and since fix round 1 basis A measures its span too (2 on \
-             `interactive_3p_subset_lethal_does_not_crown`). The label is carried by the \
-             `ring_delta_signature -> None` probe named in this row's doc, not by this number"
+            (&schema.iteration_count, offered(state).2),
+            (&IterationCount::Fixed(1000), None),
+            "{seats}p: the count is the shortcut budget, short of every opponent's crossing, so \
+             nobody is crowned"
+        );
+        assert_eq!(
+            per_cycle.frames_per_period,
+            2 * u32::from(seats),
+            "{seats}p: a PERIOD-WIDTH tripwire, not a basis attribution"
         );
 
         // EVERY living opponent loses life every cycle — the multiplayer content of the claim.
@@ -11438,227 +10565,6 @@ fn multiplayer_pure_life_drain_offers_at_three_and_four_players() {
             schema.measured_repetition_bound
         );
     }
-}
-
-/// CR 732.2a: a bounded offer carries no confirmed period, so its take drains the ring and commits
-/// the bounded cycles, even when the proposer's own play stands in the window's trace.
-#[test]
-fn a_proposers_own_driving_period_mints_no_bounded_offer() {
-    use engine::game::engine::try_offer_bounded_cycle_shortcut;
-
-    let mut state = restore_dump(&gunzip_dump(include_bytes!(
-        "../fixtures/dina_conqueror_4p.json.gz"
-    )));
-    drive_to_bounded_offer(&mut state, 400)
-        .expect("the paired arms need a state that PROVABLY certifies; see the acceptance row");
-
-    // The offer beat's `waiting_for` is the offer itself, so rewind that one field to the
-    // Priority beat the offer was raised AT — the bridge's own entry condition.
-    let (proposer, _, _) = bounded_offer_parts(&state);
-    state.waiting_for = WaitingFor::Priority { player: proposer };
-    let any_object = *state.objects.keys().next().expect("the dump has objects");
-    engine::game::install_plays_for_tests(
-        &mut state,
-        &[(proposer, engine::game::PlayLocus::Cast(any_object))],
-    );
-
-    let minted = try_offer_bounded_cycle_shortcut(&state, false)
-        .expect("REACH-GUARD: the state certifies with the proposer's play in the trace");
-    assert!(
-        matches!(&minted, WaitingFor::LoopShortcut { period, schema, .. }
-            if period.is_empty() && schema.is_bounded()),
-        "the bounded offer carries no confirmed period, so its take is the ring drain; got \
-         {minted:?}"
-    );
-}
-
-/// CR 732.2a — a play another seat made is no sequence this proposer takes, so it neither refuses
-/// nor recertifies this proposer's bounded offer, whichever card it names; the proposer's own play
-/// mints the offer too.
-///
-/// Arms on one certifying state, differing only in the window's trace:
-///
-/// | arm | trace | expected |
-/// |---|---|---|
-/// | ⓐ | as driven | `Ok` — REACH-GUARD, and the neutrality reference |
-/// | ⓑ | proposer's, any card | `Ok` |
-/// | ⓒ | opponent's, any card | `Ok`, ⓐ's basis and period length |
-/// | ⓓ | opponent's, Mortality Spear | `Ok`, ⓐ's basis and period length |
-/// | ⓔ | proposer's, Mortality Spear | `Ok` |
-///
-/// ⓒ and ⓓ differ only in the card the foreign play names, so a basis split between them could
-/// come only from `window_cast_card_ids` feeding gate (5)'s `scope.cast_card_ids`: an opponent
-/// selecting which soundness relief applies to this proposer.
-#[test]
-fn a_foreign_driving_period_neither_refuses_nor_recertifies_a_bounded_offer() {
-    use engine::game::engine::{try_offer_bounded_cycle_shortcut_metered, ProbeCap};
-    use engine::game::PlayLocus;
-
-    let mut state = restore_dump(&gunzip_dump(include_bytes!(
-        "../fixtures/dina_conqueror_4p.json.gz"
-    )));
-    drive_to_bounded_offer(&mut state, 400)
-        .expect("the paired arms need a state that PROVABLY certifies; see the acceptance row");
-
-    // The offer beat's `waiting_for` IS the offer, so rewind that one field to the Priority beat
-    // the offer was raised at — the mint's own entry condition.
-    let (proposer, _, _) = bounded_offer_parts(&state);
-    state.waiting_for = WaitingFor::Priority { player: proposer };
-    let opp = *engine_live_opponents(&state, proposer)
-        .first()
-        .expect("REACH-GUARD: the foreign arms need a living opponent to attribute a period to");
-
-    // The X4 subject: a conditioned `ModifyCost`/`SelfRef` static sitting in a zone this window
-    // never casts from. Its gate-(5) relief is precisely what an unscoped cast-set read would let
-    // an opponent switch on. Looked up BY NAME so the row cannot silently degrade into ⓒ==ⓓ if the
-    // fixture's ids ever move.
-    let spear = state
-        .objects
-        .values()
-        .find(|o| o.name == "Mortality Spear")
-        .map(|o| o.id)
-        .expect("REACH-GUARD: dump-D ships Mortality Spear; ⓒ-vs-ⓓ is vacuous without it");
-    let spear_card = state.objects[&spear].card_id;
-    let any_card = state
-        .objects
-        .values()
-        .find(|o| o.card_id != spear_card)
-        .map(|o| o.id)
-        .expect("REACH-GUARD: ⓒ and ⓓ must differ in card identity");
-
-    let step = |seat: PlayerId, object| (seat, PlayLocus::Cast(object));
-    // One state, only the trace differing per arm.
-    let mint = |plays: Vec<(PlayerId, PlayLocus)>| {
-        let mut probe = state.clone();
-        if !plays.is_empty() {
-            engine::game::install_plays_for_tests(&mut probe, &plays);
-        }
-        let (outcome, meter) =
-            try_offer_bounded_cycle_shortcut_metered(&probe, false, ProbeCap::Shipped);
-        let signature = outcome.as_ref().ok().map(|wf| match wf {
-            WaitingFor::LoopShortcut { certificate, .. } => {
-                certificate
-                    .per_cycle
-                    .as_ref()
-                    .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
-                    .expect(
-                        "a bounded offer publishes the per-period signature its bound was \
-                             divided by",
-                    )
-                    .frames_per_period
-            }
-            other => panic!("expected a bounded LoopShortcut offer, got {other:?}"),
-        });
-        (outcome, meter.certification, signature)
-    };
-
-    // ── ⓐ REACH-GUARD: the SAME state certifies with no sequence at all. Every arm below is
-    // vacuous without this, and it is also the reference ⓒ/ⓓ are compared against. ──
-    let (empty, empty_basis, empty_k) = mint(vec![]);
-    assert!(
-        empty.is_ok(),
-        "REACH-GUARD: ⓑ–ⓔ are vacuous unless this same state certifies as driven; got \
-         {empty:?}"
-    );
-    assert!(
-        empty_basis.is_some() && empty_k.is_some(),
-        "REACH-GUARD: the neutrality assertions compare a BASIS and a period length, so the \
-         control must publish both; got {empty_basis:?} / {empty_k:?}"
-    );
-
-    // ── ⓑ / ⓔ the proposer's own play mints the offer, on either card. ──
-    assert!(
-        mint(vec![step(proposer, any_card)]).0.is_ok(),
-        "ⓑ the proposer's own play does not refuse the bounded offer"
-    );
-    assert!(
-        mint(vec![step(proposer, spear)]).0.is_ok(),
-        "ⓔ whichever card the proposer's play names"
-    );
-
-    // ── ⓒ / ⓓ a foreign play neither refuses nor moves the certification. ──
-    let (c, c_basis, c_k) = mint(vec![step(opp, any_card)]);
-    assert!(
-        c.is_ok(),
-        "ⓒ CR 732.2a: an OPPONENT'S independent activation describes no sequence this proposer \
-         can take, so it must not refuse their own certified bounded offer; got {c:?}"
-    );
-    let (d, d_basis, d_k) = mint(vec![step(opp, spear)]);
-    assert!(
-        d.is_ok(),
-        "ⓓ the admission is keyed on WHOSE period it is, not on which card the foreign step \
-         names; got {d:?}"
-    );
-
-    assert_eq!(
-        (c_basis, c_k),
-        (empty_basis, empty_k),
-        "ⓒ vs ⓐ — CR 732.2a certification NEUTRALITY: a foreign period must leave the \
-         proposer's certification exactly where the empty-sequence control puts it"
-    );
-    assert_eq!(
-        (d_basis, d_k),
-        (empty_basis, empty_k),
-        "ⓓ vs ⓐ — and neutrality must not depend on WHICH card the opponent activated. ⓒ and ⓓ \
-         differ only in the named card, so a split here could come only from gate (5)'s \
-         `scope.cast_card_ids` — i.e. an opponent selecting this proposer's soundness relief"
-    );
-}
-
-/// CR 732.2a — a bounded offer reads the window's plays only as proof of what it casts, so a window
-/// whose only play names no object leaves the offer where an empty trace leaves it, and the
-/// proposer's own cast still mints it, carrying no confirmed period.
-///
-/// | arm | trace | expected |
-/// |---|---|---|
-/// | twin | empty | `Ok` — the reference, and the reach-guard |
-/// | unread | proposer's play naming no object | the SAME value as the twin |
-/// | cast | proposer's cast | `Ok`, with no confirmed period |
-#[test]
-fn a_trigger_driven_period_leaves_a_bounded_offer_where_an_empty_record_leaves_it() {
-    use engine::game::engine::{try_offer_bounded_cycle_shortcut_metered, ProbeCap};
-    use engine::game::PlayLocus;
-
-    let mut state = restore_dump(&gunzip_dump(include_bytes!(
-        "../fixtures/dina_conqueror_4p.json.gz"
-    )));
-    drive_to_bounded_offer(&mut state, 400)
-        .expect("the arms need a state that PROVABLY certifies; see the acceptance row");
-    let (proposer, _, _) = bounded_offer_parts(&state);
-    // The offer beat's `waiting_for` IS the offer, so rewind that one field to the Priority beat
-    // it was raised at.
-    state.waiting_for = WaitingFor::Priority { player: proposer };
-    let source = state
-        .objects
-        .values()
-        .find(|o| o.controller == proposer)
-        .map(|o| o.id)
-        .expect("REACH-GUARD: the proposer controls an object for the cast arm to name");
-
-    let ask = |plays: &[(PlayerId, PlayLocus)]| {
-        let mut probe = state.clone();
-        engine::game::install_plays_for_tests(&mut probe, plays);
-        try_offer_bounded_cycle_shortcut_metered(&probe, false, ProbeCap::Shipped).0
-    };
-
-    let twin = ask(&[]);
-    assert!(
-        twin.is_ok(),
-        "REACH-GUARD: the other arms are vacuous unless this same state certifies with an empty \
-         trace; got {twin:?}"
-    );
-    assert_eq!(
-        ask(&[(proposer, PlayLocus::Unread)]),
-        twin,
-        "a play that names no object is no proof of what the window casts"
-    );
-    assert!(
-        matches!(
-            ask(&[(proposer, PlayLocus::Cast(source))]),
-            Ok(WaitingFor::LoopShortcut { period, .. }) if period.is_empty()
-        ),
-        "the proposer's own cast mints the bounded offer, carrying no confirmed period"
-    );
 }
 
 /// PR-7 Phase 5b — a declared count ABOVE the offered bound is handed back fail-closed.
@@ -11804,32 +10710,24 @@ fn until_lethal_against_a_bounded_offer_is_rejected() {
 
 // ─────────────── PR-7 Phase 5c — the MANDATORY-DRAW cascade, ≥3 players ───────────────
 
-/// Real card (Psychosis Crawler is the printed member of this class); the synthetic name
-/// keeps the fixture off the card database.
-const BLEEDER: &str = "Whenever you draw a card, each opponent loses 1 life.";
-/// Synthetic mandatory payoff. Deliberately NOT "you may draw a card" — the "may" is a
-/// genuine CR 603.5 resolution-time choice that step (6) must keep refusing, and this
-/// fixture's whole job is to exercise the MANDATORY arm.
-const CHRONICLER: &str = "Whenever an opponent loses life, draw a card.";
+/// Psychosis Crawler, verbatim (Scryfall).
+const PSYCHOSIS_CRAWLER: &str = "Psychosis Crawler's power and toughness are each equal to the number of cards in your hand.\nWhenever you draw a card, each opponent loses 1 life.";
 
-/// `bloodloop` at N players: a WITHIN-TURN MANDATORY drain cascade whose every cycle also
-/// DRAWS, so the board never recurs (a card moves library→hand each cycle) and the offer
-/// must come from the growth-cover basis rather than exact recurrence.
-///
-/// The draw payload is the POINT of the fixture, not an incidental detail. Before this
-/// commit, `Effect::Draw` was fail-closed `MayPrompt`, so step (6)
-/// `stack_choices_are_all_specified` refused every beat whose stack held one of these
-/// triggers and the multiplayer cascade could never be offered. Do NOT "simplify" this to
-/// a pure life loop to make it pass — a control that steers around the hole guards nothing
-/// about the hole.
+/// `bloodloop` at N players: Psychosis Crawler and Kefka, Ruler of Ruin ("Whenever an opponent
+/// loses life during your turn, you draw that many cards.") with five cards in P0's hand, a
+/// within-turn mandatory drain cascade on P0's turn whose every cycle also draws, so the board
+/// never recurs (a card moves library to hand each cycle).
 fn bloodloop_state(players: u8) -> GameState {
     let mut scenario = GameScenario::new_n_player(players, 7);
     scenario.at_phase(Phase::PreCombatMain);
     for i in 0..players {
         scenario.with_life(PlayerId(i), 20);
     }
-    scenario.add_creature_from_oracle(P0, "Test Bleeder", 2, 2, BLEEDER);
-    scenario.add_creature_from_oracle(P0, "Test Chronicler", 2, 2, CHRONICLER);
+    scenario.add_creature_from_oracle(P0, "Psychosis Crawler", 0, 0, PSYCHOSIS_CRAWLER);
+    scenario.add_creature_from_oracle(P0, "Kefka, Ruler of Ruin", 5, 7, KEFKA_RULER_OF_RUIN);
+    for i in 0..5 {
+        scenario.add_card_to_hand(P0, &format!("Held {i}"));
+    }
     let names: Vec<String> = (0..60).map(|i| format!("Filler {i}")).collect();
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     for i in 0..players {
@@ -11843,16 +10741,6 @@ fn bloodloop_state(players: u8) -> GameState {
 /// PR-7 Phase 5c ACCEPTANCE — the bounded CR 732.2a offer fires on a MANDATORY-DRAW
 /// cascade at 2, 3 and 4 players.
 ///
-/// # What flips when the widening is reverted
-///
-/// Measured at HEAD `ea6000b5c` with the same fixture and the same driver: 3p and 4p mint
-/// **`ENGINE_OFFERS = 0`**, every candidate beat refused `UnspecifiedChoiceWindow` (34
-/// bridge-moment refusals on each), while certification itself succeeded. Classify
-/// `Effect::Draw` back to `MayPrompt` and `drive_to_bounded_offer` returns `None` for
-/// `players >= 3` — `expect` panics and this test is RED. The 2p row discriminates too, on
-/// the beat: the offer moves 29 → 31 under the revert, because step (6) starts passing one
-/// full drain cycle earlier once the draw entries stop refusing.
-///
 /// # Why the beats are pinned literals
 ///
 /// The drive is deterministic — fixed scenario seed, `dump_drive_one_beat`'s policy is
@@ -11861,7 +10749,9 @@ fn bloodloop_state(players: u8) -> GameState {
 /// commit CHANGED; pinning it is what stops a later change from moving it silently.
 #[test]
 fn bloodloop_mandatory_draw_cascade_offers_at_2p_3p_and_4p() {
-    for (players, expected_beat, expected_turn) in [(2u8, 37usize, 4u32), (3, 76, 5), (4, 129, 6)] {
+    for (players, expected_beat, expected_turn, width) in
+        [(2u8, 31usize, 4u32, 4u32), (3, 68, 5, 6), (4, 118, 6, 8)]
+    {
         let mut state = bloodloop_state(players);
         let beat = drive_to_bounded_offer(&mut state, 400).unwrap_or_else(|| {
             panic!(
@@ -11882,10 +10772,14 @@ fn bloodloop_mandatory_draw_cascade_offers_at_2p_3p_and_4p() {
             "{players}p: an unbounded schema would take a different declare arm"
         );
         assert_eq!(
-            schema.measured_repetition_bound,
-            Some(17),
-            "{players}p: CR 704.3 + CR 104.2a: every opponent leaves together at 17, so P0's \
-             library crossing never comes"
+            (
+                &schema.iteration_count,
+                schema.measured_repetition_bound,
+                offered(&state).2
+            ),
+            (&IterationCount::Fixed(19), Some(19), Some(P0)),
+            "{players}p: CR 704.3 + CR 104.2a: every opponent, at 19, leaves together at 19, so \
+             P0's library crossing never comes"
         );
         let per_cycle = certificate
             .per_cycle
@@ -11893,10 +10787,8 @@ fn bloodloop_mandatory_draw_cascade_offers_at_2p_3p_and_4p() {
             .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
             .expect("a bounded offer states its per-period signature");
         assert_eq!(
-            per_cycle.frames_per_period, 2,
-            "{players}p: this cascade's derived period spans two retained ring frames. A WIDTH \
-             tripwire only — since fix round 1 both bases measure the span, so no value \
-             attributes a basis (see `bounded_offer_on_a_within_turn_draw_drain_is_basis_b`)"
+            per_cycle.frames_per_period, width,
+            "{players}p: a WIDTH tripwire only; no value attributes a basis"
         );
 
         // The multiplayer property the ≥3p rows exist for: ONE cycle charges EVERY
@@ -12166,67 +11058,6 @@ fn bounded_fixed_count_commits_exactly_n_periods() {
     }
 }
 
-/// CR 732.1b + CR 732.2c: a Ring take of the real Dina/Conqueror drain keeps its first and last
-/// repetition. One repetition: a Dina, Soul Steeper trigger ("Whenever you gain life, each opponent
-/// loses 1 life.") makes P1, P2 and P3 each lose 1 (CR 119.3); each loss triggers Bloodthirsty
-/// Conqueror ("Whenever an opponent loses life, you gain that much life.") once (CR 603.2c); one of
-/// those resolves and P0 gains 1, and the Dina trigger that gain makes goes on top of the other two
-/// (CR 405.2) and resolves first (CR 405.5).
-#[test]
-fn a_ring_take_of_the_dina_drain_keeps_its_first_and_last_repetition() {
-    const P3: PlayerId = PlayerId(3);
-    for (count, kept) in [(1, vec![1]), (2, vec![1, 2]), (3, vec![1, 3])] {
-        let mut state = restore_dump(&gunzip_dump(include_bytes!(
-            "../fixtures/dina_conqueror_4p.json.gz"
-        )));
-        drive_to_bounded_offer(&mut state, 400).expect("the bounded offer");
-        let WaitingFor::LoopShortcut {
-            proposer, period, ..
-        } = &state.waiting_for
-        else {
-            unreachable!("the bounded offer")
-        };
-        assert!(period.is_empty(), "the Ring route takes an empty period");
-        assert_eq!(*proposer, P0);
-        let offered: Vec<i32> = state.players.iter().map(|p| p.life).collect();
-
-        let result = take_recorded(&mut state, count);
-
-        assert_eq!(
-            markers(&result.events),
-            kept.iter()
-                .map(|repetition| (P0, *repetition))
-                .collect::<Vec<_>>(),
-            "Fixed({count})"
-        );
-        for events in repetitions(&result.events) {
-            let mut changes: Vec<(PlayerId, i32)> = events
-                .iter()
-                .filter_map(|event| match event {
-                    GameEvent::LifeChanged {
-                        player_id, amount, ..
-                    } => Some((*player_id, *amount)),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(changes.pop(), Some((P0, 1)), "Fixed({count})");
-            changes.sort();
-            assert_eq!(changes, [(P1, -1), (P2, -1), (P3, -1)], "Fixed({count})");
-        }
-        let per_repetition = [1, -1, -1, -1];
-        let expected: Vec<i32> = offered
-            .iter()
-            .zip(per_repetition)
-            .map(|(life, delta)| life + count as i32 * delta)
-            .collect();
-        assert_eq!(
-            state.players.iter().map(|p| p.life).collect::<Vec<_>>(),
-            expected,
-            "Fixed({count})"
-        );
-    }
-}
-
 /// ITEM 2 (CR 732.2a) — the ACCEPT side: an opponent's play in the window's trace must not divert
 /// an accepted bounded grant away from the drain materializer.
 ///
@@ -12379,95 +11210,6 @@ fn declining_a_shortcut_discards_only_the_decliners_own_driving_period() {
         matches!(state.waiting_for, WaitingFor::Priority { .. }),
         "and the declined offer must not have been re-raised within the same `apply()`; got {:?}",
         state.waiting_for
-    );
-}
-
-/// CR 732.2a — an aborted `UntilLethal` drive ends at priority without re-raising the offer it
-/// abandoned, and discards only the proposer's own plays from the window's trace.
-///
-/// The three-player drain with unequal opponent lives is used because its take refuses to crown
-/// (`injected_3p_unequal_life_pin_all_no_crown`) on an offer naming P0.
-///
-/// | arm | trace at the accept | assertion |
-/// |---|---|---|
-/// | FOREIGN | an opponent's play | survives, no re-offer |
-/// | OWN | the proposer's own, as played | discarded, no re-offer |
-#[test]
-fn an_aborted_until_lethal_drive_discards_only_the_proposers_own_driving_period() {
-    let offer_state = || {
-        let (mut runner, kickoff) = setup_3p_both_fall(LoopDetectionMode::Interactive, 1000, 1050);
-        let _ = runner.cast(kickoff).resolve();
-        let (_events, _wf, primed, _declined) =
-            drive_collect_primed(&mut runner, PRIMED_LOOP_BEATS);
-        assert!(primed, "REACH-GUARD: the drain reached its recurring state");
-        runner.state_mut().waiting_for = WaitingFor::LoopShortcut {
-            proposer: P0,
-            predicted_winner: Some(P0),
-            certificate: synthetic_lethal_cert(),
-            schema: ShortcutDecisionSchema::default(),
-            declaration: None,
-            road: engine::analysis::loop_check::OfferRoad::Ring,
-            counted_take: Default::default(),
-            period: Default::default(),
-        };
-        runner
-            .act(GameAction::DeclareShortcut {
-                count: IterationCount::UntilLethal,
-                template: None,
-            })
-            .expect("P0 declares UntilLethal on an offer naming P0");
-        runner
-    };
-    let lives = |runner: &GameRunner| (life(runner, P1), life(runner, P2));
-
-    // ── FOREIGN: P1's play stands in the trace when P0's drive aborts ──
-    let mut runner = offer_state();
-    engine::game::install_plays_for_tests(
-        runner.state_mut(),
-        &[(P1, engine::game::PlayLocus::Unread)],
-    );
-    let before = lives(&runner);
-    accept_all_opponents(&mut runner);
-    assert_eq!(
-        lives(&runner),
-        before,
-        "REACH-GUARD: the take fell back to the offer's board rather than crowning"
-    );
-    assert_eq!(
-        trace_seats(runner.state()),
-        vec![P1],
-        "CR 732.2a: P0's aborted drive must leave P1's accumulating period intact"
-    );
-    assert!(
-        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
-        "no re-offer; got {:?}",
-        runner.state().waiting_for
-    );
-
-    // ── OWN: the must-not-flip half. The clear is the anti-livelock suppressor for the proposer. ──
-    let mut runner = offer_state();
-    assert!(
-        trace_seats(runner.state()).contains(&P0),
-        "REACH-GUARD: the drain traced the PROPOSER'S own plays, else this arm tests an empty \
-         trace that is cleared by doing nothing"
-    );
-    let before = lives(&runner);
-    accept_all_opponents(&mut runner);
-    assert_eq!(
-        lives(&runner),
-        before,
-        "REACH-GUARD: the take fell back to the offer's board rather than crowning"
-    );
-    assert!(
-        !trace_seats(runner.state()).contains(&P0),
-        "CR 732.2a: the proposer's OWN plays must still be discarded — without them gone the \
-         reconcile re-names the loop just abandoned and livelocks; seats = {:?}",
-        trace_seats(runner.state())
-    );
-    assert!(
-        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
-        "and the abandoned offer must not have been re-raised; got {:?}",
-        runner.state().waiting_for
     );
 }
 
@@ -12832,143 +11574,6 @@ fn bounded_fixed_drive_stops_at_the_first_lethal_cycle() {
         "ⓑ CR 732.2a: the refusal ends at a place where a player has priority; got {:?}",
         state.waiting_for
     );
-}
-
-/// The arrival rule on the drive's TERMINAL-DEPARTURE arm, which is the one shape a shortening
-/// can reach it on. A proposal carrying a per-period signature cannot: the consumption authority
-/// admits a predicted departure only at the accepted count while the range admits only places
-/// strictly below it, so such a shortening always names a place short of the first crossing. An
-/// UNSIGNED proposal derives no ceiling and carries no frame delimiter, so the combination is
-/// constructible and is written rather than argued away.
-///
-/// CR 732.2b/c: the seat follows the ARRIVAL, never the answer. Both legs drive the SAME board to
-/// the SAME stopping point — the cycle on which a seat leaves the game — and differ only in the
-/// place the responder named. Name the cycle the drive stops on and the shortener holds the
-/// ending point; name one further and the drive stopped short of it, so no CR 732.2b window was
-/// opened there, the handback the drive already ships stands, and the shortener does not receive
-/// it. That the two legs differ in nothing else is what makes the seat attributable to arrival.
-///
-/// Reds under its own restoration: derive arrival from the loop's EXITS rather than from its
-/// commits and the terminal arm hands back on a drive that reached the named place. The seat the
-/// drive eliminates is queued behind the shortener, so the seat rule is read on a LIVING
-/// shortener rather than through the CR 800.4a fallback.
-#[test]
-fn a_shortened_unsigned_drive_seats_the_shortener_only_where_it_reached_the_named_place() {
-    let mut base = restore_dump(&gunzip_dump(include_bytes!(
-        "../fixtures/dina_conqueror_4p.json.gz"
-    )));
-    drive_to_bounded_offer(&mut base, 400).expect("the bounded offer must fire on the 4p dump");
-    arm_responders(&mut base);
-    let (proposer, _certificate, schema) = bounded_offer_parts(&base);
-    let honest_bound = schema.deliverable_capacity;
-    let lives_before: Vec<(PlayerId, i32)> = base.players.iter().map(|p| (p.id, p.life)).collect();
-    assert!(
-        base.players.iter().all(|p| !p.is_eliminated),
-        "reach-guard: every seat is in the game going in, so an elimination below is the drive's"
-    );
-
-    // A restored window carrying an UNSIGNED proposal. Unsigned is what makes the combination
-    // reachable at all: with no signature there is no derived ceiling and no terminal-departure
-    // discriminator, and the drive's cycle is board recurrence alone.
-    let restored_at = |count: u32| {
-        let mut state = base.clone();
-        apply(
-            &mut state,
-            proposer,
-            GameAction::DeclareShortcut {
-                count: IterationCount::Fixed(honest_bound),
-                template: None,
-            },
-        )
-        .expect("the proposer declares the honest bound");
-        let WaitingFor::RespondToShortcut { proposal, .. } = &mut state.waiting_for else {
-            panic!("the declaration opens a responder window")
-        };
-        proposal.per_cycle = None;
-        proposal.count = IterationCount::Fixed(count);
-        let payload = serde_json::to_value(&state).expect("the board serializes");
-        serde_json::from_value::<engine::types::game_state::PersistedGameState>(payload)
-            .expect("it decodes through the production restore chokepoint")
-            .into_game_state()
-            .expect("persisted test snapshot satisfies the checked restore contract")
-    };
-
-    // The drive stops on the cycle a seat leaves the game, which on this board is its FIRST —
-    // measured by the elimination assertion each leg makes rather than assumed here.
-    let stops_on = 1u32;
-    for named in [stops_on, stops_on + 1] {
-        let mut state = restored_at(named + 1);
-        let WaitingFor::RespondToShortcut { player, .. } = state.waiting_for else {
-            panic!("the restore keeps the responder window")
-        };
-        let shortener = player;
-
-        let mut first = true;
-        while let WaitingFor::RespondToShortcut { player, .. } = state.waiting_for.clone() {
-            let response = if std::mem::take(&mut first) {
-                ShortcutResponse::Shorten {
-                    at_iteration: named,
-                }
-            } else {
-                ShortcutResponse::Accept
-            };
-            apply(
-                &mut state,
-                player,
-                GameAction::RespondToShortcut { response },
-            )
-            .expect("each seat answers");
-        }
-
-        let eliminated: Vec<PlayerId> = state
-            .players
-            .iter()
-            .filter(|p| p.is_eliminated)
-            .map(|p| p.id)
-            .collect();
-        assert_eq!(
-            eliminated.len(),
-            1,
-            "named={named}: the terminal-departure arm commits the cycle a seat leaves on and \
-             stops there — one departure, not none and not the whole table"
-        );
-        assert!(
-            !eliminated.contains(&shortener),
-            "named={named}: the departing seat is queued behind the shortener, so the seat rule \
-             is read on a living shortener and not through the CR 800.4a fallback"
-        );
-        assert!(
-            state.players.iter().filter(|p| !p.is_eliminated).count() >= 2,
-            "named={named}: two seats survive, so this is the terminal arm and not the CR 104.2a \
-             crown"
-        );
-        assert_ne!(
-            state
-                .players
-                .iter()
-                .map(|p| (p.id, p.life))
-                .collect::<Vec<_>>(),
-            lives_before,
-            "named={named}: the committed life vector moved, so the seat assertion below is read \
-             on a drive that ran"
-        );
-
-        if named == stops_on {
-            assert_eq!(
-                state.waiting_for,
-                WaitingFor::Priority { player: shortener },
-                "CR 732.2b/c: the drive committed exactly the named count, so the shortener holds \
-                 the ending point"
-            );
-        } else {
-            assert!(
-                matches!(state.waiting_for, WaitingFor::Priority { player } if player != shortener),
-                "CR 732.2b: the same drive stopped short of this named place, so no window was \
-                 opened there and the handback stands; got {:?}",
-                state.waiting_for
-            );
-        }
-    }
 }
 
 /// THE TERMINAL CYCLE. A crossing that eliminates ONE seat while **≥2 players survive** raises
@@ -14211,159 +12816,183 @@ fn a_tie_entrys_seat_set_is_refused_when_only_one_of_them_departs() {
     );
 }
 
-/// **ROW 4 — CR 704.5a + CR 732.2a: an unpredicted departure is refused FROM EITHER ARM, with
-/// every prior cycle committed and priority handed back.**
-///
-/// Where in the published period a crossing falls decides which `CycleOutcome` the drive classifies
-/// the crossing cycle as: a period completing at the forced-window ANSWER beat returns a
-/// RECURRENCE and never reaches the departure arm, while one completing at the settle beat after
-/// the removal returns `SeatLeft`. So a discriminator living in only one arm is one the other
-/// board silently skips — which is why this row drives the SAME perturbation on both committed
-/// untargeted boards rather than on one.
-///
-/// The perturbation is the repetition conjunct: a published per-seat charge above the period's own
-/// net loss makes the reduction name a seat's crossing EARLIER than the drive reaches it, so the
-/// departure the drive observes falls on a repetition no entry names.
-///
-/// # Reach guards, asserted before the claim
-///
-/// At least one cycle is asserted COMMITTED before the stop, else "every prior cycle intact"
-/// quantifies over nothing; the board is asserted to have moved by exactly the committed cycles'
-/// worth of periods, which is what shows the rollback was to a whole cycle boundary; and the seat
-/// that leaves is asserted to have been ALIVE and reachable going in.
-///
-/// # Discrimination
-///
-/// Route the verdict only from the `SeatLeft` arm and the board whose crossing cycle is classified
-/// a recurrence commits the unpredicted departure, so its elimination assertion FAILS while the
-/// other board stays green. Delete the repetition conjunct and both boards commit. The paired
-/// positive on each board — the same accepted count with the inflated charge removed, so the entry
-/// names the repetition the departure lands on — COMMITS and eliminates that seat.
-#[test]
-fn an_unpredicted_departure_is_refused_from_either_drive_arm() {
-    for (label, gz) in [
-        (
-            "crossing cycle classified a RECURRENCE",
-            &include_bytes!("../fixtures/dina_noff_turn5_4p.json.gz")[..],
-        ),
-        (
-            "crossing cycle classified SeatLeft",
-            &include_bytes!("../fixtures/dina_conqueror_4p.json.gz")[..],
-        ),
-    ] {
-        let mut at_offer = restore_dump(&gunzip_dump(gz));
-        drive_to_bounded_offer(&mut at_offer, 600)
-            .expect("the bounded offer must fire on this committed 4p drain");
-        let (proposer, certificate, _) = bounded_offer_parts(&at_offer);
-        let certificate = certificate.clone();
-        let published = certificate
-            .per_cycle
-            .as_ref()
-            .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
-            .cloned()
-            .expect("a bounded offer publishes its per-period signature");
-
-        // The seat the period drains hardest is the one this row moves; read off the published
-        // period so no seat is written down.
-        let victim = *published
-            .delta
-            .life
-            .iter()
-            .filter(|(seat, delta)| **delta < 0 && **seat != proposer)
-            .min_by_key(|(seat, _)| **seat)
-            .map(|(seat, _)| seat)
-            .expect("the untargeted class drains its opponents through the published period");
-        let per_period = -published.delta.life[&victim];
-
-        // Two cycles' worth of headroom plus one, so two whole cycles commit and the third is the
-        // one the departure lands on.
-        let committed_cycles = 2i64;
-        let board = |life: i64| -> GameState {
-            let mut b = at_offer.clone();
-            b.players
-                .iter_mut()
-                .find(|p| p.id == victim)
-                .expect("the drained seat is at the table")
-                .life = i32::try_from(life).expect("a test life total fits an i32");
-            b
-        };
-        let headroom = per_period * (committed_cycles + 1);
-        let accepted = u32::try_from(committed_cycles + 1).expect("a small count fits a u32");
-
-        // ⓐ THE MISMATCH — the inflated charge names the crossing on repetition 1 while the drive
-        //   reaches it on the third.
-        let mut early = board(headroom);
-        let mut inflated = published.clone();
-        inflated.seat_life_charge = vec![(victim, headroom)];
-        let cascade = cascade_from(&early, proposer, &inflated, None, &[]);
-        assert!(
-            cascade
-                .iter()
-                .all(|(repetition, seats)| !(seats.contains(&victim) && *repetition == accepted)),
-            "[{label}] REACH-GUARD (live instrument): no entry may name the victim at the \
-             repetition the drive reaches it on, or there is no mismatch to refuse; got {cascade:?}"
+/// CR 732.2b: declares the offer's count and, in the response window, applies `edit` to the
+/// departures of the record the take reads (its fields are crate-private, so through serde); then
+/// every responder accepts. Returns the departures as the offer recorded them.
+pub(crate) fn take_with_edited_departures(
+    at_offer: &GameState,
+    edit: fn(&mut Vec<serde_json::Value>),
+) -> (Vec<(u32, Vec<PlayerId>)>, GameState) {
+    fn walk(
+        value: &mut serde_json::Value,
+        edit: fn(&mut Vec<serde_json::Value>),
+        recorded: &mut Vec<serde_json::Value>,
+    ) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                for (key, field) in fields.iter_mut() {
+                    match (key.as_str(), field) {
+                        ("departures", serde_json::Value::Array(entries)) => {
+                            recorded.clone_from(entries);
+                            edit(entries);
+                        }
+                        (_, field) => walk(field, edit, recorded),
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                items.iter_mut().for_each(|item| walk(item, edit, recorded));
+            }
+            _ => {}
+        }
+    }
+    let (proposer, count, _) = offered(at_offer);
+    let mut state = at_offer.clone();
+    apply(
+        &mut state,
+        proposer,
+        GameAction::DeclareShortcut {
+            count,
+            template: None,
+        },
+    )
+    .expect("the offer's own count is declarable");
+    let WaitingFor::RespondToShortcut { proposal, .. } = &mut state.waiting_for else {
+        panic!(
+            "the declaration opens the CR 732.2b window, got {:?}",
+            state.waiting_for
         );
-        assert!(
-            !early
-                .players
-                .iter()
-                .any(|p| p.id == victim && p.is_eliminated),
-            "[{label}] REACH-GUARD: the departing seat is ALIVE going in"
-        );
-        let before = seat_lives(&early);
-        accept_restored_proposal(
-            &mut early,
-            proposer,
-            restored_proposal(&certificate, proposer, accepted, inflated),
-        );
-        assert_eq!(
-            eliminated_seats(&early),
-            Vec::<PlayerId>::new(),
-            "[{label}] CR 732.2a: the departure fell on a repetition no entry names, so that cycle \
-             is dropped whole and nobody leaves; lives {:?}",
-            seat_lives(&early)
-        );
-        let victim_life = |st: &GameState| -> i64 {
-            i64::from(
-                st.players
-                    .iter()
-                    .find(|p| p.id == victim)
-                    .expect("the seat is still on the board")
-                    .life,
+    };
+    let mut value = serde_json::to_value(&*proposal).expect("a proposal serializes");
+    let mut recorded = Vec::new();
+    walk(&mut value["period"], edit, &mut recorded);
+    *proposal = serde_json::from_value(value).expect("the edited proposal deserializes");
+    let recorded: Vec<(u32, Vec<PlayerId>)> = recorded
+        .iter()
+        .map(|entry| {
+            (
+                u32::try_from(entry["repetition"].as_u64().expect("a repetition"))
+                    .expect("a repetition fits a u32"),
+                serde_json::from_value(entry["seats"].clone()).expect("the departing seats"),
             )
-        };
-        assert_eq!(
-            headroom - victim_life(&early),
-            per_period * committed_cycles,
-            "[{label}] CR 732.2a: EVERY PRIOR CYCLE IS COMMITTED and the dropped one is rolled \
-             back whole, so the board moved by exactly the committed cycles' worth of periods — \
-             which is also the reach guard that a cycle committed at all; before {before:?}, after \
-             {:?}",
-            seat_lives(&early)
-        );
-        assert!(
-            matches!(early.waiting_for, WaitingFor::Priority { player }
-                if !early.players.iter().any(|p| p.id == player && p.is_eliminated)),
-            "[{label}] CR 732.2a: the ending point is a place where a living player has priority; \
-             got {:?}",
-            early.waiting_for
-        );
+        })
+        .collect();
+    assert!(
+        !recorded.is_empty(),
+        "reach-guard: the record the take reads predicts departures"
+    );
+    while let WaitingFor::RespondToShortcut { player, .. } = state.waiting_for.clone() {
+        apply(
+            &mut state,
+            player,
+            GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            },
+        )
+        .expect("accept");
+    }
+    (recorded, state)
+}
 
-        // ⓑ PAIRED POSITIVE — the same board and the same accepted count with the inflated charge
-        //   removed, so the entry names the repetition the departure actually lands on.
-        let mut on_time = board(headroom);
-        accept_restored_proposal(
-            &mut on_time,
-            proposer,
-            restored_proposal(&certificate, proposer, accepted, published.clone()),
-        );
-        assert!(
-            eliminated_seats(&on_time).contains(&victim),
-            "[{label}] PAIRED POSITIVE: the identical departure COMMITS once an entry names its \
-             repetition, so ⓐ's refusal is the repetition conjunct and not the rig; lives {:?}",
-            seat_lives(&on_time)
+/// CR 732.2c: a take refused at the repetition `recorded[refused]`'s seat leaves on commits every
+/// repetition before it (that seat's life at the offer frame minus 1) and hands priority back.
+fn assert_refused_at(
+    label: &str,
+    at_offer: &GameState,
+    taken: &GameState,
+    recorded: &[(u32, Vec<PlayerId>)],
+    refused: usize,
+) {
+    let life = |state: &GameState, seat: PlayerId| {
+        state
+            .players
+            .iter()
+            .find(|p| p.id == seat)
+            .expect("a seat at the table")
+            .life
+    };
+    let departing = recorded[refused].1[0];
+    let committed = life(at_offer, departing) - 1;
+    let mut left: Vec<PlayerId> = recorded[..refused]
+        .iter()
+        .flat_map(|(_, seats)| seats.iter().copied())
+        .collect();
+    left.sort_unstable();
+    let (proposer, ..) = offered(at_offer);
+    assert_eq!(
+        eliminated_seats(taken),
+        left,
+        "[{label}] CR 800.4a: only the departures before the refused repetition commit"
+    );
+    for seat in at_offer
+        .players
+        .iter()
+        .map(|p| p.id)
+        .filter(|seat| *seat != proposer && !left.contains(seat))
+    {
+        assert_eq!(
+            life(taken, seat),
+            life(at_offer, seat) - committed,
+            "[{label}] {seat:?}: CR 732.2c: every repetition before the refused one commits"
         );
     }
+    assert_eq!(
+        taken.waiting_for,
+        WaitingFor::Priority { player: proposer },
+        "[{label}]"
+    );
+}
+
+fn dina_noff_offer() -> GameState {
+    let mut state = restore_dump(&gunzip_dump(include_bytes!(
+        "../fixtures/dina_noff_turn5_4p.json.gz"
+    )));
+    drive_to_bounded_offer(&mut state, 600).expect("the committed 4p drain is offered");
+    state
+}
+
+fn shift_departures_one_early(entries: &mut Vec<serde_json::Value>) {
+    for entry in entries {
+        let repetition = entry["repetition"].as_u64().expect("a repetition");
+        entry["repetition"] = serde_json::json!(repetition - 1);
+    }
+}
+
+fn assert_unedited_take_wins(label: &str, at_offer: &GameState) {
+    let (_, taken) = take_with_edited_departures(at_offer, |_| {});
+    assert_eq!(
+        taken.waiting_for,
+        WaitingFor::GameOver {
+            winner: Some(offered(at_offer).0)
+        },
+        "[{label}] locus control: the unedited record's take ends the game"
+    );
+}
+
+/// CR 732.2a + CR 732.2c: a departure the record did not predict is refused from either arm of the
+/// recorded take, every repetition before it committed. On the turn-5 Dina board every entry is
+/// moved one repetition early, so P1's departing repetition comes round unpredicted; on the
+/// Conqueror board the last entry names P1 for P3, so P3's departing repetition ends with its
+/// holder winning, unpredicted.
+#[test]
+fn an_unpredicted_departure_is_refused_from_either_drive_arm() {
+    let noff = dina_noff_offer();
+    let (recorded, taken) = take_with_edited_departures(&noff, shift_departures_one_early);
+    assert_refused_at("came round", &noff, &taken, &recorded, 0);
+    assert_unedited_take_wins("came round", &noff);
+
+    let conqueror = dina_bounded_offer().0;
+    let (recorded, taken) = take_with_edited_departures(&conqueror, |entries| {
+        entries.last_mut().expect("a last departure")["seats"] = serde_json::json!([1]);
+    });
+    assert_refused_at(
+        "holder won",
+        &conqueror,
+        &taken,
+        &recorded,
+        recorded.len() - 1,
+    );
+    assert_unedited_take_wins("holder won", &conqueror);
 }
 
 /// **V3 — CR 704.5a + CR 800.4a: the admitted member the set equality must refuse — the
@@ -14459,207 +13088,24 @@ fn a_co_departure_the_prediction_does_not_name_is_refused() {
     );
 }
 
-/// **V3b — CR 732.2a: an absent prediction admits no departure.**
-///
-/// A divisor that TIES two seats at the minimum refuses the relief, so the published count
-/// crosses nobody and the reduction names nobody. A seat the signature understates can still
-/// depart inside that count — and when it does, the drive has reached a removal no sequence
-/// predicted, which is exactly the case an "absent prediction means commit anything" reading
-/// would wave through.
-///
-/// The departure lands on the FIRST driven cycle, which is terminal and runs no conformance
-/// check, so neither a `conforms` refusal nor an `Abort` can be producing the negative verdict.
-/// The paired positive is on this row's OWN board and its OWN departure, at the same doctored
-/// period: the single field edited between the legs is the departing seat's published
-/// magnitude, which is what creates the tie in ⓐ and the unique argmin in ⓑ.
-///
-/// REVERT-PROBE: treat an absent prediction as "commit anything" ⇒ ⓐ commits the removal and
-/// its unmoved-board assertion FAILS while ⓑ stays green.
+/// CR 732.2a + CR 732.2c: a record that predicts no departure admits none; the take stops before
+/// the first seat leaves.
 #[test]
 fn an_absent_prediction_admits_no_departure() {
-    let (state, proposer, certificate, _honest) = dina_bounded_offer();
-    let published = certificate
-        .per_cycle
-        .as_ref()
-        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
-        .cloned()
-        .expect("a bounded offer publishes its per-period signature");
-
-    // One driven cycle spans five published periods, so the board's real per-cycle drain is
-    // five life — enough for P1 to cross inside the FIRST cycle while P2 and P3 do not.
-    let stretched = |charge: Vec<(PlayerId, i64)>| -> PeriodicDelta {
-        let mut pc = published.clone();
-        pc.frames_per_period = published.frames_per_period * 5;
-        pc.seat_life_charge = charge;
-        pc
-    };
-    let board = || -> GameState {
-        let mut b = state.clone();
-        for (seat, life) in [(P1, 5), (P2, 21), (P3, 36)] {
-            b.players.iter_mut().find(|p| p.id == seat).unwrap().life = life;
-        }
-        b
-    };
-
-    // ⓐ THE TIE. P1 divides 4 of headroom by 1 and P2 divides 20 by 5: both reduce to 4, the
-    //   relief is refused, and no seat is named. P1 still crosses on the first driven cycle.
-    let mut tied = board();
-    let before = seat_lives(&tied);
-    accept_restored_proposal(
-        &mut tied,
-        proposer,
-        restored_proposal(&certificate, proposer, 4, stretched(vec![(P2, 5)])),
-    );
-    assert_eq!(
-        seat_lives(&tied),
-        before,
-        "CR 704.5a: at a tied floor the count crosses nobody, so a departure inside it is a \
-         removal the sequence never predicted and the cycle is dropped whole"
-    );
-    assert_eq!(
-        eliminated_seats(&tied),
-        Vec::<PlayerId>::new(),
-        "CR 800.4a: a refused cycle removes nobody"
-    );
-
-    // ⓑ PAIRED POSITIVE — the same board, the same period and the same first-cycle departure,
-    //   with P1's own published magnitude raised so the argmin is unique and names it at
-    //   iteration 1.
-    let mut named = board();
-    accept_restored_proposal(
-        &mut named,
-        proposer,
-        restored_proposal(&certificate, proposer, 1, stretched(vec![(P1, 5), (P2, 5)])),
-    );
-    assert_eq!(
-        eliminated_seats(&named),
-        vec![P1],
-        "PAIRED POSITIVE: the same first-cycle departure COMMITS once a prediction names it, so \
-         ⓐ's refusal is the absent prediction and not a conformance refusal or an abort"
-    );
-
-    // ⓒ LOCUS CONTROL — ⓐ's own board, its own charge and its own accepted count, with ONLY the
-    //   period width restored to the published one. The consumption ceiling and the prediction
-    //   are derived from the charge and the delta and never from `frames_per_period`, so the
-    //   guard sees byte-for-byte what it saw in ⓐ while the drive delimits real periods again.
-    let mut at_width = board();
-    let mut published_width = stretched(vec![(P2, 5)]);
-    published_width.frames_per_period = published.frames_per_period;
-    accept_restored_proposal(
-        &mut at_width,
-        proposer,
-        restored_proposal(&certificate, proposer, 4, published_width),
-    );
-    assert_ne!(
-        seat_lives(&at_width),
-        before,
-        "LOCUS CONTROL: this very board, charge and count DRIVE at the published period width, \
-         so ⓐ's unmoved board is the terminal arm refusing a departure and not the ceiling \
-         refusing the count at the guard"
-    );
+    let at_offer = dina_bounded_offer().0;
+    let (recorded, taken) = take_with_edited_departures(&at_offer, Vec::clear);
+    assert_refused_at("cleared", &at_offer, &taken, &recorded, 0);
+    assert_unedited_take_wins("cleared", &at_offer);
 }
 
-/// **V3c — CR 704.5a: the admitted member the ITERATION conjunct must refuse.**
-///
-/// Set equality alone is not enough. A published `frames_per_period` larger than the period the
-/// bound was divided by makes one driven cycle span several repetitions, so the predicted seat
-/// — and only that seat — crosses EARLIER than the repetition the prediction named. Under set
-/// equality alone that cycle commits, and the sequence the table agreed to has silently
-/// delivered its removal at a different point.
-///
-/// The departure is on the FIRST driven cycle, which is terminal and runs no conformance check,
-/// so nothing else can be producing the refusal.
-///
-/// # Non-vacuity — the pair separates the ITERATION from the IDENTITY
-///
-/// Both legs run the SAME doctored period on the SAME board and produce the SAME departure of
-/// the SAME seat on the SAME cycle. The one edited field is the seat's published magnitude,
-/// which moves the predicted repetition from 2 onto the 1 the departure actually lands on.
-/// Under set equality alone both legs commit.
-///
-/// REVERT-PROBE: drop the repetition comparison from `departure_verdict`, the authority both
-/// drive arms ask ⇒ ⓐ commits and its unmoved-board assertion FAILS while ⓑ stays green.
+/// CR 732.2a + CR 732.2c: a departure on a repetition the record did not name is refused, though
+/// the record names its seat.
 #[test]
 fn a_departure_on_an_iteration_the_prediction_did_not_name_is_refused() {
-    let (state, proposer, certificate, _honest) = dina_bounded_offer();
-    let published = certificate
-        .per_cycle
-        .as_ref()
-        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
-        .cloned()
-        .expect("a bounded offer publishes its per-period signature");
-    // One driven cycle spans TWO published periods, so a seat two life from its threshold
-    // crosses inside the first cycle whatever the reduction predicted.
-    let doubled = |charge: Vec<(PlayerId, i64)>| -> PeriodicDelta {
-        let mut pc = published.clone();
-        pc.frames_per_period = published.frames_per_period * 2;
-        pc.seat_life_charge = charge;
-        pc
-    };
-    let board = || -> GameState {
-        let mut b = state.clone();
-        for (seat, life) in [(P1, 36), (P2, 2), (P3, 36)] {
-            b.players.iter_mut().find(|p| p.id == seat).unwrap().life = life;
-        }
-        b
-    };
-
-    // ⓐ THE MISMATCH. P2 divides one of headroom by one, so the reduction names it at
-    //   repetition 2 — while the doubled period takes it out on repetition 1.
-    let mut early = board();
-    let before = seat_lives(&early);
-    accept_restored_proposal(
-        &mut early,
-        proposer,
-        restored_proposal(&certificate, proposer, 2, doubled(vec![])),
-    );
-    assert_eq!(
-        seat_lives(&early),
-        before,
-        "CR 732.2a: the seat the prediction named left on a repetition it did not name, so the \
-         cycle is dropped whole and the board is the one the offer was made on"
-    );
-    assert_eq!(
-        eliminated_seats(&early),
-        Vec::<PlayerId>::new(),
-        "CR 800.4a: a refused cycle removes nobody"
-    );
-
-    // ⓑ PAIRED POSITIVE — same board, same period, same seat, same cycle. P2's published
-    //   magnitude of 2 makes its strict headroom 0, so the relief names it at repetition 1,
-    //   which is where the departure actually lands.
-    let mut on_time = board();
-    accept_restored_proposal(
-        &mut on_time,
-        proposer,
-        restored_proposal(&certificate, proposer, 1, doubled(vec![(P2, 2)])),
-    );
-    assert_eq!(
-        eliminated_seats(&on_time),
-        vec![P2],
-        "PAIRED POSITIVE: the identical departure COMMITS once the prediction names its \
-         repetition, so ⓐ's refusal is the index comparison and nothing else"
-    );
-
-    // ⓒ LOCUS CONTROL — ⓐ's own board, its own charge and its own accepted count, with ONLY the
-    //   period width restored to the published one. Neither the ceiling nor the prediction reads
-    //   `frames_per_period`, so the guard's inputs are ⓐ's exactly; what moves is where the
-    //   repetition boundaries fall, which is what the index conjunct compares against.
-    let mut at_width = board();
-    let mut published_width = doubled(vec![]);
-    published_width.frames_per_period = published.frames_per_period;
-    accept_restored_proposal(
-        &mut at_width,
-        proposer,
-        restored_proposal(&certificate, proposer, 2, published_width),
-    );
-    assert_ne!(
-        seat_lives(&at_width),
-        before,
-        "LOCUS CONTROL: this very board, charge and count DRIVE at the published period width, \
-         so ⓐ's unmoved board is the index conjunct refusing and not the ceiling refusing the \
-         count at the guard"
-    );
+    let at_offer = dina_bounded_offer().0;
+    let (recorded, taken) = take_with_edited_departures(&at_offer, shift_departures_one_early);
+    assert_refused_at("one early", &at_offer, &taken, &recorded, 0);
+    assert_unedited_take_wins("one early", &at_offer);
 }
 
 /// **V5 — a proposal carrying NO per-period signature keeps its shipped behaviour.**
@@ -14805,143 +13251,6 @@ fn an_unsigned_proposal_commits_the_cycle_a_seat_departs_on() {
     );
 }
 
-/// **V6b — CR 119.3 + CR 704.5a: the floor at the guard, on the board it is measured on.**
-///
-/// `PeriodicDelta::seat_life_charge` is `#[serde(default)]`, so a restored signature can reach
-/// this seam with an EMPTY charge beside an intact `delta`. Without the floor the consumption
-/// divisor would then be empty, every seat's life axis would be unarmed, the re-derivation would
-/// measure NO threshold at all — leaving `shortcut_count_is_drivable` bounded by the engine's
-/// budget alone — and the over-count below would be admitted. Flooring the publication by the
-/// vector the period's own losses produce is what leaves a ceiling standing.
-///
-/// # Why the assertion is an IDENTITY on the life vector and not a bound on a count
-///
-/// Without the floor the over-count drives, every cycle below the enforced ceiling conforms and
-/// commits, and the ending point restores the LAST COMMITTED cycle — whose life vector is not
-/// the offer board's. A bound of the form "at most X" survives the floor's deletion for every X
-/// below the budget, on any board. The identity does not.
-///
-/// This board is the measured one: its enforced ceiling is comfortably above 1 and its driven
-/// period equals the published `delta` seat for seat, so every cycle below the ceiling conforms
-/// and the first departure lands on the ceiling itself.
-///
-/// REVERT-PROBE: return the published charge verbatim from `consumption_seat_life_charges` ⇒
-/// ⓐ's divisor is empty ⇒ no ceiling is derived at all ⇒ the over-count drives ⇒ the identity
-/// FAILS while ⓑ stays green.
-#[test]
-fn an_emptied_charge_still_bounds_the_drive_at_the_guard() {
-    let (state, proposer, certificate, honest) = dina_bounded_offer();
-    let published = certificate
-        .per_cycle
-        .as_ref()
-        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
-        .cloned()
-        .expect("a bounded offer publishes its per-period signature");
-    let before = seat_lives(&state);
-    assert!(
-        honest >= 7,
-        "REACH-GUARD: the paired positive drives `honest - 6` repetitions, so the published \
-         count must leave at least one below that margin — at 6 it drives none and below 6 the \
-         subtraction is not representable; got {honest}"
-    );
-    let blanked = || -> PeriodicDelta {
-        let mut pc = published.clone();
-        pc.seat_life_charge.clear();
-        pc
-    };
-
-    // ⓐ THE OVER-COUNT, above the ENFORCED ceiling, on a signature whose publication is gone.
-    let mut refused = state.clone();
-    accept_restored_proposal(
-        &mut refused,
-        proposer,
-        restored_proposal(&certificate, proposer, honest + 3, blanked()),
-    );
-    assert_eq!(
-        seat_lives(&refused),
-        before,
-        "CR 704.5a: with the publication emptied the divisor is still the period's own enforced \
-         losses, so the over-count is refused and NOT ONE seat's life has moved"
-    );
-
-    // ⓑ PAIRED POSITIVE — the same emptied signature at a count inside the enforced ceiling
-    //   drives, and commits exactly that many copies of the published period.
-    let inside = honest - 6;
-    let mut driven = state.clone();
-    accept_restored_proposal(
-        &mut driven,
-        proposer,
-        restored_proposal(&certificate, proposer, inside, blanked()),
-    );
-    for (seat, l0) in &before {
-        let now = driven.players.iter().find(|p| p.id == *seat).unwrap().life as i64;
-        assert_eq!(
-            i64::from(*l0) - now,
-            -i64::from(inside) * published.delta.life.get(seat).copied().unwrap_or(0),
-            "PAIRED POSITIVE: {seat:?} takes exactly `n` copies of the published period, which \
-             is what makes this board's regime un-concentrated and ⓐ's refusal the floor"
-        );
-    }
-    assert_ne!(
-        seat_lives(&driven),
-        before,
-        "PAIRED POSITIVE: life moved, so ⓐ's identity is the ceiling firing rather than a rig \
-         that drives nothing"
-    );
-}
-
-/// **V7 — a signature reaching this seam with an EMPTY published charge keeps its count.**
-///
-/// The floor may only RAISE a divisor, so it may only LOWER a ceiling — which is the fail-closed
-/// direction, and also the direction in which a floor could wrongly refuse a count the producer
-/// legitimately published. This row pins that it does not: the same board, driven at the count
-/// the engine itself published, commits the same board whether the charge is present or gone.
-///
-/// Reach-guard: that count is asserted non-zero and the drive is asserted to have moved life, so
-/// a refusal cannot pass for preservation.
-///
-/// REVERT-PROBE: floor by anything stricter than the period's own enforced losses ⇒ the emptied
-/// leg is refused ⇒ the equality with the published leg FAILS.
-#[test]
-fn an_emptied_charge_preserves_the_published_count() {
-    let (state, proposer, certificate, honest) = dina_bounded_offer();
-    let published = certificate
-        .per_cycle
-        .as_ref()
-        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
-        .cloned()
-        .expect("a bounded offer publishes its per-period signature");
-    let before = seat_lives(&state);
-    assert!(honest > 0, "REACH-GUARD: the published count is non-zero");
-
-    let run = |charge_present: bool| -> (Vec<(PlayerId, i32)>, Vec<PlayerId>) {
-        let mut board = state.clone();
-        let mut pc = published.clone();
-        if !charge_present {
-            pc.seat_life_charge.clear();
-        }
-        accept_restored_proposal(
-            &mut board,
-            proposer,
-            restored_proposal(&certificate, proposer, honest, pc),
-        );
-        (seat_lives(&board), eliminated_seats(&board))
-    };
-
-    let with_charge = run(true);
-    let without_charge = run(false);
-    assert_ne!(
-        with_charge.0, before,
-        "REACH-GUARD: the published-charge leg really drives, so the equality below is \
-         preservation rather than two refusals agreeing"
-    );
-    assert_eq!(
-        without_charge, with_charge,
-        "CR 704.5a: an emptied publication is floored back to the period's own enforced losses, \
-         which is the very divisor the mint used — so the count the producer published is kept"
-    );
-}
-
 /// **V8 — the `CrossLethal` arm, reached at an HONEST count.**
 ///
 /// The consumption ceiling turns every widened count into a refusal, so the arm that used to be
@@ -15027,333 +13336,6 @@ fn the_honest_count_reaches_the_cross_lethal_arm_when_the_crossing_takes_the_las
         None,
         "REACH-GUARD: this period charges the proposer's life not at all, so the crossing above \
          is attributable to the drained seat alone"
-    );
-}
-
-/// **CR 732.2a + CR 704.5a: the crown a finite drive may write is the seat the proposal named,
-/// or nobody.**
-///
-/// CR 732.2a admits only a sequence whose results are predictable, and `predicted_winner` is
-/// that prediction — confirmed over public board state when the offer was minted. A drive whose
-/// CR 704.5a sweep names a DIFFERENT seat has falsified it, so the crossing cycle is dropped
-/// whole and the drive leaves through its own ending point at a living seat. A proposal that
-/// names nobody predicted nothing to falsify and keeps the disposition its producer shipped
-/// with.
-///
-/// Reached through the restore ingress — a constructed `WaitingFor::RespondToShortcut` — which
-/// is the one ingress that arrives at this seam without passing an offer mint, and the one the
-/// seam's own owner and liveness conjuncts are already written for. It does NOT manufacture a
-/// disagreeing offer inside a mint: an offer naming a winner its own drive contradicts is an
-/// offer whose measurement was wrong, and standing between that and a crown is the point.
-///
-/// # Both ends of the disagreement, and which one discriminates
-///
-/// ⓑ/ⓐ are one board — a single opponent, so the crossing takes the last one and the drive
-/// crowns the proposer (CR 104.2a). Naming the seat the drive produces still crowns; naming the
-/// VICTIM does not. ⓓ/ⓒ are the other end — two seats crossing in one state-based sweep, so the
-/// drive names nobody. Naming nobody still draws; naming a seat does not.
-///
-/// **ⓒ is the discriminating member.** The plausible wrong predicate
-/// `winner.is_some_and(|w| w != named)` refuses a different seat exactly as the correct one
-/// does, and crowns nobody-by-draw on a proposal that named somebody. Nothing else here
-/// separates the two.
-///
-/// **ⓓ is the admitted member.** A gate that refused a nameless proposal would red it, and with
-/// it every bounded and object-growth mint, which publish no name at all.
-///
-/// Each crowning leg runs BEFORE its refusing partner on the same board at the same count, so a
-/// drive that stopped short of lethal reds the crowning leg instead of letting the refusal pass
-/// on a board that never crossed. Every count and every life is read off the certificate and the
-/// offer-beat board; none is a literal.
-///
-/// REVERT-PROBE: delete the name comparison from `materialize_fixed_shortcut`'s `CrossLethal`
-/// arm ⇒ ⓐ crowns the drive's own winner and ⓒ writes the draw ⇒ both refusal legs' first
-/// assertion FAILS, while ⓑ and ⓓ stay green.
-#[test]
-fn the_cross_lethal_arm_crowns_only_the_seat_the_proposal_names() {
-    // ── One opponent: the crossing takes the last one, so the drive names the proposer ──
-    let mut state = bloodloop_state(2);
-    drive_to_bounded_offer(&mut state, 400)
-        .expect("the mandatory-draw cascade raises a bounded offer at two seats");
-    let (proposer, certificate, schema) = bounded_offer_parts(&state);
-    let certificate = certificate.clone();
-    let per_cycle = certificate
-        .per_cycle
-        .as_ref()
-        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
-        .cloned()
-        .expect("a bounded offer publishes its per-period signature");
-    let honest = schema.deliverable_capacity;
-    let opponents: Vec<PlayerId> = state
-        .players
-        .iter()
-        .filter(|p| !p.is_eliminated && p.id != proposer)
-        .map(|p| p.id)
-        .collect();
-    assert_eq!(
-        opponents.len(),
-        1,
-        "REACH-GUARD: exactly ONE living opponent is what makes this crossing a CR 104.2a win \
-         with a NAMED seat, which is the end ⓐ disagrees with; got {opponents:?}"
-    );
-    let victim = opponents[0];
-    let charge = -per_cycle.delta.life.get(&victim).copied().unwrap_or(0);
-    assert!(
-        charge > 0,
-        "REACH-GUARD: the published period must drain the opponent, else no crossing is derivable"
-    );
-    let victim_life = i64::from(player_life(&state, victim));
-    // The repetition the victim crosses on — where the drive stops whatever the accepted count
-    // is, and therefore the cycle ⓐ's refusal drops.
-    let crossing = victim_life.div_euclid(charge) + i64::from(victim_life.rem_euclid(charge) != 0);
-    assert!(
-        crossing <= i64::from(honest),
-        "REACH-GUARD: the published ceiling must CONTAIN the crossing, or neither leg reaches \
-         the `CrossLethal` arm at all; crossing {crossing} vs ceiling {honest}"
-    );
-
-    let accept_named = |named: Option<PlayerId>| -> GameState {
-        let mut board = state.clone();
-        accept_restored_proposal(
-            &mut board,
-            proposer,
-            ShortcutProposal {
-                predicted_winner: named,
-                ..restored_proposal(&certificate, proposer, honest, per_cycle.clone())
-            },
-        );
-        board
-    };
-
-    // ⓑ — the proposal names the seat the drive produces: still crowned.
-    let agreed = accept_named(Some(proposer));
-    assert_eq!(
-        agreed.waiting_for,
-        WaitingFor::GameOver {
-            winner: Some(proposer)
-        },
-        "ⓑ CR 104.2a: the drive's verdict confirms the name, so the crossing cycle commits and \
-         the game ends; lives {:?}",
-        seat_lives(&agreed)
-    );
-    assert_eq!(
-        eliminated_seats(&agreed),
-        vec![victim],
-        "ⓑ CR 704.5a: exactly the drained seat crossed its threshold"
-    );
-
-    // ⓐ — the same board and count, naming the VICTIM: the crossing cycle is dropped whole.
-    let refused = accept_named(Some(victim));
-    assert!(
-        matches!(refused.waiting_for, WaitingFor::Priority { player }
-            if !refused.players.iter().any(|p| p.id == player && p.is_eliminated)),
-        "ⓐ CR 732.2a: a falsified prediction leaves the drive at a place where a player has \
-         priority, not at a crown; got {:?}",
-        refused.waiting_for
-    );
-    assert!(
-        eliminated_seats(&refused).is_empty(),
-        "ⓐ CR 704.5a: the crossing cycle never committed, so nobody crossed a threshold"
-    );
-    assert_eq!(
-        i64::from(player_life(&refused, victim)),
-        victim_life - (crossing - 1) * charge,
-        "ⓐ the board is the last CONFORMING cycle — one period's charge above the crossing"
-    );
-
-    // ── Two seats crossing in one sweep: the drive names nobody ──
-    let (mut runner, kickoff) = setup_2p_symmetric_plague(LoopDetectionMode::Interactive);
-    let _ = runner.cast(kickoff).resolve();
-    let (_events, wf) = drive_collect(&mut runner, 600);
-    let WaitingFor::LoopShortcut {
-        proposer: sym_proposer,
-        certificate: sym_certificate,
-        schema: sym_schema,
-        ..
-    } = wf
-    else {
-        panic!("the symmetric board must OFFER (its loop is optional), got {wf:?}");
-    };
-    let sym_per_cycle = sym_certificate
-        .per_cycle
-        .as_ref()
-        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
-        .cloned()
-        .expect("a bounded offer publishes its per-period signature");
-    let seats: Vec<PlayerId> = runner.state().players.iter().map(|p| p.id).collect();
-    let sym_charges: Vec<i64> = seats
-        .iter()
-        .map(|s| -sym_per_cycle.delta.life.get(s).copied().unwrap_or(0))
-        .collect();
-    assert!(
-        sym_charges.iter().all(|c| *c == sym_charges[0] && *c > 0),
-        "REACH-GUARD: an EQUAL per-cycle charge on every seat is what makes the crossing \
-         simultaneous, and a simultaneous crossing is what makes the drive name nobody; got \
-         {sym_charges:?}"
-    );
-    let sym_lives: Vec<i32> = seats
-        .iter()
-        .map(|s| player_life(runner.state(), *s))
-        .collect();
-    assert!(
-        sym_lives.iter().all(|l| *l == sym_lives[0]),
-        "REACH-GUARD: EQUAL lives, for the same reason; got {sym_lives:?}"
-    );
-    // The simultaneous crossing, re-derived from the equal lives and the equal charge asserted
-    // above: the repetition ⓓ ends on and the one ⓒ drops. The count declared is one PAST the
-    // published ceiling — admissible because a proposal carrying no per-period signature supports
-    // no consumption ceiling, which is exactly the shape the one winner-naming mint publishes.
-    let sym_crossing = {
-        let l0 = i64::from(sym_lives[0]);
-        l0.div_euclid(sym_charges[0]) + i64::from(l0.rem_euclid(sym_charges[0]) != 0)
-    };
-    let past = sym_schema.deliverable_capacity + 1;
-    assert!(
-        sym_crossing <= i64::from(past),
-        "REACH-GUARD: the declared count must REACH the simultaneous crossing, or neither leg \
-         exercises the arm; crossing {sym_crossing} vs declared {past}"
-    );
-    let accept_sym = |named: Option<PlayerId>| -> GameState {
-        let mut board = runner.state().clone();
-        accept_restored_proposal(
-            &mut board,
-            sym_proposer,
-            ShortcutProposal {
-                predicted_winner: named,
-                per_cycle: None,
-                ..restored_proposal(&sym_certificate, sym_proposer, past, sym_per_cycle.clone())
-            },
-        );
-        board
-    };
-
-    // ⓓ — the proposal names nobody, and the drive names nobody: the draw still stands.
-    let drawn = accept_sym(None);
-    assert_eq!(
-        drawn.waiting_for,
-        WaitingFor::GameOver { winner: None },
-        "ⓓ CR 704.5a: both seats cross in one state-based sweep, so the game ends with no \
-         winner and a nameless proposal predicted nothing to contradict; lives {:?}",
-        seat_lives(&drawn)
-    );
-    assert_eq!(
-        eliminated_seats(&drawn),
-        seats,
-        "ⓓ CR 704.3: the sweep is simultaneous — both seats leave together"
-    );
-
-    // ⓒ — the same board and count, naming a seat the drive does not produce.
-    let refused_sym = accept_sym(Some(sym_proposer));
-    assert!(
-        matches!(refused_sym.waiting_for, WaitingFor::Priority { player }
-            if !refused_sym.players.iter().any(|p| p.id == player && p.is_eliminated)),
-        "ⓒ CR 732.2a: a draw contradicts a proposal that named a winner, so the crossing cycle \
-         is dropped and the drive ends at a place where a player has priority; got {:?}",
-        refused_sym.waiting_for
-    );
-    assert!(
-        eliminated_seats(&refused_sym).is_empty(),
-        "ⓒ CR 704.5a: neither seat crossed, because the cycle that would have crossed both never \
-         committed"
-    );
-    assert_eq!(
-        seat_lives(&refused_sym),
-        seats
-            .iter()
-            .zip(&sym_lives)
-            .zip(&sym_charges)
-            .map(|((seat, l0), charge)| {
-                (*seat, l0 - (sym_crossing as i32 - 1) * *charge as i32)
-            })
-            .collect::<Vec<_>>(),
-        "ⓒ the board is the last CONFORMING cycle for BOTH seats, derived the same way as ⓐ — \
-         the crossing cycle is dropped, so the commits stop one short of it"
-    );
-}
-
-/// FIX ROUND 1 (HIGH-3) — the conformance check `PeriodicDelta`'s doc has always specified
-/// ("so a bounded drive can check that each committed cycle actually conformed") and which
-/// nothing implemented. A RECURRED cycle whose measured resource delta differs from the
-/// published signature is DROPPED WHOLE and the drive hands back to manual play.
-///
-/// # Why it is load-bearing rather than belt-and-braces
-///
-/// `elimination_bounds` divides the CR 704.5a headroom by `per_cycle.delta` to produce the count
-/// the table agreed to. If a committed cycle moves a different amount, that division no longer
-/// describes the drive, and the REMAINING repetitions can carry a seat past the threshold
-/// mid-sequence — the exact conditional action CR 732.2a forbids. The terminal cycle is the one
-/// arm the check does not govern, because it has no remaining repetitions to protect.
-///
-/// # The hostile fixture
-///
-/// The offer is real (the engine wrote it after 400 driven beats); ONE field is then doctored —
-/// the published `per_cycle.delta` gains a life term for a seat the loop does not touch, which
-/// no cycle can ever produce. Everything downstream is production: `apply()`'s declare handler,
-/// the APNAP window, `apply_confirmed_shortcut`, `materialize_fixed_shortcut`.
-///
-/// # Non-vacuity — the paired positive control is arm ⓐ
-///
-/// ⓐ runs the SAME trajectory with the signature untouched and commits `n × δ`. Without it, ⓑ's
-/// zero-delta observation would be indistinguishable from "the offer never fired" or "the drive
-/// aborts on this fixture anyway" — which is precisely the shape the HEAD defect had.
-///
-/// REVERT-PROBE: delete the `if !pd.conforms(..) { break 'cycles; }` block in
-/// `materialize_fixed_shortcut` ⇒ ⓑ commits `n × (real δ)` like ⓐ ⇒ ⓑ's zero-delta assertion
-/// FAILS while ⓐ stays green.
-#[test]
-fn a_cycle_that_does_not_match_the_published_period_is_dropped() {
-    let n: u32 = 2;
-
-    // ⓐ POSITIVE CONTROL — untouched signature, same trajectory.
-    let mut control = bloodloop_state(3);
-    drive_to_bounded_offer(&mut control, 400).expect("the bounded offer must fire");
-    let (committed_ok, per_cycle, _) = accept_bounded_fixed(&mut control, n);
-    assert!(
-        committed_ok.iter().any(|(_, d)| *d != 0),
-        "REACH-GUARD: the undoctored drive must COMMIT something, else ⓑ's zero proves nothing \
-         about the conformance check; got {committed_ok:?}"
-    );
-
-    // ⓑ the same offer with the published period made unproducible.
-    let mut state = bloodloop_state(3);
-    drive_to_bounded_offer(&mut state, 400).expect("the bounded offer must fire");
-    let (proposer, _, _) = bounded_offer_parts(&state);
-    let stowaway = state
-        .players
-        .iter()
-        .map(|p| p.id)
-        .find(|id| per_cycle.delta.life.get(id).copied().unwrap_or(0) == 0)
-        .expect("the cascade's own controller loses no life, so a zero-term seat exists");
-    let WaitingFor::LoopShortcut { certificate, .. } = &mut state.waiting_for else {
-        unreachable!("bounded_offer_parts already matched the offer")
-    };
-    let Some(engine::analysis::resource::PeriodSignature::EveryRepetition(signed)) =
-        certificate.per_cycle.as_mut()
-    else {
-        panic!("a bounded offer publishes its signature");
-    };
-    signed.delta.life.insert(stowaway, -7);
-
-    let lives_before: Vec<i32> = state.players.iter().map(|p| p.life).collect();
-    r6a_declare_and_accept_all(&mut state, proposer, n);
-
-    assert_eq!(
-        state.players.iter().map(|p| p.life).collect::<Vec<_>>(),
-        lives_before,
-        "CR 732.2a: no cycle can produce the doctored period, so the FIRST one is dropped whole \
-         and ZERO life moves — a partial commit would mean the drive kept a cycle whose \
-         magnitude the agreed bound was not computed from"
-    );
-    assert!(
-        matches!(state.waiting_for, WaitingFor::Priority { .. }),
-        "a non-conforming drive falls closed to manual play, it does not crown and does not \
-         wedge; got {:?}",
-        state.waiting_for
-    );
-    assert_eq!(
-        state.players.iter().filter(|p| p.is_eliminated).count(),
-        0,
-        "nothing was committed, so nothing crossed a CR 704.5a threshold"
     );
 }
 
@@ -15753,7 +13735,7 @@ fn an_unbounded_declaration_is_validated_over_its_schedules_extent() {
         };
         runner
             .act(GameAction::DeclareShortcut {
-                count: IterationCount::UntilLethal,
+                count: offered(runner.state()).1,
                 template: Some(drain_template(cleric, later)),
             })
             .expect("declare dispatch succeeds (a refusal is a manual handback)");
@@ -15763,9 +13745,9 @@ fn an_unbounded_declaration_is_validated_over_its_schedules_extent() {
     assert!(
         matches!(
             refused.state().waiting_for,
-            WaitingFor::Priority { player: P0 }
+            WaitingFor::LoopShortcut { proposer: P0, .. }
         ),
-        "{:?}",
+        "the refusal hands priority back to P0, which may suggest the shortcut again: {:?}",
         refused.state().waiting_for
     );
     assert_eq!(
@@ -16571,8 +14553,9 @@ fn r28_a_declared_template_owning_another_seat_is_refused_at_declare() {
         if hostile {
             // (a) refused into the manual handback.
             assert!(
-                matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-                "(a) a wrong-`owner` declaration hands priority back, got {:?}",
+                matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
+                "(a) a wrong-`owner` declaration hands priority back to P0, which may suggest the \
+                 shortcut again (CR 732.2a), got {:?}",
                 runner.state().waiting_for
             );
             assert!(
@@ -16673,9 +14656,9 @@ fn r28_a_an_empty_schema_offer_is_not_short_circuited_past_the_declare_gates() {
         })
         .expect("dispatched");
     assert!(
-        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
         "(a″) an offer publishing no point still runs the declare gates, so the foreign owner \
-         is refused here too, got {:?}",
+         is refused here too and P0 is offered again, got {:?}",
         runner.state().waiting_for
     );
     assert!(result.events.is_empty(), "(a″) no events on the handback");
@@ -17296,572 +15279,7 @@ fn d7_a_pre_declaration_save_decodes_with_no_declaration() {
 
 // ───── PR #7005 maintainer item: the answer-beat sampler records the SYNCHRONIZED window ─────
 
-/// CR 732.2a. `game::engine::apply_action`'s forced-window ANSWER sampler (the site gated on
-/// `answering_forced_window`) called `record_loop_detect_sample` BEFORE installing the
-/// pipeline's returned `wf`, while the settle sampler in `pass_priority_once_with_pipeline`
-/// records AFTER its `sync_waiting_for`. A frame minted at the answer site therefore carried
-/// the UN-SYNCED pair — whatever the reducer or `run_post_action_pipeline` last wrote straight
-/// into `state.waiting_for`, with `priority_player` never recomputed — while a settle frame
-/// carried the synced one. (NOT the "pre-pipeline" pair: the pipeline itself writes
-/// `state.waiting_for` at five sites inside `run_post_action_pipeline_from`.)
-///
-/// That is a detection hazard, not cosmetics — but the consumer is BASIS A, not
-/// `ring_delta_signature`. PR #7005's first commit and the comments it shipped said a
-/// heterogeneous ring breaks `ring_delta_signature`'s turn-position conjunct "because
-/// `impl PartialEq for GameState` compares both fields"; that is false at source. That
-/// function reads only `ResourceVector::snapshot(&f.normalized)` and
-/// `window_scope_from_cover_frames(..).phase_invariant` (= `turn_number` + `phase` +
-/// `extra_phases.is_empty()`). The real sensitivity is the ring scans that call
-/// `analysis::resource::loop_states_equal_modulo_resources(prior, state)` with `prior` a ring
-/// frame's `normalized` half and `state` the live board: that chains to `loop_states_equal` ⇒
-/// `impl PartialEq for GameState`, which DOES compare `waiting_for` and `priority_player`, and
-/// neither `normalize_for_loop` nor `project_out_resources` neutralizes either — so an
-/// un-synced frame compares UNEQUAL against a synced live board and basis A misses the
-/// recurrence. The fix routes `wf` through `game::public_state::sync_waiting_for` — the
-/// canonical synchronizer, which also recomputes `priority_player` via
-/// `turn_control::authorized_submitter_for_player` — before the record, so both producers mint
-/// the same shape.
-///
-/// FIXTURE: the tracked `dina_conqueror_4p` dump, driven through the production `apply()` path,
-/// so every frame asserted below was minted by `record_loop_detect_sample` itself rather than
-/// staged by the test.
-///
-/// SITE ATTRIBUTION IS DELIBERATELY NOT ATTEMPTED, and the paragraph that stood here claiming
-/// it was "exact" was WRONG. It argued that because the settle sampler is reached only from
-/// `pass_priority_once_with_pipeline` — i.e. from a `Priority` window, which
-/// `is_forced_cascade_window` excludes — "the pre-beat window was forced AND the ring grew"
-/// names the answer site and nothing else. That conflates the window BEFORE the beat with the
-/// window at the settle sampler's own moment. One beat here is one `apply()`, which reaches the
-/// settle sampler AFTER `apply_action` returns, so a beat whose pre-beat window was forced can
-/// perfectly well mint at the SETTLE site — e.g. when answering it resolves the last stack
-/// entry, gating the answer site off on `!stack.is_empty()` while the refill cascade settles.
-/// `answered_forced_window` is ONE conjunct of the production answer-site gate (which also
-/// demands `!in_simulation_probe()`, `loop_detection.samples()`, `!stack.is_empty()`, a
-/// non-shrinking stack, and `Priority{player == active_player}`), so it is a REACH signal and
-/// never an attribution.
-///
-/// The row therefore asserts arms (1) and (2) over EVERY frame a beat MINTED, which makes
-/// attribution irrelevant rather than sharper: both samplers gate their record on
-/// `Priority{player == active_player}` and both record after their own `sync_waiting_for`, so a
-/// frame that fails either arm is a real defect whichever site minted it. The minted set is the
-/// ring's pre-beat/post-beat `Arc`-identity MEMBERSHIP DIFFERENCE. No scalar is derived from the
-/// ring's length, and the length-delta accounting that stood here is deleted rather than
-/// sharpened — a scalar cannot name that set on either of the two production paths the loop body
-/// documents. MEASURED on this drive: 2 forced-window minting beats (5, 14), 3 non-forced ones
-/// (0, 9, 18), 5 frames minted and validated in total, offer at beat 19 over a 5-frame ring.
-///
-/// This fixture never fills the ring, so eviction at capacity, the route the deleted scalar is
-/// shown wrong on, is reached instead by `an_evicting_beat_mints_without_growing_the_ring` on a
-/// board driven through the same production `apply()`.
-///
-/// ⚠ WHAT THIS ROW DOES **NOT** CATCH, stated rather than implied. A PURE REVERT of the reorder
-/// leaves all three arms GREEN, and that is a measurement rather than an oversight: an
-/// instrumented `debug_assert_eq!` census on both fields at that position, run on the
-/// pre-reorder tree over the full lib + integration corpus, reported 0 divergences (per-site
-/// counts in PR #7005's history), so no fixture in the corpus reaches the divergence. The
-/// row is consequently the STANDING pin — it fires the first time a beat does diverge — and its
-/// instrument is proved live by MUTANTS at the sampler instead of by the revert:
-/// * `state.priority_player = PlayerId(3);` after the sync ⇒ arm (2) FAILS at the first mint
-///   (beat 5), `PlayerId(3)` vs `PlayerId(0)`, with arm (2)'s own message; arm (1) is never
-///   reached.
-/// * `state.waiting_for = WaitingFor::GameOver { winner: None };` after the sync ⇒ arm (1)
-///   FAILS at the same beat, `GameOver { winner: None }` vs `Priority { player: PlayerId(0) }`,
-///   with arm (1)'s own message. Arm (2) is SKIPPED there rather than passed — `GameOver` has
-///   no acting player — which is exactly why arm (2) is an `if let` and not an unwrap: an
-///   unwrap would panic on the `None` and replace arm (1)'s explanation with its own. Each
-///   mutant is answered by a DIFFERENT arm, which is what "separately live" means.
-///
-/// Arm (3) is the BLAST-RADIUS pin: the certificate is byte-exact under the pure revert, which
-/// is what makes "this reorder does not perturb detection" a measurement.
-#[test]
-fn answer_beat_frames_carry_the_synced_window_and_the_offer_certificate_is_exact() {
-    use engine::analysis::resource::{PeriodicDelta, ResourceVector};
-
-    let mut state = restore_dump(&gunzip_dump(include_bytes!(
-        "../fixtures/dina_conqueror_4p.json.gz"
-    )));
-
-    // ── REACH-GUARDS. Without these every assertion below is vacuous.
-    assert!(
-        state.loop_detection.samples(),
-        "reach-guard: a non-sampling mode never populates the ring, so neither a frame nor an \
-         offer could exist; got {:?}",
-        state.loop_detection
-    );
-    assert_eq!(
-        state.loop_detect_ring.len(),
-        0,
-        "reach-guard: the dump ships with an EMPTY ring — every frame asserted below was \
-         accumulated by THIS drive through the production producer, not restored from the dump"
-    );
-
-    let pin = engine_live_opponents(&state, P0).first().copied();
-    let mut answer_mints = 0usize;
-    let mut settle_mints = 0usize;
-    let mut frames_validated = 0usize;
-    let mut offer_beat = None;
-    for beat in 0..400usize {
-        if matches!(
-            state.waiting_for,
-            WaitingFor::LoopShortcut {
-                predicted_winner: None,
-                ..
-            }
-        ) {
-            offer_beat = Some(beat);
-            break;
-        }
-        let answered_forced_window = state.waiting_for.is_forced_cascade_window();
-        // THE BEAT'S MINTED SET IS A MEMBERSHIP DIFFERENCE. Nothing about the ring's LENGTH,
-        // and nothing about its `back()`, can name it — both are unsound against production:
-        //
-        // * `GameState::record_loop_detect_sample` pops the front before pushing once the ring
-        //   is at `LOOP_DETECT_RING_CAP`, so an evicting push mints while the length stays
-        //   EQUAL. A `back()`-changed + `after - before` detector reads that as a mint of size
-        //   zero and fails on a legitimate beat.
-        // * `apply_action` clears the ring at its top for any non-`PassPriority`,
-        //   non-`OrderTriggers` action answering a non-forced window, and the settle sampler in
-        //   `pass_priority_once_with_pipeline` mints LATER in the same beat. Net growth is then
-        //   `minted - cleared`, which is smaller than `minted` — a `take(net)` silently skips
-        //   frames the row claims to have checked.
-        //
-        // The full pre-beat membership covers append, eviction and clear-and-rebuild uniformly,
-        // and it makes the ring's capacity irrelevant to the row (no literal cap is transcribed
-        // here; the const is private to `types::game_state`, so a copy could only rot).
-        //
-        // The snapshot holds `Arc` CLONES, not raw addresses, and that is load-bearing rather
-        // than incidental: `pop_front` DROPS the evicted `Arc` before `Arc::new` allocates the
-        // replacement, so an address-keyed snapshot can be aliased by the allocator handing the
-        // freed block straight back, and a genuinely new frame would then read as an old one.
-        // A retained strong reference makes every snapshotted address un-reusable for the whole
-        // beat, so `Arc::ptr_eq` is exact by construction instead of by luck.
-        let before: Vec<_> = state.loop_detect_ring.iter().cloned().collect();
-        if dump_drive_one_beat(&mut state, pin).is_err() {
-            break;
-        }
-        // Frames minted and then evicted WITHIN one beat are absent here by construction —
-        // they are gone from the ring. "Every frame this beat added that the ring still holds"
-        // is exactly the set the arms below claim, and exactly the set any consumer can read.
-        let (minted, _) = ring_membership_delta(&before, &state.loop_detect_ring);
-        if minted.is_empty() {
-            continue;
-        }
-        frames_validated += minted.len();
-        if answered_forced_window {
-            answer_mints += 1;
-        } else {
-            settle_mints += minted.len();
-        }
-        // BOTH ARMS RUN OVER EVERY FRAME THIS BEAT MINTED, which is what makes site attribution
-        // stop mattering — and the row deliberately does NOT try to attribute.
-        //
-        // `answered_forced_window` is `is_forced_cascade_window()` read BEFORE the beat, i.e.
-        // strictly ONE conjunct of the production answer-site gate; that gate also demands
-        // `!in_simulation_probe()`, `loop_detection.samples()`, `!stack.is_empty()`, a
-        // non-shrinking stack, and `Priority{player == active_player}`. One beat here is one
-        // `apply()`, which reaches the SETTLE sampler after `apply_action` returns. So a beat
-        // that answers a forced window resolving the LAST stack entry gates the answer site
-        // off (`!stack.is_empty()` false) while the refill cascade mints a settle frame, and
-        // `answer_mints` increments over a frame the SETTLE site produced.
-        //
-        // Iterating the minted frames removes the question instead of sharpening it. Both
-        // samplers gate their record on `Priority{player == active_player}` and both record
-        // after their `sync_waiting_for`, so both arms hold for EITHER site's frame; a frame
-        // that fails one is a real defect no matter which sampler produced it.
-        for sample in minted {
-            let frame = &sample.live;
-            // ── (2) ITS PRIORITY PLAYER. Asserted FIRST so a mutation that touches only
-            // `priority_player` is caught by its own arm instead of being masked by arm (1).
-            //
-            // The comparand is the AUTHORITY FUNCTION, not `frame.active_player`. `sync_waiting_for`
-            // sets `priority_player = turn_control::authorized_submitter_for_player(state,
-            // waiting_for.acting_player())`, which re-routes to a DIFFERENT seat whenever a
-            // turn-decision controller (Mindslaver) or a latched search-decision controller is in
-            // play. Pinning the seat itself would false-fail a correctly synced frame on any future
-            // turn-control fixture. The recomputation is not circular: neither
-            // `effective_authority_for_player` nor `search_decision_authority` reads
-            // `priority_player`, so a mutant that clobbers only that field still fails here.
-            //
-            // `if let` rather than `expect`, and the difference is MEASURED: an `expect` here
-            // pre-empts arm (1). A window with no acting player (`GameOver`) is precisely what
-            // arm (1) exists to catch, so panicking on the `None` before reaching it replaces
-            // arm (1)'s explanation with an unwrap message and destroys the arms' separation —
-            // the `waiting_for = GameOver` mutant died on the unwrap instead of on arm (1). The
-            // pair stays TOTAL, so this skip opens no hole: either arm (2) runs, or the window
-            // had no actor and arm (1) below fails on that same frame.
-            if let Some(semantic_player) = frame.waiting_for.acting_player() {
-                assert_eq!(
-                    frame.priority_player,
-                    engine::game::turn_control::authorized_submitter_for_player(
-                        frame,
-                        semantic_player
-                    ),
-                    "beat {beat}: `sync_waiting_for` recomputes `priority_player` from the window \
-                 it installs, so an answer-beat frame must carry that window's AUTHORIZED \
-                 SUBMITTER, not whatever the un-synced state left behind"
-                );
-            }
-            // ── (1) THE NEWEST SAMPLED STATE: the window the action RETURNS, never the forced one
-            // it answered.
-            assert_eq!(
-                frame.waiting_for,
-                WaitingFor::Priority {
-                    player: frame.active_player
-                },
-                "beat {beat}: the sampler's own gate requires the RETURNED `wf` to be \
-             `Priority{{active_player}}`, so recording before the sync is the only way the \
-             frame can carry a different window — and `impl PartialEq for GameState` compares it"
-            );
-        }
-    }
-
-    assert!(
-        answer_mints > 0,
-        "reach-guard: the drive must reach at least one MINTING beat whose pre-beat window was \
-         FORCED, else the answer-site path this row exists for was never exercised and it \
-         passes vacuously. Stated exactly: this counts beats whose PRE-beat window satisfied \
-         `is_forced_cascade_window()`, which is ONE conjunct of the production answer-site \
-         gate, so it is a reach guard and NOT proof that the answer sampler is what minted; \
-         got answer={answer_mints} settle={settle_mints}"
-    );
-    assert!(
-        settle_mints > 0,
-        "reach-guard for the WIDENING: arms (1)/(2) now run over every frame a beat minted, \
-         from either sampler, so the drive must also mint at a non-forced (settle) beat — \
-         otherwise the settle-frame coverage this row claims is untested. got \
-         answer={answer_mints} settle={settle_mints}"
-    );
-    let ring_at_offer = state.loop_detect_ring.len();
-    assert_eq!(
-        frames_validated, ring_at_offer,
-        "reach-guard on the MEMBERSHIP DIFFERENCE ITSELF, which is what makes 'every frame the \
-         beat minted' a measurement instead of a claim: every frame the offer's ring holds must \
-         have reached arms (1)/(2) as a member of some beat's minted set. A detector that \
-         silently returned the EMPTY set on a minting beat — exactly what a length delta returns \
-         at capacity — leaves frames in the ring that no arm ever read, and that lands here as \
-         validated {frames_validated} against ring {ring_at_offer}. Equality rather than `>=` \
-         because \
-         this drive neither evicts nor clears (measured: max ring 5 against a capacity of 16, 0 \
-         evicting and 0 clearing beats), so a frame counted but no longer present is equally a \
-         defect on THIS board"
-    );
-    let offer_beat = offer_beat.expect(
-        "reach-guard: the bounded offer must FIRE on this real 4p drain, else arm (3) asserts \
-         about a certificate that was never published",
-    );
-
-    // ── (3) THE RESULTING CERTIFICATE, EXACT. The destructure is EXHAUSTIVE on purpose: a new
-    // `LoopCertificate` field cannot slip past this pin unstated.
-    let (proposer, certificate, _schema) = bounded_offer_parts(&state);
-    assert_eq!(
-        proposer, P0,
-        "the offer beat {offer_beat} publishes the drain's controller as proposer"
-    );
-    let LoopCertificate {
-        unbounded,
-        rising,
-        win_kind,
-        win_kind_at,
-        mandatory,
-        residual_board_delta,
-        per_cycle,
-    } = certificate;
-    assert_eq!(
-        *win_kind_at, None,
-        "CR 732.2a: the threshold authority states its outcome of the loop as a whole"
-    );
-    assert_eq!(
-        *unbounded,
-        vec![
-            ResourceAxis::Life(P0),
-            ResourceAxis::Life(P1),
-            ResourceAxis::Life(P2),
-            ResourceAxis::Life(P3),
-        ],
-        "CR 119.3: the Dina/Conqueror drain moves EVERY seat's life each period — the three \
-         opponents down and the controller up — so all four axes are unbounded"
-    );
-    assert_eq!(
-        *rising,
-        vec![ResourceAxis::Life(P0)],
-        "CR 119.3: only the controller's life rises; the three opponents are drained"
-    );
-    assert_eq!(
-        *win_kind,
-        Some(WinKind::LethalDamage),
-        "CR 704.5a: opponents reach 0 life"
-    );
-    assert!(
-        !*mandatory,
-        "CR 732.2a: the interactive offer exists only for an OPTIONAL loop"
-    );
-    assert_eq!(
-        *residual_board_delta,
-        BoardDelta::default(),
-        "CR 110.1: this cycle recycles its board exactly, so there is no non-recycled remainder"
-    );
-    let Some(PeriodSignature::EveryRepetition(PeriodicDelta {
-        frames_per_period,
-        delta,
-        victim_slot,
-        declarable_victims,
-        forced_aims: _,
-        seat_life_charge,
-        cleanup: _,
-        instructed_mills: _,
-        growth: _,
-        seat_life_charge_growth: _,
-    })) = per_cycle
-    else {
-        panic!(
-            "the bounded producer is the one that NARROWS the CR 704 bound, so it publishes \
-                a per-period signature; got None"
-        )
-    };
-    assert_eq!(
-        *frames_per_period, 2,
-        "one repetition spans two retained ring frames on this board — the gain-life \
-         resolution and the lose-life one"
-    );
-    assert!(
-        victim_slot.is_empty() && declarable_victims.is_empty(),
-        "an untargeted drain announces no CR 601.2c target, so it attributes no per-period \
-         life swing to a decision slot and reserves no CR 704.5a victim domain; got \
-         {victim_slot:?} / {declarable_victims:?}"
-    );
-    let mut expected_delta = ResourceVector::default();
-    expected_delta.life.insert(P0, 1);
-    expected_delta.life.insert(P1, -1);
-    expected_delta.life.insert(P2, -1);
-    expected_delta.life.insert(P3, -1);
-    assert_eq!(
-        *seat_life_charge,
-        expected_delta
-            .life
-            .iter()
-            .filter(|(_, magnitude)| **magnitude < 0)
-            .map(|(seat, magnitude)| (*seat, -*magnitude))
-            .collect::<Vec<_>>(),
-        "CR 119.3 + CR 704.5a: the per-seat divisor the bound was taken over — one POSITIVE \
-         magnitude for each seat this period drains, keyed on the seat CR 119.3 attributes the \
-         loss to, and no entry at all for the controller the period leaves GAINING. \
-         Re-derived from this row's own expected signature rather than pinned, so a divisor \
-         carrying the delta's negative convention, one keyed on the gaining seat, and an \
-         empty one each fail here"
-    );
-    assert_eq!(
-        *delta, expected_delta,
-        "EXACT per-period signature: +1 to the controller, -1 to each opponent, and every \
-         other axis at rest. `ring_delta_signature` is INSENSITIVE to \
-         `waiting_for`/`priority_player` — it reads resource snapshots plus \
-         `phase_invariant` (turn/phase/extra-phases) — so this arm is the blast-radius pin \
-         for the reorder, not a restatement of arms (1)/(2). The frame homogeneity those two \
-         arms pin is basis A's concern (`loop_states_equal_modulo_resources` ⇒ \
-         `impl PartialEq for GameState`)"
-    );
-}
-
 // ───── #7023 maintainer item: a beat's minted frames are a MEMBERSHIP set, not a length delta ─────
-
-/// `(minted_frames, dropped)` for one beat, by `Arc` IDENTITY: frames the ring gained, and
-/// pre-beat frames it lost. Generic over the sample type so the ring's private element type is
-/// never named here.
-///
-/// `before` must be a slice of `Arc` CLONES held across the beat, not of raw addresses.
-/// `GameState::record_loop_detect_sample` calls `pop_front()` — which DROPS the evicted
-/// allocation — before `Arc::new` claims a new one of identical layout, so an address-keyed
-/// snapshot can be aliased by the allocator handing the freed block straight back, and a
-/// genuinely new frame would then read as an old one. A retained strong reference makes every
-/// snapshotted address un-reusable for the whole beat, so `ptr_eq` is exact by construction
-/// rather than by luck.
-fn ring_membership_delta<'a, T>(
-    before: &[std::sync::Arc<T>],
-    after: &'a std::collections::VecDeque<std::sync::Arc<T>>,
-) -> (Vec<&'a std::sync::Arc<T>>, usize) {
-    let minted = after
-        .iter()
-        .filter(|f| !before.iter().any(|b| std::sync::Arc::ptr_eq(b, f)))
-        .collect();
-    let dropped = before
-        .iter()
-        .filter(|b| !after.iter().any(|f| std::sync::Arc::ptr_eq(b, f)))
-        .count();
-    (minted, dropped)
-}
-
-/// CR 732.2a. ROUTE ⓔ — EVICTION AT `LOOP_DETECT_RING_CAP`: a beat that MINTS WITHOUT GROWING.
-///
-/// `answer_beat_frames_carry_the_synced_window_and_the_offer_certificate_is_exact` reads a beat's
-/// minted frames as the `loop_detect_ring`'s pre/post `Arc`-identity MEMBERSHIP DIFFERENCE. It
-/// previously read them as `rev().take(after_len - before_len)` off a changed `back()`, and this
-/// row is the reachability half of the #7023 review that replaced that: the scalar is wrong on
-/// this production route, and the `dina_conqueror_4p` drive that row performs
-/// does not reach it — measured on it: max ring 5 against a capacity of 16, 0 evicting beats, 0
-/// clearing beats. Correcting a detector against routes no fixture reaches would re-open the
-/// evidential hole the correction exists to close, so each route gets a board.
-///
-/// THE MECHANISM. `GameState::record_loop_detect_sample` calls `pop_front()` and THEN
-/// `push_back()` once the ring is at `LOOP_DETECT_RING_CAP`. One frame leaves, one arrives: the
-/// back changes, the LENGTH DOES NOT. Net growth is 0 on a beat that minted 1, so
-/// `rev().take(net)` inspects nothing and the deleted `assert!(grew >= 1, ..)` — labelled "fail
-/// closed" in-tree — failed the test on an ordinary drain beat rather than on an anomaly. That
-/// label was wrong about which side of the line the beat is on, and it went with the code.
-///
-/// FIXTURE: the tracked `dellian_emblem_conqueror_4p` dump, driven through production `apply()`,
-/// so the ring that reaches capacity is this drive's own accumulation through
-/// `record_loop_detect_sample`. MEASURED: first evicting beat at 72 (ring 16 -> 16, minted 1,
-/// dropped 1), three more inside the first 90.
-///
-/// THE SEARCH PREDICATE IS STRUCTURAL AND THE ASSERTION IS THE CONSEQUENCE, never the reverse:
-/// the witness is the first beat that LOST a pre-beat frame without the ring shrinking — pure
-/// membership plus an ordering, saying nothing about minting — and the assertion is then what
-/// the beat minted and what its length did. A witness selected on "minted while the length stood
-/// still" would have carried its own conclusion into the arm that claims to test it.
-///
-/// This row does NOT re-assert the answer-beat row's frame invariants (the synced
-/// `waiting_for`/`priority_player` pair). Its subject is the DETECTOR, not the frames.
-#[test]
-fn an_evicting_beat_mints_without_growing_the_ring() {
-    let mut state = restore_dump(&gunzip_dump(include_bytes!(
-        "../fixtures/dellian_emblem_conqueror_4p.json.gz"
-    )));
-    assert_eq!(
-        state.loop_detect_ring.len(),
-        0,
-        "reach-guard: the dump ships with an EMPTY ring, so the capacity reached below is THIS \
-         drive's accumulation through the production sampler and not a restored ring"
-    );
-
-    let pin = engine_live_opponents(&state, P0).first().copied();
-    let mut max_ring = 0usize;
-    let mut beats_run = 0usize;
-    let mut evicting = None;
-    for beat in 0..120usize {
-        if matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }) {
-            break;
-        }
-        let before: Vec<_> = state.loop_detect_ring.iter().cloned().collect();
-        if dump_drive_one_beat(&mut state, pin).is_err() {
-            break;
-        }
-        beats_run = beat + 1;
-        max_ring = max_ring.max(state.loop_detect_ring.len());
-        let (minted_frames, dropped) = ring_membership_delta(&before, &state.loop_detect_ring);
-        let minted = minted_frames.len();
-        if dropped == 0 || state.loop_detect_ring.len() < before.len() {
-            continue;
-        }
-        evicting = Some((
-            beat,
-            before.len(),
-            state.loop_detect_ring.len(),
-            minted,
-            dropped,
-        ));
-        break;
-    }
-
-    let (beat, before_len, after_len, minted, dropped) = evicting.unwrap_or_else(|| {
-        panic!(
-            "reach-guard: no beat replaced a ring frame without shrinking the ring, so this \
-             drive never reached `LOOP_DETECT_RING_CAP` and the eviction route is untested — the \
-             state the `dina_conqueror_4p` drive is permanently in, and the reason this row \
-             exists on a different board. mode {:?}, max ring {max_ring} over {beats_run} beats",
-            state.loop_detection
-        )
-    });
-    assert_eq!(
-        (minted, after_len),
-        (1, before_len),
-        "beat {beat}: an evicting push is 1-for-1 — `record_loop_detect_sample` pops the front \
-         and THEN pushes at capacity — so this beat MINTED while its length stood still at \
-         {before_len}, dropping {dropped}. THE DELETED SCALAR ON THIS BEAT: \
-         `after_len - before_len` is 0, so `rev().take(grew)` inspects NOTHING while the beat \
-         minted a frame, and `assert!(grew >= 1)` fails the whole test on an ordinary drain \
-         beat. The membership difference reports the mint; no length delta can"
-    );
-}
-
-/// CR 732.1 + CR 117.3d: a "Resolve All" press mid-cascade keeps the loop-detection ring. The
-/// request is a shortcut over passes, so the beat drops no accumulated frame and its own pass
-/// mints one, growing the ring by exactly one.
-///
-/// `SetAutoPass { UntilStackEmpty }` IS NOT A TEST HOOK. It is the exact payload the client's
-/// Arena-style "Resolve All" control dispatches (`client/src/game/dispatch.ts`), so this beat is
-/// a player pressing that button mid-cascade. It is absent from
-/// `ai_support::legal_actions_for_viewer`'s enumeration — `classify_flat_priority_action` files
-/// it with the preference-propagation actions — which is why the generic dump driver never picks
-/// it and why it is dispatched by name here instead of being found by the driver's "first
-/// legal action" policy. Dispatching it by name changes nothing about the beat: it is one
-/// ordinary `apply()`, validated by the production reducer like any other.
-///
-/// FIXTURE: the tracked `dina_conqueror_4p` dump — the SAME board the answer-beat row drives,
-/// pressed at the first `Priority` window carrying 2 accumulated frames, so a dropped frame is
-/// visible by membership.
-#[test]
-fn a_resolve_all_press_keeps_the_ring_and_mints_inside_the_same_beat() {
-    let mut state = restore_dump(&gunzip_dump(include_bytes!(
-        "../fixtures/dina_conqueror_4p.json.gz"
-    )));
-    assert_eq!(
-        state.loop_detect_ring.len(),
-        0,
-        "reach-guard: the dump ships with an EMPTY ring, so the frames the press below keeps \
-         were accumulated by THIS drive through the production sampler"
-    );
-
-    let pin = engine_live_opponents(&state, P0).first().copied();
-    let mut max_ring = 0usize;
-    let mut beats_run = 0usize;
-    let mut pressed = None;
-    for beat in 0..120usize {
-        if matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }) {
-            break;
-        }
-        let before: Vec<_> = state.loop_detect_ring.iter().cloned().collect();
-        max_ring = max_ring.max(before.len());
-        if before.len() >= 2 && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-            let who = state
-                .waiting_for
-                .acting_player()
-                .expect("a `Priority` window names its actor");
-            apply(
-                &mut state,
-                who,
-                GameAction::SetAutoPass {
-                    mode: AutoPassRequest::UntilStackEmpty,
-                },
-            )
-            .unwrap_or_else(|e| panic!("resolve-all err: {e:?}"));
-            let (minted_frames, dropped) = ring_membership_delta(&before, &state.loop_detect_ring);
-            pressed = Some((
-                beat,
-                before.len(),
-                state.loop_detect_ring.len(),
-                minted_frames.len(),
-                dropped,
-            ));
-            break;
-        }
-        if dump_drive_one_beat(&mut state, pin).is_err() {
-            break;
-        }
-        beats_run = beat + 1;
-    }
-
-    let (beat, before_len, after_len, minted, dropped) = pressed.unwrap_or_else(|| {
-        panic!(
-            "reach-guard: no `Priority` window carried 2 accumulated frames, so the press was \
-             never dispatched. max ring {max_ring} over {beats_run} beats"
-        )
-    });
-    assert_eq!(
-        (minted, dropped, after_len),
-        (1, 0, before_len + 1),
-        "beat {beat}: a Resolve-All press must keep all {before_len} accumulated frames and \
-         mint its own pass's sample"
-    );
-}
 
 /// **Row T1b — STRUCTURAL, and the tier is FORCED.** CR 608.2b + CR 601.2c (reached via
 /// CR 603.3d): BOTH `WaitingFor::TriggerTargetSelection` reducer arms route their
@@ -18067,222 +15485,6 @@ fn detector_cost_legs(beats: usize) -> (CostLeg, CostLeg) {
          drive helper failure, not a measurement"
     );
     (interactive, off)
-}
-
-/// CR 732.2a: the shortcut detector's per-beat cost, separated by tick site and each site
-/// sized against a detector-off leg of the same drive on the same fixture. Asserts that every
-/// site this drive forces to fire ticks on both axes, that the detector-off leg ticks nothing,
-/// and that the compare population still covers the clone count.
-///
-/// Every identity below holds once each asserted site has fired at least once, so this row
-/// drives a short beat count rather than the attribution row's — the wall clock, and only the
-/// wall clock, is what needs the long drive.
-#[test]
-fn the_detector_separates_into_sized_parts_against_a_detector_off_leg() {
-    const BEATS: usize = 12;
-    // Forced non-zero by the bridge's own entry (`reconcile`), by what the bridge calls
-    // unconditionally before any recurrence question (`mandatory`, `winner_scan`), by Path D
-    // being reached whenever Path A did not return (`bounded_offer`, which the `waiting_for`
-    // leg-equality pins), and by the sampler minting into the ring the reduction then walks.
-    const ASSERTED_PARTS: [&str; 6] = [
-        "sample_normalize",
-        "sample_live",
-        "reconcile",
-        "mandatory",
-        "winner_scan",
-        "bounded_offer",
-    ];
-    const ASSERTED_CLONES: [&str; 4] = [
-        "sampler_normalized_clones",
-        "sampler_live_clones",
-        "projected_clones",
-        "compares_equal_modulo_resources",
-    ];
-    // The ring walk's meter row, named as a literal rather than read back out of the meter.
-    const LIVE_RECURRENCE_ARM: &str = "recurrence_scan_optional";
-
-    let (interactive, off) = detector_cost_legs(BEATS);
-
-    // The negative, and its reach-guard: each field is paired with ITSELF on the Interactive
-    // leg below, in this same process. Over the printed set both legs read zero, so no
-    // reach-guard exists there and none is claimed.
-    for (name, nanos, calls) in off.cost.parts() {
-        assert_eq!(
-            (nanos, calls),
-            (0, 0),
-            "the detector-OFF leg must tick nothing — `{name}` read {nanos} ns over {calls} \
-             calls. Both sampler ends and the reconcile seam sit behind \
-             `LoopDetectionMode::samples()` and the meter sits INSIDE those gates, so a tick \
-             here is a site that escaped one (a nested legality probe included) — or a \
-             `reset_loop_detect_cost()` that did nothing, which this leg ordering is what \
-             exposes"
-        );
-    }
-    for (name, count) in off.cost.clones() {
-        assert_eq!(
-            count, 0,
-            "the detector-OFF leg must tick nothing — `{name}` read {count}"
-        );
-    }
-
-    let part_names: Vec<&str> = interactive
-        .cost
-        .parts()
-        .iter()
-        .map(|(name, _, _)| *name)
-        .collect();
-    for want in ASSERTED_PARTS.iter().chain([&LIVE_RECURRENCE_ARM]) {
-        assert!(
-            part_names.contains(want),
-            "reach-guard: `{want}` is not a tick site in `parts()` — a renamed or deleted \
-             field would otherwise empty this row's asserted set in silence. Sites: \
-             {part_names:?}"
-        );
-    }
-    for (name, nanos, calls) in interactive.cost.parts() {
-        if !(ASSERTED_PARTS.contains(&name) || name == LIVE_RECURRENCE_ARM) {
-            continue;
-        }
-        assert!(
-            calls > 0 && nanos > 0,
-            "`{name}` must carry a non-zero call count AND a non-zero nanosecond total on the \
-             Interactive leg; read {nanos} ns over {calls} calls. A zero on either axis is a \
-             tick that is not installed, not reached, or not recording"
-        );
-    }
-
-    let clone_names: Vec<&str> = interactive
-        .cost
-        .clones()
-        .iter()
-        .map(|(name, _)| *name)
-        .collect();
-    for want in ASSERTED_CLONES {
-        assert!(
-            clone_names.contains(&want),
-            "reach-guard: `{want}` is not a tick site in `clones()`. Sites: {clone_names:?}"
-        );
-    }
-    for (name, count) in interactive.cost.clones() {
-        if ASSERTED_CLONES.contains(&name) {
-            assert!(
-                count > 0,
-                "`{name}` must be non-zero on the Interactive leg; read {count}"
-            );
-        }
-    }
-
-    // The one law covering the printed compare sites. `project_out_resources` is declared
-    // without `pub`, so no caller can exist outside its own module and the population is
-    // compiler-closed; each of its four production callers projects both sides as a pair.
-    // Deleting the tick at any FIRING compare site drops the right-hand side below the clone
-    // count it has to cover. A bound and not a parity, because the reconcile bridge's ring walk
-    // hoists two current-side projections per entry and ticks no compare for them: the law is a
-    // claim about ring length too, and on this fixture it holds from five beats up and fails
-    // below. Re-derive that floor by lowering `BEATS`.
-    assert!(
-        u64::from(interactive.cost.projected_clones)
-            <= 2 * u64::from(interactive.cost.resource_compares()),
-        "projected_clones ({}) must stay within 2 x resource_compares ({}) — the bridge's ring \
-         walk projects two current-side frames per entry and ticks no compare for them, so \
-         under five beats the beat count alone breaches this bound; this row ran {BEATS}, and \
-         above that floor the cause is a compare site that stopped being counted",
-        interactive.cost.projected_clones,
-        interactive.cost.resource_compares()
-    );
-
-    println!(
-        "BEATS {BEATS}  lives {:?}  stack {}  waiting {}",
-        interactive.lives, interactive.stack_len, interactive.waiting
-    );
-    println!(
-        "  DERIVED resource_compares {}  vs projected_clones {}  (base relation: 2 x compares)",
-        interactive.cost.resource_compares(),
-        interactive.cost.projected_clones
-    );
-    for (name, count) in interactive.cost.clones() {
-        println!("  COUNT {name:<38} {count}");
-    }
-
-    println!("  PRINTED SITES, each beside the ground that decides its zero:");
-    println!(
-        "    object_growth  ns={} calls={}  — GROUND (asserted per beat; discriminating on \
-         the Interactive leg, since the `Off` leg's whole meter sits behind `samples()`): the \
-         drive helper reads this counter itself after every beat and reds on a non-zero",
-        interactive.cost.object_growth_ns, interactive.cost.object_growth_calls
-    );
-    println!(
-        "    compares_cover_modulo_fodder_growth  count={}  — GROUND (asserted per beat; \
-         discriminating on the Interactive leg, same as `object_growth` above): the drive \
-         helper reads this counter itself after every beat too",
-        interactive.cost.compares_cover_modulo_fodder_growth
-    );
-    println!(
-        "    compares_cover_modulo_object_growth  count={}  — GROUND (build-level, so it \
-         cannot lapse at runtime and no runtime assertion is available or needed): its only \
-         production caller is `analysis::loop_check::detect_loop`, whose own non-test callers \
-         all sit in `analysis::corpus`, a module `analysis/mod.rs` gates on `test` or the \
-         `combo-verify` feature. A build with that feature on is not the build under test",
-        interactive.cost.compares_cover_modulo_object_growth
-    );
-    println!(
-        "    compares_cover_modulo_growth_scoped  count={}  — NO zero-ground, and none is \
-         claimed: every production call site reaches it as the second disjunct of an `||` (or \
-         the `else if`) whose first arm is a `loop_states_equal_modulo_resources` compare, so \
-         whether it fires is decided by comparison data this row pins nothing about. It is \
-         covered by the `projected_clones <= 2 x resource_compares` law asserted above",
-        interactive.cost.compares_cover_modulo_growth_scoped
-    );
-}
-
-/// CR 732.2a: the reconcile bridge's ring walks derive the current side ONCE per walk instead
-/// of once per comparison, so the same drive does strictly fewer projections at the same
-/// compare count.
-///
-/// `projected_clones` is the work counter and `resource_compares()` the decision counter at
-/// multiplicity 2: `project_out_resources` is declared without `pub`, so its caller population
-/// is compiler-closed, and each of those callers projects both sides between its own entry
-/// tick and its second projection — the two read EQUAL at base.
-///
-/// REVERT-FAILING over the one walk this drive runs. `SharedCurrentFrames::new` has one call
-/// site — the `!mandatory` ring walk of `interactive_loop_bridge` — and every other production
-/// call of the four compare entries derives both sides, so a second hoist anywhere would hold
-/// this whole-detector inequality up on its own. This fixture takes the
-/// `!mandatory` walk alone, the live arm
-/// `the_detector_separates_into_sized_parts_against_a_detector_off_leg` pins on the same drive:
-/// hand THAT walk `state` again instead of the shared frames and the current side is re-derived
-/// per prior, returning `projected_clones` to `2 x resource_compares` and failing the strict
-/// inequality — while every verdict row stays green.
-#[test]
-fn the_bridge_shares_one_current_side_projection_across_its_ring_walk() {
-    const BEATS: usize = 12;
-    let interactive = drive_cost_leg(LoopDetectionMode::Interactive, BEATS);
-    assert_eq!(
-        interactive.beats, BEATS,
-        "reach-guard: the leg must have driven the full {BEATS} beats"
-    );
-    let compares = u64::from(interactive.cost.resource_compares());
-    assert!(
-        compares > 0,
-        "reach-guard: no comparison ran, so there is nothing for the clone count to be below"
-    );
-    let walk_calls = interactive.cost.recurrence_scan_optional_calls;
-    assert!(
-        walk_calls > 0,
-        "reach-guard: neither ring walk ran, so no comparison took the shared path"
-    );
-    assert!(
-        u64::from(interactive.cost.projected_clones) < 2 * compares,
-        "projected_clones ({}) must be strictly below 2 x resource_compares ({compares}); a \
-         walk that re-derives the current side per prior reads exactly 2 x, and a `BEATS` below \
-         six leaves the walk too short to pay for its own two uncounted frames",
-        interactive.cost.projected_clones
-    );
-    println!(
-        "BEATS {BEATS}  projected_clones {}  resource_compares {compares}  ring-walk calls \
-         {walk_calls}",
-        interactive.cost.projected_clones
-    );
 }
 
 /// CR 732.2a: the same drive, ATTRIBUTED — every part's share of `wall(Interactive) -
@@ -18696,43 +15898,37 @@ fn a_take_ending_at_an_answer_beat_ends_where_play_by_hand_does() {
     let mut got = Vec::new();
     let mut want = Vec::new();
     let mut stacks = Vec::new();
-    for until_lethal in [true, false] {
-        for match_type in [MatchType::Bo1, MatchType::Bo3] {
-            let (by_hand_life, by_hand_stack) = two_gainer_drain_by_hand(match_type);
-            let (mut runner, kickoff) = setup_2p_two_gainer_drain(LoopDetectionMode::Interactive);
-            install_match(&mut runner, match_type, LoopDetectionMode::Interactive);
-            let _ = runner.cast(kickoff).resolve();
-            let (_events, offer) = drive_collect(&mut runner, 2000);
-            assert!(
-                matches!(offer, WaitingFor::LoopShortcut { .. }),
-                "reach: the drain is offered, got {offer:?}"
-            );
-            let count = if until_lethal {
-                IterationCount::UntilLethal
-            } else {
-                IterationCount::Fixed(life(&runner, P1) as u32 + 1)
-            };
-            let events = declare_and_accept(&mut runner, count.clone());
-            let game_overs: Vec<GameEvent> = events
-                .into_iter()
-                .filter(|event| matches!(event, GameEvent::GameOver { .. }))
-                .collect();
-            stacks.push((runner.state().stack.len(), by_hand_stack));
-            got.push((
-                count.clone(),
-                match_type,
-                match_reading(runner.state()),
-                life(&runner, P0),
-                game_overs,
-            ));
-            want.push((
-                count,
-                match_type,
-                ended(match_type, Some(P0)),
-                by_hand_life,
-                vec![GameEvent::GameOver { winner: Some(P0) }],
-            ));
-        }
+    for match_type in [MatchType::Bo1, MatchType::Bo3] {
+        let (by_hand_life, by_hand_stack) = two_gainer_drain_by_hand(match_type);
+        let (mut runner, kickoff) = setup_2p_two_gainer_drain(LoopDetectionMode::Interactive);
+        install_match(&mut runner, match_type, LoopDetectionMode::Interactive);
+        let _ = runner.cast(kickoff).resolve();
+        let (_events, offer) = drive_collect(&mut runner, 2000);
+        assert!(
+            matches!(offer, WaitingFor::LoopShortcut { .. }),
+            "reach: the drain is offered, got {offer:?}"
+        );
+        let count = offered(runner.state()).1;
+        let events = declare_and_accept(&mut runner, count.clone());
+        let game_overs: Vec<GameEvent> = events
+            .into_iter()
+            .filter(|event| matches!(event, GameEvent::GameOver { .. }))
+            .collect();
+        stacks.push((runner.state().stack.len(), by_hand_stack));
+        got.push((
+            count.clone(),
+            match_type,
+            match_reading(runner.state()),
+            life(&runner, P0),
+            game_overs,
+        ));
+        want.push((
+            count,
+            match_type,
+            ended(match_type, Some(P0)),
+            by_hand_life,
+            vec![GameEvent::GameOver { winner: Some(P0) }],
+        ));
     }
     assert_eq!(got, want);
     assert!(
@@ -18885,4 +16081,234 @@ fn object_growth_self_damage_recast_is_counted() {
         panic!("the drain-free loop is not offered");
     };
     assert!(!schema.is_bounded());
+}
+
+/// Verbatim Oracle texts (Scryfall) for the departure boards below.
+const BLESSED_WINE: &str =
+    "You gain 1 life.\nDraw a card at the beginning of the next turn's upkeep.";
+const MARAUDING_BLIGHT_PRIEST: &str = "Whenever you gain life, each opponent loses 1 life.";
+const EXQUISITE_BLOOD: &str = "Whenever an opponent loses life, you gain that much life.";
+const KEFKA_RULER_OF_RUIN: &str =
+    "Flying\nWhenever an opponent loses life during your turn, you draw that many cards.";
+
+#[derive(Clone, Copy)]
+enum Departing {
+    BlightPriest,
+    Conqueror,
+    Kefka,
+    ExquisiteBlood,
+}
+
+/// Three players in P0's main phase, P0 at 20 with `permanents` entered in order and `library`
+/// cards on top of its library, P1 holding Lightning Bolt and a Mountain; P0 has cast Blessed
+/// Wine, whose delayed draw falls in the next turn.
+fn departure_board(p1: i32, p2: i32, permanents: &[Departing], library: usize) -> GameState {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, p1);
+    scenario.with_life(P2, p2);
+    for permanent in permanents {
+        match permanent {
+            Departing::BlightPriest => {
+                scenario.add_creature_from_oracle(
+                    P0,
+                    "Marauding Blight-Priest",
+                    3,
+                    2,
+                    MARAUDING_BLIGHT_PRIEST,
+                );
+            }
+            Departing::Conqueror => {
+                scenario.add_creature_from_oracle(
+                    P0,
+                    "Bloodthirsty Conqueror",
+                    5,
+                    5,
+                    BLOODTHIRSTY_CONQUEROR,
+                );
+            }
+            Departing::Kefka => {
+                scenario.add_creature_from_oracle(
+                    P0,
+                    "Kefka, Ruler of Ruin",
+                    5,
+                    7,
+                    KEFKA_RULER_OF_RUIN,
+                );
+            }
+            Departing::ExquisiteBlood => {
+                scenario.add_enchantment_from_oracle(P0, "Exquisite Blood", EXQUISITE_BLOOD);
+            }
+        }
+    }
+    let names: Vec<String> = (0..library).map(|i| format!("Library card {i}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    scenario.with_library_top(P0, &names);
+    scenario.add_basic_land(P1, ManaColor::Red);
+    scenario.add_bolt_to_hand(P1);
+    let wine = scenario
+        .add_spell_to_hand_from_oracle(P0, "Blessed Wine", true, BLESSED_WINE)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    drop(runner.cast(wine).commit());
+    runner.state().clone()
+}
+
+/// Plays `state` on to its next loop-shortcut offer or game end, P0 ordering its Kefka triggers
+/// below the others (CR 603.3b); calls `at_priority` at every priority frame on the way.
+fn play_to_next_offer(state: &mut GameState, mut at_priority: impl FnMut(&GameState)) {
+    for _ in 0..400 {
+        match state.waiting_for.clone() {
+            WaitingFor::LoopShortcut { .. } | WaitingFor::GameOver { .. } => return,
+            WaitingFor::OrderTriggers { player, triggers } => {
+                let (kefka, rest): (Vec<usize>, Vec<usize>) = (0..triggers.len())
+                    .partition(|&i| triggers[i].source_name.starts_with("Kefka"));
+                let actor =
+                    engine::game::turn_control::authorized_submitter_for_player(state, player);
+                apply(
+                    state,
+                    actor,
+                    GameAction::OrderTriggers {
+                        order: kefka.into_iter().chain(rest).collect(),
+                    },
+                )
+                .expect("P0 orders its triggers");
+                continue;
+            }
+            WaitingFor::Priority { .. } => at_priority(state),
+            _ => {}
+        }
+        dump_drive_one_beat(state, Some(P1)).expect("the board plays on");
+    }
+    panic!("no offer or game end within the beat budget");
+}
+
+fn offered(state: &GameState) -> (PlayerId, IterationCount, Option<PlayerId>) {
+    let WaitingFor::LoopShortcut {
+        proposer,
+        predicted_winner,
+        schema,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!(
+            "expected a loop-shortcut offer, got {:?}",
+            state.waiting_for
+        );
+    };
+    (*proposer, schema.iteration_count.clone(), *predicted_winner)
+}
+
+fn library_len(state: &GameState, seat: PlayerId) -> usize {
+    state.players[seat.0 as usize].library.len()
+}
+
+/// CR 603.3b + CR 732.2a + CR 800.4a: Marauding Blight-Priest's loss triggers Bloodthirsty
+/// Conqueror and Kefka; P0 orders the Kefka triggers below, so they stay buried and P0 draws
+/// nothing. From P1 2 / P2 8, P1 leaves at repetition 2, and every later repetition orders the
+/// remaining Conqueror and Kefka triggers as the record did; P2 leaves at repetition 8 and P0 wins
+/// (CR 104.2a), whichever of Conqueror and Kefka entered first.
+#[test]
+fn a_departure_kefka_entry_order_does_not_move_its_count() {
+    for order in [
+        [Departing::Conqueror, Departing::Kefka],
+        [Departing::Kefka, Departing::Conqueror],
+    ] {
+        let mut state = departure_board(3, 9, &[Departing::BlightPriest, order[0], order[1]], 4);
+        play_to_next_offer(&mut state, |_| {});
+        assert_eq!(
+            (offered(&state), seat_lives(&state)[1..].to_vec()),
+            (
+                (P0, IterationCount::Fixed(8), Some(P0)),
+                vec![(P1, 2), (P2, 8)]
+            )
+        );
+        let library = library_len(&state, P0);
+        r6a_declare_and_accept_all(&mut state, P0, 8);
+        assert_eq!(
+            (state.waiting_for.clone(), library_len(&state, P0)),
+            (WaitingFor::GameOver { winner: Some(P0) }, library)
+        );
+    }
+}
+
+/// CR 800.4a: after the first offer is declined, the frame where P1 is at 1 loses P1 in its first
+/// repetition, so it names no period the compared cycles repeat; the drive goes on to P1 gone and
+/// P2 at 4, where each repetition costs P2 1 and P0 wins at the fourth (CR 104.2a).
+#[test]
+fn a_departure_kefka_declined_offer_is_offered_again_after_the_departure() {
+    let mut state = departure_board(
+        3,
+        9,
+        &[
+            Departing::BlightPriest,
+            Departing::Conqueror,
+            Departing::Kefka,
+        ],
+        4,
+    );
+    play_to_next_offer(&mut state, |_| {});
+    assert_eq!(offered(&state), (P0, IterationCount::Fixed(8), Some(P0)));
+    apply(&mut state, P0, GameAction::DeclineShortcut).expect("P0 declines");
+    let mut lead_ins = Vec::new();
+    play_to_next_offer(&mut state, |frame| {
+        if frame.players[1].life == 1 && !frame.players[1].is_eliminated {
+            lead_ins.extend(
+                engine::game::period_confirm::confirm_for_tests(frame)
+                    .into_iter()
+                    .filter(|(span, _)| {
+                        span.cause == engine::game::NamingCause::MandatoryRecurrence
+                    })
+                    .map(|(_, verdict)| verdict.map(drop)),
+            );
+        }
+    });
+    assert!(
+        !lead_ins.is_empty(),
+        "reach: a frame with P1 at 1 asks a span"
+    );
+    assert!(
+        lead_ins.iter().all(
+            |verdict| *verdict == Err(engine::game::period_confirm::OfferRefusal::NoRecurrence)
+        ),
+        "{lead_ins:?}"
+    );
+    assert_eq!(
+        (
+            offered(&state),
+            seat_lives(&state)[2],
+            eliminated_seats(&state)
+        ),
+        ((P0, IterationCount::Fixed(4), Some(P0)), (P2, 4), vec![P1])
+    );
+    r6a_declare_and_accept_all(&mut state, P0, 4);
+    assert_eq!(state.waiting_for, WaitingFor::GameOver { winner: Some(P0) });
+}
+
+/// CR 704.3 + CR 704.5a + CR 104.2a: Marauding Blight-Priest with Exquisite Blood costs each
+/// opponent 1 per repetition, so from a frame with both at L both reach 0 at repetition L and
+/// leave in one state-based action, and P0 wins.
+#[test]
+fn a_drain_whose_last_opponents_fall_together_is_offered_and_won() {
+    for (life, frame, count) in [(4, 3, 3), (3, 2, 2)] {
+        let mut state = departure_board(
+            life,
+            life,
+            &[Departing::BlightPriest, Departing::ExquisiteBlood],
+            0,
+        );
+        play_to_next_offer(&mut state, |_| {});
+        assert_eq!(
+            (offered(&state), seat_lives(&state)[1..].to_vec()),
+            (
+                (P0, IterationCount::Fixed(count), Some(P0)),
+                vec![(P1, frame), (P2, frame)]
+            ),
+            "from {life}/{life}"
+        );
+        r6a_declare_and_accept_all(&mut state, P0, count);
+        assert_eq!(state.waiting_for, WaitingFor::GameOver { winner: Some(P0) });
+    }
 }

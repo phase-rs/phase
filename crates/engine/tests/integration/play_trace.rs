@@ -3320,7 +3320,8 @@ mod recorded_niv_table {
 
     /// CR 732.2a + CR 120.3a + CR 104.2a: the suggestion is performed before it is published, so
     /// the offer states the count it reaches — every opponent's life over two pings a repetition —
-    /// and its take ends the game; the own declaration, performed alike, reaches 14.
+    /// and its take ends the game; the own declaration, performed alike, reaches 15, the repetition
+    /// its seat leaves in (CR 800.4a).
     #[test]
     fn a_recorded_niv_table_offers_and_takes_what_its_suggestion_reaches() {
         let Some(mut runner) = offered(&TABLE, &[], 0, false) else {
@@ -3345,7 +3346,7 @@ mod recorded_niv_table {
         assert_eq!(
             declaration.as_ref().map(|own| own.replay.clone()),
             Some(ReplayMode::Scheduled {
-                count: IterationCount::Fixed(14)
+                count: IterationCount::Fixed(15)
             })
         );
         // CR 115.4: the published point is the "any target" announcement's own legal set, and

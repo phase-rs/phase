@@ -2298,6 +2298,73 @@ fn an_altar_zulaport_period_is_offered_a_bounded_shortcut_and_taken() {
     }
 }
 
+/// CR 800.4a + CR 104.2a: on four seats, P0 sacrifices Gravecrawler to Phyrexian Altar beside
+/// Blood Artist ("Whenever this creature or another creature dies, target player loses 1 life and
+/// you gain 1 life."), aiming each trigger at P1, and recasts it. The repetition P1 leaves in is
+/// performed and ends the count: the offer is P1's life, with two opponents left and nobody
+/// crowned.
+#[test]
+fn a_targeted_drain_on_four_seats_counts_the_repetition_its_seat_leaves_in() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let altar = scenario.add_real_card(P0, "Phyrexian Altar", Zone::Battlefield, db);
+    for card in ["Blood Artist", "Walking Corpse"] {
+        scenario.add_real_card(P0, card, Zone::Battlefield, db);
+    }
+    let gravecrawler = scenario.add_real_card(P0, "Gravecrawler", Zone::Battlefield, db);
+    for seat in 0..4 {
+        for _ in 0..8 {
+            scenario.add_real_card(PlayerId(seat), "Swamp", Zone::Library, db);
+        }
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    let score = |action: &GameAction| {
+        2 * names(&[gravecrawler])(action)
+            + chooses_color(ManaType::Black)(action)
+            + i32::from(matches!(
+                action,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Player(P1))
+                }
+            ))
+    };
+    for _ in 0..4 {
+        let index = ability(runner.state(), altar, true);
+        activate(&mut runner, altar, index);
+        settle(&mut runner, &score);
+        if is_offer(runner.state()) {
+            break;
+        }
+        cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
+        settle(&mut runner, &score);
+        if is_offer(runner.state()) {
+            break;
+        }
+    }
+    let offered = runner.state();
+    assert_eq!(
+        offered.stack.len(),
+        1,
+        "reach: Blood Artist's trigger stands at the offer"
+    );
+    let life = offered.players[1].life as u32;
+    bounded_recorded_offer(offered, life);
+    let WaitingFor::LoopShortcut {
+        schema,
+        predicted_winner,
+        ..
+    } = &offered.waiting_for
+    else {
+        unreachable!("asserted an offer");
+    };
+    assert_eq!(
+        (schema.measured_repetition_bound, *predicted_winner),
+        (Some(life), None)
+    );
+}
+
 fn in_a_best_of_three(runner: &mut GameRunner) {
     runner.state_mut().set_match_config(MatchConfig {
         match_type: MatchType::Bo3,
@@ -2651,8 +2718,8 @@ fn an_altar_zulaport_period_on_four_seats_drops_each_seat_at_its_crossing() {
     assert_declaration_refused(&offered, 8);
 }
 
-/// CR 704.3 + CR 800.4a: a take whose signature no longer charges P1 performs the repetitions
-/// before P1's departure and stops there, rather than commit a departure it did not predict.
+/// CR 732.2c + CR 800.4a: a take whose record no longer predicts P1's departure performs the
+/// repetitions before it and stops there, rather than commit a departure it did not predict.
 #[test]
 fn a_replay_take_stops_before_a_departure_its_signature_did_not_predict() {
     let Some(db) = shared_card_db() else { return };
@@ -2660,40 +2727,20 @@ fn a_replay_take_stops_before_a_departure_its_signature_did_not_predict() {
     drain_to_offer(&mut runner, altar, gravecrawler, &[P1, P2]);
     bounded_recorded_offer(runner.state(), 8);
     let p2 = runner.state().players[2].life;
-    act(
-        &mut runner,
-        GameAction::DeclareShortcut {
-            count: IterationCount::Fixed(8),
-            template: None,
-        },
+    let (recorded, state) =
+        crate::loop_shortcut::take_with_edited_departures(runner.state(), |entries| {
+            entries.retain(|entry| entry["seats"] != serde_json::json!([1]));
+        });
+    assert!(
+        recorded.iter().any(|(_, seats)| *seats == [P1]),
+        "reach: the record predicted P1's departure: {recorded:?}"
     );
-    let WaitingFor::RespondToShortcut { proposal, .. } = &mut runner.state_mut().waiting_for else {
-        panic!("the declaration opens the acceptance window");
-    };
-    let Some(engine::analysis::resource::PeriodSignature::EveryRepetition(signed)) =
-        proposal.per_cycle.as_mut()
-    else {
-        panic!("a signed proposal");
-    };
-    signed.delta.life.remove(&P1);
-    while matches!(
-        runner.state().waiting_for,
-        WaitingFor::RespondToShortcut { .. }
-    ) {
-        act(
-            &mut runner,
-            GameAction::RespondToShortcut {
-                response: ShortcutResponse::Accept,
-            },
-        );
-    }
-    let state = runner.state();
     assert!(
         state.players[2].life < p2,
         "reach: the take performed repetitions"
     );
-    assert!(eliminated(state).is_empty());
-    assert_eq!(lives(state)[1..], [1, p2 - 5]);
+    assert!(eliminated(&state).is_empty());
+    assert_eq!(lives(&state)[1..], [1, p2 - 5]);
     assert_eq!(state.waiting_for, WaitingFor::Priority { player: P0 });
 }
 
@@ -3022,11 +3069,26 @@ fn charger_board(
     mode: LoopDetectionMode,
     db: &CardDatabase,
 ) -> (GameRunner, ObjectId) {
-    let mut scenario = GameScenario::new();
+    charger_board_on(2, mountains, umbra, others, mode, db)
+}
+
+/// `charger_board` on `seats` seats, every opponent at 200 life.
+fn charger_board_on(
+    seats: u8,
+    mountains: usize,
+    umbra: bool,
+    others: &[&str],
+    mode: LoopDetectionMode,
+    db: &CardDatabase,
+) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(seats, 42);
     scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_life(P1, 200);
-    scenario.with_library_top(P0, &["Island"; 25]);
-    scenario.with_library_top(P1, &["Island"; 25]);
+    for seat in (0..seats).map(PlayerId) {
+        if seat != P0 {
+            scenario.with_life(seat, 200);
+        }
+        scenario.with_library_top(seat, &["Island"; 25]);
+    }
     let charger = scenario.add_real_card(P0, "Hellkite Charger", Zone::Battlefield, db);
     for _ in 0..mountains {
         scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
@@ -3409,6 +3471,90 @@ fn a_hellkite_charger_period_beside_moraug_is_counted_over_its_growing_damage_an
             "{mode:?}"
         );
     }
+}
+
+/// The Charger period beside Moraug on `seats` seats, driven to its first offer.
+fn charger_moraug_offer(seats: u8, db: &CardDatabase) -> (GameRunner, ObjectId) {
+    let (mut runner, charger) = charger_board_on(
+        seats,
+        7,
+        true,
+        &["Moraug, Fury of Akoum"],
+        LoopDetectionMode::Interactive,
+        db,
+    );
+    charger_until(
+        &mut runner,
+        charger,
+        |_| true,
+        |state| is_offer(state) || combats_begun(state) > 6,
+    );
+    (runner, charger)
+}
+
+/// CR 508.1b + CR 800.4a + CR 104.2a: on three seats, once P1 leaves, P2 is the one player
+/// Hellkite Charger can attack, so its period beside Moraug is counted on past P1's departure. From
+/// the second combat, repetition r deals 8 + r (CR 510.1a + CR 613.4c): P1 at 192 leaves at 13
+/// and P2 at 200 at 21, ending the game.
+#[test]
+fn a_hellkite_charger_period_beside_moraug_on_three_seats_attacks_the_last_defender() {
+    let db = shared_card_db().expect("card db");
+    let (mut runner, charger) = charger_moraug_offer(3, db);
+    let state = runner.state();
+    assert_eq!(combats_begun(state), 2);
+    assert_eq!(state.objects[&charger].power, Some(9));
+    assert_eq!(lives(state), [20, 192, 200]);
+    let WaitingFor::LoopShortcut {
+        schema,
+        predicted_winner,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!("no offer at {:?}", state.waiting_for);
+    };
+    assert_eq!(
+        (
+            schema.iteration_count.clone(),
+            schema.measured_repetition_bound,
+            *predicted_winner
+        ),
+        (IterationCount::Fixed(21), Some(21), Some(P0))
+    );
+
+    let events = take(&mut runner, 21);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    );
+    assert_eq!(lives(runner.state()), [20, -3, -4]);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::GameOver { .. }))
+            .count(),
+        1
+    );
+}
+
+/// CR 508.1b: on four seats, once P1 leaves, which of P2 and P3 the Charger attacks is a choice
+/// its record does not hold, so the replay makes no attack on either.
+#[test]
+fn a_hellkite_charger_period_beside_moraug_on_four_seats_chooses_no_defender_for_its_proposer() {
+    let db = shared_card_db().expect("card db");
+    let (mut runner, charger) = charger_moraug_offer(4, db);
+    let state = runner.state();
+    assert_eq!(combats_begun(state), 2);
+    assert_eq!(state.objects[&charger].power, Some(9));
+    assert_eq!(lives(state), [20, 192, 200, 200]);
+    let (_, count) = offer_of(state);
+
+    take(&mut runner, fixed(&count));
+    assert_eq!(eliminated(runner.state()), [P1]);
+    assert_eq!(lives(runner.state())[2..], [200, 200]);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    );
 }
 
 /// CR 508.1a + CR 510.1a + CR 613.4c: Moraug, Fury of Akoum's "+1/+0 for each time it has

@@ -70,7 +70,7 @@ use super::match_flow;
 use super::morph;
 use super::mulligan;
 use super::payment_transaction;
-use super::period_confirm::OfferRefusal;
+use super::period_confirm::{CycleEnd, OfferRefusal};
 use super::planechase;
 use super::planeswalker;
 use super::priority;
@@ -2617,7 +2617,7 @@ fn reconcile_loop_shortcut(state: &mut GameState, result: &mut ActionResult) {
     {
         match state.loop_detection {
             LoopDetectionMode::Interactive => {
-                for span in mandatory.into_iter().rev() {
+                for &span in mandatory.iter().rev() {
                     if !super::play_trace::offer_latched(state, span)
                         && mandatory_outcome(state, result, span)
                     {
@@ -2750,9 +2750,22 @@ fn reconcile_loop_shortcut(state: &mut GameState, result: &mut ActionResult) {
         && state.loop_detection.samples()
         && !in_simulation_probe()
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
-        && !offerable.is_empty()
     {
-        if let Some((parts, period)) = try_offer_object_growth_shortcut(state, &offerable) {
+        // CR 732.2a: the mandatory spans the mandatory pass found breakable are asked after the
+        // offerable ones, newest first.
+        let out = crate::types::game_state::PriorityOut::at(state);
+        let asked: Vec<super::play_trace::NamedSpan> = offerable
+            .iter()
+            .copied()
+            .chain(mandatory.iter().rev().copied().filter(|span| {
+                super::play_trace::witnessed(state, span.start, out)
+                    == Some(super::play_trace::Witnessed::Breakable)
+            }))
+            .collect();
+        if asked.is_empty() {
+            return;
+        }
+        if let Some((parts, period)) = try_offer_object_growth_shortcut(state, &asked) {
             let WaitingFor::Priority { player: proposer } = state.waiting_for else {
                 unreachable!("guarded by matches!(Priority) above")
             };
@@ -3047,7 +3060,7 @@ fn mandatory_outcome(
             offer_draw_without_end(state, result, residual, counted_take, Some(*period));
             true
         }
-        Witnessed::Refused => false,
+        Witnessed::Refused | Witnessed::Breakable => false,
     }
 }
 
@@ -3087,12 +3100,13 @@ fn decide_mandatory_span(
             reading.profile
         };
         // CR 104.2a: a loss period without a single forced winner is not decided here.
+        // CR 704.5a + CR 732.2a: it moves a player toward losing, so its holder may shortcut it.
         return match reading.winner {
             Some(winner) if profile.is_forced() => MandatoryDecision::Won {
                 winner,
                 delta: Box::new(reading.delta),
             },
-            Some(_) | None => MandatoryDecision::Keep(Witnessed::Refused),
+            Some(_) | None => MandatoryDecision::Keep(Witnessed::Breakable),
         };
     }
     let settle = |profile: &crate::types::game_state::LoopDecisionProfile,
@@ -5843,11 +5857,42 @@ impl ConsumptionDerivation {
     }
 }
 
+/// CR 732.2a: the offer's performance of the declaration a take replays: the proposal's own
+/// template, else the declaration the offer published.
+fn performed_record(
+    proposal: &crate::analysis::loop_check::ShortcutProposal,
+) -> Option<&super::period_confirm::PerformedReach> {
+    match proposal
+        .template
+        .as_ref()
+        .or(proposal.published_declaration.as_ref())
+    {
+        Some(declared) => proposal
+            .period
+            .performed
+            .iter()
+            .find(|record| record.decisions == declared.decisions),
+        None => proposal.period.recorded.as_ref(),
+    }
+}
+
 fn shortcut_consumption_bound(
     state: &GameState,
     proposal: &crate::analysis::loop_check::ShortcutProposal,
     accepted: u32,
 ) -> ConsumptionDerivation {
+    // CR 732.2a + CR 800.4a: a declaration the offer performed predicts the departures its
+    // performance saw.
+    if let Some(record) = performed_record(proposal) {
+        return ConsumptionDerivation::Replayed(
+            record
+                .departures
+                .iter()
+                .filter(|entry| entry.repetition <= accepted)
+                .cloned()
+                .collect(),
+        );
+    }
     if let Some(departures) = proposal.period.replayed_departures() {
         return ConsumptionDerivation::Replayed(
             departures
@@ -6035,8 +6080,13 @@ fn shortcut_count_is_drivable(
             // measured none — so the budget conjunct above is the only bound either gets.
             ConsumptionDerivation::Unsigned | ConsumptionDerivation::NoMeasurement => true,
             ConsumptionDerivation::Measured(bound) => count <= bound.ceiling,
-            // The cap is the only ceiling known before the period is performed.
-            ConsumptionDerivation::Replayed(_) => count <= super::period_confirm::COUNT_CAP,
+            // A performed declaration is driven as far as its performance reached; the cap is the
+            // only ceiling known before the period is performed.
+            ConsumptionDerivation::Replayed(_) => {
+                count
+                    <= performed_record(proposal)
+                        .map_or(super::period_confirm::COUNT_CAP, |record| record.reach)
+            }
         }
 }
 
@@ -6293,18 +6343,19 @@ fn apply_until_lethal_shortcut(
             w.waiting_for = WaitingFor::Priority {
                 player: proposal.proposer,
             };
+            let run = super::period_confirm::TakeRun::of(&w, &proposal.period, proposal.proposer);
             match super::period_confirm::perform_cycle(
                 &mut w,
                 &proposal.period,
-                proposal.proposer,
+                &run,
                 None,
                 &mut Vec::new(),
             ) {
-                Ok(()) => w,
-                Err(OfferRefusal::LifeChangeUnrepresentable { player }) => {
+                CycleEnd::CameRound => w,
+                CycleEnd::Refused(OfferRefusal::LifeChangeUnrepresentable { player }) => {
                     return Err(EngineError::LifeChangeUnrepresentable { player });
                 }
-                Err(_) => {
+                _ => {
                     until_lethal_fallback(state, result, committed, proposal.proposer);
                     return Ok(());
                 }
@@ -7162,7 +7213,17 @@ fn departure_verdict(
         return DepartureVerdict::NoDeparture;
     }
     match entries.iter().find(|entry| entry.repetition == repetition) {
-        Some(entry) if entry.seats == departed => DepartureVerdict::Predicted,
+        // CR 800.4a: a predicted seat that left before this repetition cannot leave in it.
+        Some(entry)
+            if entry
+                .seats
+                .iter()
+                .copied()
+                .filter(|seat| crate::game::players::is_alive(before, *seat))
+                .eq(departed.iter().copied()) =>
+        {
+            DepartureVerdict::Predicted
+        }
         // An entry naming a different set, and no entry at this repetition at all: both are
         // sequences the table did not agree to, and an EMPTY entry list is the second of them.
         Some(_) | None => DepartureVerdict::Unpredicted,
@@ -7174,35 +7235,29 @@ fn departure_verdict(
 pub(crate) enum RepetitionVerdict {
     /// It came round, and another may follow.
     Continue,
-    /// CR 104.2a + CR 800.4a: the game ended in it, or its holder left, so it was performed
-    /// although it did not come round; `winner` is the game's, if it ended with one.
-    Ended { winner: Option<PlayerId> },
+    /// CR 104.2a + CR 800.4a: it was performed although it did not come round.
+    Ended,
     /// It was refused, or a seat left that the prediction did not name.
     Stopped,
 }
 
-/// CR 732.2a + CR 104.2a + CR 800.4a: the single verdict on one repetition a take or a
-/// performance made, from the frame it left (`after`), whether the cycle came round
-/// (`performed`), and, when the take carries a prediction, `departure_verdict`'s answer for it.
+/// CR 732.2a + CR 104.2a + CR 800.4a: the single verdict on one repetition a take made, from how
+/// its cycle ended and, when the take carries a prediction, `departure_verdict`'s answer for it.
 pub(crate) fn repetition_verdict(
-    after: &GameState,
-    performed: bool,
-    holder: PlayerId,
+    cycle: &CycleEnd,
     departure: Option<DepartureVerdict>,
 ) -> RepetitionVerdict {
-    if departure == Some(DepartureVerdict::Unpredicted) {
-        return RepetitionVerdict::Stopped;
-    }
-    let ended = after.game_end.is_some() || !crate::game::players::is_alive(after, holder);
-    match (performed, ended) {
-        (true, _) => RepetitionVerdict::Continue,
+    match cycle {
+        _ if departure == Some(DepartureVerdict::Unpredicted) => RepetitionVerdict::Stopped,
+        CycleEnd::CameRound => RepetitionVerdict::Continue,
         // A predicted take counts only the departure it named.
-        (false, true) if departure.is_none_or(|verdict| verdict == DepartureVerdict::Predicted) => {
-            RepetitionVerdict::Ended {
-                winner: after.game_end.as_ref().and_then(|end| end.winner),
-            }
+        ended
+            if ended.performed()
+                && departure.is_none_or(|verdict| verdict == DepartureVerdict::Predicted) =>
+        {
+            RepetitionVerdict::Ended
         }
-        (false, _) => RepetitionVerdict::Stopped,
+        _ => RepetitionVerdict::Stopped,
     }
 }
 
@@ -8524,9 +8579,10 @@ fn drive_one_period_frames(
     priority::reset_priority(&mut before);
     before.waiting_for = WaitingFor::Priority { player: controller };
     let mut after = before.clone();
-    super::period_confirm::perform_cycle(&mut after, period, controller, None, &mut Vec::new())
-        .ok()?;
-    Some((before, after))
+    let run = super::period_confirm::TakeRun::of(&after, period, controller);
+    (super::period_confirm::perform_cycle(&mut after, period, &run, None, &mut Vec::new())
+        == CycleEnd::CameRound)
+        .then_some((before, after))
 }
 
 fn current_period_fodder(
@@ -9088,27 +9144,26 @@ pub(crate) fn drive_persistent_axis_collapse(
     };
     let committed_events = events.len();
     let mut delivered = 0;
+    reseed(state);
+    let run = super::period_confirm::TakeRun::of(state, period, controller);
     for i in 0..n {
         #[cfg(feature = "test-support")]
         take_cost.begin_cycle();
         reseed(state);
         let before = predicted.map(|_| state.clone());
         let mut cycle_events = Vec::new();
-        let performed = match super::period_confirm::perform_cycle(
+        let ended = super::period_confirm::perform_cycle(
             state,
             period,
-            controller,
+            &run,
             declared.map(|template| (template, i)),
             &mut cycle_events,
-        ) {
-            Ok(()) => true,
-            Err(OfferRefusal::LifeChangeUnrepresentable { player }) => {
-                *state = snapshot;
-                events.truncate(committed_events);
-                return Err(EngineError::LifeChangeUnrepresentable { player });
-            }
-            Err(_) => false,
-        };
+        );
+        if let CycleEnd::Refused(OfferRefusal::LifeChangeUnrepresentable { player }) = ended {
+            *state = snapshot;
+            events.truncate(committed_events);
+            return Err(EngineError::LifeChangeUnrepresentable { player });
+        }
         let departure = before
             .as_ref()
             .zip(predicted)
@@ -9116,8 +9171,8 @@ pub(crate) fn drive_persistent_axis_collapse(
         // CR 800.4a: the controller's departure ends its cycle's frame whether or not the game
         // ends, so a predicted departure commits the cycle it cut short; without a prediction
         // nothing names it.
-        let verdict = repetition_verdict(state, performed, controller, departure);
-        if predicted.is_some() && matches!(verdict, RepetitionVerdict::Ended { .. }) {
+        let verdict = repetition_verdict(&ended, departure);
+        if predicted.is_some() && verdict == RepetitionVerdict::Ended {
             delivered += 1;
             commit_repetition(events, controller, delivered, &mut cycle_events);
             #[cfg(feature = "test-support")]
@@ -9140,20 +9195,20 @@ pub(crate) fn drive_persistent_axis_collapse(
                 match super::period_confirm::perform_cycle(
                     state,
                     period,
-                    controller,
+                    &run,
                     declared.map(|template| (template, k)),
                     &mut cycle_events,
                 ) {
-                    Ok(()) => {
+                    CycleEnd::CameRound => {
                         delivered += 1;
                         commit_repetition(events, controller, delivered, &mut cycle_events);
                     }
-                    Err(OfferRefusal::LifeChangeUnrepresentable { player }) => {
+                    CycleEnd::Refused(OfferRefusal::LifeChangeUnrepresentable { player }) => {
                         *state = snapshot;
                         events.truncate(committed_events);
                         return Err(EngineError::LifeChangeUnrepresentable { player });
                     }
-                    Err(_) => {
+                    _ => {
                         events.append(&mut cycle_events);
                         break;
                     }

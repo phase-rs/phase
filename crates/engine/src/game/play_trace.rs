@@ -1901,6 +1901,9 @@ pub(crate) enum Witnessed {
         period: Box<crate::game::period_confirm::ConfirmedPeriod>,
     },
     Refused,
+    /// CR 704.5a + CR 732.2a: a loss period the mandatory pass cannot crown, which its holder may
+    /// shortcut.
+    Breakable,
 }
 
 fn out_slot(out: PriorityOut) -> usize {
@@ -2226,6 +2229,7 @@ pub(crate) fn discard_seat(state: &mut GameState, holder: PlayerId) {
     let mut kept = PlayTrace::new(trace.window);
     kept.carrying = trace.carrying.clone();
     let mut owner = None;
+    let mut kept_at = Vec::new();
     for (at, entry) in trace.entries.iter().enumerate() {
         if matches!(
             entry.kind,
@@ -2235,8 +2239,16 @@ pub(crate) fn discard_seat(state: &mut GameState, holder: PlayerId) {
         }
         if owner.unwrap_or(entry.seat) != holder {
             kept.rerecord(trace, at, entry.clone(), false);
+            kept_at.push(at);
         }
     }
+    // CR 732.2a: a declined window period stays offered until it recurs past the kept entries it
+    // was offered over. An offered carried span is not carried: the discard drops every named
+    // carried span, so nothing left in the window is the span it named.
+    kept.offered = trace
+        .offered
+        .filter(|(span, _)| span.source == SpanSource::Window)
+        .map(|(span, prefix)| (span, kept_at.iter().filter(|&&at| at < prefix).count()));
     kept.carried = trace
         .carried
         .iter()
