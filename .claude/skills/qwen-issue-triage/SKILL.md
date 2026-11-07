@@ -66,22 +66,23 @@ while :; do
     triage/qwen/page.json >> triage/qwen/batch.jsonl
   if [ "$(wc -l < triage/qwen/batch.jsonl)" -ge "$N" ]; then STOP=full; break; fi
   if [ "$(jq '.items | length' triage/qwen/page.json)" -lt 100 ] || [ $((page * 100)) -ge "$TOTAL" ]; then
-    if [ "$INCOMPLETE" = 1 ]; then STOP=incomplete; else STOP=exhausted; fi
-    break
+    STOP=exhausted; break
   fi
   page=$((page + 1))
 done
 head -n "$N" triage/qwen/batch.jsonl > triage/qwen/batch.tmp && mv triage/qwen/batch.tmp triage/qwen/batch.jsonl
+[ "$INCOMPLETE" = 1 ] && STOP="$STOP, search incomplete"
 echo "$STOP: $(wc -l < triage/qwen/batch.jsonl) issues in batch, $TOTAL matching"
 ```
 
-The last line says why the walk stopped. Put it in the run report, and triage whatever is in the batch either way:
+The last line says why the walk stopped, and whether GitHub's search was incomplete along the way. Put both in the run report, and triage whatever is in the batch either way:
 
 - `full`: the batch has `N` issues. More may be waiting: when the last page holds more new issues than the batch has room for, the walk reports `full`, not `exhausted`, and the next run picks up the ones cut off.
-- `exhausted`: every page came back complete, and the walk reached the last matching issue. This is the only outcome that lets you report that every matching issue has been triaged.
-- `incomplete`: GitHub returned `incomplete_results: true` on at least one page, meaning its search timed out and may have left out matches. Report a partial batch and rerun later; don't claim the backlog is done.
+- `exhausted`: the walk reached the last matching issue. Without `search incomplete`, this is the only outcome that lets you report that every matching issue has been triaged.
 - `api-error on page P`: a request failed (`gh` printed the error). Report a partial batch with that error; don't claim the backlog is done.
 - `cap`: more than 1,000 issues match, and GitHub search won't return past the first 1,000, so the walk can't reach the older ones. Report a partial batch. The next run must narrow `Q` rather than raise the page limit: add `created:<=YYYY-MM-DD` with the date printed by `jq -r '.items[-1].created_at[0:10]' triage/qwen/page.json`, so the search starts where this one stopped. Use `<=`, not `<`: the boundary day can hold matches that fell past the cap, and the ones already triaged are skipped anyway.
+
+`, search incomplete` after any of these means GitHub returned `incomplete_results: true` on at least one page: its search timed out and may have left out matches. Report it whatever the reason, say the batch may be missing issues, and rerun later; don't claim the backlog is done, even after `exhausted`.
 
 For explicit numbers, run `gh issue view <N> --repo phase-rs/phase --json number,title,labels,author,createdAt,body,comments` for each.
 
@@ -226,7 +227,7 @@ Then sort each member by what came back:
 Print a short report:
 
 - how many issues you triaged, with counts by status and by classifier verdict
-- how the Step 1 search ended (`full`, `exhausted`, `incomplete`, `api-error` or `cap`), and for anything but `full` or `exhausted`, that the backlog isn't finished and what the next run should do
+- how the Step 1 search ended (`full`, `exhausted`, `api-error` or `cap`) and whether it was marked `search incomplete`; for `api-error`, `cap` or anything marked incomplete, that the backlog isn't finished and what the next run should do
 - the issues that need a maintainer's eye: likely duplicates, possible regressions, anything that looks like a crash or a stall, and anything you'd close
 - clusters that are new or that grew this run, and any members listed under `conflicts`
 
