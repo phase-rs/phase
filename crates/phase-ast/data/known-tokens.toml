@@ -12820,6 +12820,7 @@ fidelity = "Full"
 source_card_names = [
     "Bovine Intervention",
     "Bruse Tarl, Roving Rancher",
+    "Oko, Lord of the Fae",
 ]
 set_code = "OTJ"
 set_name = "Outlaws of Thunder Junction"
@@ -28930,6 +28931,7 @@ fidelity = "Full"
 source_card_names = [
     "Bovine Intervention",
     "Bruse Tarl, Roving Rancher",
+    "Oko, Lord of the Fae",
 ]
 set_code = "PLST"
 set_name = "The List"
@@ -89654,6 +89656,7 @@ source_card_names = [
     "Avatar of Burgeoning Echoes",
     "Campus Crier",
     "Countersculpt",
+    "Crux of the Theory",
     "Fatehold Charm",
     "Hexhaven Battalion",
     "Inspired Tethermage",
@@ -89665,6 +89668,7 @@ source_card_names = [
     "Overwrite the Multiverse",
     "Plan for All Outcomes",
     "Protege's Awakening",
+    "Remnants of Beleren",
     "Repurposed Enforcer",
     "Rewrite Regrets",
     "Sanctum Lurker",
@@ -166360,6 +166364,7 @@ fidelity = "Full"
 source_card_names = [
     "Bovine Intervention",
     "Bruse Tarl, Roving Rancher",
+    "Oko, Lord of the Fae",
     "Ox",
 ]
 set_code = "MSC"
@@ -219997,6 +220002,7 @@ fidelity = "Full"
 source_card_names = [
     "Bovine Intervention",
     "Bruse Tarl, Roving Rancher",
+    "Oko, Lord of the Fae",
 ]
 set_code = "MSC"
 set_name = "Marvel Super Heroes Commander"
@@ -226355,6 +226361,7 @@ source_card_names = [
     "Craftwork Crusher",
     "Fatehold Chronologist",
     "Fatehold Chronologist // Peer Review",
+    "Flourishing Forces",
     "Germinate Recruits",
     "Heartstring Puller",
     "Hexhaven Battalion",
@@ -226362,6 +226369,7 @@ source_card_names = [
     "Peer Review",
     "Prudent Fateseer",
     "Prudent Fateseer // Peer Review",
+    "Quintorius, Fate Splitter",
     "Recursive Recruitment",
     "Semester Foreseer",
     "Semester Foreseer // Peer Review",
