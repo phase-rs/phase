@@ -52,7 +52,6 @@ Q='label:status:needs-triage'   # unlabeled: 'no:label'; pending: 'label:classif
 : > triage/qwen/batch.jsonl
 page=1 TOTAL=0 INCOMPLETE=0 STOP=
 while :; do
-  if [ "$(wc -l < triage/qwen/batch.jsonl)" -ge "$N" ]; then STOP=full; break; fi
   if [ "$page" -gt 10 ]; then STOP=cap; break; fi
   if ! gh api -X GET search/issues -f q="repo:phase-rs/phase is:issue is:open $Q" \
       -f sort=created -f order=desc -f per_page=100 -f page="$page" > triage/qwen/page.json; then
@@ -65,6 +64,7 @@ while :; do
       | .items[] | select(.number as $n | $seen | index($n) | not)
       | {number, title, labels: [.labels[].name], author: .user.login, createdAt: .created_at, body: ((.body // "")[0:2000])}' \
     triage/qwen/page.json >> triage/qwen/batch.jsonl
+  if [ "$(wc -l < triage/qwen/batch.jsonl)" -ge "$N" ]; then STOP=full; break; fi
   if [ "$(jq '.items | length' triage/qwen/page.json)" -lt 100 ] || [ $((page * 100)) -ge "$TOTAL" ]; then
     if [ "$INCOMPLETE" = 1 ]; then STOP=incomplete; else STOP=exhausted; fi
     break
@@ -77,7 +77,7 @@ echo "$STOP: $(wc -l < triage/qwen/batch.jsonl) issues in batch, $TOTAL matching
 
 The last line says why the walk stopped. Put it in the run report, and triage whatever is in the batch either way:
 
-- `full`: the batch has `N` issues.
+- `full`: the batch has `N` issues. More may be waiting: when the last page holds more new issues than the batch has room for, the walk reports `full`, not `exhausted`, and the next run picks up the ones cut off.
 - `exhausted`: every page came back complete, and the walk reached the last matching issue. This is the only outcome that lets you report that every matching issue has been triaged.
 - `incomplete`: GitHub returned `incomplete_results: true` on at least one page, meaning its search timed out and may have left out matches. Report a partial batch and rerun later; don't claim the backlog is done.
 - `api-error on page P`: a request failed (`gh` printed the error). Report a partial batch with that error; don't claim the backlog is done.
