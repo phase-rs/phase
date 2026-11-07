@@ -605,7 +605,7 @@ fn check_hallowed_burial_commander_host_round_trip(with_ordinary: bool, accept_c
         }
         runner
             .act(GameAction::SelectCards {
-                cards: vec![host, rider],
+                cards: vec![rider, host],
             })
             .unwrap();
     }
@@ -619,7 +619,7 @@ fn check_hallowed_burial_commander_host_round_trip(with_ordinary: bool, accept_c
     } else if accept_command {
         expected_library.push(rider);
     } else {
-        expected_library.extend([host, rider]);
+        expected_library.extend([rider, host]);
     }
     assert_eq!(library(&runner, P0), expected_library);
     assert_eq!(

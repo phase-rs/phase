@@ -517,7 +517,7 @@ fn unification_empty_and_illegal_targets_do_not_draw() {
     }
 }
 
-// CR 702.26b/d/g: the source and optional target phase as one batch, keeping
+// CR 702.26b + CR 702.26d + CR 702.26g: the source and optional target phase as one batch, keeping
 // their identities and counters; attachments follow their host.
 #[test]
 fn defiant_optional_target_and_attachments_phase_and_return() {
@@ -792,7 +792,7 @@ fn defiant_returned_source_does_not_replace_queued_source_identity() {
     assert!(!runner.state().objects[&source].is_phased_out());
 }
 
-// CR 205.1b + CR 611.2a/c: the resolved chosen population gains an additive
+// CR 205.1b + CR 611.2a + CR 611.2c: the resolved chosen population gains an additive
 // canonical subtype, and every temporary part expires at cleanup.
 #[test]
 fn worf_two_opponents_keep_original_types_and_expire() {
@@ -1169,7 +1169,7 @@ fn reality_ripple_preserves_target_selection_and_legality() {
     finished(&runner);
 }
 
-// CR 115.10a + CR 702.26a/g: mass phasing affects shrouded permanents and
+// CR 115.10a + CR 702.26a + CR 702.26g: mass phasing affects shrouded permanents and
 // attached Equipment without targeting, then restores them on the next turn.
 #[test]
 fn teferis_protection_preserves_mass_phasing_and_empty_population() {

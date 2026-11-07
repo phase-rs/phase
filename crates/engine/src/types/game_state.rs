@@ -7242,40 +7242,68 @@ impl PendingBatchDeliveries {
         Ok(())
     }
 
+    /// CR 608.2c + CR 616.1: finish every consultation before arrangement or
+    /// delivery. This is the exhaustive member-state/stage table:
+    ///
+    /// | Member state | Approving: before / at / after cursor | Arranging or Delivering: before / at-or-after cursor |
+    /// | --- | --- | --- |
+    /// | Unconsulted | no / yes / yes | no / no |
+    /// | OuterConsulting, InnerConsulting, PreventedWithChild | no / yes / no | no / no |
+    /// | Approved | yes / yes / no | no / yes |
+    /// | Terminal, Abandoned | yes / yes / yes | yes / yes |
+    ///
+    /// Approval advances only after recording Approved or Terminal. A prevented
+    /// member with a live child is unfinished: child settlement first changes
+    /// it to Terminal and only then advances. Terminal also represents an early
+    /// prevented/remained consultation; abandonment can affect any frozen slot
+    /// during a concession. Neither requires another consultation or delivery.
+    /// Per-member payload validation remains independent of this table.
     fn validate_staged_stage(&self, staged: &StagedBatchDelivery) -> Result<(), String> {
         let members = &staged.members;
-        // CR 608.2c: arrangement preserves the next delivery member. A cursor
-        // may pass only terminal or abandoned members, never skip an approved
-        // move when an arrangement answer transitions the batch to delivery.
-        if matches!(
-            staged.stage,
-            BatchDeliveryStage::Arranging | BatchDeliveryStage::Delivering
-        ) && members.iter().take(staged.cursor).any(|member| {
-            !matches!(
-                member.state,
-                StagedBatchMemberState::Terminal | StagedBatchMemberState::Abandoned
-            )
-        }) {
-            return Err("an undelivered staged member precedes the delivery cursor".to_string());
+        for (index, member) in members.iter().enumerate() {
+            let allowed = match member.state {
+                StagedBatchMemberState::Unconsulted => {
+                    staged.stage == BatchDeliveryStage::Approving && index >= staged.cursor
+                }
+                StagedBatchMemberState::OuterConsulting
+                | StagedBatchMemberState::InnerConsulting
+                | StagedBatchMemberState::PreventedWithChild => {
+                    staged.stage == BatchDeliveryStage::Approving && index == staged.cursor
+                }
+                StagedBatchMemberState::Approved => match staged.stage {
+                    BatchDeliveryStage::Approving => index <= staged.cursor,
+                    BatchDeliveryStage::Arranging | BatchDeliveryStage::Delivering => {
+                        index >= staged.cursor
+                    }
+                },
+                StagedBatchMemberState::Terminal | StagedBatchMemberState::Abandoned => true,
+            };
+            if !allowed {
+                let message = match staged.stage {
+                    BatchDeliveryStage::Approving => {
+                        if index < staged.cursor {
+                            "an unfinished staged consultation precedes the approval cursor"
+                        } else {
+                            "a consulted staged member follows the approval cursor"
+                        }
+                    }
+                    BatchDeliveryStage::Arranging | BatchDeliveryStage::Delivering
+                        if index < staged.cursor =>
+                    {
+                        "an undelivered staged member precedes the delivery cursor"
+                    }
+                    BatchDeliveryStage::Arranging => {
+                        "a staged member entered arrangement without a completed consultation"
+                    }
+                    BatchDeliveryStage::Delivering => {
+                        "a staged member entered delivery without a final approval"
+                    }
+                };
+                return Err(message.to_string());
+            }
         }
         match staged.stage {
             BatchDeliveryStage::Approving => {
-                for (index, member) in members.iter().enumerate() {
-                    let unconsulted = member.state == StagedBatchMemberState::Unconsulted;
-                    if index < staged.cursor && unconsulted {
-                        return Err(
-                            "an unconsulted staged member precedes the approval cursor".to_string()
-                        );
-                    }
-                    if index > staged.cursor
-                        && !unconsulted
-                        && member.state != StagedBatchMemberState::Abandoned
-                    {
-                        return Err(
-                            "a consulted staged member follows the approval cursor".to_string()
-                        );
-                    }
-                }
                 // A parked boundary belongs to the cursor member; the member
                 // itself may still have no terminal (a bare `NeedsChoice`).
                 if let Some(paused) = &self.paused_current {
@@ -7292,14 +7320,6 @@ impl PendingBatchDeliveries {
                 if self.paused_current.is_some() {
                     return Err(
                         "an arranging staged batch still holds a paused delivery".to_string()
-                    );
-                }
-                if members
-                    .iter()
-                    .any(|member| member.state == StagedBatchMemberState::Unconsulted)
-                {
-                    return Err(
-                        "an unconsulted staged member survived into arrangement".to_string()
                     );
                 }
                 for (index, arrangement) in staged.arrangements.iter().enumerate() {
@@ -7323,18 +7343,6 @@ impl PendingBatchDeliveries {
                 }
             }
             BatchDeliveryStage::Delivering => {
-                for member in members {
-                    if !matches!(
-                        member.state,
-                        StagedBatchMemberState::Approved
-                            | StagedBatchMemberState::Terminal
-                            | StagedBatchMemberState::Abandoned
-                    ) {
-                        return Err(
-                            "a staged member entered delivery without a final approval".to_string()
-                        );
-                    }
-                }
                 if staged.arrangements.iter().any(|arrangement| {
                     matches!(
                         arrangement.status,

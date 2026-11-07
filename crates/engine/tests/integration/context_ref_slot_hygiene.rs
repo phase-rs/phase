@@ -791,19 +791,33 @@ fn chimera_retarget_subject_binds_to_the_triggering_spell() {
 #[test]
 fn owner_anchor_claims_no_target_slot() {
     let state = GameState::new_two_player(42);
-    for effect in [
-        Effect::Shuffle {
-            target: TargetFilter::Owner,
-        },
-        Effect::Draw {
-            count: QuantityExpr::Fixed { value: 3 },
-            target: TargetFilter::Owner,
-        },
+    for (effect, expected_slots) in [
+        (
+            Effect::Shuffle {
+                target: TargetFilter::Owner,
+            },
+            0,
+        ),
+        (
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Owner,
+            },
+            0,
+        ),
+        (
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Player,
+            },
+            1,
+        ),
     ] {
         let ability =
             ResolvedAbility::new(effect, vec![], engine::types::identifiers::ObjectId(1), P0);
-        assert!(
-            build_target_slots(&state, &ability).unwrap().is_empty(),
+        assert_eq!(
+            build_target_slots(&state, &ability).unwrap().len(),
+            expected_slots,
             "{ability:?}"
         );
     }
