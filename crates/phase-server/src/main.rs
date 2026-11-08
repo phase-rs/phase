@@ -8507,7 +8507,10 @@ fn concession_takeback_notices(
 #[derive(Debug)]
 enum GameSubmission {
     Action(GameAction),
-    Interaction(InteractionSubmission),
+    Interaction {
+        submission: InteractionSubmission,
+        at_ms: Option<u64>,
+    },
 }
 
 /// A normal human-only transition is projected in its mutation work unit.
@@ -8645,7 +8648,7 @@ impl GameSubmission {
     fn kind(&self) -> &'static str {
         match self {
             GameSubmission::Action(_) => "action",
-            GameSubmission::Interaction(_) => "interaction",
+            GameSubmission::Interaction { .. } => "interaction",
         }
     }
 
@@ -8669,7 +8672,7 @@ impl GameSubmission {
                     })
                 })
             }
-            GameSubmission::Interaction(submission) => {
+            GameSubmission::Interaction { submission, .. } => {
                 guard_interaction_submission_payload(submission).map_err(|_reason| {
                     Box::new(ServerMessage::ActionRejected {
                         rejection: ActionRejection::new(
@@ -9160,16 +9163,20 @@ async fn apply_and_publish_full_submission(
                     Some(card_db.as_ref()),
                     host_received_at_ms,
                 ),
-                GameSubmission::Interaction(submission) => session
-                    .handle_interaction_with_rejection_at(
-                        &player_token,
-                        submission,
-                        host_received_at_ms,
-                    )
-                    .map(|result| HandledAction {
-                        result,
-                        takeback: None,
-                    }),
+                GameSubmission::Interaction { submission, at_ms } => {
+                    let ingress_ms =
+                        if session.hosting() == server_core::session::HostingMode::SingleUser {
+                            at_ms.unwrap_or(host_received_at_ms)
+                        } else {
+                            host_received_at_ms
+                        };
+                    session
+                        .handle_interaction_with_rejection_at(&player_token, submission, ingress_ms)
+                        .map(|result| HandledAction {
+                            result,
+                            takeback: None,
+                        })
+                }
             }?;
             if is_zero_count_debug_create {
                 return Ok(None);
@@ -11158,10 +11165,10 @@ async fn handle_client_message(
             }
         }
 
-        ClientMessage::Interaction { submission } => {
+        ClientMessage::Interaction { submission, at_ms } => {
             handle_full_game_submission(
                 socket.command_id(),
-                GameSubmission::Interaction(submission),
+                GameSubmission::Interaction { submission, at_ms },
                 &context.game_executor,
                 state,
                 db,
@@ -14863,6 +14870,7 @@ mod interaction_preview_route_tests {
                 interaction_id: request.interaction_id.clone(),
                 response: request.response.clone(),
             },
+            at_ms: None,
         };
 
         assert!(reject_if_disabled(&preview, ServerMode::Full).is_none());
@@ -21459,9 +21467,12 @@ mod game_submission_tests {
         };
 
         // (i) an oversized interaction answers on the benign channel.
-        let handler_rejection = match *GameSubmission::Interaction(oversized.clone())
-            .payload_rejection()
-            .expect_err("an oversized interaction is refused")
+        let handler_rejection = match *(GameSubmission::Interaction {
+            submission: oversized.clone(),
+            at_ms: None,
+        })
+        .payload_rejection()
+        .expect_err("an oversized interaction is refused")
         {
             ServerMessage::ActionRejected { rejection } => rejection,
             ref other => panic!("an oversized paste must not tear the session down: {other:?}"),
@@ -21479,6 +21490,7 @@ mod game_submission_tests {
         // (iii) both layers agree, in variant *and* in reason string.
         let wire_interaction = ClientMessage::Interaction {
             submission: oversized,
+            at_ms: None,
         };
         let wire_reason =
             guard_client_message_before_dispatch(&wire_interaction, ServerMode::Full).unwrap_err();
@@ -21499,13 +21511,14 @@ mod game_submission_tests {
 
         // Reach guard: without it, a `payload_rejection` that always errored
         // would satisfy (i) and (ii).
-        assert!(
-            GameSubmission::Interaction(submission(InteractionResponse::Choose {
+        assert!(GameSubmission::Interaction {
+            submission: submission(InteractionResponse::Choose {
                 choice_id: InteractionChoiceId("a".to_string()),
-            }))
-            .payload_rejection()
-            .is_ok()
-        );
+            }),
+            at_ms: None,
+        }
+        .payload_rejection()
+        .is_ok());
         assert!(GameSubmission::Action(GameAction::PassPriority)
             .payload_rejection()
             .is_ok());
@@ -21532,6 +21545,7 @@ mod game_submission_tests {
                 submission: submission(InteractionResponse::Choose {
                     choice_id: InteractionChoiceId("no-such-choice".to_string()),
                 }),
+                at_ms: None,
             };
             socket
                 .send(WsMessage::Text(
@@ -21568,6 +21582,7 @@ mod game_submission_tests {
 
             let frame = ClientMessage::Interaction {
                 submission: oversized_submission(),
+                at_ms: None,
             };
             socket
                 .send(WsMessage::Text(
@@ -21588,6 +21603,7 @@ mod game_submission_tests {
                 submission: submission(InteractionResponse::Choose {
                     choice_id: InteractionChoiceId("no-such-choice".to_string()),
                 }),
+                at_ms: None,
             };
             socket
                 .send(WsMessage::Text(
@@ -21655,6 +21671,7 @@ mod game_submission_tests {
                 submission: submission(InteractionResponse::Choose {
                     choice_id: InteractionChoiceId("a".to_string()),
                 }),
+                at_ms: None,
             };
             socket
                 .send(WsMessage::Text(
@@ -21977,6 +21994,7 @@ mod mode_gate_tests {
                             choice_id: engine::types::interaction::InteractionChoiceId("c".to_string()),
                         },
                     },
+                    at_ms: None,
                 },
                 "disabled".to_string(),
             ),
@@ -22107,6 +22125,7 @@ mod mode_gate_tests {
                     choice_id: engine::types::interaction::InteractionChoiceId("a".to_string()),
                 },
             },
+            at_ms: None,
         }
     }
 

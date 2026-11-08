@@ -8170,6 +8170,191 @@ mod oversized_publication {
             });
         }
 
+        /// A SingleUser sidecar honors the trusted WebRTC ingress timestamp on an
+        /// interaction submission, so a timely second saying waiting behind delivery
+        /// is accepted even when the loopback socket receives it after the deadline.
+        /// A genuinely late interaction submission is rejected.
+        #[test]
+        fn single_user_sidecar_honors_ingress_timestamp_on_interaction_submission() {
+            run_async_test(|| async {
+                use engine::game::interaction::bind_interaction_authority;
+                use engine::types::interaction::{
+                    InteractionResponse, InteractionSessionId, InteractionSubmission,
+                };
+                use futures_util::SinkExt;
+                use tokio_tungstenite::tungstenite::Message;
+
+                let table = NativeTable::duel().await;
+                let now = crate::epoch_ms_at_ingress(std::time::Instant::now());
+                let (mut state, _payment_id) = toy_boat_state(Some(now + 200));
+                bind_interaction_authority(
+                    &mut state,
+                    InteractionSessionId("say-prompt".to_string()),
+                )
+                .unwrap();
+                install(&table, state.clone(), &[]).await;
+                single_user_sidecar(&table).await;
+                let mut p0 = table.connect(P0).await;
+
+                let filtered = engine::game::filter_state_for_viewer(&state, P0);
+                let view =
+                    engine::game::interaction::derive_viewer_interaction(&state, &filtered, P0);
+                let opp = view
+                    .opportunities
+                    .first()
+                    .expect("an interaction opportunity is live");
+                let engine::types::interaction::InteractionOpportunityResponse::ExactChoices {
+                    choices,
+                } = &opp.response
+                else {
+                    panic!("expected exact choices");
+                };
+                let saying_choice = choices
+                    .iter()
+                    .find(|choice| {
+                        let submission = InteractionSubmission {
+                            interaction_id: opp.interaction_id.clone(),
+                            response: InteractionResponse::Choose {
+                                choice_id: choice.id.clone(),
+                            },
+                        };
+                        matches!(
+                            engine::game::interaction::resolve_interaction_response(
+                                &state,
+                                P0,
+                                &submission
+                            ),
+                            Ok(GameAction::SayPhrase { .. })
+                        )
+                    })
+                    .expect("a saying choice is projected");
+                let submission = InteractionSubmission {
+                    interaction_id: opp.interaction_id.clone(),
+                    response: InteractionResponse::Choose {
+                        choice_id: saying_choice.id.clone(),
+                    },
+                };
+
+                let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+                    // Sleep past the deadline so loopback receipt is wall-clock late.
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+
+                    // But the trusted ingress timestamp is timely (before deadline).
+                    let timely_ingress = now + 50;
+                    let timely_frame = serde_json::json!({
+                        "type": "Interaction",
+                        "command_id": 1,
+                        "data": {
+                            "submission": submission,
+                            "at_ms": timely_ingress,
+                        },
+                    });
+                    p0.send(Message::Text(timely_frame.to_string().into()))
+                        .await
+                        .unwrap();
+
+                    let comp = completion(&mut p0, 1).await;
+                    assert_eq!(comp["command_id"], 1);
+
+                    let state_after = session_read(&table, |s| s.state.clone()).await;
+                    let say_payment = state_after
+                        .say_payment
+                        .as_ref()
+                        .expect("payment progressed");
+                    assert_eq!(say_payment.said, 1);
+                    assert_eq!(say_payment.last_said_ms, Some(timely_ingress));
+                })
+                .await;
+                table.server.abort();
+                outcome.expect("timely interaction submission with at_ms was accepted");
+
+                // Now test genuinely late interaction in a fresh game
+                let table_late = NativeTable::duel().await;
+                let now_late = crate::epoch_ms_at_ingress(std::time::Instant::now());
+                let (mut state_late, _payment_id_late) = toy_boat_state(Some(now_late + 200));
+                bind_interaction_authority(
+                    &mut state_late,
+                    InteractionSessionId("say-prompt-late".to_string()),
+                )
+                .unwrap();
+                install(&table_late, state_late.clone(), &[]).await;
+                single_user_sidecar(&table_late).await;
+                let mut p0_late = table_late.connect(P0).await;
+
+                let filtered_late = engine::game::filter_state_for_viewer(&state_late, P0);
+                let view_late = engine::game::interaction::derive_viewer_interaction(
+                    &state_late,
+                    &filtered_late,
+                    P0,
+                );
+                let opp_late = view_late.opportunities.first().expect("opportunity");
+                let engine::types::interaction::InteractionOpportunityResponse::ExactChoices {
+                    choices: choices_late,
+                } = &opp_late.response
+                else {
+                    panic!("choices");
+                };
+                let saying_choice_late = choices_late
+                    .iter()
+                    .find(|choice| {
+                        let submission = InteractionSubmission {
+                            interaction_id: opp_late.interaction_id.clone(),
+                            response: InteractionResponse::Choose {
+                                choice_id: choice.id.clone(),
+                            },
+                        };
+                        matches!(
+                            engine::game::interaction::resolve_interaction_response(
+                                &state_late,
+                                P0,
+                                &submission
+                            ),
+                            Ok(GameAction::SayPhrase { .. })
+                        )
+                    })
+                    .expect("saying choice");
+                let submission_late = InteractionSubmission {
+                    interaction_id: opp_late.interaction_id.clone(),
+                    response: InteractionResponse::Choose {
+                        choice_id: saying_choice_late.id.clone(),
+                    },
+                };
+
+                let outcome_late = tokio::time::timeout(Duration::from_secs(10), async {
+                    // Late ingress timestamp (past deadline).
+                    let late_ingress = now_late + 250;
+                    let late_frame = serde_json::json!({
+                        "type": "Interaction",
+                        "command_id": 2,
+                        "data": {
+                            "submission": submission_late,
+                            "at_ms": late_ingress,
+                        },
+                    });
+                    p0_late
+                        .send(Message::Text(late_frame.to_string().into()))
+                        .await
+                        .unwrap();
+
+                    let comp = completion(&mut p0_late, 2).await;
+                    assert_eq!(comp["command_id"], 2);
+
+                    let state_late_after = session_read(&table_late, |s| s.state.clone()).await;
+                    assert!(state_late_after.say_payment.is_none(), "payment closed");
+                    assert!(
+                        !state_late_after
+                            .battlefield
+                            .iter()
+                            .any(|id| state_late_after.objects[id].name == "Toy Boat"),
+                        "late interaction judged at ingress caused Toy Boat to be sacrificed"
+                    );
+                })
+                .await;
+                table_late.server.abort();
+                outcome_late.expect("late interaction was processed and lapsed");
+            });
+        }
+
         /// An early client `Expiry` report while the server timer is armed leaves
         /// the payment live and does NOT release the timer's internal claim.
         /// When the timer's deadline passes, the original timer task drains ingress

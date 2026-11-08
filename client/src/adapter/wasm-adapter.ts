@@ -599,10 +599,13 @@ export class WasmAdapter
   async submitInteraction(
     submission: InteractionSubmission,
     actor: PlayerId,
+    atMs?: number,
   ): Promise<SubmitResult> {
     this.assertInitialized("submitInteraction");
     try {
-      const result = this.engine ? await this.engine.submitInteraction(actor, submission) : await this.fallback!.submitInteraction(submission, actor);
+      const result = this.engine
+        ? await this.engine.submitInteraction(actor, submission, atMs)
+        : await this.fallback!.submitInteraction(submission, actor, atMs);
       this.invalidateAiDecisionDiagnostics();
       return result;
     } catch (err) {
@@ -1578,7 +1581,7 @@ interface MainThreadFallback {
   cancelTakeback(actor: PlayerId): Promise<TakebackReply>;
   pendingTakeback(): Promise<TakebackVote | null>;
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
-  submitInteraction(submission: InteractionSubmission, actor: PlayerId): Promise<SubmitResult>;
+  submitInteraction(submission: InteractionSubmission, actor: PlayerId, atMs?: number): Promise<SubmitResult>;
   previewManaPayment(action: GameAction, actor: PlayerId): Promise<ObjectId[]>;
   previewInteraction(
     request: InteractionPreviewRequest,
@@ -1739,10 +1742,10 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
     submitAction: (action: GameAction, actor: PlayerId) =>
       enqueue(() => appliedSubmitResult(unwrapAppliedOutcome(wasm.submit_action(actor, action)))),
 
-    submitInteraction: (submission: InteractionSubmission, actor: PlayerId) =>
+    submitInteraction: (submission: InteractionSubmission, actor: PlayerId, atMs?: number) =>
       enqueue(() => {
         const r = unwrapActionOutcome<{ events?: SubmitResult["events"]; log_entries?: SubmitResult["log_entries"] }>(
-          wasm.submit_interaction_js(actor, submission),
+          wasm.submit_interaction_js(actor, submission, atMs),
         );
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
       }),

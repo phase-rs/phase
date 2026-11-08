@@ -395,6 +395,8 @@ pub enum ClientMessage {
     /// See `client_message_wire_guard::wire_rejection_message`.
     Interaction {
         submission: InteractionSubmission,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_ms: Option<u64>,
     },
     /// Read-only preview of one engine-authored interaction response. The client
     /// echoes the request it minted; the authenticated session — not the payload —

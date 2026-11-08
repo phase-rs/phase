@@ -2165,6 +2165,7 @@ export class WebSocketAdapter implements EngineAdapter {
   async submitInteraction(
     submission: InteractionSubmission,
     _actor: PlayerId,
+    atMs?: number,
   ): Promise<SubmitResult> {
     this.assertNoPendingSubmission();
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -2172,7 +2173,13 @@ export class WebSocketAdapter implements EngineAdapter {
     }
 
     return this.submitGameFrame(
-      { type: "Interaction", data: { submission } },
+      {
+        type: "Interaction",
+        data: {
+          submission,
+          ...(atMs !== undefined ? { at_ms: atMs } : {}),
+        },
+      },
       new AdapterError("WS_CLOSED", "Failed to send interaction", true),
     );
   }

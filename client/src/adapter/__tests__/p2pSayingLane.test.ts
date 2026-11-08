@@ -81,9 +81,13 @@ type HostGuestMessageInternals = {
   eliminatedSeats: Set<number>;
   gameRunState: string;
   guestSessions: Map<number, unknown>;
-  applyBrowserMutation: <T>(run: () => Promise<T>) => Promise<T>;
-  nativeBridge: {
-    submitAction: (action: GameAction, player: number) => Promise<{ result: SubmitResult }>;
+  applyBrowserMutation: <T>(run: () => Promise<T>) => Promise<{ result: T }>;
+  nativeBridge?: {
+    submitAction?: (action: GameAction, player: number) => Promise<{ result: SubmitResult }>;
+    submitInteraction?: (submission: unknown, player: number, atMs?: number) => Promise<SubmitResult>;
+  };
+  wasm?: {
+    submitInteraction?: (submission: unknown, player: number, atMs?: number) => Promise<SubmitResult>;
   };
   publishHostSnapshot: (result: SubmitResult) => Promise<boolean>;
   broadcastStateUpdate: (
@@ -390,6 +394,129 @@ describe("P2P saying reply lane", () => {
         accepted: true,
       },
     ]);
+  });
+
+  it("passes trusted host receipt timestamp through guest interaction submission in browser and native P2P", async () => {
+    const session = {} as unknown as PeerSession;
+    const submission = {
+      interaction_id: "int-1",
+      response: { type: "Choose", choice_id: "say-toy-boat" },
+    };
+
+    // 1. Native bridge P2P host
+    const nativeSubmitted: Array<{ submission: unknown; player: number; atMs?: number }> = [];
+    const nativeHost = Object.create(
+      P2PHostAdapter.prototype,
+    ) as unknown as HostGuestMessageInternals;
+    nativeHost.handlePendingTerminalReconnectFrame = () => false;
+    nativeHost.authenticatedGuestPlayerId = () => 1;
+    nativeHost.concedingSeats = new Set();
+    nativeHost.eliminatedSeats = new Set();
+    nativeHost.gameRunState = "running";
+    nativeHost.guestSessions = new Map([[1, session]]);
+    nativeHost.applyBrowserMutation = async (run) => ({ result: await run() });
+    nativeHost.nativeBridge = {
+      submitInteraction: vi.fn(async (sub, player, atMs) => {
+        nativeSubmitted.push({ submission: sub, player, atMs });
+        return EMPTY;
+      }),
+    };
+    nativeHost.publishHostSnapshot = vi.fn(async () => true);
+    nativeHost.broadcastStateUpdate = vi.fn(async () => {});
+    nativeHost.runAiLoop = vi.fn(async () => {});
+    nativeHost.persistAuthoritativeState = vi.fn();
+    nativeHost.send = vi.fn(async () => true);
+
+    await nativeHost.handleGuestMessage(
+      session,
+      {
+        type: "interaction",
+        senderPlayerId: 1,
+        submission,
+      } as unknown as P2PMessage,
+      1_730_000_000_456,
+    );
+
+    expect(nativeSubmitted).toEqual([
+      {
+        submission,
+        player: 1,
+        atMs: 1_730_000_000_456,
+      },
+    ]);
+
+    // 2. Browser WASM P2P host
+    const wasmSubmitted: Array<{ submission: unknown; player: number; atMs?: number }> = [];
+    const wasmHost = Object.create(
+      P2PHostAdapter.prototype,
+    ) as unknown as HostGuestMessageInternals;
+    wasmHost.handlePendingTerminalReconnectFrame = () => false;
+    wasmHost.authenticatedGuestPlayerId = () => 1;
+    wasmHost.concedingSeats = new Set();
+    wasmHost.eliminatedSeats = new Set();
+    wasmHost.gameRunState = "running";
+    wasmHost.guestSessions = new Map([[1, session]]);
+    wasmHost.applyBrowserMutation = async (run) => ({ result: await run() });
+    wasmHost.wasm = {
+      submitInteraction: vi.fn(async (sub, player, atMs) => {
+        wasmSubmitted.push({ submission: sub, player, atMs });
+        return EMPTY;
+      }),
+    };
+    wasmHost.publishHostSnapshot = vi.fn(async () => true);
+    wasmHost.broadcastStateUpdate = vi.fn(async () => {});
+    wasmHost.runAiLoop = vi.fn(async () => {});
+    wasmHost.persistAuthoritativeState = vi.fn();
+    wasmHost.send = vi.fn(async () => true);
+
+    await wasmHost.handleGuestMessage(
+      session,
+      {
+        type: "interaction",
+        senderPlayerId: 1,
+        submission,
+      } as unknown as P2PMessage,
+      1_730_000_000_789,
+    );
+
+    expect(wasmSubmitted).toEqual([
+      {
+        submission,
+        player: 1,
+        atMs: 1_730_000_000_789,
+      },
+    ]);
+  });
+
+  it("schedules expiry after a successful host-seat opaque saying", async () => {
+    const submission = {
+      interaction_id: "int-1",
+      response: { type: "Choose", choice_id: "say-toy-boat" },
+    };
+    const host = Object.create(
+      P2PHostAdapter.prototype,
+    ) as unknown as HostInternals & {
+      concedingSeats: Set<number>;
+      gameRunState: string;
+      wasm: { submitInteraction: (sub: unknown, player: number) => Promise<SubmitResult> };
+      submitInteraction: (sub: unknown, actor: number) => Promise<SubmitResult>;
+    };
+    host.disposed = false;
+    host.ownsAuthority = () => true;
+    host.concedingSeats = new Set();
+    host.gameRunState = "running";
+    host.applyBrowserMutation = async (run) => ({ result: await run() });
+    host.wasm = {
+      submitInteraction: vi.fn(async () => EMPTY),
+    };
+    host.scheduleSayPhraseExpiry = vi.fn();
+    host.broadcastStateUpdate = vi.fn(async () => {});
+    host.runAiLoop = vi.fn(async () => {});
+    host.persistAuthoritativeState = vi.fn();
+
+    await host.submitInteraction(submission, 0);
+
+    expect(host.scheduleSayPhraseExpiry).toHaveBeenCalledTimes(1);
   });
 
   it("propagates definite no-send for untimed P2P payments and preserves retry", async () => {

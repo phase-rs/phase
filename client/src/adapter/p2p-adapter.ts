@@ -468,9 +468,10 @@ export class NativeP2PBridge {
   async submitInteraction(
     submission: InteractionSubmission,
     playerId: PlayerId,
+    atMs?: number,
   ): Promise<SubmitResult> {
     await this.ensureAttached(playerId);
-    return this.clientFor(playerId).submitInteraction(submission, playerId);
+    return this.clientFor(playerId).submitInteraction(submission, playerId, atMs);
   }
 
   /** A suspended seat that must act (the host conceding for it, say) reattaches first:
@@ -3501,6 +3502,7 @@ export class P2PHostAdapter implements EngineAdapter {
     const transition = await this.applyBrowserMutation(() => this.nativeBridge
       ? this.nativeBridge.submitInteraction(submission, actor)
       : this.wasm.submitInteraction(submission, actor));
+    this.scheduleSayPhraseExpiry();
     await this.broadcastStateUpdate(transition);
     await this.runAiLoop();
     void this.persistAuthoritativeState();
@@ -4535,8 +4537,10 @@ export class P2PHostAdapter implements EngineAdapter {
     if (ownerGen !== undefined && ownerGen !== this.sayExpiryTimerGeneration) return;
     this.sayExpiryGeneration += 1;
     this.sayExpiryTimerGeneration += 1;
-    this.sayExpiryReadPending = false;
-    this.sayExpiryReadPromise = null;
+    if (ownerGen === undefined) {
+      this.sayExpiryReadPending = false;
+      this.sayExpiryReadPromise = null;
+    }
     this.clearSayExpiryTimer();
     this.sayExpiryPayment = null;
     this.sayExpiryDeadline = null;
@@ -4590,6 +4594,7 @@ export class P2PHostAdapter implements EngineAdapter {
     if (!this.ownsSayExpiry(timerGen)) return;
     if (!target || target.payment !== paymentId) {
       this.disarmSayPhraseExpiry(timerGen);
+      this.armSayPhraseExpiry(target);
       return;
     }
     // Order received sayings before expiry: drain any in-flight frames from the authorized submitter's session
@@ -4611,6 +4616,7 @@ export class P2PHostAdapter implements EngineAdapter {
       if (!this.ownsSayExpiry(timerGen)) return;
       if (!target || target.payment !== paymentId) {
         this.disarmSayPhraseExpiry(timerGen);
+        this.armSayPhraseExpiry(target);
         return;
       }
     }
@@ -5427,8 +5433,8 @@ export class P2PHostAdapter implements EngineAdapter {
         let transition: BrowserTransition;
         try {
           transition = await this.applyBrowserMutation(() => this.nativeBridge
-            ? this.nativeBridge.submitInteraction(msg.submission, pid)
-            : this.wasm.submitInteraction(msg.submission, pid));
+            ? this.nativeBridge.submitInteraction(msg.submission, pid, receivedAtMs)
+            : this.wasm.submitInteraction(msg.submission, pid, receivedAtMs));
         } catch (err) {
           void this.send(session, actionFailureFrame(err));
           break;

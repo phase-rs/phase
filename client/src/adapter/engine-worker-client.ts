@@ -386,9 +386,9 @@ export class EngineWorkerClient {
     );
   }
 
-  async submitInteraction(actor: number, submission: InteractionSubmission): Promise<SubmitResult> {
+  async submitInteraction(actor: number, submission: InteractionSubmission, atMs?: number): Promise<SubmitResult> {
     return this.request<SubmitResult>(
-      { type: "submitInteraction", actor, submission },
+      { type: "submitInteraction", actor, submission, atMs },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }

@@ -5832,7 +5832,7 @@ export interface EngineAdapter {
     awayPlayers?: PlayerId[],
   ): Promise<ContestDriveResult>;
   /** Submit an opaque response from the engine's current interaction projection. */
-  submitInteraction?(submission: InteractionSubmission, actor: PlayerId): Promise<SubmitResult>;
+  submitInteraction?(submission: InteractionSubmission, actor: PlayerId, atMs?: number): Promise<SubmitResult>;
   /**
    * Read-only preview of the exact automatic `CastSpell` action currently
    * offered by the engine. Unsupported transports omit this capability.

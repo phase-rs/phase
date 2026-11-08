@@ -86,7 +86,7 @@ pub fn guard_client_message_before_dispatch(
         ClientMessage::Action { action } | ClientMessage::PreviewManaPayment { action, .. } => {
             guard_game_action_payload(action)
         }
-        ClientMessage::Interaction { submission } => {
+        ClientMessage::Interaction { submission, .. } => {
             guard_interaction_submission_payload(submission)
         }
         ClientMessage::PreviewInteraction { request } => {
@@ -906,6 +906,7 @@ mod tests {
                 interaction_id: InteractionId("interaction-1".to_string()),
                 response,
             },
+            at_ms: None,
         }
     }
 

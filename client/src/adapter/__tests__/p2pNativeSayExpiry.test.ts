@@ -378,6 +378,49 @@ describe("native P2P spoken-payment expiry", () => {
     }
   });
 
+  it("survives a coalesced read with a rekeyed payment when an old timer disarms", async () => {
+    vi.useFakeTimers();
+    try {
+      const host = makeHost() as HostInternals & {
+        wasm: { getState: () => Promise<GameState> };
+        sayExpiryReadPending: boolean;
+        sayExpiryReadInFlight: boolean;
+      };
+      (host as unknown as { nativeBridge: undefined }).nativeBridge = undefined;
+      const deadline = NOW() + 60_000;
+      const rekeyedState = {
+        ...viewState("rekeyed payment"),
+        say_payment: { id: 8, owed: 2, said: 1, clock_ms: 0, deadline_ms: deadline },
+      } as unknown as GameState;
+      const pendingRead = deferred<GameState>();
+      const getState = vi.fn<() => Promise<GameState>>().mockReturnValue(pendingRead.promise);
+      host.wasm = { getState };
+      host.sayExpiryTimerGeneration = 1;
+      host.sayExpiryPayment = 7;
+      host.sayExpiryDeadline = NOW() - 1;
+
+      // The old timer (generation 1, payment 7) begins its expiry read:
+      const expirePromise = host.expireSayPhrase(7, 1);
+
+      // A newer publication arrives and schedules a refresh read, coalescing with the in-flight read:
+      host.scheduleSayPhraseExpiry();
+      expect(host.sayExpiryReadPromise).not.toBeNull();
+
+      // The read resolves with the rekeyed payment:
+      pendingRead.resolve(rekeyedState);
+      await expirePromise;
+
+      // The old timer saw replacement payment 8: it disarmed generation 1,
+      // preserved the new refresh, and armed payment 8:
+      expect(host.sayExpiryPayment).toBe(8);
+      expect(host.sayExpiryDeadline).toBe(deadline);
+      expect(host.sayExpiryTimer).not.toBeNull();
+      host.clearSayExpiryTimer();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("drains through the engine-authorized seat under turn control and revalidates when authority changes", async () => {
     const host = makeHost();
     const hostSeat = new FakeSeatClient(0, viewState("host"));

@@ -5031,6 +5031,7 @@ mod transport_fixup_tests {
                                 choice_id: InteractionChoiceId("quota-choice".to_string()),
                             },
                         },
+                        at_ms: None,
                     },
                 ];
                 for (index, message) in commands
