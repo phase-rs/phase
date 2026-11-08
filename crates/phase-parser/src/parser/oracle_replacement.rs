@@ -15,7 +15,9 @@ use nom::Parser;
 
 use super::oracle_classifier::has_enters_with_counter_tokens;
 use super::oracle_effect::become_copy_except::parse_except_clause;
-use super::oracle_effect::lower::{apply_where_x_quantity_expression, parse_where_x_quantity_core};
+use super::oracle_effect::lower::{
+    apply_where_x_quantity_expression, parse_where_x_quantity_core, WhereXBinding,
+};
 use super::oracle_effect::{
     excise_selection_qualifier, parse_effect_chain, parse_effect_chain_with_context,
     parse_effect_clause, parse_named_choice_object, try_parse_named_choice,
@@ -2512,11 +2514,15 @@ fn parse_as_enters_pay(norm_lower: &str, original_text: &str) -> Option<Replacem
     let (pay_residue, _) = tag::<_, _, OracleError<'_>>("pay ")
         .parse(payment_text)
         .ok()?;
-    let cost = super::oracle_effect::imperative::parse_pay_residue_cost(pay_residue, pay_residue)?;
+    let super::oracle_effect::imperative::PayResidueCost { cost, scale } =
+        super::oracle_effect::imperative::parse_pay_residue_cost(pay_residue, pay_residue)?;
     let AbilityCost::PayLife { amount } = &cost else {
         return None;
     };
-    if !crate::types::ability::is_pay_any_amount(amount) {
+    // CR 118.1: this builder's `Effect::PayCost` has no amount-multiplier
+    // surface, so a scaled residue declines rather than having its scale
+    // dropped.
+    if !crate::types::ability::is_pay_any_amount(amount) || scale.is_some() {
         return None;
     }
     let execute = AbilityDefinition::new(
@@ -5610,7 +5616,7 @@ fn bind_enters_with_where_x(count: QuantityExpr, where_x: &str) -> Option<Quanti
             if definition.contains_x() {
                 return None;
             }
-            apply_where_x_quantity_expression(count, Some(where_x))
+            apply_where_x_quantity_expression(count, WhereXBinding::bare(Some(where_x)))
         }
     }
 }
@@ -9125,11 +9131,7 @@ fn parse_oneshot_prevent_damage_tail(
     all_consuming(delimited(
         multispace0,
         pair(
-            map_opt(parse_damage_noun_with_scope, |scope| match scope {
-                Some(CombatDamageScope::CombatOnly) => Some(PreventionScope::CombatDamage),
-                None => Some(PreventionScope::AllDamage),
-                Some(CombatDamageScope::NoncombatOnly) => None,
-            }),
+            parse_prevention_damage_noun,
             opt(preceded(char(' '), parse_damage_target_phrase)),
         ),
         multispace0,
@@ -13688,6 +13690,19 @@ fn parse_damage_noun_with_scope(input: &str) -> OracleResult<'_, Option<CombatDa
         value(Some(CombatDamageScope::CombatOnly), tag("combat damage")),
         value(None, tag("damage")),
     ))
+    .parse(input)
+}
+
+/// CR 615.1a + CR 120.2a: the damage noun of a prevention clause through the shared
+/// [`parse_damage_noun_with_scope`] authority, narrowed to the scopes a prevention
+/// shield carries: "combat damage" -> `CombatDamage`, bare "damage" -> `AllDamage`;
+/// "noncombat damage" has no `PreventionScope` and is an `Err`.
+pub(crate) fn parse_prevention_damage_noun(input: &str) -> OracleResult<'_, PreventionScope> {
+    map_opt(parse_damage_noun_with_scope, |scope| match scope {
+        Some(CombatDamageScope::CombatOnly) => Some(PreventionScope::CombatDamage),
+        None => Some(PreventionScope::AllDamage),
+        Some(CombatDamageScope::NoncombatOnly) => None,
+    })
     .parse(input)
 }
 
@@ -20536,6 +20551,9 @@ mod tests {
             "as ~ enters, pay 2 life.",
             "as ~ enters, pay {2}{b}.",
             "as ~ enters, pay any amount of {e}.",
+            // A per-unit scaled mana residue: this builder has no scale
+            // surface, so it declines rather than dropping the scale.
+            "as ~ enters, pay any amount of {r}.",
             // Cap sentence without the payment sentence.
             "as ~ enters. the amount you pay can't be more than the total number of white cards in their graveyards.",
             // Cap head with an unparseable body.

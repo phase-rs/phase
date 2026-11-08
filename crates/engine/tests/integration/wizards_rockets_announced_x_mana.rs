@@ -102,7 +102,7 @@ fn lists_activation(state: &GameState, source: ObjectId) -> bool {
 fn expect_announcement(state: &GameState, source: ObjectId) -> u32 {
     match &state.waiting_for {
         WaitingFor::PayAmountChoice {
-            resource: PayableResource::ManaGeneric { base_cost },
+            resource: PayableResource::Mana { base_cost, .. },
             min,
             max,
             accumulated,
