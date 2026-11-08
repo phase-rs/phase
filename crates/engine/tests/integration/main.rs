@@ -150,6 +150,7 @@ mod issue_5328_attacks_alone_observer;
 mod issue_5335_stonehoof_mass_attack;
 mod issue_5338_moon_circuit_hacker_ninjutsu_mana;
 mod issue_5901_depthshaker_titan;
+mod issue_6389_sharpshooter_untap_on_dies;
 mod issue_6457_anti_venom_damage_counters;
 mod issue_6634_aven_courier;
 mod issue_6678_captain_america_shield_tap_defender;
