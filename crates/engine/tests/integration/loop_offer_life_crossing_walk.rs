@@ -205,13 +205,12 @@ fn a_drain_shortcut_reads_as_many_life_charges_at_a_large_life_total() {
 /// Tenacity ("Whenever you gain life, target opponent loses that much life." / "When Enduring
 /// Tenacity dies, if it was a creature, return it to the battlefield under its owner's control.
 /// It's an enchantment. (It's not a creature.)"). Enduring Tenacity's trigger chooses its target
-/// as it is put on the stack (CR 603.3d + CR 601.2c) among three opponents. The offer comes by
-/// the ring road, whose certified period charges the target slot an announcement in its window
-/// names, so the walk gathers the declarations' change points and splits off the leading
-/// repetition. Each repetition moves "that much life", the 4
+/// as it is put on the stack (CR 603.3d + CR 601.2c) among three opponents. The offer's certified
+/// period charges that target slot, so the walk gathers the declarations' change points and
+/// splits off the leading repetition. Each repetition moves "that much life", the 4
 /// the chain carries, from the targeted P1 to P0. Each take ends where the shortcut ends
-/// (CR 732.2a), at P0's priority with Enduring Tenacity's next trigger on the stack, P0 up 12 and
-/// P1 down 12.
+/// (CR 732.2a), at P0's priority with the triggers the offer stood with on the stack, P0 up 12
+/// and P1 down 12.
 ///
 /// REVERT-PROBE: as above ⇒ the reads with P0 at 4,000,000 are millions more than at the saved
 /// total.
@@ -224,6 +223,19 @@ fn a_targeted_drain_shortcut_reads_as_many_life_charges_at_a_large_life_total() 
         if let Some(life) = life {
             state.players[0].life = life;
         }
+        // The sources of the triggers on the stack, bottom to top.
+        let in_flight = |state: &GameState| -> Vec<String> {
+            state
+                .stack
+                .iter()
+                .map(|entry| match &entry.kind {
+                    StackEntryKind::TriggeredAbility { source_id, .. } => {
+                        state.objects[source_id].name.clone()
+                    }
+                    other => panic!("P0 at {life:?}: a trigger is in flight, got {other:?}"),
+                })
+                .collect()
+        };
         perf_counters::reset_declared_life_charge_counters();
         let live = drive_to_live_declarable_offer(&mut state);
         assert_eq!(
@@ -241,6 +253,11 @@ fn a_targeted_drain_shortcut_reads_as_many_life_charges_at_a_large_life_total() 
             [("Enduring Tenacity", i64::from(HIT))],
             "REACH-GUARD, P0 at {life:?}: the certified period charges exactly one target slot, \
              Enduring Tenacity's, {HIT} a repetition"
+        );
+        let offered = in_flight(&state);
+        assert!(
+            !offered.is_empty(),
+            "REACH-GUARD, P0 at {life:?}: the offer stands with a trigger on the stack"
         );
         let before: Vec<i32> = state.players.iter().map(|p| p.life).collect();
         apply(
@@ -273,20 +290,10 @@ fn a_targeted_drain_shortcut_reads_as_many_life_charges_at_a_large_life_total() 
             WaitingFor::Priority { player: P0 },
             "P0 at {life:?}: the take ends at P0's priority"
         );
-        let in_flight: Vec<&str> = state
-            .stack
-            .iter()
-            .map(|entry| match &entry.kind {
-                StackEntryKind::TriggeredAbility { source_id, .. } => {
-                    state.objects[source_id].name.as_str()
-                }
-                other => panic!("P0 at {life:?}: a trigger is in flight, got {other:?}"),
-            })
-            .collect();
         assert_eq!(
-            in_flight,
-            ["Enduring Tenacity"],
-            "P0 at {life:?}: the take ends with Enduring Tenacity's next trigger on the stack"
+            in_flight(&state),
+            offered,
+            "P0 at {life:?}: the take ends with the triggers the offer stood with on the stack"
         );
         let after: Vec<i32> = state.players.iter().map(|p| p.life).collect();
         assert_eq!(

@@ -975,11 +975,11 @@ pub struct PeriodicDelta {
     )]
     pub instructed_mills: Option<BTreeMap<PlayerId, InstructedMill>>,
     /// CR 732.2a: what each repetition adds to the one before it on `delta`; zero for a constant
-    /// period. Read only through [`PeriodicDelta::repetition`].
+    /// period.
     #[serde(default, skip_serializing_if = "ResourceVector::is_zero")]
     pub growth: ResourceVector,
     /// CR 119.3 + CR 704.3: what each repetition adds to the one before it on
-    /// `seat_life_charge`, per seat, signed. Read only through [`PeriodicDelta::repetition`].
+    /// `seat_life_charge`, per seat, signed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub seat_life_charge_growth: Vec<(PlayerId, i64)>,
 }
@@ -1145,7 +1145,7 @@ impl PeriodicDelta {
     /// repetition's charge plus `k − 1` growths. Every reader that turns this signature into a
     /// count's consequence reads it here.
     pub fn repetition(&self, k: u32) -> Cow<'_, PeriodicDelta> {
-        if self.growth.is_zero() && self.seat_life_charge_growth.is_empty() {
+        if self.is_constant() {
             return Cow::Borrowed(self);
         }
         let steps = i64::from(k.saturating_sub(1));
@@ -1160,6 +1160,11 @@ impl PeriodicDelta {
             seat_life_charge: charge.into_iter().filter(|&(_, m)| m > 0).collect(),
             ..self.clone()
         })
+    }
+
+    /// CR 732.2a: whether every repetition moves what the first does.
+    fn is_constant(&self) -> bool {
+        self.growth.is_zero() && self.seat_life_charge_growth.is_empty()
     }
 
     /// CR 732.2a: what the first `n` repetitions move together — the sum of
@@ -1680,7 +1685,7 @@ impl PeriodicDelta {
     /// [`Self::declared_seat_life_charges`], the same answer for every input, computed without
     /// stepping through repetitions whose charge cannot differ from the one before.
     ///
-    /// On one board a repetition's charge depends on its index only through the two templates'
+    /// On one board a constant period's charge depends on its index only through the two templates'
     /// resolutions and, for a slot that leads, the latched aim its first repetition reads and the
     /// declaration it reads one index behind (CR 603.3d + CR 601.2c); a resolution changes only at
     /// a pre-declared switch point (`DecisionTemplate::resolution_change_points`). Between two
@@ -1689,8 +1694,9 @@ impl PeriodicDelta {
     /// `horizon`. A seat the declaration never charges, on a board whose horizon is a life total in
     /// the billions, is read once per stretch instead of once per point of that total.
     ///
-    /// A template with no finite list of switch points (a round robin of two or more) is walked
-    /// repetition by repetition, as [`Self::first_life_crossing`] walks any stream. That is a
+    /// A growing period ([`Self::repetition`]) and a template with no finite list of switch points
+    /// (a round robin of two or more) are walked repetition by repetition, as
+    /// [`Self::first_life_crossing`] walks any stream. For the round robin that is a
     /// stated limit: no engine producer builds such a schedule, and it arrives only in input the
     /// engine did not write: a hand-written `DeclareShortcut`, a remote client's included (the
     /// server's payload guard bounds the schedule's length and passes it through), or a restored
@@ -1723,6 +1729,10 @@ impl PeriodicDelta {
             bound,
             lead,
         );
+        // A growing period's charge changes at every repetition, so no stretch outlasts one.
+        if !self.is_constant() {
+            return Self::first_life_crossing((0..).map(charge_at), remaining_life, horizon);
+        }
         // With no charged slot no template is read, so the stream never changes.
         let mut changes: BTreeSet<IterationIndex> = BTreeSet::new();
         if !self.victim_slot.is_empty() {
@@ -30116,12 +30126,13 @@ mod tests {
 
     /// CR 704.5a + CR 732.2a: a growing loss crosses where its arithmetic stream first reaches
     /// the seat's life — 9 + 10 + … + 21 = 195 ≥ 192 at the thirteenth repetition — while the
-    /// same period without its growth crosses at ⌈192 / 9⌉ = 22.
+    /// same period without its growth crosses at ⌈192 / 9⌉ = 22. The stepping walk over the
+    /// charges and `PeriodicDelta::declared_seat_life_crossing` give each answer.
     #[test]
     fn a_growing_loss_crosses_where_its_stream_reaches_the_life_total() {
         let state = GameState::new_two_player(7);
-        let crossing = |period: &PeriodicDelta| {
-            PeriodicDelta::first_life_crossing(
+        let crossings = |period: &PeriodicDelta| {
+            let stepped = PeriodicDelta::first_life_crossing(
                 period.declared_seat_life_charges(
                     PlayerId(1),
                     None,
@@ -30133,10 +30144,27 @@ mod tests {
                 ),
                 192,
                 400,
-            )
+            );
+            let read = period.declared_seat_life_crossing(
+                PlayerId(1),
+                None,
+                None,
+                &[],
+                &state,
+                ChargeBound::Ceiling,
+                AnnouncedLead::None,
+                192,
+                400,
+            );
+            (stepped, read)
         };
-        assert_eq!(crossing(&growing_loss(9, 1)), Some(13));
-        assert_eq!(crossing(&growing_loss(9, 0)), Some(22));
+        let constant = PeriodicDelta {
+            growth: ResourceVector::default(),
+            seat_life_charge_growth: Vec::new(),
+            ..growing_loss(9, 0)
+        };
+        assert_eq!(crossings(&growing_loss(9, 1)), (Some(13), Some(13)));
+        assert_eq!(crossings(&constant), (Some(22), Some(22)));
     }
 
     /// CR 732.2a: repetition k of a growing period conforms to its own charge, not to the one
