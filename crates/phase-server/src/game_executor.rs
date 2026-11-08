@@ -584,6 +584,7 @@ impl StateUpdatePublisher {
         mut self,
         executor: &GameExecutor,
         transitions: Vec<AiTransition>,
+        saying: bool,
     ) -> Self {
         self.flush_spectators(executor).await;
         let transition_count = transitions.len();
@@ -594,7 +595,7 @@ impl StateUpdatePublisher {
             );
             self = executor
                 .run(move || {
-                    let source = StateUpdateSource::from_transition(&transition);
+                    let source = StateUpdateSource::from_transition(&transition).saying(saying);
                     let revision = source.revision;
                     match source.guarded(&self.full_key.game_code) {
                         Ok(source) => self.publish(&source),
@@ -1325,7 +1326,7 @@ mod tests {
             )
             .await;
             publisher
-                .publish_ai(&executor, vec![small, untrimmable, oversized])
+                .publish_ai(&executor, vec![small, untrimmable, oversized], false)
                 .await
                 .finish(&executor)
                 .await;

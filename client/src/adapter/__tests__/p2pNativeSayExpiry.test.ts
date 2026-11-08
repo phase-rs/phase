@@ -221,14 +221,16 @@ describe("native P2P spoken-payment expiry", () => {
     host.scheduleSayPhraseExpiry();
     host.scheduleSayPhraseExpiry();
 
+    // Exactly one read is in-flight: overlapping schedules coalesce to a pending refresh.
+    expect(hostSeat.sayPhraseExpiry).toHaveBeenCalledTimes(2);
+
+    // Resolving the in-flight read drains the pending refresh, initiating the newer read.
+    older.resolve(null);
+    await vi.waitFor(() => expect(hostSeat.sayPhraseExpiry).toHaveBeenCalledTimes(3));
+
     const deadline = NOW() + 60_000;
     newer.resolve({ payer: 0, payment: 7, deadline_ms: deadline });
     await vi.waitFor(() => expect(host.sayExpiryPayment).toBe(7));
-    // The older request settles last with a pre-saying answer; it is ignored.
-    older.resolve(null);
-    await older.promise;
-    await Promise.resolve();
-    expect(host.sayExpiryPayment).toBe(7);
     expect(host.sayExpiryDeadline).toBe(deadline);
     expect(host.sayExpiryTimer).not.toBeNull();
     // Viewer reads stay projected: no trusted export substitutes for them.
@@ -237,6 +239,55 @@ describe("native P2P spoken-payment expiry", () => {
     });
     expect(hostSeat.exportPersistenceState).not.toHaveBeenCalled();
     host.clearSayExpiryTimer();
+  });
+
+  it("coalesces overlapping expiry reads and recovers when a request receives no reply while the payer is absent", async () => {
+    vi.useFakeTimers();
+    try {
+      const host = makeHost();
+      const hostSeat = new FakeSeatClient(0, viewState("host"));
+      const payerSeat = new FakeSeatClient(1, viewState("payer", 1));
+      const bridge = await makeBridge(host, [hostSeat, payerSeat]);
+
+      // The payer's channel dropped: the bridge suspended its loopback socket.
+      bridge.suspendGuest(1);
+      host.disconnectedSeats.set(1, { disconnectedAt: NOW(), timer: null });
+      expect(bridge.isGuestAttached(1)).toBe(false);
+
+      // The first read receives no reply / times out with an error.
+      hostSeat.sayPhraseExpiry.mockRejectedValueOnce(new Error("request timed out with no reply"));
+
+      // Trigger multiple schedules while absent:
+      host.scheduleSayPhraseExpiry();
+      host.scheduleSayPhraseExpiry();
+
+      // Only one in-flight read occurred:
+      expect(hostSeat.sayPhraseExpiry).toHaveBeenCalledTimes(1);
+
+      // Flush microtasks for rejection:
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(host.sayExpiryPayment).toBeNull();
+
+      // After SAY_EXPIRY_RETRY_MS (250ms), it automatically retries with a fresh read:
+      const deadline = NOW() + 1000;
+      hostSeat.sayPhraseExpiry.mockResolvedValueOnce({
+        payer: 1,
+        payment: 7,
+        deadline_ms: deadline,
+      });
+
+      await vi.advanceTimersByTimeAsync(250);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(hostSeat.sayPhraseExpiry).toHaveBeenCalledTimes(2);
+      expect(host.sayExpiryPayment).toBe(7);
+      expect(host.sayExpiryDeadline).toBe(deadline);
+      expect(bridge.isGuestAttached(1)).toBe(false);
+      host.clearSayExpiryTimer();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("lapses through the host-only authority and leaves a suspended payer absent", async () => {

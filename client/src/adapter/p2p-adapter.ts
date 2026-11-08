@@ -1626,6 +1626,8 @@ export class P2PHostAdapter implements EngineAdapter {
   private sayExpiryDeadline: number | null = null;
   /** Generation fences a stale async state read from re-arming an old payment. */
   private sayExpiryGeneration = 0;
+  private sayExpiryReadInFlight = false;
+  private sayExpiryReadPending = false;
   /** Generation guards the active timer against an older callback resuming after rekey. */
   private sayExpiryTimerGeneration = 0;
   private sessionLatencies = new WeakMap<PeerSession, number | null>();
@@ -2483,7 +2485,7 @@ export class P2PHostAdapter implements EngineAdapter {
     });
   }
 
-  private async runAiLoop(): Promise<void> {
+  private async runAiLoop(saying?: boolean): Promise<void> {
     if (!this.ownsAuthority()) return;
     if (this.nativeBridge) return;
     if (!this.gameStarted) return;
@@ -2542,7 +2544,7 @@ export class P2PHostAdapter implements EngineAdapter {
       staleRetries = 0;
       const transition = this.stampBrowserMutation(outcome.result);
       await this.publishHostSnapshot(transition.result);
-      await this.broadcastStateUpdate(transition);
+      await this.broadcastStateUpdate(transition, undefined, saying);
       void this.persistAuthoritativeState();
     }
   }
@@ -4407,6 +4409,8 @@ export class P2PHostAdapter implements EngineAdapter {
 
   /**
    * Re-arm the authority's lapse observation from the live published payment.
+   * Overlapping requests are coalesced to at most one in-flight read plus a
+   * pending refresh, so multiple publications do not flood socket ingress.
    * The deadline and the instants compared against it are the host's own clock;
    * a guest's skewed clock only schedules its redundant UI fallback.
    */
@@ -4415,31 +4419,49 @@ export class P2PHostAdapter implements EngineAdapter {
     void this.refreshSayPhraseExpiry(generation);
   }
 
-  private async refreshSayPhraseExpiry(generation: number): Promise<void> {
+  private async drainSayPhraseExpiryReads(): Promise<void> {
     if (this.disposed || !this.ownsAuthority()) return;
-    let target: SayPhraseExpiryTarget | null;
+    this.sayExpiryReadInFlight = true;
     try {
-      target = await this.readSayPhraseExpiry();
-    } catch {
-      if (
-        generation === this.sayExpiryGeneration
-        && !this.disposed
-        && this.ownsAuthority()
-      ) {
-        this.sayExpiryPayment = null;
-        this.sayExpiryDeadline = null;
-        this.retrySayPhraseExpiry(this.sayExpiryTimerGeneration);
+      while (!this.disposed && this.ownsAuthority()) {
+        this.sayExpiryReadPending = false;
+        const generation = this.sayExpiryGeneration;
+        let target: SayPhraseExpiryTarget | null = null;
+        let readFailed = false;
+        try {
+          target = await this.readSayPhraseExpiry();
+        } catch {
+          readFailed = true;
+        }
+        if (this.disposed || !this.ownsAuthority()) return;
+        if (this.sayExpiryReadPending) {
+          continue;
+        }
+        if (readFailed) {
+          if (generation === this.sayExpiryGeneration) {
+            this.sayExpiryPayment = null;
+            this.sayExpiryDeadline = null;
+            this.retrySayPhraseExpiry(this.sayExpiryTimerGeneration);
+          }
+        } else {
+          if (generation === this.sayExpiryGeneration) {
+            this.armSayPhraseExpiry(target);
+          }
+        }
+        break;
       }
+    } finally {
+      this.sayExpiryReadInFlight = false;
+    }
+  }
+
+  private async refreshSayPhraseExpiry(generation: number): Promise<void> {
+    this.sayExpiryGeneration = generation;
+    if (this.sayExpiryReadInFlight) {
+      this.sayExpiryReadPending = true;
       return;
     }
-    if (
-      generation !== this.sayExpiryGeneration
-      || this.disposed
-      || !this.ownsAuthority()
-    ) {
-      return;
-    }
-    this.armSayPhraseExpiry(target);
+    await this.drainSayPhraseExpiryReads();
   }
 
   /**
@@ -4492,6 +4514,7 @@ export class P2PHostAdapter implements EngineAdapter {
     if (ownerGen !== undefined && ownerGen !== this.sayExpiryTimerGeneration) return;
     this.sayExpiryGeneration += 1;
     this.sayExpiryTimerGeneration += 1;
+    this.sayExpiryReadPending = false;
     this.clearSayExpiryTimer();
     this.sayExpiryPayment = null;
     this.sayExpiryDeadline = null;
@@ -4577,7 +4600,7 @@ export class P2PHostAdapter implements EngineAdapter {
       const transition = await this.applyBrowserMutation(() => this.wasm.submitAction(action, payer));
       await this.publishHostSnapshot(transition.result);
       await this.broadcastStateUpdate(transition, undefined, true);
-      await this.runAiLoop();
+      await this.runAiLoop(true);
       void this.persistAuthoritativeState();
     } catch (err) {
       // Refused — e.g. while a takeback vote is pending. The payment stays

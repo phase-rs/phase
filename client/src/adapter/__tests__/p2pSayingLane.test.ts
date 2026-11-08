@@ -693,4 +693,157 @@ describe("P2P saying reply lane", () => {
     }
   });
 
+  it("keeps detached expiry AI revisions (both delivered and withheld) out of the guest reply lane with a parked guest action", async () => {
+    const conn = new FakeDataConnection();
+    const guest = await authenticatedGuest(conn);
+
+    const sentWireMessages: unknown[] = [];
+    const session = {} as unknown as PeerSession;
+
+    const host = Object.create(P2PHostAdapter.prototype) as unknown as HostInternals & {
+      authoritativeRevision: number;
+      sayingRevisions: Set<number>;
+      guestSessions: Map<number, unknown>;
+      disconnectedSeats: Map<number, unknown>;
+      concedingSeats: Set<number>;
+      playerNamesForSeats: () => Record<number, string>;
+      playerTokens: Map<number, string>;
+      nativeInitialSetupPending: boolean;
+      nativeWithheldSeats: Map<number, unknown>;
+      recordNativeSeatOutcome: () => void;
+      scheduleSayPhraseExpiry: () => void;
+      handleNativeRevision: (
+        revision: number,
+        reports: Map<number, unknown>,
+        sayingOrReason?: boolean | string,
+        terminalReason?: string,
+      ) => Promise<void>;
+      send: (session: unknown, msg: unknown) => Promise<boolean>;
+      emit: () => void;
+    };
+    host.disposed = false;
+    host.ownsAuthority = () => true;
+    host.authoritativeRevision = 1;
+    host.sayingRevisions = new Set();
+    host.guestSessions = new Map([[1, session]]);
+    host.disconnectedSeats = new Map();
+    host.concedingSeats = new Set();
+    host.nativeInitialSetupPending = false;
+    host.nativeWithheldSeats = new Map();
+    host.playerNamesForSeats = () => ({ 0: "Host", 1: "Guest" });
+    host.playerTokens = new Map([[1, "guest-token"]]);
+    host.recordNativeSeatOutcome = vi.fn();
+    host.scheduleSayPhraseExpiry = vi.fn();
+    host.emit = vi.fn();
+    host.handleNativeRevision = P2PHostAdapter.prototype["handleNativeRevision"] as unknown as typeof host.handleNativeRevision;
+
+    // Guest has a parked ordinary submission that arrived after ingress drain:
+    const guestAction: GameAction = {
+      type: "ChooseUnlessCostBranch",
+      data: { choice: { type: "Decline" } },
+    };
+    const ordinary = guest.submitAction(guestAction, 1);
+    let ordinarySettled = false;
+    void ordinary.then(
+      () => {
+        ordinarySettled = true;
+      },
+      () => {
+        ordinarySettled = true;
+      },
+    );
+
+    // Wire up host.send to deliver to guest via fake connection
+    host.send = vi.fn(async (_session, msg) => {
+      sentWireMessages.push(msg);
+      await conn.simulateData(msg as P2PMessage);
+      return true;
+    });
+
+    const hostReport = {
+      kind: "update",
+      update: {
+        snapshot: { state: remoteState("host-state"), legalResult: { actions: [] } },
+        events: [],
+        logEntries: [],
+      },
+    };
+
+    // 1. Detached expiry first publication (lapse) is delivered to guest:
+    const lapseReports = new Map<number, unknown>([
+      [0, hostReport],
+      [
+        1,
+        {
+          kind: "update",
+          update: {
+            snapshot: { state: remoteState("lapse-applied"), legalResult: { actions: [] } },
+            events: [{ marker: "lapse-events" } as unknown as GameEvent],
+            logEntries: [],
+          },
+        },
+      ],
+    ]);
+    await host.handleNativeRevision(2, lapseReports, true);
+
+    // 2. Detached expiry follow-up AI publication (e.g. Blood Artist trigger target) is withheld for guest:
+    const aiReports = new Map<number, unknown>([
+      [0, hostReport],
+      [
+        1,
+        {
+          kind: "withheld",
+          notice: { revision: 3 },
+        },
+      ],
+    ]);
+    await host.handleNativeRevision(3, aiReports, true);
+
+    // Verify both frames were broadcast to guest with saying: true:
+    // 1. Delivered state_update with saying: true
+    // 2. Withheld state_withheld with saying: true
+    expect(sentWireMessages).toContainEqual(
+      expect.objectContaining({
+        type: "state_update",
+        revision: 2,
+        saying: true,
+      }),
+    );
+    expect(sentWireMessages).toContainEqual(
+      expect.objectContaining({
+        type: "state_withheld",
+        revision: 3,
+        saying: true,
+      }),
+    );
+
+    // Crucially: guest's ordinary parked submission was NOT settled by either frame!
+    expect(ordinarySettled).toBe(false);
+
+    // When guest's own ordinary completion arrives without saying, it settles:
+    const ordinaryReports = new Map<number, unknown>([
+      [0, hostReport],
+      [
+        1,
+        {
+          kind: "update",
+          update: {
+            snapshot: { state: remoteState("ordinary-completed"), legalResult: { actions: [] } },
+            events: [{ marker: "ordinary-done" } as unknown as GameEvent],
+            logEntries: [],
+          },
+        },
+      ],
+    ]);
+    await host.handleNativeRevision(4, ordinaryReports, false);
+
+    expect(ordinarySettled).toBe(true);
+    await expect(ordinary).resolves.toEqual({
+      events: [{ marker: "ordinary-done" }],
+      log_entries: [],
+    });
+
+    guest.dispose();
+  });
+
 });
