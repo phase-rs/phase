@@ -10,6 +10,8 @@
  *  - passes every other frame through untouched and in wire order;
  *  - requests `ResyncState` on the first rejected frame and suppresses deltas
  *    until a Full decodes, with a bounded recovery window;
+ *  - bounds outstanding expanded text and closes on overload without dropping
+ *    deltas or waiting for the active decode to settle;
  *  - never interprets, diffs or patches state. Rust owns reconstruction.
  *
  * Ownership: the wrapper owns the prepared decoder session lease and releases
@@ -39,6 +41,8 @@ export type StateCodecRecoveryState = "recovering" | "ready";
 export type StateCodecFailureReason =
   /** The decoder rejected the RPC or threw (lifecycle error, trap, timeout). */
   | "decodeFailure"
+  /** Expanded incoming text exceeded the outstanding receive budget. */
+  | "receiveOverload"
   /** Missing or contradictory selection, or a codec frame before confirmation. */
   | "confirmationFailure"
   /** A frame was rejected before the application accepted a bootstrap. */
@@ -66,8 +70,8 @@ export interface StateCodecJoinCredentials {
  *
  * `joinCredentials` is non-null only for a post-adoption failure whose exact
  * failing frame was a credential-bearing GameStarted `Full` received while the
- * bootstrap was pending: a decode rejection, a bootstrap rejection, or a
- * `Full` that preceded the codec confirmation. Every other failure carries
+ * bootstrap was pending: a decode rejection, a bootstrap rejection, a receive
+ * overload, or a `Full` that preceded the codec confirmation. Every other failure carries
  * `null`, and a notice recorded before its socket was adopted is stripped to
  * `null` (the setup frame has not been sent, so a conforming join cannot have
  * received credentials yet).
@@ -383,6 +387,14 @@ type Outbound =
  */
 const MAX_COMPLETED_RECOVERIES = 2;
 
+/**
+ * Bound expanded text retained while the shared decoder or application consumer
+ * is stalled. Both budgets include the active receive. A 16 MiB UTF-16 budget
+ * still admits multi-megabyte Full frames; it is not a 1 MiB per-frame ceiling.
+ */
+const MAX_OUTSTANDING_MESSAGES = 64;
+const MAX_OUTSTANDING_TEXT_BYTES = 16 * 1024 * 1024;
+
 export interface StateCodecSocketOptions {
   inner: PhaseSocketTransport;
   session: StateCodecSession;
@@ -410,7 +422,10 @@ export class StateCodecSocket implements PhaseSocketTransport {
   private handler: MessageListener | null = null;
   private readonly messageListeners = new Map<MessageListener, boolean>();
   private readonly closeListeners = new Map<CloseListener, boolean>();
-  private queue: Promise<void> = Promise.resolve();
+  private readonly queue: (() => Promise<void> | void)[] = [];
+  private draining = false;
+  private outstandingMessages = 0;
+  private outstandingTextBytes = 0;
   private state: ConnectionState = "awaitingConfirmation";
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
   private sessionReleased = false;
@@ -432,7 +447,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
     // and ahead of the natural close that follows it. It is only a
     // notification: it never fails, degrades or closes the codec attachment.
     inner.onerror = (event) => this.enqueue(() => this.deliverError(event));
-    inner.onmessage = (event) => this.enqueue(() => this.receive(event.data as string));
+    inner.onmessage = (event) => this.enqueueMessage(event.data as string);
     inner.onclose = (event) => this.enqueue(() => this.handleNaturalClose(event));
   }
 
@@ -524,8 +539,65 @@ export class StateCodecSocket implements PhaseSocketTransport {
 
   // ── Receive pipeline ───────────────────────────────────────────────
 
+  private enqueueMessage(text: string): void {
+    if (this.closed) return;
+    // GzipEnvelopeSocket can expand the next frame while decode is awaiting the
+    // shared WASM runtime. Reserve synchronously at this expanded-text boundary,
+    // before a closure retains the frame. Never drop a Delta and keep playing.
+    const textBytes = text.length * 2;
+    if (
+      this.outstandingMessages >= MAX_OUTSTANDING_MESSAGES
+      || textBytes > MAX_OUTSTANDING_TEXT_BYTES - this.outstandingTextBytes
+    ) {
+      this.terminate("immediate", "receiveOverload", this.credentialsOf(text));
+      return;
+    }
+    this.outstandingMessages++;
+    this.outstandingTextBytes += textBytes;
+    this.enqueue(async () => {
+      try {
+        await this.receive(text);
+      } finally {
+        // Terminal cleanup already cleared the entire budget, including the
+        // active receive; its eventual completion must not subtract it twice.
+        if (!this.closed) {
+          this.outstandingMessages--;
+          this.outstandingTextBytes -= textBytes;
+        }
+      }
+    });
+  }
+
   private enqueue(task: () => Promise<void> | void): void {
-    this.queue = this.queue.then(task).catch(() => undefined);
+    if (this.closed) return;
+    this.queue.push(task);
+    if (this.draining) return;
+    this.draining = true;
+    queueMicrotask(() => { void this.drain(); });
+  }
+
+  private async drain(): Promise<void> {
+    try {
+      while (!this.closed) {
+        const task = this.queue.shift();
+        if (!task) return;
+        try {
+          await task();
+        } catch {
+          // A failed callback must not strand later transport notifications.
+        }
+      }
+    } finally {
+      this.draining = false;
+    }
+  }
+
+  private clearReceiveQueue(): void {
+    // Unlike a promise chain, this queue can release waiting frame closures
+    // immediately even if the one active WASM decode never settles.
+    this.queue.length = 0;
+    this.outstandingMessages = 0;
+    this.outstandingTextBytes = 0;
   }
 
   /**
@@ -697,6 +769,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
   private handleNaturalClose(event: CloseEvent): void {
     if (this.state === "closed") return;
     this.state = "closed";
+    this.clearReceiveQueue();
     this.clearRecoveryTimer();
     this.wakeConsumers();
     try {
@@ -726,6 +799,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
   ): void {
     if (this.state === "closed") return;
     this.state = "closed";
+    this.clearReceiveQueue();
     this.clearRecoveryTimer();
     this.wakeConsumers();
     try {

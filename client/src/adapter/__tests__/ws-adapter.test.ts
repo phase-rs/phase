@@ -7058,6 +7058,7 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
 
         fallback.dispatchSynthetic("close");
         await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ type: "reconnecting" })));
+        await vi.advanceTimersByTimeAsync(1000);
         const next = await snapshotOnlyHandshake("Reconnect", fallback);
         next.dispatchSynthetic("message", plainStarted(3));
         await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
@@ -8104,6 +8105,7 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
 
           fallback.dispatchSynthetic("close");
           await vi.waitFor(() => expect(join.events).toContainEqual(expect.objectContaining({ type: "reconnecting" })));
+          await vi.advanceTimersByTimeAsync(1000);
           const next = await snapshotOnlyHandshake("Reconnect", fallback);
           next.dispatchSynthetic("message", plainStarted(3));
           await vi.waitFor(() => expect(join.events).toContainEqual({ type: "reconnected", inGame: true }));

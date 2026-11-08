@@ -1572,6 +1572,150 @@ describe("openPhaseSocket — codec stream, recovery and teardown", () => {
   });
 });
 
+describe("openPhaseSocket — bounded expanded codec backlog", () => {
+  // Admission includes the active decode, not just frames waiting behind it.
+  const messageLimit = 64;
+  const textByteLimit = 16 * 1024 * 1024;
+  const frameCharacters = 1024 * 1024;
+
+  function paddedFrame(type: "Full" | "Delta", characters = 512): string {
+    const frame = { type, data: { state: { type: "Pong", padding: "" }, revision: 1 } };
+    frame.data.state.padding = "x".repeat(characters - JSON.stringify(frame).length);
+    return JSON.stringify(frame);
+  }
+
+  async function negotiated(fake: { session: StateCodecSession }, recovery = vi.fn()) {
+    const pending = openPhaseSocket("ws://test", {
+      stateCodecSession: fake.session,
+      stateCodecBootstrap: () => "accepted",
+      onStateCodecRecovery: recovery,
+    });
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(fullHello({ wire_formats: ["GzipEnvelopeV1"] }));
+    const socket = await pending;
+    const received = vi.fn();
+    socket.ws.onmessage = received;
+    raw.deliverMessage(confirmationFrame());
+    raw.deliverMessage('{"type":"Pong"}');
+    await vi.waitFor(() => expect(received).toHaveBeenCalledOnce());
+    received.mockClear();
+    return { raw, socket, received, recovery };
+  }
+
+  it.each(["message count", "UTF-16 bytes"] as const)(
+    "terminates an expanded %s overload before the active decode settles",
+    async (bound) => {
+      let release!: (result: StateCodecDecodeResult) => void;
+      const fake = fakeSession();
+      fake.decode.mockImplementationOnce(() => new Promise<StateCodecDecodeResult>((resolve) => {
+        release = resolve;
+      }));
+      const order: string[] = [];
+      const recovery = vi.fn(() => { order.push("failed"); });
+      const { raw, socket, received } = await negotiated(fake, recovery);
+      const closed = vi.fn(() => { order.push("close"); });
+      socket.ws.onclose = closed;
+      const characters = bound === "message count" ? 512 : frameCharacters;
+      const full = await encodeJsonEnvelope(paddedFrame("Full", characters));
+      const delta = await encodeJsonEnvelope(paddedFrame("Delta", characters));
+      expect(full[0]).toBe(0x01);
+      expect(delta[0]).toBe(0x01);
+      raw.deliverMessage(full.buffer);
+      await vi.waitFor(() => expect(fake.decode).toHaveBeenCalledOnce());
+
+      if (bound === "message count") {
+        // One active Full plus 64 queued Deltas exceeds the 64-message budget.
+        for (let index = 0; index < messageLimit; index++) raw.deliverMessage(delta.buffer);
+      } else {
+        // ASCII occupies two retained UTF-16 bytes per character. Eight 1 MiB
+        // strings exactly fill 16 MiB, including the active Full; a tiny ninth
+        // frame must fail even though the message-count budget is nowhere near.
+        const framesAtLimit = textByteLimit / (characters * 2);
+        for (let index = 1; index < framesAtLimit; index++) raw.deliverMessage(delta.buffer);
+        raw.deliverMessage((await encodeJsonEnvelope(paddedFrame("Delta"))).buffer);
+      }
+
+      await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+      expect(recovery.mock.calls).toEqual([[
+        { kind: "failed", reason: "receiveOverload", joinCredentials: null },
+      ]]);
+      expect(order).toEqual(["failed", "close"]);
+      expect(fake.close).toHaveBeenCalledOnce();
+      expect(raw.close).toHaveBeenCalledOnce();
+      expect(fake.decode).toHaveBeenCalledOnce();
+      expect(received).not.toHaveBeenCalled();
+
+      vi.useFakeTimers();
+      try {
+        release({ kind: "decoded", json: DECODED_PONG });
+        raw.deliverMessage(codecFrame("Delta"));
+        await vi.advanceTimersByTimeAsync(0);
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(received).not.toHaveBeenCalled();
+      expect(fake.decode).toHaveBeenCalledOnce();
+      expect(closed).toHaveBeenCalledOnce();
+      socket.close();
+      expect(fake.close).toHaveBeenCalledOnce();
+      expect(raw.close).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("preserves FIFO delivery and restores the message budget as each backlog drains", async () => {
+    const fake = fakeSession((frame) => ({
+      kind: "decoded",
+      json: new TextDecoder().decode(frame),
+    }));
+    const { raw, socket, received, recovery } = await negotiated(fake);
+    const expected: string[] = [];
+    for (let wave = 0; wave < 2; wave++) {
+      let release!: (result: StateCodecDecodeResult) => void;
+      fake.decode.mockImplementationOnce(() => new Promise<StateCodecDecodeResult>((resolve) => {
+        release = resolve;
+      }));
+      const first = paddedFrame(wave === 0 ? "Full" : "Delta");
+      raw.deliverMessage((await encodeJsonEnvelope(first)).buffer);
+      await vi.waitFor(() => expect(fake.decode).toHaveBeenCalledTimes(wave * messageLimit + 1));
+      expected.push(first);
+      for (let index = 1; index < messageLimit; index++) {
+        const text = JSON.stringify({
+          type: "Delta", data: { revision: wave * messageLimit + index, padding: "x".repeat(512) },
+        });
+        expected.push(text);
+        raw.deliverMessage((await encodeJsonEnvelope(text)).buffer);
+      }
+      release({ kind: "decoded", json: first });
+      await vi.waitFor(() => expect(received).toHaveBeenCalledTimes((wave + 1) * messageLimit));
+      expect(received.mock.calls.map(([event]) => event.data)).toEqual(expected);
+      expect(raw.close).not.toHaveBeenCalled();
+    }
+    expect(recovery).not.toHaveBeenCalled();
+    socket.close();
+    expect(fake.close).toHaveBeenCalledOnce();
+  });
+
+  it("accepts Full frames over 1 MiB and restores the aggregate text budget after delivery", async () => {
+    const text = paddedFrame("Full", frameCharacters + 1);
+    const compressed = await encodeJsonEnvelope(text);
+    expect(compressed[0]).toBe(0x01);
+    const fake = fakeSession();
+    const { raw, socket, received, recovery } = await negotiated(fake);
+    // The total stream exceeds the retained-text budget; only outstanding text
+    // is bounded, so a healthy consumer can receive every large Full.
+    for (let index = 0; index < 9; index++) {
+      raw.deliverMessage(compressed.buffer);
+      await vi.waitFor(() => expect(received).toHaveBeenCalledTimes(index + 1));
+    }
+    expect(new TextDecoder().decode(fake.decode.mock.calls[0][0])).toBe(text);
+    expect(fake.decode).toHaveBeenCalledTimes(9);
+    expect(raw.close).not.toHaveBeenCalled();
+    expect(recovery).not.toHaveBeenCalled();
+    socket.close();
+    expect(fake.close).toHaveBeenCalledOnce();
+  });
+});
+
 describe("openPhaseSocket — codec lease ownership across preflight and send failure", () => {
   it.each(["resolve", "reject"] as const)(
     "releases the prepared lease once when LAN approval late-%ss after abort",
