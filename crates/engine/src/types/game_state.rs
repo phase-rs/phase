@@ -440,21 +440,62 @@ mod ability_usage_key_map {
     use serde::{Deserializer, Serializer};
     use std::fmt;
 
-    fn encode_key(key: &AbilityUsageKey) -> String {
+    /// CR 602.2a: the fingerprint rides between provenance and description so
+    /// the description — the one component that may itself contain `#` —
+    /// stays the unbounded tail (parsed with `splitn(5, …)`). The fingerprint
+    /// is percent-escaped (`%` then `#`) for the same reason: its `{:?}`
+    /// encoding can carry `#` inside quoted string payloads.
+    pub(super) fn escape_component(raw: &str) -> String {
+        raw.replace('%', "%25").replace('#', "%23")
+    }
+
+    pub(super) fn unescape_component(raw: &str) -> Result<String, String> {
+        let mut out = String::with_capacity(raw.len());
+        let mut chars = raw.chars();
+        while let Some(char) = chars.next() {
+            if char != '%' {
+                out.push(char);
+                continue;
+            }
+            let (Some(high), Some(low)) = (chars.next(), chars.next()) else {
+                return Err(format!("invalid escape in ability usage key: {raw}"));
+            };
+            match (high, low) {
+                ('2', '5') => out.push('%'),
+                ('2', '3') => out.push('#'),
+                _ => return Err(format!("invalid escape in ability usage key: {raw}")),
+            }
+        }
+        Ok(out)
+    }
+
+    pub(super) fn encode_key(key: &AbilityUsageKey) -> String {
         let provenance = match key.provenance {
             None => "-".to_string(),
             Some(stamp) => format!("{}.{}", stamp.object_id.0, stamp.incarnation),
         };
+        let fingerprint = escape_component(&key.fingerprint);
         match &key.description {
-            None => format!("{}#{}#0#", key.source.0, provenance),
-            Some(text) => format!("{}#{}#1#{}", key.source.0, provenance, text),
+            None => format!("{}#{}#0#{}#", key.source.0, provenance, fingerprint),
+            Some(text) => format!("{}#{}#1#{}#{}", key.source.0, provenance, fingerprint, text),
         }
     }
 
-    fn decode_key(raw: &str) -> Result<AbilityUsageKey, String> {
-        let mut parts = raw.splitn(4, '#');
-        let (Some(source), Some(provenance), Some(has_description), Some(description)) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
+    pub(super) fn decode_key(raw: &str) -> Result<AbilityUsageKey, String> {
+        let mut parts = raw.splitn(5, '#');
+        let (
+            Some(source),
+            Some(provenance),
+            Some(has_description),
+            Some(fingerprint),
+            Some(description),
+        ) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        )
         else {
             return Err(format!("invalid ability usage key: {raw}"));
         };
@@ -478,6 +519,8 @@ mod ability_usage_key_map {
                 Some(ObjectIncarnationRef::of(oid, incarnation))
             }
         };
+        let fingerprint = unescape_component(fingerprint)
+            .map_err(|_| format!("invalid ability usage key: {raw}"))?;
         let description = match has_description {
             "0" if description.is_empty() => None,
             "1" => Some(description.to_string()),
@@ -487,6 +530,7 @@ mod ability_usage_key_map {
             source,
             provenance,
             description,
+            fingerprint,
         })
     }
 
@@ -559,14 +603,49 @@ mod ability_usage_key_map_tests {
             "unexpected error: {err}"
         );
 
+        // CR 602.2a: the pre-fingerprint three-component encoding (`source`,
+        // provenance, description only) is refused too — the fingerprint is
+        // total, so a key without one names no live budget.
+        let err = serde_json::from_str::<Probe>(r#"{"map":{"42#-#0#":1}}"#)
+            .expect_err("fingerprint-less key must fail closed");
+        assert!(
+            err.to_string().contains("invalid ability usage key"),
+            "unexpected error: {err}"
+        );
+
         let ok: Probe =
-            serde_json::from_str(r#"{"map":{"42#-#0#":1}}"#).expect("new encoding decodes");
+            serde_json::from_str(r#"{"map":{"42#-#0#fp#":1}}"#).expect("new encoding decodes");
         assert_eq!(ok.map.len(), 1);
         let (key, count) = ok.map.into_iter().next().expect("one entry");
         assert_eq!(key.source, ObjectId(42));
         assert_eq!(key.provenance, None);
         assert_eq!(key.description, None);
+        assert_eq!(key.fingerprint, "fp");
         assert_eq!(count, 1);
+    }
+
+    /// The fingerprint rides escaped between two `#` separators while a
+    /// `#`-bearing description stays the unbounded tail: the encoding
+    /// round-trips both, and a malformed escape fails closed.
+    #[test]
+    fn usage_key_escapes_fingerprint_and_description() {
+        let key = AbilityUsageKey {
+            source: ObjectId(7),
+            provenance: Some(ObjectIncarnationRef::of(ObjectId(9), 3)),
+            description: Some("{T}: Add #1.".to_string()),
+            fingerprint: "a#b%{c}".to_string(),
+        };
+        let encoded = super::ability_usage_key_map::encode_key(&key);
+        assert_eq!(encoded, "7#9.3#1#a%23b%25{c}#{T}: Add #1.");
+        let decoded =
+            super::ability_usage_key_map::decode_key(&encoded).expect("escaped key decodes");
+        assert_eq!(decoded, key);
+
+        let bad = super::ability_usage_key_map::decode_key("7#-#0#a%zz#");
+        assert!(
+            bad.is_err(),
+            "a malformed escape must fail closed, got {bad:?}"
+        );
     }
 }
 
@@ -1582,6 +1661,16 @@ pub struct AbilityActivationRecord {
 /// two textually-identical printed abilities on one source share one budget
 /// (indistinguishable instances). The index is not in the key: layer
 /// recomputes shift indices while the acquisition stays the same.
+///
+/// CR 602.2a: `fingerprint` is the stable identity of the announced
+/// definition's `(cost, effect, ability_tag)` triple
+/// (`restrictions::ability_fingerprint`). Three-part keys alone collide on
+/// undescribed same-acquisition abilities that differ only in body — two
+/// equip costs on one object, or reconfigure's attach vs unattach modes (all
+/// `description: None`) — so the fingerprint discriminates them. It is a
+/// plain `String`, never absent: every definition has a cost/effect shape.
+/// It never participates in Tier-2 definition equality or layer stamps; it is
+/// a usage-budget discriminator only.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct AbilityUsageKey {
     /// The object holding the ability.
@@ -1591,6 +1680,8 @@ pub struct AbilityUsageKey {
     /// The ability's rules text (`None` for an undescribed/token ability).
     /// Stable across recomputes and index shifts; never unwrapped.
     pub description: Option<String>,
+    /// Stable encoding of the announced def's `(cost, effect, ability_tag)`.
+    pub fingerprint: String,
 }
 
 fn battlefield_zone() -> Zone {
@@ -11260,6 +11351,14 @@ pub struct PendingManaAbility {
     /// and resume; never restamped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub announced_source_incarnation: Option<u64>,
+    /// CR 602.2a + CR 602.5c: this mana ability's own usage key, announced
+    /// before any cost is paid (`mana_abilities::activate_mana_ability`) and
+    /// consumed when the inline completion records
+    /// (`complete_mana_ability_activation`) — never re-derived there, so a
+    /// self-sacrifice cost cannot unresolve the slot. An existing capture is
+    /// never overwritten; carried through every payment pause and resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announced_usage_key: Option<AbilityUsageKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_override: Option<ProductionOverride>,
     pub resume: ManaAbilityResume,
@@ -47220,6 +47319,7 @@ mod tests {
                         rules_execution_node: None,
                         ability_snapshot: None,
                         announced_source_incarnation: None,
+                        announced_usage_key: None,
                         color_override: None,
                         resume: ManaAbilityResume::Priority,
                         cost_move_resume: None,
@@ -47335,6 +47435,7 @@ mod tests {
                     rules_execution_node: None,
                     ability_snapshot: None,
                     announced_source_incarnation: None,
+                    announced_usage_key: None,
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
                     cost_move_resume: None,
@@ -50510,6 +50611,7 @@ mod tests {
                 rules_execution_node: None,
                 ability_snapshot: None,
                 announced_source_incarnation: None,
+                announced_usage_key: None,
                 color_override: None,
                 resume: ManaAbilityResume::UnlessPayment {
                     outer_player: None,
@@ -53837,6 +53939,7 @@ mod tests {
                     rules_execution_node: None,
                     ability_snapshot: None,
                     announced_source_incarnation: None,
+                    announced_usage_key: None,
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
                     cost_move_resume: None,
@@ -54099,6 +54202,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -58999,6 +59103,7 @@ mod restored_exact_attack_authority_tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume,
             cost_move_resume: None,

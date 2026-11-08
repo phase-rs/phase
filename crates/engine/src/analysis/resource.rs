@@ -11365,6 +11365,7 @@ mod tests {
             source: ObjectId(9999),
             provenance: None,
             description: None,
+            fingerprint: "test".to_string(),
         };
         assert!(!ability_has_per_turn_activation_gate(&state, &absent));
         assert!(!ability_has_per_game_activation_gate(&state, &absent));

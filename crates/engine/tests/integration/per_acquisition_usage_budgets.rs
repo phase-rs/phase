@@ -28,19 +28,15 @@ use engine::types::zones::Zone;
 use crate::support::shared_card_db;
 
 /// CR 602.5c: the usage key for `holder`'s ability at `index`, derived the
-/// same way the record and check paths derive it (provenance stamp + rules
-/// text off the resolved definition).
+/// same way the record and check paths derive it — through the production
+/// constructor, so cost concretization and the body fingerprint match.
 fn usage_key(
     state: &engine::types::game_state::GameState,
     holder: ObjectId,
     index: usize,
 ) -> AbilityUsageKey {
-    let def = &state.objects[&holder].abilities[index];
-    AbilityUsageKey {
-        source: holder,
-        provenance: def.granting_object,
-        description: def.description.clone(),
-    }
+    engine::game::restrictions::ability_usage_key(state, holder, index)
+        .expect("the tested slot resolves through the activation lookup")
 }
 
 /// Indices of `holder`'s Untap abilities (Quirion Ranger grants).

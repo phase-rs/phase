@@ -954,29 +954,58 @@ pub fn ability_usage_key(
 ) -> Option<AbilityUsageKey> {
     let definition =
         super::casting::activation_ability_definition(state, source_id, ability_index)?;
-    Some(AbilityUsageKey {
+    Some(ability_usage_key_for_definition(source_id, &definition))
+}
+
+/// CR 602.2a + CR 602.5c: stable identity of an announced ability
+/// definition's `(cost, effect, ability_tag)` triple. Pure function of the
+/// definition body: identical at load synthesis, runtime synthesis, layer
+/// recompute, and index shift — cost concretization runs inside
+/// `activation_ability_definition` before this is computed, so Brawl-style
+/// placeholders never fingerprint as `{0}`. The `Effect` arm prints as its
+/// canonical JSON (`impl fmt::Debug for Effect`), and the triple carries no
+/// maps, so the encoding is deterministic within a save-compatible binary
+/// (saves already fail closed across binaries).
+pub fn ability_fingerprint(definition: &AbilityDefinition) -> String {
+    format!(
+        "{:?}",
+        (
+            &definition.cost,
+            &definition.effect,
+            &definition.ability_tag
+        )
+    )
+}
+
+/// CR 602.2a: pure constructor for the per-instance usage key from an
+/// already-resolved definition (the announcement's own def, or the check
+/// side's live re-derivation). The announcement capture path binds the key
+/// here; the check side reaches the same value through `ability_usage_key`.
+pub fn ability_usage_key_for_definition(
+    source_id: ObjectId,
+    definition: &AbilityDefinition,
+) -> AbilityUsageKey {
+    AbilityUsageKey {
         source: source_id,
         provenance: definition.granting_object,
         description: definition.description.clone(),
-    })
+        fingerprint: ability_fingerprint(definition),
+    }
 }
 
 /// CR 602.2 + CR 601.2i: `record` is the activation's facts captured before
-/// its cost was paid; it joins the activator's turn journal here.
+/// its cost was paid; it joins the activator's turn journal here. `key` is
+/// the announcement-bound usage key the placement consumed off the placed
+/// entry — never re-derived here, so a cost that moved the source cannot
+/// unresolve the slot (CR 400.7).
 pub fn record_ability_activation(
     state: &mut crate::types::game_state::GameState,
-    source_id: ObjectId,
-    ability_index: usize,
+    key: AbilityUsageKey,
     record: Option<crate::types::game_state::AbilityActivationRecord>,
-) {
-    // CR 400.7: a cost may have moved the source (self-sacrifice) before the
-    // placement recorded, so the slot can no longer resolve. Skipping keeps
-    // the counters' missing-entry semantics; it never panics.
-    let Some(key) = ability_usage_key(state, source_id, ability_index) else {
-        return;
-    };
-    crate::game::ledger::record_ability_activation(state, key, record)
+) -> AbilityUsageKey {
+    crate::game::ledger::record_ability_activation(state, key.clone(), record)
         .expect("activated ability must have a valid ledger prefix");
+    key
 }
 
 /// CR 702.142b: Compute the effective per-turn activation limit for an ability.
@@ -2979,7 +3008,8 @@ mod tests {
             )
             .activation_restrictions(vec![ActivationRestriction::OnlyOnceEachTurn]),
         );
-        record_ability_activation(&mut state, source, 0, None);
+        let announced = ability_usage_key(&state, source, 0).expect("fixture slot resolves");
+        record_ability_activation(&mut state, announced, None);
 
         let result = check_activation_restrictions(
             &state,

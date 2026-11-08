@@ -5071,6 +5071,7 @@ mod tests {
             source: id,
             provenance: None,
             description: None,
+            fingerprint: "test".to_string(),
         };
         let acquired = crate::types::game_state::AbilityUsageKey {
             source: id,
@@ -5078,11 +5079,13 @@ mod tests {
                 other, 0,
             )),
             description: Some("acquired".to_string()),
+            fingerprint: "test".to_string(),
         };
         let other_key = crate::types::game_state::AbilityUsageKey {
             source: other,
             provenance: None,
             description: None,
+            fingerprint: "test".to_string(),
         };
         state
             .activated_abilities_this_turn

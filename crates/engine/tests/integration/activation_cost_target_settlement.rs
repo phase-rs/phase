@@ -35,18 +35,15 @@ fn pool(runner: &GameRunner, player: PlayerId) -> usize {
 }
 
 /// CR 602.5c: the activation counter is keyed by the resolved acquisition
-/// (provenance stamp + rules text), not the index.
+/// (provenance stamp + rules text + body fingerprint), not the index —
+/// derived through the production constructor so the fingerprint matches.
 fn usage_key(
     state: &engine::types::game_state::GameState,
     id: ObjectId,
     idx: usize,
 ) -> engine::types::game_state::AbilityUsageKey {
-    let def = &state.objects[&id].abilities[idx];
-    engine::types::game_state::AbilityUsageKey {
-        source: id,
-        provenance: def.granting_object,
-        description: def.description.clone(),
-    }
+    engine::game::restrictions::ability_usage_key(state, id, idx)
+        .expect("the tested slot resolves through the activation lookup")
 }
 
 fn mana(s: &mut GameScenario, player: PlayerId, n: usize) {

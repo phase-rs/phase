@@ -19126,6 +19126,7 @@ mod tests {
                     rules_execution_node: None,
                     ability_snapshot: Some(ability),
                     announced_source_incarnation: None,
+                    announced_usage_key: None,
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
                     cost_move_resume: None,

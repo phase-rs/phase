@@ -88,13 +88,10 @@ fn duggan_punch_deals_twice_power_and_records_once_per_game() {
     );
 
     // CR 602.5b + CR 602.5c: "Activate only once" recorded the single
-    // per-game activation, keyed by the resolved acquisition.
-    let def = &outcome.state().objects[&duggan].abilities[0];
-    let key = engine::types::game_state::AbilityUsageKey {
-        source: duggan,
-        provenance: def.granting_object,
-        description: def.description.clone(),
-    };
+    // per-game activation, keyed by the resolved acquisition (production
+    // constructor, so the body fingerprint matches the recorded key).
+    let key = engine::game::restrictions::ability_usage_key(outcome.state(), duggan, 0)
+        .expect("the activated slot resolves through the activation lookup");
     assert_eq!(
         outcome
             .state()
