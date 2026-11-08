@@ -42,6 +42,160 @@ const KING: &str = "({2/W} can be paid with any two mana or with {W}. This card'
 const SPATIAL: &str =
     "({C} represents colorless mana.)\nTarget creature gets +3/-3 until end of turn.";
 
+fn pay_glint_eye_with_an_enchanted_land(land_name: &str, land_text: &str, count: usize) {
+    for (aura_name, aura_text) in [
+        ("Wild Growth", "Enchant land\nWhenever enchanted land is tapped for mana, its controller adds an additional {G}."),
+        ("Fertile Ground", "Enchant land\nWhenever enchanted land is tapped for mana, its controller adds an additional one mana of any color."),
+    ] {
+        let mut s = board();
+        let land = s.add_land_from_oracle(P0, land_name, land_text).id();
+        let wastes = s.add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.").id();
+        let aura = s.add_enchantment_from_oracle(P0, aura_name, aura_text)
+            .with_subtypes(vec!["Aura"]).id();
+        let signet = s.add_artifact_from_oracle(P0, "Dimir Signet", "{1}, {T}: Add {U}{B}.").id();
+        let nephilim = s.add_creature_to_hand_from_oracle(P0, "Glint-Eye Nephilim", 2, 2,
+            "Whenever this creature deals combat damage to a player, draw that many cards.\n{1}, Discard a card: This creature gets +1/+1 until end of turn.")
+            .with_mana_cost(parse_mtgjson_mana_cost("{U}{B}{R}{G}")).id();
+        let mut r = s.build();
+        // These are established permanents after any enters-tapped/sacrifice
+        // work; the public payment starts with an untapped enchanted land.
+        r.state_mut().objects.get_mut(&land).unwrap().tapped = false;
+        engine::game::effects::attach::attach_to(r.state_mut(), aura, land);
+        evaluate_layers(r.state_mut());
+        let rows = activatable_mana_source_selections(r.state(), P0);
+        assert!(rows.iter().any(|row| {
+            row.source.object_id == land
+                && row.atomic_combination.as_ref().is_some_and(|combo| combo.len() == count + 1)
+                && row.taps_for_mana.len() == 1
+        }), "the printed land and Aura expose their separate full outputs");
+        let (_, _, grouped) = legal_actions_full(r.state());
+        let float = grouped[&wastes].iter().find(|action| matches!(action,
+            GameAction::TapLandForMana { selection } if selection.mana_type == ManaType::Colorless))
+            .expect("Wastes offers its printed mana ability").clone();
+        r.act(float).unwrap();
+        assert_eq!(r.state().players[0].mana_pool.count_color(ManaType::Colorless), 1);
+        r.cast(nephilim).resolve().assert_zone(&[nephilim], Zone::Battlefield);
+        assert!([land, wastes, signet].iter().all(|id| r.state().objects[id].tapped));
+        assert_eq!(r.state().objects[&aura].attached_to, Some(land));
+        assert!(r.state().players[0].mana_pool.units().all(|unit| unit.source_id == land));
+        assert_complete(&r, count - 1);
+    }
+}
+
+/// CR 106.3 + CR 118.10: floating C funds the Signet; the land's R and
+/// its Aura's G remain separate outputs for the printed four-color spell.
+#[test]
+fn floating_mana_keeps_a_city_of_brass_aura_bonus() {
+    pay_glint_eye_with_an_enchanted_land("City of Brass",
+        "Whenever this land becomes tapped, it deals 1 damage to you.\n{T}: Add one mana of any color.", 1);
+}
+
+/// CR 106.3: scalar planning keeps the Aura bonus while replay still adds
+/// all three mana from Lotus Field; two units remain after the real cast.
+#[test]
+fn floating_mana_keeps_a_counted_lands_aura_bonus() {
+    pay_glint_eye_with_an_enchanted_land("Lotus Field",
+        "Hexproof\nThis land enters tapped.\nWhen this land enters, sacrifice two lands.\n{T}: Add three mana of any one color.", 3);
+}
+
+#[test]
+fn snow_hybrid_payment_preserves_a_quality_eligible_alternative() {
+    // Supplemental combined costs: no printing combines S and these hybrid
+    // symbols. Arcum's Astrolabe supplies S, Judge's Familiar W/U, and Ulalek
+    // C/U. CR 107.4e/h: ordinary mana pays the hybrid; Snow remains for S.
+    for (symbol, a, b) in [
+        ("{W/U}", ManaType::White, ManaType::Blue),
+        ("{C/U}", ManaType::Colorless, ManaType::Blue),
+    ] {
+        for (snow_color, plain_color) in [(a, b), (b, a)] {
+            for snow_first in [false, true] {
+                for phyrexian in [false, true] {
+                    let text = if snow_first {
+                        format!("{{S}}{symbol}")
+                    } else {
+                        format!("{symbol}{{S}}")
+                    };
+                    let text = if phyrexian {
+                        format!("{text}{{R/P}}")
+                    } else {
+                        text
+                    };
+                    let cost = parse_mtgjson_mana_cost(&text);
+                    let mut units = vec![
+                        hybrid_reserve_unit(snow_color, 1, true, false),
+                        snow_regression_unit(plain_color, 2),
+                    ];
+                    if phyrexian {
+                        units.push(snow_regression_unit(ManaType::Red, 3));
+                    }
+                    let mut pool = ManaPool::from_units(units);
+                    assert!(
+                        can_pay_for_spell(&pool, &cost, None, CostPermissionContext::default()),
+                        "{text}"
+                    );
+                    if phyrexian {
+                        let preview = compute_phyrexian_shards(
+                            &pool,
+                            &cost,
+                            None,
+                            CostPermissionContext {
+                                max_life: 1,
+                                ..Default::default()
+                            },
+                        );
+                        assert_eq!(preview.len(), 1);
+                        assert_eq!(preview[0].shard_index, 2);
+                        assert_eq!(preview[0].options, ShardOptions::ManaOrLife);
+                    }
+                    let choices = [ShardChoice::PayMana];
+                    let (spent, life) = pay_cost_with_demand_and_choices(
+                        &mut pool,
+                        &cost,
+                        None,
+                        None,
+                        None,
+                        phyrexian.then_some(choices.as_slice()),
+                        LifePaymentColors::EMPTY,
+                        &[],
+                    )
+                    .unwrap();
+                    assert_eq!(spent.len(), if phyrexian { 3 } else { 2 });
+                    assert!(life.is_empty());
+                    assert!(pool.is_empty());
+                }
+            }
+        }
+    }
+    // CR 106.6: a restricted ordinary alternative cannot rescue the hybrid.
+    let cost = parse_mtgjson_mana_cost("{S}{W/U}");
+    let mut pool = ManaPool::from_units(vec![
+        hybrid_reserve_unit(ManaType::White, 1, true, false),
+        ManaUnit {
+            restrictions: vec![ManaRestriction::OnlyForActivation],
+            ..snow_regression_unit(ManaType::Blue, 2)
+        },
+    ]);
+    let original = pool.clone();
+    assert!(!can_pay_for_spell(
+        &pool,
+        &cost,
+        Some(&PaymentContext::Effect),
+        CostPermissionContext::default()
+    ));
+    assert!(pay_cost_with_demand_and_choices(
+        &mut pool,
+        &cost,
+        None,
+        Some(&PaymentContext::Effect),
+        None,
+        None,
+        LifePaymentColors::EMPTY,
+        &[]
+    )
+    .is_err());
+    assert_eq!(pool, original);
+}
+
 fn board() -> GameScenario {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
