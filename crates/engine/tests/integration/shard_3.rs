@@ -110,6 +110,7 @@ mod engine_invariants;
 mod enlightened_tutor_regression;
 mod entering_transformed_is_not_a_transform;
 mod enters_tapped_this_turn;
+mod ephemerate_token_no_entry;
 mod equipment_attach_event_context;
 mod equipment_etb_attach_parent_target;
 mod erratic_explosion;
