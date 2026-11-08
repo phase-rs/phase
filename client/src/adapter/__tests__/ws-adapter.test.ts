@@ -7241,6 +7241,42 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
         },
       );
 
+      it.each([false, true])("recovers a held join after receive overload with waiting snapshot=%s", async (waitingSnapshot) => {
+        const join = await startHeld(waitingSnapshot);
+        let release: (() => void) | undefined;
+        const decodedBefore = join.codec.decode.mock.calls.length;
+        join.codec.decode.mockImplementationOnce(() => new Promise((resolve) => {
+          release = () => resolve({ kind: "decoded", json: JSON.stringify(tokenlessStarted()) });
+        }));
+        try {
+          deliverCodec(join.raw, "Full", tokenlessStarted());
+          await vi.waitFor(() => expect(join.codec.decode).toHaveBeenCalledTimes(decodedBefore + 1));
+          for (let revision = 2; revision <= 65; revision++) {
+            deliverCodec(join.raw, "Delta", codecStateUpdate(revision, revision));
+          }
+          await vi.waitFor(() => expect(join.codec.close).toHaveBeenCalledOnce());
+          expect(policyOf(join.adapter)).toEqual({ kind: "snapshotOnly", reason: "receiveOverload" });
+          expect(join.outcome.value).toBe("never settled");
+
+          const fallback = await snapshotOnlyHandshake("Reconnect", join.raw);
+          expect(sentFrames(fallback, "Reconnect")).toEqual([heldReconnect]);
+          expect(offeredCodec(fallback)).toBe(false);
+          expect(join.provider).toHaveBeenCalledOnce();
+          fallback.dispatchSynthetic("message", plainStarted(2));
+          await expect(settledAs(join)).resolves.toEqual({ resolvedWith: undefined });
+          expect(episodeEventsOf(join.events)).toEqual([]);
+
+          release?.();
+          await vi.advanceTimersByTimeAsync(0);
+          expect((await join.adapter.getSnapshot()).state.turn_number).toBe(2);
+          expect(join.codec.decode).toHaveBeenCalledTimes(decodedBefore + 1);
+          expect(join.codec.close).toHaveBeenCalledOnce();
+        } finally {
+          release?.();
+          join.adapter.dispose();
+        }
+      });
+
       it("agrees with a token-bearing failed Full that repeats the held tuple, and admits", async () => {
         const { join, fallback } = await heldFallback({ envelope: codecGameStarted(1, 1) });
         try {

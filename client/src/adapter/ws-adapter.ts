@@ -3025,10 +3025,10 @@ export class WebSocketAdapter implements EngineAdapter {
    *
    * The credentials come from one of two sources, chosen by provenance:
    *  - `held`, when this SAME socket already accepted SessionAttached: the held
-   *    tuple, admitted for a decode failure or bootstrap rejection of ANY frame
-   *    kind (the failed frame need not carry credentials). If the failed notice
-   *    also carries credentials they must agree exactly with the held tuple; a
-   *    disagreement is a terminal identity rejection.
+   *    tuple, admitted for a decode failure, bootstrap rejection or receive
+   *    overload of ANY frame kind (the failed frame need not carry credentials).
+   *    Credentials carried by the failed notice must agree exactly with the held
+   *    tuple; a disagreement is a terminal identity rejection.
    *  - `salvaged`, otherwise: the credentials of the failed GameStarted `Full`.
    * Both must name the game being joined.
    *
@@ -3062,7 +3062,11 @@ export class WebSocketAdapter implements EngineAdapter {
     } else {
       // The held tuple came from this attachment's own SessionAttached, so
       // the failed frame (of any kind) need not carry credentials itself.
-      if (failure.reason !== "decodeFailure" && failure.reason !== "bootstrapRejection") return false;
+      if (
+        failure.reason !== "decodeFailure"
+        && failure.reason !== "bootstrapRejection"
+        && failure.reason !== "receiveOverload"
+      ) return false;
       credentials = held;
     }
     if (credentials.fullKey.game_code !== gameCode) return false;
