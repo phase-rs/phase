@@ -400,6 +400,7 @@ export function GamePage() {
   const [gameStartedAt, setGameStartedAt] = useState<number | null>(null);
   const [terminalReason, setTerminalReason] = useState<string | null>(null);
   const hasConcededRef = useRef(false);
+  const isGameOverRef = useRef(false);
   // GH #1507: "request takeback" — the table-wide pending request, if any.
   const [pendingTakeback, setPendingTakeback] = useState<
     { requester: number; requesterName: string; voters: number[] } | null
@@ -477,7 +478,9 @@ export function GamePage() {
         setReconnectState({ status: "idle" });
         break;
       case "reconnectFailed":
-        setReconnectState({ status: "failed" });
+        if (!isGameOverRef.current) {
+          setReconnectState({ status: "failed" });
+        }
         break;
       case "stateChanged":
         // Record game start time on first state update
@@ -496,6 +499,7 @@ export function GamePage() {
         // Skip if we already navigated away from a self-concede — the server sends
         // both Conceded and GameOver to all players, so this would race with navigate.
         if (hasConcededRef.current) break;
+        isGameOverRef.current = true;
         // Server-initiated game end (concede, disconnect timeout, etc.)
         // Map the server's authoritative winner into the store so GameOverScreen renders.
         clearPromptOverlayState();
@@ -505,6 +509,7 @@ export function GamePage() {
         });
         break;
       case "terminalDelivery":
+        isGameOverRef.current = true;
         clearPromptOverlayState();
         if (gameId) clearGame(gameId);
         setTerminalReason(event.delivery.display.reason);
@@ -598,7 +603,7 @@ export function GamePage() {
         useMultiplayerStore.getState().showToast(event.message);
         // Native engine sockets emit an error before close; the provider disposes
         // that terminal adapter, so no reconnectFailed event follows.
-        if (!isOnlineMode) {
+        if (!isOnlineMode && !isGameOverRef.current) {
           setReconnectState({ status: "failed" });
         }
         break;
@@ -726,12 +731,15 @@ export function GamePage() {
         );
         break;
       case "reconnectFailed":
-        setReconnectState({ status: "failed" });
+        if (!isGameOverRef.current) {
+          setReconnectState({ status: "failed" });
+        }
         break;
       case "playerSlotsUpdated":
         useMultiplayerStore.setState({ playerSlots: event.slots });
         break;
       case "gameOver":
+        isGameOverRef.current = true;
         clearPromptOverlayState();
         if (gameId) clearGame(gameId);
         useGameStore.setState({
@@ -739,6 +747,7 @@ export function GamePage() {
         });
         break;
       case "terminalResult":
+        isGameOverRef.current = true;
         clearPromptOverlayState();
         // Display is independent of native guest convergence. The provider /
         // adapter owns deletion after durable cleanup ownership is established.
@@ -765,7 +774,9 @@ export function GamePage() {
         break;
       case "error":
         useMultiplayerStore.getState().showToast(event.message);
-        setReconnectState({ status: "failed" });
+        if (!isGameOverRef.current) {
+          setReconnectState({ status: "failed" });
+        }
         break;
       case "hostingFailed": {
         // Pre-game setup failure — distinct from `error` (catch-all for

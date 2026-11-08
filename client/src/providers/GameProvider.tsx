@@ -2055,6 +2055,20 @@ export function GameProvider({
               useGameStore.setState({
                 waitingFor: { type: "GameOver", data: { winner: event.winner } },
               });
+              controller?.dispose();
+              controller = null;
+              if (nativeSessionLive) onWsEventRef.current?.(event);
+            }
+            if (event.type === "terminalDelivery") {
+              useGameStore.setState({
+                waitingFor: { type: "GameOver", data: { winner: event.delivery.display.winner } },
+              });
+              controller?.dispose();
+              controller = null;
+              if (nativeSessionLive) onWsEventRef.current?.(event);
+            }
+            if (event.type === "terminalUnavailable") {
+              if (nativeSessionLive) onWsEventRef.current?.(event);
             }
             if (event.type === "requestRejected" || event.type === "operationFailed") {
               // Application failures leave transport and adapter ownership intact.

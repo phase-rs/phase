@@ -1210,6 +1210,116 @@ describe("WebSocketAdapter", () => {
         expect.stringContaining("CreateGameWithSettings"),
       );
     });
+
+    it("suppresses transport error after gameEnded", async () => {
+      const socketFactory = vi.fn(
+        () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+      );
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Player",
+        nativeAiOptions(socketFactory),
+      );
+      const initPromise = nativeAdapter.initialize();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({
+        type: "GameStarted",
+        data: { state: createMockState(), your_player: 0 },
+      }));
+      await initPromise;
+
+      const events: unknown[] = [];
+      nativeAdapter.onEvent((event) => events.push(event));
+
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({
+        type: "GameOver",
+        data: { winner: 0, reason: "victory" },
+      }));
+
+      expect(events).toContainEqual(expect.objectContaining({ type: "gameOver", winner: 0 }));
+
+      // Socket error after game over should be suppressed and not emit "error"
+      nativeSocket.dispatchSynthetic("error");
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "error" }));
+
+      nativeAdapter.dispose();
+    });
+
+    it("uses the native socket factory to acknowledge terminal delivery and suppresses post-terminal errors", async () => {
+      let ackSocket: MockWebSocket | null = null;
+      const socketFactory = vi.fn((url: string) => {
+        const sock = new MockWebSocket(url);
+        if (socketFactory.mock.calls.length === 2) {
+          ackSocket = sock;
+        }
+        return sock as unknown as PhaseSocketTransport;
+      });
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Player",
+        nativeAiOptions(socketFactory),
+      );
+      const initPromise = nativeAdapter.initialize();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({
+        type: "GameStarted",
+        data: {
+          state: createMockState(),
+          your_player: 0,
+        },
+      }));
+      await initPromise;
+
+      const events: unknown[] = [];
+      nativeAdapter.onEvent((event) => events.push(event));
+
+      const delivery: FullTerminalDelivery = {
+        key: { game_code: "", generation: 1 },
+        terminalRevision: 5,
+        deliveryId: "del-123",
+        credential: "cred-456",
+        display: { winner: 0, reason: "Victory" },
+      };
+
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({
+        type: "TerminalResult",
+        data: { delivery },
+      }));
+
+      await vi.waitFor(() => {
+        expect(events).toContainEqual(expect.objectContaining({ type: "terminalDelivery", delivery }));
+        expect(socketFactory).toHaveBeenCalledTimes(2);
+      });
+
+      expect(ackSocket).not.toBeNull();
+      // Complete handshake on ackSocket and acknowledge delivery
+      ackSocket!.dispatchSynthetic("message", SERVER_HELLO);
+      await Promise.resolve();
+      ackSocket!.dispatchSynthetic("message", JSON.stringify({ type: "TerminalDeliveryAcknowledged" }));
+
+      await vi.waitFor(() => {
+        expect(events).toContainEqual({ type: "sessionChanged", session: null });
+      });
+
+      // It must not fail with terminalUnavailable ("The URL 'native-engine' is invalid")
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "terminalUnavailable" }));
+
+      // Error on socket after gameEnded must not emit error
+      nativeSocket.dispatchSynthetic("error");
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "error" }));
+
+      nativeAdapter.dispose();
+    });
   });
 
   describe("native P2P pregame transport", () => {

@@ -2006,7 +2006,7 @@ export class WebSocketAdapter implements EngineAdapter {
     socket.ws.onerror = () => {
       // A retired socket's late error (e.g. a delayed envelope write) must not fail its replacement.
       if (this.disposed || this.ws !== socket.ws) return;
-      if (this.sessionIdentityRejected) return;
+      if (this.sessionIdentityRejected || this.gameEnded) return;
       const err = new AdapterError("WS_ERROR", "WebSocket connection failed", true);
       if (this.initReject || this.pregameReject || this.gameStartedReject) {
         this.rejectInitialization(err);
@@ -3289,6 +3289,7 @@ export class WebSocketAdapter implements EngineAdapter {
             this.serverUrl,
             delivery.deliveryId,
             delivery.credential,
+            this.nativeSocketOptions()?.socketFactory,
           )) {
             this.terminalCleanupPending = false;
             this.emit({ type: "sessionChanged", session: null });

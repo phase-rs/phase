@@ -516,6 +516,43 @@ describe("GamePage — cEDH bracket-violation blocking modal", () => {
     expect(screen.getByRole("button", { name: "Return to Menu" })).toBeInTheDocument();
   });
 
+  it("does not show connection-lost banner when error arrives after terminal delivery", () => {
+    renderGamePage();
+
+    act(() => {
+      capturedOnWsEvent?.({
+        type: "terminalDelivery",
+        delivery: {
+          key: { game_code: "GAME01", generation: 1 },
+          terminalRevision: 1,
+          deliveryId: "del-1",
+          credential: "cred-1",
+          display: { winner: 0, reason: "Victory" },
+        },
+      });
+    });
+
+    act(() => {
+      capturedOnWsEvent?.({ type: "error", message: "WebSocket connection failed" });
+    });
+
+    expect(screen.queryByText("Connection lost")).toBeNull();
+  });
+
+  it("does not show connection-lost banner when reconnectFailed arrives after gameOver", () => {
+    renderGamePage();
+
+    act(() => {
+      capturedOnWsEvent?.({ type: "gameOver", winner: 0, reason: "victory" });
+    });
+
+    act(() => {
+      capturedOnWsEvent?.({ type: "reconnectFailed" });
+    });
+
+    expect(screen.queryByText("Connection lost")).toBeNull();
+  });
+
   it("passes Two-Headed Giant to GameProvider for a direct local URL", () => {
     renderGamePage("/game/test-game-123?format=TwoHeadedGiant&players=4");
 
