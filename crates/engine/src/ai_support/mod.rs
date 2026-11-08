@@ -967,6 +967,24 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             let exact = if *up_to { None } else { Some(*count) };
             selection_mismatch(chosen, cards, exact) || (*up_to && chosen.len() > *count)
         }
+        // Turtle Team-Up: like DiscardChoice, plus the contribution floor
+        // (Krang's minimum) when `up_to`.
+        | (
+            WaitingFor::HeroEventChoice {
+                player: _,
+                cards,
+                count,
+                up_to,
+                min,
+                ..
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            let exact = if *up_to { None } else { Some(*count) };
+            selection_mismatch(chosen, cards, exact)
+                || (*up_to && chosen.len() > *count)
+                || (*up_to && chosen.len() < *min)
+        }
         (
             WaitingFor::DrawnThisTurnTopdeckChoice {
                 cards,
@@ -1508,6 +1526,7 @@ fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass
         | GameAction::ChooseRoomDoor { .. }
         | GameAction::TapForConvoke { .. }
         | GameAction::HarmonizeTap { .. }
+        | GameAction::ChooseSecretAgendaNames { .. }
         | GameAction::DeclareCompanion { .. }
         | GameAction::CompanionToHand
         | GameAction::DiscoverChoice { .. }

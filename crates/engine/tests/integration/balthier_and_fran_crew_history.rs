@@ -20,16 +20,16 @@ use engine::game::crew_payment::CrewHistoryPair;
 use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    ContinuousModification, CrewRelation, Duration, FilterProp, TargetFilter, TargetRef,
+    ContinuousModification, CrewRelation, Duration, Effect, FilterProp, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{
-    GameState, PersistedGameState, PersistedRestoreFinalization, WaitingFor,
+    GameState, PersistedGameState, PersistedRestoreFinalization, StackEntryKind, WaitingFor,
 };
-use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
-use engine::types::mana::ManaColor;
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::triggers::TriggerMode;
@@ -971,4 +971,238 @@ fn crew_history_serde_round_trip_and_legacy_default() {
     assert!(removed.is_some(), "reach: a nonempty ledger is serialized");
     let legacy: GameState = serde_json::from_value(value).expect("legacy payload deserializes");
     assert!(legacy.crew_history_this_turn.is_empty());
+}
+
+/// Issue #8061: Golden Argosy exiles exactly the creatures that crewed it and
+/// returns those same creatures, tapped, at the beginning of the next end step
+/// (CR 603.7c: the delayed trigger acts on the objects the exile moved).
+///
+/// CR 608.2c: "Return them" is a PLURAL anaphor to the set the exile published,
+/// so the parsed payload carries the tracked-set sentinel rather than a bare
+/// `ParentTarget`. That typed anaphor — not the absence of a declared target
+/// slot — is what binds the delayed return to the published set.
+#[test]
+fn golden_argosy_returns_its_crewers_tapped_at_end_step() {
+    let parsed = parse("Golden Argosy", GOLDEN_ARGOSY);
+    let execute = parsed.triggers[0]
+        .execute
+        .as_ref()
+        .expect("Golden Argosy's attack trigger");
+    let delayed = execute
+        .sub_ability
+        .as_deref()
+        .expect("the end-step delayed trigger follows the exile");
+    let Effect::CreateDelayedTrigger {
+        effect: payload,
+        uses_tracked_set,
+        ..
+    } = &*delayed.effect
+    else {
+        panic!(
+            "expected the end-step delayed trigger, got {:?}",
+            delayed.effect
+        );
+    };
+    assert!(*uses_tracked_set, "the payload reads the published set");
+    assert!(
+        matches!(
+            &*payload.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Exile),
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSet { id },
+                ..
+            } if *id == TrackedSetId(0)
+        ),
+        "\"Return them\" must be the tracked-set anaphor: {:?}",
+        payload.effect
+    );
+
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let argosy = add_vehicle(&mut s, P0, "Golden Argosy", GOLDEN_ARGOSY, 3, 6);
+    let crewer_a = s.add_creature(P0, "Crewer A", 1, 1).id();
+    let crewer_b = s
+        .add_creature(P0, "Crewer B", 2, 1)
+        .with_subtypes(vec!["Pilot"])
+        .id();
+    let bystander = s.add_creature(P0, "Bystander", 1, 1).id();
+    let opposing = s.add_creature(P1, "Opposing", 1, 1).id();
+    let mut r = s.build();
+
+    crew(&mut r, argosy, &[crewer_a, crewer_b]);
+    let log = drive_to_end_step(
+        &mut r,
+        &Script {
+            attackers: &|_| vec![argosy],
+            accept_optional: true,
+            resolve_first: None,
+            choose_target: &no_targets,
+        },
+    );
+    assert_eq!(
+        log.declarations.first().map(|d| d.1.clone()),
+        Some(vec![argosy])
+    );
+    for crewer in [crewer_a, crewer_b] {
+        assert_eq!(
+            r.state().objects[&crewer].zone,
+            Zone::Exile,
+            "reach: every crewer was exiled before the end step"
+        );
+    }
+    assert_eq!(r.state().objects[&bystander].zone, Zone::Battlefield);
+    assert_eq!(r.state().objects[&opposing].zone, Zone::Battlefield);
+
+    // Finish the end-step delayed resolution, then assert the terminal state.
+    for _ in 0..40 {
+        let returned = [crewer_a, crewer_b]
+            .iter()
+            .all(|id| r.state().objects[id].zone == Zone::Battlefield);
+        if returned && r.state().stack.is_empty() {
+            break;
+        }
+        assert!(
+            matches!(r.state().waiting_for, WaitingFor::Priority { .. }),
+            "unexpected prompt while the delayed trigger resolves: {:?}",
+            r.state().waiting_for
+        );
+        r.act(GameAction::PassPriority)
+            .expect("the end step resolves");
+    }
+    for (crewer, name) in [(crewer_a, "Crewer A"), (crewer_b, "Crewer B")] {
+        let c = &r.state().objects[&crewer];
+        assert_eq!(c.zone, Zone::Battlefield, "{name} returns at the end step");
+        assert!(c.tapped, "{name} returns tapped");
+        assert_eq!(c.controller, P0, "{name} returns under its owner's control");
+    }
+    assert_eq!(r.state().objects[&argosy].zone, Zone::Battlefield);
+    assert_eq!(r.state().objects[&bystander].zone, Zone::Battlefield);
+    assert!(r.state().stack.is_empty(), "the delayed trigger finished");
+    assert!(
+        matches!(r.state().waiting_for, WaitingFor::Priority { .. }),
+        "priority returns after the delayed trigger: {:?}",
+        r.state().waiting_for
+    );
+}
+
+/// CR 608.2c + CR 603.7c: "Return them" names only Argosy's own exile,
+/// even when its sole crewer died in response and that population is empty.
+#[test]
+fn golden_argosy_empty_exile_does_not_return_an_earlier_spells_cards() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    s.with_library_top(P0, &["Forest"; 4]);
+    let argosy = add_vehicle(&mut s, P0, "Golden Argosy", GOLDEN_ARGOSY, 3, 6);
+    let crewer = s.add_creature(P0, "Crewer", 1, 1).id();
+    let impulse = s
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Reckless Impulse",
+            false,
+            "Exile the top two cards of your library. Until the end of your next turn, you may play those cards.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 1,
+        })
+        .id();
+    let bolt = s
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Lightning Bolt",
+            true,
+            "Lightning Bolt deals 3 damage to any target.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
+        .id();
+    for _ in 0..3 {
+        s.add_basic_land(P0, ManaColor::Red);
+    }
+    let mut r = s.build();
+
+    r.cast(impulse).resolve();
+    let (foreign_set, foreign_cards) = r
+        .state()
+        .tracked_object_sets
+        .iter()
+        .find(|(_, cards)| !cards.is_empty())
+        .map(|(id, cards)| (*id, cards.clone()))
+        .expect("reach: Reckless Impulse published its exiled cards");
+    assert_eq!(foreign_cards.len(), 2);
+    for card in &foreign_cards {
+        assert_eq!(r.state().objects[card].zone, Zone::Exile);
+    }
+
+    crew(&mut r, argosy, &[crewer]);
+    r.advance_to_combat();
+    r.declare_attackers(&[(argosy, AttackTarget::Player(P1))])
+        .expect("Argosy attacks after being crewed");
+    assert!(
+        r.state().stack.iter().any(|entry| {
+            entry.source_id == argosy
+                && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+        }),
+        "reach: Argosy's actual attack trigger is on the stack"
+    );
+
+    r.cast(bolt).target_object(crewer).resolve();
+    assert_eq!(r.state().objects[&crewer].zone, Zone::Graveyard);
+    assert!(r.state().stack.is_empty(), "the attack trigger finished");
+    assert_eq!(r.state().delayed_triggers.len(), 1);
+    let delayed = &r.state().delayed_triggers[0];
+    assert_eq!(delayed.source_id, argosy);
+    let Effect::ChangeZoneAll {
+        target: TargetFilter::TrackedSet { id: empty_set },
+        ..
+    } = &delayed.ability.effect
+    else {
+        panic!(
+            "expected Argosy's bound mass return: {:?}",
+            delayed.ability.effect
+        );
+    };
+    assert_ne!(*empty_set, foreign_set);
+    assert!(
+        r.state()
+            .tracked_object_sets
+            .get(empty_set)
+            .expect("reach: Argosy actually published a set")
+            .is_empty(),
+        "Argosy's delayed return binds its own empty exile result"
+    );
+
+    drive_to_end_step(
+        &mut r,
+        &Script {
+            attackers: &|_| vec![],
+            accept_optional: true,
+            resolve_first: None,
+            choose_target: &no_targets,
+        },
+    );
+    assert_eq!(r.state().phase, Phase::End);
+    assert!(r.state().delayed_triggers.is_empty());
+    assert!(
+        r.state().stack.iter().any(|entry| {
+            entry.source_id == argosy
+                && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+        }),
+        "reach: Argosy's delayed return actually triggered at the next end step"
+    );
+    r.advance_until_stack_empty();
+    for card in foreign_cards {
+        assert_eq!(
+            r.state().objects[&card].zone,
+            Zone::Exile,
+            "Argosy must not return a card exiled by Reckless Impulse"
+        );
+    }
+    assert_eq!(r.state().objects[&crewer].zone, Zone::Graveyard);
+    assert_eq!(r.state().objects[&argosy].zone, Zone::Battlefield);
+    assert!(r.state().stack.is_empty(), "the delayed return finished");
+    assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
 }
