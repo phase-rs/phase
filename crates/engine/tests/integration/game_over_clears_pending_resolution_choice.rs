@@ -52,6 +52,7 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::resolution::FrameKind;
+use engine::types::un_actions::{UnAction, UnTell};
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db;
@@ -108,12 +109,17 @@ fn json_key_absent(state: &GameState, key: &str) -> bool {
 fn assert_round_trips(runner: &GameRunner) {
     let json = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
         .expect("capture: the state serializes");
-    serde_json::from_str::<PersistedGameState>(&json)
+    let restored = serde_json::from_str::<PersistedGameState>(&json)
         .expect("decode: the persisted state decodes")
         .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
         .expect("admit: the persisted state is admissible")
         .finalize_after_rehydration(|_| Ok(()))
         .expect("finalize: the restored state is publishable");
+    assert_eq!(
+        restored.un_actions.pending_offers,
+        runner.state().un_actions.pending_offers,
+        "persistence preserves the exact queued Gotcha offers, including an empty terminal queue"
+    );
 }
 
 /// CR 104.1: none of the work a resolution parked outside the resolution stack,
@@ -270,6 +276,10 @@ fn assert_resolution_retired(runner: &GameRunner, winner: Option<PlayerId>) {
     assert!(
         state.pending_paradigm_remaining_offers.is_none(),
         "a finished game keeps no remaining paradigm offer"
+    );
+    assert!(
+        state.un_actions.pending_offers.is_empty(),
+        "a finished game keeps no queued Gotcha offer"
     );
     assert_no_parked_resolution_work(state);
     assert_round_trips(runner);
@@ -2007,4 +2017,261 @@ fn nonterminal_concession_preserves_remaining_paradigm_offers() {
         runner.state().waiting_for
     );
     assert!(runner.state().pending_paradigm_remaining_offers.is_none());
+}
+
+const NAME_DROPPING: &str = "Gotcha — If an opponent says a word that's in the name of a card in your graveyard, you may say \"Gotcha!\" When you do, return that card to your hand.";
+const ROD_OF_SPANKING: &str = "{2}, {T}: This artifact deals 1 damage to target player. Then untap this artifact unless that player says \"Thank you, sir. May I have another?\"";
+const YOU_ARE_ALREADY_DEAD: &str =
+    "Destroy target creature that was dealt damage this turn.\nDraw a card.";
+const INFERNIUS_SPAWNINGTON: &str = "Flying, first strike, trample, haste\nThis spell costs {3} less to cast for each card you've revealed this turn.\nWhen this creature enters, you may say \"I'm here.\" If you do, it deals 3 damage to target player.";
+const IM_GOING_ON_AN_ADVENTURE: &str = "Exile target creature. It's on an adventure. When it enters from being on an adventure, it explores. (Its owner may cast it from exile. To have a creature you control explore, reveal the top card of your library. Put that card into your hand if it's a land. Otherwise, put a +1/+1 counter on the creature, then put the card back or put it into your graveyard.)\nFlashback {4}{W}";
+
+fn enable_spoken_actions(runner: &mut GameRunner, players: &[PlayerId]) {
+    for &player in players {
+        apply(
+            runner.state_mut(),
+            player,
+            GameAction::UnAction {
+                action: UnAction::SetEnabled { enabled: true },
+            },
+        )
+        .expect("the player opts in to spoken actions");
+    }
+}
+
+/// Both printed permanents enter through fixture setup. Public activation,
+/// targeting and priority passes reach the Rod's spoken payment; P1's public
+/// tell then matches a real graveyard card while that resolution is paused.
+fn rod_with_a_queued_gotcha(players: u8) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = board(players);
+    let rod = scenario
+        .add_artifact_from_oracle(P0, "Rod of Spanking", ROD_OF_SPANKING)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        })
+        .id();
+    let source = scenario
+        .add_enchantment_from_oracle(P0, "Name Dropping", NAME_DROPPING)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        })
+        .id();
+    let returns = scenario
+        .add_spell_to_graveyard(P0, "You Are Already Dead", true)
+        .from_oracle_text(YOU_ARE_ALREADY_DEAD)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..2)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    enable_spoken_actions(&mut runner, &[P0, P1]);
+    let ability_index = runner.state().objects[&rod]
+        .abilities
+        .iter()
+        .position(|ability| ability.cost.is_some())
+        .expect("the printed Rod has its activated ability");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: rod,
+            ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(engine::types::ability::TargetRef::Player(P1)),
+        })
+        .unwrap();
+    pass_until_prompt(&mut runner);
+    assert!(matches!(
+        &runner.state().waiting_for,
+        WaitingFor::UnlessPayment {
+            player: P1,
+            cost: AbilityCost::SayPhrase { .. },
+            ..
+        }
+    ));
+    assert_eq!(runner.life(P1), 19, "the Rod really dealt its damage");
+    apply(
+        runner.state_mut(),
+        P1,
+        GameAction::UnAction {
+            action: UnAction::PerformTell {
+                tell: UnTell::Said { text: "you".into() },
+            },
+        },
+    )
+    .unwrap();
+    assert!(runner.state().un_actions.gotcha_offers.is_empty());
+    let pending = &runner.state().un_actions.pending_offers;
+    assert_eq!(
+        pending.len(),
+        1,
+        "reach guard: an actual tell queued Gotcha"
+    );
+    assert_eq!(pending[0].player, P0);
+    assert_eq!(pending[0].source.reference.object_id, source);
+    assert_eq!(pending[0].returns.reference.object_id, returns);
+    assert!(carrier_is_live(&runner));
+    assert_round_trips(&runner);
+    (runner, source, returns)
+}
+
+/// CR 104.1 + CR 104.3a: a tell made under an unresolved printed ability
+/// cannot leave a Gotcha offer waiting for priority after terminal concession.
+#[test]
+fn terminal_concession_retires_a_queued_gotcha_offer() {
+    let (mut runner, _, returns) = rod_with_a_queued_gotcha(2);
+    concede(&mut runner, P1);
+    assert_eq!(runner.state().objects[&returns].zone, Zone::Graveyard);
+    assert_finished_game_retired_its_resolution(&runner, Some(P0));
+}
+
+#[test]
+fn sideboarding_retires_a_queued_gotcha_offer() {
+    let (mut runner, _, _) = rod_with_a_queued_gotcha(2);
+    runner.state_mut().set_match_config(MatchConfig {
+        match_type: MatchType::Bo3,
+        ..Default::default()
+    });
+    concede(&mut runner, P1);
+    assert_eq!(runner.state().match_phase, MatchPhase::BetweenGames);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::BetweenGamesSideboard { .. }
+    ));
+    assert_resolution_retired(&runner, Some(P0));
+}
+
+/// CR 104.3a: leaving two survivors preserves the paused ability and exact
+/// queued offer, which can subsequently be announced and actually return the card.
+#[test]
+fn nonterminal_concession_preserves_a_queued_gotcha_offer() {
+    let (mut runner, source, returns) = rod_with_a_queued_gotcha(3);
+    let pending = runner.state().un_actions.pending_offers.clone();
+    concede(&mut runner, P2);
+    assert!(runner.state().game_end.is_none());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::UnlessPayment { player: P1, .. }
+    ));
+    assert_eq!(runner.state().un_actions.pending_offers, pending);
+    assert_round_trips(&runner);
+    runner
+        .act(GameAction::PayUnlessCost { pay: false })
+        .unwrap();
+    assert!(runner.state().un_actions.pending_offers.is_empty());
+    assert_eq!(runner.state().un_actions.gotcha_offers.len(), 1);
+    assert_eq!(
+        runner.state().un_actions.gotcha_offers[0]
+            .returns
+            .reference
+            .object_id,
+        returns
+    );
+    apply(
+        runner.state_mut(),
+        P0,
+        GameAction::UnAction {
+            action: UnAction::SayGotcha {
+                source_id: source,
+                returns,
+            },
+        },
+    )
+    .unwrap();
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&returns].zone, Zone::Hand);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 104.1: Infernius's printed spoken payment matches Name Dropping, then
+/// its damage eliminates the last opponent in the same resolution action.
+#[test]
+fn a_terminal_spoken_payment_retires_its_queued_gotcha_offer() {
+    let mut scenario = board(2);
+    scenario.with_life(P1, 3);
+    scenario.add_enchantment_from_oracle(P1, "Name Dropping", NAME_DROPPING);
+    scenario
+        .add_spell_to_graveyard(P1, "I'm Going On An Adventure!", false)
+        .from_oracle_text(IM_GOING_ON_AN_ADVENTURE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        });
+    let infernius = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Infernius Spawnington III, Esq.",
+            9,
+            9,
+            INFERNIUS_SPAWNINGTON,
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 10,
+        })
+        .id();
+    let mut mana = vec![ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![])];
+    mana.extend((0..10).map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![])));
+    scenario.with_mana_pool(P0, mana);
+    let mut runner = scenario.build();
+    enable_spoken_actions(&mut runner, &[P0, P1]);
+    runner.cast(infernius).commit();
+    runner.advance_until_stack_empty();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+    ));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(engine::types::ability::TargetRef::Player(P1)),
+        })
+        .unwrap();
+    if matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        && !runner.state().stack.is_empty()
+    {
+        runner.resolve_top();
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { player: P0, .. }
+    ));
+    assert_eq!(
+        engine::game::un_actions::open_gotcha_offers(
+            runner.state(),
+            P0,
+            &UnTell::Said {
+                text: "I'm here.".into()
+            },
+        )
+        .len(),
+        1,
+        "reach guard: the printed phrase matches a live opposing Gotcha source"
+    );
+    let events = runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap()
+        .events;
+    assert!(events.iter().any(|event| matches!(event,
+        GameEvent::PhraseSaid { player: P0, phrase } if phrase == "I'm here."
+    )));
+    assert_finished_game_retired_its_resolution(&runner, Some(P0));
 }
