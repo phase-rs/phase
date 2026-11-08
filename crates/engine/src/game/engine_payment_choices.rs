@@ -2093,8 +2093,14 @@ pub(super) fn handle_say_phrase(
         ));
     }
     // Un-card: only an opted-in player is offered a spoken payment at all, so a
-    // report from a player who has not opted in is not a payment.
-    if !crate::game::un_actions::player_can_say_phrases(state, player) {
+    // saying from a player who has not opted in is not a payment. An authoritative
+    // expiry report does not require opt-in: opting out while a payment is armed
+    // lets the timer settle the payment unpaid rather than hanging the game.
+    if matches!(
+        observation.report,
+        crate::types::un_actions::SayPhraseReport::Saying
+    ) && !crate::game::un_actions::player_can_say_phrases(state, player)
+    {
         return Err(EngineError::InvalidAction(
             "Player has not opted in to Un-card spoken actions".to_string(),
         ));

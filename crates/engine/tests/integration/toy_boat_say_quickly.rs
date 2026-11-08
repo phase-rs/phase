@@ -466,6 +466,65 @@ fn an_opted_out_player_is_never_prompted_and_sacrifices() {
     );
 }
 
+/// Un-card: an opted-out player cannot submit sayings, but an already-armed
+/// payment must still settle unpaid when the timer expires.
+#[test]
+fn an_opt_out_after_the_first_saying_settles_unpaid_on_timeout() {
+    let (mut runner, toy_boat) = setup_at_unless_prompt(1, true);
+    let id = payment_id(&runner);
+
+    // 1. First saying while opted in is accepted.
+    let first = say(&mut runner, 1, 1_000);
+    assert_eq!(phrases_said(&first.events).len(), 1);
+    assert_eq!(runner.state().say_payment.as_ref().unwrap().said, 1);
+
+    // 2. Payer opts out of spoken actions while prompt is pending.
+    runner
+        .act(GameAction::UnAction {
+            action: engine::types::un_actions::UnAction::SetEnabled { enabled: false },
+        })
+        .expect("opt-out succeeds");
+
+    // 3. Further sayings are rejected by the consent gate.
+    let err = runner
+        .act(GameAction::SayPhrase {
+            payment: id,
+            seq: 2,
+            at_ms: 1_500,
+            report: SayPhraseReport::Saying,
+        })
+        .unwrap_err();
+    assert!(
+        matches!(err, engine::game::EngineError::InvalidAction(_)),
+        "saying while opted out must be rejected, got {:?}",
+        err
+    );
+
+    // 4. Timeout occurs: authoritative expiry settles the armed payment unpaid.
+    let expiry_result = runner.act(GameAction::SayPhrase {
+        payment: id,
+        seq: 0,
+        at_ms: 2_001,
+        report: SayPhraseReport::Expiry,
+    });
+    assert!(
+        expiry_result.is_ok(),
+        "authoritative expiry must settle an armed payment: {:?}",
+        expiry_result
+    );
+
+    // 5. Toy Boat is sacrificed and the payment is cleared.
+    assert_eq!(
+        runner.state().objects[&toy_boat].zone,
+        Zone::Graveyard,
+        "Toy Boat must be sacrificed when the armed payment lapses after opt-out"
+    );
+    assert!(
+        runner.state().say_payment.is_none(),
+        "say_payment must be cleared after lapse"
+    );
+}
+
 /// Un-card (no CR entry): the payment instance is part of `GameState`, so its
 /// identity, accepted count and stored deadline survive a reconnect (a
 /// serialize/deserialize round trip). Time is validated against the same
