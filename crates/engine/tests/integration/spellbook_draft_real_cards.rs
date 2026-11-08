@@ -328,7 +328,7 @@ fn assert_single_grant(state: &GameState, object: ObjectId, mode: CardPlayMode, 
             source_id,
             ..
         } => {
-            // CR 611.2a: "until end of turn" lasts until the cleanup step.
+            // CR 611.2a + CR 514.2: an "until end of turn" effect lasts as stated and ends in the cleanup step.
             assert_eq!(*duration, Duration::UntilEndOfTurn);
             assert_eq!(*granted, mode);
             assert_eq!(*source_id, Some(source), "the grant names its own source");
