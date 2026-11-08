@@ -11290,8 +11290,8 @@ enum ZoneQual {
     /// "the chosen player's " — the player persisted on the source via an earlier
     /// "choose a player" (Haunting Apparition: "green creature cards in the chosen
     /// player's graveyard"). Sets `ControllerRef::SourceChosenPlayer`, mirroring
-    /// how `You` sets `ControllerRef::You`; CR 613.1 resolves it against the
-    /// source's persisted choice.
+    /// how `You` sets `ControllerRef::You`; CR 607.2d makes the printed
+    /// "choose a player" and this "the chosen player's" a linked reference.
     ChosenPlayer,
     /// "a ", "the ", or nothing (e.g., "from exile").
     Plain,
@@ -11766,8 +11766,8 @@ fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQu
             alt((tag("an opponent's "), tag("each opponent's "))),
         ),
         value(ZoneQual::You, tag("your ")),
-        // CR 613.1: must precede the `Plain` "the " arm so "the chosen player's "
-        // isn't consumed as a bare "the " article.
+        // Must precede the `Plain` "the " arm so "the chosen player's " isn't
+        // consumed as a bare "the " article.
         value(ZoneQual::ChosenPlayer, tag("the chosen player's ")),
         value(ZoneQual::TargetPlayer, tag("target player's ")),
         value(ZoneQual::Their, tag("their ")),
