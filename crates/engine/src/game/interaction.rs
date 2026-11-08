@@ -11920,13 +11920,22 @@ pub fn submit_interaction(
 
 /// Submits an opaque interaction with stable rejection metadata. The legacy
 /// [`submit_interaction`] result remains unchanged for existing transports.
+///
+/// `submitted_at_ms` is the host's trusted ingress instant for this submission,
+/// in the epoch-millisecond domain. Un-card (no CR entry): a projected spoken
+/// saying carries no instant of its own (the projection never reads a clock),
+/// so the host's ingress time is stamped onto the materialized action here,
+/// after the opaque choice was matched against current state and before the
+/// reducer judges it — the same stamp a direct `SayPhrase` receives.
 pub fn submit_interaction_with_rejection(
     state: &mut GameState,
     actor: PlayerId,
     submission: InteractionSubmission,
+    submitted_at_ms: u64,
 ) -> Result<AppliedInteraction, ActionRejection> {
     let action = resolve_interaction_response(state, actor, &submission)
-        .map_err(|error| action_rejection_for_interaction_reason(error.code))?;
+        .map_err(|error| action_rejection_for_interaction_reason(error.code))?
+        .stamped_by_host(submitted_at_ms);
     let semantic_owner = PlayerId(
         slot_for_submission(state, actor, &submission.interaction_id)
             .map_err(action_rejection_for_interaction_reason)?

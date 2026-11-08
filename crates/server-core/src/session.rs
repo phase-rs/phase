@@ -2189,12 +2189,32 @@ impl GameSession {
             .map_err(SessionActionError::into_legacy_reason)
     }
 
-    /// Rich interaction form for the authenticated Full transport.
+    /// Rich interaction form for the authenticated Full transport, stamped at
+    /// the moment this call runs. A transport that captured an earlier ingress
+    /// instant uses [`Self::handle_interaction_with_rejection_at`].
     #[allow(clippy::type_complexity)]
     pub fn handle_interaction_with_rejection(
         &mut self,
         player_token: &str,
         submission: InteractionSubmission,
+    ) -> Result<ActionResult, SessionActionError> {
+        self.handle_interaction_with_rejection_at(player_token, submission, now_ms())
+    }
+
+    /// [`Self::handle_interaction_with_rejection`] with the host's ingress
+    /// instant supplied by the transport.
+    ///
+    /// Un-card (no CR entry): a spoken saying chosen through the generic
+    /// interaction projection carries no instant of its own, so — exactly as
+    /// [`Self::handle_action_with_card_db_outcome_at`] does for a direct
+    /// `SayPhrase` — the server stamps it with the instant the socket read the
+    /// submission, never one a client claims.
+    #[allow(clippy::type_complexity)]
+    pub fn handle_interaction_with_rejection_at(
+        &mut self,
+        player_token: &str,
+        submission: InteractionSubmission,
+        host_received_at_ms: u64,
     ) -> Result<ActionResult, SessionActionError> {
         self.reject_if_ai_driver_faulted()?;
 
@@ -2218,8 +2238,13 @@ impl GameSession {
         // Set player names for log resolution.
         self.state.log_player_names = self.display_names.clone();
 
-        let applied = submit_interaction_with_rejection(&mut self.state, player, submission)
-            .map_err(SessionActionError::Rejected)?;
+        let applied = submit_interaction_with_rejection(
+            &mut self.state,
+            player,
+            submission,
+            host_received_at_ms,
+        )
+        .map_err(SessionActionError::Rejected)?;
 
         info!(
             game = %self.game_code,

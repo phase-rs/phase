@@ -748,9 +748,8 @@ fn a_restored_payment_lapses_on_its_retained_clock() {
 
 /// The exact-candidate surface (AI and the interaction API) offers both the
 /// saying (`SayPhrase`) and the explicit decline (`PayUnlessCost { pay: false }`).
-/// The AI can author a saying using its local clock; relay clients receive the
-/// prompt through the generic interaction projection and submit a `SayPhrase`
-/// action that the host stamps. The interaction API sorts candidates via
+/// The projected saying carries no instant (`at_ms: 0`): the authoritative
+/// submission boundary stamps it. The interaction API sorts candidates via
 /// `GameAction::cmp_stable`, which orders `PayUnlessCost` before `SayPhrase`
 /// (by `GameActionKind` discriminant), so index 0 is the explicit decline and
 /// index 1 is the saying.
@@ -773,11 +772,12 @@ fn timed_spoken_prompt_advertises_both_saying_and_decline() {
         GameAction::SayPhrase {
             payment,
             seq,
+            at_ms,
             report,
-            ..
         } => {
             assert_eq!(*payment, 1);
             assert_eq!(*seq, 1);
+            assert_eq!(*at_ms, 0, "the projection never reads a clock");
             assert_eq!(*report, SayPhraseReport::Saying);
         }
         other => panic!("expected SayPhrase at index 1, got {other:?}"),
@@ -856,6 +856,146 @@ fn timed_spoken_prompt_advertises_both_saying_and_decline() {
         }
         other => panic!("expected SayPhrase at index 1, got {other:?}"),
     }
+}
+
+/// Bind the interaction authority once and return the live opportunity's
+/// exact choices, each paired with the action it materializes to.
+fn projected_choices(
+    runner: &mut GameRunner,
+) -> Vec<(
+    engine::types::interaction::InteractionSubmission,
+    GameAction,
+)> {
+    use engine::types::interaction::{
+        InteractionOpportunityResponse, InteractionResponse, InteractionSessionId,
+        InteractionSubmission,
+    };
+    if runner.state().interaction_session_id.is_none() {
+        engine::game::interaction::bind_interaction_authority(
+            runner.state_mut(),
+            InteractionSessionId("say-prompt".to_string()),
+        )
+        .expect("bind interaction authority");
+    }
+    let filtered = engine::game::filter_state_for_viewer(runner.state(), P0);
+    let view = engine::game::interaction::derive_viewer_interaction(runner.state(), &filtered, P0);
+    let opportunity = view.opportunities.first().expect("one live opportunity");
+    let InteractionOpportunityResponse::ExactChoices { choices } = &opportunity.response else {
+        panic!("expected exact choices, got {:?}", opportunity.response);
+    };
+    choices
+        .iter()
+        .map(|choice| {
+            let submission = InteractionSubmission {
+                interaction_id: opportunity.interaction_id.clone(),
+                response: InteractionResponse::Choose {
+                    choice_id: choice.id.clone(),
+                },
+            };
+            let action = engine::game::interaction::resolve_interaction_response(
+                runner.state(),
+                P0,
+                &submission,
+            )
+            .expect("every projected choice materializes");
+            (submission, action)
+        })
+        .collect()
+}
+
+/// Submit the projected saying through the generic interaction path, as the
+/// host does when its socket reads the submission at `received_at_ms`.
+fn say_through_interaction(
+    runner: &mut GameRunner,
+    received_at_ms: u64,
+) -> engine::types::game_state::ActionResult {
+    let (submission, _) = projected_choices(runner)
+        .into_iter()
+        .find(|(_, action)| matches!(action, GameAction::SayPhrase { .. }))
+        .expect("the timed prompt projects a saying");
+    engine::game::interaction::submit_interaction_with_rejection(
+        runner.state_mut(),
+        P0,
+        submission,
+        received_at_ms,
+    )
+    .expect("the projected saying is accepted")
+    .result
+}
+
+/// Un-card (no CR entry): the projected saying is a pure function of state —
+/// reading the projection twice yields the same choices and the same payload —
+/// and it continues from the last ACCEPTED sequence. After a direct saying that
+/// skipped sequence 1, repeated interaction submissions advance 3, 4 and each
+/// is judged at the host's ingress instant, completing the payment.
+#[test]
+fn projected_sayings_are_deterministic_and_continue_from_the_accepted_sequence() {
+    let (mut runner, toy_boat) = setup_at_unless_prompt(2, true);
+    assert_eq!(owed(&runner), 3);
+
+    // A lost attempt consumed sequence 1; the engine accepted sequence 2.
+    say(&mut runner, 2, 10_000);
+    assert_eq!(
+        runner.state().say_payment.as_ref().unwrap().last_seq,
+        Some(2)
+    );
+
+    let first_read = projected_choices(&mut runner);
+    let second_read = projected_choices(&mut runner);
+    assert_eq!(
+        first_read, second_read,
+        "the projection is identical on every read"
+    );
+    let projected = first_read
+        .iter()
+        .find_map(|(_, action)| match action {
+            GameAction::SayPhrase { seq, at_ms, .. } => Some((*seq, *at_ms)),
+            _ => None,
+        })
+        .expect("a saying is projected");
+    assert_eq!(projected, (3, 0), "next sequence follows the accepted one");
+
+    let second = say_through_interaction(&mut runner, 10_400);
+    assert_eq!(
+        phrases_said(&second.events),
+        vec![(P0, "Toy Boat".to_string())]
+    );
+    let progress = runner.state().say_payment.as_ref().unwrap();
+    assert_eq!((progress.said, progress.last_seq), (2, Some(3)));
+    assert_eq!(
+        progress.last_said_ms,
+        Some(10_400),
+        "the saying is judged at the host's ingress instant"
+    );
+
+    let third = say_through_interaction(&mut runner, 11_300);
+    assert_eq!(
+        phrases_said(&third.events),
+        vec![(P0, "Toy Boat".to_string())]
+    );
+    assert!(
+        runner.state().say_payment.is_none(),
+        "the payment completed"
+    );
+    assert!(!matches!(
+        runner.state().waiting_for,
+        WaitingFor::UnlessPayment { .. }
+    ));
+    assert_eq!(runner.state().objects[&toy_boat].zone, Zone::Battlefield);
+}
+
+/// CR 118.12a: a projected saying submitted after the window is a pause. The
+/// placeholder instant cannot slip it in: the submission boundary stamps the
+/// host's ingress time, which is past the stored deadline, so Toy Boat goes.
+#[test]
+fn a_late_projected_saying_is_judged_at_ingress_and_lapses() {
+    let (mut runner, toy_boat) = setup_at_unless_prompt(1, true);
+    say(&mut runner, 1, 10_000);
+
+    let late = say_through_interaction(&mut runner, 11_001);
+    assert!(phrases_said(&late.events).is_empty(), "{:?}", late.events);
+    assert_eq!(runner.state().objects[&toy_boat].zone, Zone::Graveyard);
+    assert!(runner.state().say_payment.is_none());
 }
 
 /// A host relaying a remote seat's observation replaces the claimed instant

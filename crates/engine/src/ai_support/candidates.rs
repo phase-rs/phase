@@ -1,7 +1,6 @@
 use std::cell::OnceCell;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, HashSet};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::game::casting;
 use crate::game::combat::AttackTarget;
@@ -2926,26 +2925,29 @@ pub fn candidate_actions_broad_with_probe(
             .collect(),
         // Un-card (no CR entry) + CR 118.12a: a TIMED spoken payment (Toy
         // Boat's "Say \"Toy Boat\" quickly") is paid by host-stamped
-        // `GameAction::SayPhrase` observations. The AI can author a saying using
-        // its local clock (it runs in the engine process); relay clients receive
-        // the prompt through the generic interaction projection and submit a
-        // `SayPhrase` action that the host stamps. Offer both the saying and the
-        // explicit decline so the AI can choose to pay or let the effect happen.
+        // `GameAction::SayPhrase` observations. Offer the next saying and the
+        // explicit decline. The projected saying is a pure function of state —
+        // it never reads a clock, so the payload (and its interaction action
+        // id) is identical on every read and the projection runs on hosts with
+        // no `std` clock (browser WASM). `at_ms` is a placeholder: the
+        // authoritative submission boundary stamps the instant the action is
+        // submitted (`GameAction::stamped_by_host`). The sequence continues
+        // from the last ACCEPTED one, not from the count of sayings, so a
+        // number skipped by a lost attempt never makes the next saying stale.
         WaitingFor::UnlessPayment { player, cost, .. }
             if crate::game::un_actions::is_timed_saying(cost) =>
         {
-            let payment_id = state.say_payment.as_ref().map(|p| p.id).unwrap_or(0);
-            let next_seq = state.say_payment.as_ref().map(|p| p.said + 1).unwrap_or(1);
-            let now_ms = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
+            let payment = state.say_payment.as_ref();
+            let payment_id = payment.map_or(0, |p| p.id);
+            let next_seq = payment
+                .and_then(|p| p.last_seq)
+                .map_or(1, |seq| seq.saturating_add(1));
             vec![
                 candidate(
                     GameAction::SayPhrase {
                         payment: payment_id,
                         seq: next_seq,
-                        at_ms: now_ms,
+                        at_ms: 0,
                         report: SayPhraseReport::Saying,
                     },
                     TacticalClass::Selection,

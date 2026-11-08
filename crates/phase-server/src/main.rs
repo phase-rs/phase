@@ -9161,7 +9161,11 @@ async fn apply_and_publish_full_submission(
                     host_received_at_ms,
                 ),
                 GameSubmission::Interaction(submission) => session
-                    .handle_interaction_with_rejection(&player_token, submission)
+                    .handle_interaction_with_rejection_at(
+                        &player_token,
+                        submission,
+                        host_received_at_ms,
+                    )
                     .map(|result| HandledAction {
                         result,
                         takeback: None,
@@ -10325,6 +10329,19 @@ fn owned_say_phrase_deadline(session: &GameSession, claim: &SayPhraseExpiryClaim
 pub(crate) static SAY_EXPIRY_DRAINS: std::sync::Mutex<Vec<(String, u64)>> =
     std::sync::Mutex::new(Vec::new());
 
+/// Test-only pause inside a game's payer-ingress drain: `(reached, release)`.
+/// The drain signals `reached` and waits for `release`, so a test can change
+/// the table (replace the host's socket, let an AI seat reply) at exactly the
+/// moment the expiry authority has let go of the session lock.
+#[cfg(test)]
+pub(crate) static SAY_EXPIRY_DRAIN_GATES: std::sync::Mutex<
+    Vec<(
+        String,
+        std::sync::Arc<tokio::sync::Notify>,
+        std::sync::Arc<tokio::sync::Notify>,
+    )>,
+> = std::sync::Mutex::new(Vec::new());
+
 /// Drain the submitter's already-received frames so a timely saying still in
 /// that seat's ingress is applied before the lapse is judged. A submitter with no
 /// attached route has nothing in flight.
@@ -10339,6 +10356,19 @@ async fn drain_say_phrase_submitter(
         .lock()
         .unwrap()
         .push((game_code.to_string(), payment_id));
+    #[cfg(test)]
+    {
+        let gate = SAY_EXPIRY_DRAIN_GATES
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(code, _, _)| code == game_code)
+            .map(|(_, reached, release)| (reached.clone(), release.clone()));
+        if let Some((reached, release)) = gate {
+            reached.notify_one();
+            release.notified().await;
+        }
+    }
     #[cfg(not(test))]
     let _ = payment_id;
     let submitter_tx = {

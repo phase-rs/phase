@@ -2645,7 +2645,14 @@ fn submit_interaction_inner(
 ) -> Result<Result<ActionResult, ActionRejection>, String> {
     with_installed_state_mut(|state| {
         let capture = hosted_capture(state, None)?;
-        let applied = submit_interaction_with_rejection(state, actor, submission)?;
+        // Un-card (no CR entry): this bridge is the authoritative ingress of a
+        // locally hosted game, so its clock stamps a projected spoken saying.
+        let applied = submit_interaction_with_rejection(
+            state,
+            actor,
+            submission,
+            engine::util::host_clock::epoch_ms(),
+        )?;
         // No vote is open here (refused above), so no resolution can arise.
         let (result, _) = hosted_record(state, actor, capture, &applied.action, applied.result);
         record_replay_action(false, actor, applied.action);
@@ -6017,9 +6024,17 @@ fn submit_ai_action_proposal_inner(
         };
     };
 
+    // Un-card (no CR entry): this bridge hosts the AI, so its clock stamps a
+    // spoken saying at submission; the replay records the stamped action.
+    let submitted_at_ms = engine::util::host_clock::epoch_ms();
     match with_installed_state_mut(|state| {
-        let application =
-            apply_ai_action_proposal(state, &proposal.contract, actor, action.clone());
+        let application = apply_ai_action_proposal(
+            state,
+            &proposal.contract,
+            actor,
+            action.clone(),
+            submitted_at_ms,
+        );
         if let AiProposalApplication::AppliedStackPass { result }
         | AiProposalApplication::AppliedAction { result } = &application
         {
@@ -6035,7 +6050,7 @@ fn submit_ai_action_proposal_inner(
             }
         }
         Ok(AiProposalApplication::AppliedAction { result }) => {
-            record_replay_action(false, actor, action);
+            record_replay_action(false, actor, action.stamped_by_host(submitted_at_ms));
             invalidate_ai_proposals();
             AiProposalSubmission::Applied {
                 result: Box::new(result),

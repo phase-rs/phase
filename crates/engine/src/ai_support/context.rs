@@ -53,12 +53,17 @@ pub fn apply_ai_action_proposal(
     contract: &AiDecisionContract,
     actor: PlayerId,
     action: GameAction,
+    submitted_at_ms: u64,
 ) -> AiProposalApplication {
     let verified_stack_pass =
         crate::game::engine::verified_ai_stack_pass_player(state, &action).is_some();
     if !contract.permits(state, actor, &action) {
         return AiProposalApplication::Stale;
     }
+    // Un-card (no CR entry): membership is checked against the issued,
+    // clock-free candidate; the host's submission instant is stamped only now,
+    // so a spoken saying is judged at the moment the AI actually said it.
+    let action = action.stamped_by_host(submitted_at_ms);
     let applied = if verified_stack_pass {
         crate::game::engine::apply_verified_ai_priority_pass_with_rejection(
             state, actor, contract, action,
@@ -473,7 +478,7 @@ mod tests {
         let contract = AiDecisionContract::issue(&state, player);
 
         assert!(matches!(
-            apply_ai_action_proposal(&mut state, &contract, player, GameAction::PassPriority),
+            apply_ai_action_proposal(&mut state, &contract, player, GameAction::PassPriority, 0),
             AiProposalApplication::AppliedStackPass { .. }
         ));
         assert_eq!(
@@ -496,7 +501,7 @@ mod tests {
         state.state_revision = state.state_revision.wrapping_add(1);
 
         assert!(matches!(
-            apply_ai_action_proposal(&mut state, &contract, player, GameAction::PassPriority),
+            apply_ai_action_proposal(&mut state, &contract, player, GameAction::PassPriority, 0),
             AiProposalApplication::Stale
         ));
         assert!(state.stack_resolution_session.is_none());
@@ -529,7 +534,13 @@ mod tests {
         )
         .is_none());
         assert!(matches!(
-            apply_ai_action_proposal(&mut state, &contract, ai_player, GameAction::PassPriority),
+            apply_ai_action_proposal(
+                &mut state,
+                &contract,
+                ai_player,
+                GameAction::PassPriority,
+                0
+            ),
             AiProposalApplication::AppliedAction { .. }
         ));
     }
