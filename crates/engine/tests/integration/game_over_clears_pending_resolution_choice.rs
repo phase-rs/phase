@@ -120,6 +120,11 @@ fn assert_round_trips(runner: &GameRunner) {
         runner.state().un_actions.pending_offers,
         "persistence preserves the exact queued Gotcha offers, including an empty terminal queue"
     );
+    assert_eq!(
+        restored.un_actions.gotcha_offers,
+        runner.state().un_actions.gotcha_offers,
+        "persistence preserves the exact open Gotcha offers, including an empty terminal window"
+    );
 }
 
 /// CR 104.1: none of the work a resolution parked outside the resolution stack,
@@ -139,6 +144,10 @@ fn assert_no_parked_resolution_work(state: &GameState) {
         (
             "pending_discard_for_cost",
             state.pending_discard_for_cost.is_some(),
+        ),
+        (
+            "pending_single_discard",
+            state.pending_single_discard.is_some(),
         ),
         ("pending_replacement", state.pending_replacement.is_some()),
         (
@@ -280,6 +289,10 @@ fn assert_resolution_retired(runner: &GameRunner, winner: Option<PlayerId>) {
     assert!(
         state.un_actions.pending_offers.is_empty(),
         "a finished game keeps no queued Gotcha offer"
+    );
+    assert!(
+        state.un_actions.gotcha_offers.is_empty(),
+        "a finished game keeps no open Gotcha offer"
     );
     assert_no_parked_resolution_work(state);
     assert_round_trips(runner);
@@ -2202,10 +2215,11 @@ fn nonterminal_concession_preserves_a_queued_gotcha_offer() {
     ));
 }
 
-/// CR 104.1: Infernius's printed spoken payment matches Name Dropping, then
-/// its damage eliminates the last opponent in the same resolution action.
+/// CR 104.1: the optional-effect handler restores Priority before Infernius's
+/// printed payment, so Name Dropping opens a live offer rather than queueing it.
+/// Its damage then ends the game in the same action; that open offer retires too.
 #[test]
-fn a_terminal_spoken_payment_retires_its_queued_gotcha_offer() {
+fn a_terminal_spoken_payment_retires_its_open_gotcha_offer() {
     let mut scenario = board(2);
     scenario.with_life(P1, 3);
     scenario.add_enchantment_from_oracle(P1, "Name Dropping", NAME_DROPPING);
@@ -2274,4 +2288,100 @@ fn a_terminal_spoken_payment_retires_its_queued_gotcha_offer() {
         GameEvent::PhraseSaid { player: P0, phrase } if phrase == "I'm here."
     )));
     assert_finished_game_retired_its_resolution(&runner, Some(P0));
+}
+
+/// CR 701.50a + CR 701.9a: with an empty hand, Grifter's real activation
+/// draws one Island and automatically selects it for the connive discard.
+/// Library of Leng's optional replacement pauses the single-card move.
+fn connive_with_a_paused_single_discard(players: u8) -> (GameRunner, ObjectId) {
+    let db = shared_card_db().expect("card database");
+    let mut scenario = if players == 2 {
+        GameScenario::new()
+    } else {
+        GameScenario::new_n_player(players, 42)
+    };
+    scenario.at_phase(Phase::PreCombatMain);
+    for seat in 1..players {
+        scenario.add_real_card(PlayerId(seat), "Island", Zone::Library, db);
+    }
+    let drawn = scenario.add_real_card(P0, "Island", Zone::Library, db);
+    let grifter = scenario.add_real_card(P0, "Hypnotic Grifter", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Library of Leng", Zone::Battlefield, db);
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    assert!(runner.state().players[P0.0 as usize].hand.is_empty());
+    let ability_index = runner.state().objects[&grifter]
+        .abilities
+        .iter()
+        .position(|ability| matches!(ability.effect.as_ref(), Effect::Connive { .. }))
+        .expect("the printed Grifter has its connive activation");
+    runner.activate(grifter, ability_index).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+    let pending = runner
+        .state()
+        .pending_single_discard
+        .as_ref()
+        .expect("reach guard: the real replacement paused a frameless single discard");
+    assert_eq!(pending.player, P0);
+    assert_eq!(pending.source_id, Some(grifter));
+    assert!(runner.state().pending_discard_batch.is_none());
+    assert_eq!(runner.state().objects[&drawn].zone, Zone::Hand);
+    assert!(carrier_is_live(&runner));
+    assert_round_trips(&runner);
+    (runner, drawn)
+}
+
+/// CR 104.1 + CR 104.3a: the departing opponent is not the replacement chooser;
+/// the surviving player's single-discard cursor retires with the finished game.
+#[test]
+fn terminal_concession_retires_a_paused_single_discard() {
+    let (mut runner, drawn) = connive_with_a_paused_single_discard(2);
+    concede(&mut runner, P1);
+    assert_eq!(
+        runner.state().objects[&drawn].zone,
+        Zone::Hand,
+        "retiring a discard must not commit the paused move"
+    );
+    assert_finished_game_retired_its_resolution(&runner, Some(P0));
+}
+
+/// CR 104.3a: a different opponent leaving a continuing game preserves the
+/// replacement and its cursor. Declining Leng must still perform that discard.
+#[test]
+fn nonterminal_concession_preserves_a_paused_single_discard() {
+    let (mut runner, drawn) = connive_with_a_paused_single_discard(3);
+    concede(&mut runner, P2);
+    assert!(runner.state().game_end.is_none());
+    assert!(runner.state().pending_single_discard.is_some());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+    assert_round_trips(&runner);
+    let (chooser, decline) = decline_index(&runner);
+    apply(
+        runner.state_mut(),
+        chooser,
+        GameAction::ChooseReplacement { index: decline },
+    )
+    .expect("declining Leng resumes the single discard");
+    assert!(runner.state().pending_single_discard.is_none());
+    assert_eq!(runner.state().objects[&drawn].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().cards_discarded_this_turn_by_player.get(&P0),
+        Some(&1)
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }

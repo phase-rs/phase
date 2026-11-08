@@ -2214,6 +2214,7 @@ fn retire_parked_resolution_work(state: &mut GameState) {
     state.pending_player_scope_sacrifice_choice = None;
     state.pending_mass_library_order_choice = None;
     state.pending_discard_batch = None;
+    state.pending_single_discard = None;
     state.pending_exile_from_top_until = None;
     state.pending_scoped_library_search = None;
     state.pending_library_search_delivery = None;
@@ -2292,6 +2293,7 @@ pub(super) fn retire_finished_game_resolution(state: &mut GameState) {
     state.pending_miracle_offers.clear();
     state.pending_paradigm_remaining_offers = None;
     state.un_actions.pending_offers.clear();
+    state.un_actions.gotcha_offers.clear();
     let resolution_live =
         state.resolving_stack_entry.is_some() || !state.resolution_stack.is_empty();
     if !resolution_live {
