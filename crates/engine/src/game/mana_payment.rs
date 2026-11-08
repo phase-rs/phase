@@ -441,8 +441,16 @@ pub(crate) fn producing_incarnation_for_ability(
 /// unit's departed source is step-scoped, so a unit that survives the boundary
 /// would lose the one fact CR 106.3 owes its eventual payment. Rather than
 /// extending the generic cache (which is compiled, statewide history that every
-/// unrelated reader would suddenly see), this copies the fact onto the unit's own
-/// pin: one entry per exact producing incarnation a pool still holds.
+/// unrelated reader would suddenly see), this copies the fact onto the pool's own
+/// ledger: one entry per still-pooled unit, keyed by that unit's PIP.
+///
+/// The pip key is what makes the answer a fact about ONE unit. A storage id can
+/// have two floating tenures at once — a copy's trigger mana retained across a
+/// turn, next to the mana the returned permanent's own Treasure ability just made
+/// — and an entry that named only the id would hand either unit the other's
+/// producer. Position in the pool cannot carry this either: a payment between two
+/// boundaries shifts every later unit's position, while a pip never moves to
+/// another unit.
 ///
 /// Called immediately BEFORE the boundary clears the incarnation-keyed caches,
 /// and rebuilding the vector from the pools each time makes it self-pruning — an
@@ -466,13 +474,20 @@ pub(crate) fn retain_pooled_mana_producer_snapshots(state: &mut GameState) {
 
     let mut retained: Vec<PooledManaProducerSnapshot> = Vec::new();
     for player in &state.players {
-        for (shape, _count) in player.mana_pool.shapes() {
-            let Some(incarnation) = shape.source_incarnation else {
+        // Per UNIT, not per shape: two units of one shape can name different
+        // producing tenures, and the fact is owed to the unit that survives.
+        for unit in player.mana_pool.units() {
+            // CR 118.3a: an unstamped unit (a synthetic or legacy pool) has no
+            // identity to associate a fact with, so nothing is recorded for it.
+            if unit.pip_id.0 == 0 {
+                continue;
+            }
+            let Some(incarnation) = unit.source_incarnation else {
                 continue;
             };
             let live_is_producer = state
                 .objects
-                .get(&shape.source_id)
+                .get(&unit.source_id)
                 .is_some_and(|source| source.incarnation == incarnation);
             if live_is_producer {
                 continue;
@@ -482,22 +497,35 @@ pub(crate) fn retain_pooled_mana_producer_snapshots(state: &mut GameState) {
             // still reads that cache. A departure that records no last-known
             // information (a hidden zone) leaves the fact unprovable, so nothing
             // is recorded rather than inventing one.
-            let lki = carried_lki(shape.source_id, incarnation).or_else(|| {
-                crate::game::filter::exit_lki_for_incarnation(state, shape.source_id, incarnation)
+            let lki = carried_lki(unit.source_id, incarnation).or_else(|| {
+                crate::game::filter::exit_lki_for_incarnation(state, unit.source_id, incarnation)
                     .cloned()
             });
             let Some(lki) = lki else {
                 continue;
             };
             retained.push(PooledManaProducerSnapshot {
-                source_id: shape.source_id,
+                pip_id: unit.pip_id,
+                source_id: unit.source_id,
                 source_incarnation: incarnation,
                 lki,
             });
         }
     }
-    retained.sort_by_key(|snapshot| (snapshot.source_id, snapshot.source_incarnation));
-    retained.dedup_by_key(|snapshot| (snapshot.source_id, snapshot.source_incarnation));
+    retained.sort_by_key(|snapshot| {
+        (
+            snapshot.source_id,
+            snapshot.source_incarnation,
+            snapshot.pip_id,
+        )
+    });
+    retained.dedup_by_key(|snapshot| {
+        (
+            snapshot.source_id,
+            snapshot.source_incarnation,
+            snapshot.pip_id,
+        )
+    });
     state.pooled_mana_producer_snapshots = retained;
 }
 

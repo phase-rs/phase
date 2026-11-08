@@ -1383,12 +1383,21 @@ pub struct ManaSpentSourceSnapshot {
 /// information is kept. CR 106.3 makes the unit's source the source of the
 /// ability that produced it, and that binding does not expire while the mana is
 /// unspent — so the fact the unit will owe at payment time has to outlive the
-/// generic cache WITHOUT extending it. One entry per exact producing
-/// incarnation, written only for units a pool still holds, and rebuilt from the
-/// pools at every boundary, so nothing is retained beyond a floating unit's own
-/// lifetime.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// generic cache WITHOUT extending it. One entry per still-pooled unit whose
+/// producing incarnation is gone, and rebuilt from the pools at every boundary,
+/// so nothing is retained beyond a floating unit's own lifetime.
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct PooledManaProducerSnapshot {
+    /// CR 118.3a: the pooled unit this fact was copied from, by its pip identity.
+    ///
+    /// A producer epoch belongs to ONE unit. One storage id can have several
+    /// floating units from different tenures at once — a copy's trigger mana
+    /// retained across a turn next to the mana the returned permanent's own
+    /// Treasure ability made — and only this key says which fact is which unit's.
+    /// A save that predates the field decodes with the unstamped sentinel, which
+    /// matches no real unit, so such an entry is ignored rather than mis-applied.
+    #[serde(default = "unstamped_pool_pip")]
+    pub pip_id: crate::types::mana::ManaPipId,
     pub source_id: ObjectId,
     /// CR 400.7: the epoch that produced the unit — never an epoch that merely
     /// shares its storage id.
@@ -1396,6 +1405,27 @@ pub struct PooledManaProducerSnapshot {
     /// The producing source's public characteristics at that epoch.
     #[serde(with = "crate::types::history_snapshot::compact_history_lki")]
     pub lki: LKISnapshot,
+}
+
+// CR 104.4b: `pip_id` is a runtime/UI identity tag (the pin key used to direct
+// which pool unit pays a cost), NOT a game-state-semantic property — the same rule
+// `ManaUnit`'s own equality follows. Two loop positions one cycle apart mint
+// different pips for the mana they float, and comparing them would make a
+// genuinely repeated position look different, defeating the mandatory-loop
+// detection of CR 104.4b. `Eq` is derived (it only requires `PartialEq` to exist);
+// ignoring one field keeps the relation reflexive/symmetric/transitive.
+impl PartialEq for PooledManaProducerSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.source_id == other.source_id
+            && self.source_incarnation == other.source_incarnation
+            && self.lki == other.lki
+    }
+}
+
+/// CR 118.3a: the unstamped sentinel a save that predates
+/// [`PooledManaProducerSnapshot::pip_id`] decodes with — it matches no real unit.
+fn unstamped_pool_pip() -> crate::types::mana::ManaPipId {
+    crate::types::mana::ManaPipId(0)
 }
 
 /// CR 601.2a + CR 400.7: the identity of one spell on the stack, minted when the
@@ -16833,30 +16863,38 @@ impl GameState {
     /// none.
     ///
     /// A current-format save pins every unit at production
-    /// (`ManaUnit::source_incarnation`), so this guard never sees a current pool:
-    /// it catches only legacy pools written before the pin existed. See
+    /// (`ManaUnit::source_incarnation`), so this guard only has work to do on
+    /// legacy pools written before the pin existed. See
     /// [`Self::saved_producer_epoch`] for the per-unit decision and, for each
     /// answer, the record in the save that carries it.
     ///
-    /// The rule is one sentence: **what a retained unit's producer was is decided
-    /// by the boundary that retained it, and only a record saved at that boundary
-    /// survives to tell us.** Anything re-derived at restore time — the object
-    /// that occupies the storage id now, this turn's zone-change journal, which
-    /// step-end handlers happen to be in play — describes the state at RESTORE,
-    /// and the evidence that mattered is already gone: turn advancement clears the
-    /// journal (`turns::prune_turn_scoped_state`), and a retention effect
-    /// ("Players don't lose unspent mana as steps and phases end") can be destroyed
-    /// in the very step the saved pool is restored into, leaving the scan empty
-    /// while the mana it retained is still floating.
+    /// The rule is one sentence: **a unit's producer is a fact about that unit,
+    /// recorded where that unit was produced, and nothing re-derived at restore
+    /// time can supply it.** The records that count all name ONE unit: the pin on
+    /// the pooled unit, the pin and producer node the journal wrote for that pip at
+    /// production, the pool's per-unit producer ledger, and — only where the id
+    /// answers for no object at all — the sole epoch its exit last-known
+    /// information records. Whatever occupies the storage ID NOW is not one of
+    /// them: CR 400.7 makes a moved object "a new object with no memory of, or
+    /// relation to, its previous existence", so a save that offers only the live
+    /// occupant offers no evidence, and this guard refuses it. That refusal is the
+    /// whole point — the shape it rejects is the one where a copy's retained trigger
+    /// mana would be priced as the Treasure Cloudshift returned in its place.
     ///
     /// Admitting a unit is not enough on its own. A unit admitted without a pin
     /// re-derives its source from the live board at every later read, so a blink
     /// that reuses the storage id turns an honest admission into a mis-attributed
-    /// payment (CR 400.7: the returned object is not the producer). That is why
-    /// every admitted unit leaves here STAMPED: with the epoch the save carries, or
-    /// with the live object's own incarnation when the save proves that object is
-    /// the producer — the same value
+    /// payment. That is why every admitted unit leaves here STAMPED with the epoch
+    /// the save proves — the same value
     /// `mana_payment::producing_incarnation_for_ability` would have pinned live.
+    ///
+    /// The stamp is applied to BOTH copies of the unit: the pool's, and every copy
+    /// the resolved-rules journal holds of the same pip
+    /// ([`ResolvedRulesJournal::bind_unit_epoch`]). They must agree or the save is
+    /// unreadable — a payment records the spent unit against the produced one and
+    /// `ResolvedRulesJournal::validate_serialized_authority` compares them whole,
+    /// CR 400.7's epoch included — so a pool-only stamp would let this boundary
+    /// admit a save whose successor it writes cannot be loaded.
     ///
     /// Convoke markers are taps, not mana production (CR 702.51a), and are never
     /// refused or stamped. Neither is a unit that names no producing object at all
@@ -16866,50 +16904,66 @@ impl GameState {
     /// to anything either, so admission adds no guess.
     fn bind_or_reject_floating_mana_provenance(&mut self) -> Result<(), PersistedRestoreError> {
         let mut binding: Vec<(PlayerId, Vec<(usize, u64)>)> = Vec::new();
-        let mut ambiguous: Option<(PlayerId, ObjectId)> = None;
+        // Every pooled unit's binding, for the journal's own copies of it. Deferred
+        // like `binding` so the read pass above runs on an unmodified state.
+        let mut journal_binding: Vec<(PlayerId, ManaPipId, ObjectId, u64)> = Vec::new();
+        let mut refusal: Option<PersistedRestoreError> = None;
         for player in &self.players {
             let mut stamped: Vec<(usize, u64)> = Vec::new();
             // Pool position, not pip: `ManaPipId(0)` is the unstamped sentinel, so
             // two unjournaled units of one pool share a pip and only pool order
             // tells them apart.
             for (index, unit) in player.mana_pool.units().enumerate() {
-                if unit.source_incarnation.is_some()
-                    || unit.is_convoke_payment()
-                    || unit.source_id == NO_PRODUCING_OBJECT
-                {
+                if unit.is_convoke_payment() || unit.source_id == NO_PRODUCING_OBJECT {
                     continue;
                 }
-                match self.saved_producer_epoch(&unit) {
-                    // CR 106.3 + CR 400.7: the save names the epoch, so admission
-                    // BINDS it. An admitted unit left pin-less would re-derive its
-                    // source from the live board at every later read, so a blink
-                    // that reuses the storage id would turn an honest admission
-                    // into a mis-attributed payment.
-                    Some(incarnation) => stamped.push((index, incarnation)),
-                    // CR 106.3 + CR 400.7: no record in the save names the producer,
-                    // and the nearest substitute available here — the object that
-                    // occupies the storage id now — is a different object from the
-                    // one that made the mana (CR 400.7), so reading it would
-                    // fabricate the source-qualified answer the game never
-                    // established.
-                    None => {
-                        ambiguous = Some((player.id, unit.source_id));
-                        break;
-                    }
-                }
+                let proven = match unit.source_incarnation {
+                    Some(pinned) => pinned,
+                    None => match self.saved_producer_epoch(&unit) {
+                        // CR 106.3 + CR 400.7: the save names this unit's epoch, so
+                        // admission BINDS it. An admitted unit left pin-less would
+                        // re-derive its source from the live board at every later
+                        // read, so a blink that reuses the storage id would turn an
+                        // honest admission into a mis-attributed payment.
+                        Some(incarnation) => {
+                            stamped.push((index, incarnation));
+                            incarnation
+                        }
+                        // CR 106.3 + CR 400.7: no record in the save names THIS
+                        // unit's producer, and the nearest substitute available here
+                        // — the object that occupies the storage id now — is a
+                        // different object from the one that made the mana
+                        // (CR 400.7), so reading it would fabricate the
+                        // source-qualified answer the game never established.
+                        None => {
+                            refusal =
+                                Some(PersistedRestoreError::AmbiguousFloatingManaProvenance {
+                                    player: player.id,
+                                    source_id: unit.source_id,
+                                });
+                            break;
+                        }
+                    },
+                };
+                journal_binding.push((player.id, unit.pip_id, unit.source_id, proven));
             }
-            if ambiguous.is_some() {
+            if refusal.is_some() {
                 break;
             }
             if !stamped.is_empty() {
                 binding.push((player.id, stamped));
             }
         }
-        if let Some((player, source_id)) = ambiguous {
-            return Err(PersistedRestoreError::AmbiguousFloatingManaProvenance {
-                player,
-                source_id,
-            });
+        if let Some(error) = refusal {
+            return Err(error);
+        }
+        // CR 106.3 + CR 118.3a: the journal's copies of each admitted unit carry the
+        // same binding the pool's does, so the payment that spends the restored unit
+        // records a produced unit and a spent unit that agree — the journal compares
+        // them whole when the save is decoded, and one that did not would write a save
+        // the engine could not load back.
+        for (_, pip, _, proven) in journal_binding {
+            self.resolved_rules_journal.bind_unit_epoch(pip, proven);
         }
         // Rebuilt through `ManaPool::from_units` — the constructor the pool's own
         // wire codec uses — so slot order, pips and shape merging stay the
@@ -16940,111 +16994,119 @@ impl GameState {
     /// CR 106.3 + CR 106.4 + CR 400.7 + CR 605.1a: the producing epoch the SAVE
     /// itself proves for ONE pin-less floating unit, or `None` when it proves none.
     ///
-    /// The unit carries only a storage id, so the question is which of the id's
-    /// tenures made this mana (CR 400.7: a moved object "becomes a new object with
-    /// no memory of, or relation to, its previous existence"). Five records in the
-    /// save are consulted, in the order that decides the answer, and none of them
-    /// is a read of the board at restore time:
+    /// The question is which of `source_id`'s tenures made THIS unit (CR 400.7: a
+    /// moved object "becomes a new object with no memory of, or relation to, its
+    /// previous existence"), so every record consulted is a record about this
+    /// unit. Three of them can answer, and none is a read of the board at restore
+    /// time:
     ///
-    /// 1. **The pool's own producer fact**
-    ///    ([`GameState::pooled_mana_producer_snapshots`]). The engine writes one,
-    ///    keyed by `(source_id, source_incarnation)`, for every still-pooled unit
-    ///    whose producing incarnation is no longer live at a step or phase boundary
+    /// 1. **The journal's own production record for this pip**
+    ///    (`ResolvedRulesJournal::produced_unit`,
+    ///    [`ResolvedRulesJournal::produced_source_epoch`]). Production writes the
+    ///    unit against its pip the moment the mana is made, together with the
+    ///    producer node's exact `ObjectIncarnationRef` — the epoch captured at
+    ///    announcement for an activated mana ability (CR 602.2a, before a cost can
+    ///    move the source) and the trigger's own latched source for a triggered one
+    ///    (CR 603.2). This is the finest-grained record in the save: it survives
+    ///    everything except
+    ///    [`GameState::reset_resolved_rules_journal`], which turn advancement runs
+    ///    because the journal is turn-scoped.
+    /// 2. **The unit's own entry in the pool's producer ledger**
+    ///    ([`GameState::pooled_mana_producer_snapshots`]). The engine writes one per
+    ///    still-pooled unit whose producing incarnation is no longer live at a step
+    ///    or phase boundary
     ///    (`mana_payment::retain_pooled_mana_producer_snapshots`, immediately
-    ///    before the boundary clears the incarnation-keyed LKI caches). That is
-    ///    the ledger of exactly this question, written at exactly the boundary
-    ///    that retained the unit, so it is the one record that survives a
-    ///    retention effect being destroyed afterwards. Exactly one epoch for the
-    ///    id is an answer; two are two tenures the save cannot tell apart, and an
-    ///    unprovable producer is refused rather than guessed.
-    /// 2. **The save's step-scoped, incarnation-keyed exit LKI**
+    ///    before the boundary clears the incarnation-keyed LKI caches), keyed by the
+    ///    unit's PIP. It is the record that outlives a cleared journal, so it is what
+    ///    answers for a retention effect ("Players don't lose unspent mana as steps
+    ///    and phases end") carrying mana into a later turn. Its pip key is what stops
+    ///    one tenure's fact being applied to a different tenure's unit sharing the
+    ///    same storage id.
+    /// 3. **The save's step-scoped, incarnation-keyed exit LKI**
     ///    ([`GameState::lki_by_incarnation`]) when the id holds no object at all.
     ///    A departure this step writes the departed object's epoch and its
     ///    last-known information there (CR 400.7 + CR 608.2h), so exactly one
     ///    epoch for the id names the tenure that left and what it was — the record
     ///    the payment itself reads (`filter::exit_lki_for_incarnation`). Two are
-    ///    two tenures the save cannot tell apart, and no entry means the only
-    ///    record was cleared with the step, which is refusal 3.
-    /// 3. **Nothing occupies the id and no epoch is recorded** → no answer. CR
-    ///    704.5d makes a token in a non-battlefield zone cease to exist, and a
-    ///    boundary clears the step-scoped LKI, so a save taken after one names
-    ///    nothing at all about a producer that is gone — which is exactly the epoch
-    ///    the missing pin held. Refusing is what keeps an admitted payment from
-    ///    silently losing the producer fact a cascade or a "spend only on" gate
-    ///    owed it.
-    /// 4. **The live object is off the battlefield** → no answer. Mana floating in
-    ///    a pool was added by a mana ability of the object named by `source_id` —
-    ///    the ability of a PERMANENT (CR 605.1a) or of a spell/card in the zone it
-    ///    occupied (CR 113.7) — so pricing the unit at the next payment from a card
-    ///    in a graveyard or exile would name an object that never made it. That is
-    ///    the Minimus Containment shape: the "Treasure" that made the mana is now a
-    ///    card in the graveyard.
-    /// 5. **The id already had an earlier producing tenure this turn** → no answer.
-    ///    The one record that is not evidence of an earlier tenure is the
-    ///    Stack → Battlefield arrival: that is the current permanent's own
-    ///    beginning (CR 400.7 makes it the object the spell became), and every
-    ///    creature cast this turn carries one, so convicting on it would refuse
-    ///    saves whose mana came from the very permanent that is there now.
+    ///    two tenures the save cannot tell apart, and no entry for an id that
+    ///    answers for no object is the refusal below (CR 704.5d makes a token in a
+    ///    non-battlefield zone cease to exist, so a save taken after one names
+    ///    nothing at all about a producer that is gone).
     ///
-    /// Only when none of those fires does the live object answer, and it answers as
-    /// itself: with the fact ledger silent for this id (record 1), no epoch recorded
-    /// for a departed one (record 2), the object on the battlefield (record 4) and
-    /// no earlier tenure recorded (record 5), the object occupying the id is the
-    /// object that produced the unit.
+    /// Records 1 and 2 are both about this unit, so they must agree: two epochs for
+    /// one pip are two tenures the save itself contradicts. Two epochs across the
+    /// two records are the same contradiction. Either is refused rather than
+    /// resolved by preference.
     ///
-    /// Both reported defects are shapes record 1 or record 3 catches, and neither
-    /// is decided by a scan of the live board: a unit Upwelling carried past a turn
-    /// boundary whose producer has since been replaced at its storage id is named by
-    /// record 1 even after the Upwelling is destroyed and the journal is cleared,
-    /// and a unit whose producer is simply gone is record 3's refusal instead of an
-    /// admission the payment would then answer from nothing.
+    /// Nothing else answers. In particular the object that occupies the storage id
+    /// now does not: CR 400.7 makes it a different object from the one that made
+    /// the mana whenever the id changed tenures, and the save holds no record of
+    /// whether it did — the turn journal that could have said so is cleared at turn
+    /// advancement, which is precisely what let a retention effect carry a unit past
+    /// the tenure that produced it. A guard that read the live object anyway would
+    /// price a copy's retained trigger mana as the Treasure Cloudshift returned in
+    /// its place, and grant cascade for mana a Treasure never made.
     fn saved_producer_epoch(&self, unit: &crate::types::mana::ManaUnit) -> Option<u64> {
         let source_id = unit.source_id;
-        let mut facts = self
-            .pooled_mana_producer_snapshots
-            .iter()
-            .filter(|snapshot| snapshot.source_id == source_id)
-            .map(|snapshot| snapshot.source_incarnation);
-        if let Some(proven) = facts.next() {
-            // CR 400.7: a second epoch for the same id is a second tenure, and the
-            // save does not say which of them produced this unit.
-            return facts.next().is_none().then_some(proven);
-        }
-        let Some(object) = self.objects.get(&source_id) else {
-            // CR 400.7 + CR 608.2h: with no object to read, the only record left is
-            // the exit LKI this save carries for the id, keyed by the epoch that
-            // left — exactly one of them is an answer.
-            let mut epochs = self
-                .lki_by_incarnation
-                .get(&source_id)
-                .into_iter()
-                .flat_map(|history| history.keys().copied());
-            return epochs
-                .next()
-                .and_then(|proven| epochs.next().is_none().then_some(proven));
-        };
-        if object.zone != Zone::Battlefield {
-            return None;
-        }
-        // CR 400.7: an object that left a zone and came back is a new object, so a
-        // recorded departure from a mana-producing zone — the battlefield per
-        // CR 605.1a, the stack per CR 106.3 — proves this storage id has already had an
-        // EARLIER tenure that could have produced the mana. Which tenure did is exactly
-        // what the missing pin would have said.
-        let earlier_producing_tenure = self.zone_changes_this_turn.iter().any(|record| {
-            record.object_id == source_id
-                && match record.from_zone {
-                    Some(Zone::Battlefield) => true,
-                    Some(Zone::Stack) => record.to_zone != Zone::Battlefield,
-                    _ => false,
+        let pip = unit.pip_id;
+        // Every unit-keyed record that names an epoch, one per record.
+        let mut recorded: Vec<u64> = Vec::new();
+        if pip.0 != 0 {
+            // CR 106.3 + CR 118.3a: the journal's production record belongs to this
+            // pip; one naming a different object is a save contradicting itself.
+            if let Some(produced) = self.resolved_rules_journal.produced_unit(pip) {
+                if produced.source_id != source_id {
+                    return None;
                 }
-        });
-        if earlier_producing_tenure {
+                if let Some(epoch) = produced.source_incarnation {
+                    recorded.push(epoch);
+                } else if let Some(note) = self.resolved_rules_journal.produced_source_epoch(pip) {
+                    // CR 113.7 + CR 400.7: the producer node names the object that
+                    // generated the ability, not whatever holds the id now.
+                    if note.object_id != source_id {
+                        return None;
+                    }
+                    recorded.push(note.incarnation);
+                }
+            }
+            // CR 118.3a: the ledger entry keyed by this unit's own pip.
+            let mut ledger = self
+                .pooled_mana_producer_snapshots
+                .iter()
+                .filter(|snapshot| snapshot.pip_id == pip);
+            if let Some(snapshot) = ledger.next() {
+                if snapshot.source_id != source_id {
+                    return None;
+                }
+                recorded.push(snapshot.source_incarnation);
+                if ledger.next().is_some() {
+                    // CR 400.7: two epochs for one unit are two tenures it cannot be.
+                    return None;
+                }
+            }
+        }
+        if let Some((first, rest)) = recorded.split_first() {
+            // CR 400.7: two epochs recorded for this unit are two tenures, and the
+            // save does not say which produced it.
+            return rest.iter().all(|epoch| epoch == first).then_some(*first);
+        }
+        if self.objects.contains_key(&source_id) {
+            // CR 400.7: an object still occupies the id, and no unit-keyed record
+            // names this unit's producer. The occupant answers for itself, not for
+            // whatever previous tenure made the mana — so there is no answer here.
             return None;
         }
-        // CR 106.3 + CR 400.7: no record names a departed producer for this id, so
-        // the object holding it is the producer itself.
-        Some(object.incarnation)
+        // CR 400.7 + CR 608.2h: with no object to read, the only record left is the
+        // exit LKI this save carries for the id, keyed by the epoch that left —
+        // exactly one of them is an answer.
+        let mut epochs = self
+            .lki_by_incarnation
+            .get(&source_id)
+            .into_iter()
+            .flat_map(|history| history.keys().copied());
+        epochs
+            .next()
+            .and_then(|proven| epochs.next().is_none().then_some(proven))
     }
 
     /// CR 601.2 / CR 602.2: at most one announcement is in flight, so every live

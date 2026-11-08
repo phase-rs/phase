@@ -258,35 +258,35 @@ pub fn record_captured_target_facts_json(json: &str) -> String {
 ///
 /// # What it stamps, and how the epoch is derived
 ///
-/// Only the shape that guard convicts is touched: a unit with no
-/// `ManaUnit::source_incarnation` (and not a CR 702.51a convoke marker) whose
-/// `source_id` names a LIVE object that is not a battlefield permanent, in a
-/// capture that carries no producer fact for that id
-/// (`GameState::pooled_mana_producer_snapshots`, which the guard reads first and
-/// which the pre-field capture this migration serves cannot hold). The other two
-/// shapes the guard sees are left byte-identical: a unit whose source is still a
-/// battlefield permanent is admitted on the live object's own epoch, and a unit
-/// the pool's own producer fact names is admitted on that epoch.
+/// It stamps a pin-less unit only when the capture itself settles which object
+/// produced it, and never invents one:
 ///
-/// CR 106.3 makes a unit's source the source of the ability that produced it,
-/// and CR 113.7 makes that the object that generated the ability — the object
-/// as it stood when the ability resolved, which CR 400.7 says is a different
-/// object from whatever later occupies the same storage id. So the epoch to
-/// stamp is the one the producer had while it made the mana, and from the
-/// capture alone that is settled by exactly one record: this turn's zone-change
-/// journal. Each [`crate::types::game_state::ZoneChangeRecord`] binds the
-/// object's PRE-change identity (`trigger_source_context.identity`), so the
-/// record that took the source out of the zone it produced the mana in still
-/// names the producing epoch — the same value
-/// `crate::game::mana_payment::producing_incarnation_for_ability` would have
-/// pinned live.
+/// * **The producer is still a battlefield permanent.** The live object's own
+///   epoch is stamped, but ONLY when nothing in the capture contradicts that
+///   tenure being the producing one: no recorded exit epoch for the id, no
+///   producer-ledger entry naming a different epoch, and no journal record of the
+///   id departing the battlefield this turn (a departure means the object there
+///   now began afterwards, so the mana could belong to the earlier tenure). This
+///   is the reading the PRE-PIN engine itself took for such a capture — the pool
+///   named the object, and the pre-pin spend read that object — which is why the
+///   frozen fixture is admitted on it. Production refuses the same shape precisely
+///   because the save cannot prove the id did not change tenures before the
+///   journal it carries begins; a fixture is frozen input, not a player's game.
+/// * **The producer has left a zone a mana ability can produce mana in.** The
+///   epoch is derived from this turn's zone-change journal, which binds the
+///   object's PRE-change identity (`ZoneChangeRecord::trigger_source_context`) —
+///   the same value
+///   `crate::game::mana_payment::producing_incarnation_for_ability` would have
+///   pinned live.
 ///
 /// The derivation runs on typed state, not on JSON: the root is decoded through
 /// the engine's own ingress ([`CaptureForm`]) and the journal is read as
 /// [`crate::types::game_state::ZoneChangeRecord`]s, so a record the engine
 /// cannot represent is a root the migration declines rather than a hand-parsed
-/// field. A unit is stamped only when ALL of the following hold, and is
-/// otherwise left unknown:
+/// field.
+///
+/// A unit is stamped only when ALL of the following hold, and is otherwise left
+/// unknown:
 ///
 /// * exactly ONE entry this turn departs the source from a zone a mana ability
 ///   can produce mana in — the battlefield (CR 605.1a) or the stack
@@ -331,26 +331,42 @@ pub fn record_captured_floating_mana_provenance(document: &mut Value) {
     /// at, or `None` when the capture cannot prove it. See the function docs.
     fn producing_incarnation(state: &GameState, source_id: ObjectId) -> Option<u64> {
         let object = state.objects.get(&source_id)?;
-        // A source that is still a battlefield permanent is admitted on the live read
-        // only while this turn's journal records NO departure from a producing zone for
-        // its storage id, and the capture carries no producer fact for that id
-        // (`GameState::saved_producer_epoch`). When the journal does record one, the id
-        // has already had an earlier tenure and this migration declines too: the journal
-        // names what that tenure was, but not whether IT or the current object made the
-        // unit, and stamping the earlier epoch would be a guess. The guard refuses the
-        // unit instead.
-        if object.zone == Zone::Battlefield {
-            return None;
-        }
         let mut departures = state
             .zone_changes_this_turn
             .iter()
             .filter(|record| record.object_id == source_id)
             .filter(|record| matches!(record.from_zone, Some(Zone::Battlefield | Zone::Stack)));
-        let departure = departures.next()?;
+        let departure = departures.next();
+        let second_departure = departures.next().is_some();
+        if object.zone == Zone::Battlefield {
+            // Two producing tenures this turn: the journal does not say which made
+            // the mana, so the live object is not the answer.
+            if second_departure || departure.is_some() {
+                return None;
+            }
+            // The capture must record no OTHER tenure of this id either. A recorded
+            // exit epoch (CR 400.7 + CR 608.2h) or a producer-ledger entry naming a
+            // different epoch is a competing tenure the live read cannot outrank.
+            let recorded_elsewhere = state
+                .lki_by_incarnation
+                .get(&source_id)
+                .is_some_and(|epochs| epochs.keys().any(|epoch| *epoch != object.incarnation))
+                || state.pooled_mana_producer_snapshots.iter().any(|snapshot| {
+                    snapshot.source_id == source_id
+                        && snapshot.source_incarnation != object.incarnation
+                });
+            if recorded_elsewhere {
+                return None;
+            }
+            // CR 106.3: the object the unit names, on the battlefield, with no
+            // competing tenure in the capture. That is the object the pre-pin
+            // engine read, and the only epoch that reading can mean.
+            return Some(object.incarnation);
+        }
+        let departure = departure?;
         // Two producing tenures this turn: the journal does not say which made
         // the mana, so nothing is stamped.
-        if departures.next().is_some() {
+        if second_departure {
             return None;
         }
         // The qualifying departure must be the one that left the object in the
@@ -772,32 +788,82 @@ mod tests {
         );
     }
 
-    /// The over-rejection guard, matching the production rule's own: a pin-less
-    /// unit whose source is still a battlefield permanent needs no epoch from the
-    /// MIGRATION — the capture already proves it — so the migration leaves the
-    /// payload byte-identical. Admission then BINDS the unit to the live object's
-    /// own epoch (`GameState::bind_or_reject_floating_mana_provenance`), because a
-    /// unit left pin-less would re-derive its source from whatever holds the
-    /// storage id later (CR 400.7).
+    /// The live-producer shape: a pin-less unit whose source is still a
+    /// battlefield permanent, in a capture that records no competing tenure of the
+    /// id.
+    ///
+    /// Production REFUSES this shape — the save cannot prove the id did not change
+    /// tenures before the journal it carries begins, which is exactly the reported
+    /// defect a live read caused — so a committed capture that holds it needs this
+    /// migration to be admitted at all. The epoch stamped is the live object's own:
+    /// that is the object the unit names, and the one the PRE-PIN engine itself read
+    /// for this capture. It is a reading of frozen fixture input, never of a
+    /// player's save.
     #[test]
-    fn a_unit_whose_source_is_still_a_battlefield_permanent_is_left_untouched() {
+    fn a_unit_whose_source_is_still_a_battlefield_permanent_is_stamped_with_the_live_epoch() {
         let mut state = GameState::new_two_player(42);
         let star = source_on_battlefield(&mut state);
         add_pinless_red_unit(&mut state, star);
         let live_incarnation = state.objects[&star].incarnation;
 
         let json = capture_of(state);
+        assert_eq!(
+            admitted(json.clone()).err(),
+            Some(PersistedRestoreError::AmbiguousFloatingManaProvenance {
+                player: SEAT,
+                source_id: star,
+            }),
+            "production must refuse a pool it cannot prove, even when the source is live"
+        );
+
+        let mut migrated = json.clone();
+        record_captured_floating_mana_provenance(&mut migrated);
+        assert_ne!(
+            migrated, json,
+            "the capture owes the stamp, so the migration must rewrite it"
+        );
+        assert_eq!(
+            restored_pin(migrated.clone()),
+            Some(Some(live_incarnation)),
+            "CR 106.3: the stamped epoch is the live object's own"
+        );
+
+        let mut twice = migrated.clone();
+        record_captured_floating_mana_provenance(&mut twice);
+        assert_eq!(twice, migrated, "a re-migrated capture is a no-op");
+    }
+
+    /// The honesty pin for the live shape: when the capture records that the
+    /// storage id has an EARLIER tenure this turn — the departure that took the
+    /// producer off the battlefield — the live object began afterwards, and the
+    /// capture no longer says which tenure made the mana. The migration declines,
+    /// and production refuses.
+    #[test]
+    fn a_live_source_with_an_earlier_tenure_this_turn_is_left_unstamped() {
+        let mut state = GameState::new_two_player(42);
+        let star = source_on_battlefield(&mut state);
+        // CR 601.2h: the sacrifice is the mana ability's own cost, so the mana and
+        // the departure are one event's two halves...
+        crate::game::zones::move_to_zone(&mut state, star, Zone::Graveyard, &mut Vec::new());
+        add_pinless_red_unit(&mut state, star);
+        // ...and then the card comes back, which is a NEW object at the same id
+        // (CR 400.7).
+        crate::game::zones::move_to_zone(&mut state, star, Zone::Battlefield, &mut Vec::new());
+        assert_eq!(state.objects[&star].zone, Zone::Battlefield);
+
+        let json = capture_of(state);
         let mut migrated = json.clone();
         record_captured_floating_mana_provenance(&mut migrated);
         assert_eq!(
             migrated, json,
-            "an admitted pool must be left byte-identical"
+            "a live source with a recorded earlier tenure leaves the epoch unproven"
         );
         assert_eq!(
-            restored_pin(migrated),
-            Some(Some(live_incarnation)),
-            "CR 106.3: admission binds the epoch the capture proved — the live \
-             object's own — rather than leaving the unit to re-derive its source"
+            admitted(migrated).err(),
+            Some(PersistedRestoreError::AmbiguousFloatingManaProvenance {
+                player: SEAT,
+                source_id: star,
+            })
         );
     }
 }

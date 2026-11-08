@@ -2440,6 +2440,100 @@ impl ResolvedRulesJournal {
         self.node_index(node).is_ok()
     }
 
+    /// CR 106.3 + CR 118.3a: the mana unit this journal recorded as PRODUCED under
+    /// `pip` — the unit-keyed record production wrote, as opposed to the
+    /// storage-id-keyed history that has to guess which of a source's tenures made
+    /// the mana.
+    pub fn produced_unit(&self, pip: ManaPipId) -> Option<&ManaUnit> {
+        let position = *self.index.produced.get(&pip)?;
+        Some(&self.produced_mana[position].unit)
+    }
+
+    /// CR 106.3 + CR 113.7 + CR 400.7: the exact object epoch that produced the
+    /// unit recorded under `pip`.
+    ///
+    /// The producer node the journal opened when the mana was made carries the
+    /// source as an [`ObjectIncarnationRef`] — for an activated mana ability the
+    /// epoch captured at announcement, before any cost could move the source
+    /// (CR 602.2a), and for a triggered mana ability the trigger's own latched
+    /// source (CR 603.2). That is the same value
+    /// [`crate::game::mana_payment::producing_incarnation_for_ability`] pins on the
+    /// unit at production, and it is per-UNIT evidence: it belongs to this pip, not
+    /// to whatever object happens to hold the storage id now.
+    ///
+    /// A producer that is not a mana node (a proposal the engine opened for a
+    /// unit it re-stamped without recording production) names no source, so it
+    /// answers nothing rather than guessing one.
+    pub fn produced_source_epoch(&self, pip: ManaPipId) -> Option<ObjectIncarnationRef> {
+        let position = *self.index.produced.get(&pip)?;
+        let node = self
+            .node_index(self.produced_mana[position].producer)
+            .ok()?;
+        match &self.nodes[node].kind {
+            RulesExecutionNodeKind::ActivatedMana { source }
+            | RulesExecutionNodeKind::TriggeredMana { source, .. } => Some(*source),
+            _ => None,
+        }
+    }
+
+    /// CR 106.3 + CR 118.3a: stamp `epoch` onto EVERY copy this journal holds of
+    /// `pip`'s unit.
+    ///
+    /// The journal keeps the same unit in three places — the `produced` record,
+    /// any `spent` record, and the insert/spend command entries — and
+    /// [`Self::validate_serialized_authority`] compares them on load, CR 400.7's
+    /// epoch included. The restore boundary admits a pin-less pooled unit by
+    /// binding the epoch the save proves, and that unit exists both in the pool and
+    /// here: a POOL-ONLY stamp would leave the copies describing different objects,
+    /// so the first payment recorded against the restored unit would write a save
+    /// this journal rejects at its next load. Stamping every copy is what keeps the
+    /// round trip readable.
+    ///
+    /// No copy can carry a CONTRADICTORY epoch by the time this runs: the decoder
+    /// is the authority on agreement and refuses a save whose copies disagree
+    /// (`ResolvedRulesJournalError::InvalidSerializedAuthority`), so an epoch that
+    /// reaches here is either unrecorded on every copy or already the same
+    /// everywhere.
+    pub fn bind_unit_epoch(&mut self, pip: ManaPipId, epoch: u64) {
+        if pip.0 == 0 {
+            return;
+        }
+        for position in 0..self.produced_mana.len() {
+            let Some(record) = self.produced_mana.get_mut(position) else {
+                continue;
+            };
+            if record.unit.pip_id == pip {
+                record.unit.source_incarnation = Some(epoch);
+            }
+        }
+        for position in 0..self.spent_mana.len() {
+            let Some(record) = self.spent_mana.get_mut(position) else {
+                continue;
+            };
+            if record.unit.pip_id == pip {
+                record.unit.source_incarnation = Some(epoch);
+            }
+        }
+        for position in 0..self.entries.len() {
+            let Some(entry) = self.entries.get_mut(position) else {
+                continue;
+            };
+            match entry.command.as_mut() {
+                Some(ResolvedRulesCommand::ManaInsert(command)) if command.unit.pip_id == pip => {
+                    command.unit.source_incarnation = Some(epoch);
+                }
+                Some(ResolvedRulesCommand::ManaSpend(command)) => {
+                    for spent in command.units.iter_mut() {
+                        if spent.unit.pip_id == pip {
+                            spent.unit.source_incarnation = Some(epoch);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// CR 603.7: the origins of the recorded delayed-trigger installs sharing `token` or
     /// `instance`, in journal order.
     pub(crate) fn delayed_install_origins_sharing(

@@ -9376,6 +9376,14 @@ mod tests {
             serde_json::from_str(&json).expect("dump envelope parses as JSON");
         // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
         crate::types::game_state::record_captured_onsets(&mut envelope);
+        // Committed PRE-PIN capture: its floating mana was written before
+        // `ManaUnit::source_incarnation`, and production refuses a pool whose producing
+        // epoch it cannot prove. The documented test-only migration stamps the epochs
+        // this capture proves (see `record_captured_floating_mana_provenance`); it never
+        // runs in a product build.
+        crate::types::legacy_capture_fixture::record_captured_floating_mana_provenance(
+            &mut envelope,
+        );
         serde_json::from_value::<crate::types::game_state::PersistedGameState>(
             envelope["gameState"].clone(),
         )
