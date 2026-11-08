@@ -4200,6 +4200,12 @@ function SayPhrasePanel({
     // Update the deadline ref. The running timer will pick up the new deadline
     // on its next check without needing to be restarted.
     deadlineRef.current = at + quickWindowMs;
+    // Start the timer immediately on the first local click (CR 118.12a: the
+    // pace window times the gap between sayings, armed from the player's own
+    // click, not from the engine's acknowledgement). If a timer is already
+    // running (e.g. from a restored payment), this restarts it with the fresh
+    // deadline from this click.
+    startTimer();
     submitSaying(at, 2);
   };
 

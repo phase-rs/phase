@@ -118,20 +118,23 @@ fn split_binary_cost_legs<'a>(text: &'a str, delimiter: &str) -> Option<(&'a str
     Some((left, right))
 }
 
-/// The first occurrence of `delimiter` outside a double-quoted span. Scanning
-/// cursor movement is structural, not phrase recognition: the typed cost
-/// combinators still decide what each leg means.
+/// The first occurrence of `delimiter` outside a quoted span (single or
+/// double). Scanning cursor movement is structural, not phrase recognition:
+/// the typed cost combinators still decide what each leg means.
 fn find_unquoted_delimiter(text: &str, delimiter: &str) -> Option<usize> {
-    let mut in_quotes = false;
+    let mut in_double_quotes = false;
+    let mut in_single_quotes = false;
     let mut i = 0;
     while i < text.len() {
         let ch = text[i..].chars().next().expect("valid UTF-8");
         match ch {
-            '"' => in_quotes = !in_quotes,
+            '"' => in_double_quotes = !in_double_quotes,
+            '\'' => in_single_quotes = !in_single_quotes,
             // The cost text keeps the original casing so a spoken phrase is
             // preserved verbatim; the structural separator is matched without
             // regard to case.
-            _ if !in_quotes
+            _ if !in_double_quotes
+                && !in_single_quotes
                 && text[i..]
                     .get(..delimiter.len())
                     .is_some_and(|candidate| candidate.eq_ignore_ascii_case(delimiter)) =>
@@ -348,7 +351,8 @@ fn split_cost_parts(text: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0;
     let mut brace_depth = 0u32;
-    let mut in_quotes = false;
+    let mut in_double_quotes = false;
+    let mut in_single_quotes = false;
     let bytes = text.as_bytes();
     let mut i = 0;
 
@@ -357,11 +361,12 @@ fn split_cost_parts(text: &str) -> Vec<&str> {
         match ch {
             '{' => brace_depth += 1,
             '}' => brace_depth = brace_depth.saturating_sub(1),
-            // Un-card (no CR entry): a spoken cost's double-quoted phrase is
-            // VERBATIM speech, so a comma or " and " inside it never separates
-            // cost components (I'm Rubber, You're Glue prints a sentence).
-            '"' => in_quotes = !in_quotes,
-            ',' if brace_depth == 0 && !in_quotes => {
+            // Un-card (no CR entry): a spoken cost's quoted phrase (single or
+            // double) is VERBATIM speech, so a comma or " and " inside it never
+            // separates cost components (I'm Rubber, You're Glue prints a sentence).
+            '"' => in_double_quotes = !in_double_quotes,
+            '\'' => in_single_quotes = !in_single_quotes,
+            ',' if brace_depth == 0 && !in_double_quotes && !in_single_quotes => {
                 // CR 107.1a: The rounding comma is part of the fractional
                 // life-cost clause; a later comma still separates costs.
                 let prefix = text[start..i].trim().to_lowercase();
@@ -380,7 +385,11 @@ fn split_cost_parts(text: &str) -> Vec<&str> {
                 }
                 start = i + 1;
             }
-            ' ' if brace_depth == 0 && !in_quotes && bytes[i..].starts_with(b" and ") => {
+            ' ' if brace_depth == 0
+                && !in_double_quotes
+                && !in_single_quotes
+                && bytes[i..].starts_with(b" and ") =>
+            {
                 let part = text[start..i].trim();
                 if !part.is_empty() {
                     parts.push(part);

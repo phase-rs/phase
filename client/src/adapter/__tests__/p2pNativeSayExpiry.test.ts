@@ -385,6 +385,7 @@ describe("native P2P spoken-payment expiry", () => {
         wasm: { getState: () => Promise<GameState> };
         sayExpiryReadPending: boolean;
         sayExpiryReadInFlight: boolean;
+        sayExpiryReadPromise: Promise<SayPhraseExpiryTarget | null> | null;
       };
       (host as unknown as { nativeBridge: undefined }).nativeBridge = undefined;
       const deadline = NOW() + 60_000;

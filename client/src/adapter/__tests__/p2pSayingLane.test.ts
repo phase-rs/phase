@@ -302,7 +302,7 @@ describe("P2P saying reply lane", () => {
     host.eliminatedSeats = new Set();
     host.gameRunState = "running";
     host.guestSessions = new Map([[1, session]]);
-    host.applyBrowserMutation = (run) => run();
+    host.applyBrowserMutation = async (run) => ({ result: await run() });
     host.nativeBridge = { submitAction };
     host.send = vi.fn((_session: unknown, msg: unknown) => {
       sentMessages.push(msg);
@@ -348,7 +348,7 @@ describe("P2P saying reply lane", () => {
     host.eliminatedSeats = new Set();
     host.gameRunState = "running";
     host.guestSessions = new Map([[1, session]]);
-    host.applyBrowserMutation = (run) => run();
+    host.applyBrowserMutation = async (run) => ({ result: await run() });
     host.nativeBridge = { submitAction };
     host.send = vi.fn((_session: unknown, msg: unknown) => {
       sentMessages.push(msg);
@@ -495,7 +495,8 @@ describe("P2P saying reply lane", () => {
     };
     const host = Object.create(
       P2PHostAdapter.prototype,
-    ) as unknown as HostInternals & {
+    ) as unknown as Omit<HostInternals, "applyBrowserMutation"> & {
+      applyBrowserMutation: <T>(run: () => Promise<T>) => Promise<{ result: T }>;
       concedingSeats: Set<number>;
       gameRunState: string;
       wasm: { submitInteraction: (sub: unknown, player: number) => Promise<SubmitResult> };
