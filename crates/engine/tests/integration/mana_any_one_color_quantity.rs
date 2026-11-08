@@ -358,40 +358,63 @@ fn snow_hybrid_partial_pool_counts_surplus_blue_before_tapping_generic() {
     // for this artifact (CR 106.6 + CR 107.4e/h).
     const HAVEN: &str = "{T}: Add {C}.\n{S}{S}{S}: This land becomes a 4/3 creature with vigilance and all creature types until end of turn. It's still a land. ({S} can be paid with one mana from a snow source.)";
     for (symbol, snow_name, snow_text, snow_color) in [
-        ("{W/U}", "Snow-Covered Plains", "({T}: Add {W}.)", ManaType::White),
+        (
+            "{W/U}",
+            "Snow-Covered Plains",
+            "({T}: Add {W}.)",
+            ManaType::White,
+        ),
         ("{C/U}", "Faceless Haven", HAVEN, ManaType::Colorless),
     ] {
         for (blue_count, restricted_extra) in [(1, false), (2, false), (1, true)] {
             let mut s = board();
             let snow = if snow_color == ManaType::White {
-                s.add_land_from_oracle(P0, snow_name, snow_text).as_snow()
-                    .with_subtypes(vec!["Plains"]).id()
+                s.add_land_from_oracle(P0, snow_name, snow_text)
+                    .as_snow()
+                    .with_subtypes(vec!["Plains"])
+                    .id()
             } else {
-                s.add_land_from_oracle(P0, snow_name, snow_text).as_snow().id()
+                s.add_land_from_oracle(P0, snow_name, snow_text)
+                    .as_snow()
+                    .id()
             };
             let islands: Vec<_> = (0..blue_count)
-                .map(|_| s.add_basic_land(P0, ManaColor::Blue)).collect();
+                .map(|_| s.add_basic_land(P0, ManaColor::Blue))
+                .collect();
             let wastes = s.add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.").id();
-            let spare_snow = (blue_count == 1).then(||
-                s.add_land_from_oracle(P0, "Faceless Haven", HAVEN).as_snow().id());
+            let spare_snow = (blue_count == 1).then(|| {
+                s.add_land_from_oracle(P0, "Faceless Haven", HAVEN)
+                    .as_snow()
+                    .id()
+            });
             let restricted_land = if restricted_extra {
                 s.add_artifact_from_oracle(P0, "Resonating Lute", LUTE);
                 Some(s.add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.").id())
-            } else { None };
+            } else {
+                None
+            };
             s.add_artifact_from_oracle(P0, "Sphere of Resistance", "Spells cost {1} more to cast.");
             let astrolabe = s.add_artifact_to_hand_from_oracle(P0, "Arcum's Astrolabe",
                 "({S} can be paid with one mana from a snow source.)\nWhen this artifact enters, draw a card.\n{1}, {T}: Add one mana of any color.")
                 .as_snow().with_mana_cost(parse_mtgjson_mana_cost(&format!("{{S}}{symbol}{{U}}"))).id();
             let mut r = s.build();
-            if snow_color == ManaType::White { finish_snow_forest(&mut r, snow); }
+            if snow_color == ManaType::White {
+                finish_snow_forest(&mut r, snow);
+            }
             evaluate_layers(r.state_mut());
             for (source, color) in std::iter::once((snow, snow_color))
-                .chain(islands.iter().map(|&id| (id, ManaType::Blue))) {
+                .chain(islands.iter().map(|&id| (id, ManaType::Blue)))
+            {
                 let (_, _, grouped) = legal_actions_full(r.state());
-                let action = grouped[&source].iter().find(|action| matches!(action,
+                let action = grouped[&source]
+                    .iter()
+                    .find(|action| {
+                        matches!(action,
                     GameAction::TapLandForMana { selection }
-                        if selection.mana_type == color && selection.restrictions.is_empty()))
-                    .expect("the real land offers unrestricted printed mana").clone();
+                        if selection.mana_type == color && selection.restrictions.is_empty())
+                    })
+                    .expect("the real land offers unrestricted printed mana")
+                    .clone();
                 r.act(action).unwrap();
             }
             if let Some(source) = restricted_land {
@@ -403,19 +426,40 @@ fn snow_hybrid_partial_pool_counts_surplus_blue_before_tapping_generic() {
                             && selection.atomic_combination.as_ref().is_some_and(|units| units.len() == 2)))
                     .expect("Lute offers two restricted blue units on this land").clone();
                 r.act(action).unwrap();
-                assert_eq!(r.state().players[0].mana_pool.units()
-                    .filter(|unit| unit.source_id == source && !unit.restrictions.is_empty()).count(), 2);
+                assert_eq!(
+                    r.state().players[0]
+                        .mana_pool
+                        .units()
+                        .filter(|unit| unit.source_id == source && !unit.restrictions.is_empty())
+                        .count(),
+                    2
+                );
             }
             assert!(r.state().objects[&snow].tapped);
             assert!(islands.iter().all(|id| r.state().objects[id].tapped));
             assert!(!r.state().objects[&wastes].tapped);
             assert!(spare_snow.is_none_or(|id| !r.state().objects[&id].tapped));
-            assert_eq!(r.state().players[0].mana_pool.total(), 1 + blue_count + if restricted_extra { 2 } else { 0 });
-            assert_eq!(r.state().players[0].mana_pool.units()
-                .filter(|unit| unit.source_id == snow && unit.supertype == Some(ManaSupertype::Snow)).count(), 1);
-            assert!(activatable_mana_source_selections(r.state(), P0).iter()
-                .all(|selection| selection.source.object_id == wastes || Some(selection.source.object_id) == spare_snow));
-            r.cast(astrolabe).resolve().assert_zone(&[astrolabe], Zone::Battlefield);
+            assert_eq!(
+                r.state().players[0].mana_pool.total(),
+                1 + blue_count + if restricted_extra { 2 } else { 0 }
+            );
+            assert_eq!(
+                r.state().players[0]
+                    .mana_pool
+                    .units()
+                    .filter(|unit| unit.source_id == snow
+                        && unit.supertype == Some(ManaSupertype::Snow))
+                    .count(),
+                1
+            );
+            assert!(activatable_mana_source_selections(r.state(), P0)
+                .iter()
+                .all(|selection| selection.source.object_id == wastes
+                    || Some(selection.source.object_id) == spare_snow));
+            eprintln!("partial hybrid {symbol}: ordinary blue={blue_count}, restricted extra={restricted_extra}");
+            r.cast(astrolabe)
+                .resolve()
+                .assert_zone(&[astrolabe], Zone::Battlefield);
             assert!(r.state().objects[&wastes].tapped);
             assert!(spare_snow.is_none_or(|id| r.state().objects[&id].tapped));
             assert_complete(&r, if restricted_extra { 2 } else { 0 });

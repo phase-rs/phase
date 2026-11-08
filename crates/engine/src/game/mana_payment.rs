@@ -1225,8 +1225,8 @@ struct PaymentContinuation<'a> {
 }
 
 impl PaymentContinuation<'_> {
-    /// CR 107.4e + CR 107.4h: partial-pool planning keeps the legacy choice
-    /// when the other color is wanted later, retaining residual funding paths.
+    /// CR 107.4e + CR 107.4h + CR 106.6: retain the eligible units needed
+    /// later, while letting surplus pay a hybrid without consuming Snow.
     fn hybrid_color(
         self,
         pool: &ManaPool,
@@ -1248,19 +1248,41 @@ impl PaymentContinuation<'_> {
             None,
             None,
         );
-        let color_wanted = mana_type_to_demand_index(alternative)
-            .map_or(future.required_colorless > 0, |index| {
-                future.preferred[index] > 0
-            });
+        let color_reserve = mana_type_to_demand_index(alternative)
+            .map_or(future.required_colorless, |index| future.preferred[index])
+            as usize;
         let restricted_x_wanted = self.generic > 0
             && matches!(spell,
             Some(PaymentContext::Spell(meta)) if meta.spend_only_on_x_generic_count > 0
                 && meta.spend_only_on_x_colors.as_ref().is_some_and(|colors|
                     colors.iter().any(|&color| ManaType::from(color) == alternative)));
-        if color_wanted || restricted_x_wanted {
-            preferred
-        } else {
+        if restricted_x_wanted {
+            return preferred;
+        }
+        if color_reserve == 0 {
+            return alternative;
+        }
+
+        // CR 106.6: use the existing payer to identify which eligible unit
+        // this alternative spends, then count the future color's remainder.
+        let mut remaining = pool.clone();
+        if spend_eligible(
+            &mut remaining,
+            alternative,
+            spell,
+            pins,
+            self.quality_demand,
+        )
+        .is_none()
+        {
+            return preferred;
+        }
+        if remaining.count_where(|unit| is_eligible_color_unit(unit, alternative, spell))
+            >= color_reserve
+        {
             alternative
+        } else {
+            preferred
         }
     }
 
@@ -2899,6 +2921,18 @@ fn spell_permits_unit(spell: Option<&PaymentContext<'_>>, unit: &ManaShape) -> b
     spell.is_none_or(|ctx| ctx_permits_unit(ctx, unit))
 }
 
+// CR 106.6 + CR 702.51a: match the color payer's eligibility, including
+// colored convoke stand-ins but never a colorless stand-in for a C symbol.
+fn is_eligible_color_unit(
+    unit: &ManaShape,
+    color: ManaType,
+    spell: Option<&PaymentContext<'_>>,
+) -> bool {
+    unit.color == color
+        && !(color == ManaType::Colorless && unit.is_convoke_payment())
+        && spell_permits_unit(spell, unit)
+}
+
 /// Remaining source-quality requirements in one payment traversal.
 /// CR 107.4h: Snow is a property of the producing source, not a mana color.
 /// Experiment Five's {Z} similarly requires a source that could produce at
@@ -2921,11 +2955,7 @@ impl SourceQualityDemand {
         spell: Option<&PaymentContext<'_>>,
         pins: &[ManaPipId],
     ) -> ManaType {
-        let eligible = |unit: &ManaShape, color| {
-            unit.color == color
-                && !(color == ManaType::Colorless && unit.is_convoke_payment())
-                && spell_permits_unit(spell, unit)
-        };
+        let eligible = |unit: &ManaShape, color| is_eligible_color_unit(unit, color, spell);
         if self.snow == 0
             || pool
                 .first_pinned_where(pins, |unit| eligible(unit, preferred))
@@ -4082,6 +4112,73 @@ mod tests {
         SpellMeta {
             cant_spend_mana,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn partial_hybrid_reserves_eligible_quantities_for_later_colors() {
+        // Supplemental typed costs: no printing combines S with these hybrids.
+        // Astrolabe, Judge's Familiar and Ulalek supply the printed primitives.
+        // CR 107.4e/h + CR 106.6: surplus is eligibility-aware, including
+        // colored convoke units, and each unit can cover only one later use.
+        for (hybrid, snow_color) in [
+            (ManaCostShard::WhiteBlue, ManaType::White),
+            (ManaCostShard::ColorlessBlue, ManaType::Colorless),
+        ] {
+            let cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Snow, hybrid, ManaCostShard::Blue],
+                generic: 1,
+            };
+            let generic_one = ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            };
+            let snow_and_generic = ManaCost::Cost {
+                shards: vec![ManaCostShard::Snow],
+                generic: 1,
+            };
+            let surplus = ManaPool::from_units(vec![
+                make_snow_unit(snow_color),
+                make_unit(ManaType::Blue),
+                make_unit(ManaType::Blue),
+            ]);
+            assert_eq!(
+                reduce_cost_by_pool(&surplus, &cost, None, None, None),
+                generic_one
+            );
+            let scarce =
+                ManaPool::from_units(vec![make_snow_unit(snow_color), make_unit(ManaType::Blue)]);
+            assert_eq!(
+                reduce_cost_by_pool(&scarce, &cost, None, None, None),
+                snow_and_generic
+            );
+            let restricted = ManaPool::from_units(vec![
+                make_snow_unit(snow_color),
+                make_unit(ManaType::Blue),
+                ManaUnit {
+                    restrictions: vec![ManaRestriction::OnlyForActivation],
+                    ..make_unit(ManaType::Blue)
+                },
+            ]);
+            assert_eq!(
+                reduce_cost_by_pool(
+                    &restricted,
+                    &cost,
+                    Some(&PaymentContext::Effect),
+                    None,
+                    None
+                ),
+                snow_and_generic
+            );
+            let convoke = ManaPool::from_units(vec![
+                make_snow_unit(snow_color),
+                make_unit(ManaType::Blue),
+                ManaUnit::convoke_payment(ManaType::Blue, ObjectId(2)),
+            ]);
+            assert_eq!(
+                reduce_cost_by_pool(&convoke, &cost, None, None, None),
+                generic_one
+            );
         }
     }
 
