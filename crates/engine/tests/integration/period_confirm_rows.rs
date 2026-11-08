@@ -2302,20 +2302,60 @@ fn an_altar_zulaport_period_is_offered_a_bounded_shortcut_and_taken() {
 /// Phyrexian Altar and recasts it beside a death trigger aimed at P1: Blood Artist ("Whenever this
 /// creature or another creature dies, target player loses 1 life and you gain 1 life."), Spiteful
 /// Prankster ("Whenever another creature dies, this creature deals 1 damage to target player or
-/// planeswalker."), or Blood Artist beside Extractor Demon ("Whenever another creature leaves the
-/// battlefield, you may have target player mill two cards."). Each trigger's target is chosen as
-/// it goes on the stack, so the period re-aims at each seat left: P1 leaves at repetition 19, P2 at
-/// 39 and P3 at 59, and P0 wins. The record aims at P1 alone, so its own declaration reaches 19.
+/// planeswalker."), Blood Artist beside Extractor Demon ("Whenever another creature leaves the
+/// battlefield, you may have target player mill two cards."), or Blood Artist beside Spiteful
+/// Prankster, with or without P1's Energy Field ("Prevent all damage that would be dealt to you by
+/// sources you don't control." / "When a card is put into your graveyard from anywhere, sacrifice
+/// this enchantment."). Each trigger's target is chosen as it goes on the stack, so the period
+/// re-aims at each seat left, and P0 wins. With every slot taking life, P1 leaves at repetition 19,
+/// P2 at 39 and P3 at 59, or at 9, 19 and 29 when Blood Artist and Spiteful Prankster both take 1.
+/// A slot that took nothing at P1 (Extractor Demon's mill, or Prankster's damage under Energy
+/// Field, CR 615.6) keeps P1, so P2 leaves at 21, P3 at 41 and P1 at 59. The record aims at P1
+/// alone, so its own declaration reaches P1's departure: 19, or 9 when both slots take 1.
 #[test]
 fn a_single_player_death_trigger_on_four_seats_re_aims_at_each_seat_left() {
     let Some(db) = shared_card_db() else { return };
-    for (payoffs, frame, end) in [
-        (&["Blood Artist"][..], [21, 19, 20, 20], [80, 0, 0, 0]),
-        (&["Spiteful Prankster"][..], [20, 19, 20, 20], [20, 0, 0, 0]),
+    let prankster_artist = &["Blood Artist", "Spiteful Prankster"][..];
+    for (payoffs, p1_permanents, frame, count, own, end) in [
+        (
+            &["Blood Artist"][..],
+            &[][..],
+            [21, 19, 20, 20],
+            59,
+            19,
+            [80, 0, 0, 0],
+        ),
+        (
+            &["Spiteful Prankster"][..],
+            &[][..],
+            [20, 19, 20, 20],
+            59,
+            19,
+            [20, 0, 0, 0],
+        ),
         (
             &["Blood Artist", "Extractor Demon"][..],
+            &[][..],
             [21, 19, 20, 20],
+            59,
+            19,
             [80, 0, 0, 0],
+        ),
+        (
+            prankster_artist,
+            &["Energy Field"][..],
+            [21, 19, 20, 20],
+            59,
+            19,
+            [80, 0, 0, 0],
+        ),
+        (
+            prankster_artist,
+            &[][..],
+            [21, 18, 20, 20],
+            29,
+            9,
+            [50, 0, 0, 0],
         ),
     ] {
         let mut scenario = GameScenario::new_n_player(4, 42);
@@ -2323,6 +2363,9 @@ fn a_single_player_death_trigger_on_four_seats_re_aims_at_each_seat_left() {
         let altar = scenario.add_real_card(P0, "Phyrexian Altar", Zone::Battlefield, db);
         for card in payoffs.iter().chain(&["Walking Corpse"]) {
             scenario.add_real_card(P0, card, Zone::Battlefield, db);
+        }
+        for card in p1_permanents {
+            scenario.add_real_card(P1, card, Zone::Battlefield, db);
         }
         let gravecrawler = scenario.add_real_card(P0, "Gravecrawler", Zone::Battlefield, db);
         for seat in 0..4 {
@@ -2359,7 +2402,7 @@ fn a_single_player_death_trigger_on_four_seats_re_aims_at_each_seat_left() {
         assert_eq!(
             (offered.stack.len(), lives(&offered)),
             (payoffs.len(), frame.to_vec()),
-            "reach {payoffs:?}: the triggers stand at the offer frame"
+            "reach {payoffs:?} {p1_permanents:?}: the triggers stand at the offer frame"
         );
         let WaitingFor::LoopShortcut {
             schema,
@@ -2368,7 +2411,10 @@ fn a_single_player_death_trigger_on_four_seats_re_aims_at_each_seat_left() {
             ..
         } = &offered.waiting_for
         else {
-            panic!("{payoffs:?}: no offer: {:?}", latest_verdict(&offered));
+            panic!(
+                "{payoffs:?} {p1_permanents:?}: no offer: {:?}",
+                latest_verdict(&offered)
+            );
         };
         assert_eq!(
             (
@@ -2376,33 +2422,33 @@ fn a_single_player_death_trigger_on_four_seats_re_aims_at_each_seat_left() {
                 schema.measured_repetition_bound,
                 *predicted_winner
             ),
-            (&IterationCount::Fixed(59), Some(59), Some(P0)),
-            "{payoffs:?}"
+            (&IterationCount::Fixed(count), Some(count), Some(P0)),
+            "{payoffs:?} {p1_permanents:?}"
         );
-        bounded_recorded_offer(&offered, 59);
+        bounded_recorded_offer(&offered, count);
         assert_eq!(
             declaration.as_ref().map(|own| own.replay.clone()),
             Some(ReplayMode::Scheduled {
-                count: IterationCount::Fixed(19)
+                count: IterationCount::Fixed(own)
             }),
-            "{payoffs:?}"
+            "{payoffs:?} {p1_permanents:?}"
         );
         let suggestion = schema
             .suggested_declaration
             .clone()
-            .unwrap_or_else(|| panic!("{payoffs:?}: a suggestion"));
+            .unwrap_or_else(|| panic!("{payoffs:?} {p1_permanents:?}: a suggestion"));
         assert_eq!(
             suggestion.replay,
             ReplayMode::Scheduled {
-                count: IterationCount::Fixed(59)
+                count: IterationCount::Fixed(count)
             },
-            "{payoffs:?}"
+            "{payoffs:?} {p1_permanents:?}"
         );
 
         let mut events = act_events(
             &mut runner,
             GameAction::DeclareShortcut {
-                count: IterationCount::Fixed(59),
+                count: IterationCount::Fixed(count),
                 template: Some(suggestion),
             },
         );
@@ -2411,7 +2457,7 @@ fn a_single_player_death_trigger_on_four_seats_re_aims_at_each_seat_left() {
         assert_eq!(
             taken.waiting_for,
             WaitingFor::GameOver { winner: Some(P0) },
-            "{payoffs:?}"
+            "{payoffs:?} {p1_permanents:?}"
         );
         assert_eq!(
             events
@@ -2419,12 +2465,12 @@ fn a_single_player_death_trigger_on_four_seats_re_aims_at_each_seat_left() {
                 .filter(|event| matches!(event, GameEvent::GameOver { .. }))
                 .count(),
             1,
-            "{payoffs:?}"
+            "{payoffs:?} {p1_permanents:?}"
         );
         assert_eq!(
             (lives(taken), eliminated(taken)),
             (end.to_vec(), vec![P1, PlayerId(2), PlayerId(3)]),
-            "{payoffs:?}"
+            "{payoffs:?} {p1_permanents:?}"
         );
     }
 }

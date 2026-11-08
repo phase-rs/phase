@@ -1723,15 +1723,24 @@ impl PeriodicDelta {
         None
     }
 
+    /// CR 119.3: the charged slots that took life where the period measured them.
+    fn taking_slots(&self) -> impl Iterator<Item = &(DecisionSlot, i64)> {
+        self.victim_slot
+            .iter()
+            .filter(|(_, magnitude)| *magnitude > 0)
+    }
+
     /// CR 119.3: the one domain seat whose observed loss is wholly the period's single charged
-    /// slot's — exactly one charged slot, exactly one domain seat losing life over the period and
-    /// by exactly that slot's magnitude, and every domain seat reserved exactly that magnitude.
+    /// slot's — exactly one charged slot that took life, exactly one domain seat losing life over
+    /// the period and by exactly that slot's magnitude, and every domain seat reserved exactly that
+    /// magnitude.
     ///
     /// An untargeted loss confined to the aimed seat also reads as the slot's own, because the
     /// magnitude is [`ResourceVector::worst_seat_life_loss`], so the relief under-charges there;
     /// [`PeriodicDelta::conforms_in`] stops the drive at the first repetition whose period differs.
     fn sole_slot_loss(&self) -> Option<PlayerId> {
-        let [(_, magnitude)] = self.victim_slot.as_slice() else {
+        let taking: Vec<_> = self.taking_slots().collect();
+        let [(_, magnitude)] = taking.as_slice() else {
             return None;
         };
         let floor = self.delta.seat_life_charges(&[]);
@@ -2090,10 +2099,11 @@ impl PeriodicDelta {
     /// # The shape
     ///
     /// A [`TargetSchedule::Piecewise`] — the existing pre-declared switch-over, whose switch
-    /// points are fixed in advance and therefore CR 732.2a-predictable — replacing ONLY the
-    /// charged slots' pins on `observed`, the offer's own published declaration. Every other pin
-    /// and the `ReplayMode` are carried through untouched, so the witness differs from a
-    /// declaration the publisher already validated in exactly the aim.
+    /// points are fixed in advance and therefore CR 732.2a-predictable — replacing only the pins
+    /// of the charged slots that took life (`taking_slots`) on `observed`, the offer's own
+    /// published declaration. Every other pin and the `ReplayMode` are carried through untouched,
+    /// so the witness differs from a declaration the publisher already validated in exactly the
+    /// aim.
     ///
     /// Each segment aims at one living reachable seat, and each charged slot switches to the next
     /// segment at its first resolution after the previous seat's departure, so no segment aims at
@@ -2101,10 +2111,10 @@ impl PeriodicDelta {
     /// index `i` resolves at repetition `i + 1 + lead`; a slot ranked after the killing
     /// resolution, or any slot when that resolution is unknown, switches in the departure's own
     /// repetition, every other slot in the next. A seat that crosses at or before the previous
-    /// departure gets no segment. Seats are taken in the charged point's
-    /// published `legal_targets` order, the order the declaration dialog lists them in — a
-    /// choice on which nothing rests, because the witness's contract is legality and not
-    /// optimality.
+    /// departure gets no segment. Seats are taken in the charged point's published
+    /// `legal_targets` order, except that a seat a non-taking slot's observed pin names goes last,
+    /// because that slot keeps the aim its zero was measured at and its take at any other seat is
+    /// unmeasured.
     ///
     /// # The two refusals, and the one over-charge
     ///
@@ -2140,11 +2150,29 @@ impl PeriodicDelta {
         use crate::analysis::decision_template::{
             AnnouncementSubject, PinnedDecision, Ranking, TargetPin, TargetSchedule,
         };
-        if self.victim_slot.is_empty() {
+        let charged: BTreeSet<&DecisionSlot> = self.taking_slots().map(|(slot, _)| slot).collect();
+        if charged.is_empty() {
             return None;
         }
-        let charged: BTreeSet<&DecisionSlot> =
-            self.victim_slot.iter().map(|(slot, _)| slot).collect();
+        // A slot that took nothing keeps the one seat the observation pinned it to.
+        let seen = decision_template::resolve(observed, 0, state).unwrap_or_default();
+        let parked: BTreeSet<PlayerId> = self
+            .victim_slot
+            .iter()
+            .filter(|(slot, _)| !charged.contains(slot))
+            .filter_map(|(slot, _)| {
+                seen.iter().find_map(|decision| match decision {
+                    ConcreteDecision::Targets {
+                        slot: pinned,
+                        targets,
+                    } if pinned == slot => match targets.as_slice() {
+                        [ConcreteTarget::Player(seat)] if *seat != proposer => Some(*seat),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+            })
+            .collect();
         // CR 115.2 + CR 800.4 + CR 102.1: the seats some charged slot can be re-aimed onto that
         // are still people in the game, in the charged point's published order.
         let published_order: Vec<PlayerId> = points
@@ -2163,7 +2191,7 @@ impl PeriodicDelta {
                 _ => None,
             })
             .unwrap_or_default();
-        let order: Vec<(i64, PlayerId)> = published_order
+        let mut order: Vec<(i64, PlayerId)> = published_order
             .iter()
             .filter(|seat| self.declarable_victims.contains(seat) && **seat != proposer)
             .filter_map(|seat| {
@@ -2174,6 +2202,7 @@ impl PeriodicDelta {
                     .map(|p| (i64::from(p.life), p.id))
             })
             .collect();
+        order.sort_by_key(|&(_, seat)| parked.contains(&seat));
         // CR 603.3d + CR 601.2c: after a departure at `(repetition, rank)`, a slot's first
         // announcement aimed at the next seat is the one its first resolution after that
         // departure makes — in the departure's own repetition when the slot resolves after the
