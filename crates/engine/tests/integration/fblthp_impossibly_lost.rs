@@ -180,8 +180,10 @@ fn combat_damage_outside_the_controllers_turn_does_not_fire() {
     assert!(runner.state().stack.iter().all(|e| e.source_id != fblthp));
 }
 
-/// Card text + CR 104.2b: the win check reads the library AFTER the draw, so
-/// drawing the last two cards wins. A pre-draw check would leave no winner.
+/// Card text + CR 104.2b + CR 608.2c: the effect states that its controller
+/// wins, and the controller follows the instructions in the order written — so
+/// the win check reads the library AFTER the draw, and drawing the last two
+/// cards wins. A pre-draw check would leave no winner.
 #[test]
 fn win_after_the_draw_empties_the_library() {
     let mut scenario = GameScenario::new_n_player(3, 42);
