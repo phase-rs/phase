@@ -199,6 +199,70 @@ fn snow_hybrid_payment_preserves_a_quality_eligible_alternative() {
     )
     .is_err());
     assert_eq!(pool, original);
+
+    // An eligible pin keeps the legacy color choice, even when an unpinned
+    // payment would reserve the Snow unit for the other shard.
+    let mut pinned = ManaPool::from_units(vec![
+        hybrid_reserve_unit(ManaType::White, 1, true, false),
+        snow_regression_unit(ManaType::Blue, 2),
+    ]);
+    let original = pinned.clone();
+    assert!(pay_cost_with_demand_and_choices(
+        &mut pinned,
+        &cost,
+        None,
+        None,
+        None,
+        None,
+        LifePaymentColors::EMPTY,
+        &[ManaPipId(1)],
+    )
+    .is_err());
+    assert_eq!(pinned, original);
+}
+
+#[test]
+fn snow_hybrid_partial_pool_keeps_the_later_strict_color() {
+    // Supplemental S + W/U + U cost on the real Astrolabe fixture; no
+    // printing has this combined cost. The old partial path spends Snow W
+    // on W/U, keeps U for strict U, then taps Haven for S. Switching to U
+    // merely to reserve Snow would strand the later U requirement.
+    let mut s = board();
+    let plains = s
+        .add_land_from_oracle(P0, "Snow-Covered Plains", "({T}: Add {W}.)")
+        .as_snow()
+        .with_subtypes(vec!["Plains"])
+        .id();
+    let island = s.add_basic_land(P0, ManaColor::Blue);
+    let haven = s.add_land_from_oracle(P0, "Faceless Haven",
+        "{T}: Add {C}.\n{S}{S}{S}: This land becomes a 4/3 creature with vigilance and all creature types until end of turn. It's still a land. ({S} can be paid with one mana from a snow source.)")
+        .as_snow().id();
+    let astrolabe = s.add_artifact_to_hand_from_oracle(P0, "Arcum's Astrolabe",
+        "({S} can be paid with one mana from a snow source.)\nWhen this artifact enters, draw a card.\n{1}, {T}: Add one mana of any color.")
+        .as_snow().with_mana_cost(parse_mtgjson_mana_cost("{W/U}{S}{U}")).id();
+    let mut r = s.build();
+    finish_snow_forest(&mut r, plains);
+    for (source, color) in [(plains, ManaType::White), (island, ManaType::Blue)] {
+        let (_, _, grouped) = legal_actions_full(r.state());
+        let action = grouped[&source]
+            .iter()
+            .find(|action| {
+                matches!(action,
+            GameAction::TapLandForMana { selection } if selection.mana_type == color)
+            })
+            .expect("the real basic land offers its mana action")
+            .clone();
+        r.act(action).unwrap();
+    }
+    assert!(!r.state().objects[&haven].tapped);
+    assert_eq!(r.state().players[0].mana_pool.total(), 2);
+    r.cast(astrolabe)
+        .resolve()
+        .assert_zone(&[astrolabe], Zone::Battlefield);
+    assert!([plains, island, haven]
+        .iter()
+        .all(|id| r.state().objects[id].tapped));
+    assert_complete(&r, 0);
 }
 
 fn board() -> GameScenario {

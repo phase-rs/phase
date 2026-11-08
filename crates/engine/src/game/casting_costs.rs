@@ -16687,14 +16687,20 @@ enum AutoTapSourceOrder {
 /// CR 106.3: classify the counted single-color bundles whose newly visible
 /// width must not displace a complete ordinary-source payment.
 fn counted_single_color_bundle(state: &GameState, option: &ManaSourceOption) -> bool {
-    option.atomic_combination.is_some()
-        && option
-            .ability_index
-            .and_then(|index| state.objects.get(&option.object_id)?.abilities.get(index))
-            .is_some_and(|ability| {
-                matches!(&*ability.effect, Effect::Mana { produced, .. }
+    option.atomic_combination.as_ref().is_some_and(|combo| {
+        // CR 106.3: Aura bonuses are separate production; only the land's
+        // own repeated output makes this a counted bundle.
+        combo
+            .len()
+            .saturating_sub(option.taps_for_mana_overrides.len())
+            > 1
+    }) && option
+        .ability_index
+        .and_then(|index| state.objects.get(&option.object_id)?.abilities.get(index))
+        .is_some_and(|ability| {
+            matches!(&*ability.effect, Effect::Mana { produced, .. }
                     if mana_sources::single_color_production_count(produced).is_some())
-            })
+        })
 }
 
 /// CR 118.1 + CR 118.10: output used to pay this activation cannot also
@@ -17245,8 +17251,21 @@ fn plan_all_auto_tap_rows(
         .iter()
         .map(|option| {
             let mut scalar = option.clone();
-            if counted_single_color_bundle(state, option) {
-                scalar.atomic_combination = None;
+            if let Some(combo) = scalar
+                .atomic_combination
+                .as_mut()
+                .filter(|_| counted_single_color_bundle(state, option))
+            {
+                // CR 106.3 + CR 118.10: discount only the land's surplus.
+                // Its first unit and every separately produced Aura unit
+                // remain available to the conservative planner.
+                let land_end = combo
+                    .len()
+                    .saturating_sub(option.taps_for_mana_overrides.len());
+                drop(combo.drain(1..land_end));
+                if combo.len() == 1 {
+                    scalar.atomic_combination = None;
+                }
             }
             scalar
         })
