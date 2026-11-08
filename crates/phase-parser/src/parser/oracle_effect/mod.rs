@@ -14443,9 +14443,9 @@ fn try_parse_spellbook_draft(tp: TextPair) -> Option<Effect> {
     // `draft a card` do not occur in the Comprehensive Rules).
     // CR 608.2c: later text may modify earlier text — apply the rules of English;
     // ", then exile it" names the draft's destination, same as " and exile it",
-    // rather than a later independent exile of a hand card.
-    // CR 701.13a: to exile an object, move it to the exile zone (the created
-    // object is created there). `tail_done` still rejects " face down".
+    // rather than a later independent exile of a hand card. The drafted card is
+    // created directly in exile; `tail_done` still rejects " face down" (not
+    // modeled yet).
     if let Ok((tail, _)) = preceded(
         alt((
             tag::<_, _, OracleError<'_>>(" and"),

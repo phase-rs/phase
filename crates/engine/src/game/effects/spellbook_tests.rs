@@ -655,7 +655,7 @@ fn arms_scavenger_upkeep_drafts_into_exile_with_play_grant() {
     assert_eq!(
         drafted.zone,
         Zone::Exile,
-        "CR 701.13a: the drafted card is created in exile, not moved there from hand"
+        "the drafted card is created in exile, not moved there from hand"
     );
     let in_hand = state.players[0]
         .hand
