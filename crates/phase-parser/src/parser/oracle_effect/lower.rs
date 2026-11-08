@@ -16830,6 +16830,8 @@ mod tests {
             }
         }
         // (text, axis guard): each guard pins the read the refusal rests on.
+        // Named so the array's element type stays readable (clippy::type_complexity).
+        type RefusalGuard = Box<dyn Fn(&Effect) -> bool>;
         let damage_source = |effect: &Effect| {
             matches!(
                 effect,
@@ -16848,7 +16850,7 @@ mod tests {
                 found
             }
         };
-        let refused: [(&str, &str, Box<dyn Fn(&Effect) -> bool>); 5] = [
+        let refused: [(&str, &str, RefusalGuard); 5] = [
             (
                 "Asmoranomardicadaistinaculdacar",
                 "Target creature deals 6 damage to itself.",
