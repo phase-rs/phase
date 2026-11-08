@@ -2226,10 +2226,19 @@ fn drain_active_repeat_until(state: &mut GameState, events: &mut Vec<GameEvent>)
         stop_progress,
         iteration_progress,
     } = pending;
+    // CR 104.1: the game ended while the iteration was paused; no prompt or
+    // next iteration may follow.
+    if repeat_has_game_ended(state) {
+        return;
+    }
     match &ability.repeat_until {
         // CR 107.1c: the iteration's choice has resolved — prompt the
         // controller whether to repeat the process.
         Some(RepeatContinuation::ControllerChoice) => {
+            // CR 104.1: no repeat prompt after a recorded game end.
+            if repeat_has_game_ended(state) {
+                return;
+            }
             state.waiting_for = WaitingFor::RepeatDecision {
                 player: ability.controller,
                 ability,
@@ -2239,6 +2248,10 @@ fn drain_active_repeat_until(state: &mut GameState, events: &mut Vec<GameEvent>)
             stop_on_put_to_hand,
             stop_on_duplicate_exiled_names,
         }) => {
+            // CR 104.1: never judge a repeat that ended the game as a loop.
+            if repeat_has_game_ended(state) {
+                return;
+            }
             // CR 104.4b: `stop_progress` is the pre-iteration baseline stashed
             // at the pause. Comparing it HERE — after the iteration's player
             // choice and any chained continuation have fully drained — measures
@@ -2296,6 +2309,10 @@ fn drain_active_repeat_until(state: &mut GameState, events: &mut Vec<GameEvent>)
             condition,
             max_iterations,
         }) => {
+            // CR 104.1: no resumed pass after a recorded game end.
+            if repeat_has_game_ended(state) {
+                return;
+            }
             let mut remaining = *max_iterations;
             if should_repeat_while_condition(state, &ability, condition, &mut remaining) {
                 // Thread the decremented cap into the re-entered loop so a bounded
@@ -2443,6 +2460,15 @@ impl RepeatIterationMovement {
     }
 }
 
+/// CR 104.1: a recorded game end stops every repeat driver before it starts the
+/// next iteration or raises a repeat prompt. A repeat body can contain an
+/// effect-based win; the chained body then no-ops, so without this check the
+/// while-driver could spin and the until-driver could overwrite the win with a
+/// CR 104.4b mandatory-loop draw.
+fn repeat_has_game_ended(state: &GameState) -> bool {
+    state.game_end.is_some()
+}
+
 /// CR 608.2c + CR 104.4b: what an `UntilStopConditions` repeat does after one
 /// iteration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2482,6 +2508,11 @@ fn repeat_until_verdict(
     baseline: Option<&RepeatUntilStopWitness>,
     choice: RepeatIterationChoice,
 ) -> RepeatUntilVerdict {
+    // CR 104.1: never turn a repeat that already ended the game into the
+    // mandatory-loop draw below; the recorded result stands.
+    if repeat_has_game_ended(state) {
+        return RepeatUntilVerdict::Stop;
+    }
     if should_stop_repeat_until(
         state,
         ability,
@@ -2919,7 +2950,15 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
         } = pending;
         let mut iteration = next_iteration;
         let mut paused = false;
+        // CR 104.1: the game ended before this frame resumed; drop the rest.
+        if repeat_has_game_ended(state) {
+            return;
+        }
         while iteration < total_iterations {
+            // CR 104.1: stop the resumed counted loop before another iteration.
+            if repeat_has_game_ended(state) {
+                return;
+            }
             if open_spell_copy_order_choice(
                 state,
                 &ability,
@@ -2983,6 +3022,10 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // Preserve the established void-drain error boundary.
                     Err(_) => return,
                 };
+            // CR 104.1: the resumed iteration ended the game; do not park another.
+            if repeat_has_game_ended(state) {
+                return;
+            }
             if progress.is_pending() {
                 let next = iteration + 1;
                 if next < total_iterations {
@@ -17719,12 +17762,20 @@ fn drive_repeat_for_outermost(
 
     let mut iteration = 0usize;
     while iteration < base_iterations {
+        // CR 104.1: a prior iteration ended the game; stop the counted loop.
+        if repeat_has_game_ended(state) {
+            return Ok(ResolutionProgress::Complete);
+        }
         let mut iter_ability = effective.clone();
         iter_ability.repeat_for = None;
         let stack_depth_before_iteration = state.resolution_stack.capture_child_boundary();
         let progress = with_iteration_return_result_occurrence(state, &iter_ability, |state| {
             resolve_chain_body(state, &iter_ability, events, depth, payment_choice.take())
         })?;
+        // CR 104.1: do not park or run another iteration after the game ended.
+        if repeat_has_game_ended(state) {
+            return Ok(ResolutionProgress::Complete);
+        }
         if progress.is_pending() {
             let next_iteration = iteration + 1;
             if next_iteration < base_iterations {
@@ -21644,6 +21695,10 @@ fn resolve_ability_chain_with_root_result(
                 let progress = with_iteration_return_result_occurrence(state, ability, |state| {
                     resolve_chain_body(state, ability, events, depth, payment_choice.take())
                 })?;
+                // CR 104.1: the iteration ended the game; no repeat prompt.
+                if repeat_has_game_ended(state) {
+                    return Ok(ResolutionProgress::Complete);
+                }
                 if progress.is_pending() {
                     // Inner pause: stash so the drain re-sets the repeat prompt
                     // after the iteration's player choice resolves.
@@ -21674,6 +21729,11 @@ fn resolve_ability_chain_with_root_result(
                 stop_on_put_to_hand,
                 stop_on_duplicate_exiled_names,
             }) => loop {
+                // CR 104.1: a prior iteration ended the game; stop before the
+                // next iteration can re-enter the (now terminal) chain body.
+                if repeat_has_game_ended(state) {
+                    return Ok(ResolutionProgress::Complete);
+                }
                 // CR 104.4b: pre-iteration baseline. Captured INSIDE the loop so
                 // each iteration is measured against its own start, not the
                 // repeat's start — a repeat that makes progress and THEN stalls
@@ -21694,6 +21754,11 @@ fn resolve_ability_chain_with_root_result(
                 let progress = with_iteration_return_result_occurrence(state, ability, |state| {
                     resolve_chain_body(state, ability, events, depth, payment_choice.take())
                 })?;
+                // CR 104.1: the iteration ended the game; do not park or judge
+                // it as a loop.
+                if repeat_has_game_ended(state) {
+                    return Ok(ResolutionProgress::Complete);
+                }
                 if progress.is_pending() {
                     park_repeat_until_after_inner_pause(
                         state,
@@ -21751,6 +21816,11 @@ fn resolve_ability_chain_with_root_result(
                 let mut remaining = max_iterations;
                 let mut pass = ability.clone();
                 loop {
+                    // CR 104.1: a prior pass ended the game; the chain body is
+                    // terminal, so stop instead of spinning on the condition.
+                    if repeat_has_game_ended(state) {
+                        return Ok(ResolutionProgress::Complete);
+                    }
                     // CR 608.2c: each repeated process is a FRESH execution of the
                     // instructions, so its "that card"/"those cards" tracked set must
                     // not extend the prior iteration's. Reset the chain-local
@@ -21785,6 +21855,11 @@ fn resolve_ability_chain_with_root_result(
                         with_iteration_return_result_occurrence(state, &body, |state| {
                             resolve_chain_body(state, &body, events, depth, payment_choice.take())
                         })?;
+                    // CR 104.1: the pass ended the game; do not park or evaluate
+                    // another pass.
+                    if repeat_has_game_ended(state) {
+                        return Ok(ResolutionProgress::Complete);
+                    }
                     if progress.is_pending() {
                         // Inner pause: stash the loop ability with its remaining cap
                         // so the drain re-evaluates the condition after the choice.
@@ -47977,6 +48052,93 @@ mod tests {
             .expect("spawn 256 MiB structural-depth thread")
             .join()
             .expect("structural-depth fixture thread must not panic");
+    }
+
+    #[test]
+    fn repeat_until_body_that_ends_the_game_does_not_draw() {
+        // CR 104.1 + CR 104.4b: no printed card currently has a repeat body that
+        // can end the game (the 17 parsed `repeat_until` cards contain no
+        // WinTheGame/LoseTheGame body; the nearest printed repeat cards are
+        // Tainted Pact and Claim Jumper). This synthetic shape pins the shared
+        // guard: the win is recorded, and the stalled mandatory iteration must
+        // not be judged a CR 104.4b draw that overwrites the winner.
+        let mut state = GameState::new_two_player(42);
+        assert!(
+            state.objects.is_empty(),
+            "precondition: the stalled iteration moves nothing"
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::WinTheGame { target: None },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.repeat_until = Some(RepeatContinuation::UntilStopConditions {
+            stop_on_put_to_hand: false,
+            stop_on_duplicate_exiled_names: false,
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.game_end.and_then(|end| end.winner),
+            Some(PlayerId(0)),
+            "the recorded win must not be overwritten by a mandatory-loop draw"
+        );
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::GameOver {
+                    winner: Some(PlayerId(0))
+                }
+            ),
+            "the terminal wait must still name the winner, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, GameEvent::GameOver { winner: None })),
+            "no draw GameOver may be emitted after the win"
+        );
+    }
+
+    #[test]
+    fn repeat_while_body_that_ends_the_game_stops_after_the_win() {
+        // CR 104.1: an unbounded `WhileCondition` repeat whose body records the
+        // game end must stop at the next loop head; without the guard the body
+        // no-ops and the condition stays true forever. Synthetic shape: no
+        // printed card has a winning repeat body (nearest repeat cards: Tainted
+        // Pact, Claim Jumper). The test returning is the no-spin assertion.
+        let mut state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::WinTheGame { target: None },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.repeat_until = Some(RepeatContinuation::WhileCondition {
+            condition: Box::new(AbilityCondition::IsYourTurn),
+            max_iterations: None,
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.game_end.and_then(|end| end.winner),
+            Some(PlayerId(0)),
+            "the first pass records the win"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::GameOver { .. }))
+                .count(),
+            1,
+            "one terminal event; no further pass may run"
+        );
     }
 
     #[test]
