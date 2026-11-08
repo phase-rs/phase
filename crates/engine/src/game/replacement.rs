@@ -14523,6 +14523,23 @@ fn replay_pending_replacement(
     } else {
         None
     };
+    // CR 118.3 + CR 614.12a: when a MayCost replacement is unpayable, only
+    // declining remains legal, so apply its decline branch without prompting.
+    let index = index.or_else(|| {
+        let pending = state.pending_replacement.as_ref()?;
+        if !pending.is_optional {
+            return None;
+        }
+        let rid = *pending.candidates.first()?;
+        let replacement = replacement_definition_for_id(state, rid)?;
+        let ReplacementMode::MayCost { cost, .. } = &replacement.mode else {
+            return None;
+        };
+        let payer = pending
+            .choice_player
+            .or_else(|| replacement_choice_player(state, &pending.proposed, rid))?;
+        (!cost.is_payable_for_replacement(state, payer, rid.source)).then_some(1)
+    });
     let Some(index) = index else {
         // A nested optional prompt never inherits acceptance from an order.
         if had_tail {
