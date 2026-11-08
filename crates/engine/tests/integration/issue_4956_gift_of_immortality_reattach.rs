@@ -9,7 +9,8 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::process_triggers;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityCondition, DelayedTriggerCondition, Effect, TargetFilter, TargetRef, TypedFilter,
+    AbilityCondition, DelayedTriggerCondition, Effect, FilterProp, TargetChoiceTiming,
+    TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
@@ -437,6 +438,35 @@ fn next_of_kin_delayed_reattach_shape() {
         "Next of Kin must parse supported: {:?}",
         execute.effect
     );
+    assert_eq!(
+        execute.target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "a multi-origin put is a resolution choice, not a stack target"
+    );
+    // CR 400.1 + CR 400.7: the printed "from your hand or from the command
+    // zone" is one multi-origin instruction. Its union must live on the target
+    // filter, and `origin` must be None — a single `Zone` here would silently
+    // override the union at resolution.
+    let Effect::ChangeZone { origin, target, .. } = execute.effect.as_ref() else {
+        panic!(
+            "Next of Kin dies trigger must be ChangeZone, got {:?}",
+            execute.effect
+        );
+    };
+    assert_eq!(
+        origin, &None,
+        "Next of Kin's two origin zones cannot be represented by one origin field"
+    );
+    let TargetFilter::Typed(typed) = target else {
+        panic!("Next of Kin target must be Typed, got {target:?}");
+    };
+    assert!(
+        typed.properties.contains(&FilterProp::InAnyZone {
+            zones: vec![Zone::Hand, Zone::Command],
+        }),
+        "Next of Kin target must name Hand or Command, got {:?}",
+        typed.properties
+    );
     let delayed_link = execute
         .sub_ability
         .as_ref()
@@ -793,6 +823,213 @@ fn next_of_kin_attaches_to_put_creature_not_dying_host() {
         Some(AttachTarget::Object(put_b)),
         "hostile: attach to put creature B, not dying host A"
     );
+}
+
+/// CR 400.1 + CR 400.7 + CR 608.2c: Next of Kin's printed "from your hand or
+/// from the command zone" is one instruction over two zones. The command-zone
+/// leg must be offered alongside the hand leg, the chosen card must move from
+/// the zone it actually occupies, and the "If you do" delayed reattachment must
+/// still complete at the next end step.
+#[test]
+fn next_of_kin_offers_command_zone_and_moves_the_chosen_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let host = scenario
+        .add_creature(P0, "Hill Giant", 3, 3)
+        .with_mana_cost(generic_cost(3))
+        .id();
+    let hand = scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .with_mana_cost(generic_cost(2))
+        .id();
+    let command = scenario
+        .add_creature_to_hand(P0, "Elite Vanguard", 2, 1)
+        .with_mana_cost(generic_cost(1))
+        .id();
+    scenario.with_commander(command);
+    // Invalid-zone control: a legal lesser-mana-value creature outside the two
+    // named zones must never enter the eligible set.
+    let exiled = scenario
+        .add_creature_to_exile(P0, "Exiled Bears", 2, 2)
+        .with_mana_cost(generic_cost(2))
+        .id();
+    let aura = scenario
+        .add_creature(P0, "Next of Kin", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(NEXT_OF_KIN_ORACLE)
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )))
+        .id();
+
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), aura, host);
+
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), host, Zone::Graveyard, &mut events);
+    process_triggers(runner.state_mut(), &events);
+    drain_priority_preferring(&mut runner, &[command]);
+
+    assert_eq!(
+        runner.state().objects[&command].zone,
+        Zone::Battlefield,
+        "Next of Kin must offer and move the command-zone creature"
+    );
+    assert_eq!(
+        runner.state().objects[&hand].zone,
+        Zone::Hand,
+        "the unchosen hand leg stays in hand"
+    );
+    assert_eq!(
+        runner.state().objects[&exiled].zone,
+        Zone::Exile,
+        "a creature in an unnamed zone is not a legal choice"
+    );
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "choosing the command-zone creature installs the if-you-do delayed reattach"
+    );
+
+    runner.advance_to_end_step();
+    advance_through_delayed_end(&mut runner);
+
+    assert_eq!(
+        runner.state().objects[&aura].zone,
+        Zone::Battlefield,
+        "Next of Kin returns at end step after the command-zone choice"
+    );
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(AttachTarget::Object(command)),
+        "the delayed Attach must bind the put command-zone creature"
+    );
+}
+
+/// The single-eligible shortcut must also move from the object's real zone:
+/// with only a command-zone candidate there is no `EffectZoneChoice` prompt, so
+/// a resolver that assumes the first scan zone (Hand) would move nothing.
+#[test]
+fn next_of_kin_single_command_zone_candidate_moves_without_a_hand_leg() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let host = scenario
+        .add_creature(P0, "Hill Giant", 3, 3)
+        .with_mana_cost(generic_cost(3))
+        .id();
+    let command = scenario
+        .add_creature_to_hand(P0, "Elite Vanguard", 2, 1)
+        .with_mana_cost(generic_cost(1))
+        .id();
+    scenario.with_commander(command);
+    let aura = scenario
+        .add_creature(P0, "Next of Kin", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(NEXT_OF_KIN_ORACLE)
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )))
+        .id();
+
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), aura, host);
+
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), host, Zone::Graveyard, &mut events);
+    process_triggers(runner.state_mut(), &events);
+    drain_priority(&mut runner);
+
+    assert_eq!(
+        runner.state().objects[&command].zone,
+        Zone::Battlefield,
+        "the lone command-zone candidate must move from Command, not the first scan zone"
+    );
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::EffectZoneChoice { .. }
+        ),
+        "one eligible card must not open a card-choice prompt"
+    );
+
+    runner.advance_to_end_step();
+    advance_through_delayed_end(&mut runner);
+
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(AttachTarget::Object(command)),
+        "the delayed Attach must bind the lone command-zone creature"
+    );
+}
+
+/// Invalid-zone control: a lesser-mana-value creature that is only in exile is
+/// not named by Next of Kin, so the optional trigger must find no legal card,
+/// move nothing, and install no delayed reattachment.
+#[test]
+fn next_of_kin_ignores_a_creature_outside_hand_and_command() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let host = scenario
+        .add_creature(P0, "Hill Giant", 3, 3)
+        .with_mana_cost(generic_cost(3))
+        .id();
+    let exiled = scenario
+        .add_creature_to_exile(P0, "Exiled Bears", 2, 2)
+        .with_mana_cost(generic_cost(2))
+        .id();
+    let aura = scenario
+        .add_creature(P0, "Next of Kin", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(NEXT_OF_KIN_ORACLE)
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )))
+        .id();
+
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), aura, host);
+
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), host, Zone::Graveyard, &mut events);
+    process_triggers(runner.state_mut(), &events);
+    assert!(
+        !runner.state().stack.is_empty()
+            || matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ),
+        "the dies trigger must reach the stack before the no-legal-card assertion"
+    );
+    drain_priority(&mut runner);
+
+    assert_eq!(
+        runner.state().objects[&exiled].zone,
+        Zone::Exile,
+        "the exile creature must stay exiled"
+    );
+    assert_eq!(
+        runner.state().objects[&aura].zone,
+        Zone::Graveyard,
+        "no legal choice means the Aura stays in the graveyard"
+    );
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "the if-you-do delayed reattach must not install without a performed put"
+    );
+}
+
+/// Generic mana cost for a staged card's mana value.
+fn generic_cost(generic: u32) -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![],
+        generic,
+    }
 }
 
 #[test]

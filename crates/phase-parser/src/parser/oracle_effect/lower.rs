@@ -2307,12 +2307,16 @@ pub(super) fn change_zone_target_choice_timing(
     has_multi_target: bool,
     fragment_lower: &str,
 ) -> TargetChoiceTiming {
+    // CR 400.1 + CR 400.7: a target filter that names more than one zone is a
+    // multi-origin population (Next of Kin's "from your hand or from the
+    // command zone"). The producer deliberately leaves `origin: None` because
+    // one `Zone` cannot hold the union, so the filter's own zones are the
+    // authority here too; without this the clause falls through to the
+    // battlefield/Stack default and the put card is treated as a stack target.
+    let target_zones = target.extract_zones();
     let off_battlefield_origin = origin.is_some_and(|zone| zone != Zone::Battlefield)
-        || has_multi_target
-            && target
-                .extract_zones()
-                .iter()
-                .any(|zone| *zone != Zone::Battlefield);
+        || (has_multi_target || target_zones.len() > 1)
+            && target_zones.iter().any(|zone| *zone != Zone::Battlefield);
     if off_battlefield_origin {
         // Off-BF non-"target " legs (Relic: "exiles a card from their graveyard")
         // are resolution picks; explicit "target cards …" (Memory's Journey) stay Stack.
@@ -18451,5 +18455,79 @@ mod dq_d_player_set_lift_tests {
             None
         );
         assert_eq!(parse_for_each_multiplier_prefix(" for every"), None);
+    }
+}
+
+#[cfg(test)]
+mod change_zone_target_choice_timing_tests {
+    use super::*;
+
+    fn creature_in(zones: &[Zone]) -> TargetFilter {
+        TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![if zones.len() == 1 {
+                FilterProp::InZone { zone: zones[0] }
+            } else {
+                FilterProp::InAnyZone {
+                    zones: zones.to_vec(),
+                }
+            }]),
+        )
+    }
+
+    /// CR 400.1 + CR 400.7: a multi-origin filter is a resolution choice even
+    /// when the producer suppressed the single `origin` field. A single-zone
+    /// off-battlefield filter without `origin` keeps its historical Stack
+    /// default (Deadly Cover-Up's class), and printed "target" still wins.
+    #[test]
+    fn multi_zone_target_is_a_resolution_choice_without_an_explicit_origin() {
+        let fragment = "put a creature card onto the battlefield";
+        assert_eq!(
+            change_zone_target_choice_timing(
+                None,
+                &creature_in(&[Zone::Hand, Zone::Command]),
+                false,
+                fragment,
+            ),
+            TargetChoiceTiming::Resolution,
+        );
+        assert_eq!(
+            change_zone_target_choice_timing(
+                None,
+                &creature_in(&[Zone::Exile, Zone::Graveyard]),
+                false,
+                fragment,
+            ),
+            TargetChoiceTiming::Resolution,
+        );
+        assert_eq!(
+            change_zone_target_choice_timing(
+                None,
+                &creature_in(&[Zone::Hand, Zone::Command]),
+                false,
+                "put target creature card onto the battlefield",
+            ),
+            TargetChoiceTiming::Stack,
+            "a printed target word stays a stack-time target",
+        );
+        assert_eq!(
+            change_zone_target_choice_timing(
+                None,
+                &creature_in(&[Zone::Graveyard]),
+                false,
+                fragment,
+            ),
+            TargetChoiceTiming::Stack,
+            "single-zone off-battlefield seeds without an origin keep their historical timing",
+        );
+        assert_eq!(
+            change_zone_target_choice_timing(
+                Some(Zone::Hand),
+                &creature_in(&[Zone::Hand]),
+                false,
+                fragment,
+            ),
+            TargetChoiceTiming::Resolution,
+            "an explicit off-battlefield origin is unchanged",
+        );
     }
 }

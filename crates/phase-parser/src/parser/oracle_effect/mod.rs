@@ -51807,6 +51807,15 @@ fn try_parse_put_zone_change_parts(
                 Some(zones) => add_put_multi_origin_constraint(target, zones),
                 None => target,
             };
+            // CR 400.1 + CR 400.7: A put instruction whose own type phrase names
+            // more than one origin zone ("from your hand or from the command
+            // zone" — Next of Kin) carries that union on the TARGET filter. The
+            // single `origin` field cannot express it, and the literal
+            // hand/graveyard table above reaches only two spellings, so deriving
+            // multi-origin authority from the parsed zones is what keeps the
+            // producer and the resolver's scan set from disagreeing. Leave
+            // `origin: None` and let the resolver read `extract_zones()`.
+            let target_names_multiple_origins = target.extract_zones().len() > 1;
             // CR 202.3 + CR 107.3i: A trailing "where X is <expression>"
             // defining clause (Birthing Ritual: "...with mana value X or less
             // ..., where X is 1 plus the sacrificed creature's mana value")
@@ -51904,7 +51913,10 @@ fn try_parse_put_zone_change_parts(
                 // `origin: Some(Exile)` shape — `resolve_all` with
                 // `origin: None` would fall back to a Battlefield scan).
                 Some(Zone::Exile)
-            } else if is_tracked_anaphor || multi_origin_zones.is_some() {
+            } else if is_tracked_anaphor
+                || multi_origin_zones.is_some()
+                || target_names_multiple_origins
+            {
                 None
             } else {
                 let origin_text = format!("{}{}", before.lower, after.lower);
