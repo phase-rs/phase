@@ -16694,7 +16694,13 @@ fn counted_single_color_bundle(state: &GameState, option: &ManaSourceOption) -> 
             .len()
             .saturating_sub(option.taps_for_mana_overrides.len())
             > 1
-    }) && option
+    }) && single_color_choice_source(state, option)
+}
+
+// CR 106.3: a flexible color choice remains flexible when an Aura adds a
+// separate unit. Its own quantity controls funding, not source assignment.
+fn single_color_choice_source(state: &GameState, option: &ManaSourceOption) -> bool {
+    option
         .ability_index
         .and_then(|index| state.objects.get(&option.object_id)?.abilities.get(index))
         .is_some_and(|ability| {
@@ -17577,10 +17583,10 @@ fn assign_combination_sources(
 ) -> usize {
     let mut surplus = 0;
     // Keep fixed output and filter combinations in their existing pre-pass.
-    // Only a choice of one repeated color moves to the scarce-shard loop;
-    // amount alone does not distinguish it from a fixed-output sacrifice.
+    // Flexible one-color choices stay in the scarce-shard loop even when
+    // an Aura adds a separate color; fixed output retains this pre-pass.
     let prepass_combination = |option: &ManaSourceOption| {
-        option.atomic_combination.is_some() && !counted_single_color_bundle(state, option)
+        option.atomic_combination.is_some() && !single_color_choice_source(state, option)
     };
     // Build per-object candidate list: for each object that has any
     // `atomic_combination`-bearing rows, collect all of its combination rows.

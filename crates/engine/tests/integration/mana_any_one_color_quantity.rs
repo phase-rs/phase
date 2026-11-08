@@ -274,6 +274,7 @@ fn snow_hybrid_partial_pool_keeps_the_later_strict_color() {
         .as_snow().with_mana_cost(parse_mtgjson_mana_cost("{W/U}{S}{U}")).id();
     let mut r = s.build();
     finish_snow_forest(&mut r, plains);
+    evaluate_layers(r.state_mut());
     for (source, color) in [(plains, ManaType::White), (island, ManaType::Blue)] {
         let (_, _, grouped) = legal_actions_full(r.state());
         let action = grouped[&source]
