@@ -846,6 +846,34 @@ pub(crate) fn until_event_already_occurred(
         })
 }
 
+/// CR 400.7: the zone a picked object actually occupies is its move origin.
+///
+/// A multi-zone origin instruction (Next of Kin's "from your hand or from the
+/// command zone") has no single `origin` to pass to the mover, and the first
+/// entry of the scan set is not necessarily the zone the chosen card is in. The
+/// object itself is the authority once the choice is made; `fallback` covers
+/// only an object that ceased to exist between the scan and the move. A
+/// single-zone scan keeps the historical behavior: the scan zone and the
+/// object's zone already agree when the choice was legal, and an object that
+/// moved mid-resolution must not be followable to its new zone (CR 400.7).
+fn chosen_object_origin(
+    state: &GameState,
+    chosen: ObjectId,
+    scan_zones: &[Zone],
+    fallback: Zone,
+) -> Zone {
+    if scan_zones.len() == 1 {
+        return fallback;
+    }
+    state
+        .objects
+        .get(&chosen)
+        .map_or(fallback, |object| object.zone)
+}
+
+/// CR 400.7 + CR 603.2: the zone a move expects its object to be in — the
+/// effect's origin, or for an event referent the zone the trigger event put it
+/// in.
 fn expected_move_origin(
     state: &GameState,
     origin: Option<Zone>,
@@ -1014,11 +1042,13 @@ fn untargeted_zone_pool(
     // battlefield.
     let scan_zones = if exile_tracked_set_library_only {
         vec![Zone::Library]
-    } else if let Some(origin) = origin {
-        vec![origin]
     } else {
         let extracted = target_filter.extract_zones();
-        if !extracted.is_empty() {
+        if extracted.len() > 1 {
+            extracted
+        } else if let Some(origin) = origin {
+            vec![origin]
+        } else if !extracted.is_empty() {
             extracted
         } else if let Some(zone) = target_filter.extract_in_zone() {
             vec![zone]
@@ -1711,9 +1741,7 @@ pub fn resolve(
                 .draw(RandomDraw::Outcome)
                 .random_range(0..eligible.len());
             let chosen = eligible[index];
-            // CR 400.3 + CR 608.2c: a zone-union choice moves from the
-            // selected object's zone, not the prompt's default scan zone.
-            let chosen_origin = state.objects[&chosen].zone;
+            let chosen_origin = chosen_object_origin(state, chosen, &scan_zones, scan_zone);
             publish_finalized_owner_library_subjects(state, ability, &[chosen]);
             // CR 508.4 + CR 614.12a: the seat frame's boundary is captured before
             // this entry's Devour snapshot, so a seat frame parked for it lies
@@ -1805,9 +1833,7 @@ pub fn resolve(
 
         if eligible.len() == 1 && !choice_up_to && choice_count == 1 {
             let chosen = eligible[0];
-            // CR 400.3 + CR 608.2c: the singleton can occupy any member
-            // zone of the selection filter's union.
-            let chosen_origin = state.objects[&chosen].zone;
+            let chosen_origin = chosen_object_origin(state, chosen, &scan_zones, scan_zone);
             publish_finalized_owner_library_subjects(state, ability, &[chosen]);
             // CR 508.4 + CR 614.12a: the seat frame's boundary is captured before
             // this entry's Devour snapshot, so a seat frame parked for it lies
