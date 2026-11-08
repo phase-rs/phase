@@ -590,7 +590,7 @@ fn decline_index(runner: &GameRunner) -> (PlayerId, usize) {
 /// Graveyard Warden (moved to exile for the cast and back after the resolution
 /// starts, as the source fixtures do) offers to exile the first fodder instead; P0
 /// declines, the first fodder dies (CR 701.21a), and the second sacrifice is paused
-/// on the Warden's CR 616.1 choice. The cursor is parked at index 1 outside the
+/// on the Warden's CR 614.1a choice. The cursor is parked at index 1 outside the
 /// resolution stack. `observer` adds Deathgreeter with its verbatim Oracle text:
 /// "Whenever another creature dies, you may gain 1 life." Its trigger must not
 /// reach the stack after the game ends. Returns the runner, both fodder and P0's
@@ -678,7 +678,7 @@ fn optional_sacrifice_paused_on_its_second_move(
     )
     .expect("the Warden is declined on the first fodder");
 
-    // Reach guard: the second sacrifice is paused on a CR 616.1 choice, its cursor
+    // Reach guard: the second sacrifice is paused on a CR 614.1a choice, its cursor
     // parked outside the resolution stack under a live carrier.
     assert!(
         matches!(
@@ -1087,7 +1087,7 @@ fn a_mandatory_loop_draw_retires_the_final_parts_replacement_choice() {
     assert_finished_game_retired_its_resolution(&runner, None);
 }
 
-/// CR 104.3a + CR 616.1: the resolution's own optional sacrifice, paid
+/// CR 104.3a + CR 614.1a: the resolution's own optional sacrifice, paid
 /// by its controller, is paused on its second move by P0's Graveyard Warden; P1
 /// concedes. The parked cursor and its replacement choice go with the finished
 /// game and nothing moves (CR 104.1): no payoff, no further sacrifice, and an
@@ -1139,7 +1139,7 @@ fn a_parked_sacrifice_cursor_does_not_outlive_its_return_result_occurrence() {
 }
 
 /// CR 104.2a: with P0 and P1 still in the game, P2's concession does not end it,
-/// so P0's paused sacrifice and its CR 616.1 choice stay and resume: declining
+/// so P0's paused sacrifice and its CR 614.1a choice stay and resume: declining
 /// the Warden lets the second fodder die (CR 701.21a), and the spell's own
 /// CR 608.2n move then meets the Warden again.
 #[test]
@@ -1235,7 +1235,7 @@ fn a_three_player_game_keeps_the_survivors_may_prompt() {
     assert!(runner.state().game_end.is_none());
 }
 
-/// CR 104.3a + CR 616.1: Hymn to Tourach (verbatim; cost zero as in
+/// CR 104.3a + CR 614.1a: Hymn to Tourach (verbatim; cost zero as in
 /// `random_discard_cost_replacement_resume.rs`) is paused on the replacement
 /// choice for its first discard: P1's choice about P1's Graveyard Warden (narrowed
 /// to cards other than Hymn, as that source fixture does). Hymn's controller
@@ -1288,7 +1288,7 @@ fn conceding_under_a_paused_random_discard_retires_the_discard_batch() {
     assert_eq!(hand_size(&runner, P1), 4);
 }
 
-/// CR 104.3a + CR 608.2g + CR 616.1: Violent Outburst's cascade casts Village
+/// CR 104.3a + CR 608.2g + CR 614.1a: Violent Outburst's cascade casts Village
 /// Rites inside the cascade trigger's resolution, and Village Rites' sacrifice
 /// cost is paused on the choice about P1's Graveyard Warden. P1 concedes. The
 /// instructed cast's parked cost cursor, its replacement choice and its reversal
