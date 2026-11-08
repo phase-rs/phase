@@ -387,11 +387,15 @@ Default server game and draft sockets negotiate `StateCodecV1` only when the sha
 WASM runtime is already ready. A cold runtime warms in the background while the
 current connection opens snapshot-only; later connections can use the decoder.
 Explicit codec providers retain their bounded preparation wait. The codec wrapper
-runs after optional gzip decompression and preserves frame order. It limits
+runs after optional gzip decompression and preserves frame order. Canonical codec
+headers are read without materializing their payload; Rust validates the body.
+The wrapper limits
 outstanding receives (including an active decode) to 64 messages and 16 MiB of
 UTF-16 text; overload closes the transport and releases its lease rather than
 dropping deltas. Leaving a local WASM game, including a native-AI fallback,
 resets game state without disposing the shared runtime or unrelated codec leases.
+Recovery notifications use the active UI language and distinguish an interrupted
+in-flight action from a new action that was never sent.
 
 ### Design Principles
 

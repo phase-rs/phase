@@ -17,6 +17,7 @@
  * Ownership: the wrapper owns the prepared decoder session lease and releases
  * it exactly once, on any terminal path.
  */
+import i18n from "i18next";
 import type { StateCodecDecodeResult, StateCodecSession } from "../adapter/state-codec-runtime";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import type { PlayerId } from "../adapter/types";
@@ -110,13 +111,6 @@ export interface StateCodecBootstrapBinding {
   status: StateCodecBootstrap;
   failure: StateCodecFailure | null;
 }
-
-/** Rejection message for a command dropped while codec recovery begins. */
-export const STATE_CODEC_RECOVERY_INTERRUPTED_MESSAGE = "State delivery interrupted during action";
-
-/** Rejection message for a submission refused while codec recovery is in progress. */
-export const STATE_CODEC_RECOVERY_SUBMISSION_BLOCKED_MESSAGE =
-  "State delivery is being recovered; this submission was not sent.";
 
 /**
  * Adapter-side authority for the codec attachments of one owning adapter.
@@ -251,7 +245,7 @@ export class StateCodecAttachment {
     if (binding.socket === null || currentSocket !== binding.socket) return;
     if (state === "recovering") {
       this.recovery = state;
-      interruptPending(new AdapterError("WS_CLOSED", STATE_CODEC_RECOVERY_INTERRUPTED_MESSAGE, true));
+      interruptPending(new AdapterError("WS_CLOSED", i18n.t("stateCodec.actionInterrupted"), true));
       return;
     }
     this.recovery = null;
@@ -265,7 +259,7 @@ export class StateCodecAttachment {
     if (this.recovery !== null) {
       throw new AdapterError(
         AdapterErrorCode.ACTION_NOT_SENT,
-        STATE_CODEC_RECOVERY_SUBMISSION_BLOCKED_MESSAGE,
+        i18n.t("stateCodec.submissionNotSent"),
         true,
       );
     }
@@ -946,10 +940,13 @@ export class StateCodecSocket implements PhaseSocketTransport {
 }
 
 /**
- * The reserved top-level tag of a frame, without re-serializing it. Anything
- * unparseable is treated as a plain frame and passed through untouched.
+ * Read the server's compact, type-first codec header without materializing its
+ * payload. Rust validates the body. The compatibility path keeps noncanonical
+ * field order/escaped tags and plain or malformed non-codec routing unchanged.
  */
 function frameType(text: string): string {
+  if (text.startsWith('{"type":"Full","data":')) return "Full";
+  if (text.startsWith('{"type":"Delta","data":')) return "Delta";
   try {
     const parsed = JSON.parse(text) as { type?: unknown };
     return typeof parsed?.type === "string" ? parsed.type : "";

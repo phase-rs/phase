@@ -26,7 +26,7 @@ import {
   MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL,
   PROTOCOL_VERSION,
 } from "../../adapter/ws-adapter";
-import { encodeJsonEnvelope } from "../../network/wireEnvelope";
+import { decodeJsonEnvelope, encodeJsonEnvelope } from "../../network/wireEnvelope";
 
 class MockWebSocket extends EventTarget {
   static OPEN = 1;
@@ -1716,6 +1716,113 @@ describe("openPhaseSocket — bounded expanded codec backlog", () => {
   });
 });
 
+describe("openPhaseSocket — canonical codec discriminator", () => {
+  async function openWire(compressed: boolean, fake: { session: StateCodecSession }) {
+    const recovery: StateCodecRecoveryNotice[] = [];
+    const pending = openPhaseSocket("ws://test", {
+      stateCodecSession: fake.session,
+      stateCodecBootstrap: () => "accepted",
+      onStateCodecRecovery: (state) => { recovery.push(state); },
+    });
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(fullHello(compressed ? { wire_formats: ["GzipEnvelopeV1"] } : {}));
+    const socket = await pending;
+    const received: string[] = [];
+    socket.ws.onmessage = (event) => { received.push(event.data); };
+    raw.deliverMessage(confirmationFrame());
+    const deliver = async (text: string) => {
+      raw.deliverMessage(compressed ? (await encodeJsonEnvelope(text)).buffer : text);
+    };
+    return { raw, socket, received, recovery, deliver };
+  }
+
+  it.each([
+    [false, "Full"], [false, "Delta"], [true, "Full"], [true, "Delta"],
+  ] as const)("lets the decoder reject a malformed canonical body (gzip=%s, %s)", async (compressed, type) => {
+    const fake = fakeSession();
+    fake.decode.mockResolvedValueOnce({ kind: "resyncRequired" });
+    const wire = await openWire(compressed, fake);
+    const text = `{"type":"${type}","data":not-json}`;
+    try {
+      await wire.deliver(text);
+      await vi.waitFor(() => expect(wire.recovery).toEqual(["recovering"]));
+      expect(fake.decode).toHaveBeenCalledOnce();
+      expect(new TextDecoder().decode(fake.decode.mock.calls[0][0])).toBe(text);
+      expect(wire.received).toEqual([]);
+      await vi.waitFor(() => expect(wire.raw.send).toHaveBeenCalledTimes(2));
+      const sent: unknown = wire.raw.send.mock.calls[1][0];
+      const resync = typeof sent === "string" ? sent
+        : sent instanceof Uint8Array ? await decodeJsonEnvelope(sent) : null;
+      expect(resync).toBe('{"type":"ResyncState"}');
+
+      await wire.deliver(codecFrame("Full"));
+      await vi.waitFor(() => expect(wire.received).toEqual([DECODED_PONG]));
+      expect(wire.recovery).toEqual(["recovering", "ready"]);
+      expect(wire.raw.close).not.toHaveBeenCalled();
+    } finally {
+      wire.socket.close();
+    }
+  });
+
+  it.each([false, true])("routes large canonical Full and Delta frames in order (gzip=%s)", async (compressed) => {
+    const fake = fakeSession();
+    const wire = await openWire(compressed, fake);
+    const padding = "x".repeat(1024 * 1024 + 1);
+    const frames = [
+      JSON.stringify({ type: "Full", data: { state: { padding }, revision: 1 } }),
+      JSON.stringify({ type: "Delta", data: { patch: { padding }, revision: 2 } }),
+    ];
+    try {
+      for (const text of frames) await wire.deliver(text);
+      await vi.waitFor(() => expect(wire.received).toEqual([DECODED_PONG, DECODED_PONG]));
+      expect(fake.decode.mock.calls.map(([frame]) => new TextDecoder().decode(frame))).toEqual(frames);
+      expect(wire.recovery).toEqual([]);
+      expect(wire.raw.close).not.toHaveBeenCalled();
+    } finally {
+      wire.socket.close();
+    }
+  });
+
+  it.each([false, true])("preserves ordinary and malformed-header delivery (gzip=%s)", async (compressed) => {
+    const fake = fakeSession();
+    const wire = await openWire(compressed, fake);
+    const plain = [
+      '{"type":"Pong","data":{"type":"Full"}}',
+      '{"type":"Fullness","data":{}}',
+      '{"type":"DeltaSuffix","data":{}}',
+      '{"type":"Pong","data":',
+      '{"type":',
+      '{"type":"Full" "data":{}}',
+      '[{"type":"Full","data":{}}]',
+    ];
+    try {
+      for (const text of plain) await wire.deliver(text);
+      await vi.waitFor(() => expect(wire.received).toEqual(plain));
+      expect(fake.decode).not.toHaveBeenCalled();
+      expect(wire.recovery).toEqual([]);
+    } finally {
+      wire.socket.close();
+    }
+  });
+
+  it.each([false, true])("retains noncanonical field order and escaped codec tags (gzip=%s)", async (compressed) => {
+    const fake = fakeSession();
+    const wire = await openWire(compressed, fake);
+    const frames = [
+      ' { "data": {}, "type": "Fu\\u006cl" } ',
+      '{"data":{},"type":"Delta"}',
+    ];
+    try {
+      for (const text of frames) await wire.deliver(text);
+      await vi.waitFor(() => expect(wire.received).toEqual([DECODED_PONG, DECODED_PONG]));
+      expect(fake.decode.mock.calls.map(([frame]) => new TextDecoder().decode(frame))).toEqual(frames);
+      expect(wire.recovery).toEqual([]);
+    } finally {
+      wire.socket.close();
+    }
+  });
+});
+
 describe("openPhaseSocket — codec lease ownership across preflight and send failure", () => {
   it.each(["resolve", "reject"] as const)(
     "releases the prepared lease once when LAN approval late-%ss after abort",
@@ -2061,10 +2168,10 @@ describe("StateCodecAttachment", () => {
     const interrupted: string[] = [];
     const blockedDuringInterrupt: boolean[] = [];
     attachment.handleRecovery(binding, "recovering", socketA, false, (error) => {
-      interrupted.push(`${error.code}:${error.message}:${error.recoverable}`);
+      interrupted.push(`${error.code}:${error.recoverable}`);
       blockedDuringInterrupt.push(blocked(attachment));
     });
-    expect(interrupted).toEqual(["WS_CLOSED:State delivery interrupted during action:true"]);
+    expect(interrupted).toEqual(["WS_CLOSED:true"]);
     expect(blockedDuringInterrupt).toEqual([true]);
     expect(blocked(attachment)).toBe(true);
     attachment.handleRecovery(binding, "ready", socketA, false, () => undefined);

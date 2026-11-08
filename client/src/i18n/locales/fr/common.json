@@ -329,6 +329,10 @@
     "body": "L'application a rencontré une erreur inattendue et ne peut pas continuer sur cet écran. Recharger règle généralement le problème.",
     "reload": "Recharger"
   },
+  "stateCodec": {
+    "actionInterrupted": "La transmission de l’état a été interrompue pendant l’action",
+    "submissionNotSent": "La transmission de l’état est en cours de rétablissement ; cette action n’a pas été envoyée."
+  },
   "actionError": {
     "title": "Échec de {{action}}",
     "skipTarget": "Ignorer la cible",

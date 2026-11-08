@@ -3140,7 +3140,6 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
     }));
     await expect(observed()).resolves.toMatchObject({
       code: "WS_CLOSED",
-      message: "State delivery interrupted during action",
       recoverable: true,
     });
 
@@ -4311,7 +4310,7 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
     }));
     await vi.waitFor(() => expect(replacement.send).toHaveBeenCalledWith('{"type":"ResyncState"}'));
     await expect(claimed()).resolves.toMatchObject({
-      code: "WS_CLOSED", message: "State delivery interrupted during action", recoverable: true,
+      code: "WS_CLOSED", recoverable: true,
     });
     expect(events).toContainEqual({ type: "actionPendingChanged", pending: false });
     adapter.dispose();
@@ -4436,7 +4435,7 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
     await vi.waitFor(() => expect(ws.send).toHaveBeenCalledWith('{"type":"ResyncState"}'));
     // Recovery path, not the pre-bootstrap fatal path.
     await expect(claimed()).resolves.toMatchObject({
-      code: "WS_CLOSED", message: "State delivery interrupted during action", recoverable: true,
+      code: "WS_CLOSED", recoverable: true,
     });
     expect(ws.close).not.toHaveBeenCalled();
     expect(session.close).not.toHaveBeenCalled();

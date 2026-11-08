@@ -329,6 +329,10 @@
     "body": "Aplikacja napotkała nieoczekiwany błąd i nie może kontynuować na tym ekranie. Ponowne załadowanie zwykle to naprawia.",
     "reload": "Załaduj ponownie"
   },
+  "stateCodec": {
+    "actionInterrupted": "Przesyłanie stanu zostało przerwane podczas akcji",
+    "submissionNotSent": "Trwa przywracanie przesyłania stanu; ta akcja nie została wysłana."
+  },
   "actionError": {
     "title": "{{action}} nie powiodła się",
     "skipTarget": "Pomiń cel",

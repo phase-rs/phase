@@ -329,6 +329,10 @@
     "body": "予期しないエラーが発生し、この画面を続行できません。通常は再読み込みで解決します。",
     "reload": "再読み込み"
   },
+  "stateCodec": {
+    "actionInterrupted": "操作中に状態の配信が中断されました",
+    "submissionNotSent": "状態の配信を復旧中です。この操作は送信されませんでした。"
+  },
   "actionError": {
     "title": "{{action}}に失敗しました",
     "skipTarget": "対象をスキップ",

@@ -38,7 +38,6 @@ import { StateCodecRuntime, type StateCodecSession } from "../state-codec-runtim
 import type { EngineModule } from "../engine-queries";
 import {
   STATE_CODEC_PREPARATION_TIMEOUT_MS,
-  STATE_CODEC_RECOVERY_SUBMISSION_BLOCKED_MESSAGE,
   STATE_CODEC_SOCKET_TIMEOUT_MS,
 } from "../../services/stateCodecSocket";
 import type { FormatConfig, GameAction, GameState, SubmitResult } from "../types";
@@ -4388,7 +4387,6 @@ describe("WebSocketAdapter — negotiated StateCodecV1", () => {
     raw.dispatchSynthetic("message", deltaFrame(update));
     await expect(observed()).resolves.toMatchObject({
       code: "WS_CLOSED",
-      message: "State delivery interrupted during action",
       recoverable: true,
     });
     expect(events).toContainEqual({ type: "actionPendingChanged", pending: false });
@@ -4873,7 +4871,7 @@ describe("WebSocketAdapter — negotiated StateCodecV1 reconnect", () => {
       await vi.waitFor(() => expect(resyncRequests(raw)).toBe(1));
       // Recovery path, not the pre-bootstrap fatal path.
       await expect(outcome).resolves.toMatchObject({
-        code: "WS_CLOSED", message: "State delivery interrupted during action", recoverable: true,
+        code: "WS_CLOSED", recoverable: true,
       });
       expect(raw.close).not.toHaveBeenCalled();
       expect(first.close).not.toHaveBeenCalled();
@@ -5434,7 +5432,7 @@ describe("WebSocketAdapter — codec degradation policy", () => {
     adapter.onEvent((event) => {
       if ((event as { type?: string }).type !== "stateChanged" || !probing) return;
       // A listener that submits during the Full's delivery must be refused.
-      adapter.submitAction(action, 0).then(() => probes.push("sent"), (error: AdapterError) => probes.push(error.message));
+      adapter.submitAction(action, 0).then(() => probes.push("sent"), (error: AdapterError) => probes.push(error.code));
     });
     try {
       // Recovery one: refused while recovering, admitted after ready.
@@ -5443,7 +5441,7 @@ describe("WebSocketAdapter — codec degradation policy", () => {
       await vi.waitFor(() => expect(resyncRequests(raw)).toBe(1));
       probing = true;
       deliverCodec(raw, "Full", codecStateUpdate(3, 3));
-      await vi.waitFor(() => expect(probes).toEqual([STATE_CODEC_RECOVERY_SUBMISSION_BLOCKED_MESSAGE]));
+      await vi.waitFor(() => expect(probes).toEqual([AdapterErrorCode.ACTION_NOT_SENT]));
       probing = false;
       const resumed = adapter.submitAction(action, 0);
       await vi.waitFor(() => expect(submissionTypes(raw)).toHaveLength(1));
@@ -5460,8 +5458,8 @@ describe("WebSocketAdapter — codec degradation policy", () => {
       deliverCodec(raw, "Full", codecStateUpdate(6, 6));
       await vi.waitFor(() => expect(raw.close).toHaveBeenCalled());
       expect(probes).toEqual([
-        STATE_CODEC_RECOVERY_SUBMISSION_BLOCKED_MESSAGE,
-        STATE_CODEC_RECOVERY_SUBMISSION_BLOCKED_MESSAGE,
+        AdapterErrorCode.ACTION_NOT_SENT,
+        AdapterErrorCode.ACTION_NOT_SENT,
       ]);
       expect((adapter as unknown as { snapshot: { state: GameState } }).snapshot.state.turn_number).toBe(6);
       expect(first.close).toHaveBeenCalledOnce();
