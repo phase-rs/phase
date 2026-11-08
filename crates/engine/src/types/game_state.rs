@@ -9438,6 +9438,16 @@ pub enum PendingCostMoveResume {
         paused_at_index: usize,
         destination: Zone,
         completion: PendingCostMoveCompletion,
+        /// CR 118.11: the number of objects this cost CALLED FOR, owed to
+        /// `last_effect_count` once every parked move has settled. A deterministic
+        /// top-of-library exile cost publishes its count inline when it pays
+        /// without pausing; when a replacement pauses it mid-payment, the count
+        /// must survive the round trip instead of being recomputed from what
+        /// actually arrived. `None` for every other cost shape, which owes no
+        /// count — the completion is shared, so the field is what identifies a
+        /// resume that owes one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        requested_cost_count: Option<u32>,
         /// CR 603.2 + CR 603.10a: Cost events emitted in earlier actions of
         /// this one logical multi-object cost move (a counted return to hand or
         /// exile). They are stamped and settled only when every selected object
@@ -49181,6 +49191,7 @@ mod tests {
             paused_at_index: 0,
             destination: Zone::Hand,
             completion: PendingCostMoveCompletion::FinishPending,
+            requested_cost_count: None,
             deferred_cost_events: vec![deferred_event],
             departure_record_indices: vec![],
         });
@@ -49237,6 +49248,7 @@ mod tests {
             paused_at_index: 0,
             destination: Zone::Hand,
             completion: PendingCostMoveCompletion::FinishPending,
+            requested_cost_count: None,
             deferred_cost_events: vec![],
             departure_record_indices: vec![],
         };
@@ -49253,6 +49265,7 @@ mod tests {
             paused_at_index: 0,
             destination: Zone::Hand,
             completion: PendingCostMoveCompletion::FinishPending,
+            requested_cost_count: None,
             deferred_cost_events: vec![],
             departure_record_indices: vec![4, 5],
         };
@@ -59202,6 +59215,7 @@ mod restored_exact_attack_authority_tests {
                             )),
                             prepaid_actual_mana_spent: None,
                         },
+                        requested_cost_count: None,
                         deferred_cost_events: vec![],
                         departure_record_indices: vec![],
                     });
@@ -59220,6 +59234,7 @@ mod restored_exact_attack_authority_tests {
                             phyrexian_choices: None,
                             pre_payment_checks: Some(Box::new(pre_payment_checks())),
                         },
+                        requested_cost_count: None,
                         deferred_cost_events: vec![],
                         departure_record_indices: vec![],
                     });
