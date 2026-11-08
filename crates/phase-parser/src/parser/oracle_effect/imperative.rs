@@ -30921,6 +30921,74 @@ mod tests {
         assert_eq!(execute.target_choice_timing, TargetChoiceTiming::Resolution);
     }
 
+    /// SHAPE — CR 510.1a: "… and this creature assigns no combat damage this
+    /// turn" after a bare " and " is its own subject-predicate clause. Covers the
+    /// printed members of the class (Goblin Vandal after a Destroy, Rysorian
+    /// Badger after a GainLife). Before the clause splitter recognised the
+    /// conjunct, it stayed glued to the leading imperative: the trailing "this
+    /// turn" was stripped onto that imperative and the rider fell to an
+    /// `Unimplemented` sub-ability.
+    #[test]
+    fn self_assigns_no_combat_damage_conjunct_splits_off_the_leading_imperative() {
+        let cases = [
+            (
+                "Goblin Vandal",
+                "Whenever this creature attacks and isn't blocked, you may pay {R}. If you do, destroy target artifact defending player controls and this creature assigns no combat damage this turn.",
+                vec!["Goblin".to_string(), "Rogue".to_string()],
+            ),
+            (
+                "Rysorian Badger",
+                "Whenever this creature attacks and isn't blocked, you may exile up to two target creature cards from defending player's graveyard. If you do, you gain 1 life for each card exiled this way and this creature assigns no combat damage this turn.",
+                vec!["Badger".to_string()],
+            ),
+        ];
+        for (name, oracle, subtypes) in cases {
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                oracle,
+                name,
+                &[],
+                &["Creature".to_string()],
+                &subtypes,
+            );
+            let execute = parsed
+                .triggers
+                .first()
+                .and_then(|trigger| trigger.execute.as_ref())
+                .unwrap_or_else(|| panic!("{name} trigger execute"));
+            assert!(
+                !crate::parser::oracle::has_unimplemented(execute),
+                "{name} must parse fully: {execute:?}"
+            );
+            // Walk to the last link of the chain: the rider, immediately after
+            // the conditional ("If you do") leading imperative.
+            let mut chain: Vec<&AbilityDefinition> = vec![execute];
+            while let Some(next) = chain.last().and_then(|def| def.sub_ability.as_deref()) {
+                chain.push(next);
+            }
+            let [.., leading, rider] = chain.as_slice() else {
+                panic!("{name}: expected a leading imperative and a rider, got {chain:?}");
+            };
+            assert_eq!(
+                leading.duration, None,
+                "{name}: the rider's \"this turn\" must not leak onto the leading imperative"
+            );
+            let Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } = rider.effect.as_ref()
+            else {
+                panic!("{name}: expected the rider GenericEffect, got {rider:?}");
+            };
+            assert_eq!(duration, &Some(Duration::UntilEndOfTurn), "{name}");
+            let [rule] = static_abilities.as_slice() else {
+                panic!("{name}: expected one rule modification, got {static_abilities:?}");
+            };
+            assert_eq!(rule.mode, StaticMode::AssignNoCombatDamage, "{name}");
+            assert_eq!(rule.affected, Some(TargetFilter::SelfRef), "{name}");
+        }
+    }
+
     #[test]
     fn singular_and_adjacent_exile_grammars_remain_on_existing_paths() {
         let singular = crate::parser::oracle_effect::parse_effect_chain(
