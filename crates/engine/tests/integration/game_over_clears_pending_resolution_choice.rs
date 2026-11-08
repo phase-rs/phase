@@ -36,10 +36,11 @@ use engine::game::zones::move_to_zone;
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, Effect, PlayerFilter,
     QuantityExpr, ReplacementDefinition, ReplacementMode, ReturnResultId, SacrificeCost,
-    SubAbilityLink, TargetFilter,
+    SubAbilityLink, TargetFilter, TargetRef,
 };
 use engine::types::actions::{CastChoice, GameAction, ResolutionOptionalPaymentChoice};
 use engine::types::events::GameEvent;
+use engine::types::format::{ChallengeDeck, FormatConfig};
 use engine::types::game_state::{
     GameState, PayCostKind, PendingCostMoveResume, PendingSacrificeCostCompletion,
     PersistedGameState, PersistedRestoreFinalization, StackEntryKind, WaitingFor,
@@ -125,6 +126,14 @@ fn assert_round_trips(runner: &GameRunner) {
         runner.state().un_actions.gotcha_offers,
         "persistence preserves the exact open Gotcha offers, including an empty terminal window"
     );
+    assert_eq!(
+        restored.pending_single_discard,
+        runner.state().pending_single_discard
+    );
+    assert_eq!(
+        restored.pending_damage_post_loss,
+        runner.state().pending_damage_post_loss
+    );
 }
 
 /// CR 104.1: none of the work a resolution parked outside the resolution stack,
@@ -148,6 +157,10 @@ fn assert_no_parked_resolution_work(state: &GameState) {
         (
             "pending_single_discard",
             state.pending_single_discard.is_some(),
+        ),
+        (
+            "pending_damage_post_loss",
+            state.pending_damage_post_loss.is_some(),
         ),
         ("pending_replacement", state.pending_replacement.is_some()),
         (
@@ -2331,7 +2344,12 @@ fn connive_with_a_paused_single_discard(players: u8) -> (GameRunner, ObjectId) {
         .as_ref()
         .expect("reach guard: the real replacement paused a frameless single discard");
     assert_eq!(pending.player, P0);
-    assert_eq!(pending.source_id, Some(grifter));
+    assert_eq!(pending.source_id, None);
+    assert_eq!(pending.paused_card.object_id, drawn);
+    assert_eq!(
+        pending.paused_card.incarnation,
+        runner.state().objects[&drawn].incarnation
+    );
     assert!(runner.state().pending_discard_batch.is_none());
     assert_eq!(runner.state().objects[&drawn].zone, Zone::Hand);
     assert!(carrier_is_live(&runner));
@@ -2379,6 +2397,115 @@ fn nonterminal_concession_preserves_a_paused_single_discard() {
         runner.state().cards_discarded_this_turn_by_player.get(&P0),
         Some(&1)
     );
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// Prodigal Sorcerer's printed ping targets its controller, the Horde. The
+/// variant's damage-to-mill rule reaches a CR 616.1 ordering choice between
+/// Rest in Peace and the opponent's Leyline of the Void. The source owner and
+/// replacement chooser both survive the opponent's concession.
+fn horde_with_paused_damage(players: u8) -> (GameRunner, ObjectId, ObjectId) {
+    let db = shared_card_db().expect("card database");
+    let mut scenario = GameScenario::new_with_format(
+        FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset()),
+        players,
+        42,
+    );
+    scenario.at_phase(Phase::PreCombatMain);
+    let tim = scenario.add_real_card(P0, "Prodigal Sorcerer", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Rest in Peace", Zone::Battlefield, db);
+    scenario.add_real_card(P1, "Leyline of the Void", Zone::Battlefield, db);
+    let milled = scenario.add_real_card(P0, "Island", Zone::Library, db);
+    for _ in 0..4 {
+        scenario.add_real_card(P0, "Island", Zone::Library, db);
+    }
+    for seat in 1..players {
+        scenario.add_real_card(PlayerId(seat), "Island", Zone::Library, db);
+    }
+    let mut runner = scenario.build();
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: tim,
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("the printed ping activation is legal");
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P0)),
+        })
+        .expect("any target includes the source's controller");
+    pass_until_prompt(&mut runner);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+    let pending = runner
+        .state()
+        .pending_damage_post_loss
+        .as_ref()
+        .expect("reach guard: the real damage paused after its redirected life loss");
+    assert_eq!(pending.source_id, tim);
+    assert_eq!(pending.controller, P0);
+    assert_eq!(pending.target, P0);
+    assert_eq!(pending.actual_amount, 1);
+    assert!(!pending.is_combat);
+    assert_eq!(runner.state().objects[&milled].zone, Zone::Library);
+    assert!(carrier_is_live(&runner));
+    assert_round_trips(&runner);
+    (runner, tim, milled)
+}
+
+/// CR 104.1 + CR 104.3a: no post-loss damage work is owed to a finished game,
+/// including a Horde damage-to-mill instruction paused on CR 616.1 ordering.
+#[test]
+fn terminal_concession_retires_paused_damage_post_loss() {
+    let (mut runner, _, milled) = horde_with_paused_damage(2);
+    concede(&mut runner, P1);
+    assert_eq!(runner.state().objects[&milled].zone, Zone::Library);
+    assert_finished_game_retired_its_resolution(&runner, Some(P0));
+}
+
+/// CR 104.3a + CR 120.1: another survivor's concession leaves the damage
+/// continuation live. Answering the original choice still records it once.
+#[test]
+fn nonterminal_concession_preserves_paused_damage_post_loss() {
+    let (mut runner, tim, milled) = horde_with_paused_damage(3);
+    concede(&mut runner, P2);
+    assert!(runner.state().game_end.is_none());
+    assert!(runner.state().pending_damage_post_loss.is_some());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+    assert_round_trips(&runner);
+    for _ in 0..4 {
+        if !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("the original mill replacement resumes");
+    }
+    runner.advance_until_stack_empty();
+    assert!(runner.state().pending_damage_post_loss.is_none());
+    assert_eq!(runner.state().objects[&milled].zone, Zone::Exile);
+    let records: Vec<_> = runner
+        .state()
+        .damage_dealt_this_turn
+        .iter()
+        .filter(|record| record.source_id == tim)
+        .collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].target, TargetRef::Player(P0));
+    assert_eq!(records[0].amount, 1);
     assert!(runner.state().stack.is_empty());
     assert!(matches!(
         runner.state().waiting_for,
