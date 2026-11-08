@@ -7916,5 +7916,214 @@ mod oversized_publication {
                 );
             });
         }
+
+        /// An early client `Expiry` report while the server timer is armed leaves
+        /// the payment live and does NOT release the timer's internal claim.
+        /// When the timer's deadline passes, the original timer task drains ingress
+        /// and lapses the payment once.
+        #[test]
+        fn say_phrase_early_client_report_does_not_release_armed_timer() {
+            run_async_test(|| async {
+                let table = NativeTable::duel().await;
+                let now = crate::epoch_ms_at_ingress(std::time::Instant::now());
+                let (state, payment_id) = toy_boat_state(Some(now + 300));
+                install(&table, state, &[]).await;
+                let mut p0 = table.connect(P0).await;
+                let schedule = |claim| {
+                    crate::schedule_say_phrase_expiry(
+                        claim,
+                        &table.app.context.game_executor,
+                        &table.app.sessions,
+                        &table.app.db,
+                        &table.app.draft_sessions,
+                        &table.app.connections,
+                        &table.app.game_db,
+                        &table.app.game_spectators,
+                        &table.key.game_code,
+                    )
+                };
+                let claim = {
+                    let mut session =
+                        crate::lock_session(&table.app.sessions, &table.key.game_code)
+                            .await
+                            .unwrap();
+                    crate::claim_say_phrase_expiry(&mut session)
+                };
+                assert!(claim.is_some(), "the live payment is claimed");
+                schedule(claim);
+
+                // Send an early client Expiry report before the deadline has elapsed.
+                let early_expiry = GameAction::SayPhrase {
+                    payment: payment_id,
+                    seq: 0,
+                    at_ms: now,
+                    report: engine::types::un_actions::SayPhraseReport::Expiry,
+                };
+                send_command_frame(&mut p0, &early_expiry, 101).await;
+                let comp = completion(&mut p0, 101).await;
+                assert_eq!(comp["command_id"], 101);
+
+                // Verify the payment is STILL live and the claim is STILL held by the server timer.
+                let (still_armed, claim_held) = session_read(&table, |s| {
+                    (
+                        s.state.say_payment.is_some(),
+                        s.active_say_expiry_task.is_some() && s.active_say_expiry_claim.is_some(),
+                    )
+                })
+                .await;
+                assert!(still_armed, "early expiry report left the payment live");
+                assert!(
+                    claim_held,
+                    "early expiry report did NOT release the server timer's claim"
+                );
+
+                // An attempt to claim again must fail (None) while the original timer owns it.
+                let duplicate_claim = {
+                    let mut session =
+                        crate::lock_session(&table.app.sessions, &table.key.game_code)
+                            .await
+                            .unwrap();
+                    crate::claim_say_phrase_expiry(&mut session)
+                };
+                assert!(duplicate_claim.is_none(), "duplicate claim rejected");
+
+                // Now wait for the original timer to elapse and lapse the payment.
+                let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        let (payment, owner) = session_read(&table, |s| {
+                            (s.state.say_payment.clone(), s.active_say_expiry_task)
+                        })
+                        .await;
+                        if payment.is_none() && owner.is_none() {
+                            break;
+                        }
+                    }
+                })
+                .await;
+                table.server.abort();
+                outcome.expect("the original timer lapsed the payment and retired");
+
+                let drains: Vec<u64> = crate::SAY_EXPIRY_DRAINS
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(code, _)| *code == table.key.game_code)
+                    .map(|(_, payment)| *payment)
+                    .collect();
+                assert_eq!(
+                    drains,
+                    vec![payment_id],
+                    "exactly one ingress drain occurred for the live payment"
+                );
+            });
+        }
+
+        /// Under turn control (CR 723.5 / Mindslaver), the controlling seat is the
+        /// authorized submitter for the semantic payer. When the controller submits
+        /// the first of two required sayings and then stops, authoritative expiry
+        /// resolves the submitter under the session lease, drains the controlling seat's
+        /// ingress, and submits the lapse under the controlling seat's token/authority
+        /// while Toy Boat is sacrificed for the semantic payer.
+        #[test]
+        fn say_phrase_expiry_resolves_submitter_under_turn_control() {
+            run_async_test(|| async {
+                let table = NativeTable::duel().await;
+                let now = crate::epoch_ms_at_ingress(std::time::Instant::now());
+                let (mut state, payment_id) = toy_boat_state(Some(now + 150));
+                // P1 controls P0 during P0's turn
+                state.active_full_turn_control =
+                    Some(engine::types::game_state::ActivePlayerControl {
+                        controller: P1,
+                        timestamp: 1,
+                    });
+                state.turn_decision_controller = Some(P1);
+                state.turn_decision_control_timestamp = Some(1);
+
+                install(&table, state, &[]).await;
+                let mut p1 = table.connect(P1).await;
+
+                // Verify authorized submitter is P1 while semantic payer is P0
+                let (payer, submitter) = session_read(&table, |s| {
+                    let (payer, ..) = crate::live_say_phrase_payment(s).expect("payment is live");
+                    let (submitter, ..) = crate::live_say_phrase_submitter(s, payer)
+                        .expect("submitter is authorized");
+                    (payer, submitter)
+                })
+                .await;
+                assert_eq!(payer, P0, "semantic payer is P0");
+                assert_eq!(submitter, P1, "authorized submitter is P1");
+
+                // Claim and schedule the first expiry timer
+                let claim = {
+                    let mut session =
+                        crate::lock_session(&table.app.sessions, &table.key.game_code)
+                            .await
+                            .unwrap();
+                    crate::claim_say_phrase_expiry(&mut session)
+                };
+                crate::schedule_say_phrase_expiry(
+                    claim,
+                    &table.app.context.game_executor,
+                    &table.app.sessions,
+                    &table.app.db,
+                    &table.app.draft_sessions,
+                    &table.app.connections,
+                    &table.app.game_db,
+                    &table.app.game_spectators,
+                    &table.key.game_code,
+                );
+
+                // P1 (the controller) submits the first saying
+                let saying_action = GameAction::SayPhrase {
+                    payment: payment_id,
+                    seq: 1,
+                    at_ms: now,
+                    report: engine::types::un_actions::SayPhraseReport::Saying,
+                };
+                send_command_frame(&mut p1, &saying_action, 50).await;
+                let comp = completion(&mut p1, 50).await;
+                assert_eq!(comp["command_id"], 50);
+
+                let said =
+                    session_read(&table, |s| s.state.say_payment.as_ref().map(|p| p.said)).await;
+                assert_eq!(
+                    said,
+                    Some(1),
+                    "first saying was accepted from controlling seat P1"
+                );
+
+                // P1 stops. Wait for the authoritative expiry timer for the 2nd saying to lapse the payment.
+                let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        let (payment, owner) = session_read(&table, |s| {
+                            (s.state.say_payment.clone(), s.active_say_expiry_task)
+                        })
+                        .await;
+                        if payment.is_none() && owner.is_none() {
+                            break;
+                        }
+                    }
+                })
+                .await;
+                table.server.abort();
+                outcome.expect("expiry timer resolved and lapsed under turn control");
+
+                // Verify Toy Boat was sacrificed to the graveyard of payer P0
+                let toy_boat_sacrificed = session_read(&table, |s| {
+                    s.state.objects.values().any(|o| {
+                        o.name == "Toy Boat"
+                            && o.controller == P0
+                            && o.zone == engine::types::zones::Zone::Graveyard
+                    })
+                })
+                .await;
+                assert!(
+                    toy_boat_sacrificed,
+                    "Toy Boat was sacrificed on upkeep timeout under turn control"
+                );
+            });
+        }
     }
 }
