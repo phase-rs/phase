@@ -27789,6 +27789,17 @@ mod counters_among_condition_tests {
             (Some(CounterType::Stun), Comparator::GE, 2)
         );
     }
+
+    /// Jace, Reality Sculptor — "Jaces" is a pluralized planeswalker subtype.
+    #[test]
+    fn loyalty_counters_among_plural_planeswalker_subtype() {
+        assert_eq!(
+            counters_among(
+                "there are twenty-five or more loyalty counters among Jaces you control"
+            ),
+            (Some(CounterType::Loyalty), Comparator::GE, 25)
+        );
+    }
 }
 
 /// CR 603.4 + CR 105.2 + CR 109.2: the universal/existential state
