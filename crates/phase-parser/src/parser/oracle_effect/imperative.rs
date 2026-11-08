@@ -19620,9 +19620,11 @@ mod tests {
 
     #[test]
     fn seeded_owner_shuffle_preserves_target_and_requires_complete_body() {
-        let mut ctx = ParseContext::default();
-        ctx.relative_player_scope = Some(ControllerRef::ParentTargetOwner);
-        ctx.object_pronoun_ref = Some(TargetFilter::ParentTarget);
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::ParentTargetOwner),
+            object_pronoun_ref: Some(TargetFilter::ParentTarget),
+            ..ParseContext::default()
+        };
         assert!(!ctx.parent_target_available);
         for library in ["their library", "its owner's library"] {
             let text = format!("shuffles it into {library}");
