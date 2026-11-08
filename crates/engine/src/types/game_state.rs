@@ -37446,7 +37446,6 @@ impl GameState {
             pending_activations: _,
             pending_trigger_entry: _,
             consumed_before_priority_trigger_events: _,
-            exile_links: _,
             paradigm_primed: _,
             tracked_object_sets: _,
             next_tracked_set_id: _,
@@ -37636,7 +37635,6 @@ impl GameState {
             resolving_spell_final_part: _,
             resolving_stack_object: _,
             pending_resolution_completion: _,
-            lki_cache: _,
             lki_copiable_values: _,
             linked_exile_lki: _,
             cost_payment_failed_flag: _,
@@ -37687,6 +37685,10 @@ impl GameState {
             pending_die_roll_instruction: _,
             post_replacement_token_substitution_count: _,
             resolution_source_relatch: _,
+            // PRE-EXISTING RAW PIN LIMITATIONS — outside the named issue rows:
+            // hideaway source incarnations and cached LKI attachment pins remain raw.
+            exile_links: _,
+            lki_cache: _,
             // CR 104.4b: append-only and immutable, compared raw on purpose. Clearing their
             // trigger identity would let a twice-normalized state (a ring prior the resource
             // projection normalizes again) build the stack rename's table from cleared
