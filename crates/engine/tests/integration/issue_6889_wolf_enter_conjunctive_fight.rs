@@ -18,6 +18,13 @@ const TOLSIMIR_ORACLE: &str = "When Tolsimir enters, create Voja, Friend to Elve
 
 const BOUNCE_ORACLE: &str = "Return target creature to its owner's hand.";
 
+/// Murder's first sentence.
+const DESTROY_ORACLE: &str = "Destroy target creature.";
+
+/// Cloudshift (verbatim).
+const FLICKER_ORACLE: &str =
+    "Exile target creature you control, then return that card to the battlefield under your control.";
+
 struct Board {
     runner: GameRunner,
     tolsimir: ObjectId,
@@ -26,6 +33,10 @@ struct Board {
 }
 
 fn board_with_bounce(include_bounce: bool) -> (Board, Option<ObjectId>) {
+    board_with_instant(include_bounce.then_some(("Unsummon", BOUNCE_ORACLE)))
+}
+
+fn board_with_instant(instant: Option<(&str, &str)>) -> (Board, Option<ObjectId>) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let tolsimir = scenario
@@ -36,15 +47,11 @@ fn board_with_bounce(include_bounce: bool) -> (Board, Option<ObjectId>) {
         .add_creature_to_hand(P0, "Lone Wolf", 1, 1)
         .with_subtypes(vec!["Wolf"])
         .id();
-    let bounce = if include_bounce {
-        Some(
-            scenario
-                .add_spell_to_hand_from_oracle(P0, "Unsummon", true, BOUNCE_ORACLE)
-                .id(),
-        )
-    } else {
-        None
-    };
+    let bounce = instant.map(|(name, oracle)| {
+        scenario
+            .add_spell_to_hand_from_oracle(P0, name, true, oracle)
+            .id()
+    });
     (
         Board {
             runner: scenario.build(),
@@ -253,4 +260,87 @@ fn wolf_enter_wolf_gone_gains_life_no_fight() {
         "reach-guard: the chosen target stayed legal (contrast 608.2b row)"
     );
     assert_eq!(board.runner.state().objects[&board.wolf].zone, Zone::Hand);
+}
+
+/// CR 113.7a + CR 608.2k: the trigger exists independently of Tolsimir, and
+/// "that creature" is the Wolf. Destroying Tolsimir with the trigger on the
+/// stack must not stop the Wolf's fight.
+#[test]
+fn tolsimir_leaving_does_not_stop_the_wolf_fight() {
+    let (mut board, destroy) = board_with_instant(Some(("Murder", DESTROY_ORACLE)));
+    let destroy = destroy.expect("Murder in hand");
+    let life_before = board.runner.state().players[0].life;
+
+    drive_wolf_to_fight_target_prompt(&mut board);
+    board
+        .runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(board.opponent)),
+        })
+        .expect("choose the 4/4 as the fight target");
+
+    board
+        .runner
+        .cast(destroy)
+        .target_objects(&[board.tolsimir])
+        .resolve();
+
+    let state = board.runner.state();
+    assert_eq!(
+        state.objects[&board.tolsimir].zone,
+        Zone::Graveyard,
+        "reach-guard: Tolsimir left before the trigger resolved"
+    );
+    assert_eq!(state.players[0].life, life_before + 3);
+    assert_eq!(
+        state.objects[&board.opponent].damage_marked, 1,
+        "the 1/1 Wolf still fights the 4/4"
+    );
+    assert_eq!(
+        state.objects[&board.wolf].zone,
+        Zone::Graveyard,
+        "the 4/4 deals 4 back to the Wolf"
+    );
+}
+
+/// CR 400.7 + CR 701.14b: a Wolf blinked in response returns as a new object,
+/// so the original trigger's "that creature" no longer exists and nothing
+/// fights. The blink fires a second Wolf trigger; with no declared object left
+/// the driver declines its optional fight.
+#[test]
+fn blinked_wolf_does_not_fight_for_the_old_trigger() {
+    let (mut board, flicker) = board_with_instant(Some(("Cloudshift", FLICKER_ORACLE)));
+    let flicker = flicker.expect("Cloudshift in hand");
+    let life_before = board.runner.state().players[0].life;
+
+    drive_wolf_to_fight_target_prompt(&mut board);
+    board
+        .runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(board.opponent)),
+        })
+        .expect("choose the 4/4 as the fight target");
+
+    board
+        .runner
+        .cast(flicker)
+        .target_objects(&[board.wolf])
+        .resolve();
+
+    let state = board.runner.state();
+    assert_eq!(
+        state.objects[&board.wolf].zone,
+        Zone::Battlefield,
+        "reach-guard: the blinked Wolf is back under the same id"
+    );
+    assert_eq!(
+        state.players[0].life,
+        life_before + 6,
+        "both Wolf triggers gain 3"
+    );
+    assert_eq!(
+        state.objects[&board.opponent].damage_marked, 0,
+        "the old trigger's Wolf is gone, so nothing fights"
+    );
+    assert_eq!(state.objects[&board.wolf].damage_marked, 0);
 }

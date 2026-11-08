@@ -84,7 +84,7 @@ mod etrata_cloak_enters_under_cloaker_5944;
 mod exiled_card_power_linked_pile;
 mod exuberant_wolfbear_base_pt_target;
 mod fantastic_four_bounded_loop;
-mod fight_dual_slot_up_to_one;
+mod fight_up_to_one_target_slots;
 mod fin_sidequest_turn_history_conditions;
 mod finneas_token_or_rabbit_counters;
 mod first_combat_phase_static;

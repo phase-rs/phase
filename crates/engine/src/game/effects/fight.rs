@@ -17,13 +17,16 @@ use crate::types::zones::Zone;
 /// - `TriggeringSource` → the object named by the trigger event
 ///   (CR 608.2k + CR 608.2c: "that creature" is the entering Wolf, not the
 ///   ability source).
+///
+/// `Ok(None)` means the fighter no longer exists as that object, so there is no
+/// fight (CR 701.14b).
 fn resolve_fight_subject(
     state: &GameState,
     ability: &ResolvedAbility,
-) -> Result<ObjectId, EffectError> {
+) -> Result<Option<ObjectId>, EffectError> {
     let subject = match &ability.effect {
         Effect::Fight { subject, .. } => subject,
-        _ => return Ok(ability.source_id),
+        _ => return Ok(Some(ability.source_id)),
     };
     if refers_to_attached(subject) {
         // CR 303.4 + CR 701.14a: "Enchanted creature fights" requires an Object
@@ -35,32 +38,34 @@ fn resolve_fight_subject(
             .get(&ability.source_id)
             .and_then(|obj| obj.attached_to)
             .and_then(|t| t.as_object())
+            .map(Some)
             .ok_or_else(|| {
                 EffectError::MissingParam("Fight subject: source not attached to anything".into())
             });
     }
     match subject {
+        // CR 608.2k + CR 400.7 + CR 701.14a: the fighter is the object the
+        // trigger event names (the entering Wolf), never `ability.source_id`,
+        // and only while it is still that incarnation on the battlefield — a
+        // Wolf that left (or blinked back as a new object) does not fight. The
+        // shared event-referent authority is the one tap/untap and prepare use.
         TargetFilter::TriggeringSource => {
-            // CR 608.2k + CR 608.2c + CR 701.14a: the fighter is the event
-            // source (`extract_source_from_event`), not `ability.source_id`.
-            // Same pair `deal_damage.rs` uses for `DamageSource::TriggeringSource`.
-            // Do not call `resolve_event_context_target` — its ParentTarget +
-            // ZoneChanged arm binds the entering object for filters that are
-            // not the trigger source.
-            Ok(state
-                .current_trigger_event
-                .as_ref()
-                .and_then(crate::game::targeting::extract_source_from_event)
-                .unwrap_or(ability.source_id))
+            Ok(crate::game::targeting::resolve_event_referent_permanents(
+                state,
+                subject,
+                ability.source_id,
+            )
+            .first()
+            .copied())
         }
-        TargetFilter::SelfRef => Ok(ability.source_id),
+        TargetFilter::SelfRef => Ok(Some(ability.source_id)),
         TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => {
             // Dual-chosen fights return from `resolve_fight_fighters` before
             // this function. A single-fighter ParentTarget subject is the
             // ability source, never the live ZoneChanged object.
-            Ok(ability.source_id)
+            Ok(Some(ability.source_id))
         }
-        _ => Ok(ability.source_id),
+        _ => Ok(Some(ability.source_id)),
     }
 }
 
@@ -156,7 +161,13 @@ pub(crate) fn resolve_fight_fighters(
         // CR 701.14b + CR 400.7: "~ fights …" whose source left and returned
         // before resolution — the fighter is no longer on the battlefield (the
         // returned permanent is a new object), so neither creature fights.
-        if !refers_to_attached(subject) && ability.self_ref_binding(state).is_none() {
+        // CR 113.7a: a `TriggeringSource` fighter is not the source, so the
+        // source leaving does not stop it; its own identity is checked in
+        // `resolve_fight_subject`.
+        if !refers_to_attached(subject)
+            && !matches!(subject, TargetFilter::TriggeringSource)
+            && ability.self_ref_binding(state).is_none()
+        {
             return Ok(None);
         }
     }
@@ -168,7 +179,9 @@ pub(crate) fn resolve_fight_fighters(
     if object_targets.is_empty() && ability.targeting_is_optional() {
         return Ok(None);
     }
-    let source_id = resolve_fight_subject(state, ability)?;
+    let Some(source_id) = resolve_fight_subject(state, ability)? else {
+        return Ok(None);
+    };
     let target_id = object_targets
         .first()
         .copied()
