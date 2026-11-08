@@ -2467,9 +2467,12 @@ fn pay_ability_cost_inner(
             // granter involves no choice, so it is paid here like `~`.
             let payer = match target {
                 // CR 201.5a + CR 400.7: the granter stamped on the paying ability, while it is that object.
-                Some(TargetFilter::GrantingObject { .. }) => {
-                    match scope
-                        .granting_object(state, source_id)
+                // First-bound wins across re-donation (cf. `filter.rs` `bound.or(head)`):
+                // after a second hop `bound` still names the original granter
+                // while the head stamp moved on to the carrier.
+                Some(TargetFilter::GrantingObject { bound }) => {
+                    match bound
+                        .or(scope.granting_object(state, source_id))
                         .filter(|granter| granter.is_current(state))
                     {
                         Some(granter) => granter.object_id,
@@ -4553,6 +4556,60 @@ mod tests {
                 "stale={stale}"
             );
             assert_eq!(scenario.state.objects[&src].counters.get(&charge), Some(&1));
+        }
+    }
+
+    /// CR 201.5a + CR 400.7 + CR 601.2h: a re-donated remove-counter cost naming
+    /// the granter pays from the first-bound incarnation, not the head carrier.
+    /// The ability lives on the carrier (second hop, e.g. Marvin) while `bound`
+    /// still names the original granter (e.g. Hankyu).
+    #[test]
+    fn remove_counter_cost_on_granter_prefers_first_bound_over_head() {
+        let charge = CounterType::Generic("charge".to_string());
+        for stale in [false, true] {
+            let mut scenario = GameScenario::new();
+            let carrier = scenario.add_creature(P0, "Carrier", 2, 2).id();
+            let granter = scenario.add_creature(P0, "Granter", 0, 3).id();
+            scenario.with_counter(carrier, charge.clone(), 1);
+            scenario.with_counter(granter, charge.clone(), 3);
+            let mut bound = ObjectIncarnationRef::from_object(&scenario.state.objects[&granter]);
+            bound.incarnation += u64::from(stale);
+            let cost = AbilityCost::RemoveCounter {
+                count: 1,
+                counter_type: CounterMatch::OfType(charge.clone()),
+                target: Some(TargetFilter::GrantingObject { bound: Some(bound) }),
+                selection: Default::default(),
+            };
+            let mut def =
+                AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp).cost(cost.clone());
+            def.granting_object = Some(ObjectIncarnationRef::from_object(
+                &scenario.state.objects[&carrier],
+            ));
+            std::sync::Arc::make_mut(
+                &mut scenario.state.objects.get_mut(&carrier).unwrap().abilities,
+            )
+            .push(def);
+            let paid = pay_ability_cost_for_activation(
+                &mut scenario.state,
+                P0,
+                carrier,
+                &cost,
+                Some(0),
+                &mut None,
+                &mut Vec::new(),
+            )
+            .is_ok_and(|outcome| matches!(outcome, PaymentOutcome::Paid));
+            assert_eq!(paid, !stale, "stale={stale}");
+            let expected = if stale { 3 } else { 2 };
+            assert_eq!(
+                scenario.state.objects[&granter].counters.get(&charge),
+                Some(&expected),
+                "stale={stale}"
+            );
+            assert_eq!(
+                scenario.state.objects[&carrier].counters.get(&charge),
+                Some(&1)
+            );
         }
     }
 

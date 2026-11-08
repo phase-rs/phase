@@ -294,6 +294,7 @@ mod hag_noxious_nightmares_menace_grant;
 mod halana_alena_partners_where_x;
 mod half_life_activation_cost;
 mod hand_alternative_cost_legal_action_offer;
+mod hankyu_two_hop_granter_cost;
 mod harms_way_redirect;
 mod harrow_regression;
 mod hatchery_sliver_dynamic_replicate;
