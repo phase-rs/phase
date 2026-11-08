@@ -1370,19 +1370,23 @@ pub struct ManaSpentSourceSnapshot {
     pub lki: LKISnapshot,
 }
 
-/// CR 106.3 + CR 400.7: the producer fact of a mana unit that is still floating
+/// CR 106.3 + CR 106.4: the producer fact of a mana unit that is still floating
 /// in a mana pool while its producing source is gone.
 ///
 /// CR 106.4 holds unspent mana in a pool, and a "you don't lose unspent mana as
 /// steps and phases end" effect (Upwelling) keeps a unit there across the
-/// step/phase boundary that ends the generic last-known-information window
-/// (CR 400.7: exit LKI is step-scoped). CR 106.3 makes the unit's source the
-/// source of the ability that produced it, and that binding does not expire
-/// while the mana is unspent — so the fact the unit will owe at payment time
-/// has to outlive the generic cache WITHOUT extending it. One entry per exact
-/// producing incarnation, written only for units a pool still holds, and
-/// rebuilt from the pools at every boundary, so nothing is retained beyond a
-/// floating unit's own lifetime.
+/// step/phase boundary that ends this engine's last-known-information window.
+/// That window is a storage POLICY of this engine — the entry is dropped at step
+/// cleanup because the cache is step-scoped — not a CR requirement: CR 400.7
+/// makes a moved object a new object, which is why the fact must be keyed to the
+/// epoch that produced it, and nothing in the rules bounds how long last-known
+/// information is kept. CR 106.3 makes the unit's source the source of the
+/// ability that produced it, and that binding does not expire while the mana is
+/// unspent — so the fact the unit will owe at payment time has to outlive the
+/// generic cache WITHOUT extending it. One entry per exact producing
+/// incarnation, written only for units a pool still holds, and rebuilt from the
+/// pools at every boundary, so nothing is retained beyond a floating unit's own
+/// lifetime.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PooledManaProducerSnapshot {
     pub source_id: ObjectId,
@@ -16667,21 +16671,38 @@ impl GameState {
     /// What the save CAN still prove is that the legacy fallback's live read would
     /// describe a different object than the producer (CR 400.7: a moved object
     /// "becomes a new object with no memory of, or relation to, its previous
-    /// existence"). Mana floating in a pool was added by a mana ability of the
-    /// object named by `source_id` — the ability of a PERMANENT (CR 605.1a) or of
-    /// a spell/card in the zone it occupied (CR 113.7) — so a unit whose storage
-    /// id names a LIVE object that is no longer a permanent on the battlefield is
-    /// refused here rather than priced at the next payment from a card in a
-    /// graveyard or exile. That is the Minimus Containment shape: the "Treasure"
-    /// that made the mana is now a card in the graveyard.
+    /// existence"). Two shapes prove it, and neither is "the current object is off
+    /// the battlefield":
+    ///
+    /// * the storage id's current object is not a battlefield permanent. Mana
+    ///   floating in a pool was added by a mana ability of the object named by
+    ///   `source_id` — the ability of a PERMANENT (CR 605.1a) or of a spell/card in
+    ///   the zone it occupied (CR 113.7) — so the unit is refused here rather than
+    ///   priced at the next payment from a card in a graveyard or exile. That is the
+    ///   Minimus Containment shape: the "Treasure" that made the mana is now a card
+    ///   in the graveyard.
+    /// * the storage id's current object IS a battlefield permanent, but this turn's
+    ///   journal records a departure from a MANA-PRODUCING zone for that storage id by
+    ///   an EARLIER tenure — out of the battlefield (CR 605.1a) or out of the stack into
+    ///   any zone but the battlefield (CR 106.3 makes a spell the source of mana it
+    ///   produces). Such a departure is CR 400.7 applied to the id: the object now there
+    ///   arrived after it, so the id has already had a tenure that could have produced
+    ///   the mana. The pin is the only thing that would say WHICH tenure, so the unit's
+    ///   producer is unprovable exactly as in the first shape. Leaving this out is what
+    ///   let the Clever Impersonator / Burning-Tree Emissary / Cloudshift board — the
+    ///   returned card is a Treasure ON the battlefield with the trigger's own storage
+    ///   id — attribute an earlier object's `{R}{G}` to the returned copy, which
+    ///   CR 106.3 never licensed: that mana's source is the object that generated the
+    ///   trigger (CR 113.7), not its successor.
     ///
     /// The shapes that stay admitted are the ones the save does not convict:
     ///
-    /// * a unit whose storage id still holds a battlefield permanent — the live
-    ///   read names the same object the pre-pin engine read, and refusing it would
-    ///   reject historical snapshots this tree still loads (the pump of floating
-    ///   mana off `sprout_witherbloom_realistic_lands_4p`) for an ambiguity the
-    ///   save cannot settle either way;
+    /// * a unit whose storage id holds a battlefield permanent whose arrival is the
+    ///   journal's only zone change for it — the live read names the same object the
+    ///   pre-pin engine read, and refusing it would reject historical snapshots this
+    ///   tree still loads (the pump of floating mana off
+    ///   `sprout_witherbloom_realistic_lands_4p`) for an ambiguity the save cannot
+    ///   settle either way;
     /// * a unit whose storage id appears in NO live object, whether or not the
     ///   step-scoped `lki_cache` still holds that id's departure snapshot. The
     ///   ObjectId-keyed cache describes the object that was there when it left, so
@@ -16699,11 +16720,7 @@ impl GameState {
                     shape.source_incarnation.is_none() && !shape.is_convoke_payment()
                 })
                 .map(|(shape, _)| shape.source_id)
-                .find(|source_id| {
-                    self.objects
-                        .get(source_id)
-                        .is_some_and(|object| object.zone != Zone::Battlefield)
-                })
+                .find(|source_id| self.unpinned_producer_is_unprovable(*source_id))
                 .map(|source_id| (player.id, source_id))
         });
         match ambiguous {
@@ -16712,6 +16729,38 @@ impl GameState {
             }
             None => Ok(()),
         }
+    }
+
+    /// CR 106.3 + CR 400.7 + CR 605.1a: whether `source_id`'s storage id proves a
+    /// pin-less floating unit cannot be attributed to the object a live read
+    /// would return. The two proofs are [`Self::reject_ambiguous_floating_mana_provenance`]'s;
+    /// this is the per-id half so the guard reads as one predicate per unit.
+    fn unpinned_producer_is_unprovable(&self, source_id: ObjectId) -> bool {
+        let Some(object) = self.objects.get(&source_id) else {
+            // CR 400.7: nothing occupies the id, so the legacy read is the departed
+            // object's own last-known answer rather than a later object's.
+            return false;
+        };
+        if object.zone != Zone::Battlefield {
+            return true;
+        }
+        // CR 400.7: an object that left a zone and came back is a new object, so a
+        // recorded departure from a mana-producing zone — the battlefield per
+        // CR 605.1a, the stack per CR 106.3 — proves this storage id has already had an
+        // EARLIER tenure that could have produced the mana. Which tenure did is exactly
+        // what the missing pin would have said. The one record that is not evidence of
+        // an earlier tenure is the Stack → Battlefield arrival: that is the current
+        // permanent's own beginning (CR 400.7 makes it the object the spell became), and
+        // every creature cast this turn carries one, so convicting on it would refuse
+        // saves whose mana came from the very permanent that is there now.
+        self.zone_changes_this_turn.iter().any(|record| {
+            record.object_id == source_id
+                && match record.from_zone {
+                    Some(Zone::Battlefield) => true,
+                    Some(Zone::Stack) => record.to_zone != Zone::Battlefield,
+                    _ => false,
+                }
+        })
     }
 
     /// CR 601.2 / CR 602.2: at most one announcement is in flight, so every live
@@ -26961,6 +27010,13 @@ declare_game_state! {
     /// retained across a boundary (Upwelling's "you don't lose unspent mana as
     /// steps and phases end") keeps the producer fact CR 106.3 owes the payment
     /// that eventually spends it.
+    ///
+    /// Authority only. Each entry names the object that produced the mana, and the
+    /// storage id it names may since have been occupied by a card in a hidden zone
+    /// (CR 400.2), so the viewer projection drops the entries a viewer cannot
+    /// identify (`visibility::redact_hidden_identity_side_tables`, on the same rule
+    /// as every other id-keyed LKI table). The engine keeps them: the payment that
+    /// spends the unit reads them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pooled_mana_producer_snapshots: Vec<PooledManaProducerSnapshot>,
 

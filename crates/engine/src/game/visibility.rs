@@ -4580,8 +4580,8 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
 ///
 /// Policy, per table:
 /// - id-keyed LKI (`lki_cache`, `lki_by_incarnation`, `lki_copiable_values`,
-///   `lki_copiable_values_by_incarnation`, `departed_stack_spells`, and `linked_exile_lki`
-///   keyed by a hidden source) is dropped;
+///   `lki_copiable_values_by_incarnation`, `departed_stack_spells`, `linked_exile_lki`
+///   keyed by a hidden source, and `pooled_mana_producer_snapshots`) is dropped;
 /// - a departed activated ability whose source is hidden from the viewer is dropped (the
 ///   same rule as a departed spell keyed by a hidden id: once the ability left the stack,
 ///   its CR 701.20a reveal or its source's public zone is gone);
@@ -4620,6 +4620,20 @@ fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSe
         state.departed_stack_spells.remove(id);
         state.linked_exile_lki.remove(id);
     }
+    // CR 106.3 + CR 106.4 + CR 400.2 + CR 401.2: a floating unit's retained producer fact is
+    // id-keyed last-known information — an `LKISnapshot` naming the object that produced the
+    // mana — and it is held under the very storage id a hidden card may now occupy (the
+    // shuffle that hid the card keeps the id). CR 400.2 makes a library a hidden zone, and
+    // CR 401.2 — "Players can't look at or change the order of cards in a library" — forbids
+    // exactly the disclosure a name here would make: the fact identifies which card sits in
+    // that library, and the id ties it to the shuffled card. So it goes with the caches above
+    // rather than surviving them. Only the PROJECTION drops it: the authoritative state keeps
+    // the fact, because the payment that eventually spends the unit still owes CR 106.3 the
+    // source of the ability that produced the mana, and that answer is read by the engine,
+    // never by a viewer.
+    state
+        .pooled_mana_producer_snapshots
+        .retain(|snapshot| !hidden_ids.contains(&snapshot.source_id));
     // CR 400.2: a departed activated ability names its source and carries that source's
     // ability. Once the source is hidden from this viewer the record is dropped, as a
     // departed spell keyed by a hidden id is. Projection only.

@@ -326,8 +326,13 @@ pub fn record_captured_floating_mana_provenance(document: &mut Value) {
     /// at, or `None` when the capture cannot prove it. See the function docs.
     fn producing_incarnation(state: &GameState, source_id: ObjectId) -> Option<u64> {
         let object = state.objects.get(&source_id)?;
-        // Only the shape the production guard convicts needs an epoch; a source
-        // that is still a battlefield permanent is admitted on the live read.
+        // A source that is still a battlefield permanent is admitted on the live read
+        // only while this turn's journal records NO departure from a producing zone for
+        // its storage id (`GameState::unpinned_producer_is_unprovable`). When it does
+        // record one, the id has already had an earlier tenure and this migration
+        // declines too: the journal names what that tenure was, but not whether IT or
+        // the current object made the unit, and stamping the earlier epoch would be a
+        // guess. The guard refuses the unit instead.
         if object.zone == Zone::Battlefield {
             return None;
         }

@@ -4,7 +4,7 @@
 //! Three shapes, all driven through the real pipeline (`GameScenario` /
 //! `GameRunner`, real activations, the real restore chokepoint) and all read
 //! through Rain of Riches' `FilterProp::ManaSpentFromSource` gate plus the
-//! CR 601.2i cast-history record:
+//! CR 601.2i cast-history record, and two more that pin the SEAM the fact crosses:
 //!
 //! * **phase boundary** (`retained_pip_keeps_its_producer_across_the_phase_boundary`) —
 //!   Oracle verified against Scryfall: **Upwelling** `{3}{G}` Enchantment —
@@ -39,10 +39,25 @@
 //!   a Treasure; the trigger's mana is the ORIGINAL object's (CR 400.7), so it
 //!   must not qualify for Rain of Riches even though a Treasure now shares the
 //!   storage id.
+//! * **viewer projection** (`retained_producer_fact_is_stripped_from_the_opponent_view`) —
+//!   **Chaos Warp** shuffles the tapped **Llanowar Elves** into its owner's
+//!   library while Upwelling holds the pip it made, so the retained producer fact
+//!   names a card that is now in a hidden zone (CR 400.2). CR 401.2 forbids
+//!   looking at, or reordering, the cards in a library, so the fact must not reach
+//!   any viewer's serialized state — while the engine keeps using it.
+//! * **pre-pin restore with a live successor**
+//!   (`legacy_pinless_pool_is_not_attributed_to_a_battlefield_successor`) — the
+//!   same board as the stacked-trigger shape, saved without pins. The guard's old
+//!   "is the current object off the battlefield" discriminator admitted it and the
+//!   live read priced the trigger's mana as the returned Treasure's; the journal
+//!   proves an earlier producing tenure, so the unit's producer is unprovable and
+//!   the pool is refused.
 
+use engine::game::derived_views::ClientGameStateRef;
 use engine::game::effects::token::predefined_token_abilities;
 use engine::game::layers::evaluate_layers;
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::visibility::filter_state_for_viewer;
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{Effect, TargetRef};
@@ -564,13 +579,16 @@ fn legacy_pinless_pool_is_refused_and_pinned_pool_still_pays() {
     // (the live object is the same one the pre-pin engine read), so refusing it
     // would reject historical snapshots for an ambiguity nothing establishes.
     {
-        let mut legacy = persisted_json(runner.state());
-        assert_eq!(strip_pool_pins(&mut legacy), 1);
-        // Replace the departed Treasure's unit with one whose source is a live
-        // permanent, leaving the pin stripped.
+        // The permanent exists BEFORE the save is taken, so the save really
+        // carries a live battlefield object at that storage id — a save
+        // serialized first and re-pointed afterwards would only prove what the
+        // guard does with an id no object answers for.
         let live_land = land(runner.state_mut(), 9300, "Forest", "Forest");
         let live_incarnation = runner.state().objects[&live_land].incarnation;
-        let mut legacy_with_live_source = legacy;
+        let mut legacy_with_live_source = persisted_json(runner.state());
+        assert_eq!(strip_pool_pins(&mut legacy_with_live_source), 1);
+        // Replace the departed Treasure's unit with one whose source is that live
+        // permanent, leaving the pin stripped.
         for player in legacy_with_live_source["state"]["players"]
             .as_array_mut()
             .expect("players")
@@ -588,6 +606,17 @@ fn legacy_pinless_pool_is_refused_and_pinned_pool_still_pays() {
                  {live_land:?} (incarnation {live_incarnation}) must stay admitted, got {error:?}"
             )
         });
+        let source = admitted_state.objects.get(&live_land).unwrap_or_else(|| {
+            panic!(
+                "the restored save must carry the live source object {live_land:?}; a save \
+                 without it would only exercise an id no object answers for"
+            )
+        });
+        assert_eq!(
+            (source.zone, source.incarnation),
+            (Zone::Battlefield, live_incarnation),
+            "reach: the restored unit's storage id answers for a live battlefield permanent"
+        );
         let unit = admitted_state.players[P0.0 as usize]
             .mana_pool
             .units()
@@ -650,15 +679,16 @@ fn legacy_pinless_pool_is_refused_and_pinned_pool_still_pays() {
 // 3 — a triggered ability's mana comes from the trigger's own source
 // ---------------------------------------------------------------------------
 
-/// CR 106.3 + CR 113.7 + CR 400.7: the trigger keeps the object that generated
-/// it. A Clever Impersonator entering as a copy of Burning-Tree Emissary puts
+/// The shared board of tests 3 and 5, driven to the moment the original
+/// Emissary trigger has resolved and its two pinned units are floating.
+///
+/// A Clever Impersonator entering as a copy of Burning-Tree Emissary puts
 /// "add {R}{G}" on the stack (CR 605.1b does not apply); Cloudshift returns the
-/// card to the battlefield as a Treasure copy while that trigger waits. The
-/// trigger's mana is the ORIGINAL object's, so paying for the turn's first spell
-/// with it must NOT qualify for Rain of Riches — no cascade, and no Treasure
-/// fact in the cast history.
-#[test]
-fn trigger_source_mana_is_not_the_returned_copy() {
+/// card to the battlefield as a Treasure copy while that trigger waits, so the
+/// storage id holds a LIVE battlefield object that is not the producer. Returns
+/// the runner, that storage id, the epoch that generated the trigger, and the
+/// `{2}` spell the floating mana is spent on.
+fn clever_impersonator_trigger_pool() -> (GameRunner, ObjectId, u64, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
@@ -859,6 +889,18 @@ fn trigger_source_mana_is_not_the_returned_copy() {
         );
     }
 
+    (runner, impersonator, copied_incarnation, sciences)
+}
+
+/// CR 106.3 + CR 113.7 + CR 400.7: the trigger keeps the object that generated
+/// it, so paying for the turn's first spell with the trigger's mana must NOT
+/// qualify for Rain of Riches — no cascade, and no Treasure fact in the cast
+/// history — even though a Treasure now occupies the storage id.
+#[test]
+fn trigger_source_mana_is_not_the_returned_copy() {
+    let (mut runner, impersonator, _copied_incarnation, sciences) =
+        clever_impersonator_trigger_pool();
+
     // --- Act 4: spend that mana on the turn's first spell.
     {
         let commit = runner.cast(sciences).commit();
@@ -902,4 +944,378 @@ fn trigger_source_mana_is_not_the_returned_copy() {
             .count();
         assert_eq!(cascade_triggers, 0, "no cascade trigger may be enqueued");
     }
+}
+
+// ---------------------------------------------------------------------------
+// 4 — a retained producer fact is engine-private, never viewer-facing
+// ---------------------------------------------------------------------------
+
+/// Chaos Warp, verbatim (Scryfall).
+const CHAOS_WARP: &str = "The owner of target permanent shuffles it into their \
+                          library, then reveals the top card of their library. If \
+                          it's a permanent card, they put it onto the battlefield.";
+/// Llanowar Elves' printed mana ability, verbatim (Scryfall).
+const LLANOWAR_ELVES: &str = "{T}: Add {G}.";
+/// The viewer-facing wire of `state` for `viewer`, exactly as `phase-server`
+/// sends it (`ClientGameStateRef::wrap_filtered` over that viewer's filter
+/// output), rendered as text so an assertion can search the whole payload.
+fn viewer_wire_text(state: &GameState, viewer: PlayerId) -> String {
+    let projection = filter_state_for_viewer(state, viewer);
+    let wrapped = ClientGameStateRef::wrap_filtered(state, &projection, Some(viewer));
+    serde_json::to_string(&wrapped).expect("the viewer wire serializes")
+}
+
+/// CR 106.3 + CR 106.4 + CR 400.2 + CR 401.2: a floating unit's retained
+/// producer fact is engine-private. Upwelling keeps a Llanowar Elves pip in the
+/// pool across the step boundary that ends the generic LKI window, so the fact
+/// CR 106.3 owes that unit's eventual payment is copied onto the pip. Chaos Warp
+/// then shuffles the Elves into its owner's library, where CR 400.2 makes it a
+/// card in a hidden zone: CR 401.2 keeps "the order of cards in a library"
+/// unlookable, and a payload that still carried the shuffled card's name would
+/// tell the opponent exactly which card sits in that library — the one thing
+/// 401.2 withholds. The projection must therefore strip the fact for every
+/// viewer the object is hidden from, while the authoritative state keeps it for
+/// the payment that will spend the unit.
+#[test]
+fn retained_producer_fact_is_stripped_from_the_opponent_view() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // A library deep enough that the Chaos Warp shuffle leaves the Elves in it;
+    // the reach guards below verify that rather than assume it.
+    scenario.with_library_top(
+        P0,
+        &[
+            "Forest", "Forest", "Forest", "Forest", "Forest", "Forest", "Forest", "Forest",
+            "Forest", "Forest", "Forest", "Forest",
+        ],
+    );
+    let _upwelling = scenario
+        .add_enchantment_from_oracle(P0, "Upwelling", UPWELLING)
+        .id();
+    let elves = scenario
+        .add_creature_from_oracle(P0, "Llanowar Elves", 1, 1, LLANOWAR_ELVES)
+        .id();
+    let warp = {
+        let mut builder =
+            scenario.add_spell_to_hand_from_oracle(P0, "Chaos Warp", true, CHAOS_WARP);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 2,
+        });
+        builder.id()
+    };
+    let sciences = sciences_in_hand(&mut scenario);
+
+    let mut runner = scenario.build();
+    let mountain = land(runner.state_mut(), 9400, "Mountain", "Mountain");
+    add_mana_from_source(runner.state_mut(), P0, ManaType::Colorless, 2, mountain);
+    add_mana_from_source(runner.state_mut(), P0, ManaType::Red, 1, mountain);
+
+    // --- Act 1: Chaos Warp targets the Elves, and the Elves tap in response.
+    let producing_incarnation = runner.state().objects[&elves].incarnation;
+    runner.cast(warp).target_object(elves).commit();
+    activate_mana_ability(&mut runner, elves, ManaType::Green);
+
+    // --- Act 2: Chaos Warp resolves — the Elves is shuffled into the library.
+    pass_until(
+        &mut runner,
+        |r| r.state().stack.is_empty(),
+        "resolving Chaos Warp",
+    );
+    {
+        let state = runner.state();
+        assert_eq!(
+            state.objects[&elves].zone,
+            Zone::Library,
+            "reach: Chaos Warp must shuffle the Elves into its owner's library"
+        );
+        assert!(
+            !state.last_revealed_ids.contains(&elves),
+            "reach: the Elves must stay UNREVEALED for the hidden-identity projection to \
+             apply; the shuffle revealed it"
+        );
+        assert!(
+            state
+                .lki_by_incarnation
+                .get(&elves)
+                .is_some_and(|history| history.contains_key(&producing_incarnation)),
+            "reach: the battlefield exit that hid the Elves recorded exit LKI inside this step"
+        );
+        let units = pool_units(&runner);
+        assert_eq!(units.len(), 1, "reach: one floating unit, got {units:?}");
+        assert_eq!(
+            units[0].source_incarnation,
+            Some(producing_incarnation),
+            "reach: the unit is pinned to the epoch that produced it"
+        );
+    }
+
+    // --- Act 3: cross the step boundary, where the fact moves onto the pip.
+    pass_until(
+        &mut runner,
+        |r| r.state().phase == Phase::PostCombatMain,
+        "crossing combat into postcombat main",
+    );
+    {
+        let state = runner.state();
+        assert_eq!(
+            pool_units(&runner).len(),
+            1,
+            "Upwelling must have retained the unit across the boundary"
+        );
+        assert!(
+            state.lki_by_incarnation.is_empty() && state.lki_cache.is_empty(),
+            "CR 400.7: the generic exit LKI was cleared at the boundary"
+        );
+        let retained = state
+            .pooled_mana_producer_snapshots
+            .iter()
+            .find(|snapshot| {
+                snapshot.source_id == elves && snapshot.source_incarnation == producing_incarnation
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "the retained fact must name the exact producing epoch; got {:?}",
+                    state.pooled_mana_producer_snapshots
+                )
+            });
+        assert_eq!(
+            retained.lki.name, "Llanowar Elves",
+            "reach: the retained fact is last-known information about the Elves"
+        );
+        assert_eq!(state.objects[&elves].zone, Zone::Library);
+    }
+
+    // --- Act 4: the OPPONENT's serialized state must not name the hidden card.
+    {
+        let projection = filter_state_for_viewer(runner.state(), P1);
+        assert_eq!(
+            projection.objects[&elves].name, "Hidden Card",
+            "reach: the projection already hides the library card's own identity"
+        );
+        let wire = viewer_wire_text(runner.state(), P1);
+        if let Some(at) = wire.find("Llanowar Elves") {
+            let from = at.saturating_sub(200);
+            let to = (at + 200).min(wire.len());
+            panic!(
+                "CR 400.2 + CR 401.2: the opponent's state still names the card Chaos Warp \
+                 shuffled into the library, so the retained producer fact identifies a hidden \
+                 library card: …{}…",
+                &wire[from..to]
+            );
+        }
+    }
+
+    // --- Act 5: authority still holds and uses the retained fact.
+    {
+        let state = runner.state();
+        assert!(
+            state.pooled_mana_producer_snapshots.iter().any(|snapshot| {
+                snapshot.source_id == elves && snapshot.source_incarnation == producing_incarnation
+            }),
+            "projecting a viewer's state must not mutate the authoritative retained fact"
+        );
+        let forest = land(runner.state_mut(), 9401, "Forest", "Forest");
+        add_mana_from_source(runner.state_mut(), P0, ManaType::Colorless, 1, forest);
+        let commit = runner.cast(sciences).commit();
+        let state = commit.state();
+        let record = state.spells_cast_this_turn_by_player[&P0]
+            .back()
+            .expect("the cast must be recorded");
+        let snapshots = record.mana_source_snapshots();
+        let producer = snapshots
+            .iter()
+            .find(|snapshot| snapshot.source_id == elves)
+            .unwrap_or_else(|| {
+                panic!(
+                    "CR 106.3: the retained fact must still answer the payment; got {snapshots:?}"
+                )
+            });
+        assert_eq!(
+            producer.lki.name, "Llanowar Elves",
+            "the engine itself must keep using the retained producer after the projection \
+             stripped it for the viewer"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 5 — a live battlefield successor is not admissible evidence either
+// ---------------------------------------------------------------------------
+/// CR 106.3 + CR 400.7: the pre-pin guard keys on "the current object is off the
+/// battlefield", which is the wrong discriminator. The stored id may hold a
+/// LIVE battlefield object that is not the producer: the Clever Impersonator has
+/// returned as a Treasure, so a pin-less pool unit's only recorded incarnation
+/// (the CURRENT object's) describes the Treasure, and a live read would price
+/// the ORIGINAL trigger's mana with the returned copy's characteristics. The
+/// journal proves the same id has already had a producing tenure, so the epoch
+/// is not recoverable from the save — the shared restore chokepoint refuses it,
+/// exactly as it refuses the graveyard shape. The current-format control (the
+/// save the engine writes today, pins intact) stays admitted.
+#[test]
+fn legacy_pinless_pool_is_not_attributed_to_a_battlefield_successor() {
+    let (runner, impersonator, copied_incarnation, sciences) = clever_impersonator_trigger_pool();
+
+    // Reach guards: the storage id holds a live battlefield Treasure that is a
+    // different object from the epoch that produced the mana (CR 400.7).
+    {
+        let state = runner.state();
+        let returned = &state.objects[&impersonator];
+        assert_eq!(
+            returned.zone,
+            Zone::Battlefield,
+            "reach: the returned card is on the battlefield, so the off-battlefield \
+             discriminator does not fire"
+        );
+        assert!(
+            returned.card_types.subtypes.iter().any(|s| s == "Treasure"),
+            "reach: the returned copy must be a Treasure, got {:?}",
+            returned.card_types.subtypes
+        );
+        assert_ne!(
+            returned.incarnation, copied_incarnation,
+            "CR 400.7: the returned card is a new object"
+        );
+    }
+
+    // The current-format control: the save the engine writes today is admitted.
+    assert!(
+        admitted(persisted_json(runner.state())).is_ok(),
+        "a current-format save (pins intact) must stay admitted"
+    );
+
+    // --- The legacy shape: the same pool, saved before the pin existed. ---
+    let mut legacy = persisted_json(runner.state());
+    assert_eq!(
+        strip_pool_pins(&mut legacy),
+        2,
+        "both trigger units must lose their pin to reproduce the legacy save"
+    );
+
+    match admitted(legacy) {
+        Err(PersistedRestoreError::AmbiguousFloatingManaProvenance { player, source_id }) => {
+            assert_eq!(player, P0);
+            assert_eq!(
+                source_id, impersonator,
+                "the refused unit is the one whose producer the save cannot prove"
+            );
+        }
+        Err(other) => panic!("expected an ambiguous-provenance refusal, got {other:?}"),
+        Ok(state) => {
+            // The adjudication a battlefield-only guard permits: the pool is
+            // admitted, and the legacy live read prices the ORIGINAL trigger's
+            // mana from the returned Treasure. Demonstrated rather than
+            // asserted, so a loosened rule fails here with its own consequence.
+            let mut restored = GameRunner::from_state(state);
+            let commit = restored.cast(sciences).commit();
+            let state = commit.state();
+            let record = state.spells_cast_this_turn_by_player[&P0]
+                .back()
+                .expect("the admitted cast must be recorded");
+            let named: Vec<&str> = record
+                .mana_source_snapshots()
+                .iter()
+                .map(|snapshot| snapshot.lki.name.as_str())
+                .collect();
+            let cascade = state.objects[&sciences]
+                .cast_spell_keywords
+                .iter()
+                .any(|keyword| matches!(keyword, Keyword::Cascade));
+            panic!(
+                "CR 106.3 + CR 400.7: a pin-less unit whose storage id names a battlefield \
+                 permanent must be refused when the journal proves an earlier producing \
+                 tenure; this save was admitted and attributed the trigger's mana to \
+                 {named:?} (cascade granted: {cascade})"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 6 — the over-rejection edge of that rule: a Stack → Battlefield arrival
+// ---------------------------------------------------------------------------
+
+/// CR 106.3 + CR 400.7: the refusal above must convict only on an EARLIER producing
+/// tenure. A permanent cast this turn arrives through a `Stack → Battlefield`
+/// record, which is the current permanent's own beginning (CR 400.7 makes the
+/// permanent the object the spell became) — every creature cast this turn carries
+/// one. Convicting on it would refuse a pin-less save whose mana came from the very
+/// permanent that is still on the battlefield, so the unit stays admitted.
+#[test]
+fn a_stack_arrival_this_turn_is_not_an_earlier_producing_tenure() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    let dork = {
+        let mut builder =
+            scenario.add_creature_to_hand_from_oracle(P0, "Llanowar Elves", 1, 1, LLANOWAR_ELVES);
+        builder.with_mana_cost(ManaCost::generic(1));
+        builder.id()
+    };
+
+    let mut runner = scenario.build();
+    let mountain = land(runner.state_mut(), 9500, "Mountain", "Mountain");
+    add_mana_from_source(runner.state_mut(), P0, ManaType::Colorless, 1, mountain);
+    runner.cast(dork).resolve();
+
+    // Reach guard: the cast left exactly the record this control is about, and it is
+    // the arrival of the tenure the Elves is in now.
+    {
+        let state = runner.state();
+        assert_eq!(
+            state.objects[&dork].zone,
+            Zone::Battlefield,
+            "reach: the Elves resolved onto the battlefield"
+        );
+        let journal: Vec<(Option<Zone>, Zone)> = state
+            .zone_changes_this_turn
+            .iter()
+            .filter(|record| record.object_id == dork)
+            .map(|record| (record.from_zone, record.to_zone))
+            .collect();
+        assert_eq!(
+            journal,
+            vec![
+                (Some(Zone::Hand), Zone::Stack),
+                (Some(Zone::Stack), Zone::Battlefield),
+            ],
+            "reach: the Elves' journal is the cast and its Stack → Battlefield arrival"
+        );
+        let arrival = state
+            .zone_changes_this_turn
+            .iter()
+            .find(|record| record.object_id == dork && record.from_zone == Some(Zone::Stack))
+            .expect("reach: the arrival record exists");
+        assert_eq!(
+            arrival.entered_incarnation,
+            Some(state.objects[&dork].incarnation),
+            "CR 400.7: the arrival record names the epoch now on the battlefield"
+        );
+    }
+
+    // A pin-less unit sourced from that permanent — the shape a pre-pin save writes
+    // for any creature cast this turn.
+    add_mana_from_source(runner.state_mut(), P0, ManaType::Green, 1, dork);
+    let mut legacy = persisted_json(runner.state());
+    assert_eq!(
+        strip_pool_pins(&mut legacy),
+        0,
+        "reach: the hand-added unit already carries no pin"
+    );
+    let admitted_state = admitted(legacy).unwrap_or_else(|error| {
+        panic!(
+            "a pin-less unit sourced from a permanent whose only journal entry is its own \
+             Stack → Battlefield arrival must stay admitted, got {error:?}"
+        )
+    });
+    let unit = admitted_state.players[P0.0 as usize]
+        .mana_pool
+        .units()
+        .next()
+        .expect("the unit survives");
+    assert_eq!(
+        unit.source_incarnation, None,
+        "reach: the admitted unit really is pin-less"
+    );
+    assert_eq!(unit.source_id, dork);
 }
