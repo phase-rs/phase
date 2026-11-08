@@ -2298,28 +2298,91 @@ fn an_altar_zulaport_period_is_offered_a_bounded_shortcut_and_taken() {
     }
 }
 
+/// Drives P0's Phyrexian Altar + Gravecrawler loop on four seats, with `payoffs` beside Walking
+/// Corpse and each of `placements` on its seat, every trigger aimed at `aim`, to the offer.
+fn four_seat_altar_offer(
+    db: &CardDatabase,
+    payoffs: &[&str],
+    placements: &[(PlayerId, &str)],
+    aim: PlayerId,
+) -> GameRunner {
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let altar = scenario.add_real_card(P0, "Phyrexian Altar", Zone::Battlefield, db);
+    for card in payoffs.iter().chain(&["Walking Corpse"]) {
+        scenario.add_real_card(P0, card, Zone::Battlefield, db);
+    }
+    for &(seat, card) in placements {
+        scenario.add_real_card(seat, card, Zone::Battlefield, db);
+    }
+    let gravecrawler = scenario.add_real_card(P0, "Gravecrawler", Zone::Battlefield, db);
+    for seat in 0..4 {
+        for _ in 0..50 {
+            scenario.add_real_card(PlayerId(seat), "Swamp", Zone::Library, db);
+        }
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    let score = |action: &GameAction| {
+        2 * names(&[gravecrawler])(action)
+            + chooses_color(ManaType::Black)(action)
+            + i32::from(
+                matches!(
+                    action,
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(seat))
+                    } if *seat == aim
+                ) || matches!(action, GameAction::DecideOptionalEffect { accept: true }),
+            )
+    };
+    for _ in 0..6 {
+        let index = ability(runner.state(), altar, true);
+        activate(&mut runner, altar, index);
+        settle(&mut runner, &score);
+        if is_offer(runner.state()) {
+            break;
+        }
+        cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
+        settle(&mut runner, &score);
+        if is_offer(runner.state()) {
+            break;
+        }
+    }
+    runner
+}
+
 /// CR 603.3d + CR 601.2c + CR 800.4a + CR 104.2a: on four seats, P0 sacrifices Gravecrawler to
-/// Phyrexian Altar and recasts it beside a death trigger aimed at P1: Blood Artist ("Whenever this
-/// creature or another creature dies, target player loses 1 life and you gain 1 life."), Spiteful
-/// Prankster ("Whenever another creature dies, this creature deals 1 damage to target player or
-/// planeswalker."), Blood Artist beside Extractor Demon ("Whenever another creature leaves the
-/// battlefield, you may have target player mill two cards."), or Blood Artist beside Spiteful
-/// Prankster, with or without P1's Energy Field ("Prevent all damage that would be dealt to you by
-/// sources you don't control." / "When a card is put into your graveyard from anywhere, sacrifice
-/// this enchantment."). Each trigger's target is chosen as it goes on the stack, so the period
-/// re-aims at each seat left, and P0 wins. With every slot taking life, P1 leaves at repetition 19,
-/// P2 at 39 and P3 at 59, or at 9, 19 and 29 when Blood Artist and Spiteful Prankster both take 1.
-/// A slot that took nothing at P1 (Extractor Demon's mill, or Prankster's damage under Energy
-/// Field, CR 615.6) keeps P1, so P2 leaves at 21, P3 at 41 and P1 at 59. The record aims at P1
-/// alone, so its own declaration reaches P1's departure: 19, or 9 when both slots take 1.
+/// Phyrexian Altar and recasts it beside a death trigger aimed at one seat: Blood Artist ("Whenever
+/// this creature or another creature dies, target player loses 1 life and you gain 1 life."),
+/// Spiteful Prankster ("Whenever another creature dies, this creature deals 1 damage to target
+/// player or planeswalker."), Blood Artist beside Extractor Demon ("Whenever another creature
+/// leaves the battlefield, you may have target player mill two cards."), or Blood Artist beside
+/// Spiteful Prankster, with or without an opponent's Energy Field ("Prevent all damage that would
+/// be dealt to you by sources you don't control." / "When a card is put into your graveyard from
+/// anywhere, sacrifice this enchantment.") or Fiendish Duo ("First strike (This creature deals
+/// combat damage before creatures without first strike.)" / "If a source would deal damage to an
+/// opponent, it deals double that damage to that player instead."). Each trigger's target is
+/// chosen as it goes on the stack, so the period re-aims at each seat left, and P0 wins. With every
+/// slot taking life, P1 leaves at repetition 19, P2 at 39 and P3 at 59, or at 9, 19 and 29 when
+/// Blood Artist and Spiteful Prankster both take 1; aimed at P2 or P3 instead, both taking 1 still
+/// win at 29. A slot that
+/// took nothing at P1 (Extractor Demon's mill, or Prankster's damage under Energy Field, CR 615.6)
+/// keeps P1, so P2 leaves at 21, P3 at 41 and P1 at 59. Prankster measured taking nothing at Energy
+/// Field's controller stays there while Blood Artist drains the others, so with the record aimed at
+/// P2 and the Field under P1, or aimed at P1 and the Field under P3, P0 wins at 57. Under P1's
+/// Fiendish Duo, P1 is not its own opponent and takes 2 a repetition: 29; under P2's, P1 takes 3 a
+/// repetition until it leaves in repetition 6, and P2 leaves with the Duo (CR 800.4a) in 16: 26.
+/// The record aims at one seat alone, so its own declaration reaches that seat's departure: 19, 9
+/// when both slots take 1, or 6 when P1 takes 3.
 #[test]
 fn a_single_player_death_trigger_on_four_seats_re_aims_at_each_seat_left() {
     let Some(db) = shared_card_db() else { return };
     let prankster_artist = &["Blood Artist", "Spiteful Prankster"][..];
-    for (payoffs, p1_permanents, frame, count, own, end) in [
+    for (payoffs, placements, aim, frame, count, own, end) in [
         (
             &["Blood Artist"][..],
             &[][..],
+            P1,
             [21, 19, 20, 20],
             59,
             19,
@@ -2328,6 +2391,7 @@ fn a_single_player_death_trigger_on_four_seats_re_aims_at_each_seat_left() {
         (
             &["Spiteful Prankster"][..],
             &[][..],
+            P1,
             [20, 19, 20, 20],
             59,
             19,
@@ -2336,6 +2400,7 @@ fn a_single_player_death_trigger_on_four_seats_re_aims_at_each_seat_left() {
         (
             &["Blood Artist", "Extractor Demon"][..],
             &[][..],
+            P1,
             [21, 19, 20, 20],
             59,
             19,
@@ -2343,7 +2408,8 @@ fn a_single_player_death_trigger_on_four_seats_re_aims_at_each_seat_left() {
         ),
         (
             prankster_artist,
-            &["Energy Field"][..],
+            &[(P1, "Energy Field")][..],
+            P1,
             [21, 19, 20, 20],
             59,
             19,
@@ -2352,57 +2418,73 @@ fn a_single_player_death_trigger_on_four_seats_re_aims_at_each_seat_left() {
         (
             prankster_artist,
             &[][..],
+            P1,
             [21, 18, 20, 20],
             29,
             9,
             [50, 0, 0, 0],
         ),
+        (
+            prankster_artist,
+            &[(P1, "Energy Field")][..],
+            P2,
+            [21, 20, 18, 20],
+            57,
+            9,
+            [78, 0, 0, 0],
+        ),
+        (
+            prankster_artist,
+            &[(P3, "Energy Field")][..],
+            P1,
+            [21, 18, 20, 20],
+            57,
+            9,
+            [78, 0, 0, 0],
+        ),
+        (
+            prankster_artist,
+            &[][..],
+            P2,
+            [21, 20, 18, 20],
+            29,
+            9,
+            [50, 0, 0, 0],
+        ),
+        (
+            prankster_artist,
+            &[][..],
+            P3,
+            [21, 20, 20, 18],
+            29,
+            9,
+            [50, 0, 0, 0],
+        ),
+        (
+            prankster_artist,
+            &[(P1, "Fiendish Duo")][..],
+            P1,
+            [21, 18, 20, 20],
+            29,
+            9,
+            [50, 0, 0, 0],
+        ),
+        (
+            prankster_artist,
+            &[(P2, "Fiendish Duo")][..],
+            P1,
+            [21, 17, 20, 20],
+            26,
+            6,
+            [46, 0, 0, 0],
+        ),
     ] {
-        let mut scenario = GameScenario::new_n_player(4, 42);
-        scenario.at_phase(Phase::PreCombatMain);
-        let altar = scenario.add_real_card(P0, "Phyrexian Altar", Zone::Battlefield, db);
-        for card in payoffs.iter().chain(&["Walking Corpse"]) {
-            scenario.add_real_card(P0, card, Zone::Battlefield, db);
-        }
-        for card in p1_permanents {
-            scenario.add_real_card(P1, card, Zone::Battlefield, db);
-        }
-        let gravecrawler = scenario.add_real_card(P0, "Gravecrawler", Zone::Battlefield, db);
-        for seat in 0..4 {
-            for _ in 0..50 {
-                scenario.add_real_card(PlayerId(seat), "Swamp", Zone::Library, db);
-            }
-        }
-        let mut runner = scenario.build();
-        runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
-        let score = |action: &GameAction| {
-            2 * names(&[gravecrawler])(action)
-                + chooses_color(ManaType::Black)(action)
-                + i32::from(matches!(
-                    action,
-                    GameAction::ChooseTarget {
-                        target: Some(TargetRef::Player(P1))
-                    } | GameAction::DecideOptionalEffect { accept: true }
-                ))
-        };
-        for _ in 0..4 {
-            let index = ability(runner.state(), altar, true);
-            activate(&mut runner, altar, index);
-            settle(&mut runner, &score);
-            if is_offer(runner.state()) {
-                break;
-            }
-            cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
-            settle(&mut runner, &score);
-            if is_offer(runner.state()) {
-                break;
-            }
-        }
+        let mut runner = four_seat_altar_offer(db, payoffs, placements, aim);
         let offered = runner.state().clone();
         assert_eq!(
             (offered.stack.len(), lives(&offered)),
             (payoffs.len(), frame.to_vec()),
-            "reach {payoffs:?} {p1_permanents:?}: the triggers stand at the offer frame"
+            "reach {payoffs:?} {placements:?} {aim:?}: the triggers stand at the offer frame"
         );
         let WaitingFor::LoopShortcut {
             schema,
@@ -2412,7 +2494,7 @@ fn a_single_player_death_trigger_on_four_seats_re_aims_at_each_seat_left() {
         } = &offered.waiting_for
         else {
             panic!(
-                "{payoffs:?} {p1_permanents:?}: no offer: {:?}",
+                "{payoffs:?} {placements:?} {aim:?}: no offer: {:?}",
                 latest_verdict(&offered)
             );
         };
@@ -2423,7 +2505,7 @@ fn a_single_player_death_trigger_on_four_seats_re_aims_at_each_seat_left() {
                 *predicted_winner
             ),
             (&IterationCount::Fixed(count), Some(count), Some(P0)),
-            "{payoffs:?} {p1_permanents:?}"
+            "{payoffs:?} {placements:?} {aim:?}"
         );
         bounded_recorded_offer(&offered, count);
         assert_eq!(
@@ -2431,18 +2513,18 @@ fn a_single_player_death_trigger_on_four_seats_re_aims_at_each_seat_left() {
             Some(ReplayMode::Scheduled {
                 count: IterationCount::Fixed(own)
             }),
-            "{payoffs:?} {p1_permanents:?}"
+            "{payoffs:?} {placements:?} {aim:?}"
         );
         let suggestion = schema
             .suggested_declaration
             .clone()
-            .unwrap_or_else(|| panic!("{payoffs:?} {p1_permanents:?}: a suggestion"));
+            .unwrap_or_else(|| panic!("{payoffs:?} {placements:?} {aim:?}: a suggestion"));
         assert_eq!(
             suggestion.replay,
             ReplayMode::Scheduled {
                 count: IterationCount::Fixed(count)
             },
-            "{payoffs:?} {p1_permanents:?}"
+            "{payoffs:?} {placements:?} {aim:?}"
         );
 
         let mut events = act_events(
@@ -2457,7 +2539,7 @@ fn a_single_player_death_trigger_on_four_seats_re_aims_at_each_seat_left() {
         assert_eq!(
             taken.waiting_for,
             WaitingFor::GameOver { winner: Some(P0) },
-            "{payoffs:?} {p1_permanents:?}"
+            "{payoffs:?} {placements:?} {aim:?}"
         );
         assert_eq!(
             events
@@ -2465,14 +2547,195 @@ fn a_single_player_death_trigger_on_four_seats_re_aims_at_each_seat_left() {
                 .filter(|event| matches!(event, GameEvent::GameOver { .. }))
                 .count(),
             1,
-            "{payoffs:?} {p1_permanents:?}"
+            "{payoffs:?} {placements:?} {aim:?}"
         );
         assert_eq!(
             (lives(taken), eliminated(taken)),
-            (end.to_vec(), vec![P1, PlayerId(2), PlayerId(3)]),
-            "{payoffs:?} {p1_permanents:?}"
+            (end.to_vec(), vec![P1, P2, P3]),
+            "{payoffs:?} {placements:?} {aim:?}"
         );
     }
+}
+
+/// Takes the offer standing in `runner` at its published count with its suggestion, and returns
+/// the events.
+fn take_suggestion(runner: &mut GameRunner) -> Vec<GameEvent> {
+    let WaitingFor::LoopShortcut { schema, .. } = &runner.state().waiting_for else {
+        panic!("an offer stands, got {:?}", runner.state().waiting_for);
+    };
+    let count = schema.iteration_count.clone();
+    let template = schema.suggested_declaration.clone();
+    let mut events = act_events(runner, GameAction::DeclareShortcut { count, template });
+    events.extend(accept(runner));
+    events
+}
+
+/// CR 614.1a + CR 704.5g + CR 800.4a: Palisade Giant ("All damage that would be dealt to you and
+/// other permanents you control is dealt to this creature instead.") takes Spiteful Prankster's
+/// damage in its controller's place until a 7th damage destroys it, and its death triggers break
+/// the cycle, so a zero measured at its controller does not last. Under P3, with the record aimed
+/// at P1 at 18 life, the witness that parks Prankster on P3 performs only 9 repetitions before the
+/// Giant dies, while the one that re-aims both slots in published order drains P1 (rep 9) and P2
+/// (rep 19) and then takes P3 to 14 and the Giant to 6 damage over six repetitions: 25, no winner.
+/// Under P2, with the record aimed at P2 at 19, re-aiming the record's non-taking slot reaches 11,
+/// no winner.
+/// Under P1, with the record aimed at P1 at 19, the Giant is destroyed in repetition 6 under either
+/// witness: 5, no suggestion.
+#[test]
+fn a_zero_that_ends_partway_publishes_the_witness_that_reaches_further() {
+    let Some(db) = shared_card_db() else { return };
+    let prankster_artist = &["Blood Artist", "Spiteful Prankster"][..];
+    for (giant, aim, frame, count, own, taken_to) in [
+        (
+            P3,
+            P1,
+            [21, 18, 20, 20],
+            25,
+            9,
+            Some(([46, 0, 0, 14], vec![P1, P2])),
+        ),
+        (
+            P2,
+            P2,
+            [21, 20, 19, 20],
+            11,
+            5,
+            Some(([32, 0, 18, 20], vec![P1])),
+        ),
+        (P1, P1, [21, 19, 20, 20], 5, 5, None),
+    ] {
+        let mut runner =
+            four_seat_altar_offer(db, prankster_artist, &[(giant, "Palisade Giant")], aim);
+        let offered = runner.state().clone();
+        assert_eq!(
+            (offered.stack.len(), lives(&offered)),
+            (2, frame.to_vec()),
+            "Giant under {giant:?}: the triggers stand at the offer frame"
+        );
+        let WaitingFor::LoopShortcut {
+            schema,
+            predicted_winner,
+            declaration,
+            ..
+        } = &offered.waiting_for
+        else {
+            panic!(
+                "Giant under {giant:?}: no offer: {:?}",
+                latest_verdict(&offered)
+            );
+        };
+        assert_eq!(
+            (&schema.iteration_count, *predicted_winner),
+            (&IterationCount::Fixed(count), None),
+            "Giant under {giant:?}"
+        );
+        assert_eq!(
+            declaration.as_ref().map(|own| own.replay.clone()),
+            Some(ReplayMode::Scheduled {
+                count: IterationCount::Fixed(own)
+            }),
+            "Giant under {giant:?}"
+        );
+        let Some((end, gone)) = taken_to else {
+            assert_eq!(schema.suggested_declaration, None, "Giant under {giant:?}");
+            continue;
+        };
+        assert_eq!(
+            schema
+                .suggested_declaration
+                .as_ref()
+                .map(|suggestion| suggestion.replay.clone()),
+            Some(ReplayMode::Scheduled {
+                count: IterationCount::Fixed(count)
+            }),
+            "Giant under {giant:?}"
+        );
+        let events = take_suggestion(&mut runner);
+        let taken = runner.state();
+        assert_eq!(
+            (
+                &taken.waiting_for,
+                lives(taken),
+                eliminated(taken),
+                events
+                    .iter()
+                    .any(|event| matches!(event, GameEvent::GameOver { .. }))
+            ),
+            (
+                &WaitingFor::Priority { player: P0 },
+                end.to_vec(),
+                gone,
+                false
+            ),
+            "Giant under {giant:?}"
+        );
+    }
+}
+
+/// CR 614.1a + CR 800.4a: under P1's Fiendish Duo ("First strike (This creature deals combat
+/// damage before creatures without first strike.)" / "If a source would deal damage to an
+/// opponent, it deals double that damage to that player instead."), with Blood Artist and Spiteful
+/// Prankster's record aimed at P2 at 17, the cards in published order give 28: P2 takes 3 in the
+/// first repetition, P1 leaves at repetition 11 taking the Duo, then P2 at 18 and P3 at 28. The
+/// suggestion stops at 26, no winner, because the take table measured Prankster's doubled
+/// 2 at P2 while P1 lived, so the witness charges P2 3 a repetition after P1 leaves and switches to
+/// P3 early.
+#[test]
+fn a_take_raised_by_a_seat_that_leaves_first_is_not_re_measured() {
+    let Some(db) = shared_card_db() else { return };
+    let mut runner = four_seat_altar_offer(
+        db,
+        &["Blood Artist", "Spiteful Prankster"],
+        &[(P1, "Fiendish Duo")],
+        P2,
+    );
+    let offered = runner.state().clone();
+    assert_eq!(
+        (offered.stack.len(), lives(&offered)),
+        (2, vec![21, 20, 17, 20]),
+        "the triggers stand at the offer frame"
+    );
+    let WaitingFor::LoopShortcut {
+        schema,
+        predicted_winner,
+        declaration,
+        ..
+    } = &offered.waiting_for
+    else {
+        panic!("no offer: {:?}", latest_verdict(&offered));
+    };
+    assert_eq!(
+        (
+            &schema.iteration_count,
+            schema.measured_repetition_bound,
+            *predicted_winner
+        ),
+        (&IterationCount::Fixed(26), Some(26), None)
+    );
+    assert_eq!(
+        declaration.as_ref().map(|own| own.replay.clone()),
+        Some(ReplayMode::Scheduled {
+            count: IterationCount::Fixed(6)
+        })
+    );
+    let events = take_suggestion(&mut runner);
+    let taken = runner.state();
+    assert_eq!(
+        (
+            &taken.waiting_for,
+            lives(taken),
+            eliminated(taken),
+            events
+                .iter()
+                .any(|event| matches!(event, GameEvent::GameOver { .. }))
+        ),
+        (
+            &WaitingFor::Priority { player: P0 },
+            vec![46, 0, 5, 0],
+            vec![P1, P3],
+            false
+        )
+    );
 }
 
 fn in_a_best_of_three(runner: &mut GameRunner) {

@@ -5442,6 +5442,7 @@ fn a_wire_zero_frames_per_period_fails_the_load_and_a_wire_two_does_not() {
             instructed_mills: None,
             growth: Default::default(),
             seat_life_charge_growth: Vec::new(),
+            seat_takes: Vec::new(),
         };
         v["waiting_for"]["data"]["certificate"]["per_cycle"] =
             serde_json::to_value(&period).expect("a PeriodicDelta serializes");
@@ -5506,6 +5507,7 @@ fn a_wire_zero_frames_per_period_fails_the_load_and_a_wire_two_does_not() {
                             instructed_mills: None,
                             growth: Default::default(),
                             seat_life_charge_growth: Vec::new(),
+                            seat_takes: Vec::new(),
                         },
                     ),
                 ),

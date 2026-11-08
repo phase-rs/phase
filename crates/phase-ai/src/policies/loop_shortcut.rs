@@ -900,6 +900,7 @@ mod tests {
             instructed_mills: None,
             growth: Default::default(),
             seat_life_charge_growth: Vec::new(),
+            seat_takes: Vec::new(),
         }
     }
 
@@ -922,6 +923,7 @@ mod tests {
             instructed_mills: None,
             growth: Default::default(),
             seat_life_charge_growth: Vec::new(),
+            seat_takes: Vec::new(),
         }
     }
 
@@ -1219,6 +1221,7 @@ mod tests {
             instructed_mills: None,
             growth: Default::default(),
             seat_life_charge_growth: Vec::new(),
+            seat_takes: Vec::new(),
         };
         let point = either_seat_point(&slot);
         let published = seat_declaration(&[(&slot, P1)]);

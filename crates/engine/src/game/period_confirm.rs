@@ -274,6 +274,8 @@ pub(crate) struct BoundedOfferParts {
     pub(crate) schema: ShortcutDecisionSchema,
     pub(crate) declaration: Option<DecisionTemplate>,
     pub(crate) predicted_winner: Option<PlayerId>,
+    /// The witness built with the other parking, performed beside the suggestion.
+    pub(crate) other_suggestion: Option<DecisionTemplate>,
 }
 
 /// The refusal of a span whose optional choices are not `holder`'s alone: more than one seat's
@@ -2545,6 +2547,11 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
                 == ObjectGrowthVerdict::ResourceRecurrence(Some(RecurrenceCover::TurnCycle)))
             .then(|| CleanupPair::measure(&frames, holder))
             .flatten();
+            let takes = if grows {
+                Vec::new()
+            } else {
+                measure_seat_takes(frame, holder, &s_n, &items, &end, &frames, &choices)
+            };
             match replay_bounded_offer(
                 frame,
                 holder,
@@ -2552,6 +2559,7 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
                 &choices,
                 cleanup,
                 repetition_growth,
+                takes,
             )? {
                 Some(mut parts) => {
                     (performed_reaches, recorded) =
@@ -3425,10 +3433,131 @@ pub(crate) fn perform_declared_on(
     )
 }
 
-/// CR 732.2a: performs the offer's own declaration and its suggestion from `start` to the count
-/// the threshold authority published, publishes the suggestion's reach (the own's without one; the
-/// recorded answers' without either), withdraws a suggestion that reaches no further than the own,
-/// and returns the declarations' records.
+/// CR 119.3 + CR 601.2c: per charged slot, the life one resolution takes at its recorded aim and
+/// at each other living opponent, replayed from the offer frame with the slot declared there.
+fn measure_seat_takes(
+    frame: &GameState,
+    holder: PlayerId,
+    s_n: &GameState,
+    items: &[PeriodItem],
+    end: &FrameEnd,
+    frames: &[GameState],
+    choices: &[PinnedDecision],
+) -> Vec<(DecisionSlot, PlayerId, i64)> {
+    use crate::analysis::decision_template::{
+        AnnouncementSubject, DecisionGroupKey, DecisionKind, IterationCount, Ranking, ReplayMode,
+        TargetSchedule,
+    };
+    let charges = |frames: &[GameState]| {
+        let refs: Vec<&GameState> = frames.iter().collect();
+        let (&last, window) = refs.split_last()?;
+        let touch = crate::analysis::resource::certified_period_touch(
+            window,
+            last,
+            crate::analysis::resource::PeriodCertification::BoardCovered,
+        );
+        Some(
+            crate::game::engine::bounded_cycle_charged_targets_for_window(
+                &touch,
+                holder,
+                i64::MAX,
+                crate::analysis::loop_check::OfferRoad::RecordedPeriod,
+            ),
+        )
+    };
+    let Some(recorded) = charges(frames) else {
+        return Vec::new();
+    };
+    let record: Vec<(DecisionSlot, PlayerId, i64)> = recorded
+        .iter()
+        .filter_map(|charge| {
+            let aim = charge.aimed_at.filter(|seat| *seat != holder)?;
+            Some((charge.slot.clone(), aim, charge.magnitude))
+        })
+        .collect();
+    let mut takes = record.clone();
+    for seat in frame
+        .players
+        .iter()
+        .filter(|p| !p.is_eliminated && p.id != holder)
+        .map(|p| p.id)
+    {
+        let probes: Vec<&(DecisionSlot, PlayerId, i64)> = record
+            .iter()
+            .filter(|(slot, aim, took)| {
+                *took > 0
+                    && *aim != seat
+                    && recorded
+                        .iter()
+                        .any(|charge| charge.slot == *slot && charge.reaches.contains(&seat))
+            })
+            .collect();
+        if probes.is_empty() {
+            continue;
+        }
+        let template = DecisionTemplate {
+            owner: holder,
+            decisions: choices
+                .iter()
+                .cloned()
+                .map(|decision| match decision {
+                    PinnedDecision::Targets { slot, .. }
+                        if probes.iter().any(|(probe, ..)| *probe == slot) =>
+                    {
+                        PinnedDecision::Targets {
+                            slot,
+                            targets: vec![TargetPin::Scheduled(TargetSchedule::Constant(
+                                Ranking::one(AnnouncementSubject::Seat(seat)),
+                            ))],
+                        }
+                    }
+                    other => other,
+                })
+                .collect(),
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::Fixed(2),
+            },
+            key: DecisionGroupKey::from_sources(&[], DecisionKind::LoopChoice),
+        };
+        let mut replay = s_n.clone();
+        let mut measured = Vec::new();
+        let came_round = end.repeat(
+            &mut replay,
+            items,
+            &mut Vec::new(),
+            None,
+            &mut Vec::new(),
+            Some((&template, 0)),
+        ) == CycleEnd::CameRound
+            && end.repeat(
+                &mut replay,
+                items,
+                &mut Vec::new(),
+                Some(&mut measured),
+                &mut Vec::new(),
+                Some((&template, 1)),
+            ) == CycleEnd::CameRound;
+        let Some(at) = charges(&measured).filter(|_| came_round) else {
+            continue;
+        };
+        takes.extend(at.into_iter().filter_map(|charge| {
+            let (_, _, record_take) = probes.iter().find(|(probe, ..)| *probe == charge.slot)?;
+            // CR 800.4a: a take above the record's may come from a permanent whose controller
+            // leaves first, so it is not published.
+            (charge.aimed_at == Some(seat) && charge.magnitude <= *record_take).then_some((
+                charge.slot,
+                seat,
+                charge.magnitude,
+            ))
+        }));
+    }
+    takes
+}
+
+/// CR 732.2a: performs the offer's own declaration and its suggestion — of two witnesses, the one
+/// that reaches further — from `start` to the count the threshold authority published, publishes
+/// the suggestion's reach (the own's without one; the recorded answers' without either), withdraws
+/// a suggestion that reaches no further than the own, and returns the declarations' records.
 fn perform_published(
     parts: &mut BoundedOfferParts,
     start: &GameState,
@@ -3463,6 +3592,19 @@ fn perform_published(
         };
         published = Some(record.clone());
         performed.push(record);
+    }
+    if let (Some(mut other), [_, suggestion]) =
+        (parts.other_suggestion.take(), performed.as_mut_slice())
+    {
+        let record = perform_declared(start, items, reach, holder, Some(&other), n);
+        if record.reach > suggestion.reach {
+            other.replay = ReplayMode::Scheduled {
+                count: IterationCount::Fixed(record.reach),
+            };
+            parts.schema.suggested_declaration = Some(other);
+            published = Some(record.clone());
+            *suggestion = record;
+        }
     }
     if let ([own, suggestion], Some(_)) = (performed.as_slice(), &parts.declaration) {
         if suggestion.reach <= own.reach {

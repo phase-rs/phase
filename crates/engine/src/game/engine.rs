@@ -3143,7 +3143,7 @@ fn bounded_offer_tail(
         .collect();
     // CR 119.3 + CR 704.5a: the per-seat divisor, published and then HANDED to the reduction,
     // so the bound cannot be divided by anything other than what the certificate states.
-    periodic.seat_life_charge = frame_wise.seat_life_charges(&charged);
+    periodic.seat_life_charge = frame_wise.seat_life_charges_at(&charged, &periodic.seat_takes);
     // (7b) THE DECLARATION, BEFORE THE SCHEMA. The cascade below is DECLARATION-RELATIVE, so the
     // pins have to exist before there is a count to publish. `pin_observed_declaration` pins
     // each charged slot to its observed aim and every other point from the period's record, and
@@ -3218,24 +3218,37 @@ fn bounded_offer_tail(
     // Re-aiming a chosen recorded target after its seat leaves is this witness's alone, over the
     // slots `entry_announces` charges; a slot it refuses keeps the record's aim, and the count ends
     // at that seat's departure.
-    let witness = pins
-        .as_ref()
-        .and_then(|observed| periodic.piecewise_witness(state, proposer, observed, &points, lead));
-    let witness_cascade = witness.as_ref().and_then(|witness| {
-        periodic.elimination_cascade(
+    // CR 732.2a: a measured zero is not known to be permanent, so the witness is built with and
+    // without parking there and the performance publishes whichever reaches further.
+    let witnesses: Vec<(
+        crate::analysis::decision_template::DecisionTemplate,
+        crate::analysis::resource::EliminationCascade,
+    )> = [
+        crate::analysis::resource::WitnessParking::AtMeasuredZero,
+        crate::analysis::resource::WitnessParking::Never,
+    ]
+    .into_iter()
+    .filter_map(|parking| {
+        let observed = pins.as_ref()?;
+        let witness =
+            periodic.piecewise_witness(state, proposer, observed, &points, lead, parking)?;
+        let cascade = periodic.elimination_cascade(
             state,
             proposer,
-            Some(witness),
-            pins.as_ref(),
+            Some(&witness),
+            Some(observed),
             &points,
             crate::analysis::resource::ChargeBound::Ceiling,
             lead,
-        )
-    });
-    let witness_bound = witness_cascade.as_ref().map_or(
-        0,
-        crate::analysis::resource::EliminationCascade::capacity_count,
-    );
+        )?;
+        Some((witness, cascade))
+    })
+    .collect();
+    let witness_bound = witnesses
+        .iter()
+        .map(|(_, cascade)| cascade.capacity_count())
+        .max()
+        .unwrap_or(0);
     // THE LARGER OF THE TWO, and that is not an optimisation. `handle_declare_shortcut` refuses
     // any `Fixed(n)` above `deliverable_capacity`, so a ceiling below the suggestion would have it
     // refuse the offer's own suggestion; and nothing about the witness's greedy aim guarantees its
@@ -3318,34 +3331,40 @@ fn bounded_offer_tail(
     // (11) The SUGGESTION: the witness at the most repetitions the proposer survives, within the
     // capacity, cut to the segments that count reaches, stamped and validated at that count, and
     // published only where it drives further than the declaration's own count and conforms there.
-    let suggested_count = witness_cascade.as_ref().map_or(0, |cascade| {
-        cascade.survived_count(proposer, schema.deliverable_capacity)
-    });
-    let suggested = IterationCount::Fixed(suggested_count);
-    let suggestion = witness
-        .filter(|_| suggested_count > own_survived)
-        .filter(|_| declaration.is_some())
-        .and_then(|mut witness| {
-            witness.cut_schedules_at(&suggested);
-            witness.replay = crate::analysis::decision_template::ReplayMode::Scheduled {
-                count: suggested.clone(),
-            };
-            let validated_range = shortcut_validated_range(&suggested, Some(&witness));
-            // A recorded period's suggestion is performed before it is published, so what it
-            // reaches is measured there rather than modelled here.
-            crate::analysis::decision_template::declaration_pins_conform(
-                &schema,
-                &witness,
-                validated_range,
-                certificate.per_cycle.as_ref(),
-                recorded,
-                state,
-            )
-            .then_some(witness)
-        });
-    match suggestion {
-        Some(witness) => {
-            schema.iteration_count = suggested;
+    let mut suggestions: Vec<(u32, crate::analysis::decision_template::DecisionTemplate)> =
+        witnesses
+            .into_iter()
+            .filter_map(|(mut witness, cascade)| {
+                let suggested_count = cascade.survived_count(proposer, schema.deliverable_capacity);
+                if suggested_count <= own_survived || declaration.is_none() {
+                    return None;
+                }
+                let suggested = IterationCount::Fixed(suggested_count);
+                witness.cut_schedules_at(&suggested);
+                witness.replay = crate::analysis::decision_template::ReplayMode::Scheduled {
+                    count: suggested.clone(),
+                };
+                let validated_range = shortcut_validated_range(&suggested, Some(&witness));
+                // A recorded period's suggestion is performed before it is published, so what it
+                // reaches is measured there rather than modelled here.
+                crate::analysis::decision_template::declaration_pins_conform(
+                    &schema,
+                    &witness,
+                    validated_range,
+                    certificate.per_cycle.as_ref(),
+                    recorded,
+                    state,
+                )
+                .then_some((suggested_count, witness))
+            })
+            .collect();
+    // Stable, so the parked witness leads a tie.
+    suggestions.sort_by_key(|(count, _)| std::cmp::Reverse(*count));
+    suggestions.dedup_by(|a, b| a.1 == b.1);
+    let mut suggestions = suggestions.into_iter();
+    match suggestions.next() {
+        Some((count, witness)) => {
+            schema.iteration_count = IterationCount::Fixed(count);
             schema.suggested_declaration = Some(witness);
         }
         None => schema.iteration_count = own_count,
@@ -3358,6 +3377,7 @@ fn bounded_offer_tail(
         schema,
         declaration,
         predicted_winner: None,
+        other_suggestion: suggestions.next().map(|(_, witness)| witness),
     })
 }
 
@@ -7806,6 +7826,7 @@ fn try_offer_object_growth_shortcut(
             schema,
             declaration: None,
             predicted_winner: None,
+            other_suggestion: None,
         },
         confirmation.period,
     ))
@@ -7815,7 +7836,8 @@ fn try_offer_object_growth_shortcut(
 /// period — `frames` its priority frames in order, `choices` the answers it recorded,
 /// `cleanup` the hand a turn-cycle period carries into each cleanup (CR 514.1), and `growth`
 /// what each repetition adds to the one before it (`resource::repetition_growth`), in which case
-/// `frames` are the offer's first repetition's.
+/// `frames` are the offer's first repetition's; `seat_takes` is what the confirmer measured each
+/// charged slot taking per seat (`PeriodicDelta::seat_takes`).
 pub(crate) fn replay_bounded_offer(
     state: &GameState,
     caster: PlayerId,
@@ -7826,6 +7848,11 @@ pub(crate) fn replay_bounded_offer(
         crate::analysis::resource::ResourceVector,
         Vec<(PlayerId, i64)>,
     ),
+    seat_takes: Vec<(
+        crate::analysis::decision_template::DecisionSlot,
+        PlayerId,
+        i64,
+    )>,
 ) -> Result<Option<super::period_confirm::BoundedOfferParts>, OfferRefusal> {
     let (growth, seat_life_charge_growth) = growth;
     let frames: Vec<&GameState> = frames.iter().collect();
@@ -7843,6 +7870,7 @@ pub(crate) fn replay_bounded_offer(
         instructed_mills: crate::analysis::resource::period_instructed_mills(state, prior, current),
         growth,
         seat_life_charge_growth,
+        seat_takes,
     };
     // CR 732.2a: the points are the game choices the replay answered.
     let points = pinned_decisions_to_points(choices, state, caster)
@@ -7990,6 +8018,7 @@ pub(crate) fn counted_offer(
                 instructed_mills: None,
                 growth: Default::default(),
                 seat_life_charge_growth: Vec::new(),
+                seat_takes: Vec::new(),
             },
         )),
     };
@@ -8003,6 +8032,7 @@ pub(crate) fn counted_offer(
         schema,
         declaration: None,
         predicted_winner: ending.map(|(_, winner)| winner),
+        other_suggestion: None,
     }
 }
 

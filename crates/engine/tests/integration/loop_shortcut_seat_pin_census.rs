@@ -369,9 +369,10 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
         ranked_files,
         vec![
             ("engine/src/analysis/decision_template.rs", 1),
-            ("engine/src/analysis/resource.rs", 1),
+            ("engine/src/analysis/resource.rs", 2),
             ("engine/src/game/engine.rs", 1),
             ("engine/src/game/interaction.rs", 4),
+            ("engine/src/game/period_confirm.rs", 1),
             ("engine/src/game/visibility.rs", 1),
             ("engine/src/types/actions.rs", 1),
         ],
@@ -385,10 +386,12 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
          human ingress's mint in `shortcut_announcement_subject`, \
          `declared_targets_statement`'s declared-subject mint beside its subject-to-candidate \
          read arm, and `suggested_allocation`'s segment-seat read arm. \
-         `analysis/resource.rs`'s occurrence is `piecewise_witness`'s per-segment mint, a \
-         TARGET-class PRODUCER: the witness is published as the offer's suggested \
-         declaration and driven, and every `TargetSchedule` variant is typed over `Ranking`, so \
-         no choice-class spelling is expressible there. \
+         `analysis/resource.rs`'s occurrences are `piecewise_witness`'s per-segment mint and its \
+         measured-zero park pin, TARGET-class PRODUCERS: the witness is published as the offer's \
+         suggested declaration and driven, and every `TargetSchedule` variant is typed over \
+         `Ranking`, so no choice-class spelling is expressible there. `game/period_confirm.rs`'s \
+         occurrence is `measure_seat_takes`'s declared-seat pin, a TARGET-class PRODUCER: the \
+         declaration it builds is replayed from the offer frame. \
          A MISSING producer is the revert this row exists to catch; an EXTRA file is \
          a new producer that must be classified rather than absorbed. got {ranked:?}"
     );
