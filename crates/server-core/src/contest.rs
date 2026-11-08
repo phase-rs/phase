@@ -889,17 +889,14 @@ mod tests {
             ContestClickReceipt::Ignored
         );
 
-        session.tick_contest();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        session.tick_contest();
-        assert_eq!(phase(session), ContestPhase::Active);
+        let now = start_active_contest(session);
 
         assert_eq!(
-            session.handle_contest_click(HOST, 1, 1),
+            session.handle_contest_click_at(HOST, 1, 1, now),
             ContestClickReceipt::Counted
         );
         assert_eq!(
-            session.handle_contest_click(HOST, 1, 1),
+            session.handle_contest_click_at(HOST, 1, 1, now),
             ContestClickReceipt::Ignored,
             "a duplicate delivery is not counted twice"
         );
@@ -1564,18 +1561,15 @@ mod tests {
     fn a_click_addressed_to_another_contest_is_ignored() {
         let mut mgr = session_with_contest(fast_policy());
         let session = only_session(&mut mgr);
-        session.tick_contest();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        session.tick_contest();
-        assert_eq!(phase(session), ContestPhase::Active);
+        let now = start_active_contest(session);
 
         assert_eq!(
-            session.handle_contest_click(HOST, 99, 1),
+            session.handle_contest_click_at(HOST, 99, 1, now),
             ContestClickReceipt::Ignored,
             "a prior contest's frame is not activity in this one"
         );
         assert_eq!(
-            session.handle_contest_click(HOST, 1, 1),
+            session.handle_contest_click_at(HOST, 1, 1, now),
             ContestClickReceipt::Counted,
             "and it did not burn the sequence number the real click needs"
         );
@@ -1620,13 +1614,18 @@ mod tests {
         let session = only_session(&mut mgr);
         session.connected[1] = false;
 
-        session.tick_contest();
+        // Pinning the epoch keeps the two observations exactly 0 ms and 60 ms from
+        // "first seen away" — the same timeline a wall-clock sleep intends, minus
+        // the drift: a 30 ms stall before the first tick would otherwise expire
+        // the grace and fail the in-grace assertion below.
+        let now = Instant::now();
+        session.contest.clock.epoch = now;
+        session.tick_contest_at(now);
         assert!(
             session.contest_active(),
             "within grace the contest only waits"
         );
-        std::thread::sleep(std::time::Duration::from_millis(60));
-        session.tick_contest();
+        session.tick_contest_at(now + std::time::Duration::from_millis(60));
 
         assert!(
             !session.contest_active(),
@@ -1689,9 +1688,7 @@ mod tests {
         assert!(session.claim_contest_driver());
         assert!(!session.claim_contest_driver(), "one driver per contest");
 
-        session.tick_contest();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        session.tick_contest();
+        start_active_contest(session);
 
         let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
             panic!("contest ended");
