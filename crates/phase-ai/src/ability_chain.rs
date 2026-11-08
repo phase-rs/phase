@@ -517,7 +517,7 @@ mod tests {
         effect(serde_json::json!({
             "type": "DraftFromSpellbook",
             "destination": "Battlefield",
-            "random": true
+            "selection": "Random"
         }))
     }
 

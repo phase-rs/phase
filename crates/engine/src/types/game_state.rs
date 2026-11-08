@@ -18444,9 +18444,12 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         proposition_truth: Option<bool>,
     },
-    /// Alchemy "draft a card from [card]'s spellbook": `player` chooses one card
-    /// name from `options` (the source card's spellbook list); the chosen card is
-    /// then conjured into `destination` (`tapped` if a "tapped" rider applied).
+    /// Alchemy spellbook choice: `player` chooses one card name from `options`;
+    /// the chosen card is then conjured into `destination` (`tapped` if a
+    /// "tapped" rider applied). A draft ("draft a card from [card]'s
+    /// spellbook") offers a random sample of the source card's spellbook; a
+    /// conjure-of-your-choice offers the whole book. The offer is hidden from
+    /// other viewers (`visibility::filter_state_for_scope` empties `options`).
     SpellbookDraft {
         player: PlayerId,
         source_id: ObjectId,

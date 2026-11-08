@@ -142,12 +142,12 @@ use crate::types::ability::{
     QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, ReplacementCondition,
     ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope,
     RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition,
-    SkipScope, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
-    SubAbilityLink, TapStateChange, TargetFilter, TargetReadOrigin, TargetSelectionMode,
-    ThisWayCause, TokenAttackDestination, TrackedAnaphorSource, TriggerCondition,
-    TriggerDefinition, TurnGate, TypeFilter, TypedFilter, UnlessPayModifier, UnloweredGuard,
-    UntilCondition, VoteSubject, WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser,
-    ZoneChoiceGatherRole, ZoneOwner,
+    SkipScope, SpellStackToGraveyardReplacement, SpellbookSelection, StaticCondition,
+    StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter,
+    TargetReadOrigin, TargetSelectionMode, ThisWayCause, TokenAttackDestination,
+    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter,
+    UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject, WheneverEventExpiry,
+    ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneChoiceGatherRole, ZoneOwner,
 };
 // `DoubleTarget` has no production use in this module since the counter-doubling
 // discriminator moved to `Effect::is_counter_multiplication()`; the child
@@ -12807,9 +12807,10 @@ fn parse_effect_clause_inner_with_damage_context(
         return parsed_clause(effect);
     }
 
-    // Digital-only Alchemy: "draft a card from [X]'s spellbook [+ destination]".
-    if let Some(effect) = try_parse_spellbook_draft(tp) {
-        return parsed_clause(effect);
+    // Digital-only Alchemy: "draft a card from [X]'s spellbook [+ destination
+    // or exile rider]".
+    if let Some(clause) = try_parse_spellbook_draft(tp) {
+        return clause;
     }
 
     // Digital-only Alchemy: "conjure a card of your choice from [X]'s spellbook
@@ -14384,23 +14385,34 @@ fn try_parse_typed_cards_in_hand_perpetual_gain_cost(tp: TextPair) -> Option<Eff
 }
 
 /// Digital-only Alchemy keyword action: parse "draft a card from [X]'s spellbook"
-/// with its destination. The source name between "from " and "spellbook" is the
+/// with its rider. The source name between "from " and "spellbook" is the
 /// card's own name (or "this creature/artifact/…") and is irrelevant to the
-/// effect — the resolver reads the spellbook list from the source object.
+/// effect — the resolver reads the spellbook list from the source object. Every
+/// draft is `SpellbookSelection::Draft`: the game offers a random sample of the
+/// book and the controller chooses one.
 ///
 /// To avoid silently dropping unmodeled riders (which the coverage tooling
 /// counts as swallowed clauses), the clause tail must be **fully consumed**:
 /// the bare draft goes to the hand; "and put it onto the battlefield[ tapped]"
 /// goes to the battlefield (honouring the tapped rider); "and exile it" / ",
-/// then exile it" goes to exile. Anything else — "and exile it face down",
-/// "twice, then …", or a trailing "then …" continuation not split off by the
-/// effect chain — returns `None` so the card falls through to `Unimplemented`
-/// rather than parsing to a subtly wrong effect.
-fn try_parse_spellbook_draft(tp: TextPair) -> Option<Effect> {
+/// then exile it" drafts into the hand and then exiles the drafted card (a
+/// following `ChangeZone` sub-ability). Anything else — "and exile it face
+/// down", "twice, then …", or a trailing "then …" continuation not split off by
+/// the effect chain — returns `None` so the card falls through to
+/// `Unimplemented` rather than parsing to a subtly wrong effect.
+fn try_parse_spellbook_draft(tp: TextPair) -> Option<ParsedEffectClause> {
     /// The clause tail is fully consumed when nothing (or just a sentence
     /// period) remains.
     fn tail_done(tail: &str) -> bool {
         tail.is_empty() || tail == "."
+    }
+
+    fn draft(destination: Zone, tapped: bool) -> Effect {
+        Effect::DraftFromSpellbook {
+            destination,
+            tapped,
+            selection: SpellbookSelection::Draft,
+        }
     }
 
     let (rest, _) = tag::<_, _, OracleError<'_>>("draft a card from ")
@@ -14416,14 +14428,12 @@ fn try_parse_spellbook_draft(tp: TextPair) -> Option<Effect> {
 
     // Default: a bare "draft a card from X's spellbook" creates it in hand.
     if tail_done(after_book) {
-        return Some(Effect::DraftFromSpellbook {
-            destination: Zone::Hand,
-            tapped: false,
-            random: false,
-        });
+        return Some(parsed_clause(draft(Zone::Hand, false)));
     }
 
-    // "… and put it onto the battlefield[ tapped]".
+    // "… and put it onto the battlefield[ tapped]". The literal reading (draft
+    // into hand, then put it onto the battlefield) is deferred: the card is
+    // still created directly on the battlefield.
     if let Ok((tail, _)) =
         tag::<_, _, OracleError<'_>>(" and put it onto the battlefield").parse(after_book)
     {
@@ -14431,21 +14441,11 @@ fn try_parse_spellbook_draft(tp: TextPair) -> Option<Effect> {
             Ok((tail, _)) => (tail, true),
             Err(_) => (tail, false),
         };
-        return tail_done(tail).then_some(Effect::DraftFromSpellbook {
-            destination: Zone::Battlefield,
-            tapped,
-            random: false,
-        });
+        return tail_done(tail).then(|| parsed_clause(draft(Zone::Battlefield, tapped)));
     }
 
-    // Connector axis (` and` / `, then`) × destination-verb (` exile it`).
-    // Digital-only Alchemy draft (no CR entry: `spellbook` / `conjure` /
-    // `draft a card` do not occur in the Comprehensive Rules).
-    // CR 608.2c: later text may modify earlier text — apply the rules of English;
-    // ", then exile it" names the draft's destination, same as " and exile it",
-    // rather than a later independent exile of a hand card. The drafted card is
-    // created directly in exile; `tail_done` still rejects " face down" (not
-    // modeled yet).
+    // Connector axis (` and` / `, then`) × destination-verb (` exile it`);
+    // `tail_done` still rejects " face down" (not modeled yet).
     if let Ok((tail, _)) = preceded(
         alt((
             tag::<_, _, OracleError<'_>>(" and"),
@@ -14455,11 +14455,35 @@ fn try_parse_spellbook_draft(tp: TextPair) -> Option<Effect> {
     )
     .parse(after_book)
     {
-        return tail_done(tail).then_some(Effect::DraftFromSpellbook {
-            destination: Zone::Exile,
-            tapped: false,
-            random: false,
-        });
+        if !tail_done(tail) {
+            return None;
+        }
+        // CR 608.2c: the controller follows the instructions in the order
+        // written — the card is drafted into its default zone, hand, then exiled
+        // from there (the move Ranar the Ever-Watchful's "put into exile from
+        // your hand" observes). CR 701.13a: to exile an object, move it to the
+        // exile zone from wherever it is. "it" is the drafted card: the draft
+        // publishes the created referent (`TargetFilter::LastCreated`).
+        let mut clause = parsed_clause(draft(Zone::Hand, false));
+        clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::LastCreated,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )));
+        return Some(clause);
     }
 
     // Unmodeled tail ("twice, then …", a trailing chained clause, …) — leave it
@@ -14468,34 +14492,31 @@ fn try_parse_spellbook_draft(tp: TextPair) -> Option<Effect> {
 }
 
 /// Digital-only Alchemy keyword action: parse "conjure a card of your choice from
-/// [X]'s spellbook [+ destination]". This is the "conjure ... of your choice" wording of
-/// the same operation as `draft a card from [X]'s spellbook`: reveal the source card's
-/// spellbook, the controller chooses one card, and it is created in the destination zone.
-/// Both map to `Effect::DraftFromSpellbook` — the resolver reads the spellbook list from the
-/// source object, so the printed source name in the text is irrelevant. The clause tail must
-/// be fully consumed (mirroring `try_parse_spellbook_draft`) so an unmodeled rider falls
-/// through to `Unimplemented` rather than parsing to a subtly wrong effect.
+/// [X]'s spellbook [+ destination]" and "conjure a random card from [X]'s spellbook
+/// [+ destination]". Both are the same take-one-card-from-the-spellbook operation as
+/// `draft a card from [X]'s spellbook`, so both map to `Effect::DraftFromSpellbook` — the
+/// resolver reads the spellbook list from the source object, so the printed source name in
+/// the text is irrelevant. The clause tail must be fully consumed (mirroring
+/// `try_parse_spellbook_draft`) so an unmodeled rider falls through to `Unimplemented`
+/// rather than parsing to a subtly wrong effect.
 ///
-/// Coupling note: this mapping is correct while `Effect::DraftFromSpellbook` offers the
-/// controller the *entire* spellbook to choose from, which is exactly what "a card of your
-/// choice" means. (In Arena, `draft a card from ... spellbook` presents three random cards,
-/// whereas "conjure a card of your choice" reveals the whole book.) If `DraftFromSpellbook`
-/// is ever narrowed to model the real three-card draft, these conjure-of-your-choice cards
-/// must retain the whole-book choice rather than following it.
+/// Selection: a draft offers a random sample of the book (`SpellbookSelection::Draft`),
+/// while "a card of your choice" keeps the whole-book choice (`SpellbookSelection::Chosen`)
+/// and "a random card" has the engine pick one with no prompt
+/// (`SpellbookSelection::Random`).
 fn try_parse_conjure_from_spellbook(tp: TextPair) -> Option<Effect> {
-    // Two wordings of the same draft-from-spellbook operation: "of your choice" lets the
-    // controller choose (random = false); "a random card" has the engine pick (random = true).
-    let (rest, random) = if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("conjure a card of your choice from ").parse(tp.lower)
-    {
-        (rest, false)
-    } else if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("conjure a random card from ").parse(tp.lower)
-    {
-        (rest, true)
-    } else {
-        return None;
-    };
+    let (rest, selection) = alt((
+        value(
+            SpellbookSelection::Chosen,
+            tag::<_, _, OracleError<'_>>("conjure a card of your choice from "),
+        ),
+        value(
+            SpellbookSelection::Random,
+            tag::<_, _, OracleError<'_>>("conjure a random card from "),
+        ),
+    ))
+    .parse(tp.lower)
+    .ok()?;
     // Consume the (irrelevant) source-card name up to "spellbook".
     let (after_book, _src) = take_until::<_, _, OracleError<'_>>("spellbook")
         .parse(rest)
@@ -14506,8 +14527,8 @@ fn try_parse_conjure_from_spellbook(tp: TextPair) -> Option<Effect> {
 
     // Destination via the shared conjure-zone parser; " tapped" only after the
     // battlefield. `DraftFromSpellbook` has no positional slot, so an "into the top
-    // N … at random" position is not carried (its `random` flag already captures
-    // the randomized-draft intent); the destination still collapses to the zone.
+    // N … at random" position is not carried (its `selection` already captures
+    // the randomized-pick intent); the destination still collapses to the zone.
     let (destination, _library_position, _library_players, zone_rest) =
         parse_conjure_zone(after_book)?;
     let (tail, tapped) = if destination == Zone::Battlefield {
@@ -14523,7 +14544,7 @@ fn try_parse_conjure_from_spellbook(tp: TextPair) -> Option<Effect> {
     (tail.is_empty() || tail == ".").then_some(Effect::DraftFromSpellbook {
         destination,
         tapped,
-        random,
+        selection,
     })
 }
 
