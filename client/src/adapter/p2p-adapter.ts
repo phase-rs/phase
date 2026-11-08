@@ -4437,6 +4437,10 @@ export class P2PHostAdapter implements EngineAdapter {
         }
         if (this.disposed || !this.ownsAuthority()) return;
         if (readFailed) {
+          // A newer publication arrived while this read was in flight: its
+          // read is still owed, so service it rather than letting the stale
+          // failure end the drain with nobody timing the payment.
+          if (this.sayExpiryReadPending) continue;
           if (generation === this.sayExpiryGeneration) {
             this.sayExpiryPayment = null;
             this.sayExpiryDeadline = null;
@@ -4578,6 +4582,9 @@ export class P2PHostAdapter implements EngineAdapter {
     try {
       target = await this.readSayPhraseExpiry();
     } catch {
+      // The payment may still be live: this timer stays its owner and reads
+      // again after a pause rather than leaving it untimed.
+      if (this.ownsSayExpiry(timerGen)) this.retrySayPhraseExpiry(timerGen);
       return;
     }
     if (!this.ownsSayExpiry(timerGen)) return;
@@ -4598,6 +4605,7 @@ export class P2PHostAdapter implements EngineAdapter {
       try {
         target = await this.readSayPhraseExpiry();
       } catch {
+        if (this.ownsSayExpiry(timerGen)) this.retrySayPhraseExpiry(timerGen);
         return;
       }
       if (!this.ownsSayExpiry(timerGen)) return;

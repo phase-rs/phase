@@ -304,6 +304,80 @@ describe("native P2P spoken-payment expiry", () => {
     }
   });
 
+  it("services a newer publication's read when the in-flight read fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const host = makeHost();
+      const hostSeat = new FakeSeatClient(0, viewState("host"));
+      await makeBridge(host, [hostSeat]);
+      // No timer is armed: only the drain can arm one.
+      const failing = deferred<SayPhraseExpiryTarget | null>();
+      const deadline = NOW() + 60_000;
+      hostSeat.sayPhraseExpiry.mockImplementationOnce(
+        () => failing.promise.then(() => Promise.reject(new Error("socket dropped the reply"))),
+      );
+      hostSeat.sayPhraseExpiry.mockResolvedValueOnce({
+        payer: 0,
+        submitter: 0,
+        payment: 7,
+        deadline_ms: deadline,
+      });
+
+      host.scheduleSayPhraseExpiry();
+      // A newer publication lands while that read is in flight: it advances the
+      // generation and leaves its own read pending behind the first.
+      host.scheduleSayPhraseExpiry();
+      expect(hostSeat.sayPhraseExpiry).toHaveBeenCalledTimes(1);
+
+      failing.resolve(null);
+      // The stale failure does not end the drain: the newer read is issued at
+      // once, without waiting for the retry pause, and arms the payment.
+      await vi.waitFor(() => expect(hostSeat.sayPhraseExpiry).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(host.sayExpiryPayment).toBe(7));
+      expect(host.sayExpiryDeadline).toBe(deadline);
+      expect(host.sayExpiryTimer).not.toBeNull();
+      host.clearSayExpiryTimer();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a browser host's expiry timer alive when its refresh read fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const host = makeHost() as HostInternals & { wasm: { getState: () => Promise<GameState> } };
+      (host as unknown as { nativeBridge: undefined }).nativeBridge = undefined;
+      const deadline = NOW() + 60_000;
+      const live = {
+        ...viewState("live payment"),
+        say_payment: { id: 7, owed: 2, said: 1, clock_ms: 0, deadline_ms: deadline },
+      } as unknown as GameState;
+      const getState = vi
+        .fn<() => Promise<GameState>>()
+        .mockRejectedValueOnce(new Error("engine worker busy"))
+        .mockResolvedValue(live);
+      host.wasm = { getState };
+      host.sayExpiryTimerGeneration = 1;
+      host.sayExpiryPayment = 7;
+      host.sayExpiryDeadline = NOW() - 1;
+
+      // The timer fired, but its refresh read failed.
+      await host.expireSayPhrase(7, 1);
+      expect(getState).toHaveBeenCalledTimes(1);
+
+      // It stays the payment's owner: after the pause it reads again and
+      // re-times the payment instead of leaving it untimed.
+      await vi.advanceTimersByTimeAsync(250);
+      await vi.waitFor(() => expect(getState).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(host.sayExpiryDeadline).toBe(deadline));
+      expect(host.sayExpiryPayment).toBe(7);
+      expect(host.sayExpiryTimer).not.toBeNull();
+      host.clearSayExpiryTimer();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("drains through the engine-authorized seat under turn control and revalidates when authority changes", async () => {
     const host = makeHost();
     const hostSeat = new FakeSeatClient(0, viewState("host"));
