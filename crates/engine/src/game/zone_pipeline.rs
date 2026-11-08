@@ -3845,7 +3845,8 @@ fn settle_batch_owner(
             | BatchCompletion::MeldExile { .. }
             | BatchCompletion::MeldEntry { .. }
             | BatchCompletion::MeldRedirect { .. }
-            | BatchCompletion::MilledDeliveryComplete { .. },
+            | BatchCompletion::MilledDeliveryComplete { .. }
+            | BatchCompletion::HordeMillFromLossDeliveryComplete { .. },
         ) => crate::game::triggers::ConsumedTriggerEventScope::AllCollectors,
     };
     crate::game::triggers::mark_logical_zone_events_consumed_before_priority(
