@@ -95581,7 +95581,7 @@ fn source_departure_shuffle_moves_the_source_not_a_population() {
         ),
         (
             "Dread",
-            "Whenever a creature deals damage to you, put a nightmare counter on this creature.\nWhen Dread is put into a graveyard from anywhere, shuffle it into its owner's library.",
+            "Fear (This creature can't be blocked except by artifact creatures and/or black creatures.)\nWhenever a creature deals damage to you, destroy it.\nWhen Dread is put into a graveyard from anywhere, shuffle it into its owner's library.",
         ),
         (
             "Serra Avatar",
@@ -95706,6 +95706,184 @@ fn source_owner_possessive_shuffle_moves_the_source() {
     );
 }
 
+/// SHAPE — CR 201.5 + CR 115.10a: a normalized source name or gendered
+/// object under its source-owner subject moves only the source, not an earlier
+/// selected creature. Full Oracle verified against MTGJSON AtomicCards.
+#[test]
+fn source_owner_shuffle_full_oracle_keeps_named_and_gendered_source_objects() {
+    for (name, text, has_exile_target) in [
+        (
+            "Etrata, the Silencer",
+            "Etrata can't be blocked.\nWhenever Etrata deals combat damage to a player, exile target creature that player controls and put a hit counter on that card. That player loses the game if they own three or more exiled cards with hit counters on them. Etrata's owner shuffles Etrata into their library.",
+            true,
+        ),
+        (
+            "Fblthp, Impossibly Lost",
+            "When one or more of your opponents are dealt combat damage during your turn, draw two cards. If your library has no cards in it, you win the game. Fblthp's owner shuffles him into their library. (If you draw from an empty library this way, you still win the game.)",
+            false,
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, name, &[], &["Creature".to_string()], &[]);
+        let mut nodes = Vec::new();
+        for trigger in &parsed.triggers {
+            if let Some(execute) = trigger.execute.as_deref() {
+                collect_test_tree(execute, false, &mut nodes);
+            }
+        }
+        if has_exile_target {
+            assert!(
+                nodes.iter().any(|def| matches!(
+                    &*def.effect,
+                    Effect::ChangeZone {
+                        destination: Zone::Exile,
+                        target: TargetFilter::Typed(filter),
+                        ..
+                    } if filter.type_filters.contains(&TypeFilter::Creature)
+                )),
+                "{name}: missing the distinct earlier creature target: {nodes:?}"
+            );
+        }
+        let movement = nodes
+            .iter()
+            .find(|def| matches!(
+                &*def.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Library,
+                    target: TargetFilter::SelfRef,
+                    owner_library: true,
+                    ..
+                }
+            ))
+            .unwrap_or_else(|| panic!("{name}: missing source-library move: {nodes:?}"));
+        assert!(
+            matches!(
+                movement.sub_ability.as_deref().map(|def| &*def.effect),
+                Some(Effect::Shuffle { .. })
+            ),
+            "{name}: missing terminal shuffle: {movement:?}"
+        );
+        assert!(
+            !nodes.iter().any(|def| matches!(
+                &*def.effect,
+                Effect::TargetOnly { target: TargetFilter::SelfRef }
+            )),
+            "{name}: source references must not declare a target slot"
+        );
+    }
+}
+
+/// SHAPE: source-only object grammar must not widen the generic target-owner
+/// route or consume a trailing instruction.
+#[test]
+fn source_owner_shuffle_object_grammar_is_scoped_and_whole_clause() {
+    for object in ["~", "this creature", "it", "itself", "him", "her", "them"] {
+        let text = format!("~'s owner shuffles {object} into their library");
+        let lower = text.to_ascii_lowercase();
+        let clause = try_parse_owner_of_target_shuffle(
+            TextPair::new(&text, &lower),
+            &mut ParseContext::default(),
+        )
+        .expect(&text);
+        assert!(matches!(
+            clause.effect,
+            Effect::ChangeZone {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+    }
+    let control = "The owner of target creature shuffles it into their library";
+    let lower = control.to_ascii_lowercase();
+    let clause = try_parse_owner_of_target_shuffle(
+        TextPair::new(control, &lower),
+        &mut ParseContext::default(),
+    )
+    .expect("generic owner-target control");
+    assert!(matches!(
+        clause.effect,
+        Effect::TargetOnly {
+            target: TargetFilter::Typed(_)
+        }
+    ));
+    for text in [
+        "~'s owner shuffles ~ into their library and draws a card",
+        "~'s owner shuffles target creature into their library",
+        "~'s owner shuffles him into your library",
+        "The owner of target creature shuffles him into their library",
+        "The owner of target creature shuffles ~ into their library",
+        "The owner of up to one target creature shuffles it into their library",
+        "The owner of target player shuffles it into their library",
+    ] {
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            try_parse_owner_of_target_shuffle(
+                TextPair::new(text, &lower),
+                &mut ParseContext::default(),
+            )
+            .is_none(),
+            "{text}"
+        );
+    }
+}
+
+/// SHAPE — CR 903.3 + CR 115.1c: a commander designation and entry history
+/// constrain a target without a card-type or controller restriction.
+#[test]
+fn forge_of_heroes_full_oracle_preserves_properties_only_target() {
+    let parsed = parse_oracle_text(
+        "{T}: Add {C}.\n{T}: Choose target commander that entered this turn. Put a +1/+1 counter on it if it's a creature and a loyalty counter on it if it's a planeswalker.",
+        "Forge of Heroes",
+        &[],
+        &["Land".to_string()],
+        &[],
+    );
+    let declaration = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(&*ability.effect, Effect::TargetOnly { .. }))
+        .unwrap_or_else(|| panic!("missing commander target declaration: {parsed:?}"));
+    let Effect::TargetOnly {
+        target: TargetFilter::Typed(filter),
+    } = &*declaration.effect
+    else {
+        panic!(
+            "expected a properties-only target: {:?}",
+            declaration.effect
+        );
+    };
+    assert!(filter.type_filters.is_empty());
+    assert_eq!(filter.controller, None);
+    assert!(filter.properties.contains(&FilterProp::IsCommander));
+    assert!(filter.properties.contains(&FilterProp::EnteredThisTurn));
+
+    // Synthetic counted sibling exercises the separate clause-level guard.
+    let counted = parse_effect_clause(
+        "Choose two target commanders that entered this turn",
+        &mut ParseContext::default(),
+    );
+    assert_eq!(counted.multi_target, Some(MultiTargetSpec::exact(2)));
+    let Effect::TargetOnly {
+        target: TargetFilter::Typed(filter),
+    } = &counted.effect
+    else {
+        panic!("expected a counted commander target: {:?}", counted.effect);
+    };
+    assert!(filter.properties.contains(&FilterProp::IsCommander));
+    assert!(filter.properties.contains(&FilterProp::EnteredThisTurn));
+
+    // Positive declarations above prove these malformed-tail refusals reach
+    // the same grammar instead of passing because targeting is disabled.
+    for text in [
+        "Choose target commander that entered this turn nonsense",
+        "Choose two target commanders that entered this turn nonsense",
+    ] {
+        assert!(
+            matches!(parse_effect(text), Effect::Unimplemented { .. }),
+            "{text}: malformed target tail must not be discarded"
+        );
+    }
+}
+
 /// CR 109.5 + CR 400.6 + CR 115.10a: "Shuffle this artifact and your graveyard
 /// into their owner's library" (Elixir of Immortality) moves the ACTIVATOR's
 /// graveyard. The explicit "your" possessor is the activator's population and
@@ -95778,7 +95956,7 @@ fn plural_player_target_nouns_share_the_target_grammar() {
 
     // Full-Oracle controls: the plural noun is the clause's whole payload.
     let officious = parse_oracle_text(
-        "Choose any number of target players. Investigate X times, where X is the total number of creatures those players control.",
+        "This spell costs {W}{U} more to cast for each target beyond the first.\nChoose any number of target players. Investigate X times, where X is the total number of creatures those players control.",
         "Officious Interrogation",
         &[],
         &["Instant".to_string()],
@@ -95796,7 +95974,7 @@ fn plural_player_target_nouns_share_the_target_grammar() {
     );
 
     let coppercoats = parse_oracle_text(
-        "Strive — This spell costs {1}{W} more to cast for each target beyond the first.\nChoose any number of target opponents. Create X 1/1 white Human Soldier creature tokens, where X is the number of those opponents.",
+        "Strive — This spell costs {1}{W} more to cast for each target beyond the first.\nChoose any number of target opponents. Create X 1/1 white Human Soldier creature tokens, where X is the number of creatures those opponents control.",
         "Call the Coppercoats",
         &[],
         &["Instant".to_string()],

@@ -5109,7 +5109,9 @@ pub(super) fn parse_choose_ast(
                 && !tail.chars().all(|c| c.is_ascii_punctuation())
                 && !super::sequence::starts_clause_text_or_conjugated(tail))
                 || matches!(&target, TargetFilter::Typed(filter)
-                    if filter.type_filters.is_empty() && filter.controller.is_none())
+                    if filter.type_filters.is_empty()
+                        && filter.controller.is_none()
+                        && filter.properties.is_empty())
             {
                 return None;
             }

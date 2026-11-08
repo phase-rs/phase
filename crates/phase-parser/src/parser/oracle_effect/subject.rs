@@ -38,7 +38,8 @@ use super::super::oracle_nom::error::OracleResult;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_nom::target::{
-    parse_event_context_ref, parse_object_exclusion_list, parse_supertype_word, ObjectExclusion,
+    parse_declared_target_prefix, parse_event_context_ref, parse_object_exclusion_list,
+    parse_supertype_word, ObjectExclusion,
 };
 use super::super::oracle_quantity;
 use super::super::oracle_static::{
@@ -3260,7 +3261,7 @@ fn parse_subject_application_for(
     }) {
         let (object_text, multi_target) = super::strip_optional_target_prefix(object_text);
         let object_lower = object_text.to_lowercase();
-        tag::<_, _, OracleError<'_>>("target ")
+        parse_declared_target_prefix
             .parse(object_lower.as_str())
             .ok()?;
         let mut trial = ctx.clone();
@@ -9316,17 +9317,38 @@ mod tests {
         assert_eq!(owner_subject_seed(&subject, &ctx), None);
     }
 
+    /// SHAPE: owner actor, object exclusion, and optional count are independent
+    /// axes of the declared-target subject grammar.
     #[test]
     fn declared_owner_subject_seed_accepts_only_one_pinned_object() {
-        for phrase in [
-            "the owner of target creature",
-            "the owner of up to one target creature",
-            "target creature's owner",
+        for (phrase, expected_multi, another) in [
+            ("the owner of target creature", None, false),
+            (
+                "the owner of up to one target creature",
+                Some(MultiTargetSpec::fixed(0, 1)),
+                false,
+            ),
+            (
+                "the owner of up to one other target nonland permanent",
+                Some(MultiTargetSpec::fixed(0, 1)),
+                true,
+            ),
+            ("the owner of another target creature", None, true),
+            ("target creature's owner", None, false),
         ] {
             let app =
                 parse_subject_application(phrase, &mut ParseContext::default()).expect(phrase);
             assert_eq!(app.affected, TargetFilter::ParentTargetOwner);
             assert_eq!(app.player_anaphor, None);
+            assert_eq!(app.multi_target, expected_multi, "{phrase}");
+            let Some(TargetFilter::Typed(filter)) = app.target.as_ref() else {
+                panic!("{phrase}: expected a typed object target: {:?}", app.target);
+            };
+            assert_eq!(
+                filter.properties.contains(&FilterProp::Another),
+                another,
+                "{phrase}"
+            );
             let mut subject = subject_phrase_ast(Some(app));
             assert_eq!(
                 subject_player_antecedent(&subject),
@@ -9352,16 +9374,19 @@ mod tests {
                 assert_eq!(subject_possessive_object_antecedent(&subject), None);
             }
         }
-        assert!(parse_subject_application(
+        for phrase in [
             "the owner of target player",
-            &mut ParseContext::default()
-        )
-        .is_none());
-        assert!(parse_subject_application(
+            "the owner of up to one other target player",
             "the owner of target creature nonsense",
-            &mut ParseContext::default()
-        )
-        .is_none());
+            "the owner of another target creature nonsense",
+            "the owner of target",
+            "the owner of any target",
+        ] {
+            assert!(
+                parse_subject_application(phrase, &mut ParseContext::default()).is_none(),
+                "{phrase}"
+            );
+        }
     }
 
     #[test]
