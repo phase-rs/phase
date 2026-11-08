@@ -411,16 +411,111 @@ pub(crate) fn live_source_incarnation(state: &GameState, source_id: ObjectId) ->
 /// that is the epoch captured at announcement
 /// (`ResolvedAbility::announced_source_incarnation`), because a cost paid during
 /// the activation may have sacrificed or exiled the source (CR 601.2h) — by
-/// resolution the storage id names the moved object. Abilities with no
-/// announcement capture (spells, triggered abilities) have not moved, so their
-/// live epoch answers.
+/// resolution the storage id names the moved object.
+///
+/// A triggered ability carries the same kind of capture in its trigger source
+/// context (`ResolvedAbility::trigger_source`, latched when the trigger was
+/// instantiated): CR 603.2 keeps the trigger bound to the object that triggered
+/// it, and CR 400.7 makes a source that left and returned a NEW object, so a
+/// trigger whose source was blinked (or Cloudshifted) while it waited still
+/// produces its mana from the object that generated the ability — never from
+/// whatever now occupies the storage id. Only an ability with no capture at all
+/// (a spell, or a synthetic fixture) reads the live epoch.
 pub(crate) fn producing_incarnation_for_ability(
     state: &GameState,
     ability: &crate::types::ability::ResolvedAbility,
 ) -> Option<u64> {
     ability
         .announced_source_incarnation
+        .or_else(|| ability.trigger_source_incarnation())
         .or_else(|| live_source_incarnation(state, ability.source_id))
+}
+
+/// CR 106.3 + CR 106.4 + CR 400.7: keep the producer fact of every floating mana
+/// unit whose producing source is no longer live, for exactly as long as a pool
+/// holds that unit.
+///
+/// CR 106.4 holds unspent mana in a pool, and an effect can keep it there past
+/// the step/phase boundary ("you don't lose unspent mana as steps and phases
+/// end", Upwelling). The exit last-known information that answers for a spent
+/// unit's departed source is step-scoped, so a unit that survives the boundary
+/// would lose the one fact CR 106.3 owes its eventual payment. Rather than
+/// extending the generic cache (which is compiled, statewide history that every
+/// unrelated reader would suddenly see), this copies the fact onto the unit's own
+/// pin: one entry per exact producing incarnation a pool still holds.
+///
+/// Called immediately BEFORE the boundary clears the incarnation-keyed caches,
+/// and rebuilding the vector from the pools each time makes it self-pruning — an
+/// entry disappears at the first boundary after its unit is spent. A unit whose
+/// producing incarnation is still live needs no entry: the live object answers.
+/// An entry already carried by an earlier boundary is carried forward unchanged,
+/// because after that boundary the exit cache it was copied from is gone: the
+/// fact travels with the pip, not with the cache.
+pub(crate) fn retain_pooled_mana_producer_snapshots(state: &mut GameState) {
+    use crate::types::game_state::PooledManaProducerSnapshot;
+
+    let carried: Vec<PooledManaProducerSnapshot> = state.pooled_mana_producer_snapshots.clone();
+    let carried_lki = |source_id: ObjectId, incarnation: u64| {
+        carried
+            .iter()
+            .find(|snapshot| {
+                snapshot.source_id == source_id && snapshot.source_incarnation == incarnation
+            })
+            .map(|snapshot| snapshot.lki.clone())
+    };
+
+    let mut retained: Vec<PooledManaProducerSnapshot> = Vec::new();
+    for player in &state.players {
+        for (shape, _count) in player.mana_pool.shapes() {
+            let Some(incarnation) = shape.source_incarnation else {
+                continue;
+            };
+            let live_is_producer = state
+                .objects
+                .get(&shape.source_id)
+                .is_some_and(|source| source.incarnation == incarnation);
+            if live_is_producer {
+                continue;
+            }
+            // CR 400.7: the fact recorded at an earlier boundary outlives the
+            // exit cache it came from; only a unit crossing its FIRST boundary
+            // still reads that cache. A departure that records no last-known
+            // information (a hidden zone) leaves the fact unprovable, so nothing
+            // is recorded rather than inventing one.
+            let lki = carried_lki(shape.source_id, incarnation).or_else(|| {
+                crate::game::filter::exit_lki_for_incarnation(state, shape.source_id, incarnation)
+                    .cloned()
+            });
+            let Some(lki) = lki else {
+                continue;
+            };
+            retained.push(PooledManaProducerSnapshot {
+                source_id: shape.source_id,
+                source_incarnation: incarnation,
+                lki,
+            });
+        }
+    }
+    retained.sort_by_key(|snapshot| (snapshot.source_id, snapshot.source_incarnation));
+    retained.dedup_by_key(|snapshot| (snapshot.source_id, snapshot.source_incarnation));
+    state.pooled_mana_producer_snapshots = retained;
+}
+
+/// CR 106.3 + CR 400.7: the producer fact retained for `source_id`'s
+/// `incarnation` while a pool still holds the unit it produced — the read side
+/// of [`retain_pooled_mana_producer_snapshots`].
+pub(crate) fn pooled_mana_producer_snapshot(
+    state: &GameState,
+    source_id: ObjectId,
+    incarnation: u64,
+) -> Option<&crate::types::game_state::LKISnapshot> {
+    state
+        .pooled_mana_producer_snapshots
+        .iter()
+        .find(|snapshot| {
+            snapshot.source_id == source_id && snapshot.source_incarnation == incarnation
+        })
+        .map(|snapshot| &snapshot.lki)
 }
 
 /// CR 106.3 + CR 113.7 + CR 400.7: `source_incarnation` is the object epoch the

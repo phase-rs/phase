@@ -1500,6 +1500,15 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     state.priority_player = turn_control::turn_decision_maker(state);
     priority::clear_priority_passes(state);
     state.players_attacked_this_step.clear();
+    // CR 106.3 + CR 106.4 + CR 400.7: unspent mana a retention effect keeps
+    // (Upwelling's "players don't lose unspent mana as steps and phases end")
+    // outlives this boundary, and so does the source that produced it. Copy each
+    // still-pooled unit's producer fact onto its own pin BEFORE the generic exit
+    // LKI is invalidated: the pip's binding does not expire while the mana is
+    // unspent, while the step-scoped cache it would otherwise read does. This
+    // retains nothing beyond the units a pool still holds, so the statewide LKI
+    // window below stays exactly as step-scoped as CR 400.7 makes it.
+    super::mana_payment::retain_pooled_mana_producer_snapshots(state);
     // CR 400.7: LKI persists within a step but is invalidated on step transition.
     state.lki_cache.clear();
     state.lki_copiable_values.clear();

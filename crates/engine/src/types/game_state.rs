@@ -1370,6 +1370,30 @@ pub struct ManaSpentSourceSnapshot {
     pub lki: LKISnapshot,
 }
 
+/// CR 106.3 + CR 400.7: the producer fact of a mana unit that is still floating
+/// in a mana pool while its producing source is gone.
+///
+/// CR 106.4 holds unspent mana in a pool, and a "you don't lose unspent mana as
+/// steps and phases end" effect (Upwelling) keeps a unit there across the
+/// step/phase boundary that ends the generic last-known-information window
+/// (CR 400.7: exit LKI is step-scoped). CR 106.3 makes the unit's source the
+/// source of the ability that produced it, and that binding does not expire
+/// while the mana is unspent — so the fact the unit will owe at payment time
+/// has to outlive the generic cache WITHOUT extending it. One entry per exact
+/// producing incarnation, written only for units a pool still holds, and
+/// rebuilt from the pools at every boundary, so nothing is retained beyond a
+/// floating unit's own lifetime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PooledManaProducerSnapshot {
+    pub source_id: ObjectId,
+    /// CR 400.7: the epoch that produced the unit — never an epoch that merely
+    /// shares its storage id.
+    pub source_incarnation: u64,
+    /// The producing source's public characteristics at that epoch.
+    #[serde(with = "crate::types::history_snapshot::compact_history_lki")]
+    pub lki: LKISnapshot,
+}
+
 /// CR 601.2a + CR 400.7: the identity of one spell on the stack, minted when the
 /// spell is announced (or a copy is put onto the stack, CR 707.10) and carried
 /// unchanged through targeting, payment and finalization — unlike the object's
@@ -16611,6 +16635,66 @@ impl GameState {
         }
     }
 
+    /// CR 106.3 + CR 106.4 + CR 400.7: refuse a save whose floating mana can be
+    /// PROVEN to name the wrong producing object.
+    ///
+    /// A current-format save pins every unit at production
+    /// (`ManaUnit::source_incarnation`), so this guard never sees a current pool:
+    /// it catches only legacy pools written before the pin existed. For those the
+    /// producing epoch is not recoverable — the only incarnation a save records is
+    /// the CURRENT object's (`GameObject::incarnation`), and which earlier epoch
+    /// produced the mana is exactly what the pin held.
+    ///
+    /// What the save CAN still prove is that the legacy fallback's live read would
+    /// describe a different object than the producer (CR 400.7: a moved object
+    /// "becomes a new object with no memory of, or relation to, its previous
+    /// existence"). Mana floating in a pool was added by a mana ability of the
+    /// object named by `source_id` — the ability of a PERMANENT (CR 605.1a) or of
+    /// a spell/card in the zone it occupied (CR 113.7) — so a unit whose storage
+    /// id names a LIVE object that is no longer a permanent on the battlefield is
+    /// refused here rather than priced at the next payment from a card in a
+    /// graveyard or exile. That is the Minimus Containment shape: the "Treasure"
+    /// that made the mana is now a card in the graveyard.
+    ///
+    /// The shapes that stay admitted are the ones the save does not convict:
+    ///
+    /// * a unit whose storage id still holds a battlefield permanent — the live
+    ///   read names the same object the pre-pin engine read, and refusing it would
+    ///   reject historical snapshots this tree still loads (the pump of floating
+    ///   mana off `sprout_witherbloom_realistic_lands_4p`) for an ambiguity the
+    ///   save cannot settle either way;
+    /// * a unit whose storage id appears in NO live object, whether or not the
+    ///   step-scoped `lki_cache` still holds that id's departure snapshot. The
+    ///   ObjectId-keyed cache describes the object that was there when it left, so
+    ///   the read is a last-known-information answer, not a re-derivation from a
+    ///   later occupant.
+    ///
+    /// Convoke markers are taps, not mana production (CR 702.51a), and are never
+    /// refused.
+    fn reject_ambiguous_floating_mana_provenance(&self) -> Result<(), PersistedRestoreError> {
+        let ambiguous = self.players.iter().find_map(|player| {
+            player
+                .mana_pool
+                .shapes()
+                .filter(|(shape, _)| {
+                    shape.source_incarnation.is_none() && !shape.is_convoke_payment()
+                })
+                .map(|(shape, _)| shape.source_id)
+                .find(|source_id| {
+                    self.objects
+                        .get(source_id)
+                        .is_some_and(|object| object.zone != Zone::Battlefield)
+                })
+                .map(|source_id| (player.id, source_id))
+        });
+        match ambiguous {
+            Some((player, source_id)) => {
+                Err(PersistedRestoreError::AmbiguousFloatingManaProvenance { player, source_id })
+            }
+            None => Ok(()),
+        }
+    }
+
     /// CR 601.2 / CR 602.2: at most one announcement is in flight, so every live
     /// `PendingCast` owner names the same cast.
     ///
@@ -17016,6 +17100,27 @@ pub enum PersistedRestoreError {
          {spell_object_id:?} and cannot be resumed"
     )]
     UnknownPendingTargetFacts { spell_object_id: Option<ObjectId> },
+    /// CR 106.3 + CR 400.7: a saved mana pool holds floating mana whose producing
+    /// object the save can PROVE it no longer names. `ManaUnit::source_incarnation`
+    /// is the pin that binds a unit to the epoch that produced it; a save written
+    /// before the pin existed carries `None` there, and the epoch is not
+    /// recoverable from anything else the save holds — `GameObject::incarnation`
+    /// names only the CURRENT object under the storage id, so the producing epoch
+    /// would have to be guessed. What the save does establish is that a live read
+    /// of that id describes a different object (CR 400.7: a moved object "becomes a
+    /// new object with no memory of, or relation to, its previous existence"), and
+    /// pricing the mana from it would be a source-qualified payment answer the game
+    /// never established — the same class of unknown `UnknownCastHistoryProvenance`
+    /// refuses. Restore therefore refuses rather than admitting that pool.
+    #[error(
+        "persisted mana pool of player {player:?} holds floating mana whose producing object \
+         {source_id:?} cannot be proven and cannot be restored"
+    )]
+    AmbiguousFloatingManaProvenance {
+        player: PlayerId,
+        source_id: ObjectId,
+    },
+
     /// CR 601.2 / CR 602.2: at most one announcement is in flight, so every live
     /// `PendingCast` owner names the same cast. A persisted save that parks two
     /// different announcements is corrupt; admitting it would move the failure to
@@ -17244,6 +17349,7 @@ impl PersistedGameState {
             .validate_payment_transaction()
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
         state.reject_unknown_cast_history_provenance()?;
+        state.reject_ambiguous_floating_mana_provenance()?;
         state.reject_conflicting_pending_cast_owners()?;
         state.reject_unknown_pending_target_facts()?;
         crate::game::effects::choose_from_zone::migrate_legacy_per_player_frame_on_restore(
@@ -26826,6 +26932,18 @@ declare_game_state! {
     #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map_of_im_hash_map")]
     pub lki_copiable_values_by_incarnation:
         im::HashMap<ObjectId, im::HashMap<u64, CopiableValues>>,
+    /// CR 106.3 + CR 106.4 + CR 400.7: producer facts of the mana units that are
+    /// still floating in a pool, for the units whose producing incarnation is no
+    /// longer live at the storage id. Written by
+    /// `mana_payment::retain_pooled_mana_producer_snapshots` immediately BEFORE
+    /// the step/phase boundary clears the incarnation-keyed LKI caches, and
+    /// rebuilt from the pools at each boundary, so an entry exists exactly while
+    /// a pool still holds its unit — never as a general LKI extension. A unit
+    /// retained across a boundary (Upwelling's "you don't lose unspent mana as
+    /// steps and phases end") keeps the producer fact CR 106.3 owes the payment
+    /// that eventually spends it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pooled_mana_producer_snapshots: Vec<PooledManaProducerSnapshot>,
 
     /// CR 608.2h + CR 707.2: A spell's stack entry and object as they last
     /// existed on the stack (`stack::record_departed_stack_spell`) — keyed by storage id,
@@ -34605,6 +34723,7 @@ impl GameState {
             lki_copiable_values: im::HashMap::new(),
             lki_by_incarnation: im::HashMap::new(),
             lki_copiable_values_by_incarnation: im::HashMap::new(),
+            pooled_mana_producer_snapshots: Vec::new(),
             departed_stack_spells: im::HashMap::new(),
             departed_activated_abilities: im::HashMap::new(),
             linked_exile_lki: HashMap::new(),
@@ -36190,6 +36309,29 @@ impl GameState {
                 (!history.is_empty()).then_some((object_id, history))
             })
             .collect();
+
+        // CR 106.3 + CR 106.4 + CR 104.4b: a floating unit's retained producer
+        // fact is read by the POOL, not by a trigger-event carrier, so it is
+        // pruned against the pins pooled units still carry rather than against
+        // `referenced_lki`. It is then a function of the pools alone — two
+        // samples of one game holding the same pools hold the same entries — so
+        // it is loop-material position without being a per-cycle accumulator.
+        let pooled_pins: HashSet<ObjectIncarnationRef> = self
+            .players
+            .iter()
+            .flat_map(|player| player.mana_pool.shapes())
+            .filter_map(|(shape, _)| {
+                shape
+                    .source_incarnation
+                    .map(|incarnation| ObjectIncarnationRef::of(shape.source_id, incarnation))
+            })
+            .collect();
+        self.pooled_mana_producer_snapshots.retain(|snapshot| {
+            pooled_pins.contains(&ObjectIncarnationRef::of(
+                snapshot.source_id,
+                snapshot.source_incarnation,
+            ))
+        });
     }
 
     /// CR 104.4b + CR 608.2h: keeps only the `departed_stack_spells` records a spell-cast
@@ -38428,6 +38570,12 @@ fn _gamestate_partition_is_total(s: &GameState) {
         lki_copiable_values: _,
         lki_by_incarnation: _,
         lki_copiable_values_by_incarnation: _,
+        // CR 106.3 + CR 106.4 + CR 400.7: COMPARED, like the incarnation-keyed
+        // LKI caches it shadows. It is a function of the pools (an entry exists
+        // only while a pool holds the exact unit it describes), so it carries no
+        // per-cycle accumulator: a completed loop spends the mana it produced
+        // and the boundary rebuild drops the entry.
+        pooled_mana_producer_snapshots: _,
         departed_stack_spells: _,
         departed_activated_abilities: _,
         linked_exile_lki: _,
@@ -38810,6 +38958,7 @@ impl PartialEq for GameState {
             && self.lki_by_incarnation == other.lki_by_incarnation
             && self.lki_copiable_values_by_incarnation
                 == other.lki_copiable_values_by_incarnation
+            && self.pooled_mana_producer_snapshots == other.pooled_mana_producer_snapshots
             && self.departed_stack_spells == other.departed_stack_spells
             && self.departed_activated_abilities == other.departed_activated_abilities
             && self.city_blessing == other.city_blessing

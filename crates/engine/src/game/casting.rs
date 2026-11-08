@@ -24815,7 +24815,9 @@ fn mana_spent_source_snapshots(
 ///
 /// Resolution is exact and fails closed: the live object answers only while it
 /// still IS the pinned incarnation, otherwise the epoch's exit last-known
-/// information (`exit_lki_for_incarnation`) does, and only then is the fact
+/// information (`exit_lki_for_incarnation`) does, then the producer fact a
+/// floating unit carries across a step/phase boundary
+/// (`mana_payment::pooled_mana_producer_snapshot`), and only then is the fact
 /// unprovable. A unit that predates the pin (legacy payload, synthetic pool
 /// fixture) keeps the historical live-then-`lki_cache` read, so no answer that
 /// was already reachable changes.
@@ -24830,12 +24832,18 @@ fn mana_spent_source_snapshot(
             crate::types::identifiers::ObjectIncarnationRef::from_object(source) == pinned
         }) {
             Some(source) => source.snapshot_for_mana_spent(),
-            None => super::filter::exit_lki_for_incarnation(
-                state,
-                pinned.object_id,
-                pinned.incarnation,
-            )?
-            .clone(),
+            None => {
+                super::filter::exit_lki_for_incarnation(state, pinned.object_id, pinned.incarnation)
+                    .cloned()
+                    .or_else(|| {
+                        super::mana_payment::pooled_mana_producer_snapshot(
+                            state,
+                            pinned.object_id,
+                            pinned.incarnation,
+                        )
+                        .cloned()
+                    })?
+            }
         },
         None => state
             .objects

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "GameState gains pooled_mana_producer_snapshots: the CR 106.3 producing-source fact of each mana unit still floating in a pool, retained per-pip across the step/phase boundary that clears generic exit LKI (Upwelling's retained mana). Additive and optional, but a peer that omits it loses the fact for retained pips and so can disagree on a rules outcome (whether spent mana came from a Treasure, and therefore whether a first-spell cascade grant applies), and this build additionally refuses to restore a legacy save whose floating mana carries no producing-incarnation pin (PersistedRestoreError::AmbiguousFloatingManaProvenance), so mixed-version peers cannot agree on which saves are playable."
+}
