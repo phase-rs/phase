@@ -372,9 +372,7 @@ fn arms_upkeep_draft(db: &CardDatabase, extra: &[&str]) -> (GameRunner, ObjectId
 /// 15-card spellbook, and a real member outside the offer is not a legal pick.
 #[test]
 fn arms_scavenger_draft_offers_three_distinct_members_of_its_spellbook() {
-    let Some(db) = shared_card_db() else {
-        return;
-    };
+    let db = shared_card_db().expect("spellbook draft tests require the integration card database");
     let (mut runner, arms) = arms_upkeep_draft(db, &[]);
     let (player, source, options) = pending_draft(runner.state());
     assert_eq!(player, P0);
@@ -409,9 +407,7 @@ fn arms_scavenger_draft_offers_three_distinct_members_of_its_spellbook() {
 /// R2: Follow the Tracks ("a card of your choice") keeps the whole-book choice.
 #[test]
 fn follow_the_tracks_offers_its_whole_spellbook() {
-    let Some(db) = shared_card_db() else {
-        return;
-    };
+    let db = shared_card_db().expect("spellbook draft tests require the integration card database");
     let mut scenario = scenario(Phase::PreCombatMain, db);
     let spell = scenario.add_real_card(P0, "Follow the Tracks", Zone::Hand, db);
     for _ in 0..3 {
@@ -442,9 +438,7 @@ fn follow_the_tracks_offers_its_whole_spellbook() {
 /// with no prompt.
 #[test]
 fn goblin_influx_array_conjures_a_random_book_entry_without_a_prompt() {
-    let Some(db) = shared_card_db() else {
-        return;
-    };
+    let db = shared_card_db().expect("spellbook draft tests require the integration card database");
     let mut scenario = scenario(Phase::PreCombatMain, db);
     let array = scenario.add_real_card(P0, "Goblin Influx Array", Zone::Battlefield, db);
     let mut runner = build(scenario, db);
@@ -473,9 +467,7 @@ fn goblin_influx_array_conjures_a_random_book_entry_without_a_prompt() {
 /// R4: the AI's legal picks are exactly the offer.
 #[test]
 fn ai_legal_draft_picks_are_exactly_the_offer() {
-    let Some(db) = shared_card_db() else {
-        return;
-    };
+    let db = shared_card_db().expect("spellbook draft tests require the integration card database");
     let (runner, _) = arms_upkeep_draft(db, &[]);
     let (_, _, options) = pending_draft(runner.state());
     let picks: HashSet<String> = engine::ai_support::legal_actions(runner.state())
@@ -498,9 +490,7 @@ fn ai_legal_draft_picks_are_exactly_the_offer() {
 /// R5: the offer is private to the drafting player.
 #[test]
 fn the_draft_offer_is_hidden_from_other_viewers() {
-    let Some(db) = shared_card_db() else {
-        return;
-    };
+    let db = shared_card_db().expect("spellbook draft tests require the integration card database");
     let (runner, _) = arms_upkeep_draft(db, &[]);
     let (_, _, options) = pending_draft(runner.state());
     assert_eq!(
@@ -521,9 +511,7 @@ fn the_draft_offer_is_hidden_from_other_viewers() {
 /// is the card in exile (CR 400.7j), playable until end of turn (CR 611.2a).
 #[test]
 fn arms_scavenger_drafts_into_hand_then_exiles_it_with_a_play_grant() {
-    let Some(db) = shared_card_db() else {
-        return;
-    };
+    let db = shared_card_db().expect("spellbook draft tests require the integration card database");
     let (mut runner, arms) = arms_upkeep_draft(db, &[]);
     let (_, _, options) = pending_draft(runner.state());
     let events = submit(&mut runner, &options[0]);
@@ -541,9 +529,7 @@ fn arms_scavenger_drafts_into_hand_then_exiles_it_with_a_play_grant() {
 /// drafted card's hand-to-exile move.
 #[test]
 fn the_war_doctor_counts_the_drafted_cards_exile() {
-    let Some(db) = shared_card_db() else {
-        return;
-    };
+    let db = shared_card_db().expect("spellbook draft tests require the integration card database");
     let (mut runner, _) = arms_upkeep_draft(db, &["The War Doctor"]);
     let doctor = object_named(runner.state(), "The War Doctor");
     assert!(
@@ -572,9 +558,7 @@ fn the_war_doctor_counts_the_drafted_cards_exile() {
 /// decomposition, with a cast grant.
 #[test]
 fn kaylas_kindling_drafts_into_hand_then_exiles_it_with_a_cast_grant() {
-    let Some(db) = shared_card_db() else {
-        return;
-    };
+    let db = shared_card_db().expect("spellbook draft tests require the integration card database");
     let mut scenario = scenario(Phase::Untap, db);
     let kayla = scenario.add_real_card(P0, "Kayla's Kindling", Zone::Battlefield, db);
     let mut runner = build(scenario, db);
@@ -599,9 +583,7 @@ fn kaylas_kindling_drafts_into_hand_then_exiles_it_with_a_cast_grant() {
 /// sorcery speed in P0's main phase (CR 606.3).
 #[test]
 fn tibalt_plus_one_drafts_exiles_and_casts_the_card() {
-    let Some(db) = shared_card_db() else {
-        return;
-    };
+    let db = shared_card_db().expect("spellbook draft tests require the integration card database");
     let mut scenario = scenario(Phase::PreCombatMain, db);
     let tibalt = scenario.add_real_card(P0, "Tibalt, Wicked Tormentor", Zone::Battlefield, db);
     let mut runner = build(scenario, db);
@@ -657,9 +639,7 @@ fn tibalt_plus_one_drafts_exiles_and_casts_the_card() {
 /// grant ends at cleanup (CR 514.2); next upkeep's grant names only pick B.
 #[test]
 fn a_later_draft_does_not_regrant_an_earlier_pick() {
-    let Some(db) = shared_card_db() else {
-        return;
-    };
+    let db = shared_card_db().expect("spellbook draft tests require the integration card database");
     let (mut runner, arms) = arms_upkeep_draft(db, &[]);
     let first_turn = runner.state().turn_number;
     let (_, _, first_offer) = pending_draft(runner.state());
@@ -704,9 +684,7 @@ fn a_later_draft_does_not_regrant_an_earlier_pick() {
 /// source's pick. The two triggers differ, so P0 orders them (CR 603.3b).
 #[test]
 fn two_sources_in_one_upkeep_each_grant_only_their_own_pick() {
-    let Some(db) = shared_card_db() else {
-        return;
-    };
+    let db = shared_card_db().expect("spellbook draft tests require the integration card database");
     let mut scenario = scenario(Phase::Untap, db);
     let arms = scenario.add_real_card(P0, "Arms Scavenger", Zone::Battlefield, db);
     let kayla = scenario.add_real_card(P0, "Kayla's Kindling", Zone::Battlefield, db);
@@ -759,9 +737,7 @@ fn two_sources_in_one_upkeep_each_grant_only_their_own_pick() {
 /// book" row.
 #[test]
 fn an_empty_draft_exiles_and_grants_nothing() {
-    let Some(db) = shared_card_db() else {
-        return;
-    };
+    let db = shared_card_db().expect("spellbook draft tests require the integration card database");
     let mut scenario = scenario(Phase::Untap, db);
     let arms = scenario.add_real_card(P0, "Arms Scavenger", Zone::Battlefield, db);
     for _ in 0..3 {
