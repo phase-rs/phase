@@ -389,16 +389,20 @@ current connection opens snapshot-only; later connections can use the decoder.
 Explicit codec providers retain their bounded preparation wait. The codec wrapper
 runs after optional gzip decompression and preserves frame order. Canonical codec
 headers are read without materializing their payload; Rust validates the body.
-The wrapper limits
-outstanding receives (including an active decode) to 64 messages and 16 MiB of
-UTF-16 text; overload closes the transport and releases its lease rather than
-dropping deltas. Leaving a local WASM game, including a native-AI fallback,
+The wrapper limits outstanding receives to 64 messages (including the active
+decode) and text queued behind that active frame to 16 MiB of UTF-16. The active
+frame has no new individual-size ceiling, so a supported large spectator Full
+can bootstrap an empty queue. Overload closes and releases rather than dropping
+deltas. Leaving a local WASM game, including a native-AI fallback,
 resets game state without disposing the shared runtime or unrelated codec leases.
 Recovery notifications use the active UI language and distinguish an interrupted
 in-flight action from a new action that was never sent.
-A draft recovery Full rejected by the application's identity checks closes its
-current transport before readiness can reopen submissions against a stale snapshot;
-healthy-stream foreign-state ignores are unchanged.
+Recovery reopens submissions only when the primary application handler returns
+`true` after committing that specific Full and its bootstrap is still accepted.
+A declined stale/foreign Full or a callback that throws before acknowledging it
+closes the transport; healthy-stream ignores are unchanged. The wrapper reports
+`CLOSED` before close callbacks, so synchronous reentrant submissions reject
+rather than occupying an unsent slot.
 
 ### Design Principles
 
@@ -430,6 +434,29 @@ pnpm build                                 # TypeScript check + Vite build
 pnpm lint                                  # ESLint
 pnpm test                                  # Vitest
 ```
+
+### Large Codec Frame Proof
+
+The manual native producer uses 9,000 database-backed Llanowar Elves, the real
+spectator projection and frame guards, and the connection codec/gzip encoder.
+Its consumer proof uses real WASM reconstruction and the production spectator
+adapter for both initial and established delivery. This is a supported-size
+scenario, not an action replay or a claim that a 9,000-card deck is reachable.
+Run producer and consumer from the same committed source; keep generated output
+outside the checkout in a fresh, nonexistent absolute directory:
+
+```bash
+LARGE_SPECTATOR_FULL_DIR=/tmp/phase-large-full cargo test -p phase-server \
+  --bin phase-server socket_io::large_full_tests::produce_native_large_spectator_full \
+  -- --ignored --exact --nocapture
+./scripts/build-wasm.sh wasm-dev
+LARGE_SPECTATOR_FULL_DIR=/tmp/phase-large-full pnpm --dir client exec vitest run \
+  --config vitest.integration.config.ts --coverage.enabled=false \
+  src/adapter/__tests__/largeSpectatorFull.integration.test.ts
+```
+
+If Cargo uses a relocated target directory, export `CARGO_TARGET_DIR` to that
+directory for `build-wasm.sh`.
 
 ### Cargo Aliases
 

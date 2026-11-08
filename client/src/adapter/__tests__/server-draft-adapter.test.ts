@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { EMPTY_DRAFT_POOL_GROUPS } from "../draft-adapter";
-import { ServerDraftAdapter } from "../server-draft-adapter";
+import { ServerDraftAdapter, type ServerDraftAdapterEvent } from "../server-draft-adapter";
 import { PROTOCOL_VERSION } from "../ws-adapter";
 import { AdapterError, AdapterErrorCode } from "../types";
 import type { DraftPlayerView } from "../draft-adapter";
@@ -94,6 +94,7 @@ vi.mock("../../services/openPhaseSocket", async (importOriginal) => {
 
 class MockWebSocket extends EventTarget {
   static OPEN = 1;
+  static CLOSED = 3;
   static last: MockWebSocket | null = null;
   readyState = MockWebSocket.OPEN;
   onopen: (() => void) | null = null;
@@ -3107,6 +3108,71 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
         && (event as { state?: { label?: string } }).state?.label === "b-start"),
     ).toBe(false);
   });
+
+  it.each(["Action", "Interaction"] as const)(
+    "rejects a reentrant %s during fatal codec close without stranding a submission",
+    async (kind) => {
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, ws } = await startCodecDraft(session.session);
+      const events: ServerDraftAdapterEvent[] = [];
+      adapter.onEvent((event) => events.push(event));
+      // Model native close without synthesizing another close event. The inner
+      // socket remains OPEN throughout the wrapper's synchronous notification.
+      ws.close.mockImplementation(() => { ws.readyState = 3; });
+      let stop: (() => void) | undefined;
+      try {
+        await enterCodecMatch(ws, events);
+        await completeDraftCommand(adapter, ws, "healthy-before-fatal-close", "codec");
+        expect(session.decode).toHaveBeenCalledTimes(3);
+        expect(submissionTypes(ws)).toEqual(["Action"]);
+        expect(ws.close).not.toHaveBeenCalled();
+        events.length = 0;
+
+        const pendingStates: boolean[] = [];
+        const innerStatesAtReentry: number[] = [];
+        const reentrant: Array<() => Promise<unknown>> = [];
+        let attempted = false;
+        stop = adapter.onEvent((event) => {
+          if (event.type !== "actionPendingChanged") return;
+          pendingStates.push(event.pending);
+          if (event.pending || attempted) return;
+          attempted = true;
+          innerStatesAtReentry.push(ws.readyState);
+          // Attach rejection observation in the callback itself: neither an
+          // immediate rejection nor a stranded replacement may go unobserved.
+          reentrant.push(trackRejection(kind === "Action"
+            ? adapter.submitAction({ type: "PassPriority" }, 0)
+            : adapter.submitInteraction(interactionSubmission("fatal-close-reentry"), 0)));
+        });
+
+        const pending = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+        expect(submissionTypes(ws)).toEqual(["Action", "Action"]);
+        const sentBeforeFatal = ws.send.mock.calls.length;
+        // A rejected decode Promise is fatal, unlike a resyncRequired verdict.
+        session.decode.mockRejectedValueOnce(new Error("decoder rejection sentinel"));
+        ws.dispatchSynthetic("message", draftFrame("Delta", {
+          type: "StateUpdate",
+          data: { state: matchState("fatal-decode"), events: [], full_key: FULL_KEY },
+        }));
+
+        await vi.waitFor(() => expect(events).toContainEqual({ type: "disconnected" }));
+        expect(session.decode).toHaveBeenCalledTimes(4);
+        expect(await pending()).toBeInstanceOf(AdapterError);
+        expect(reentrant).toHaveLength(1);
+        expect(innerStatesAtReentry).toEqual([MockWebSocket.OPEN]);
+        await expect(reentrant[0]()).resolves.toBeInstanceOf(AdapterError);
+        expect(ws.send).toHaveBeenCalledTimes(sentBeforeFatal);
+        expect(submissionTypes(ws)).toEqual(["Action", "Action"]);
+        expect(pendingStates).toEqual([true, false]);
+        expect(events.filter((event) => event.type === "disconnected")).toHaveLength(1);
+        expect(ws.close).toHaveBeenCalledOnce();
+        expect(session.close).toHaveBeenCalledOnce();
+      } finally {
+        stop?.();
+        adapter.dispose();
+      }
+    },
+  );
 
   it.each([
     ["Action", true], ["Interaction", true], ["Action", false], ["Interaction", false],

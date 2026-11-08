@@ -2439,7 +2439,7 @@ export class WebSocketAdapter implements EngineAdapter {
         );
         return;
       }
-      this.handleMessage(message as { type: string; data?: unknown });
+      return this.handleMessage(message as { type: string; data?: unknown });
     };
 
     socket.ws.onerror = () => {
@@ -3581,7 +3581,7 @@ export class WebSocketAdapter implements EngineAdapter {
     }
   }
 
-  private handleMessage(msg: { type: string; data?: unknown; command_id?: unknown }): void {
+  private handleMessage(msg: { type: string; data?: unknown; command_id?: unknown }): true | void {
     if (this.sessionIdentityRejected) return;
     if (this.routeFallbackEpisode(msg)) return;
 
@@ -3864,7 +3864,7 @@ export class WebSocketAdapter implements EngineAdapter {
             rewindTargets: startedRewindTargets,
           });
         }
-        break;
+        return true;
       }
 
       case "StateUpdate": {
@@ -3919,7 +3919,7 @@ export class WebSocketAdapter implements EngineAdapter {
             rewindTargets: data.rewind_targets ?? [],
           });
         }
-        break;
+        return true;
       }
 
       case "ActionRejected": {

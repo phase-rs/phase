@@ -945,7 +945,7 @@ export class ServerDraftAdapter implements EngineAdapter {
           if (message.type === "GameStarted" || message.type === "StateUpdate"
             || message.type === "DraftMatchStart") return;
         }
-        this.handleMessage(JSON.parse(event.data as string), initOwner, sourceSocket);
+        return this.handleMessage(JSON.parse(event.data as string), initOwner, sourceSocket);
       };
       sourceSocket.onerror = () => {
         const err = new AdapterError("WS_ERROR", "WebSocket connection failed", true);
@@ -1036,7 +1036,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     msg: { type: string; data?: unknown; command_id?: unknown },
     initOwner: DraftInit | null,
     sourceSocket: PhaseSocketTransport,
-  ): void {
+  ): true | void {
     switch (msg.type) {
       // ── Draft-phase messages ──────────────────────────────────────
       case "DraftCreated": {
@@ -1207,7 +1207,6 @@ export class ServerDraftAdapter implements EngineAdapter {
           || this._playerId !== data.your_player
           || !fullSessionKeysEqual(data.full_key, this.activeFullKey)
         ) {
-          this.stateCodec.rejectRecoveryDelivery(sourceSocket);
           break;
         }
         this.acceptedFullKey = data.full_key ?? null;
@@ -1223,7 +1222,7 @@ export class ServerDraftAdapter implements EngineAdapter {
           events: [],
           legalResult: startedSnapshot.legalResult,
         });
-        break;
+        return true;
       }
 
       case "StateUpdate": {
@@ -1243,7 +1242,6 @@ export class ServerDraftAdapter implements EngineAdapter {
           full_key?: FullSessionKey;
         };
         if (!fullSessionKeysEqual(data.full_key, this.acceptedFullKey)) {
-          this.stateCodec.rejectRecoveryDelivery(sourceSocket);
           break;
         }
         const updated = ServerDraftAdapter.snapshotPair(data);
@@ -1262,7 +1260,7 @@ export class ServerDraftAdapter implements EngineAdapter {
             logEntries: data.log_entries,
           });
         }
-        break;
+        return true;
       }
 
       case "ActionRejected": {

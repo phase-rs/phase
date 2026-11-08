@@ -25,7 +25,7 @@ import { StateCodecRuntime } from "../state-codec-runtime";
 import { readGameStartedFullCredentials } from "../../services/stateCodecSocket";
 import { PROTOCOL_VERSION, WebSocketAdapter } from "../ws-adapter";
 import { ServerDraftAdapter } from "../server-draft-adapter";
-import type { GameState } from "../types";
+import { AdapterError, type GameState } from "../types";
 
 type ExactRow = { json: string; hash: string; revision?: string };
 type Checkpoint = {
@@ -551,6 +551,7 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
 
   class IntegrationSocket extends EventTarget {
     static OPEN = 1;
+    static CLOSED = 3;
     static last: IntegrationSocket | null = null;
     readyState = IntegrationSocket.OPEN;
     binaryType: BinaryType = "blob";
@@ -826,6 +827,58 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
     expect(sessions[0].closes).toBe(0);
     adapter.dispose();
     runtime.dispose();
+  });
+
+  it("does not reopen submissions when a real recovery Full is strictly stale", async () => {
+    const viewer = baselineJson();
+    const startedText = JSON.stringify(gameStartedEnvelope(viewerVariant(viewer, 0), 10));
+    const accepted = stateUpdateEnvelope(viewerVariant(viewer, 0), 10);
+    const acceptedText = JSON.stringify(accepted);
+    const staleText = JSON.stringify(stateUpdateEnvelope(viewerVariant(viewer, 1), 9));
+    const nextText = JSON.stringify(stateUpdateEnvelope(viewerVariant(viewer, 2), 11));
+    const delta = encodeAfter(nextText, 11n, acceptedText, 10n);
+    expect(frameType(delta)).toBe("Delta");
+    const runtime = new StateCodecRuntime(wasm);
+    const sessions: SessionStats[] = [];
+    const { adapter, events } = newNormalAdapter(runtime, sessions);
+    try {
+      const init = adapter.initialize();
+      const socket = await handshakeSocket("JoinGameWithPassword");
+      socket.deliver(frameText(fullFrame(startedText, 10n)));
+      await init;
+      socket.deliver(frameText(fullFrame(acceptedText, 10n)));
+      await vi.waitFor(() => expect(stateChanges(events)).toEqual([accepted.data.state]));
+      const pending = adapter.submitAction({ type: "PassPriority" }, 0)
+        .then(() => "resolved", (error: unknown) => error);
+      socket.deliver(frameText(tamperDelta(delta, (data) => {
+        data.result_hash = flipFirst(data.result_hash);
+      })));
+      await expect(pending).resolves.toMatchObject({ code: "WS_CLOSED", recoverable: true });
+      expect(resyncCount(socket)).toBe(1);
+      await expect(adapter.submitAction({ type: "PassPriority" }, 0))
+        .rejects.toMatchObject({ code: "ACTION_NOT_SENT" });
+
+      socket.deliver(frameText(fullFrame(staleText, 9n)));
+      socket.deliver(JSON.stringify({ type: "Pong", data: { timestamp: Date.now() } }));
+      // Close or the queued Pong is a deterministic delivery-completion barrier
+      // on both the fixed and previously unsafe implementations.
+      await vi.waitFor(() => expect(
+        sessions[0].closes > 0 || events.some((event) => event.type === "latencyChanged"),
+      ).toBe(true));
+      expect(sessions[0].decodes).toBe(4);
+      const refused: { outcome: unknown } = { outcome: "pending" };
+      void adapter.submitAction({ type: "PassPriority" }, 0)
+        .then((value) => { refused.outcome = value; }, (error: unknown) => { refused.outcome = error; });
+      expect(sentTypes(socket).filter((type) => type === "Action")).toEqual(["Action"]);
+      await vi.waitFor(() => expect(refused.outcome).toBeInstanceOf(AdapterError));
+      expect((await adapter.getSnapshot()).state).toEqual(accepted.data.state);
+      expect(stateChanges(events)).toEqual([accepted.data.state]);
+      expect(socket.close).toHaveBeenCalledOnce();
+      expect(sessions[0].closes).toBe(1);
+    } finally {
+      adapter.dispose();
+      runtime.dispose();
+    }
   });
 
   it("retires the real session on a wrong-key Full and fences its queued Delta", async () => {

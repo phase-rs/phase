@@ -27,7 +27,13 @@ import type { StateCodecSession } from "../adapter/state-codec-runtime";
 export interface PhaseSocketTransport {
   readonly readyState: number;
   onopen: ((event: Event) => void) | null;
-  onmessage: ((event: MessageEvent<string>) => void) | null;
+  /**
+   * The owning application returns true only after committing this message's
+   * snapshot. A codec recovery Full requires that synchronous receipt; an old
+   * accepted bootstrap or an observer's return value cannot authorize it.
+   * Ordinary delivery and native WebSockets ignore the return value.
+   */
+  onmessage: ((event: MessageEvent<string>) => boolean | void) | null;
   onerror: ((event: Event) => void) | null;
   onclose: ((event: CloseEvent) => void) | null;
   addEventListener(

@@ -9,9 +9,9 @@
  *    decoder session and emits the decoded `ServerMessage` text unchanged;
  *  - passes every other frame through untouched and in wire order;
  *  - requests `ResyncState` on the first rejected frame and suppresses deltas
- *    until a Full decodes, with a bounded recovery window;
- *  - bounds outstanding expanded text and closes on overload without dropping
- *    deltas or waiting for the active decode to settle;
+ *    until the application commits a Full, with a bounded recovery window;
+ *  - bounds queued expanded text behind one active frame and closes on overload
+ *    without dropping deltas or waiting for the active decode to settle;
  *  - never interprets, diffs or patches state. Rust owns reconstruction.
  *
  * Ownership: the wrapper owns the prepared decoder session lease and releases
@@ -265,17 +265,6 @@ export class StateCodecAttachment {
     }
   }
 
-  /**
-   * A declined game-state delivery cannot complete recovery against an older
-   * accepted snapshot. Close only its current recovering transport before the
-   * wrapper can publish readiness. Healthy-stream ignore behavior and retired
-   * attachment ownership are unchanged.
-   */
-  rejectRecoveryDelivery(socket: PhaseSocketTransport): void {
-    if (this.recovery !== "recovering" || this.current?.socket !== socket) return;
-    socket.close();
-  }
-
   /** The current attachment's socket is gone: a retired transport can no longer gate submissions. */
   clearRecovery(): void {
     this.recovery = null;
@@ -393,19 +382,20 @@ type Outbound =
 const MAX_COMPLETED_RECOVERIES = 2;
 
 /**
- * Bound expanded text retained while the shared decoder or application consumer
- * is stalled. Both budgets include the active receive. A 16 MiB UTF-16 budget
- * still admits multi-megabyte Full frames; it is not a 1 MiB per-frame ceiling.
+ * Bound expanded text queued behind the active receive. The 64-message budget
+ * includes that active frame, whose supported size is independent of backlog.
+ * Queued text has a separate 16 MiB UTF-16 budget; no individual-frame cap.
  */
 const MAX_OUTSTANDING_MESSAGES = 64;
-const MAX_OUTSTANDING_TEXT_BYTES = 16 * 1024 * 1024;
+const MAX_QUEUED_TEXT_BYTES = 16 * 1024 * 1024;
 
 export interface StateCodecSocketOptions {
   inner: PhaseSocketTransport;
   session: StateCodecSession;
   /**
-   * Consulted on rejection and after delivering a recovery Full. Application
-   * bootstrap, not a valid wire baseline, decides whether recovery is safe.
+   * Consulted on rejection and after delivering a recovery Full. The bootstrap
+   * must still be accepted, and the primary onmessage handler must acknowledge
+   * committing that specific Full before recovery can finish.
    */
   bootstrap: () => StateCodecBootstrap;
   /**
@@ -424,13 +414,13 @@ export class StateCodecSocket implements PhaseSocketTransport {
   onerror: ((event: Event) => void) | null = null;
   private closeHandler: CloseListener | null = null;
 
-  private handler: MessageListener | null = null;
+  private handler: PhaseSocketTransport["onmessage"] = null;
   private readonly messageListeners = new Map<MessageListener, boolean>();
   private readonly closeListeners = new Map<CloseListener, boolean>();
   private readonly queue: (() => Promise<void> | void)[] = [];
   private draining = false;
   private outstandingMessages = 0;
-  private outstandingTextBytes = 0;
+  private queuedTextBytes = 0;
   private state: ConnectionState = "awaitingConfirmation";
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
   private sessionReleased = false;
@@ -457,7 +447,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
   }
 
   get readyState(): number {
-    return this.options.inner.readyState;
+    return this.closed ? WebSocket.CLOSED : this.options.inner.readyState;
   }
 
   /**
@@ -478,11 +468,11 @@ export class StateCodecSocket implements PhaseSocketTransport {
     this.flushClose();
   }
 
-  get onmessage(): MessageListener | null {
+  get onmessage(): PhaseSocketTransport["onmessage"] {
     return this.handler;
   }
 
-  set onmessage(listener: MessageListener | null) {
+  set onmessage(listener: PhaseSocketTransport["onmessage"]) {
     this.handler = listener;
     if (listener) this.wakeConsumers();
   }
@@ -549,25 +539,29 @@ export class StateCodecSocket implements PhaseSocketTransport {
     // GzipEnvelopeSocket can expand the next frame while decode is awaiting the
     // shared WASM runtime. Reserve synchronously at this expanded-text boundary,
     // before a closure retains the frame. Never drop a Delta and keep playing.
-    const textBytes = text.length * 2;
+    // The first reserved message is logically active even before the drain's
+    // microtask starts. Its own size must not spend a stalled backlog budget.
+    const queuedBytes = this.outstandingMessages === 0 ? 0 : text.length * 2;
     if (
       this.outstandingMessages >= MAX_OUTSTANDING_MESSAGES
-      || textBytes > MAX_OUTSTANDING_TEXT_BYTES - this.outstandingTextBytes
+      || queuedBytes > MAX_QUEUED_TEXT_BYTES - this.queuedTextBytes
     ) {
       this.terminate("immediate", "receiveOverload", this.credentialsOf(text));
       return;
     }
     this.outstandingMessages++;
-    this.outstandingTextBytes += textBytes;
+    this.queuedTextBytes += queuedBytes;
     this.enqueue(async () => {
+      // Promotion releases the queued charge before decoding begins, so the
+      // next active frame again leaves the full backlog allowance available.
+      this.queuedTextBytes -= queuedBytes;
       try {
         await this.receive(text);
       } finally {
-        // Terminal cleanup already cleared the entire budget, including the
+        // Terminal cleanup already cleared the message budget, including the
         // active receive; its eventual completion must not subtract it twice.
         if (!this.closed) {
           this.outstandingMessages--;
-          this.outstandingTextBytes -= textBytes;
         }
       }
     });
@@ -602,7 +596,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
     // immediately even if the one active WASM decode never settles.
     this.queue.length = 0;
     this.outstandingMessages = 0;
-    this.outstandingTextBytes = 0;
+    this.queuedTextBytes = 0;
   }
 
   /**
@@ -730,22 +724,22 @@ export class StateCodecSocket implements PhaseSocketTransport {
   private finishRecovery(json: string): void {
     if (this.state !== "awaitingFull") return;
     const event = new MessageEvent<string>("message", { data: json });
-    // Receive waits for application attachment before decoding.
+    // Only the primary application's receipt for this invocation can authorize
+    // recovery. An ignored frame or a callback that throws before committing
+    // cannot reuse an earlier GameStarted's bootstrap acceptance.
+    let accepted = false;
     try {
-      this.dispatch({ kind: "message", event });
+      accepted = this.dispatch({ kind: "message", event });
     } finally {
-      // The application handler decides bootstrap acceptance while this frame
-      // is delivered, so the decision is made after delivery and in a
-      // throwing-listener-safe path.
-      this.finishRecoveryDecision();
+      this.finishRecoveryDecision(accepted);
     }
   }
 
-  private finishRecoveryDecision(): void {
+  private finishRecoveryDecision(accepted: boolean): void {
     if (this.state !== "awaitingFull") return;
-    if (this.bootstrap() !== "accepted") {
-      // The delivery reset the application bootstrap: nothing to restore, and
-      // no codec evidence against the stream.
+    if (!accepted || this.bootstrap() !== "accepted") {
+      // The application declined this Full or reset its bootstrap. There is no
+      // committed recovery snapshot, and no codec evidence against the stream.
       this.terminate();
       return;
     }
@@ -851,23 +845,26 @@ export class StateCodecSocket implements PhaseSocketTransport {
     this.dispatch(item);
   }
 
-  private dispatch(item: Outbound): void {
+  private dispatch(item: Outbound): boolean {
     switch (item.kind) {
-      case "message":
+      case "message": {
+        let accepted = false;
         try {
-          this.handler?.(item.event);
+          accepted = this.handler?.(item.event) === true;
         } catch {
-          // Subscribers do not own queue progress or transport cleanup.
+          // A throwing application did not acknowledge this delivery.
         }
         for (const [listener, once] of [...this.messageListeners]) {
           if (once) this.messageListeners.delete(listener);
           try {
             listener(item.event);
           } catch {
-            // Continue delivering to independent subscribers.
+            // Continue delivering to independent observers; they do not own
+            // application snapshot acceptance.
           }
         }
-        return;
+        return accepted;
+      }
       case "close":
         try {
           this.closeHandler?.(item.event);
@@ -883,7 +880,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
             }
           }
         }
-        return;
+        return false;
       case "recovery":
         // A throwing application callback must not strand the transport in
         // recovery without sending the resync that exits it.
@@ -892,7 +889,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
         } catch {
           // The owning adapter already dropped its slot before emitting.
         }
-        return;
+        return false;
     }
   }
 

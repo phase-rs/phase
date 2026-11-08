@@ -57,6 +57,7 @@ import type { FullTerminalDelivery } from "../../services/fullTerminalResult";
 // `adapter.ws` is not populated until after the handshake completes.
 class MockWebSocket extends EventTarget {
   static OPEN = 1;
+  static CLOSED = 3;
   static last: MockWebSocket | null = null;
   readyState = MockWebSocket.OPEN;
   onopen: (() => void) | null = null;
@@ -4292,6 +4293,83 @@ describe("WebSocketAdapter — negotiated StateCodecV1", () => {
     }
     adapter.dispose();
   });
+
+  it.each(["stale update", "throwing application"] as const)(
+    "does not reopen submissions after a recovery Full is declined by a %s",
+    async (decline) => {
+      const accepted = { ...createMockState(), turn_number: 10 };
+      const started = JSON.stringify({
+        type: "GameStarted",
+        data: { state: accepted, state_revision: 10, your_player: 0,
+          player_token: "codec-token", full_key: REPLY_OWNERSHIP_FULL_KEY },
+      });
+      const stale = JSON.stringify({
+        type: "StateUpdate",
+        data: { state: { ...accepted, turn_number: 9 }, state_revision: 9,
+          full_key: REPLY_OWNERSHIP_FULL_KEY, events: [] },
+      });
+      const rejected = decline === "stale update" ? stale : JSON.stringify({
+        type: "GameStarted",
+        data: { state: { ...accepted, turn_number: 11 }, state_revision: 11,
+          your_player: 0, player_token: "codec-token", full_key: REPLY_OWNERSHIP_FULL_KEY },
+      });
+      const results: CodecDecodeResult[] = [
+        { kind: "decoded", json: started },
+        { kind: "decoded", json: stale },
+        { kind: "resyncRequired" },
+        { kind: "decoded", json: rejected },
+      ];
+      const session = codecSession(() => results.shift() ?? { kind: "resyncRequired" });
+      const { adapter, raw, init } = await startCodecAdapter(session.session);
+      let rejectApplication = false;
+      const events = vi.fn();
+      adapter.onEvent(events);
+      adapter.onEvent((event) => {
+        if (rejectApplication && event.type === "bootstrapDelivered") {
+          throw new Error("application rejected the delivery before caching it");
+        }
+      });
+      try {
+        raw.dispatchSynthetic("message", fullFrame(started));
+        await init;
+        // The same stale payload remains an ordinary healthy-stream ignore.
+        raw.dispatchSynthetic("message", fullFrame(stale));
+        raw.dispatchSynthetic("message", JSON.stringify({ type: "Pong", data: { timestamp: Date.now() } }));
+        await vi.waitFor(() => expect(events).toHaveBeenCalledWith(
+          expect.objectContaining({ type: "latencyChanged" })));
+        expect((await adapter.getSnapshot()).state.turn_number).toBe(10);
+        expect(raw.close).not.toHaveBeenCalled();
+        const pending = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+        raw.dispatchSynthetic("message", deltaFrame(stale));
+        await expect(pending()).resolves.toMatchObject({ code: "WS_CLOSED", recoverable: true });
+        await expect(adapter.submitAction({ type: "PassPriority" }, 0))
+          .rejects.toMatchObject({ code: AdapterErrorCode.ACTION_NOT_SENT });
+        expect(raw.send).toHaveBeenCalledWith('{"type":"ResyncState"}');
+
+        rejectApplication = decline === "throwing application";
+        events.mockClear();
+        raw.dispatchSynthetic("message", fullFrame(rejected));
+        raw.dispatchSynthetic("message", JSON.stringify({ type: "Pong", data: { timestamp: Date.now() } }));
+        // Either terminal close or this following control frame proves the
+        // recovery delivery finished, including on the unsafe old path.
+        await vi.waitFor(() => expect(
+          session.close.mock.calls.length > 0
+          || events.mock.calls.some(([event]) => event.type === "latencyChanged"),
+        ).toBe(true));
+        expect(session.decode).toHaveBeenCalledTimes(4);
+        const refused = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+        // On the old implementation this sends a second Action and never settles.
+        expect(submissionTypes(raw)).toEqual(["Action"]);
+        expect(await refused()).toBeInstanceOf(AdapterError);
+        expect((await adapter.getSnapshot()).state.turn_number).toBe(10);
+        expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged" }));
+        expect(raw.close).toHaveBeenCalledOnce();
+        expect(session.close).toHaveBeenCalledOnce();
+      } finally {
+        adapter.dispose();
+      }
+    },
+  );
 
   it.each([
     ["wrong game", { game_code: "OTHER", generation: 1 }],

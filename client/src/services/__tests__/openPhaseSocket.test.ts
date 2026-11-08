@@ -30,6 +30,7 @@ import { decodeJsonEnvelope, encodeJsonEnvelope, WIRE_COMPRESSION_THRESHOLD } fr
 
 class MockWebSocket extends EventTarget {
   static OPEN = 1;
+  static CLOSED = 3;
   static instances: MockWebSocket[] = [];
   readyState = MockWebSocket.OPEN;
   binaryType: BinaryType = "blob";
@@ -143,7 +144,7 @@ describe("openPhaseSocket", () => {
     expect(binary?.[0]).toBe(0x00);
 
     const order: string[] = [];
-    const received = vi.fn((_event: MessageEvent<string>) => order.push("message"));
+    const received = vi.fn((_event: MessageEvent<string>) => { order.push("message"); });
     socket.ws.onmessage = received;
     socket.ws.addEventListener("close", () => order.push("close"));
     const response = new TextEncoder().encode(JSON.stringify({ type: "Pong" }));
@@ -1324,7 +1325,7 @@ describe("openPhaseSocket — codec stream, recovery and teardown", () => {
     const raw = MockWebSocket.instances[0];
     raw.deliverMessage(fullHello());
     const socket = await promise;
-    const received = vi.fn();
+    const received = vi.fn((_event: MessageEvent<string>) => true);
     socket.ws.onmessage = received;
     raw.deliverMessage(confirmationFrame());
     return { raw, socket, received };
@@ -1466,7 +1467,7 @@ describe("openPhaseSocket — codec stream, recovery and teardown", () => {
     raw.close();
 
     const order: string[] = [];
-    socket.ws.onmessage = (event) => order.push(`message:${event.data}`);
+    socket.ws.onmessage = (event) => { order.push(`message:${event.data}`); };
     socket.ws.addEventListener("close", () => order.push("close"));
 
     await vi.waitFor(() => expect(order).toContain("close"));
@@ -1537,27 +1538,35 @@ describe("openPhaseSocket — codec stream, recovery and teardown", () => {
     expect(raw.send).not.toHaveBeenCalledWith('{"type":"ResyncState"}');
   });
 
-  it("publishes ready even when the recovery handler throws", async () => {
-    const frames: Uint8Array[] = [];
-    const fake = fakeSession((frame) => {
-      frames.push(frame);
-      return frames.length === 1 ? { kind: "resyncRequired" } : { kind: "decoded", json: DECODED_PONG };
-    });
-    const recovery: StateCodecRecoveryNotice[] = [];
-    const { raw, socket } = await negotiated(fake, { onRecovery: (state) => recovery.push(state) });
-
-    raw.deliverMessage(codecFrame("Delta"));
-    await vi.waitFor(() => expect(recovery).toEqual(["recovering"]));
-    socket.ws.onmessage = () => {
-      throw new Error("listener blew up");
-    };
-    raw.deliverMessage(codecFrame("Full"));
-
-    // The bootstrap decision is made after delivery, in a throwing-listener-safe
-    // path: a throw must not leave the socket stuck in recovery.
-    await vi.waitFor(() => expect(recovery).toEqual(["recovering", "ready"]));
-    expect(fake.close).not.toHaveBeenCalled();
-  });
+  it.each(["declines", "throws"] as const)(
+    "closes when the primary application %s recovery even if an observer acknowledges",
+    async (outcome) => {
+      let calls = 0;
+      const fake = fakeSession(() => ++calls === 1
+        ? { kind: "resyncRequired" } : { kind: "decoded", json: DECODED_PONG });
+      const recovery: StateCodecRecoveryNotice[] = [];
+      const { raw, socket } = await negotiated(fake, { onRecovery: (state) => recovery.push(state) });
+      const closed = vi.fn();
+      socket.ws.onclose = closed;
+      raw.deliverMessage(codecFrame("Delta"));
+      await vi.waitFor(() => expect(recovery).toEqual(["recovering"]));
+      const primary = vi.fn((_event: MessageEvent<string>) => {
+        if (outcome === "throws") throw new Error("application declined before committing");
+        return false;
+      });
+      const observer = vi.fn((_event: MessageEvent<string>) => true);
+      socket.ws.onmessage = primary;
+      socket.ws.addEventListener("message", observer);
+      raw.deliverMessage(codecFrame("Full"));
+      await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+      expect(primary).toHaveBeenCalledOnce();
+      expect(observer).toHaveBeenCalledOnce();
+      expect(fake.decode).toHaveBeenCalledTimes(2);
+      expect(recovery).toEqual(["recovering"]);
+      expect(fake.close).toHaveBeenCalledOnce();
+      expect(raw.close).toHaveBeenCalledOnce();
+    },
+  );
 
   it("propagates a listener throw without skipping queue cleanup", async () => {
     const fake = fakeSession();
@@ -1573,7 +1582,7 @@ describe("openPhaseSocket — codec stream, recovery and teardown", () => {
 });
 
 describe("openPhaseSocket — bounded expanded codec backlog", () => {
-  // Admission includes the active decode, not just frames waiting behind it.
+  // Count includes the logical active decode; bytes bound only queued backlog.
   const messageLimit = 64;
   const textByteLimit = 16 * 1024 * 1024;
   const frameCharacters = 1024 * 1024;
@@ -1627,11 +1636,11 @@ describe("openPhaseSocket — bounded expanded codec backlog", () => {
         // One active Full plus 64 queued Deltas exceeds the 64-message budget.
         for (let index = 0; index < messageLimit; index++) raw.deliverMessage(delta.buffer);
       } else {
-        // ASCII occupies two retained UTF-16 bytes per character. Eight 1 MiB
-        // strings exactly fill 16 MiB, including the active Full; a tiny ninth
-        // frame must fail even though the message-count budget is nowhere near.
+        // ASCII occupies two retained UTF-16 bytes per character. Eight queued
+        // 1 MiB strings exactly fill 16 MiB, independently of the active Full;
+        // a tiny additional frame must fail well below the message-count bound.
         const framesAtLimit = textByteLimit / (characters * 2);
-        for (let index = 1; index < framesAtLimit; index++) raw.deliverMessage(delta.buffer);
+        for (let index = 0; index < framesAtLimit; index++) raw.deliverMessage(delta.buffer);
         raw.deliverMessage((await encodeJsonEnvelope(paddedFrame("Delta"))).buffer);
       }
 
@@ -1695,25 +1704,133 @@ describe("openPhaseSocket — bounded expanded codec backlog", () => {
     expect(fake.close).toHaveBeenCalledOnce();
   });
 
-  it("accepts Full frames over 1 MiB and restores the aggregate text budget after delivery", async () => {
-    const text = paddedFrame("Full", frameCharacters + 1);
+  // These are scripted-decoder queue tests, not native serializer evidence.
+  // The separate largeSpectatorFull integration probe covers genuine native
+  // GameStarted/Full bytes with the real WASM decoder and spectator adapter.
+  function largeBootstrapFrame(): string {
+    const objects = Object.fromEntries(Array.from({ length: 9_000 }, (_, index) => [
+      String(index + 1),
+      {
+        id: index + 1,
+        name: "Queue fixture permanent",
+        abilities: Array.from({ length: 16 }, () => ({
+          type: "Activated", cost: { type: "Tap" }, effect: { type: "DrawCards", count: 1 },
+        })),
+      },
+    ]));
+    return JSON.stringify({
+      type: "Full",
+      data: {
+        revision: 100,
+        state: {
+          type: "GameStarted",
+          data: { your_player: 255, state_revision: 100, state: { objects, turn_number: 7 } },
+        },
+      },
+    });
+  }
+
+  function bootstrapDecoder(frame: Uint8Array): StateCodecDecodeResult {
+    const parsed = JSON.parse(new TextDecoder().decode(frame));
+    return { kind: "decoded", json: JSON.stringify(parsed.data.state) };
+  }
+
+  it("delivers a standalone Full larger than the stalled backlog and restores capacity", async () => {
+    const text = largeBootstrapFrame();
+    expect(text.length).toBeGreaterThan(8_388_608);
     const compressed = await encodeJsonEnvelope(text);
     expect(compressed[0]).toBe(0x01);
-    const fake = fakeSession();
+    const fake = fakeSession(bootstrapDecoder);
     const { raw, socket, received, recovery } = await negotiated(fake);
-    // The total stream exceeds the retained-text budget; only outstanding text
-    // is bounded, so a healthy consumer can receive every large Full.
-    for (let index = 0; index < 9; index++) {
+    const consumer: { revision?: number; turn?: number; objectCount?: number; spectator?: number } = {};
+    socket.ws.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      consumer.revision = message.data.state_revision;
+      consumer.turn = message.data.state.turn_number;
+      consumer.objectCount = Object.keys(message.data.state.objects).length;
+      consumer.spectator = message.data.your_player;
+      received(event);
+      return true;
+    };
+    for (let wave = 0; wave < 2; wave++) {
       raw.deliverMessage(compressed.buffer);
-      await vi.waitFor(() => expect(received).toHaveBeenCalledTimes(index + 1));
+      await vi.waitFor(() => expect(received).toHaveBeenCalledTimes(wave + 1));
+      expect(consumer).toEqual({ revision: 100, turn: 7, objectCount: 9_000, spectator: 255 });
+      expect(fake.close).not.toHaveBeenCalled();
+      expect(raw.close).not.toHaveBeenCalled();
     }
-    expect(new TextDecoder().decode(fake.decode.mock.calls[0][0])).toBe(text);
-    expect(fake.decode).toHaveBeenCalledTimes(9);
-    expect(raw.close).not.toHaveBeenCalled();
+    expect(fake.decode).toHaveBeenCalledTimes(2);
+    expect(recovery).not.toHaveBeenCalled();
+    // A completed large frame must leave the entire ordinary budget available.
+    let release!: (result: StateCodecDecodeResult) => void;
+    fake.decode.mockImplementationOnce(() => new Promise<StateCodecDecodeResult>((resolve) => {
+      release = resolve;
+    }));
+    const ordinary = await encodeJsonEnvelope(paddedFrame("Delta", frameCharacters));
+    raw.deliverMessage(ordinary.buffer);
+    await vi.waitFor(() => expect(fake.decode).toHaveBeenCalledTimes(3));
+    for (let index = 0; index < textByteLimit / (frameCharacters * 2); index++) {
+      raw.deliverMessage(ordinary.buffer);
+    }
+    socket.ws.onmessage = received;
+    fake.decode.mockImplementation(() => ({ kind: "decoded", json: DECODED_PONG }));
+    release({ kind: "decoded", json: DECODED_PONG });
+    await vi.waitFor(() => expect(received).toHaveBeenCalledTimes(11));
     expect(recovery).not.toHaveBeenCalled();
     socket.close();
     expect(fake.close).toHaveBeenCalledOnce();
+    expect(raw.close).toHaveBeenCalledOnce();
   });
+
+  it.each(["ordinary backlog bytes", "another oversized Full"] as const)(
+    "bounds %s behind a stalled oversized Full and fences its late result",
+    async (bound) => {
+      const compressed = await encodeJsonEnvelope(largeBootstrapFrame());
+      expect(compressed[0]).toBe(0x01);
+      let release!: (result: StateCodecDecodeResult) => void;
+      const fake = fakeSession();
+      fake.decode.mockImplementationOnce(() => new Promise<StateCodecDecodeResult>((resolve) => {
+        release = resolve;
+      }));
+      const { raw, socket, received, recovery } = await negotiated(fake);
+      const closed = vi.fn();
+      socket.ws.onclose = closed;
+      raw.deliverMessage(compressed.buffer);
+      await vi.waitFor(() => expect(fake.decode).toHaveBeenCalledOnce());
+      expect(raw.close).not.toHaveBeenCalled();
+      expect(fake.close).not.toHaveBeenCalled();
+      if (bound === "another oversized Full") {
+        raw.deliverMessage(compressed.buffer);
+      } else {
+        const delta = await encodeJsonEnvelope(paddedFrame("Delta", frameCharacters));
+        for (let index = 0; index < textByteLimit / (frameCharacters * 2); index++) {
+          raw.deliverMessage(delta.buffer);
+        }
+        // This must be the overflowing frame, not the active large Full.
+        raw.deliverMessage((await encodeJsonEnvelope(paddedFrame("Delta"))).buffer);
+      }
+      await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+      expect(recovery.mock.calls).toEqual([[
+        { kind: "failed", reason: "receiveOverload", joinCredentials: null },
+      ]]);
+      expect(fake.close).toHaveBeenCalledOnce();
+      expect(raw.close).toHaveBeenCalledOnce();
+      expect(fake.decode).toHaveBeenCalledOnce();
+      expect(received).not.toHaveBeenCalled();
+      vi.useFakeTimers();
+      try {
+        release({ kind: "decoded", json: '{"type":"GameStarted","data":{"state_revision":100}}' });
+        await vi.advanceTimersByTimeAsync(0);
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(received).not.toHaveBeenCalled();
+      expect(fake.decode).toHaveBeenCalledOnce();
+      socket.close();
+      expect(fake.close).toHaveBeenCalledOnce();
+      expect(raw.close).toHaveBeenCalledOnce();
+    },
+  );
 });
 
 describe("openPhaseSocket — canonical codec discriminator", () => {
@@ -1731,7 +1848,7 @@ describe("openPhaseSocket — canonical codec discriminator", () => {
     raw.deliverMessage(fullHello(compressed ? { wire_formats: ["GzipEnvelopeV1"] } : {}));
     const socket = await pending;
     const received: string[] = [];
-    socket.ws.onmessage = (event) => { received.push(event.data); };
+    socket.ws.onmessage = (event) => { received.push(event.data); return true; };
     raw.deliverMessage(confirmationFrame());
     const deliver = async (text: string) => {
       if (!compressed) {
@@ -2025,7 +2142,7 @@ describe("codec attachment and deadline boundaries", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(fake.decode).not.toHaveBeenCalled();
       const messages: string[] = [];
-      socket.ws.onmessage = (event) => { messages.push(event.data); bootstrap = "accepted"; };
+      socket.ws.onmessage = (event) => { messages.push(event.data); bootstrap = "accepted"; return true; };
       const closed = vi.fn();
       socket.ws.onclose = closed;
       await vi.advanceTimersByTimeAsync(0);
@@ -2056,7 +2173,7 @@ describe("codec attachment and deadline boundaries", () => {
     const raw = MockWebSocket.instances[0];
     raw.deliverMessage(fullHello());
     const socket = await pending;
-    const received = vi.fn(() => { bootstrap = "pending"; throw new Error("listener"); });
+    const received = vi.fn(() => { bootstrap = "pending"; return true; });
     const closed = vi.fn();
     socket.ws.onmessage = received;
     socket.ws.onclose = closed;
@@ -2353,7 +2470,10 @@ describe("openPhaseSocket — typed terminal codec reasons", () => {
     // Reach guard: the codec was really advertised, so the wrapper exists.
     expect(raw.send).toHaveBeenCalledWith(expect.stringContaining('"state_codecs":["StateCodecV1"]'));
     const closed = vi.fn(() => { trace.push("close"); });
-    const received = vi.fn((event: { data: string }) => { trace.push(`message:${event.data.length}`); });
+    const received = vi.fn((event: { data: string }) => {
+      trace.push(`message:${event.data.length}`);
+      return true;
+    });
     if (options.attachHandlers !== false) {
       socket.ws.onclose = closed;
       socket.ws.onmessage = received;
@@ -2544,7 +2664,7 @@ describe("openPhaseSocket — typed terminal codec reasons", () => {
     reset.raw.deliverMessage(confirmationFrame());
     reset.raw.deliverMessage(codecFrame("Delta"));
     await vi.waitFor(() => expect(reset.notices).toEqual(["recovering"]));
-    reset.socket.ws.onmessage = () => { bootstrap = "pending"; };
+    reset.socket.ws.onmessage = () => { bootstrap = "pending"; return true; };
     reset.raw.deliverMessage(codecFrame("Full"));
     await vi.waitFor(() => expect(reset.closed).toHaveBeenCalledOnce());
     expect(reset.notices).toEqual(["recovering"]);
