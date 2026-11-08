@@ -1904,6 +1904,9 @@ pub fn fallback_action(
         | WaitingFor::SearchChoice { .. }
         | WaitingFor::ChooseFromZoneChoice { .. }
         | WaitingFor::DiscardChoice { .. }
+        // Turtle Team-Up hero-choice Events: per-event counts and up_to/empty
+        // rules live in the engine's issued candidates — take that answer.
+        | WaitingFor::HeroEventChoice { .. }
         | WaitingFor::EffectZoneChoice { .. }
         | WaitingFor::ConniveDiscard { .. }
         | WaitingFor::DiscardToHandSize { .. }
@@ -17888,6 +17891,7 @@ mod tests {
             selectable_cards: pool,
             kept_destination: None,
             rest_destination: None,
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: engine::types::ability::DigRestOrder::Preserve,
             source_id: None,
@@ -18015,6 +18019,7 @@ mod tests {
                 selectable_cards: vec![pool[0]],
                 kept_destination: None,
                 rest_destination: None,
+                rest_remainder: engine::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: engine::types::ability::DigRestOrder::Preserve,
                 source_id: None,
@@ -19287,6 +19292,7 @@ mod tests {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: Some(QuantityExpr::Fixed { value: 0 }),
             rest_order: engine::types::ability::DigRestOrder::Preserve,
             reveal,

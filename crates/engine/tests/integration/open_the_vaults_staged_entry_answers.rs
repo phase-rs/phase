@@ -241,3 +241,201 @@ fn twilights_call_xantcha_entry_controller_choice_settles_both_entrants() {
     assert_eq!(runner.state().objects[&thopter].controller, P0);
     assert_settled(&runner);
 }
+
+/// CR 800.4a/f: the departing Mox owner never transfers an offered or accepted
+/// discard payment to a survivor; the other Vaults entrant still completes.
+#[test]
+fn fu7_mox_departure_before_and_during_discard_payment_settles_surviving_entry() {
+    const P2: PlayerId = PlayerId(2);
+    for accept in [false, true] {
+        let mut scenario = GameScenario::new_n_player(3, 0x326f);
+        scenario.at_phase(Phase::PreCombatMain);
+        let mox = scenario
+            .add_creature_to_graveyard(P1, "Mox Diamond", 0, 0)
+            .as_artifact()
+            .from_oracle_text(MOX)
+            .id();
+        let thopter = scenario
+            .add_creature_to_graveyard(P2, "Ornithopter", 0, 2)
+            .as_artifact_creature()
+            .from_oracle_text("Flying")
+            .id();
+        let forest = scenario
+            .add_land_to_hand(P1, "Forest")
+            .from_oracle_text("({T}: Add {G}.)")
+            .id();
+        let island = scenario
+            .add_land_to_hand(P1, "Island")
+            .from_oracle_text("({T}: Add {U}.)")
+            .id();
+        let vaults = scenario
+            .add_spell_to_hand_from_oracle(P0, "Open the Vaults", false, VAULTS)
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(vaults).commit().try_resolve().unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P1, .. }
+        ));
+        let pending = runner.state().pending_replacement.as_ref().unwrap();
+        assert!(pending.is_optional);
+        assert_eq!(pending.proposed.affected_object_id(), Some(mox));
+        assert_eq!(pending.choice_player, Some(P1));
+        if accept {
+            runner
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .unwrap();
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::DiscardChoice { player: P1, .. }
+            ));
+            assert!(
+                runner
+                    .state()
+                    .pending_replacement
+                    .as_ref()
+                    .unwrap()
+                    .may_cost_paid
+            );
+        }
+        assert_eq!(runner.state().objects[&mox].zone, Zone::Graveyard);
+        runner.act(GameAction::Concede { player_id: P1 }).unwrap();
+        let state = runner.state();
+        assert!(!state.battlefield.contains(&mox));
+        assert!(!state.players[P1.0 as usize].hand.contains(&forest));
+        assert!(!state.players[P1.0 as usize].hand.contains(&island));
+        assert_eq!(state.objects[&thopter].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&vaults].zone, Zone::Graveyard);
+        assert!(state.pending_replacement.is_none());
+        assert!(state.pending_cost_move_resume.is_none());
+        assert!(!state.replacement_may_cost_paused);
+        assert_settled(&runner);
+    }
+}
+
+/// CR 800.4f: only the departed payer loses an unfinished payment. Another
+/// player's departure leaves the exact accepted discard choice with its payer.
+#[test]
+fn fu7_unrelated_departure_preserves_mox_discard_and_pays_exactly_one_land() {
+    let mut scenario = GameScenario::new_n_player(3, 0x3260);
+    scenario.at_phase(Phase::PreCombatMain);
+    let mox = scenario
+        .add_creature_to_graveyard(P0, "Mox Diamond", 0, 0)
+        .as_artifact()
+        .from_oracle_text(MOX)
+        .id();
+    let thopter = scenario
+        .add_creature_to_graveyard(P0, "Ornithopter", 0, 2)
+        .as_artifact_creature()
+        .from_oracle_text("Flying")
+        .id();
+    let forest = scenario
+        .add_land_to_hand(P0, "Forest")
+        .from_oracle_text("({T}: Add {G}.)")
+        .id();
+    let island = scenario
+        .add_land_to_hand(P0, "Island")
+        .from_oracle_text("({T}: Add {U}.)")
+        .id();
+    let vaults = scenario
+        .add_spell_to_hand_from_oracle(P0, "Open the Vaults", false, VAULTS)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(vaults).commit().try_resolve().unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DiscardChoice { player: P0, .. }
+    ));
+    let before = runner.state().pending_replacement.clone().unwrap();
+    runner.act(GameAction::Concede { player_id: P1 }).unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DiscardChoice { player: P0, .. }
+    ));
+    assert_eq!(runner.state().pending_replacement.as_ref(), Some(&before));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![forest],
+        })
+        .unwrap();
+    let state = runner.state();
+    assert_eq!(state.objects[&forest].zone, Zone::Graveyard);
+    assert_eq!(state.objects[&island].zone, Zone::Hand);
+    assert_eq!(state.objects[&mox].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&thopter].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&vaults].zone, Zone::Graveyard);
+    assert!(state.pending_replacement.is_none());
+    assert!(state.pending_cost_move_resume.is_none());
+    assert!(!state.replacement_may_cost_paused);
+    assert_settled(&runner);
+}
+
+/// CR 800.4b/f: a foreign-owned Mox cannot enter under its departed Beacon
+/// controller, and the owner is not a substitute payer for its accepted cost.
+#[test]
+fn fu7_foreign_owned_mox_does_not_reassign_departed_beacon_payer() {
+    const P2: PlayerId = PlayerId(2);
+    const BEACON: &str = "Put target artifact or creature card from a graveyard onto the battlefield under your control. Shuffle Beacon of Unrest into its owner's library.";
+    let mut scenario = GameScenario::new_n_player(3, 0x326b);
+    scenario.at_phase(Phase::PreCombatMain);
+    let mox = scenario
+        .add_creature_to_graveyard(P2, "Mox Diamond", 0, 0)
+        .as_artifact()
+        .from_oracle_text(MOX)
+        .id();
+    let forest = scenario
+        .add_land_to_hand(P1, "Forest")
+        .from_oracle_text("({T}: Add {G}.)")
+        .id();
+    scenario
+        .add_land_to_hand(P1, "Island")
+        .from_oracle_text("({T}: Add {U}.)");
+    let beacon = scenario
+        .add_spell_to_hand_from_oracle(P1, "Beacon of Unrest", false, BEACON)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    runner
+        .cast(beacon)
+        .target_object(mox)
+        .commit()
+        .try_resolve()
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P1, .. }
+    ));
+    let pending = runner.state().pending_replacement.as_ref().unwrap();
+    assert_eq!(pending.choice_player, Some(P1));
+    assert!(matches!(
+        &pending.proposed,
+        engine::types::proposed_event::ProposedEvent::ZoneChange {
+            controller_override: Some(P1),
+            ..
+        }
+    ));
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DiscardChoice { player: P1, .. }
+    ));
+    assert_eq!(runner.state().objects[&forest].zone, Zone::Hand);
+    runner.act(GameAction::Concede { player_id: P1 }).unwrap();
+    assert_eq!(runner.state().objects[&mox].zone, Zone::Graveyard);
+    assert!(runner.state().players[P2.0 as usize].hand.is_empty());
+    assert!(runner.state().pending_replacement.is_none());
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert!(!runner.state().replacement_may_cost_paused);
+    assert_settled(&runner);
+}

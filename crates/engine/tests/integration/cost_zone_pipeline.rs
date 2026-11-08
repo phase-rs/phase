@@ -158,6 +158,7 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
@@ -284,6 +285,7 @@ fn dig_zero_kept_deferred_rest_pile_publishes_an_empty_tracked_set() {
             up_to: true,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
@@ -409,6 +411,7 @@ fn dig_mass_put_all_nonbattlefield_redirect_publishes_only_delivered_set() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
@@ -570,6 +573,7 @@ fn uninterrupted_dig_rest_and_mass_put_all_complete_synchronously() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: false,
@@ -629,6 +633,7 @@ fn uninterrupted_dig_rest_and_mass_put_all_complete_synchronously() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: false,
@@ -717,6 +722,7 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
@@ -3228,13 +3234,14 @@ fn self_exile_activation_cost_pauses_for_moved_redirect_without_pending_cast() {
     );
 }
 
-#[test]
-fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exiles_only() {
-    let mut scenario = GameScenario::new();
+fn mimeoplasm_forced_cost_board(
+    cost_owner: engine::types::player::PlayerId,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(3, 0x326c);
     scenario.at_phase(Phase::PreCombatMain);
 
     let first = scenario
-        .add_creature_to_graveyard(P0, "First Mimeoplasm Witness", 2, 2)
+        .add_creature_to_graveyard(cost_owner, "First Mimeoplasm Witness", 2, 2)
         .id();
     let second = scenario
         .add_creature_to_graveyard(P0, "Second Mimeoplasm Witness", 3, 3)
@@ -3242,10 +3249,10 @@ fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exi
     let mimeoplasm = scenario
         .add_creature_to_hand_from_oracle(
             P0,
-            "Mimeoplasm Forced-Cost Witness",
+            "The Mimeoplasm",
             5,
             5,
-            "As ~ enters, you may exile two creature cards from graveyards. If you do, ~ enters as a copy of one of them, except it has +1/+1 counters equal to the other's power.",
+            "As The Mimeoplasm enters, you may exile two creature cards from graveyards. If you do, it enters as a copy of one of those cards with a number of additional +1/+1 counters on it equal to the power of the other card.",
         )
         .id();
     for name in ["First Mimeoplasm Redirect", "Second Mimeoplasm Redirect"] {
@@ -3261,7 +3268,7 @@ fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exi
     scenario.add_basic_land(P0, ManaColor::Black);
 
     let mut runner = scenario.build();
-    assert!(runner.state().players[P0.0 as usize]
+    assert!(runner.state().players[cost_owner.0 as usize]
         .graveyard
         .contains(&first));
     assert!(runner.state().players[P0.0 as usize]
@@ -3289,6 +3296,12 @@ fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exi
     runner
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("accept Mimeoplasm's replacement cost");
+    (runner, first, second, mimeoplasm)
+}
+
+#[test]
+fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exiles_only() {
+    let (mut runner, first, second, mimeoplasm) = mimeoplasm_forced_cost_board(P0);
 
     let state = runner.state();
     let Some(PendingCostMoveResume::ReplacementMayCost { remaining, .. }) =
@@ -3380,6 +3393,81 @@ fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exi
         state.active_spell_resolution().is_none(),
         "the outer context is consumed only when Mimeoplasm's own entry completes"
     );
+}
+
+/// Supplemental typed-cost infrastructure witness. As in the ordinary row
+/// above, Mimeoplasm's independent copy/counter branch is intentionally stripped;
+/// full-Oracle Mox rows establish the actual optional-entry card semantics.
+#[test]
+fn fu7_nested_may_cost_departure_preserves_outer_cursor_or_retires_departed_payer() {
+    for (leaver, cost_owner) in [(P1, P0), (P0, P0), (P1, P1)] {
+        let (mut runner, first, second, mimeoplasm) = mimeoplasm_forced_cost_board(cost_owner);
+        let root_before = runner.state().pending_cost_move_resume.clone().unwrap();
+        let inner_before = runner.state().pending_replacement.as_ref().unwrap().clone();
+        assert_eq!(inner_before.candidates.len(), 2);
+        let PendingCostMoveResume::ReplacementMayCost {
+            current,
+            remaining,
+            outer_replacement: Some(outer),
+            ..
+        } = &root_before
+        else {
+            panic!("the inner move must retain its exact outer MayCost root");
+        };
+        assert_eq!(*current, if cost_owner == P0 { first } else { second });
+        assert_eq!(
+            remaining.as_slice(),
+            if cost_owner == P0 {
+                &[second]
+            } else {
+                &[first]
+            }
+        );
+        assert_eq!(outer.choice_player, Some(P0));
+        assert!(outer.may_cost_paid);
+        runner
+            .act(GameAction::Concede { player_id: leaver })
+            .unwrap();
+        if leaver == P0 {
+            assert!(!runner.state().battlefield.contains(&mimeoplasm));
+            assert!(runner.state().pending_cost_move_resume.is_none());
+            assert!(runner.state().pending_replacement.is_none());
+        } else if cost_owner == leaver {
+            assert_eq!(runner.state().objects[&mimeoplasm].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&second].zone, Zone::Graveyard);
+            assert!(runner.state().pending_cost_move_resume.is_none());
+            assert!(runner.state().pending_replacement.is_none());
+        } else {
+            assert_eq!(
+                runner.state().pending_cost_move_resume.as_ref(),
+                Some(&root_before)
+            );
+            let inner_after = runner.state().pending_replacement.as_ref().unwrap();
+            assert_eq!(inner_after.proposed, inner_before.proposed);
+            assert_eq!(inner_after.depth, inner_before.depth);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { player: P0, .. }
+            ));
+            for _ in 0..2 {
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .unwrap();
+            }
+            assert_eq!(runner.state().objects[&first].zone, Zone::Hand);
+            assert_eq!(runner.state().objects[&second].zone, Zone::Hand);
+            assert_eq!(runner.state().objects[&mimeoplasm].zone, Zone::Battlefield);
+            assert!(runner.state().pending_cost_move_resume.is_none());
+            assert!(runner.state().pending_replacement.is_none());
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(!runner.state().replacement_may_cost_paused);
+    }
 }
 
 #[test]
@@ -13118,6 +13206,7 @@ fn dig_kept_nonbattlefield_redirect_pauses_before_tail() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Graveyard),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
@@ -13269,6 +13358,7 @@ fn r2_effect_zone_moves_stay_synchronous_without_redirects() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Graveyard),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,

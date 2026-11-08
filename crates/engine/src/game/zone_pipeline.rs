@@ -857,8 +857,10 @@ pub(crate) fn zone_move_is_primitive_noop(
     object: &GameObject,
     to: Zone,
 ) -> bool {
-    // CR 111.8: a token outside the battlefield (and not stack-resident) stays put.
-    zones::token_is_outside_battlefield_and_stack(state, object)
+    // CR 111.8: a token outside the battlefield (and not stack-resident) stays
+    // put — except a Horde-deck token, which moves by design in boss-deck
+    // games (see `zones::token_cannot_change_zones`).
+    zones::token_cannot_change_zones(state, object)
         // CR 400.6 + CR 603.6d: Battlefield -> Battlefield is no entry event.
         || (object.zone == Zone::Battlefield && to == Zone::Battlefield)
 }
@@ -1420,9 +1422,17 @@ fn move_arranged_batch_then(
     let component_family = reqs
         .iter()
         .all(|req| matches!(req.cause, ZoneChangeCause::MergedComponentRouting));
-    let staged_admitted = staged_batch_admission(state, &reqs)
-        && (component_delivery_parent.is_none() || component_family);
-    let staged_parent = if staged_admitted {
+    let staged_entry = if staged_batch_admission(state, &reqs)
+        && (component_delivery_parent.is_none() || component_family)
+    {
+        let arrangements = component_delivery_parent
+            .as_ref()
+            .map_or(arrangements, |link| link.inherited_arrangements.clone());
+        Some(new_staged_batch(state, &reqs, arrangements))
+    } else {
+        None
+    };
+    let staged_parent = if staged_entry.is_some() {
         component_delivery_parent.take()
     } else {
         None
@@ -1432,8 +1442,7 @@ fn move_arranged_batch_then(
         reqs,
         logical_zone_change_group,
         BatchDeliveryParking::NewChild,
-        staged_admitted,
-        arrangements,
+        staged_entry,
         staged_parent,
         events,
     ) {
@@ -1471,7 +1480,7 @@ fn move_arranged_batch_then(
                 .resolution_stack
                 .batch_delivery_owner_mut(group_id)
                 .expect("new batch retains its exact owner");
-            if !staged_admitted {
+            if pending.staged.is_none() {
                 pending.component_delivery_parent = component_delivery_parent;
             }
             pending.completion = completion;
@@ -1549,23 +1558,22 @@ fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut Pending
 /// undelivered tail with each request's exact heterogeneous context. The exact
 /// same logical owner flows into the parked record, which settles only after
 /// every requested move has a terminal result.
-#[allow(clippy::too_many_arguments)]
 fn deliver_batch(
     state: &mut GameState,
     reqs: Vec<ZoneMoveRequest>,
     mut logical_zone_change_group: LogicalZoneChangeGroup,
     parking: BatchDeliveryParking,
-    staged_admitted: bool,
-    arrangements: Vec<StagedLibraryArrangement>,
+    staged_entry: Option<StagedBatchDelivery>,
     component_delivery_parent: Option<PendingComponentDeliveryParent>,
     events: &mut Vec<GameEvent>,
 ) -> BatchDeliveryResult {
-    if staged_admitted && matches!(parking, BatchDeliveryParking::NewChild) {
+    if let Some(staged) = staged_entry {
+        debug_assert!(matches!(parking, BatchDeliveryParking::NewChild));
         return deliver_staged_batch_entry(
             state,
             reqs,
             logical_zone_change_group,
-            arrangements,
+            staged,
             component_delivery_parent,
             events,
         );
@@ -2954,14 +2962,10 @@ fn deliver_staged_batch_entry(
     state: &mut GameState,
     reqs: Vec<ZoneMoveRequest>,
     logical_zone_change_group: LogicalZoneChangeGroup,
-    arrangements: Vec<StagedLibraryArrangement>,
+    staged: StagedBatchDelivery,
     component_delivery_parent: Option<PendingComponentDeliveryParent>,
     events: &mut Vec<GameEvent>,
 ) -> BatchDeliveryResult {
-    let arrangements = component_delivery_parent
-        .as_ref()
-        .map_or(arrangements, |link| link.inherited_arrangements.clone());
-    let staged = new_staged_batch(state, &reqs, arrangements);
     let mut owner = new_staged_owner(
         state,
         &reqs,
@@ -3611,8 +3615,8 @@ pub(crate) fn prune_staged_member_for_player_left(
 /// reaches a staged owner buried below a top `PostReplacement` child; that case
 /// mutates the owner in place (the child's own resume drains it) rather than
 /// popping a frame it does not own.
-/// A retired replacement consultation skips its member, preserving main's
-/// departure behavior; FU-7/#341 tracks reconsulting the surviving controller.
+/// Surviving replacement consultations are reconciled by the shared replacement
+/// authority before this owner resumes; departure never silently approves/skips one.
 pub(crate) fn reconcile_staged_batch_after_departure(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -3637,49 +3641,6 @@ pub(crate) fn reconcile_staged_batch_after_departure(
         // members. If it settles, give settlement only that delivery segment,
         // not the departure sweep; otherwise append the segment and re-park.
         let mut batch_events = Vec::new();
-        // CR 800.4a + CR 616.1: departure can retire the chooser's pending
-        // replacement without retiring this surviving member's consultation.
-        // Only the active owner with no live child may skip that member.
-        let retired_prompt = match state.waiting_for {
-            WaitingFor::Priority { .. } => true,
-            WaitingFor::ReplacementChoice { player, .. } => {
-                !crate::game::players::is_alive(state, player)
-            }
-            _ => false,
-        };
-        if state.pending_replacement.is_none() && retired_prompt {
-            let retired_cursor = owner.staged.as_mut().and_then(|staged| {
-                if staged.stage != BatchDeliveryStage::Approving {
-                    return None;
-                }
-                let member = staged.members.get_mut(staged.cursor)?;
-                if member.pending_outcome.is_some()
-                    || !matches!(
-                        member.state,
-                        StagedBatchMemberState::OuterConsulting
-                            | StagedBatchMemberState::InnerConsulting
-                    )
-                {
-                    return None;
-                }
-                if let StagedMemberOperation::Destroy(operation) = &mut member.operation {
-                    operation.outer = StagedDestroyOuterApproval::Unapproved;
-                }
-                Some(staged.cursor)
-            });
-            if let Some(cursor) = retired_cursor {
-                state.waiting_for = WaitingFor::Priority {
-                    player: state.active_player,
-                };
-                mark_staged_member_terminal(
-                    state,
-                    &mut owner,
-                    cursor,
-                    ZoneMoveCompletion::Remained,
-                    &mut batch_events,
-                );
-            }
-        }
         if reconcile_staged_owner(state, &mut owner, identity.group, &mut batch_events) {
             let deferred_events = std::mem::take(&mut owner.deferred_events);
             settle_batch_owner(state, owner, deferred_events, &mut batch_events);
@@ -4115,6 +4076,14 @@ fn anticipated_zone_change_delivery(
 /// `mill_double_redirect_choice_continuation` (two sequential parks, no
 /// completion) and `surveil_rest_pile_redirect_continuation` (two sequential
 /// parks WITH a completion that must fire once after the second park drains).
+///
+/// CLASSIFICATION CONTRACT (issue #10431): the resumed segment's
+/// `terminal_completion` is recorded by the resume seam
+/// (`engine_replacement::handle_replacement_choice_inner`) before either
+/// terminal, so a delivery that parks again in its own tail (ETB counter
+/// ordering, entering-attacker choice) is still classified `Moved` here. `None`
+/// at this point means the delivery never reached a terminal decision and is a
+/// contract violation, not a state this function may paper over.
 pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let Some(pending) = state.active_batch_delivery().cloned() else {
         return;
@@ -4188,8 +4157,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
         reqs,
         logical_zone_change_group,
         BatchDeliveryParking::ReparkActive,
-        false,
-        Vec::new(),
+        None,
         None,
         events,
     ) {
@@ -7661,6 +7629,23 @@ fn prepare_zone_move_proposal(
     if from_zone == Zone::Library && dest_zone == Zone::Library && library_placement.is_none() {
         return None;
     }
+    // Boss-stage Horde (Turtle Team-Up booklet, printed p. 7): Boss-owned
+    // cards bound for hand go to their graveyard "instead". Normalize the
+    // PROPOSED destination — before `replace_event` consults — so
+    // graveyard-scoped replacements (Rest in Peace) observe the real
+    // destination and survive CR 616.1 ordering pauses on the parked event.
+    // CR 400.6 applies replacements before the move happens; CR 616.1f
+    // repeats the process for effects that would now be applicable. The
+    // classic top-of-library redirect stays a mover-level mapping in
+    // `zones::move_to_zone` (unchanged); that mover also keeps this mapping
+    // as a backstop for consult-bypassing paths. The object exists (the
+    // missing-object arm returned above), so the owner read is total.
+    let dest_zone = {
+        let owner = state.objects.get(&obj_id).map(|obj| obj.owner);
+        owner.map_or(dest_zone, |owner| {
+            zones::boss_hand_redirect_destination(state, owner, dest_zone)
+        })
+    };
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
     if let ProposedEvent::ZoneChange {
         applied,

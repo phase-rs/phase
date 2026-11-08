@@ -333,8 +333,16 @@ fn c5_targeted_change_zone_counts_actual_arrivals() {
             Zone::Battlefield,
             "each targeted card arrives on the battlefield"
         );
+        assert!(
+            outcome.state().objects[&id].tapped,
+            "Regrowth returns the land tapped"
+        );
     }
     assert_eq!(zone_of(&outcome, c), Zone::Graveyard);
+    assert!(
+        zone_changed_for(&outcome, &[c]).is_empty(),
+        "the Cage-blocked attempted return must not emit an arrival"
+    );
     assert_eq!(
         outcome.state().last_effect_count,
         Some(2),
@@ -362,6 +370,17 @@ fn c5_targeted_change_zone_counts_actual_arrivals() {
     );
     for token in tokens {
         let object = &outcome.state().objects[&token];
+        assert!(
+            object.is_token,
+            "the printed continuation creates real tokens"
+        );
+        // CR 111.2: the player creating the token owns and controls it.
+        assert_eq!(object.owner, P0);
+        assert_eq!(object.controller, P0);
+        assert_eq!(
+            object.color.as_slice(),
+            &[engine::types::mana::ManaColor::Green]
+        );
         assert_eq!(
             (object.power, object.toughness),
             (Some(4), Some(2)),
@@ -1051,20 +1070,20 @@ fn c4_targeted_later_member_pause_keeps_every_return() {
     let first = {
         let mut builder = scenario.add_land_to_graveyard(P0, "Forest");
         let id = builder.id();
-        // Infrastructure exception: Temple Garden is the nearest printed
-        // as-enters choice. An optional tap write on this Forest isolates the
-        // replacement pause without the life-payment branch.
+        // Infrastructure exception: Llanowar Reborn is the nearest printed
+        // counter-on-entry land. This optional counter write isolates a pause
+        // and an observable effect that Regrowth's printed tapped entry cannot produce.
         builder.with_replacement_definition(
             ReplacementDefinition::new(ReplacementEvent::Moved)
                 .mode(ReplacementMode::Optional { decline: None })
                 .destination_zone(Zone::Battlefield)
-                .description("enters tapped".to_string())
+                .description("enters with a +1/+1 counter".to_string())
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
-                    Effect::SetTapState {
+                    Effect::PutCounter {
                         target: TargetFilter::SelfRef,
-                        scope: engine::types::ability::EffectScope::Single,
-                        state: phase_ast::types::ability::TapStateChange::Tap,
+                        counter_type: CounterType::Plus1Plus1,
+                        count: QuantityExpr::Fixed { value: 1 },
                     },
                 )),
         );
@@ -1074,33 +1093,50 @@ fn c4_targeted_later_member_pause_keeps_every_return() {
     let third = scenario.add_land_to_graveyard(P0, "Mountain").id();
     let regrowth = zero_cost_spell(&mut scenario, "Vengeful Regrowth", VENGEFUL_REGROWTH);
     let mut runner = scenario.build();
-    let outcome = runner
+    let pending = runner
         .cast(regrowth)
         .target_objects(&[first, second, third])
-        .replacement_choice(0)
-        .resolve();
+        .commit()
+        .try_resolve()
+        .expect("Regrowth reaches its first entry replacement");
+    assert!(matches!(
+        pending.final_waiting_for(),
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+    assert!(pending.state().active_batch_delivery().is_some());
+    for id in [first, second, third] {
+        assert_eq!(pending.state().objects[&id].zone, Zone::Graveyard);
+    }
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accept the observed counter-on-entry replacement");
+    let state = runner.state();
 
     for id in [first, second, third] {
         assert_eq!(
-            zone_of(&outcome, id),
+            state.objects[&id].zone,
             Zone::Battlefield,
             "no returned member may be stranded by the first pause"
         );
     }
+    assert_eq!(
+        state.objects[&first].counters.get(&CounterType::Plus1Plus1),
+        Some(&1),
+        "the accepted replacement, not Regrowth's tapped entry, added the counter"
+    );
     assert!(
-        outcome.state().objects[&first].tapped,
-        "the accepted replacement applied to the paused member"
+        state.objects[&first].tapped,
+        "Regrowth still returns it tapped"
     );
     assert_eq!(
-        outcome.state().last_effect_count,
+        state.last_effect_count,
         Some(3),
         "the admitted targeted population count survives the pause"
     );
-    let tokens: Vec<_> = outcome
-        .state()
+    let tokens: Vec<_> = state
         .battlefield
         .iter()
-        .map(|id| &outcome.state().objects[id])
+        .map(|id| &state.objects[id])
         .filter(|object| object.is_token)
         .collect();
     assert_eq!(
@@ -1113,12 +1149,9 @@ fn c4_targeted_later_member_pause_keeps_every_return() {
         assert_eq!((token.power, token.toughness), (Some(4), Some(2)));
         assert!(token.keywords.contains(&Keyword::Reach));
     }
-    assert!(matches!(
-        outcome.state().waiting_for,
-        WaitingFor::Priority { .. }
-    ));
-    assert!(outcome.state().stack.is_empty());
-    assert!(outcome.state().resolution_stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.stack.is_empty());
+    assert!(state.resolution_stack.is_empty());
 }
 
 /// D8 (staged Destroy wire/save): a mass destruction paused at the staged
@@ -1213,10 +1246,13 @@ fn d8_staged_destroy_pause_round_trips_and_resumes() {
 
 /// CR 616.1: retain an outer-approved Destroy rider across an inner choice
 /// and a persisted-state round trip, then retire the batch at public priority.
-/// FU-6: the printed "instead sacrifice this Aura and that land gains
-/// indestructible" clause does not prevent destruction because `destroy_applier`
-/// preserves non-regeneration Destroy events. This pre-existing defect is not
-/// fixed here; this row deliberately does not assert the land's final zone.
+/// FU-6 characterization: this exact `InnerConsulting` state is reachable only
+/// because `destroy_applier` preserves the printed non-regeneration "instead"
+/// Destroy event. The retained-drain assertions below depend on that defect,
+/// even though the row does not assert the land's final zone. When FU-6 is
+/// repaired, its independent replacement-child witness must instead follow the
+/// sacrificed Aura's graveyard consultation; this is not evidence that the
+/// printed land-protection clause currently works.
 #[test]
 fn emergence_destroy_replacement_inner_choice_round_trips() {
     let mut scenario = GameScenario::new();
@@ -1245,6 +1281,8 @@ fn emergence_destroy_replacement_inner_choice_round_trips() {
     );
     let day = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
     let mut runner = scenario.build();
+    // Infrastructure exception: preattach the printed Aura instead of casting
+    // it, so this row isolates the Destroy/inner-choice persistence boundary.
     runner
         .state_mut()
         .objects
@@ -1688,25 +1726,40 @@ fn c10_paused_targeted_population_pins_count_and_moved_ledger() {
         VENGEFUL_REGROWTH_RETURN_ONLY,
     );
     let mut runner = scenario.build();
-    let outcome = runner
+    let pending = runner
         .cast(regrowth)
         .target_objects(&[first, second, third])
-        .replacement_choice(0)
-        .resolve();
+        .commit()
+        .try_resolve()
+        .expect("the return-only population reaches its entry replacement");
+    assert!(matches!(
+        pending.final_waiting_for(),
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+    assert!(pending.state().active_batch_delivery().is_some());
+    let completion = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("answer the observed targeted entry replacement");
+    let state = runner.state();
 
-    assert_eq!(outcome.state().last_effect_count, Some(3));
+    assert_eq!(state.last_effect_count, Some(3));
     assert_eq!(
-        outcome.state().last_zone_changed_ids,
+        state.last_zone_changed_ids,
         vec![first, second, third],
         "the moved ledger is the actual moved members in announcement order"
     );
-    assert_eq!(effect_resolved_events(&outcome), 1);
-    assert!(matches!(
-        outcome.state().waiting_for,
-        WaitingFor::Priority { .. }
-    ));
-    assert!(outcome.state().stack.is_empty());
-    assert!(outcome.state().resolution_stack.is_empty());
+    assert_eq!(
+        pending
+            .events()
+            .iter()
+            .chain(&completion.events)
+            .filter(|event| matches!(event, GameEvent::EffectResolved { .. }))
+            .count(),
+        1
+    );
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.stack.is_empty());
+    assert!(state.resolution_stack.is_empty());
 }
 
 /// C10 (mass paused pins): a paused mass population uses the non-abandoned
@@ -1751,14 +1804,27 @@ fn c10_paused_mass_population_pins_non_abandoned_count_and_ledger() {
         RISE_OF_THE_DARK_REALMS,
     );
     let mut runner = scenario.build();
-    let outcome = runner.cast(rise).replacement_choice(0).resolve();
+    let pending = runner
+        .cast(rise)
+        .commit()
+        .try_resolve()
+        .expect("the mass return population reaches its entry replacement");
+    assert!(matches!(
+        pending.final_waiting_for(),
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+    assert!(pending.state().active_batch_delivery().is_some());
+    let completion = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("answer the observed mass entry replacement");
+    let state = runner.state();
 
     assert_eq!(
-        outcome.state().last_effect_count,
+        state.last_effect_count,
         Some(4),
         "the paused mass policy counts every non-abandoned member"
     );
-    let mut ledger = outcome.state().last_zone_changed_ids.clone();
+    let mut ledger = state.last_zone_changed_ids.clone();
     ledger.sort_unstable();
     let mut expected = vec![a, b, c, pauser];
     expected.sort_unstable();
@@ -1766,13 +1832,18 @@ fn c10_paused_mass_population_pins_non_abandoned_count_and_ledger() {
         ledger, expected,
         "the paused mass ledger holds every moved member"
     );
-    assert_eq!(effect_resolved_events(&outcome), 1);
-    assert!(matches!(
-        outcome.state().waiting_for,
-        WaitingFor::Priority { .. }
-    ));
-    assert!(outcome.state().stack.is_empty());
-    assert!(outcome.state().resolution_stack.is_empty());
+    assert_eq!(
+        pending
+            .events()
+            .iter()
+            .chain(&completion.events)
+            .filter(|event| matches!(event, GameEvent::EffectResolved { .. }))
+            .count(),
+        1
+    );
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.stack.is_empty());
+    assert!(state.resolution_stack.is_empty());
 }
 
 /// C12 (F6): a `forward_result` ChangeZone over two members pauses on the first
@@ -2168,14 +2239,17 @@ fn tricksters_stratagem_nonmerged_exact_nth_slot() {
     }
 }
 
-fn destroy_with_surviving_owner_and_opposing_chooser() -> (GameRunner, ObjectId, ObjectId, ObjectId)
-{
+fn destroy_with_surviving_owner_and_opposing_chooser(
+    name: &str,
+    oracle: &str,
+    spell_type: CoreType,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
     let p2 = PlayerId(2);
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
-    let host = scenario.add_creature(p2, "Protected creature", 2, 2).id();
+    let host = scenario.add_creature(p2, "Grizzly Bears", 2, 2).id();
     scenario.with_counter(host, CounterType::Shield, 1);
-    let sibling = scenario.add_creature(P0, "Ordinary creature", 2, 2).id();
+    let sibling = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let control = scenario
         .add_enchantment_from_oracle(
             P1,
@@ -2192,46 +2266,106 @@ fn destroy_with_surviving_owner_and_opposing_chooser() -> (GameRunner, ObjectId,
         )
         .with_subtypes(vec!["Aura"])
         .id();
-    let wrath = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, name, spell_type == CoreType::Instant, oracle)
+        .with_mana_cost(ManaCost::zero())
+        .id();
     let mut runner = scenario.build();
+    // Infrastructure exception: preattach the full-Oracle Auras in place of
+    // casting them, isolating the public destruction/concession handoff.
     engine::game::effects::attach::attach_to(runner.state_mut(), control, host);
     engine::game::effects::attach::attach_to(runner.state_mut(), umbra, host);
     engine::game::layers::flush_layers(runner.state_mut());
     assert_eq!(runner.state().objects[&host].controller, P1);
-    (runner, host, sibling, wrath)
+    (runner, host, sibling, spell, umbra)
 }
 
-/// CR 800.4a + CR 616.1: a departed chooser's retired consultation must not
-/// strand the other members. Skipping the protected member preserves main's
-/// behavior; reconsulting its surviving owner is FU-7/#341, not this repair.
+/// CR 800.4a + CR 616.1: after Mind Control leaves, the surviving controller
+/// must answer the interrupted Destroy consultation. CR 122.1c: choosing the
+/// shield spends it; merely skipping the member would leave both protections.
 #[test]
-fn staged_destroy_skips_the_member_whose_chooser_conceded_and_resolves_the_rest() {
+fn staged_destroy_reasks_the_surviving_controller_and_resolves_the_rest() {
     let p2 = PlayerId(2);
-    let (mut runner, host, sibling, wrath) = destroy_with_surviving_owner_and_opposing_chooser();
+    let (mut runner, host, sibling, wrath, umbra) =
+        destroy_with_surviving_owner_and_opposing_chooser(
+            "Day of Judgment",
+            DAY_OF_JUDGMENT,
+            CoreType::Sorcery,
+        );
     let pending = runner.cast(wrath).commit().try_resolve().unwrap();
     assert!(matches!(
         pending.final_waiting_for(),
         WaitingFor::ReplacementChoice { player: P1, .. }
     ));
     assert!(runner.state().active_batch_delivery().is_some());
-    let result = runner.act(GameAction::Concede { player_id: P1 }).unwrap();
+    runner.act(GameAction::Concede { player_id: P1 }).unwrap();
     let wire = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
-        .expect("the boundary immediately after concession serializes");
+        .expect("the surviving controller's unanswered consultation serializes");
     let restored = serde_json::from_value::<PersistedGameState>(wire)
-        .expect("the post-concession boundary decodes")
+        .expect("the reasked consultation decodes")
         .prepare_for_restore(PersistedRestoreFinalization::Immediate)
-        .expect("the post-concession boundary prepares")
+        .expect("the reasked consultation prepares")
         .finalize_immediately()
-        .expect("the post-concession boundary finalizes");
-    for state in [runner.state(), &restored] {
-        assert_eq!(state.objects[&host].controller, p2);
+        .expect("the reasked consultation finalizes");
+    for mut runner in [runner, GameRunner::from_state(restored)] {
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "the surviving controller must choose: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, p2);
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.source_id == umbra));
+        let shield = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == host)
+            .expect("the host's shield is offered separately from the surviving Aura");
+        assert_eq!(runner.state().objects[&host].controller, p2);
+        assert_eq!(runner.state().objects[&sibling].zone, Zone::Battlefield);
+        assert!(runner.state().pending_replacement.is_some());
+        runner
+            .state()
+            .resolution_stack
+            .validate_at_rest(&runner.state().waiting_for)
+            .expect("the new controller's unanswered choice is a valid boundary");
+        let result = runner
+            .act(GameAction::ChooseReplacement { index: shield })
+            .expect("the surviving controller chooses its shield");
+        let state = runner.state();
         assert_eq!(state.objects[&host].zone, Zone::Battlefield);
         assert_eq!(
-            state.objects[&sibling].zone,
-            Zone::Graveyard,
-            "retiring the chooser's consultation must not strand later members"
+            state.objects[&host]
+                .counters
+                .get(&CounterType::Shield)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "the actual replacement consumes the shield rather than skipping destruction"
         );
+        assert_eq!(state.objects[&umbra].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&sibling].zone, Zone::Graveyard);
         assert_eq!(state.objects[&wrath].zone, Zone::Graveyard);
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::CreatureDestroyed { object_id, .. } if *object_id == sibling
+                ))
+                .count(),
+            1
+        );
+        assert!(!result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::CreatureDestroyed { object_id, .. } if *object_id == host
+        )));
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert!(state.pending_replacement.is_none());
         assert!(state.stack.is_empty());
@@ -2239,23 +2373,20 @@ fn staged_destroy_skips_the_member_whose_chooser_conceded_and_resolves_the_rest(
         state
             .resolution_stack
             .validate_at_rest(&state.waiting_for)
-            .expect("the departed chooser leaves a valid public boundary");
+            .expect("answering the replacement completes the whole population");
     }
-    assert!(!result.events.iter().any(|event| matches!(
-        event,
-        GameEvent::CreatureDestroyed { object_id, .. } if *object_id == host
-    )));
-    assert!(result.events.iter().any(|event| matches!(
-        event,
-        GameEvent::CreatureDestroyed { object_id, .. } if *object_id == sibling
-    )));
 }
 
 /// CR 616.1: the same population must retain its live controller's choice,
 /// not skip the protected member before the chooser answers.
 #[test]
 fn staged_destroy_keeps_the_choice_when_its_chooser_does_not_concede() {
-    let (mut runner, host, sibling, wrath) = destroy_with_surviving_owner_and_opposing_chooser();
+    let (mut runner, host, sibling, wrath, umbra) =
+        destroy_with_surviving_owner_and_opposing_chooser(
+            "Day of Judgment",
+            DAY_OF_JUDGMENT,
+            CoreType::Sorcery,
+        );
     let pending = runner.cast(wrath).commit().try_resolve().unwrap();
     assert!(matches!(
         pending.final_waiting_for(),
@@ -2265,10 +2396,24 @@ fn staged_destroy_keeps_the_choice_when_its_chooser_does_not_concede() {
     assert_eq!(runner.state().objects[&host].controller, P1);
     assert_eq!(runner.state().objects[&host].zone, Zone::Battlefield);
     assert_eq!(runner.state().objects[&sibling].zone, Zone::Battlefield);
+    let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+        unreachable!("the required choice was asserted above");
+    };
+    let armor = candidates
+        .iter()
+        .position(|candidate| candidate.source_id == umbra)
+        .expect("the living controller is offered its host's Hyena Umbra");
     runner
-        .act(GameAction::ChooseReplacement { index: 0 })
-        .expect("the living controller answers its retained choice");
+        .act(GameAction::ChooseReplacement { index: armor })
+        .expect("the living controller chooses the printed umbra armor replacement");
     assert_eq!(runner.state().objects[&host].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&umbra].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().objects[&host]
+            .counters
+            .get(&CounterType::Shield),
+        Some(&1)
+    );
     assert_eq!(runner.state().objects[&sibling].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&wrath].zone, Zone::Graveyard);
     assert!(matches!(
@@ -2282,4 +2427,625 @@ fn staged_destroy_keeps_the_choice_when_its_chooser_does_not_concede() {
         .resolution_stack
         .validate_at_rest(&runner.state().waiting_for)
         .expect("the living chooser completes at a valid public boundary");
+}
+
+/// CR 800.4a + CR 616.1: the same reconsultation belongs to an ordinary
+/// singleton Destroy, not only to the staged-population cursor.
+/// CR 702.89a: choosing armor destroys that Aura and leaves the shield intact.
+#[test]
+fn singleton_destroy_reasks_the_surviving_controller_and_applies_armor() {
+    let p2 = PlayerId(2);
+    let (mut runner, host, sibling, murder, umbra) =
+        destroy_with_surviving_owner_and_opposing_chooser("Murder", MURDER, CoreType::Instant);
+    let pending = runner
+        .cast(murder)
+        .target_object(host)
+        .commit()
+        .try_resolve()
+        .unwrap();
+    assert!(matches!(
+        pending.final_waiting_for(),
+        WaitingFor::ReplacementChoice { player: P1, .. }
+    ));
+    runner.act(GameAction::Concede { player_id: P1 }).unwrap();
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "the singleton event must be reasked: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, p2);
+    assert_eq!(candidates.len(), 2);
+    let armor = candidates
+        .iter()
+        .position(|candidate| candidate.source_id == umbra)
+        .expect("the surviving controller can choose the printed armor replacement");
+    runner
+        .act(GameAction::ChooseReplacement { index: armor })
+        .unwrap();
+    let state = runner.state();
+    assert_eq!(state.objects[&host].controller, p2);
+    assert_eq!(state.objects[&host].zone, Zone::Battlefield);
+    assert_eq!(
+        state.objects[&host].counters.get(&CounterType::Shield),
+        Some(&1)
+    );
+    assert_eq!(state.objects[&umbra].zone, Zone::Graveyard);
+    assert_eq!(state.objects[&sibling].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&murder].zone, Zone::Graveyard);
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.pending_replacement.is_none());
+    assert!(state.stack.is_empty());
+    assert!(state.resolution_stack.is_empty());
+    state
+        .resolution_stack
+        .validate_at_rest(&state.waiting_for)
+        .expect("the singleton reconsultation completes at a valid boundary");
+}
+
+/// CR 800.4a + CR 616.1 + CR 702.89a: removed sources are not stale candidates.
+/// With zero surviving Auras, destroy the host; with one, apply its mandatory
+/// armor without inventing a new ordering choice.
+#[test]
+fn staged_destroy_refreshes_zero_or_one_surviving_umbra_after_chooser_departure() {
+    let p2 = PlayerId(2);
+    for second_owner in [P1, p2] {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let host = scenario.add_creature(p2, "Grizzly Bears", 2, 2).id();
+        let sibling = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let control = scenario
+            .add_enchantment_from_oracle(
+                P1,
+                "Mind Control",
+                "Enchant creature\nYou control enchanted creature.",
+            )
+            .with_subtypes(vec!["Aura"])
+            .id();
+        let umbras: Vec<_> = [P1, second_owner].into_iter().map(|owner|
+            scenario.add_enchantment_from_oracle(
+                owner,
+                "Hyena Umbra",
+                "Enchant creature\nEnchanted creature gets +1/+1 and has first strike.\nUmbra armor (If enchanted creature would be destroyed, instead remove all damage from it and destroy this Aura.)",
+            ).with_subtypes(vec!["Aura"]).id()
+        ).collect();
+        let wrath = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
+        let mut runner = scenario.build();
+        // Infrastructure exception: preattach the full-Oracle Auras instead
+        // of casting them; the pending consultation is produced by the public cast.
+        for aura in [control, umbras[0], umbras[1]] {
+            engine::game::effects::attach::attach_to(runner.state_mut(), aura, host);
+        }
+        engine::game::layers::flush_layers(runner.state_mut());
+        assert_eq!(runner.state().objects[&host].controller, P1);
+        let pending = runner.cast(wrath).commit().try_resolve().unwrap();
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = pending.final_waiting_for()
+        else {
+            panic!(
+                "two printed Auras must offer ordering: {:?}",
+                pending.final_waiting_for()
+            );
+        };
+        assert_eq!(*player, P1);
+        assert_eq!(candidates.len(), 2);
+        for aura in &umbras {
+            assert!(candidates
+                .iter()
+                .any(|candidate| candidate.source_id == *aura));
+        }
+        let result = runner.act(GameAction::Concede { player_id: P1 }).unwrap();
+        let state = runner.state();
+        assert_eq!(state.objects[&host].controller, p2);
+        assert!(!state.battlefield.contains(&control));
+        assert!(!state.battlefield.contains(&umbras[0]));
+        if second_owner == P1 {
+            assert!(!state.battlefield.contains(&umbras[1]));
+            assert_eq!(state.objects[&host].zone, Zone::Graveyard);
+            assert_eq!(
+                result
+                    .events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        GameEvent::CreatureDestroyed { object_id, .. } if *object_id == host
+                    ))
+                    .count(),
+                1,
+                "zero remaining replacements must not silently skip the host"
+            );
+        } else {
+            assert_eq!(state.objects[&host].zone, Zone::Battlefield);
+            assert_eq!(
+                state.objects[&umbras[1]].zone,
+                Zone::Graveyard,
+                "the one remaining mandatory armor replacement actually destroys its Aura"
+            );
+            assert!(!result.events.iter().any(|event| matches!(
+                event,
+                GameEvent::CreatureDestroyed { object_id, .. } if *object_id == host
+            )));
+        }
+        assert_eq!(state.objects[&sibling].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&wrath].zone, Zone::Graveyard);
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::CreatureDestroyed { object_id, .. } if *object_id == sibling
+                ))
+                .count(),
+            1
+        );
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.pending_replacement.is_none());
+        assert!(state.stack.is_empty());
+        assert!(state.resolution_stack.is_empty());
+        state
+            .resolution_stack
+            .validate_at_rest(&state.waiting_for)
+            .expect("removing old candidates still completes the original population");
+    }
+}
+
+/// CR 616.1 + CR 800.4a: retain an already-approved Destroy's inner zone-change
+/// event while its controller changes. The reasked source is a graveyard
+/// redirect, not a replay of the outer destruction.
+#[test]
+fn singleton_destroy_inner_graveyard_choice_reasks_after_controller_departure() {
+    use engine::types::proposed_event::ProposedEvent;
+
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(p2, "Grizzly Bears", 2, 2).id();
+    let sibling = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let control = scenario
+        .add_enchantment_from_oracle(
+            P1,
+            "Mind Control",
+            "Enchant creature\nYou control enchanted creature.",
+        )
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let rest = scenario.add_enchantment_from_oracle(
+        P0,
+        "Rest in Peace",
+        "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.",
+    ).id();
+    let leyline = scenario.add_enchantment_from_oracle(
+        P0,
+        "Leyline of the Void",
+        "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.",
+    ).id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    // Infrastructure exception: preattach Mind Control instead of casting it;
+    // Murder publicly produces the inner consultation and its replacement context.
+    engine::game::effects::attach::attach_to(runner.state_mut(), control, host);
+    engine::game::layers::flush_layers(runner.state_mut());
+    let pending = runner
+        .cast(murder)
+        .target_object(host)
+        .commit()
+        .try_resolve()
+        .unwrap();
+    assert!(matches!(
+        pending.final_waiting_for(),
+        WaitingFor::ReplacementChoice { player: P1, .. }
+    ));
+    assert!(matches!(
+        &runner.state().pending_replacement.as_ref().unwrap().proposed,
+        ProposedEvent::ZoneChange { object_id, from: Zone::Battlefield, to: Zone::Graveyard, .. }
+            if *object_id == host
+    ));
+    runner.act(GameAction::Concede { player_id: P1 }).unwrap();
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "the inner move must retain its live choice: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, p2);
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate.source_id == rest));
+    let redirect = candidates
+        .iter()
+        .position(|candidate| candidate.source_id == leyline)
+        .expect("the surviving Leyline is offered for the same inner graveyard move");
+    assert!(matches!(
+        &runner.state().pending_replacement.as_ref().unwrap().proposed,
+        ProposedEvent::ZoneChange { object_id, from: Zone::Battlefield, to: Zone::Graveyard, .. }
+            if *object_id == host
+    ));
+    let result = runner
+        .act(GameAction::ChooseReplacement { index: redirect })
+        .unwrap();
+    let state = runner.state();
+    assert_eq!(state.objects[&host].zone, Zone::Exile);
+    assert_eq!(state.objects[&sibling].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&murder].zone, Zone::Exile);
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::ZoneChanged { object_id, .. } if *object_id == host
+            ))
+            .count(),
+        1,
+        "the retained inner event moves its subject exactly once"
+    );
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.pending_replacement.is_none());
+    assert!(state.stack.is_empty());
+    assert!(state.resolution_stack.is_empty());
+    state
+        .resolution_stack
+        .validate_at_rest(&state.waiting_for)
+        .expect("the inner redirect completes the singleton Destroy");
+}
+
+/// CR 614.5 + CR 616.1 + CR 800.4a: reconsult the modified counter event,
+/// preserving its applied replacement and depth while refreshing source control.
+/// The printed effects must produce (1 + 1) * 2 + 1 = 5, not restart at one.
+#[test]
+fn reconsult_preserves_modified_counter_event_after_controller_departure() {
+    use engine::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
+
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(p2, "Grizzly Bears", 2, 2).id();
+    let mind_control = scenario
+        .add_enchantment_from_oracle(
+            P1,
+            "Mind Control",
+            "Enchant creature\nYou control enchanted creature.",
+        )
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let scales = scenario.add_enchantment_from_oracle(
+        p2,
+        "Hardened Scales",
+        "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on it instead.",
+    ).id();
+    let branching = scenario.add_enchantment_from_oracle(
+        p2,
+        "Branching Evolution",
+        "If one or more +1/+1 counters would be put on a creature you control, twice that many +1/+1 counters are put on that creature instead.",
+    ).id();
+    let steal_scales = scenario
+        .add_enchantment_from_oracle(
+            P1,
+            "Steal Enchantment",
+            "Enchant enchantment\nYou control enchanted enchantment.",
+        )
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let steal_branching = scenario
+        .add_enchantment_from_oracle(
+            P1,
+            "Steal Enchantment",
+            "Enchant enchantment\nYou control enchanted enchantment.",
+        )
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let constrictors: Vec<_> = [P1, p2].into_iter().map(|owner|
+        scenario.add_creature_from_oracle(
+            owner,
+            "Winding Constrictor",
+            2,
+            3,
+            "If one or more counters would be put on an artifact or creature you control, that many plus one of each of those kinds of counters are put on that permanent instead.\nIf you would get one or more counters, you get that many plus one of each of those kinds of counters instead.",
+        ).with_subtypes(vec!["Snake"]).id()
+    ).collect();
+    let travel = scenario.add_spell_to_hand_from_oracle(
+        P0,
+        "Travel Preparations",
+        false,
+        "Put a +1/+1 counter on each of up to two target creatures.\nFlashback {1}{W} (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
+    ).with_mana_cost(ManaCost::zero()).id();
+    let mut runner = scenario.build();
+    // Infrastructure exception: preattach the full-Oracle control Auras instead
+    // of casting them. Travel Preparations publicly creates every pending event.
+    for (aura, enchanted) in [
+        (mind_control, host),
+        (steal_scales, scales),
+        (steal_branching, branching),
+    ] {
+        engine::game::effects::attach::attach_to(runner.state_mut(), aura, enchanted);
+    }
+    engine::game::layers::flush_layers(runner.state_mut());
+    for id in [host, scales, branching] {
+        assert_eq!(runner.state().objects[&id].controller, P1);
+    }
+    let pending = runner
+        .cast(travel)
+        .target_object(host)
+        .commit()
+        .try_resolve()
+        .unwrap();
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = pending.final_waiting_for()
+    else {
+        panic!(
+            "the printed counter replacements must offer ordering: {:?}",
+            pending.final_waiting_for()
+        );
+    };
+    assert_eq!(*player, P1);
+    assert_eq!(candidates.len(), 3);
+    for source in [scales, branching, constrictors[0]] {
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.source_id == source));
+    }
+    let scales_index = candidates
+        .iter()
+        .position(|candidate| candidate.source_id == scales)
+        .expect("select Hardened Scales by its actual source identity");
+    runner
+        .act(GameAction::ChooseReplacement {
+            index: scales_index,
+        })
+        .unwrap();
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("Branching and the first controller's Constrictor must still compete");
+    };
+    assert_eq!(*player, P1);
+    assert_eq!(candidates.len(), 2);
+    for source in [branching, constrictors[0]] {
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.source_id == source));
+    }
+    let modified = runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .expect("the modified counter event is still suspended");
+    assert_eq!(modified.proposed.affected_object_id(), Some(host));
+    assert!(matches!(
+        &modified.proposed,
+        ProposedEvent::AddCounter { count: 2, .. }
+    ));
+    assert!(modified.depth > 0);
+    assert!(modified.proposed.applied_set().iter().any(|key| matches!(
+        key, AppliedReplacementKey::Object { source, .. } if *source == scales
+    )));
+    let retained_proposal = modified.proposed.clone();
+    let retained_depth = modified.depth;
+    runner.act(GameAction::Concede { player_id: P1 }).unwrap();
+    let wire = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+        .expect("the modified reasked event serializes");
+    let restored = serde_json::from_value::<PersistedGameState>(wire)
+        .expect("the modified reasked event decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+        .expect("the modified reasked event prepares")
+        .finalize_immediately()
+        .expect("the modified reasked event finalizes");
+    for mut runner in [runner, GameRunner::from_state(restored)] {
+        let state = runner.state();
+        for id in [host, scales, branching] {
+            assert_eq!(state.objects[&id].controller, p2);
+        }
+        assert!(!state.battlefield.contains(&constrictors[0]));
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &state.waiting_for
+        else {
+            panic!("the new controller must choose for the modified counter event");
+        };
+        assert_eq!(*player, p2);
+        assert_eq!(candidates.len(), 2);
+        for source in [branching, constrictors[1]] {
+            assert!(candidates
+                .iter()
+                .any(|candidate| candidate.source_id == source));
+        }
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| candidate.source_id == scales),
+            "the already-applied Scales must not be offered again after control reversion"
+        );
+        let modified = state.pending_replacement.as_ref().unwrap();
+        assert_eq!(modified.proposed, retained_proposal);
+        assert_eq!(modified.depth, retained_depth);
+        let branching_index = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == branching)
+            .expect(
+                "double the retained two counters before adding the surviving Constrictor's one",
+            );
+        runner
+            .act(GameAction::ChooseReplacement {
+                index: branching_index,
+            })
+            .unwrap();
+        let state = runner.state();
+        assert_eq!(state.objects[&host].counters.get(&CounterType::Plus1Plus1), Some(&5),
+            "preserve Scales' earlier +1, then apply Branching and the current controller's Constrictor");
+        assert_eq!(state.objects[&travel].zone, Zone::Graveyard);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.pending_replacement.is_none());
+        assert!(state.stack.is_empty());
+        assert!(state.resolution_stack.is_empty());
+        state
+            .resolution_stack
+            .validate_at_rest(&state.waiting_for)
+            .expect("the modified counter event finishes after its source-identified answer");
+    }
+}
+
+/// CR 800.4a + CR 616.1: each departure consults the event's current authority,
+/// not the chooser captured at its first pause.
+#[test]
+fn staged_destroy_can_reask_after_two_successive_controller_departures() {
+    let p2 = PlayerId(2);
+    let p3 = PlayerId(3);
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(p3, "Grizzly Bears", 2, 2).id();
+    scenario.with_counter(host, CounterType::Shield, 1);
+    let sibling = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let earlier_control = scenario
+        .add_enchantment_from_oracle(
+            p2,
+            "Mind Control",
+            "Enchant creature\nYou control enchanted creature.",
+        )
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let later_control = scenario
+        .add_enchantment_from_oracle(
+            P1,
+            "Mind Control",
+            "Enchant creature\nYou control enchanted creature.",
+        )
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let umbra = scenario.add_enchantment_from_oracle(
+        p3,
+        "Hyena Umbra",
+        "Enchant creature\nEnchanted creature gets +1/+1 and has first strike.\nUmbra armor (If enchanted creature would be destroyed, instead remove all damage from it and destroy this Aura.)",
+    ).with_subtypes(vec!["Aura"]).id();
+    let day = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
+    let mut runner = scenario.build();
+    // Infrastructure exception: preattach both printed control Auras in
+    // timestamp order and the Umbra, then publicly produce the Destroy event.
+    for aura in [earlier_control, later_control, umbra] {
+        engine::game::effects::attach::attach_to(runner.state_mut(), aura, host);
+    }
+    engine::game::layers::flush_layers(runner.state_mut());
+    assert_eq!(runner.state().objects[&host].controller, P1);
+    let pending = runner.cast(day).commit().try_resolve().unwrap();
+    assert!(matches!(
+        pending.final_waiting_for(),
+        WaitingFor::ReplacementChoice { player: P1, .. }
+    ));
+    let original = runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .unwrap()
+        .proposed
+        .clone();
+    let original_depth = runner.state().pending_replacement.as_ref().unwrap().depth;
+    for (leaver, next_controller) in [(P1, p2), (p2, p3)] {
+        runner
+            .act(GameAction::Concede { player_id: leaver })
+            .unwrap();
+        assert_eq!(runner.state().objects[&host].controller, next_controller);
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("each surviving controller must receive the unanswered consultation");
+        };
+        assert_eq!(*player, next_controller);
+        assert_eq!(candidates.len(), 2);
+        for source in [host, umbra] {
+            assert!(candidates
+                .iter()
+                .any(|candidate| candidate.source_id == source));
+        }
+        let pending = runner.state().pending_replacement.as_ref().unwrap();
+        assert_eq!(pending.proposed, original);
+        assert_eq!(pending.depth, original_depth);
+        assert_eq!(runner.state().objects[&sibling].zone, Zone::Battlefield);
+    }
+    let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+        unreachable!("the second reasked prompt was asserted above");
+    };
+    let shield = candidates
+        .iter()
+        .position(|candidate| candidate.source_id == host)
+        .expect("P3 can choose its host's shield after both control Auras leave");
+    runner
+        .act(GameAction::ChooseReplacement { index: shield })
+        .unwrap();
+    let state = runner.state();
+    assert_eq!(state.objects[&host].zone, Zone::Battlefield);
+    assert_eq!(
+        state.objects[&host]
+            .counters
+            .get(&CounterType::Shield)
+            .copied()
+            .unwrap_or(0),
+        0
+    );
+    assert_eq!(state.objects[&umbra].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&sibling].zone, Zone::Graveyard);
+    assert_eq!(state.objects[&day].zone, Zone::Graveyard);
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.pending_replacement.is_none());
+    assert!(state.stack.is_empty());
+    assert!(state.resolution_stack.is_empty());
+    state
+        .resolution_stack
+        .validate_at_rest(&state.waiting_for)
+        .expect("the twice-reasked population finishes without an orphaned owner");
+}
+
+/// CR 104.1 + CR 104.2a: a two-player concession ends the game immediately;
+/// replacement reconciliation must not publish a new living-player choice.
+#[test]
+fn two_player_replacement_chooser_concession_keeps_game_over() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    scenario.with_counter(host, CounterType::Shield, 1);
+    let umbra = scenario.add_enchantment_from_oracle(
+        P1,
+        "Hyena Umbra",
+        "Enchant creature\nEnchanted creature gets +1/+1 and has first strike.\nUmbra armor (If enchanted creature would be destroyed, instead remove all damage from it and destroy this Aura.)",
+    ).with_subtypes(vec!["Aura"]).id();
+    let day = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
+    let mut runner = scenario.build();
+    // Infrastructure exception: preattach the printed protection Aura instead
+    // of casting it; Day publicly produces the genuine two-candidate prompt.
+    engine::game::effects::attach::attach_to(runner.state_mut(), umbra, host);
+    let pending = runner.cast(day).commit().try_resolve().unwrap();
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = pending.final_waiting_for()
+    else {
+        panic!("the game must first reach its real replacement choice");
+    };
+    assert_eq!(*player, P1);
+    assert_eq!(candidates.len(), 2);
+    for source in [host, umbra] {
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.source_id == source));
+    }
+    runner.act(GameAction::Concede { player_id: P1 }).unwrap();
+    let state = runner.state();
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    ));
+    assert!(state.pending_replacement.is_none());
+    assert!(state.resolution_stack.is_empty());
 }

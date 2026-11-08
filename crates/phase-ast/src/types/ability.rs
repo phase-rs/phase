@@ -5563,6 +5563,12 @@ pub enum PermissionGrantee {
     /// of Hospitality), read through `TargetFilter::TriggeringSourceController`
     /// with its last-known-information fallback (CR 608.2h).
     TriggeringSourceController,
+    /// CR 406.3a + CR 608.2c — each object's recorded exiling player (the
+    /// player who performed the exile that put it there, which need not be
+    /// its owner or the ability's controller): "For each card exiled this way,
+    /// the player who exiled it may play it" (Vulcan Mind-Meld). A card whose
+    /// exile was not attributed to a player is granted to nobody.
+    ObjectExiler,
 }
 
 /// Returns true when `grantee` is the default (`AbilityController`). Used as a
@@ -6474,6 +6480,32 @@ where
             DamageChannel::Excess
         } else {
             DamageChannel::Total
+        });
+    }
+    serde_json::from_value(raw).map_err(serde::de::Error::custom)
+}
+
+/// Legacy decode: a `DraftFromSpellbook` written before `selection` existed (or
+/// with `random: false`) was resolved by offering the whole spellbook.
+fn default_spellbook_selection_legacy_whole_book() -> SpellbookSelection {
+    SpellbookSelection::Chosen
+}
+
+/// Compatibility deserializer for `selection`, which replaced `random: bool`.
+/// Paired with `#[serde(alias = "random")]`: a legacy bool maps `true` →
+/// `Random`, `false` → `Chosen` (what base executed); the current
+/// representation decodes as the enum. Both keys at once is a serde
+/// duplicate-field error. Only `selection` is ever written.
+fn deserialize_spellbook_selection_compat<'de, D>(d: D) -> Result<SpellbookSelection, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = serde_json::Value::deserialize(d)?;
+    if let serde_json::Value::Bool(random) = raw {
+        return Ok(if random {
+            SpellbookSelection::Random
+        } else {
+            SpellbookSelection::Chosen
         });
     }
     serde_json::from_value(raw).map_err(serde::de::Error::custom)
@@ -7486,8 +7518,15 @@ pub enum FilterProp {
     NameMatchesAnyPermanent {
         controller: Option<ControllerRef>,
     },
-    /// CR 903.3 + CR 903.3d: Matches permanents on the battlefield that are a
-    /// commander. Reads `GameObject::is_commander`, set during deck construction
+    /// CR 903.3 + CR 903.3d: Matches an object that is a commander. It checks no zone
+    /// itself; whatever reads the filter supplies the zone. A population reads the
+    /// zones `FilterProp::InZone` / `FilterProp::InAnyZone` name (Cloudkill's "a
+    /// commander you own on the battlefield or in the command zone"; every zone for
+    /// Tangleweave Armor's "your commanders", CR 903.3e), or the battlefield when the
+    /// filter names none (Command Chair's "commanders you control"). Other readers
+    /// look where their effect does: Command Beacon's "Put your commander into your
+    /// hand from the command zone" is a move whose `origin` names that zone.
+    /// Reads `GameObject::is_commander`, set during deck construction
     /// per CR 903.3 (the legendary card designated as that deck's commander).
     /// Used for "commander(s) you control", "your commander" subject phrases
     /// and for "target commander" in commander-format effects (Codsworth, Falthis,
@@ -9020,19 +9059,23 @@ pub fn filter_contains_filter_prop(
 ) -> bool {
     filter_grammar_any(filter, &|node| match node {
         FilterGrammarNode::Prop(prop) => predicate(prop),
-        FilterGrammarNode::Filter(_) => false,
+        FilterGrammarNode::Filter(_) | FilterGrammarNode::Player(_) => false,
     })
 }
 
 /// One node of the filter grammar as the grammar walkers below reach it: a
-/// `TargetFilter` at its entry, or a `FilterProp` at its entry. The walkers are
-/// generic over what a caller looks for; each entry that calls them names the
-/// node kind it tests (`filter_contains_filter_prop` above, and
-/// `crate::game::filter`'s `*_operands_contain` family).
+/// `TargetFilter`, a `FilterProp` or a `PlayerFilter` at its entry. The walkers
+/// are generic over what a caller looks for; each entry that calls them names
+/// the node kind it tests (`filter_contains_filter_prop` above, and
+/// `crate::game::filter`'s `*_operands_contain` family). A player filter is a
+/// node in its own right because some of its variants read state themselves
+/// (`TrackedSetPossessor` reads the chain's tracked set) rather than only
+/// through the target filters they nest.
 #[derive(Clone, Copy)]
 pub enum FilterGrammarNode<'a> {
     Filter(&'a TargetFilter),
     Prop(&'a FilterProp),
+    Player(&'a PlayerFilter),
 }
 
 /// The complete target → property → player → quantity topology of the filter
@@ -9259,6 +9302,9 @@ pub fn player_filter_grammar_any(
     filter: &PlayerFilter,
     visit: &dyn Fn(FilterGrammarNode<'_>) -> bool,
 ) -> bool {
+    if visit(FilterGrammarNode::Player(filter)) {
+        return true;
+    }
     match filter {
         PlayerFilter::OpponentDealtDamage { source, .. } => source
             .as_deref()
@@ -9407,6 +9453,7 @@ pub fn quantity_ref_grammar_any(
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
@@ -9422,6 +9469,7 @@ pub fn quantity_ref_grammar_any(
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -10267,6 +10315,7 @@ fn rewrite_quantity_ref_filter_props<C>(
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
@@ -10282,6 +10331,7 @@ fn rewrite_quantity_ref_filter_props<C>(
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -11116,7 +11166,10 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
-        | Effect::Unimplemented { .. } => InstructionObjectReach::Unclassified,
+        | Effect::Unimplemented { .. }
+        // Turtle Team-Up: plays cards whose own instructions introduce objects;
+        // this instruction's reach is not classified.
+        | Effect::HordePlayCard { .. } => InstructionObjectReach::Unclassified,
     }
 }
 
@@ -11785,7 +11838,11 @@ pub enum CardTypeSetSource {
     Zone { zone: ZoneRef, scope: CountScope },
     /// CR 607.2a + CR 406.6: Cards exiled by the source's linked ability.
     ExiledBySource,
-    /// CR 109.2: Objects matching a battlefield-style filter.
+    /// Objects matching `filter`. A typed filter that names no zone reads the
+    /// battlefield; `FilterProp::InZone` / `FilterProp::InAnyZone` name the zones
+    /// it reads otherwise. When the Oracle description has a card type or subtype,
+    /// names no zone and doesn't say "card", "spell", "source" or "scheme", that
+    /// default is CR 109.2's reading: a permanent of that type on the battlefield.
     Objects { filter: TargetFilter },
     /// CR 608.2c + CR 205.2a: distinct card types among the current chain
     /// tracked set, optionally restricted to members produced by `caused_by`.
@@ -12504,6 +12561,7 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         | QuantityRef::NameStickerLetterCount { .. }
         | QuantityRef::SelfManaValue
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::ExiledFromHandThisResolution
@@ -12525,6 +12583,7 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         | QuantityRef::Devotion { .. }
         | QuantityRef::VoteCount { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::TurnsTaken
         | QuantityRef::EventContextSourceCostX
@@ -13630,6 +13689,16 @@ pub enum QuantityRef {
     /// with ~" conditional statics (Veteran Survivor, etc.) — composes with
     /// `StaticCondition::QuantityComparison` rather than requiring a dedicated variant.
     CardsExiledBySource,
+    /// Turtle Team-Up: the number of Bosses currently deployed (face-up Boss
+    /// cards in the command zone). Chrome Dome's "+1/+0 for each boss in play"
+    /// reads this live so the bonus tracks stage transitions without
+    /// re-grafting. Not expressible as `ObjectCount { filter }`: there is no
+    /// Boss `TypeFilter` member, no face-up predicate, and undeployed
+    /// (face-down) Bosses share `Zone::Command`, so even a Boss+InZone filter
+    /// would over-count. No CR section (casual product) — the product booklet
+    /// is the authority. Synthesized only (Boss grafts never go through the
+    /// Oracle parser).
+    DeployedBossCount,
     /// CR 607.2b: The power of a specific card exiled by the source, indexed by order.
     /// Its only producer is The Mimeoplasm's entry replacement, which reads the second
     /// card exiled "this way" (the per-turn ledger) for counter placement. Readers of
@@ -13873,6 +13942,13 @@ pub enum QuantityRef {
     },
     /// CR 700.13: Number of crimes the controller has committed this turn.
     CrimesCommittedThisTurn,
+    /// CR 107.14 + CR 122.1: Number of energy counters the controller has paid
+    /// or lost this turn. Reads `Player::energy_paid_or_lost_this_turn`, bumped
+    /// on every energy decrement (cost payment or any other removal) and reset
+    /// at turn start. Backs "for each {E} you've paid or lost this turn"
+    /// (Blaster Hulk). Controller-scoped, mirroring the bare
+    /// `CrimesCommittedThisTurn` per-turn accumulator sibling.
+    EnergyPaidOrLostThisTurn,
     /// CR 701.65b / 701.66b / 701.67c / 702.189b: count of distinct bend types
     /// (air/earth/water/fire) the controller has performed this turn — these are
     /// the "whenever a player [airbends/earthbends/waterbends/firebends]" trigger
@@ -14346,6 +14422,7 @@ impl QuantityRef {
             | QuantityRef::SharedCardTypes { .. }
             | QuantityRef::DistinctSubtypes { .. }
             | QuantityRef::CardsExiledBySource
+            | QuantityRef::DeployedBossCount
             | QuantityRef::ExiledCardPower { .. }
             | QuantityRef::ZoneCardCount { .. }
             | QuantityRef::BasicLandTypeCount { .. }
@@ -14364,6 +14441,7 @@ impl QuantityRef {
             | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
             | QuantityRef::EnteredThisTurn { .. }
             | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::EnergyPaidOrLostThisTurn
             | QuantityRef::BendTypesThisTurn
             | QuantityRef::TurnsTaken
             | QuantityRef::ZoneChangeCountThisTurn { .. }
@@ -14501,6 +14579,7 @@ impl QuantityRef {
             | QuantityRef::TargetZoneCardCount { .. }
             | QuantityRef::Devotion { .. }
             | QuantityRef::CardsExiledBySource
+            | QuantityRef::DeployedBossCount
             | QuantityRef::ExiledCardPower { .. }
             | QuantityRef::BasicLandTypeCount { .. }
             | QuantityRef::TrackedSetSize
@@ -14521,6 +14600,7 @@ impl QuantityRef {
             | QuantityRef::EventContextSourceCostX
             | QuantityRef::EventContextSourceModesChosen
             | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::EnergyPaidOrLostThisTurn
             | QuantityRef::BendTypesThisTurn
             | QuantityRef::LifeGainedThisTurn { .. }
             | QuantityRef::CardsDrawnThisTurn { .. }
@@ -14614,6 +14694,7 @@ impl QuantityRef {
             | QuantityRef::SharedCardTypes { .. }
             | QuantityRef::DistinctSubtypes { .. }
             | QuantityRef::CardsExiledBySource
+            | QuantityRef::DeployedBossCount
             | QuantityRef::ExiledCardPower { .. }
             | QuantityRef::ZoneCardCount { .. }
             | QuantityRef::BasicLandTypeCount { .. }
@@ -14632,6 +14713,7 @@ impl QuantityRef {
             | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
             | QuantityRef::EnteredThisTurn { .. }
             | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::EnergyPaidOrLostThisTurn
             | QuantityRef::BendTypesThisTurn
             | QuantityRef::TurnsTaken
             | QuantityRef::ZoneChangeCountThisTurn { .. }
@@ -14754,7 +14836,7 @@ pub enum ObjectProperty {
     Toughness,
     ManaValue,
     /// CR 107.4a + CR 202.1: The number of colored mana symbols of `color` in
-    /// this object's mana cost. Summed (via `QuantityRef::Aggregate`) over a
+    /// this object's mana cost. Summed (via `QuantityRef::PropertyAggregate`) over a
     /// zone-scoped filter, this expresses chroma in any zone — "the number of
     /// black mana symbols in the mana costs of cards in your graveyard" (Umbra
     /// Stalker) is `Sum` of `ManaSymbolCount(Black)` over cards in your
@@ -15495,7 +15577,7 @@ pub fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRead {
         | QuantityRef::SpellsCastThisTurn { .. } | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SpellsCastThisGame { .. } | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::TargetZoneCardCount { .. } | QuantityRef::Devotion { .. }
-        | QuantityRef::BasicLandTypeCount { .. } | QuantityRef::CardsExiledBySource
+        | QuantityRef::BasicLandTypeCount { .. } | QuantityRef::CardsExiledBySource | QuantityRef::DeployedBossCount
         // Numbers, counters on players, and resolution/turn records.
         | QuantityRef::LifeAboveStarting | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount | QuantityRef::TriggeringScryBottomCount
@@ -15505,6 +15587,7 @@ pub fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRead {
         | QuantityRef::PreviousEffectCount | QuantityRef::UnspentMana { .. }
         | QuantityRef::EventContextAmount | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn | QuantityRef::TurnsTaken | QuantityRef::NotedNumber
         | QuantityRef::ChosenNumber | QuantityRef::DescendedThisTurn | QuantityRef::SpellsCastLastTurn
         | QuantityRef::DungeonsCompleted | QuantityRef::CostXPaid | QuantityRef::KickerCount
@@ -15836,6 +15919,9 @@ impl Effect {
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
+            // Horde-internal wave instruction: never parser-built, never an
+            // indicated action — no address route from its shape.
+            | Effect::HordePlayCard { .. }
             | Effect::Unimplemented { .. } => {}
         }
         let scoped_change_zone = matches!(
@@ -16141,6 +16227,11 @@ pub fn indicated_action_commit(effect: &Effect) -> IndicatedActionCommit {
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
+        // Horde-internal wave instruction: never parser-built, never an
+        // indicated action. OnAccept fails closed — OnSpellCast would route
+        // to the strict single-card CastFromZone shape check above, which a
+        // Horde wave play can never satisfy.
+        | Effect::HordePlayCard { .. }
         | Effect::Unimplemented { .. } => IndicatedActionCommit::OnAccept,
     }
 }
@@ -20535,7 +20626,7 @@ impl LegacyPaymentCost {
 /// The controller of the spell or ability follows its instructions, unless the
 /// instruction names its subject — and a subject acting on "their library" is
 /// the player whose library it is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum LibraryInstructionActor {
     /// "Exile the top card of target player's library" — the controller acts.
     #[default]
@@ -20543,12 +20634,37 @@ pub enum LibraryInstructionActor {
     /// "That player exiles the top card of their library" — the player whose
     /// library it is acts (Uba Mask, Ingest, Crumbling Sanctuary).
     LibraryPlayer,
+    /// CR 608.2c: the instruction's named subject is a player other than the
+    /// library's owner — "Target opponent looks at the top card of your
+    /// library, then exiles it face down" (Vulcan Mind-Meld). CR 115.1: a
+    /// targeting subject (`player` not a context ref) is the instruction's
+    /// declared player target, surfaced by [`Effect::target_filter`] when the
+    /// library owner is itself a context ref.
+    Player { player: TargetFilter },
 }
 
 impl LibraryInstructionActor {
     /// Serde skip-helper: `Controller` is the default and is omitted from JSON.
     pub fn is_controller(&self) -> bool {
         matches!(self, Self::Controller)
+    }
+
+    /// CR 115.1: the subject's player filter when it names a target, so the
+    /// instruction can declare it. `None` for the controller, the library
+    /// owner, and context-ref subjects ("its controller").
+    pub fn declared_target(&self) -> Option<&TargetFilter> {
+        match self {
+            Self::Player { player } if !player.is_context_ref() => Some(player),
+            Self::Controller | Self::LibraryPlayer | Self::Player { .. } => None,
+        }
+    }
+
+    /// Mutable form of [`Self::declared_target`].
+    pub fn declared_target_mut(&mut self) -> Option<&mut TargetFilter> {
+        match self {
+            Self::Player { player } if !player.is_context_ref() => Some(player),
+            Self::Controller | Self::LibraryPlayer | Self::Player { .. } => None,
+        }
     }
 }
 
@@ -20801,6 +20917,21 @@ pub enum ConjureSource {
     /// referenced card's copiable characteristics (CR 707.2), resolved at
     /// resolution time from the ability's target / anaphoric reference.
     Duplicate { duplicate_of: TargetFilter },
+}
+
+/// Digital-only Alchemy (no CR entry): how `Effect::DraftFromSpellbook` picks
+/// the card it conjures from the source card's spellbook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpellbookSelection {
+    /// "draft a card from X's spellbook": the game offers a random sample of
+    /// distinct spellbook entries and the controller chooses one of them.
+    Draft,
+    /// "conjure a card of your choice from X's spellbook": the controller
+    /// chooses from the whole spellbook.
+    Chosen,
+    /// "conjure a random card from X's spellbook": one entry is picked at
+    /// random, with no prompt.
+    Random,
 }
 
 impl ConjureCard {
@@ -21656,6 +21787,35 @@ pub enum DigRestOrder {
 impl DigRestOrder {
     pub fn is_preserve(&self) -> bool {
         matches!(self, DigRestOrder::Preserve)
+    }
+}
+
+/// CR 701.20e + CR 608.2c: what happens to the cards a look-at Dig did NOT keep.
+///
+/// Looking at cards never moves them (CR 701.20e). An instruction that routes
+/// its chosen cards out of the library and stays silent about the others ("put
+/// any number of land cards from among them onto the battlefield tapped") leaves
+/// those others exactly where they are. That outcome is neither of the two
+/// states `rest_destination: Option<Zone>` can name: its `None` means the
+/// historical graveyard default (a move), and `Some(Zone::Library)` means an
+/// explicit "put the rest on the bottom" (also a move, and one that reorders
+/// the library under CR 401.4, changing the next draw of any such dig that has
+/// no later shuffle).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DigRestRemainder {
+    /// Move the unkept cards to `rest_destination` (`None` = graveyard).
+    #[default]
+    Route,
+    /// The instruction named no destination for the unkept cards, so they are
+    /// never moved: they were only looked at and stay in the library in their
+    /// existing order.
+    StayInLibrary,
+}
+
+impl DigRestRemainder {
+    pub fn is_route(&self) -> bool {
+        matches!(self, DigRestRemainder::Route)
     }
 }
 
@@ -22563,9 +22723,17 @@ pub enum Effect {
         /// Filter for keepable cards (Any = no filter).
         #[serde(default = "default_target_filter_any")]
         filter: TargetFilter,
-        /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom).
+        /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom
+        /// unless `rest_split_top_count` names a top position).
         #[serde(default)]
         rest_destination: Option<Zone>,
+        /// CR 701.20e: whether the unkept cards are moved at all. A silent
+        /// remainder ("… put any number of land cards from among them onto the
+        /// battlefield", with no clause naming the rest) stays in the library
+        /// untouched — `RestRemainder::StayInLibrary` — rather than being routed
+        /// to `rest_destination`'s graveyard default or to the library bottom.
+        #[serde(default, skip_serializing_if = "DigRestRemainder::is_route")]
+        rest_remainder: DigRestRemainder,
         /// CR 401.2 + CR 701.20e + CR 608.2c: Telling Time-class split of the
         /// unkept remainder between the two rules-legal positions of ONE
         /// library ("...one on top of your library, and one on the bottom of
@@ -22576,9 +22744,14 @@ pub enum Effect {
         /// is known only to them).
         ///
         /// `Some(n)` = exactly `n` of the remainder go on top and the rest go
-        /// to the bottom, via a `WaitingFor::DigRestSplitChoice` pause.
-        /// `None` = unchanged behavior: the whole remainder goes uniformly to
-        /// `rest_destination` (defaulting to Graveyard). Note CR 701.20d: the
+        /// to the bottom, via a `WaitingFor::DigRestSplitChoice` pause. `n` is
+        /// clamped to the actual remainder, so a value at or beyond the pile
+        /// size is the DEGENERATE all-top remainder the parser emits for "…
+        /// and the rest on top of your library" (Diabolic Vision) — the whole
+        /// pile goes on top and its CR 401.4 arrangement
+        /// is still the owner's choice. `None` = unchanged behavior: the whole
+        /// remainder goes uniformly to `rest_destination` (defaulting to
+        /// Graveyard). Note CR 701.20d: the
         /// remainder cards are reordered within the library by this split, so
         /// they stop being revealed and become new objects — the shared
         /// `reorder_within_library` primitive that performs the move already
@@ -24260,6 +24433,12 @@ pub enum Effect {
         /// `PaymentCost::ScaledMana`). When `Some(times)` the mana `cost` base
         /// is multiplied by `times` at payment ("pay {N} for each object chosen
         /// this way"); `times == 0` yields `{0}`, a trivial no-op success.
+        /// That first producer is the per-object `TrackedSetSize` payment
+        /// (Thelon's Curse; CR 118.1). The second producer is a `times` that
+        /// still carries the unannounced X (`times.contains_x()`): the
+        /// multiplier is then the player-chosen amount of a resolution-time
+        /// prompt (`pay::resolve` → `PayableResource::Mana { composition:
+        /// PerUnit }`, CR 107.1c; "pay any amount of {R}", Leyline Tyrant).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scale: Option<QuantityExpr>,
         /// CR 608.2c: Player who pays the resolution-time cost. Defaults to
@@ -24461,11 +24640,13 @@ pub enum Effect {
     /// `recipient_scope`.
     PreventDamage {
         amount: PreventionAmount,
-        /// CR 615.11 + CR 107.3i: When present, overrides `amount` at effect
-        /// resolution — the dynamic quantity is resolved to a concrete count and
-        /// the prevention shield is created as a static `Next(n)` depletion shield.
-        /// Set by "prevent X … where X is <quantity>" clauses. `None` for the
-        /// common fixed/All forms.
+        /// CR 615.7 + CR 107.3a + CR 107.3c: when present, overrides `amount` at
+        /// effect resolution — the quantity is resolved to a concrete count and
+        /// the shield is created as a static `Next(n)` depletion shield (CR 615.7).
+        /// Set by the announced `{X}` of a counted prevention clause ('prevent the
+        /// next X damage …', CR 107.3a) or by a trailing 'where X is <quantity>'
+        /// binder (CR 107.3c), which overwrites the announced-X reading. `None`
+        /// for the fixed/All forms.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         amount_dynamic: Option<QuantityExpr>,
         #[serde(default = "default_target_filter_any")]
@@ -25627,6 +25808,18 @@ pub enum Effect {
         /// Number of +1/+1 counters to place.
         count: QuantityExpr,
     },
+    /// Turtle Team-Up (Savanti Romero, Temporal Rogue): "the bosses play a
+    /// card" — reveal and resolve the top card of the Boss event deck
+    /// immediately, outside the wave (Savanti triggers on combat damage, mid
+    /// combat). Not a cast: creatures enter, Events resolve one-shot, exactly
+    /// as in the Action-phase wave. No CR section (casual product) — the
+    /// product booklet is the authority. Synthesized only (Boss grafts never
+    /// go through the Oracle parser).
+    HordePlayCard {
+        /// How many cards to play.
+        #[serde(default = "default_one")]
+        count: u32,
+    },
     /// Digital-only Specialize: permanently become a color-specific face after
     /// paying the synthesized activation cost (mana + discard). Not in CR text.
     Specialize,
@@ -25835,20 +26028,34 @@ pub enum Effect {
         #[serde(default = "default_quantity_one")]
         amount: QuantityExpr,
     },
-    /// Digital-only Alchemy keyword action (no CR entry): "draft a card from
-    /// [this card]'s spellbook" — reveal the source card's fixed spellbook list,
-    /// the controller chooses one card name from it, and that card is conjured
-    /// into `destination` (mirrors `Conjure`, but the controller picks one entry
-    /// from a per-card list). The list is not in the Oracle text; it is carried
-    /// on the source object (`GameObject::spellbook`, from
-    /// `CardFace::metadata.spellbook`), so the resolver reads it from the source.
-    /// An empty list resolves as a no-op.
+    /// Digital-only Alchemy keyword action (no CR entry): take one card from the
+    /// source card's fixed spellbook list and conjure it into `destination`
+    /// (mirrors `Conjure`, but the card comes from a per-card list). `selection`
+    /// is how the card is picked: a draft offers a random sample of distinct
+    /// entries and the controller chooses one; "a card of your choice" offers the
+    /// whole book; "a random card" picks one with no prompt. The list is not in
+    /// the Oracle text; it is carried on the source object
+    /// (`GameObject::spellbook`, from `CardFace::metadata.spellbook`), so the
+    /// resolver reads it from the source. An empty list resolves as a no-op.
+    ///
+    /// For `SpellbookSelection::Draft`, `destination` is `Hand`, except the
+    /// deferred " and put it onto the battlefield[ tapped]" rider, which keeps
+    /// `Battlefield`. The exile riders (" and exile it", ", then exile it") are a
+    /// following `Effect::ChangeZone` of the drafted card, not a destination.
     DraftFromSpellbook {
         destination: Zone,
         #[serde(default)]
         tapped: bool,
-        #[serde(default)]
-        random: bool,
+        /// How the card is picked from the spellbook. Decodes the legacy
+        /// `random: bool` key (`true` → `Random`; `false` or absent → `Chosen`,
+        /// the whole-book choice base executed) through
+        /// `deserialize_spellbook_selection_compat`; only `selection` is written.
+        #[serde(
+            default = "default_spellbook_selection_legacy_whole_book",
+            alias = "random",
+            deserialize_with = "deserialize_spellbook_selection_compat"
+        )]
+        selection: SpellbookSelection,
     },
     /// CR 701.55 + CR 608.2d: Inline "[player] chooses/faces [effect A] or
     /// [effect B]" — the configured chooser scope chooses at resolution which
@@ -27830,6 +28037,7 @@ pub fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
@@ -27841,6 +28049,7 @@ pub fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
@@ -30408,6 +30617,7 @@ impl Effect {
             // nor the note names a copied stack object.
             | Effect::CreateBoon { .. }
             | Effect::NoteNumber { .. }
+            | Effect::HordePlayCard { .. }
             // CR 701.33b: abandoning names no stack object at all.
             | Effect::AbandonScheme
             | Effect::Unimplemented { .. } => false,
@@ -30660,6 +30870,7 @@ impl Effect {
             // note resolve their slot as operand, never as a donor.
             | Effect::CreateBoon { .. }
             | Effect::NoteNumber { .. }
+            | Effect::HordePlayCard { .. }
             // CR 701.33b: abandoning resolves its slot as operand.
             | Effect::AbandonScheme
             | Effect::Unimplemented { .. } => AttachmentHostSlot::Operand,
@@ -30854,6 +31065,12 @@ impl Effect {
                 }
             }
 
+            // CR 115.1 + CR 608.2c: "Target opponent looks at the top card of
+            // your library, then exiles it face down" — the library owner is a
+            // context ref, so the targeting subject is the declared player.
+            Effect::ExileTop { player, actor, .. } if player.is_context_ref() => {
+                Some(actor.declared_target().unwrap_or(player))
+            }
             Effect::Dig { player, .. }
             | Effect::ExileTop { player, .. }
             | Effect::ExileFaceDownPile { player, .. }
@@ -31221,6 +31438,9 @@ impl Effect {
             // surfaced by `collect_target_slots`.
             | Effect::ChooseCounterAdjustment { .. }
             | Effect::Unimplemented { .. }
+            // Turtle Team-Up (no CR section — casual product): HordePlayCard
+            // names no target; the Boss event deck it plays from is implied.
+            | Effect::HordePlayCard { .. }
             // CR 603.7e: ChooseObjectsIntoTrackedSet has no discrete effect-target
             // slot — `chooser` is a player ref resolved like `PayCost.payer`, and
             // `filter` constrains the interactive selection, not a targeting slot.
@@ -31445,6 +31665,13 @@ impl Effect {
                 }
             }
 
+            // CR 115.1 + CR 608.2c: mirrors `target_filter` — a targeting
+            // subject of a context-ref library owner is the declared player.
+            Effect::ExileTop { player, actor, .. }
+                if player.is_context_ref() && actor.declared_target().is_some() =>
+            {
+                actor.declared_target_mut()
+            }
             Effect::Dig { player, .. }
             | Effect::ExileTop { player, .. }
             | Effect::ExileFaceDownPile { player, .. }
@@ -31679,6 +31906,7 @@ impl Effect {
             | Effect::ChooseOneOf { .. }
             | Effect::ChooseCounterAdjustment { .. }
             | Effect::Unimplemented { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::SeparateIntoPiles { .. }
             | Effect::ExileTopCardContest { .. }
@@ -31813,7 +32041,12 @@ impl Effect {
             | Effect::Learn
             // Randomly picks card(s) FROM a library matching a filter; the library
             // is always the origin.
-            | Effect::Seek { .. } => true,
+            | Effect::Seek { .. }
+            // Turtle Team-Up (no CR section — casual product): "the bosses
+            // play a card" reveals the top cards of the Boss event deck (a
+            // library) and resolves them onto the battlefield / into the
+            // graveyard; the library is always the origin.
+            | Effect::HordePlayCard { .. } => true,
 
             // CR 701.40a names no source zone ("Put that card onto the
             // battlefield face down"), so the verdict is conditional on the
@@ -32672,6 +32905,9 @@ impl Effect {
             | Effect::VentureInto { .. }
             | Effect::VentureIntoDungeon
             | Effect::WinTheGame { .. }
+            // Turtle Team-Up: plays cards; this node publishes no created referent
+            // (a played card's own token creation is that node's answer).
+            | Effect::HordePlayCard { .. }
             | Effect::AbandonScheme
             => None,
         }
@@ -33391,6 +33627,7 @@ macro_rules! define_effect_quantity_walk {
             // CR 122.1: the per-kind magnitude is `EventCounterReproductionCount`,
             // not a `QuantityExpr`, so there is nothing to visit here.
             | Effect::ReproduceEventCounters { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::Unimplemented { .. } => {}
         }
     }
@@ -33750,6 +33987,7 @@ impl Effect {
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::Unimplemented { .. } => {}
         }
     }
@@ -34030,6 +34268,7 @@ impl Effect {
             // CR 122.1: per-kind magnitude is `EventCounterReproductionCount`,
             // not a `QuantityExpr`.
             | Effect::ReproduceEventCounters { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::WinTheGame { .. } => None,
         }
     }
@@ -34301,6 +34540,7 @@ impl Effect {
             // CR 122.1: per-kind magnitude is `EventCounterReproductionCount`,
             // not a `QuantityExpr`.
             | Effect::ReproduceEventCounters { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::WinTheGame { .. } => None,
         }
     }
@@ -34524,6 +34764,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Amass { .. } => "Amass",
         Effect::EmpowerJace { .. } => "EmpowerJace",
         Effect::Monstrosity { .. } => "Monstrosity",
+        Effect::HordePlayCard { .. } => "HordePlayCard",
         Effect::Specialize => "Specialize",
         Effect::Renown { .. } => "Renown",
         Effect::Bolster { .. } => "Bolster",
@@ -34785,6 +35026,7 @@ pub enum EffectKind {
     Amass,
     EmpowerJace,
     Monstrosity,
+    HordePlayCard,
     Specialize,
     Renown,
     Bolster,
@@ -35079,6 +35321,7 @@ impl From<&Effect> for EffectKind {
             Effect::Amass { .. } => EffectKind::Amass,
             Effect::EmpowerJace { .. } => EffectKind::EmpowerJace,
             Effect::Monstrosity { .. } => EffectKind::Monstrosity,
+            Effect::HordePlayCard { .. } => EffectKind::HordePlayCard,
             Effect::Specialize => EffectKind::Specialize,
             Effect::Renown { .. } => EffectKind::Renown,
             Effect::Bolster { .. } => EffectKind::Bolster,
@@ -37716,6 +37959,107 @@ impl AbilityCondition {
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
             | AbilityCondition::ScopedPlayerMatches { .. } => false,
+        }
+    }
+
+    /// CR 608.2c: whether any filter-grammar node this condition carries — a
+    /// `TargetFilter`, a `PlayerFilter`'s nested filters, a `FilterProp`, or a
+    /// filter inside a compared quantity — satisfies `visit`, through the `Not`
+    /// / `ConditionInstead` / `And` / `Or` wrappers. The filter-axis companion of
+    /// [`Self::any_quantity_expr`]: a gate that tests membership in the chain's
+    /// tracked set ("if it was put into your graveyard this way") reads it as
+    /// surely as one that counts it. Exhaustive, no wildcard arm, so a new
+    /// filter-bearing condition must say what it carries.
+    pub fn any_filter_grammar(&self, visit: &dyn Fn(FilterGrammarNode<'_>) -> bool) -> bool {
+        match self {
+            AbilityCondition::RevealedHasCardType {
+                additional_filter,
+                subtype_filter,
+                ..
+            } => {
+                additional_filter
+                    .as_ref()
+                    .is_some_and(|prop| filter_prop_grammar_any(prop, visit))
+                    || subtype_filter
+                        .as_deref()
+                        .is_some_and(|filter| filter_grammar_any(filter, visit))
+            }
+            AbilityCondition::ObjectsShareQuality {
+                subject, reference, ..
+            } => filter_grammar_any(subject, visit) || filter_grammar_any(reference, visit),
+            AbilityCondition::TargetSharesNameWithOtherExiledThisWay { target: filter }
+            | AbilityCondition::DiscardedCardMatchesFilter { filter }
+            | AbilityCondition::TargetMatchesFilter { filter, .. }
+            | AbilityCondition::TriggeringSpellTargetsFilter { filter }
+            | AbilityCondition::SourceMatchesFilter { filter }
+            | AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter }
+            | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
+            | AbilityCondition::ControllerControlsMatching { filter }
+            | AbilityCondition::ControllerControlledMatchingAsCast { filter }
+            | AbilityCondition::ZoneChangedThisWay { filter, .. }
+            | AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
+                filter_grammar_any(filter, visit)
+            }
+            AbilityCondition::ScopedPlayerMatches { filter } => {
+                player_filter_grammar_any(filter, visit)
+            }
+            AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+                quantity_expr_grammar_any(lhs, visit) || quantity_expr_grammar_any(rhs, visit)
+            }
+            AbilityCondition::QuantityQuality { quantity, .. } => {
+                quantity_expr_grammar_any(quantity, visit)
+            }
+            AbilityCondition::PreviousEffectAmount { rhs, .. } => {
+                quantity_expr_grammar_any(rhs, visit)
+            }
+            AbilityCondition::Not { condition }
+            | AbilityCondition::ConditionInstead { inner: condition } => {
+                condition.any_filter_grammar(visit)
+            }
+            AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+                conditions
+                    .iter()
+                    .any(|condition| condition.any_filter_grammar(visit))
+            }
+            AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+            | AbilityCondition::TriggerEventTargetExploitedBySource
+            | AbilityCondition::AdditionalCostPaid { .. }
+            | AbilityCondition::AdditionalCostPaidInstead
+            | AbilityCondition::AlternativeManaCostPaid
+            | AbilityCondition::EffectOutcome { .. }
+            | AbilityCondition::EventOutcomeWon
+            | AbilityCondition::CoinFlipOutcome { .. }
+            | AbilityCondition::ChosenLabelIs { .. }
+            | AbilityCondition::WhenYouDo
+            | AbilityCondition::WasCast { .. }
+            | AbilityCondition::CastDuringPhase { .. }
+            | AbilityCondition::CurrentPhaseIs { .. }
+            | AbilityCondition::CastTimingPermission { .. }
+            | AbilityCondition::ManaColorSpent { .. }
+            | AbilityCondition::SourceEnteredThisTurn
+            | AbilityCondition::CastVariantPaid { .. }
+            | AbilityCondition::CastVariantPaidInstead { .. }
+            | AbilityCondition::HasMaxSpeed
+            | AbilityCondition::IsMonarch
+            | AbilityCondition::IsInitiative
+            | AbilityCondition::HasCityBlessing
+            | AbilityCondition::HasEnduringStory
+            | AbilityCondition::ControlsCommander { .. }
+            | AbilityCondition::IsRingBearer
+            | AbilityCondition::CompletedDungeon { .. }
+            | AbilityCondition::TargetHasKeywordInstead { .. }
+            | AbilityCondition::HasObjectTarget
+            | AbilityCondition::IsYourTurn
+            | AbilityCondition::WasStartingPlayer { .. }
+            | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+            | AbilityCondition::FirstCombatPhaseOfTurn
+            | AbilityCondition::FirstEndStepOfTurn
+            | AbilityCondition::SourceIsTapped
+            | AbilityCondition::SourceAttachedToCreature
+            | AbilityCondition::DayNightIsNeither
+            | AbilityCondition::DayNightIs { .. }
+            | AbilityCondition::AbilityUseCountThisTurn { .. }
+            | AbilityCondition::SourceLacksKeyword { .. } => false,
         }
     }
 
@@ -50684,7 +51028,7 @@ mod created_referent_classification_tests {
                 "destination": "Battlefield"
             })),
             effect(
-                json!({ "type": "DraftFromSpellbook", "destination": "Battlefield", "random": true }),
+                json!({ "type": "DraftFromSpellbook", "destination": "Battlefield", "selection": "Random" }),
             ),
             effect(json!({
                 "type": "CopyTokenBlockingAttacker",
@@ -50927,5 +51271,105 @@ mod created_referent_classification_tests {
             serde_json::from_value(serde_json::json!({"target": {"type": "Any"}, "count": 2}))
                 .expect("legacy decode");
         assert_eq!(legacy.requirement, SacrificeRequirement::Count { count: 2 });
+    }
+}
+
+#[cfg(test)]
+mod spellbook_selection_serde_tests {
+    //! `Effect::DraftFromSpellbook.selection` replaced `random: bool`. Persisted
+    //! payloads (server sessions, P2P backups, client saves, card data) written
+    //! before the change must keep decoding to the selection base executed.
+    use super::*;
+    use serde_json::json;
+
+    fn decode(value: serde_json::Value) -> Result<Effect, serde_json::Error> {
+        serde_json::from_value(value)
+    }
+
+    fn selection_of(value: serde_json::Value) -> SpellbookSelection {
+        match decode(value.clone()).unwrap_or_else(|err| panic!("{value} must load: {err}")) {
+            Effect::DraftFromSpellbook { selection, .. } => selection,
+            other => panic!("{value} decoded to {other:?}"),
+        }
+    }
+
+    /// Legacy `random: true` was the random pick; `random: false` and an absent
+    /// key were resolved as a whole-book choice, so both decode to `Chosen`.
+    #[test]
+    fn legacy_random_key_decodes_to_the_selection_base_executed() {
+        assert_eq!(
+            selection_of(
+                json!({ "type": "DraftFromSpellbook", "destination": "Hand", "random": true })
+            ),
+            SpellbookSelection::Random,
+            "legacy random: true"
+        );
+        assert_eq!(
+            selection_of(
+                json!({ "type": "DraftFromSpellbook", "destination": "Hand", "random": false })
+            ),
+            SpellbookSelection::Chosen,
+            "legacy random: false"
+        );
+        assert_eq!(
+            selection_of(json!({ "type": "DraftFromSpellbook", "destination": "Hand" })),
+            SpellbookSelection::Chosen,
+            "neither key present"
+        );
+    }
+
+    #[test]
+    fn selection_key_decodes_every_variant_and_round_trips() {
+        for (wire, variant) in [
+            ("Draft", SpellbookSelection::Draft),
+            ("Chosen", SpellbookSelection::Chosen),
+            ("Random", SpellbookSelection::Random),
+        ] {
+            let payload =
+                json!({ "type": "DraftFromSpellbook", "destination": "Hand", "selection": wire });
+            assert_eq!(selection_of(payload.clone()), variant, "selection {wire}");
+            let effect = decode(payload).expect("modern payload loads");
+            let reencoded = serde_json::to_value(&effect).expect("effect serializes");
+            assert_eq!(
+                decode(reencoded).expect("re-encoded payload loads"),
+                effect,
+                "selection {wire} round-trips"
+            );
+        }
+    }
+
+    /// Serialization always writes `selection`; the legacy key survives as a
+    /// read-side alias only.
+    #[test]
+    fn serialization_emits_only_the_selection_key() {
+        let effect =
+            decode(json!({ "type": "DraftFromSpellbook", "destination": "Hand", "random": true }))
+                .expect("legacy payload loads");
+        let json = serde_json::to_string(&effect).expect("effect serializes");
+        assert!(
+            json.contains("\"selection\":\"Random\""),
+            "the selection key must be written: {json}"
+        );
+        assert!(
+            !json.contains("\"random\""),
+            "the legacy key must never be written back out: {json}"
+        );
+    }
+
+    /// Both spellings name ONE field, so carrying both is a duplicate, not a
+    /// silent last-one-wins.
+    #[test]
+    fn both_keys_at_once_is_a_duplicate_field_error() {
+        let err = decode(json!({
+            "type": "DraftFromSpellbook",
+            "destination": "Hand",
+            "random": true,
+            "selection": "Draft"
+        }))
+        .expect_err("a payload carrying both spellings must be rejected");
+        assert!(
+            err.to_string().contains("duplicate field"),
+            "expected a duplicate-field error, got {err}"
+        );
     }
 }

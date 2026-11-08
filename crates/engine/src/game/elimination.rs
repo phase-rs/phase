@@ -261,6 +261,8 @@ pub(crate) fn eliminate_players(
         super::turn_control::invalidate_resolve_all_consent_for_topology_change(state);
         super::engine::take_and_restore_stack_resolution_session(state);
     }
+    let interrupted_replacement =
+        super::engine_replacement::capture_replacement_before_departure(state);
     let staged_optional_sacrifice_decline =
         stage_resolution_optional_sacrifice_decline_for_departing_payer(
             state,
@@ -483,6 +485,7 @@ pub(crate) fn eliminate_players(
     prune_deferred_triggers_for_eliminated_players(state);
 
     if let Some(winner) = game_over_winner {
+        super::engine_replacement::retire_replacement_at_game_over(state, interrupted_replacement);
         if staged_optional_sacrifice_decline.is_some() {
             // The game is over: no final part is owed to a finished game, so the
             // whole family goes, carrier included.
@@ -533,6 +536,15 @@ pub(crate) fn eliminate_players(
         state.pending_player_scope_sacrifice_choice = None;
         state.waiting_for = WaitingFor::GameOver { winner };
     } else {
+        // CR 800.4a + CR 616.1: preserve the current proposal through the whole
+        // departure transaction, then refresh candidates and authority before
+        // any drain or generic dead-actor priority fallback can advance it.
+        let replacement_settlement = super::engine_replacement::settle_replacement_after_departure(
+            state,
+            interrupted_replacement,
+            events,
+        )
+        .expect("interrupted replacement must settle through its existing delivery owner");
         // CR 800.4a + CR 608.2m + CR 800.4g/800.4h: once every departure,
         // control-effect end and stack removal above has settled, reconcile an
         // active per-player zone choice against the final set of living
@@ -767,6 +779,10 @@ pub(crate) fn eliminate_players(
                 )
                 && matches!(
                     staged_batch_settlement,
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                )
+                && matches!(
+                    replacement_settlement,
                     super::engine_resolution_choices::DepartureSettlement::NotSettled
                 )
                 && state
@@ -1686,41 +1702,6 @@ fn do_eliminate(
         grants.retain(|(_, grant)| grant.grantee != player && grant.controller != player);
     }
 
-    // CR 800.4a + CR 616.1 + CR 704.4: Abandon a parked replacement choice this
-    // leaving player was answering. A CR 616.1 replacement-order (or optional
-    // MayCost / MayCost sub-choice re-park) is held in `state.pending_replacement`
-    // and resumed ONLY via `(WaitingFor::ReplacementChoice, ChooseReplacement)`
-    // (engine.rs) or that sub-choice's own resolution — both re-enter
-    // `continue_replacement`. If the player who must answer leaves the game, the
-    // choice is unanswerable: the post-loop reconcile rewrite advances
-    // `waiting_for` to `Priority{next}`, and every later `check_state_based_actions`
-    // then bails at its `pending_replacement` guard (sba.rs) — freezing all
-    // object-destroying SBAs for the rest of the game.
-    //
-    // Key off the LATCHED chooser identity, not the mutating object graph:
-    // `waiting_for.acting_player()` is the affected player for both
-    // `ReplacementChoice{player}` (game_state.rs) and a MayCost sub-choice re-park
-    // (payer == affected, replacement.rs). The identity was captured before
-    // teardown can mutate `waiting_for`, so it remains constant across a
-    // simultaneous multi-elimination batch and object-graph-independent.
-    // (`ProposedEvent::affected_player` would mis-resolve here: once a co-eliminated
-    // lower-id loser has exiled the affected object, its effective controller is
-    // reverted to its owner — CR 616.1's owner-fallback is pre-existing and NOT
-    // relied upon.) Mirror the `pending_cast` teardown: clear `pending_replacement`
-    // (the SBA-gating slot) plus the parked replacement's own tightly-coupled
-    // continuation slots (`replacement_may_cost_paused`, `post_replacement_*`,
-    // the stack-owned Connive re-entry). The resume drain also touches OTHER resolution
-    // slots on a normal answer (e.g. `pending_phase_transition_progress`,
-    // `pending_team_draw_step`, `pending_continuation`); those are intentionally
-    // NOT cleared here. Stranding some of them is its own PRE-EXISTING soft-lock
-    // (PPT gates `auto_advance`; `pending_continuation` gates the deferred-trigger
-    // drain) that predates this PR and is NOT the reported regression; repairing
-    // them correctly requires resuming the interrupted APNAP queue for the
-    // remaining players (not field-nulling), tracked as a separate follow-up. This
-    // fix deliberately addresses only the CR 704.4 SBA-freeze introduced by the
-    // `pending_replacement` guard. A player-scope sacrifice batch parked on this
-    // choice is the exception: `settle_player_scope_sacrifice_after_departure`
-    // resumes it for the remaining players once every departure has settled.
     // CR 800.4a: Tear down choices and continuations owned by the leaving player.
     // CR 616.1: SearchFound owns an outer per-card batch, and a replacement-
     // selected zone move may own a nested batch completion. The
@@ -1743,15 +1724,6 @@ fn do_eliminate(
                 .take_active_batch_delivery()
                 .expect("eliminated search batch must own the active frame");
         }
-    }
-    if state.pending_replacement.is_some() && leaving_is_latched_chooser {
-        state.pending_replacement = None;
-        // CR 800.4a: a paused frameless single-card discard belongs to the
-        // abandoned choice of the leaving player; left behind it would go stale.
-        state.pending_single_discard = None;
-        state.replacement_may_cost_paused = false;
-        super::replacement::abandon_post_replacement_continuation(state);
-        super::turns::abandon_phase_begin_choice(state);
     }
 
     // A leaving player gains no life: they are no longer a player in the game, so
@@ -2152,6 +2124,22 @@ fn abandon_change_zone_family_for_controller(
     if pending.controller != player {
         return;
     }
+    // CR 608.2m + CR 800.4a: a spell already resolving continues after its
+    // controller's stack object leaves. Its exact interrupted replacement,
+    // including an outer event boxed behind a MayCost child, is reconciled
+    // after the full departure sweep rather than abandoning the living tail.
+    if pending.paused_current.as_ref().is_some_and(|paused| {
+        state
+            .pending_replacement
+            .as_ref()
+            .is_some_and(|replacement| replacement.parks_delivery(&paused.expected_event))
+            || matches!(state.pending_cost_move_resume.as_ref(),
+                Some(PendingCostMoveResume::ReplacementMayCost {
+                    outer_replacement: Some(outer), ..
+                }) if outer.parks_delivery(&paused.expected_event))
+    }) {
+        return;
+    }
 
     let _ = state
         .take_active_change_zone_frame()
@@ -2188,11 +2176,33 @@ fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
         .collect();
 
     if let Some(archenemy) = super::topology::archenemy(state) {
-        let archenemy_alive = living.contains(&archenemy);
+        // CR 104.2a win check. Horde Magic (casual variant): the Horde seat has
+        // no life total and can never be eliminated by the ordinary
+        // life/poison SBAs, so "archenemy alive" is replaced by the Horde-loss
+        // condition — the Horde is defeated when its library is empty AND it
+        // controls no creature. All other formats keep the generic living-set
+        // check.
+        let archenemy_alive =
+            if state.format_config.format == crate::types::format::GameFormat::Horde {
+                !super::horde::horde_is_defeated(state)
+            } else {
+                living.contains(&archenemy)
+            };
+        // CR 104.2a heroes = the living non-Horde seats. For a two-Horde-force
+        // Horde game (LOTR Two Towers) BOTH Horde seats must be excluded, not just
+        // the one archenemy — a second Horde seat has no life total and is never
+        // eliminated, so counting it as a living hero would keep the survivors from
+        // ever winning. Single-Horde and Archenemy reduce to `pid != archenemy`.
         let living_heroes: Vec<PlayerId> = living
             .iter()
             .copied()
-            .filter(|&pid| pid != archenemy)
+            .filter(|&pid| {
+                if state.format_config.format == crate::types::format::GameFormat::Horde {
+                    !super::horde::is_horde_seat(state, pid)
+                } else {
+                    pid != archenemy
+                }
+            })
             .collect();
         let winner = if archenemy_alive && living_heroes.is_empty() {
             Some(archenemy)
@@ -2205,6 +2215,12 @@ fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
         };
         end_game(state, winner, events);
     } else if super::topology::has_two_headed_giant_shared_resources(state) {
+        // Horde note: a Horde game never reaches this `else if` — the
+        // `if let Some(archenemy)` branch above evaluates FIRST and always
+        // matches (Horde maps to `OneVsMany`, so `topology::archenemy`
+        // returns the Horde seat). This branch therefore stays the pure
+        // Two-Headed Giant team-win path; Horde win/loss is fully handled on
+        // the archenemy path above.
         let mut living_teams = std::collections::BTreeSet::new();
         for &pid in &living {
             living_teams.insert(super::topology::team_dedup_key(state, pid));

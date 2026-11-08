@@ -1810,6 +1810,134 @@ fn replacement_is_optional(state: &GameState, rid: ReplacementId) -> bool {
             .is_some_and(|repl| replacement_mode_is_optional(&repl.mode))
 }
 
+/// CR 800.4a/b: departure can remove an event's subject without removing its
+/// source. Check typed subjects before asking `affected_player`, whose legacy
+/// missing-object fallback is not evidence of a surviving rule choice.
+pub(crate) fn replacement_event_survives(state: &GameState, proposed: &ProposedEvent) -> bool {
+    let alive = |player| super::players::is_alive(state, player);
+    let object_survives = |id| {
+        state
+            .objects
+            .get(&id)
+            .is_some_and(|object| alive(object.owner))
+    };
+    let permanent_survives = |id| {
+        state
+            .objects
+            .get(&id)
+            .is_some_and(|object| alive(object.owner) && object.zone == Zone::Battlefield)
+    };
+    match proposed {
+        ProposedEvent::ZoneChange {
+            object_id,
+            from,
+            to,
+            controller_override,
+            ..
+        } => state.objects.get(object_id).is_some_and(|object| {
+            alive(object.owner)
+                && object.zone == *from
+                && (!matches!(to, Zone::Battlefield | Zone::Stack)
+                    || alive(controller_override.unwrap_or(object.controller)))
+        }),
+        ProposedEvent::Destroy { object_id, .. }
+        | ProposedEvent::Tap { object_id, .. }
+        | ProposedEvent::Untap { object_id, .. }
+        | ProposedEvent::TurnFaceUp { object_id, .. }
+        | ProposedEvent::Explore { object_id, .. }
+        | ProposedEvent::Connive { object_id, .. } => permanent_survives(*object_id),
+        ProposedEvent::RemoveCounter { object_id, .. } => object_survives(*object_id),
+        ProposedEvent::AddCounter { placement, .. } => match placement {
+            CounterPlacement::Object { object_id, .. } => object_survives(*object_id),
+            CounterPlacement::Player { player_id, .. }
+            | CounterPlacement::Energy { player_id, .. } => alive(*player_id),
+        },
+        ProposedEvent::MoveCounter {
+            source_id,
+            destination_id,
+            ..
+        } => object_survives(*source_id) && object_survives(*destination_id),
+        ProposedEvent::Attach {
+            attachment_id,
+            target_id,
+            ..
+        } => permanent_survives(*attachment_id) && permanent_survives(*target_id),
+        ProposedEvent::Damage { target, .. } => match target {
+            TargetRef::Object(id) => permanent_survives(*id),
+            TargetRef::Player(player) => alive(*player),
+        },
+        ProposedEvent::Discard {
+            player_id,
+            object_id,
+            ..
+        } => alive(*player_id) && object_survives(*object_id),
+        ProposedEvent::Sacrifice {
+            player_id,
+            object_id,
+            ..
+        } => alive(*player_id) && permanent_survives(*object_id),
+        ProposedEvent::SearchFound {
+            searcher,
+            library_owner,
+            object_id,
+            ..
+        } => alive(*searcher) && library_owner.is_none_or(alive) && object_survives(*object_id),
+        ProposedEvent::TokenEntry { entry_ref, .. } => {
+            state.liminal_entries.get(entry_ref).is_some_and(|entry| {
+                alive(entry.object.projected().owner) && alive(entry.object.projected().controller)
+            })
+        }
+        ProposedEvent::CreateToken { owner, .. } => alive(*owner),
+        ProposedEvent::Draw { player_id, .. }
+        | ProposedEvent::Scry { player_id, .. }
+        | ProposedEvent::Mill { player_id, .. }
+        | ProposedEvent::CoinFlip { player_id, .. }
+        | ProposedEvent::RollDice { player_id, .. }
+        | ProposedEvent::Proliferate { player_id, .. }
+        | ProposedEvent::LifeGain { player_id, .. }
+        | ProposedEvent::LifeLoss { player_id, .. }
+        | ProposedEvent::BeginTurn { player_id, .. }
+        | ProposedEvent::BeginPhase { player_id, .. }
+        | ProposedEvent::ProduceMana { player_id, .. }
+        | ProposedEvent::EmptyManaPool { player_id, .. }
+        | ProposedEvent::Planeswalk { player_id, .. } => alive(*player_id),
+    }
+}
+
+/// CR 616.1 + CR 800.4h: ordering is a rule-required choice of the current
+/// affected controller/owner, never an old prompt's actor or a cost payer.
+fn replacement_order_choice_player(
+    state: &GameState,
+    proposed: &ProposedEvent,
+) -> Option<PlayerId> {
+    if !replacement_event_survives(state, proposed) {
+        return None;
+    }
+    let affected = match proposed {
+        ProposedEvent::Connive { object_id, .. } => state.objects.get(object_id)?.controller,
+        _ => proposed.affected_player(state),
+    };
+    if super::players::is_alive(state, affected) {
+        Some(affected)
+    } else {
+        let next = super::players::next_player_in_turn_order(state, affected);
+        super::players::is_alive(state, next).then_some(next)
+    }
+}
+
+pub(crate) fn pending_replacement_cost_payer(
+    state: &GameState,
+    pending: &PendingReplacement,
+) -> Option<PlayerId> {
+    pending.is_optional.then_some(())?;
+    let rid = *pending.candidates.first()?;
+    replacement_definition_for_id(state, rid)
+        .filter(|definition| matches!(definition.mode, ReplacementMode::MayCost { .. }))?;
+    pending
+        .choice_player
+        .or_else(|| replacement_choice_player(state, &pending.proposed, rid))
+}
+
 /// CR 903.9b: The commander owner makes this optional-replacement choice. All
 /// other replacement choices retain the ordinary CR 616.1 affected-player rule.
 fn replacement_choice_player(
@@ -1818,29 +1946,30 @@ fn replacement_choice_player(
     rid: ReplacementId,
 ) -> Option<PlayerId> {
     if is_commander_hand_or_library_return_replacement(rid) {
-        return Some(
-            commander_hand_or_library_return_object(state, rid.source)
-                .map(|obj| obj.owner)
-                .unwrap_or_else(|| proposed.affected_player(state)),
-        );
+        return commander_hand_or_library_return_object(state, rid.source)
+            .map(|obj| obj.owner)
+            .filter(|owner| super::players::is_alive(state, *owner));
     }
     if is_granted_dredge_replacement(rid) {
         // CR 702.52a: mirrors printed dredge's default `choice_authority`
         // (`ReplacementChoiceAuthority::AffectedPlayer`, `synthesize_dredge` /
         // `dredge_replacement_definition` never override it) — the drawing
         // player decides whether to dredge instead of drawing.
-        return Some(proposed.affected_player(state));
+        return replacement_order_choice_player(state, proposed);
     }
     let definition = replacement_definition_for_id(state, rid)?;
     match definition.choice_authority {
-        ReplacementChoiceAuthority::AffectedPlayer => Some(proposed.affected_player(state)),
+        ReplacementChoiceAuthority::AffectedPlayer => {
+            replacement_order_choice_player(state, proposed)
+        }
         ReplacementChoiceAuthority::SourceController => state
             .liminal_entries
             .get(&rid.source)
             .map(|entry| entry.object.projected())
             .or_else(|| state.objects.get(&rid.source))
             .map(replacement_source_player)
-            .or(definition.source_controller),
+            .or(definition.source_controller)
+            .filter(|controller| super::players::is_alive(state, *controller)),
     }
 }
 
@@ -1944,6 +2073,11 @@ fn pay_replacement_may_cost(
     cost: &AbilityCost,
     events: &mut Vec<GameEvent>,
 ) -> MayCostOutcome {
+    // CR 800.4f: an outstanding cost is unpaid, never transferred to a new
+    // controller or completed from an old accepted-payment resume flag.
+    if !super::players::is_alive(state, player) {
+        return MayCostOutcome::Unpaid;
+    }
     if replacement_may_cost_has_self_zone_move(cost) {
         debug_assert!(
             false,
@@ -13133,7 +13267,7 @@ fn pipeline_loop(
                 .as_ref()
                 .is_none_or(|tail| {
                     auto_choice_event(&proposed).as_ref() == Some(&tail.event)
-                        && proposed.affected_player(state) == tail.player
+                        && replacement_order_choice_player(state, &proposed) == Some(tail.player)
                         && auto_choice_identities(state, &proposed, &candidates).is_some_and(
                             |identities| same_identity_set(&identities, &tail.remaining),
                         )
@@ -13149,7 +13283,7 @@ fn pipeline_loop(
             if !is_optional {
                 if let Some(tail) = state.replacement_auto_choice_tail.take() {
                     let matches = auto_choice_event(&proposed).as_ref() == Some(&tail.event)
-                        && proposed.affected_player(state) == tail.player
+                        && replacement_order_choice_player(state, &proposed) == Some(tail.player)
                         && auto_choice_identities(state, &proposed, &candidates).is_some_and(
                             |identities| same_identity_set(&identities, &tail.remaining),
                         );
@@ -13240,7 +13374,9 @@ fn pipeline_loop(
             // CR 616.1: If multiple replacement effects apply, the affected player
             // or controller of the affected object chooses which one to apply first,
             // even when every candidate is mandatory.
-            let affected = proposed.affected_player(state);
+            let Some(affected) = replacement_order_choice_player(state, &proposed) else {
+                return ReplacementResult::Prevented;
+            };
             let search_found_candidates =
                 snapshot_search_found_candidates(state, &proposed, &candidates);
             state.pending_replacement = Some(PendingReplacement {
@@ -14004,6 +14140,125 @@ pub fn continue_replacement(
     chosen_index: usize,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
+    resume_pending_replacement(state, events, |state, events| {
+        continue_replacement_impl(state, chosen_index, events)
+    })
+}
+
+/// An unrelated departure is not an answer. Leave a still-valid opportunity
+/// (and especially its bound provenance/payment stage) resident unchanged.
+pub(crate) fn pending_replacement_needs_reconsult(
+    state: &mut GameState,
+    published_actor: Option<PlayerId>,
+) -> bool {
+    prepare_replacement_index_for_pipeline(state);
+    let pending = state
+        .pending_replacement
+        .as_ref()
+        .expect("departure applicability check requires its pending record");
+    let changed = if matches!(pending.proposed, ProposedEvent::SearchFound { .. }) {
+        replacement_order_choice_player(state, &pending.proposed) != published_actor
+            || pending.search_found_candidates.iter().any(|candidate| {
+                !candidate.disposition.source.is_current(state)
+                    || state
+                        .objects
+                        .get(&candidate.disposition.source.object_id)
+                        .is_none_or(|source| !super::players::is_alive(state, source.owner))
+            })
+    } else {
+        let candidates = choosable_replacement_candidates(
+            state,
+            &pending.proposed,
+            find_applicable_replacements(state, &pending.proposed, replacement_registry()),
+        );
+        if pending.is_optional {
+            pending.candidates.first().is_none_or(|rid| {
+                !candidates.contains(rid)
+                    || replacement_choice_player(state, &pending.proposed, *rid) != published_actor
+            })
+        } else {
+            replacement_order_choice_player(state, &pending.proposed) != published_actor
+                || candidates.len() != pending.candidates.len()
+                || candidates
+                    .iter()
+                    .any(|rid| !pending.candidates.contains(rid))
+        }
+    };
+    clear_replacement_index_pipeline(state);
+    changed
+}
+
+/// CR 614.5 + CR 616.1f: consult the current modified event again after a
+/// departure, without answering or applying anything from the obsolete menu.
+pub(crate) fn reconsult_pending_replacement(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
+    state.replacement_auto_choice_tail = None;
+    resume_pending_replacement(state, events, |state, events| {
+        let mut pending = state
+            .pending_replacement
+            .take()
+            .expect("departure reconsult requires the surviving pending event");
+        prepare_replacement_index_for_pipeline(state);
+        // SearchFound candidates are bound provenance, not indices to rebind
+        // against a changed registry after a source leaves.
+        if matches!(pending.proposed, ProposedEvent::SearchFound { .. }) {
+            pending.search_found_candidates.retain(|candidate| {
+                candidate.disposition.source.is_current(state)
+                    && state
+                        .objects
+                        .get(&candidate.disposition.source.object_id)
+                        .is_some_and(|source| super::players::is_alive(state, source.owner))
+            });
+            pending.candidates = pending
+                .search_found_candidates
+                .iter()
+                .map(|candidate| candidate.replacement_id)
+                .collect();
+            match pending.search_found_candidates.as_slice() {
+                [] => {}
+                [candidate] if !candidate.is_optional => {
+                    let candidate = candidate.clone();
+                    let proposed = apply_bound_search_found_candidate(
+                        state,
+                        pending.proposed,
+                        &candidate,
+                        events,
+                    );
+                    return pipeline_loop(
+                        state,
+                        proposed,
+                        pending.depth + 1,
+                        replacement_registry(),
+                        events,
+                    );
+                }
+                candidates => {
+                    let player = replacement_order_choice_player(state, &pending.proposed)
+                        .expect("surviving SearchFound choice has a living rule chooser");
+                    pending.is_optional = candidates.len() == 1;
+                    pending.choice_player = pending.is_optional.then_some(player);
+                    state.pending_replacement = Some(pending);
+                    return ReplacementResult::NeedsChoice(player);
+                }
+            }
+        }
+        pipeline_loop(
+            state,
+            pending.proposed,
+            pending.depth,
+            replacement_registry(),
+            events,
+        )
+    })
+}
+
+fn resume_pending_replacement(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    operation: impl FnOnce(&mut GameState, &mut Vec<GameEvent>) -> ReplacementResult,
+) -> ReplacementResult {
     // CR 614.12: a resumed pause reuses its own resident `TransformedEntry`
     // projection (staged when the pause first parked, still needed by the
     // resume's label/choice reads) rather than rebuilding it. Any pending
@@ -14043,7 +14298,7 @@ pub fn continue_replacement(
         .pending_replacement
         .as_ref()
         .map(|pending| pending.unrepresentable_life_change);
-    let result = continue_replacement_impl(state, chosen_index, events);
+    let result = operation(state, events);
     // CR 616.1f: backstop for the stamp — a record re-parked while a stamped
     // record is answered stays stamped (a fresh park already reads the open
     // ingress window; this never downgrades).

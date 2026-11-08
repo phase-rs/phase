@@ -8,11 +8,11 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::ability::{EffectKind, LibraryPosition};
-use engine::types::actions::GameAction;
+use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::events::GameEvent;
-use engine::types::game_state::{PersistedGameState, WaitingFor};
+use engine::types::game_state::{CastingVariant, PersistedGameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -373,19 +373,29 @@ fn add_component_pair(
         .as_enchantment()
         .as_creature()
         .id();
-    let rider = {
-        let mut card =
-            scenario.add_creature_to_hand_from_oracle(owner, "Gemrazer", 4, 4, GEMRAZER_ORACLE);
-        if commander {
-            card.commander();
-        }
-        card.id()
+    let rider = if commander {
+        scenario
+            .add_creature_to_hand_from_oracle(
+                owner,
+                "Otrimi, the Ever-Playful",
+                6,
+                6,
+                OTRIMI_ORACLE,
+            )
+            .as_legendary()
+            .with_subtypes(vec!["Nightmare", "Beast"])
+            .commander()
+            .id()
+    } else {
+        scenario
+            .add_creature_to_hand_from_oracle(owner, "Gemrazer", 4, 4, GEMRAZER_ORACLE)
+            .id()
     };
     (host, rider)
 }
 
-// Infrastructure exception: this direct merge stands in for Gemrazer's public
-// Mutate cast so these rows isolate owner arrangement and component delivery.
+// Infrastructure exception: this direct merge stands in for the printed creature's
+// public Mutate cast so these rows isolate owner arrangement and component delivery.
 fn merge_pair(runner: &mut GameRunner, host: ObjectId, rider: ObjectId) {
     engine::game::merge::merge_object_onto(
         runner.state_mut(),
@@ -430,13 +440,51 @@ fn assert_arrangement_finished(runner: &GameRunner) {
 fn hallowed_burial_interleaves_components_with_an_ordinary_creature() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_mana_pool(P0, burial_mana());
+    let mut mana = burial_mana();
+    mana.extend((0..2).map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![])));
+    scenario.with_mana_pool(P0, mana);
     scenario.with_library_top(P0, &["Sentinel"]);
-    let (host, rider) = add_component_pair(&mut scenario, P0, false);
+    let host = scenario
+        .add_creature_from_oracle(P0, "Nyxborn Courser", 2, 4, "")
+        .as_enchantment()
+        .as_creature()
+        .with_subtypes(vec!["Centaur", "Scout"])
+        .id();
+    const OCTOPUS_ORACLE: &str = "Mutate {1}{U} (If you cast this spell for its mutate cost, put it over or under target non-Human creature you own. They mutate into the creature on top plus all abilities from under it.)\nFlash\nWhenever this creature deals combat damage to a player, draw a card.";
+    let rider = scenario
+        .add_creature_to_hand(P0, "Sea-Dasher Octopus", 2, 2)
+        .with_subtypes(vec!["Octopus"])
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+        })
+        .from_oracle_text_with_keywords(&["Mutate", "Flash"], OCTOPUS_ORACLE)
+        .id();
     let ordinary = scenario.add_creature(P0, "Ordinary creature", 2, 2).id();
     let burial = add_hallowed_burial(&mut scenario);
     let mut runner = scenario.build();
-    merge_pair(&mut runner, host, rider);
+    // CR 702.140a + CR 702.140c: reach the merged permanent through its
+    // printed alternative cost and the public choice, not a constructed merge.
+    let mutate = runner
+        .cast(rider)
+        .alternative_cast(AlternativeCastDecision::Alternative)
+        .casting_variant(CastingVariant::Mutate)
+        .target_object(host)
+        .resolve();
+    assert!(matches!(
+        mutate.final_waiting_for(),
+        WaitingFor::MutateMergeChoice { player: P0, .. }
+    ));
+    runner
+        .act(GameAction::ChooseMutateMergeSide {
+            side: engine::game::merge::MergeSide::Bottom,
+        })
+        .unwrap();
+    assert_eq!(
+        runner.state().objects[&host].merged_components,
+        vec![host, rider]
+    );
+    assert_arrangement_finished(&runner);
     let sentinel = library(&runner, P0)[0];
     let cast = runner.cast(burial).resolve();
     assert_bottom_arrangement_prompt(cast.final_waiting_for(), P0, &[ordinary, host, rider]);
@@ -450,10 +498,24 @@ fn hallowed_burial_interleaves_components_with_an_ordinary_creature() {
             .events,
     );
     assert_eq!(library(&runner, P0), vec![sentinel, rider, ordinary, host]);
-    for id in [rider, ordinary, host] {
-        assert_eq!(events.iter().filter(|event| matches!(
-            event, GameEvent::ZoneChanged { object_id, to: Zone::Library, .. } if *object_id == id
-        )).count(), 1);
+    for (id, origin) in [
+        (rider, None),
+        (ordinary, Some(Zone::Battlefield)),
+        (host, Some(Zone::Battlefield)),
+    ] {
+        let departures: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from,
+                    to,
+                    ..
+                } if *object_id == id => Some((*from, *to)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(departures, vec![(origin, Zone::Library)]);
     }
     assert_arrangement_finished(&runner);
 }

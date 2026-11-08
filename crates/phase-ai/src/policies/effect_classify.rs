@@ -590,6 +590,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::HideawayConceal { .. }
+        | Effect::HordePlayCard { .. }
         | Effect::Incubate { .. }
         | Effect::Intensify { .. }
         | Effect::Learn

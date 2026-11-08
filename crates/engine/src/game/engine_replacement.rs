@@ -15,7 +15,7 @@ use crate::types::game_state::{
     PendingCounterPostAction, PendingReplacement, StagedMemberOutcome, TokenEntryEventEmission,
     UnrepresentablePolicy, WaitingFor,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
@@ -31,7 +31,8 @@ use super::effects::destroy::apply_destroy_after_replacement;
 use super::effects::draw::{apply_draw_after_replacement, settle_draw_instruction};
 use super::effects::life::{
     drain_pending_life_total_assignment, settle_life_gain_after_choice,
-    settle_life_loss_after_choice, within_ingress_life_window, LifeChangeUnrepresentable,
+    settle_life_loss_after_choice, within_ingress_life_window, LifeChangeError,
+    LifeChangeUnrepresentable,
 };
 use super::effects::mill::apply_mill_after_replacement;
 use super::effects::scry::apply_scry_after_replacement;
@@ -188,12 +189,33 @@ pub(super) fn handle_replacement_choice(
     index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let Some(pending) = state.pending_replacement.as_ref() else {
+        return Err(EngineError::InvalidAction(
+            "replacement choice has no pending replacement".to_string(),
+        ));
+    };
+    let option_count = super::replacement::pending_replacement_option_count(state, pending);
+    if index >= option_count {
+        return Err(EngineError::InvalidAction(format!(
+            "replacement choice index {index} is outside 0..{option_count}"
+        )));
+    }
+    resolve_pending_replacement(state, events, |state, events| {
+        super::replacement::continue_replacement(state, index, events)
+    })
+}
+
+fn resolve_pending_replacement(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    operation: impl FnOnce(&mut GameState, &mut Vec<GameEvent>) -> super::replacement::ReplacementResult,
+) -> Result<WaitingFor, EngineError> {
     // CR 616.1: retire the answered prompt once, before any nested consultation.
     let placeholder = WaitingFor::Priority {
         player: state.active_player,
     };
     let answered = std::mem::replace(&mut state.waiting_for, placeholder.clone());
-    match handle_replacement_choice_body(state, index, events) {
+    match handle_replacement_choice_body(state, events, operation) {
         Ok(waiting_for) => {
             state.waiting_for = waiting_for.clone();
             Ok(waiting_for)
@@ -207,10 +229,210 @@ pub(super) fn handle_replacement_choice(
     }
 }
 
+/// Stack-local authority captured before the complete CR 800.4a transaction.
+/// The live record remains resident so exact member/root retirement can see it.
+pub(crate) struct InterruptedReplacement {
+    boundary: ProposedEvent,
+    subjects: [Option<ObjectIncarnationRef>; 2],
+    actor: Option<PlayerId>,
+    cost_payer: Option<PlayerId>,
+    waiting_for_replacement: bool,
+}
+
+pub(crate) fn capture_replacement_before_departure(
+    state: &GameState,
+) -> Option<InterruptedReplacement> {
+    let pending = state.pending_replacement.as_ref()?;
+    let pin = |id| {
+        state
+            .objects
+            .get(&id)
+            .map(ObjectIncarnationRef::from_object)
+    };
+    let subjects = match &pending.proposed {
+        ProposedEvent::MoveCounter {
+            source_id,
+            destination_id,
+            ..
+        } => [pin(*source_id), pin(*destination_id)],
+        ProposedEvent::Attach {
+            attachment_id,
+            target_id,
+            ..
+        } => [pin(*attachment_id), pin(*target_id)],
+        // A mana source is provenance, not the player receiving this event.
+        ProposedEvent::ProduceMana { .. } => [None, None],
+        _ => [pending.proposed.affected_object_id().and_then(pin), None],
+    };
+    Some(InterruptedReplacement {
+        boundary: pending.delivery_boundary_event().clone(),
+        subjects,
+        actor: state.waiting_for.acting_player(),
+        cost_payer: super::replacement::pending_replacement_cost_payer(state, pending),
+        waiting_for_replacement: matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+    })
+}
+
+/// CR 104.1: retire only this interrupted event and its owned cost child.
+pub(crate) fn retire_replacement_at_game_over(
+    state: &mut GameState,
+    interrupted: Option<InterruptedReplacement>,
+) {
+    let Some(interrupted) = interrupted else {
+        return;
+    };
+    if state
+        .pending_replacement
+        .as_ref()
+        .is_some_and(|pending| pending.parks_delivery(&interrupted.boundary))
+    {
+        state.pending_replacement = None;
+        state.pending_single_discard = None;
+        state.replacement_may_cost_paused = false;
+        super::replacement::abandon_post_replacement_continuation(state);
+    }
+    if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::ReplacementMayCost { .. })
+    ) {
+        state.pending_cost_move_resume = None;
+    }
+}
+
+/// CR 800.4a/f + CR 616.1: reconcile once, after every departure/control sweep,
+/// through the same result dispatcher and epilogue as an actual answer.
+pub(crate) fn settle_replacement_after_departure(
+    state: &mut GameState,
+    interrupted: Option<InterruptedReplacement>,
+    events: &mut Vec<GameEvent>,
+) -> Result<super::engine_resolution_choices::DepartureSettlement, EngineError> {
+    use super::engine_resolution_choices::DepartureSettlement;
+    let Some(interrupted) = interrupted else {
+        return Ok(DepartureSettlement::NotSettled);
+    };
+    if let Some(waiting) = super::costs::settle_replacement_may_cost_after_departure(state, events)?
+    {
+        state.waiting_for = waiting;
+        return Ok(replacement_departure_settlement(state));
+    }
+    let Some(pending) = state.pending_replacement.as_ref() else {
+        // Exact member retirement may already have consumed the record. Never
+        // resurrect it; its owner's surviving tail still owes completion.
+        if matches!(state.waiting_for, WaitingFor::Priority { .. })
+            || state.waiting_for.acting_player() == interrupted.actor
+        {
+            let waiting = finish_abandoned_replacement(state, &interrupted.boundary, events)?;
+            state.waiting_for = waiting;
+            return Ok(replacement_departure_settlement(state));
+        }
+        return Ok(DepartureSettlement::NotSettled);
+    };
+    if !pending.parks_delivery(&interrupted.boundary) {
+        return Ok(DepartureSettlement::NotSettled);
+    }
+    // CR 400.7: being represented in the object map is not survival of the
+    // interrupted incarnation. Do not apply its event to a later incarnation.
+    let survives = interrupted
+        .subjects
+        .into_iter()
+        .flatten()
+        .all(|subject| subject.is_current(state))
+        && super::replacement::replacement_event_survives(state, &pending.proposed);
+    if !survives {
+        state.pending_replacement = None;
+        state.pending_single_discard = None;
+        state.replacement_may_cost_paused = false;
+        super::replacement::abandon_post_replacement_continuation(state);
+        let waiting = finish_abandoned_replacement(state, &interrupted.boundary, events)?;
+        state.waiting_for = waiting;
+        return Ok(replacement_departure_settlement(state));
+    }
+    if interrupted
+        .cost_payer
+        .is_some_and(|payer| !super::players::is_alive(state, payer))
+    {
+        let waiting = resolve_pending_replacement(state, events, |state, events| {
+            super::replacement::continue_replacement(state, 1, events)
+        })?;
+        state.waiting_for = waiting;
+        return Ok(replacement_departure_settlement(state));
+    }
+    if !interrupted.waiting_for_replacement
+        || state
+            .pending_replacement
+            .as_ref()
+            .is_some_and(|pending| pending.may_cost_paid)
+    {
+        // An accepted payment's living payer still owes their exact child
+        // choice/suffix. Departure is not a second optional-payment decision.
+        return Ok(DepartureSettlement::NotSettled);
+    }
+    if !super::replacement::pending_replacement_needs_reconsult(state, interrupted.actor) {
+        return Ok(DepartureSettlement::NotSettled);
+    }
+    let waiting = resolve_pending_replacement(
+        state,
+        events,
+        super::replacement::reconsult_pending_replacement,
+    )?;
+    state.waiting_for = waiting;
+    Ok(replacement_departure_settlement(state))
+}
+
+fn replacement_departure_settlement(
+    state: &GameState,
+) -> super::engine_resolution_choices::DepartureSettlement {
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.pending_replacement.is_none()
+    {
+        super::engine_resolution_choices::DepartureSettlement::Settled
+    } else {
+        super::engine_resolution_choices::DepartureSettlement::NotSettled
+    }
+}
+
+fn finish_abandoned_replacement(
+    state: &mut GameState,
+    boundary: &ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // This is cancellation, not replacement prevention: no paid-cost completion,
+    // occurrence, or Prevented staged terminal is fabricated for the lost member.
+    finish_replacement_execute_epilogue(
+        state,
+        ReplacementExecuteEpilogue {
+            zone_change_object_id: None,
+            enters_battlefield: false,
+            parked_single_discard: None,
+            parked_affected_object_id: boundary.affected_object_id(),
+            pending_phase_drain_life_loser: None,
+            action_event_start: events.len(),
+        },
+        events,
+    )
+}
+
+pub(crate) fn settle_unpaid_replacement_may_cost(
+    state: &mut GameState,
+    outer: PendingReplacement,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    state.replacement_may_cost_paused = false;
+    if super::replacement::replacement_event_survives(state, &outer.proposed) {
+        state.pending_replacement = Some(outer);
+        resolve_pending_replacement(state, events, |state, events| {
+            super::replacement::continue_replacement(state, 1, events)
+        })
+    } else {
+        super::replacement::abandon_post_replacement_continuation(state);
+        finish_abandoned_replacement(state, outer.delivery_boundary_event(), events)
+    }
+}
+
 fn handle_replacement_choice_body(
     state: &mut GameState,
-    index: usize,
     events: &mut Vec<GameEvent>,
+    operation: impl FnOnce(&mut GameState, &mut Vec<GameEvent>) -> super::replacement::ReplacementResult,
 ) -> Result<WaitingFor, EngineError> {
     let action_event_start = events.len();
     // A record stamped for rejection came from an action-ingress player-resource
@@ -223,7 +445,7 @@ fn handle_replacement_choice_body(
     });
     let waiting_for = if parked_for_rejection {
         let (inner, window) = within_ingress_life_window(state, |state| {
-            handle_replacement_choice_inner(state, index, events)
+            handle_replacement_choice_inner(state, events, operation)
         });
         let waiting_for = inner?;
         if let Some(player) = window.failed_player {
@@ -231,7 +453,7 @@ fn handle_replacement_choice_body(
         }
         waiting_for
     } else {
-        handle_replacement_choice_inner(state, index, events)?
+        handle_replacement_choice_inner(state, events, operation)?
     };
     // CR 616.1f: a second ordering choice, or any nested prompt, leaves the record
     // parked for the next answer; only a settled round trip may close the batch.
@@ -776,20 +998,9 @@ fn finish_replacement_execute_epilogue(
 
 fn handle_replacement_choice_inner(
     state: &mut GameState,
-    index: usize,
     events: &mut Vec<GameEvent>,
+    operation: impl FnOnce(&mut GameState, &mut Vec<GameEvent>) -> super::replacement::ReplacementResult,
 ) -> Result<WaitingFor, EngineError> {
-    let Some(pending) = state.pending_replacement.as_ref() else {
-        return Err(EngineError::InvalidAction(
-            "replacement choice has no pending replacement".to_string(),
-        ));
-    };
-    let option_count = super::replacement::pending_replacement_option_count(state, pending);
-    if index >= option_count {
-        return Err(EngineError::InvalidAction(format!(
-            "replacement choice index {index} is outside 0..{option_count}"
-        )));
-    }
     let replacement_action_event_start = events.len();
     let parked_search_found_replacement = state
         .pending_replacement
@@ -934,11 +1145,20 @@ fn handle_replacement_choice_inner(
     // answer resolves (a nested connive) belongs to the next answer and is left
     // in place.
     let parked_single_discard = state.pending_single_discard.as_deref().copied();
+    let parked_non_zone_boundary = state
+        .pending_replacement
+        .as_ref()
+        .filter(|_| parked_zone_change_delivery.is_none())
+        .map(|pending| pending.delivery_boundary_event().clone());
+    let parked_delivery_boundary = parked_zone_change_delivery
+        .as_ref()
+        .map(|paused| &paused.expected_event)
+        .or(parked_non_zone_boundary.as_ref());
     let parked_phase_begin = state
         .pending_replacement
         .as_ref()
         .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::BeginPhase { .. }));
-    let result = super::replacement::continue_replacement(state, index, events);
+    let result = operation(state, events);
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
     // multiple eligible lands) re-parked the pending replacement with
@@ -1000,7 +1220,7 @@ fn handle_replacement_choice_inner(
                     // CR 101.4 + CR 616.1: staged approval retains the exact
                     // final event; delivery happens only after every member has
                     // been consulted.
-                    if let Some((group, fresh)) = staged_approval_owner {
+                    if let Some((group, fresh)) = staged_consult_owner {
                         if !fresh {
                             return Ok(state.waiting_for.clone());
                         }
@@ -1040,6 +1260,9 @@ fn handle_replacement_choice_inner(
                         } => (*object_id, *to, *cause, *discard_frame),
                         _ => unreachable!("arm pattern guarantees ZoneChange"),
                     };
+                    // CR 616.1: the approved resume event carries the chosen
+                    // replacement's modifications; keep it for the paused-key match.
+                    let event_for_capture = event.clone();
                     let Ok(approved) =
                         crate::game::zone_pipeline::ApprovedZoneChange::approve_post_replacement(
                             event,
@@ -1048,7 +1271,7 @@ fn handle_replacement_choice_inner(
                         unreachable!("arm pattern guarantees a ZoneChange payload");
                     };
                     let delivery_start = events.len();
-                    match crate::game::zone_pipeline::deliver_batch_member(
+                    let delivery = crate::game::zone_pipeline::deliver_batch_member(
                         state,
                         approved,
                         crate::game::zone_pipeline::DeliveryCtx {
@@ -1065,7 +1288,60 @@ fn handle_replacement_choice_inner(
                         },
                         batch_member_owner,
                         events,
-                    ) {
+                    );
+                    // CR 616.1 + CR 614.1c + CR 400.7: the resumed segment IS the
+                    // parked member's terminal delivery history whether or not the
+                    // delivery's own tail parks again. Record the classification
+                    // BEFORE either terminal, using the same pre-move key and the
+                    // same single-authority classifier as the synchronous path, or
+                    // a tail park returns early and the batch owner later reaches
+                    // `drain_pending_batch_deliveries` with `terminal_completion:
+                    // None` (issue #10431). A pre-move park (merge leave) pushes a
+                    // child batch frame that owns the pause; the member has not
+                    // moved, so its classification is `Remained`, the exact path
+                    // sees only the child, and the occurrence-level walk (gated on
+                    // `Moved`) records nothing for the parent.
+                    if let Some(paused) = parked_zone_change_delivery.as_ref() {
+                        let completion =
+                            crate::game::zone_pipeline::zone_move_completion_from_delivery(
+                                paused.member,
+                                &events[delivery_start..],
+                            );
+                        // Exact boundary match first (the historical path every
+                        // shipped park uses), then the occurrence-level match for a
+                        // resume whose approved event carries the chosen
+                        // replacement's modifications (controller/counter override
+                        // or a CR 614.6 zone redirect).
+                        let matched = state.capture_paused_zone_change_delivery(
+                            paused.member,
+                            &paused.expected_event,
+                            &events[delivery_start..],
+                            completion,
+                        ) || (completion
+                            == crate::types::game_state::ZoneMoveCompletion::Moved
+                            && state.capture_resumed_paused_zone_change_delivery(
+                                paused.member,
+                                &event_for_capture,
+                                &events[delivery_start..],
+                                completion,
+                            ));
+                        if matched
+                            && matches!(
+                                &delivery,
+                                crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_)
+                            )
+                        {
+                            // CR 614.6: the replaced move's terminal `ZoneChanged` is
+                            // already in this slice, so the forwarded-result marker
+                            // settles against the same record the Done path uses.
+                            effects::settle_replaced_forwarded_zone_delivery(
+                                state,
+                                paused.member,
+                                &events[delivery_start..],
+                            );
+                        }
+                    }
+                    match delivery {
                         crate::game::zone_pipeline::ZoneDeliveryResult::Done => {}
                         // CR 614.1c / CR 614.12a: the delivery tail parked a
                         // counter-replacement or devour prompt and stashed the
@@ -1110,15 +1386,6 @@ fn handle_replacement_choice_inner(
                         }
                     }
                     if let Some(paused) = parked_zone_change_delivery.as_ref() {
-                        state.capture_paused_zone_change_delivery(
-                            paused.member,
-                            &paused.expected_event,
-                            &events[delivery_start..],
-                            crate::game::zone_pipeline::zone_move_completion_from_delivery(
-                                paused.member,
-                                &events[delivery_start..],
-                            ),
-                        );
                         effects::settle_replaced_forwarded_zone_delivery(
                             state,
                             paused.member,
@@ -1473,7 +1740,20 @@ fn handle_replacement_choice_inner(
                 // `Reject` fails the answer (the boundary restores the record and
                 // its prompt), `IgnoreImpossible` skips the change and resumes.
                 gain @ ProposedEvent::LifeGain { .. } => {
-                    settle_life_gain_after_choice(state, gain, parked_life_policy, events)?;
+                    // A settle that parks a prompt (the Horde loss redirect's
+                    // mill choice; gain itself never pauses) early-returns the
+                    // parked prompt like the Mill arm above, so the
+                    // unconditional `waiting_for = Priority` reset below does
+                    // not clobber it.
+                    match settle_life_gain_after_choice(state, gain, parked_life_policy, events) {
+                        Ok(_) => {}
+                        Err(LifeChangeError::Deferred(_)) => {
+                            return Ok(state.waiting_for.clone());
+                        }
+                        Err(LifeChangeError::Unrepresentable(unrepresentable)) => {
+                            return Err(unrepresentable.into());
+                        }
+                    }
                 }
                 // CR 119.3: Life loss accepted after replacement choice.
                 loss @ ProposedEvent::LifeLoss { player_id, .. } => {
@@ -1481,8 +1761,30 @@ fn handle_replacement_choice_inner(
                     // the phase-transition drain, so this is the only place
                     // its cause can still be named (a mana burn would
                     // otherwise land as an unexplained life change).
-                    let actual =
-                        settle_life_loss_after_choice(state, loss, parked_life_policy, events)?;
+                    let actual = match settle_life_loss_after_choice(
+                        state,
+                        loss,
+                        parked_life_policy,
+                        events,
+                    ) {
+                        Ok(actual) => actual,
+                        // The Horde redirect parked a mill choice mid-settle:
+                        // the LIFE choice terminally resolved, so consume any
+                        // parked empty-pool record with a zero figure (there is
+                        // no life figure to narrate — the loss became a mill —
+                        // and a stranded record would be mis-claimed by the
+                        // next same-player loss). Early-return the parked mill
+                        // prompt like the Mill arm above.
+                        Err(LifeChangeError::Deferred(_)) => {
+                            crate::game::turns::note_empty_pool_life_loss_resolved(
+                                state, player_id, 0, events,
+                            );
+                            return Ok(state.waiting_for.clone());
+                        }
+                        Err(LifeChangeError::Unrepresentable(unrepresentable)) => {
+                            return Err(unrepresentable.into());
+                        }
+                    };
                     crate::game::turns::note_empty_pool_life_loss_resolved(
                         state, player_id, actual, events,
                     );
@@ -1762,7 +2064,28 @@ fn handle_replacement_choice_inner(
         super::replacement::ReplacementResult::NeedsChoice(player) => {
             // The proposed event retains its canonical placement across parks.
             // Preserve the other delivery context independently of that value.
-            if let Some(pending) = state.pending_replacement.as_mut() {
+            let same_event_repark = state.pending_replacement.as_ref().is_some_and(|pending| {
+                parked_delivery_boundary.is_some_and(|boundary| {
+                    pending.proposed.affected_object_id() == boundary.affected_object_id()
+                        && (std::mem::discriminant(&pending.proposed)
+                            == std::mem::discriminant(boundary)
+                            || matches!(
+                                (&pending.proposed, boundary),
+                                (
+                                    ProposedEvent::ZoneChange { .. },
+                                    ProposedEvent::Destroy { .. }
+                                )
+                            ))
+                        && (boundary.affected_object_id().is_some()
+                            || pending.proposed.affected_player(state)
+                                == boundary.affected_player(state))
+                })
+            });
+            if let Some(pending) = state
+                .pending_replacement
+                .as_mut()
+                .filter(|_| same_event_repark)
+            {
                 if pending.exile_controller.is_none() {
                     pending.exile_controller = parked_exile_controller;
                 }
@@ -1793,12 +2116,11 @@ fn handle_replacement_choice_inner(
                         pending.sacrifice_provenance = Some(provenance);
                     }
                 }
-                // CR 616.1f + CR 614.12a: a re-park of the SAME zone change keeps
-                // the event its logical owner parked on, so the eventual resume
-                // settles that owner's paused delivery even though an answered
-                // choice or applied replacement has changed the proposal since.
-                if let Some(paused) = parked_zone_change_delivery.as_ref() {
-                    pending.inherit_delivery_boundary(&paused.expected_event);
+                // CR 616.1f + CR 614.12a: one same-event carry-forward retains
+                // the owner's original boundary, even when an outer Destroy's
+                // current proposal has become a ZoneChange.
+                if let Some(boundary) = parked_delivery_boundary {
+                    pending.inherit_delivery_boundary(boundary);
                 }
             }
             Ok(super::replacement::replacement_choice_waiting_for(
@@ -2143,6 +2465,39 @@ fn handle_replacement_choice_inner(
                     crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
                     | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
                         return Ok(state.waiting_for.clone());
+                    }
+                }
+            }
+            // Turtle Team-Up: resume a hero-event batch parked by a nested
+            // replacement prompt — the Prevented twin of the Execute arm's
+            // hook. Preventing one step (a regeneration shield saving one
+            // Mayhem destroy) modifies only that action (CR 608.2c); the
+            // remaining steps still run. Re-pauses re-park through this same
+            // hook, so nested pauses keep composing.
+            if state.pending_hero_event.is_some() {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                match super::boss::drain_pending_hero_event(state, events) {
+                    super::boss::HeroEventDrainOutcome::Idle => {}
+                    super::boss::HeroEventDrainOutcome::PausedForReplacement => {
+                        super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                            state,
+                            events,
+                            replacement_action_event_start,
+                        );
+                        return Ok(state.waiting_for.clone());
+                    }
+                    super::boss::HeroEventDrainOutcome::Completed => {
+                        effects::drain_pending_continuation(state, events);
+                        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                            super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                                state,
+                                events,
+                                replacement_action_event_start,
+                            );
+                            return Ok(state.waiting_for.clone());
+                        }
                     }
                 }
             }
