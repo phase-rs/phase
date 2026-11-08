@@ -26193,6 +26193,16 @@ fn effect_introduces_per_player_chosen_card_referent(effect: &Effect) -> bool {
 pub fn effect_introduces_per_iteration_referent(effect: &Effect) -> bool {
     effect_introduces_per_player_object_referent(effect)
         || effect_introduces_per_player_chosen_card_referent(effect)
+        // CR 608.2c: a single exiled top card is also an iteration-local
+        // referent for the following land-deploy or optional-cast instruction.
+        || matches!(
+            effect,
+            Effect::ExileTop {
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+                ..
+            }
+        )
 }
 
 pub fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool {

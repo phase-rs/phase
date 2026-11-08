@@ -96507,7 +96507,10 @@ fn forge_of_heroes_full_oracle_preserves_properties_only_target() {
         "Choose two target commanders that entered this turn",
         &mut ParseContext::default(),
     );
-    assert_eq!(counted.multi_target, Some(MultiTargetSpec::exact(2)));
+    assert_eq!(
+        counted.multi_target,
+        Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 }))
+    );
     let Effect::TargetOnly {
         target: TargetFilter::Typed(filter),
     } = &counted.effect

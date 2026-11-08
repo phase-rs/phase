@@ -44591,11 +44591,11 @@ fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text
                 }
             }
             Effect::ExileTop { player, .. }
-                if owner_anchor.is_some()
-                    && repair_exile
-                    && is_repairable_library_owner(player) =>
+                if repair_exile && is_repairable_library_owner(player) =>
             {
-                *player = TargetFilter::ParentTargetOwner;
+                if let Some(anchor) = &owner_anchor {
+                    *player = anchor.clone();
+                }
             }
             _ => {}
         }

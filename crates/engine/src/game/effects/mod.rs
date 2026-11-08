@@ -11481,9 +11481,9 @@ fn is_player_scope_local_continuation(
     child: &Effect,
     scope: &PlayerFilter,
 ) -> bool {
-    // CR 608.2c + CR 701.20a: an owner-relative top-card instruction follows
-    // that owner's terminal shuffle inside the published owner iteration.
-    // Other player populations do not acquire this continuation authority.
+    // CR 608.2c + CR 701.55a: an owner-relative top-card instruction or
+    // villainous choice follows the terminal shuffle inside that owner's
+    // published iteration, not as an unbound tail after the owner scope ends.
     if is_owner_library_shuffle_scope(scope)
         && matches!(
             (parent, child),
@@ -11493,6 +11493,12 @@ fn is_player_scope_local_continuation(
                 },
                 Effect::RevealTop {
                     player: TargetFilter::ScopedPlayer,
+                    ..
+                } | Effect::ExileTop {
+                    player: TargetFilter::ScopedPlayer,
+                    ..
+                } | Effect::ChooseOneOf {
+                    chooser: PlayerFilter::ParentObjectTargetOwner,
                     ..
                 }
             )
