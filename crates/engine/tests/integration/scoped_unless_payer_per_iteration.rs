@@ -73,11 +73,21 @@ fn battlefield_ids(runner: &GameRunner, player: PlayerId) -> Vec<ObjectId> {
 /// nonland permanent and a card in hand, so both branches of the disjunctive
 /// cost are payable for them.
 fn viper_attacking(player_count: u8) -> (GameRunner, ObjectId) {
+    viper_attacking_with_blight_counters(player_count, 0)
+}
+
+fn viper_attacking_with_blight_counters(
+    player_count: u8,
+    starting_blight_counters: u32,
+) -> (GameRunner, ObjectId) {
     let mut scenario = GameScenario::new_n_player(player_count, 42);
     scenario.at_phase(Phase::PreCombatMain);
     let viper = scenario
         .add_creature_from_oracle(P0, "Rottenmouth Viper", 5, 4, ROTTENMOUTH_VIPER)
         .id();
+    if starting_blight_counters > 0 {
+        scenario.with_counter(viper, BLIGHT(), starting_blight_counters);
+    }
     for seat in 1..player_count {
         let pid = PlayerId(seat);
         scenario.add_creature(pid, &format!("Grizzly Bears {seat}"), 2, 2);
@@ -157,6 +167,54 @@ fn viper_attack_trigger_offers_the_choice_to_each_opponent() {
 
     assert_eq!(runner.life(P1), 16, "declining costs the opponent 4 life");
     assert_eq!(runner.life(P0), 20, "the controller loses nothing");
+}
+
+/// CR 608.2c + CR 608.2h: the preceding instruction adds a blight counter,
+/// then the repeat count is determined from Viper's current counters. Starting
+/// with one counter makes the attack trigger's second counter observable: P1
+/// must receive and decline two separate unless prompts, losing 4 life each.
+#[test]
+fn viper_attack_repeats_the_unless_clause_for_each_blight_counter() {
+    let (mut runner, viper) = viper_attacking_with_blight_counters(2, 1);
+
+    assert_eq!(
+        blight_counters(&runner, viper),
+        2,
+        "the attack trigger adds a counter before measuring the repeat count"
+    );
+    for iteration in 0..2 {
+        match &runner.state().waiting_for {
+            WaitingFor::UnlessPaymentChooseCost { player, costs, .. } => {
+                assert_eq!(*player, P1, "each iteration is scoped to the opponent");
+                assert_eq!(costs.len(), 2, "both unless-cost branches remain available");
+            }
+            other => panic!("expected unless prompt {iteration}, got {other:?}"),
+        }
+        runner
+            .act(GameAction::ChooseUnlessCostBranch {
+                choice: UnlessCostBranch::Decline,
+            })
+            .expect("decline the current iteration's unless cost");
+        runner.advance_until_stack_empty();
+        if iteration == 0 {
+            assert_eq!(
+                runner.life(P1),
+                16,
+                "the first declined iteration costs 4 life before the second prompt"
+            );
+        }
+    }
+
+    assert_eq!(runner.life(P1), 12, "two counters cause two 4-life losses");
+    assert_eq!(runner.life(P0), 20, "the controller is not taxed");
+    assert!(
+        runner.state().stack.is_empty(),
+        "the trigger fully resolves"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
 }
 
 /// CR 118.12a: the cost's "of their choice" resolves against the PROMPTEE, so

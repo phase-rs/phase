@@ -19244,11 +19244,11 @@ fn trigger_unless_each_opponent_sacrifice_binds_scoped_player() {
     assert_eq!(execute.player_scope, Some(PlayerFilter::Opponent));
 }
 
-/// CR 608.2f + CR 118.12a: Rottenmouth Viper's scoped clause is two links below
-/// the chain root, so a hoisted payer resolves against whatever stamped the
-/// root's `scoped_player` rather than against the fan-out's per-opponent seat.
+/// CR 608.2c + CR 608.2h + CR 608.2f + CR 118.12a: the counter is added before
+/// the repeat count is fixed, and each repeated instruction fans out to the
+/// opponents with its unless payer bound to the scoped player.
 #[test]
-fn trigger_scoped_unless_stays_on_the_scoped_clause_under_an_unimplemented_parent() {
+fn trigger_for_each_blight_counter_repeats_scoped_unless() {
     let def = parse_trigger_line(
             "Whenever this creature enters or attacks, put a blight counter on it. Then for each blight counter on it, each opponent loses 4 life unless that player sacrifices a nonland permanent of their choice or discards a card.",
             "Rottenmouth Viper",
@@ -19264,6 +19264,18 @@ fn trigger_scoped_unless_stays_on_the_scoped_clause_under_an_unimplemented_paren
         matches!(scoped.effect.as_ref(), Effect::LoseLife { .. }),
         "the scoped clause should be the life loss, got {:?}",
         scoped.effect
+    );
+    assert!(
+        matches!(
+            scoped.repeat_for.as_ref(),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: Some(CounterType::Generic(counter_type)),
+                }
+            }) if counter_type == "blight"
+        ),
+        "the scoped clause should repeat for Viper's blight counters: {scoped:#?}"
     );
     let unless_pay = scoped
         .unless_pay
@@ -19284,6 +19296,7 @@ fn trigger_scoped_unless_stays_on_the_scoped_clause_under_an_unimplemented_paren
         "second branch should be Discard, got {:?}",
         costs[1]
     );
+    assert_no_unimplemented(def.execute.as_deref().expect("should have execute"));
 }
 
 /// CR 608.2f: Bellowing Mauler's `each player` subject is scope-bearing exactly

@@ -2885,6 +2885,9 @@ fn starts_prefix_clause(current_lower: &str) -> bool {
         // lose the game") — without this, the splitter bisects the conditional
         // at the comma between life and "you lose", orphaning the body.
         tag("then, if "),
+        // CR 608.2c: a sequence-connected "for each" prefix still owns its
+        // comma-delimited effect body.
+        tag("then for each "),
         tag("otherwise"),
         tag("if not"),
         tag("the next time "),
@@ -11775,6 +11778,17 @@ mod tests {
         assert_eq!(split_clause_sequence(waltz).len(), 2, "{waltz}");
         let plain = "Draw a card. It gains flying until end of turn.";
         assert_eq!(split_clause_sequence(plain).len(), 2, "{plain}");
+    }
+
+    #[test]
+    fn then_for_each_prefix_keeps_its_effect_body_together() {
+        let text = "put a blight counter on it. Then for each blight counter on it, each opponent loses 4 life unless that player sacrifices a nonland permanent of their choice or discards a card.";
+        let chunks = split_clause_sequence(text);
+        assert_eq!(chunks.len(), 2, "{chunks:#?}");
+        assert_eq!(
+            chunks[1].text,
+            "Then for each blight counter on it, each opponent loses 4 life unless that player sacrifices a nonland permanent of their choice or discards a card"
+        );
     }
 
     #[test]
