@@ -13635,7 +13635,7 @@ mod tests {
     /// REVERT-PROBE: replace the union arm
     /// with `if charged.iter().any(|charge| charge.slot == target.slot) { continue; }`. The
     /// charged reach reads `[PlayerId(1)]` and the row FLIPS TO FAILING at the union
-    /// assertion; the bound assertion below then reads 6 where 3 is required.
+    /// assertion; the bound assertion below then reads 7 where 4 is required.
     ///
     /// REVERT-PROBE (AIM): first-wins the aim — make the fold's disagreeing arm keep `prev`. The
     /// agreeing arm is unmoved (both resolved announcements name P1) and the divergent arm
