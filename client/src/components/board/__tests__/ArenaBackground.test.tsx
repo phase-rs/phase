@@ -46,4 +46,32 @@ describe("Arena background lifecycle", () => {
     unmount();
     expect(scene.dispose).toHaveBeenCalledTimes(2);
   });
+
+  it("keeps the painting when the scene fails to start, without rejecting unhandled", async () => {
+    // three.js throws out of `new WebGLRenderer()` when WebGL is unavailable, and
+    // a chunk fetch can reject outright mid-deploy. Both settle the lazy-import
+    // chain with a rejection that nothing else is going to handle, so an
+    // unhandled rejection takes down the whole process even though this
+    // component's contract is that the painting simply stays up.
+    scene.create.mockImplementation(() => {
+      throw new Error("WebGL unavailable");
+    });
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    try {
+      const { container } = render(<ArenaBackground />);
+      // Reach-guard: the scene really was attempted, so an empty `rejections`
+      // below cannot pass because the effect bailed out before importing.
+      await waitFor(() => expect(scene.create).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(rejections).toEqual([]);
+      expect(container.querySelector("img")?.getAttribute("src")).toContain("ocean-temple-topdown.webp");
+    } finally {
+      process.off("unhandledRejection", onRejection);
+      scene.create.mockReset();
+    }
+  });
 });
