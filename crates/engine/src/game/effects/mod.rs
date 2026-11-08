@@ -24401,6 +24401,11 @@ fn resolve_chain_body(
             // ordered by its controller, one copy at a time.
             let copy_order_fixed = per_member_copy_counts.then_some(0);
             while iteration < iterations {
+                // CR 104.1: a prior iteration ended the game; the counted loop
+                // must not resolve its effect again.
+                if repeat_has_game_ended(state) {
+                    break;
+                }
                 if open_spell_copy_order_choice(
                     state,
                     effective,
@@ -24582,6 +24587,11 @@ fn resolve_chain_body(
                             return Ok(progress);
                         }
                     }
+                }
+                // CR 104.1: the iteration ended the game; stop before parking
+                // another iteration or advancing the counter.
+                if repeat_has_game_ended(state) {
+                    break;
                 }
                 // CR 608.2c + CR 109.5: When the inner effect enters an
                 // interactive WaitingFor (e.g. SearchChoice), stash the
@@ -48138,6 +48148,60 @@ mod tests {
                 .count(),
             1,
             "one terminal event; no further pass may run"
+        );
+    }
+
+    #[test]
+    fn repeat_for_body_that_ends_the_game_stops_after_the_win() {
+        // CR 104.1: the generic counted driver resolves its effect directly (it
+        // does not re-enter the guarded chain body), so it needs its own game-end
+        // check. No printed card has this shape — the two Win/Lose repeat_for
+        // cards put the repeat on a different effect (Lich's Mastery:
+        // ChangeZone exile; Seek Bolas's Counsel: ExileFromTopUntil); the nearest
+        // printed plain repeat_for cards are Torment of Hailfire and Doubling
+        // Chant. Synthetic shape: Fixed(2) + WinTheGame must resolve exactly once.
+        let mut state = GameState::new_two_player(42);
+        assert!(
+            state.objects.is_empty(),
+            "precondition: the second pass would have no living opponents to move"
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::WinTheGame { target: None },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.repeat_for = Some(QuantityExpr::Fixed { value: 2 });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.game_end.and_then(|end| end.winner),
+            Some(PlayerId(0)),
+            "the recorded win stands"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: crate::types::ability::EffectKind::WinTheGame,
+                        ..
+                    }
+                ))
+                .count(),
+            1,
+            "the counted driver must not resolve the win a second time"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::GameOver { .. }))
+                .count(),
+            1,
+            "one terminal event"
         );
     }
 
