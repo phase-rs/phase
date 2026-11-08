@@ -2766,9 +2766,14 @@ fn select_hybrid_payment_color(
     let preferred = preferred_hybrid_colors
         .iter()
         .find_map(|&(first, second, color)| {
-            (first == key.0 && second == key.1 && pool.count_color(color) > 0).then_some(color)
+            (first == key.0
+                && second == key.1
+                && pool.count_where(|unit| is_eligible_color_unit(unit, color, spell)) > 0)
+                .then_some(color)
         })
-        .unwrap_or_else(|| auto_pay_hybrid(pool, a, b, hand_demand, remaining_hybrid_shards));
+        .unwrap_or_else(|| {
+            auto_pay_hybrid(pool, a, b, hand_demand, remaining_hybrid_shards, spell)
+        });
     let color = quality_demand.hybrid_color(
         pool,
         preferred,
@@ -2792,16 +2797,17 @@ fn select_hybrid_payment_color(
 /// Falls back to spending whichever color has more in the pool (preserving the scarcer color).
 /// If one color can satisfy the remaining identical hybrid shards, use it so repeated
 /// hybrid requirements stay on the same color when possible.
+/// CR 106.6: only units eligible for this payment contribute to those counts.
 fn auto_pay_hybrid(
     pool: &ManaPool,
     a: ManaType,
     b: ManaType,
     hand_demand: Option<&ColorDemand>,
     remaining_hybrid_shards: usize,
+    spell: Option<&PaymentContext<'_>>,
 ) -> ManaType {
-    // Only consider colors actually available in pool
-    let count_a = pool.count_color(a);
-    let count_b = pool.count_color(b);
+    let count_a = pool.count_where(|unit| is_eligible_color_unit(unit, a, spell));
+    let count_b = pool.count_where(|unit| is_eligible_color_unit(unit, b, spell));
 
     if count_a == 0 {
         return b;
@@ -4179,6 +4185,38 @@ mod tests {
                 reduce_cost_by_pool(&convoke, &cost, None, None, None),
                 generic_one
             );
+
+            // After auto-tap supplies the residual Snow and generic, restricted
+            // blue still cannot bias the actual hybrid choice away from the
+            // primary Snow color and consume the strict blue requirement.
+            let complete_restricted = ManaPool::from_units(vec![
+                make_snow_unit(snow_color),
+                make_unit(ManaType::Blue),
+                ManaUnit {
+                    restrictions: vec![ManaRestriction::OnlyForActivation],
+                    ..make_unit(ManaType::Blue)
+                },
+                ManaUnit {
+                    restrictions: vec![ManaRestriction::OnlyForActivation],
+                    ..make_unit(ManaType::Blue)
+                },
+                make_snow_unit(ManaType::Colorless),
+                make_unit(ManaType::Colorless),
+            ]);
+            let (spent, life) = select_mana_payment(
+                &complete_restricted,
+                &cost,
+                None,
+                Some(&PaymentContext::Effect),
+                None,
+                None,
+                crate::types::mana::LifePaymentColors::EMPTY,
+                &[],
+            )
+            .expect("ineligible blue does not bias the completed payment");
+            assert_eq!(spent.len(), 4);
+            assert!(spent.iter().all(|unit| unit.restrictions.is_empty()));
+            assert!(life.is_empty());
         }
     }
 
