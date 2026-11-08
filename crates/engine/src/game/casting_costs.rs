@@ -16918,26 +16918,32 @@ fn plan_auto_tap_rows_in_order(
             assigned[idx] = true;
             units.remove(unit);
             used_sources.insert(option.object_id);
-            let mut remaining: Vec<_> = (0..needs.len()).filter(|&i| !assigned[i]).collect();
-            remaining.sort_by_key(|&i| {
-                auto_tap_need_priority(
-                    available,
-                    &used_sources,
-                    &needs[i],
-                    snow_output,
-                    payment_context,
-                )
-            });
-            for index in remaining {
-                let (_, _, requires_two_or_more_color_source, _, _) = &needs[index];
-                if *requires_two_or_more_color_source
-                    && !option.source_could_produce_two_or_more_colors
-                {
-                    continue;
-                }
-                if let Some(unit) = auto_tap_matching_unit(&units, &needs[index]) {
-                    units.remove(unit);
-                    assigned[index] = true;
+            // CR 106.3: an exhausted activation has no further units to assign.
+            if !units.is_empty() {
+                let mut remaining: Vec<_> = (0..needs.len()).filter(|&i| !assigned[i]).collect();
+                remaining.sort_by_key(|&i| {
+                    auto_tap_need_priority(
+                        available,
+                        &used_sources,
+                        &needs[i],
+                        snow_output,
+                        payment_context,
+                    )
+                });
+                for index in remaining {
+                    if units.is_empty() {
+                        break;
+                    }
+                    let (_, _, requires_two_or_more_color_source, _, _) = &needs[index];
+                    if *requires_two_or_more_color_source
+                        && !option.source_could_produce_two_or_more_colors
+                    {
+                        continue;
+                    }
+                    if let Some(unit) = auto_tap_matching_unit(&units, &needs[index]) {
+                        units.remove(unit);
+                        assigned[index] = true;
+                    }
                 }
             }
             combination_surplus += units.len();
