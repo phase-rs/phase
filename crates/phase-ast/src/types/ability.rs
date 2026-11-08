@@ -6500,7 +6500,6 @@ fn deserialize_spellbook_selection_compat<'de, D>(d: D) -> Result<SpellbookSelec
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::Deserialize as _;
     let raw = serde_json::Value::deserialize(d)?;
     if let serde_json::Value::Bool(random) = raw {
         return Ok(if random {

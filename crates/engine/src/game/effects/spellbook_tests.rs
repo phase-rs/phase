@@ -4,13 +4,17 @@
 use super::resolve_ability_chain;
 use super::spellbook::{complete_draft, resolve};
 use crate::game::zones::create_object;
-use crate::parser::oracle_effect::parse_effect;
+use crate::parser::oracle::parse_oracle_text;
+use crate::parser::oracle_effect::{parse_effect, parse_effect_chain};
 use crate::types::ability::{
-    Effect, QuantityExpr, ResolvedAbility, SpellbookSelection, TargetFilter,
+    AbilityKind, CardPlayMode, CastingPermission, Duration, Effect, QuantityExpr, ResolvedAbility,
+    SpellbookSelection, TargetFilter,
 };
 use crate::types::game_state::{GameState, WaitingFor};
-use crate::types::identifiers::CardId;
+use crate::types::identifiers::{CardId, TrackedSetId};
+use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
+use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 fn draft_ability(
@@ -152,9 +156,6 @@ fn complete_draft_rejects_a_card_not_in_the_offered_list() {
 
 #[test]
 fn parser_maps_draft_clauses_to_the_right_destination() {
-    use crate::parser::oracle_effect::parse_effect_chain;
-    use crate::types::ability::AbilityKind;
-
     // Every draft wording is `SpellbookSelection::Draft`. Default → hand.
     // Trailing periods (as cards actually print) must still match.
     assert!(matches!(
@@ -494,9 +495,6 @@ fn assert_draft_then_exile_then_grant(
     draft: &crate::types::ability::AbilityDefinition,
     mode: crate::types::ability::CardPlayMode,
 ) {
-    use crate::types::ability::{CastingPermission, Duration};
-    use crate::types::identifiers::TrackedSetId;
-
     assert!(
         matches!(
             &*draft.effect,
@@ -553,9 +551,6 @@ fn assert_draft_then_exile_then_grant(
 fn upkeep_execute(
     parsed: &crate::parser::oracle::ParsedAbilities,
 ) -> &crate::types::ability::AbilityDefinition {
-    use crate::types::phase::Phase;
-    use crate::types::triggers::TriggerMode;
-
     parsed
         .triggers
         .iter()
@@ -570,9 +565,6 @@ fn upkeep_execute(
 /// upkeep execute to the literal draft → exile → play-grant chain.
 #[test]
 fn arms_scavenger_parse_oracle_text_shape() {
-    use crate::parser::oracle::parse_oracle_text;
-    use crate::types::ability::CardPlayMode;
-
     let parsed = parse_oracle_text(
         ARMS_SCAVENGER_ORACLE,
         "Arms Scavenger",
@@ -589,9 +581,6 @@ fn arms_scavenger_parse_oracle_text_shape() {
 /// literal draft → exile chain with a **cast** grant.
 #[test]
 fn tibalt_wicked_tormentor_plus_one_parse_shape() {
-    use crate::parser::oracle::parse_oracle_text;
-    use crate::types::ability::CardPlayMode;
-
     let parsed = parse_oracle_text(
         TIBALT_WICKED_TORMENTOR_ORACLE,
         "Tibalt, Wicked Tormentor",
@@ -620,9 +609,6 @@ fn tibalt_wicked_tormentor_plus_one_parse_shape() {
 /// literal decomposition, with a cast grant.
 #[test]
 fn kaylas_kindling_parse_oracle_text_shape() {
-    use crate::parser::oracle::parse_oracle_text;
-    use crate::types::ability::CardPlayMode;
-
     let parsed = parse_oracle_text(
         KAYLAS_KINDLING_ORACLE,
         "Kayla's Kindling",
