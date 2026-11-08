@@ -15484,6 +15484,13 @@ fn option_satisfies(
     {
         return true;
     }
+    // CR 106.3 + CR 106.6: an ordinary scalar row has one known unit.
+    // Preserve its direct eligibility check without projecting a bundle.
+    if opt.atomic_combination.is_none() && snow_output.is_none() {
+        return required_supertype.is_none()
+            && (acceptable.is_empty() || acceptable.contains(&opt.mana_type))
+            && payment_context.is_none_or(|ctx| ctx.permits_actual_mana_type(opt.mana_type));
+    }
     option_units_for_context(opt, payment_context, snow_output)
         .iter()
         .any(|(mana_type, supertype)| {
@@ -15595,14 +15602,19 @@ fn find_least_flexible_source(
                     .iter()
                     .filter(|other| other.object_id == opt.object_id)
                     .count();
-                let units = option_units_for_context(opt, payment_context, snow_output);
-                let (covered, _) = score_combination(&units, needs, assigned);
+                // Eligibility already proves a scalar row covers one pip.
+                // Only FullOutput ranking of a bundle needs coverage scoring.
+                let covered = match source_order {
+                    AutoTapSourceOrder::LeastFlexible => 0,
+                    AutoTapSourceOrder::FullOutput if opt.atomic_combination.is_none() => 1,
+                    AutoTapSourceOrder::FullOutput => {
+                        let units = option_units_for_context(opt, payment_context, snow_output);
+                        score_combination(&units, needs, assigned).0
+                    }
+                };
                 (
                     opt.penalty.tier_byte(),
-                    std::cmp::Reverse(match source_order {
-                        AutoTapSourceOrder::LeastFlexible => 0,
-                        AutoTapSourceOrder::FullOutput => covered,
-                    }),
+                    std::cmp::Reverse(covered),
                     flexibility,
                 )
             })

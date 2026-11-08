@@ -254,6 +254,55 @@ fn snow_hybrid_payment_preserves_a_quality_eligible_alternative() {
 }
 
 #[test]
+fn fully_floated_snow_hybrid_cast_keeps_the_only_snow_unit() {
+    // Supplemental costs: no printing combines Snow and these hybrids.
+    // Astrolabe supplies S; Judge's Familiar supplies W/U and Ulalek C/U.
+    // CR 107.4e/h: the ordinary Island unit pays the hybrid, preserving
+    // the Snow source's unit for S. Every source is exhausted before casting.
+    for (symbol, snow_name, snow_text, snow_color) in [
+        ("{W/U}", "Snow-Covered Plains", "({T}: Add {W}.)", ManaType::White),
+        ("{C/U}", "Faceless Haven", "{T}: Add {C}.\n{S}{S}{S}: This land becomes a 4/3 creature with vigilance and all creature types until end of turn. It's still a land. ({S} can be paid with one mana from a snow source.)", ManaType::Colorless),
+    ] {
+        for snow_first in [true, false] {
+            let mut s = board();
+            let snow = if snow_color == ManaType::White {
+                s.add_land_from_oracle(P0, snow_name, snow_text).as_snow()
+                    .with_subtypes(vec!["Plains"]).id()
+            } else {
+                s.add_land_from_oracle(P0, snow_name, snow_text).as_snow().id()
+            };
+            let island = s.add_basic_land(P0, ManaColor::Blue);
+            let cost = if snow_first { format!("{{S}}{symbol}") } else { format!("{symbol}{{S}}") };
+            let astrolabe = s.add_artifact_to_hand_from_oracle(P0, "Arcum's Astrolabe",
+                "({S} can be paid with one mana from a snow source.)\nWhen this artifact enters, draw a card.\n{1}, {T}: Add one mana of any color.")
+                .as_snow().with_mana_cost(parse_mtgjson_mana_cost(&cost)).id();
+            let mut r = s.build();
+            if snow_color == ManaType::White {
+                finish_snow_forest(&mut r, snow);
+            }
+            evaluate_layers(r.state_mut());
+            for (source, color) in [(snow, snow_color), (island, ManaType::Blue)] {
+                let (_, _, grouped) = legal_actions_full(r.state());
+                let action = grouped[&source].iter().find(|action| matches!(action,
+                    GameAction::TapLandForMana { selection } if selection.mana_type == color))
+                    .expect("the real land offers its chosen mana action").clone();
+                r.act(action).unwrap();
+            }
+            assert!([snow, island].iter().all(|id| r.state().objects[id].tapped));
+            assert!(activatable_mana_source_selections(r.state(), P0).is_empty());
+            let pool = &r.state().players[0].mana_pool;
+            assert_eq!(pool.total(), 2);
+            assert_eq!(pool.units().filter(|unit| unit.source_id == snow
+                && unit.color == snow_color && unit.supertype == Some(ManaSupertype::Snow)).count(), 1);
+            assert_eq!(pool.units().filter(|unit| unit.source_id == island
+                && unit.color == ManaType::Blue && unit.supertype.is_none()).count(), 1);
+            r.cast(astrolabe).resolve().assert_zone(&[astrolabe], Zone::Battlefield);
+            assert_complete(&r, 0);
+        }
+    }
+}
+
+#[test]
 fn snow_hybrid_partial_pool_keeps_the_later_strict_color() {
     // Supplemental S + W/U + U cost on the real Astrolabe fixture; no
     // printing has this combined cost. The old partial path spends Snow W
