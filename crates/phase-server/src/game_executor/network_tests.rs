@@ -7889,7 +7889,7 @@ mod oversized_publication {
                     loop {
                         tokio::time::sleep(Duration::from_millis(20)).await;
                         let (payment, owner) = session_read(&table, |s| {
-                            (s.state.say_payment.clone(), s.active_say_expiry_task)
+                            (s.state.say_payment.clone(), s.active_say_expiry_claim)
                         })
                         .await;
                         if payment.is_none() && owner.is_none() {
@@ -7952,6 +7952,10 @@ mod oversized_publication {
                 assert!(claim.is_some(), "the live payment is claimed");
                 schedule(claim);
 
+                let original_claim = session_read(&table, |s| s.active_say_expiry_claim)
+                    .await
+                    .expect("active expiry claim is armed");
+
                 // Send an early client Expiry report before the deadline has elapsed.
                 let early_expiry = GameAction::SayPhrase {
                     payment: payment_id,
@@ -7963,18 +7967,16 @@ mod oversized_publication {
                 let comp = completion(&mut p0, 101).await;
                 assert_eq!(comp["command_id"], 101);
 
-                // Verify the payment is STILL live and the claim is STILL held by the server timer.
-                let (still_armed, claim_held) = session_read(&table, |s| {
-                    (
-                        s.state.say_payment.is_some(),
-                        s.active_say_expiry_task.is_some() && s.active_say_expiry_claim.is_some(),
-                    )
+                // Verify the payment is STILL live and the original claim is STILL held by the server timer.
+                let (still_armed, current_claim) = session_read(&table, |s| {
+                    (s.state.say_payment.is_some(), s.active_say_expiry_claim)
                 })
                 .await;
                 assert!(still_armed, "early expiry report left the payment live");
-                assert!(
-                    claim_held,
-                    "early expiry report did NOT release the server timer's claim"
+                assert_eq!(
+                    current_claim,
+                    Some(original_claim),
+                    "the original expiry claim survived the early client report"
                 );
 
                 // An attempt to claim again must fail (None) while the original timer owns it.
@@ -7992,7 +7994,7 @@ mod oversized_publication {
                     loop {
                         tokio::time::sleep(Duration::from_millis(20)).await;
                         let (payment, owner) = session_read(&table, |s| {
-                            (s.state.say_payment.clone(), s.active_say_expiry_task)
+                            (s.state.say_payment.clone(), s.active_say_expiry_claim)
                         })
                         .await;
                         if payment.is_none() && owner.is_none() {
@@ -8098,7 +8100,7 @@ mod oversized_publication {
                     loop {
                         tokio::time::sleep(Duration::from_millis(20)).await;
                         let (payment, owner) = session_read(&table, |s| {
-                            (s.state.say_payment.clone(), s.active_say_expiry_task)
+                            (s.state.say_payment.clone(), s.active_say_expiry_claim)
                         })
                         .await;
                         if payment.is_none() && owner.is_none() {

@@ -304,11 +304,13 @@ pub struct TerminalBootstrapRequest {
 }
 
 /// Un-card (no CR entry): the live timed spoken payment an expiry authority
-/// must time — who owes it, which engine-minted payment it is, and the
-/// epoch-millisecond deadline the engine stored for the next saying.
+/// must time — who owes it, who is authorized to submit for it, which
+/// engine-minted payment it is, and the epoch-millisecond deadline the engine
+/// stored for the next saying.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SayPhraseExpiryTarget {
     pub payer: PlayerId,
+    pub submitter: PlayerId,
     pub payment: u64,
     pub deadline_ms: u64,
 }

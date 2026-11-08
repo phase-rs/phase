@@ -4980,7 +4980,7 @@ mod tests {
     use engine::types::identifiers::CardId;
     use engine::types::interaction::InteractionSessionId;
     use engine::types::triggers::TriggerMode;
-    use engine::types::un_actions::PhrasePace;
+    use engine::types::un_actions::{PhrasePace, SayPhrasePayment, SayPhraseReport};
     use pretty_assertions::assert_eq;
 
     fn lookup(_: &GameObject) -> Option<String> {
@@ -6675,6 +6675,10 @@ mod tests {
             Zone::Battlefield,
         );
         state.un_actions.set_enabled(PlayerId(0), true);
+        // Manually arm the say_payment so the engine has a payment ID and
+        // repetition count. The AI candidate generator reads this to author
+        // SayPhrase with the correct payment ID and sequence.
+        state.say_payment = Some(Box::new(SayPhrasePayment::new(42, 2)));
         state.waiting_for = WaitingFor::UnlessPayment {
             player: PlayerId(0),
             cost: AbilityCost::SayPhrase {
@@ -6703,9 +6707,16 @@ mod tests {
         let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
             panic!("a timed spoken payment is not a ChooseBoolean, got {prompt:?}");
         };
-        assert_eq!(input.options.len(), 1, "only the decline is offered");
+        // Timed spoken payments now offer both the saying (SayPhrase) and the explicit decline.
+        // The engine-authored SayPhrase candidate includes the payment ID, next sequence, and a
+        // current timestamp; the host stamps the observation when relaying.
+        // The interaction projection sorts candidates via GameAction::cmp_stable, which orders
+        // PayUnlessCost before SayPhrase (by GameActionKind discriminant), so index 0 is
+        // the explicit decline and index 1 is the saying.
+        assert_eq!(input.options.len(), 2, "say phrase and decline are offered");
 
-        let action = translate_response(
+        // Index 0: Explicit decline (PayUnlessCost { pay: false }) — stable sort puts this first.
+        let action_decline = translate_response(
             42,
             PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
                 chosen_indices: vec![0],
@@ -6713,9 +6724,36 @@ mod tests {
             &prepared.prompt_context(),
             &state,
         )
-        .expect("the decline resolves back through the engine");
-        assert_eq!(action, GameAction::PayUnlessCost { pay: false });
+        .expect("decline resolves back through the engine");
+        assert_eq!(action_decline, GameAction::PayUnlessCost { pay: false });
 
+        // Index 1: Say the phrase (AI can use this; relay clients submit SayPhrase through the
+        // generic interaction which the host then stamps with its clock).
+        let action_say = translate_response(
+            42,
+            PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
+                chosen_indices: vec![1],
+            }),
+            &prepared.prompt_context(),
+            &state,
+        )
+        .expect("saying resolves back through the engine");
+        match action_say {
+            GameAction::SayPhrase {
+                payment,
+                seq,
+                at_ms: _,
+                report,
+            } => {
+                assert_eq!(payment, 42); // the engine-minted payment ID
+                assert_eq!(seq, 1); // first saying
+                assert_eq!(report, SayPhraseReport::Saying);
+            }
+            other => panic!("expected SayPhrase, got {other:?}"),
+        }
+
+        // ChooseBoolean is not accepted for timed payments (the pace window requires
+        // host-stamped observations).
         let err_true = translate_response(
             42,
             PromptOutput::ChooseBoolean(ChooseBooleanOutput::Decision { value: true }),

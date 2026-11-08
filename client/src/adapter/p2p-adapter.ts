@@ -1628,6 +1628,7 @@ export class P2PHostAdapter implements EngineAdapter {
   private sayExpiryGeneration = 0;
   private sayExpiryReadInFlight = false;
   private sayExpiryReadPending = false;
+  private sayExpiryReadPromise: Promise<SayPhraseExpiryTarget | null> | null = null;
   /** Generation guards the active timer against an older callback resuming after rekey. */
   private sayExpiryTimerGeneration = 0;
   private sessionLatencies = new WeakMap<PeerSession, number | null>();
@@ -3463,9 +3464,10 @@ export class P2PHostAdapter implements EngineAdapter {
       ? this.nativeBridge.submitAction(action, actor)
       : this.wasm.submitAction(action, actor));
     if (isZeroCountDebugCreate(action)) return transition.result;
+    const isSaying = action.type === "SayPhrase";
     this.scheduleSayPhraseExpiry();
-    await this.broadcastStateUpdate(transition, undefined, action.type === "SayPhrase");
-    await this.runAiLoop();
+    await this.broadcastStateUpdate(transition, undefined, isSaying);
+    await this.runAiLoop(isSaying);
     void this.persistAuthoritativeState();
     if (this.nativeBridge && action.type === "SayPhrase") {
       // The sidecar's correlated reply to a saying also releases the host seat's
@@ -4434,19 +4436,19 @@ export class P2PHostAdapter implements EngineAdapter {
           readFailed = true;
         }
         if (this.disposed || !this.ownsAuthority()) return;
-        if (this.sayExpiryReadPending) {
-          continue;
-        }
         if (readFailed) {
           if (generation === this.sayExpiryGeneration) {
             this.sayExpiryPayment = null;
             this.sayExpiryDeadline = null;
             this.retrySayPhraseExpiry(this.sayExpiryTimerGeneration);
           }
-        } else {
-          if (generation === this.sayExpiryGeneration) {
-            this.armSayPhraseExpiry(target);
-          }
+          break;
+        }
+        if (this.sayExpiryReadPending) {
+          continue;
+        }
+        if (generation === this.sayExpiryGeneration) {
+          this.armSayPhraseExpiry(target);
         }
         break;
       }
@@ -4472,13 +4474,28 @@ export class P2PHostAdapter implements EngineAdapter {
    * The browser host reads its own trusted WASM state.
    */
   private async readSayPhraseExpiry(): Promise<SayPhraseExpiryTarget | null> {
-    if (this.nativeBridge) return this.nativeBridge.sayPhraseExpiry();
-    const state = await this.wasm.getState();
-    const payment = state.say_payment;
-    if (payment?.deadline_ms === undefined || state.waiting_for.type !== "UnlessPayment") {
-      return null;
+    if (this.sayExpiryReadPromise) {
+      return this.sayExpiryReadPromise;
     }
-    return { payer: state.waiting_for.data.player, payment: payment.id, deadline_ms: payment.deadline_ms };
+    const read = (async () => {
+      if (this.nativeBridge) return this.nativeBridge.sayPhraseExpiry();
+      const state = await this.wasm.getState();
+      const payment = state.say_payment;
+      if (payment?.deadline_ms === undefined || state.waiting_for.type !== "UnlessPayment") {
+        return null;
+      }
+      const payer = state.waiting_for.data.player;
+      const submitter = state.derived?.unique_authorized_submitter ?? payer;
+      return { payer, submitter, payment: payment.id, deadline_ms: payment.deadline_ms };
+    })();
+    this.sayExpiryReadPromise = read;
+    try {
+      return await read;
+    } finally {
+      if (this.sayExpiryReadPromise === read) {
+        this.sayExpiryReadPromise = null;
+      }
+    }
   }
 
   /** Time `target` on the host's clock, or disarm when nothing is timed. */
@@ -4515,6 +4532,7 @@ export class P2PHostAdapter implements EngineAdapter {
     this.sayExpiryGeneration += 1;
     this.sayExpiryTimerGeneration += 1;
     this.sayExpiryReadPending = false;
+    this.sayExpiryReadPromise = null;
     this.clearSayExpiryTimer();
     this.sayExpiryPayment = null;
     this.sayExpiryDeadline = null;
@@ -4567,12 +4585,15 @@ export class P2PHostAdapter implements EngineAdapter {
       this.disarmSayPhraseExpiry(timerGen);
       return;
     }
-    // Order received sayings before expiry: drain any in-flight frames from the payer's session
+    // Order received sayings before expiry: drain any in-flight frames from the authorized submitter's session
     // so a timely saying waiting behind an earlier delivery is delivered and applied first.
-    const payer = target.payer;
-    const payerSession = payer !== 0 ? this.guestSessions.get(payer) : undefined;
-    if (payerSession) {
-      await payerSession.drain();
+    // If authority changes after a drain, drain the new submitter's seat.
+    const drainedSeats = new Set<PlayerId>();
+    while (target && target.payment === paymentId && target.submitter !== 0 && !drainedSeats.has(target.submitter)) {
+      const submitterSession = this.guestSessions.get(target.submitter);
+      if (!submitterSession) break;
+      drainedSeats.add(target.submitter);
+      await submitterSession.drain();
       if (!this.ownsSayExpiry(timerGen)) return;
       try {
         target = await this.readSayPhraseExpiry();
@@ -4597,7 +4618,7 @@ export class P2PHostAdapter implements EngineAdapter {
       data: { payment: paymentId, seq: 0, at_ms: now, report: "Expiry" },
     };
     try {
-      const transition = await this.applyBrowserMutation(() => this.wasm.submitAction(action, payer));
+      const transition = await this.applyBrowserMutation(() => this.wasm.submitAction(action, target.submitter));
       await this.publishHostSnapshot(transition.result);
       await this.broadcastStateUpdate(transition, undefined, true);
       await this.runAiLoop(true);
@@ -4615,7 +4636,7 @@ export class P2PHostAdapter implements EngineAdapter {
   /**
    * A native host's lapse report. The sidecar's engine owns the payment, so
    * the host neither reads a seat's projected view nor submits on the payer's
-   * socket: it orders the payer's WebRTC ingress ahead of the report, then
+   * socket: it orders the submitter's WebRTC ingress ahead of the report, then
    * asks the sidecar's host-only expiry authority to lapse the payment under
    * the payer's own authority. A suspended payer therefore stays absent; the
    * sidecar publishes the result through the ordinary native revision barrier.
@@ -4627,7 +4648,7 @@ export class P2PHostAdapter implements EngineAdapter {
   ): Promise<void> {
     let target: SayPhraseExpiryTarget | null;
     try {
-      target = await bridge.sayPhraseExpiry();
+      target = await this.readSayPhraseExpiry();
       if (!this.ownsSayExpiry(timerGen)) return;
       if (!target || target.payment !== paymentId) {
         this.disarmSayPhraseExpiry(timerGen);
@@ -4641,12 +4662,29 @@ export class P2PHostAdapter implements EngineAdapter {
         this.armSayPhraseExpiry(target);
         return;
       }
-      // A timely saying still crossing the payer's WebRTC channel reaches the
-      // sidecar first; the sidecar drains the payer's own loopback ingress.
-      const payerSession = target.payer !== 0 ? this.guestSessions.get(target.payer) : undefined;
-      if (payerSession) {
-        await payerSession.drain();
+      // A timely saying still crossing the submitter's WebRTC channel reaches the
+      // sidecar first; the sidecar drains the submitter's own loopback ingress.
+      // If authority changes after a drain, drain the new submitter's seat.
+      const drainedSeats = new Set<PlayerId>();
+      while (target && target.payment === paymentId && target.submitter !== 0 && !drainedSeats.has(target.submitter)) {
+        const submitterSession = this.guestSessions.get(target.submitter);
+        if (!submitterSession) break;
+        drainedSeats.add(target.submitter);
+        await submitterSession.drain();
         if (!this.ownsSayExpiry(timerGen)) return;
+        target = await this.readSayPhraseExpiry();
+        if (!this.ownsSayExpiry(timerGen)) return;
+        if (!target || target.payment !== paymentId) {
+          this.disarmSayPhraseExpiry(timerGen);
+          this.armSayPhraseExpiry(target);
+          return;
+        }
+        if (sayPhraseHostClockMs() <= target.deadline_ms) {
+          this.sayExpiryPayment = null;
+          this.sayExpiryDeadline = null;
+          this.armSayPhraseExpiry(target);
+          return;
+        }
       }
       target = await bridge.sayPhraseExpiry(paymentId);
     } catch (err) {
@@ -5340,12 +5378,13 @@ export class P2PHostAdapter implements EngineAdapter {
             break;
           }
           // Host screen first, then the guests (see `publishHostSnapshot`).
+          const isSaying = appliedAction?.type === "SayPhrase";
           await this.publishHostSnapshot(transition.result);
-          await this.broadcastStateUpdate(transition, undefined, appliedAction?.type === "SayPhrase");
+          await this.broadcastStateUpdate(transition, undefined, isSaying);
           // Wake the AI loop. After a guest's action lands, priority may have
           // shifted to an AI seat — without this, the AI never gets a turn
           // and the game stalls (same pattern as concedePlayer/host submit).
-          await this.runAiLoop();
+          await this.runAiLoop(isSaying);
           void this.persistAuthoritativeState();
         } catch (err) {
           console.error("[P2PHost] delivery after an applied guest action failed:", err);

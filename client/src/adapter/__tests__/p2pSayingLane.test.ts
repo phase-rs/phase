@@ -4,10 +4,11 @@ import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection.t
 import type { PeerSession } from "../../network/peer.ts";
 import { WIRE_PROTOCOL_VERSION, type P2PMessage } from "../../network/protocol.ts";
 import type { TransportConnection, TransportPeer } from "../../network/transport.ts";
-import { P2PGuestAdapter, P2PHostAdapter } from "../p2p-adapter.ts";
+import { NativeP2PBridge, P2PGuestAdapter, P2PHostAdapter } from "../p2p-adapter.ts";
 import {
   AdapterError,
   AdapterErrorCode,
+  EMPTY_LEGAL_ACTIONS,
   type GameAction,
   type GameEvent,
   type GameState,
@@ -676,7 +677,7 @@ describe("P2P saying reply lane", () => {
       host.sayExpiryTimer = newerTimer;
 
       // Now resolve the old authority read with the newer payment live:
-      resolveRead!({ payer: 0, payment: 8, deadline_ms: Date.now() + 1000 });
+      resolveRead!({ payer: 0, submitter: 0, payment: 8, deadline_ms: Date.now() + 1000 });
 
       await expiryPromise;
       // The superseded owner never asked the authority to lapse anything.
@@ -737,6 +738,52 @@ describe("P2P saying reply lane", () => {
     host.emit = vi.fn();
     host.handleNativeRevision = P2PHostAdapter.prototype["handleNativeRevision"] as unknown as typeof host.handleNativeRevision;
 
+    class FakeSeatClient {
+      listener: ((event: Record<string, unknown>) => void) | null = null;
+      readonly dispose = vi.fn();
+      readonly sayPhraseExpiry = vi.fn<() => Promise<SayPhraseExpiryTarget | null>>(async () => null);
+      readonly submitAction = vi.fn<() => Promise<SubmitResult>>(async () => ({ events: [], log_entries: [] }));
+      readonly exportPersistenceState = vi.fn(async () => { throw new Error("not used"); });
+      constructor(readonly playerId: number, readonly state: GameState) {}
+      onEvent(listener: (event: Record<string, unknown>) => void): () => void {
+        this.listener = listener;
+        return () => {};
+      }
+      async initializePregame() {
+        return {
+          gameCode: "TOYBOAT",
+          playerId: this.playerId,
+          playerToken: `token-${this.playerId}`,
+          fullKey: { game_code: "TOYBOAT", generation: 1 },
+        };
+      }
+      async getState(): Promise<GameState> {
+        return this.state;
+      }
+      emit(event: Record<string, unknown>): void {
+        this.listener?.(event);
+      }
+    }
+
+    const hostSeat = new FakeSeatClient(0, remoteState("host-state"));
+    const guestSeat = new FakeSeatClient(1, remoteState("guest-state"));
+    const bridge = new NativeP2PBridge(
+      { player: { main_deck: [], sideboard: [] } } as never,
+      "Host",
+      2,
+      undefined,
+      undefined,
+      { expectedServerVersion: "test" } as never,
+      (revision, reports, saying) => host.handleNativeRevision(revision, reports, saying),
+      async () => {},
+      async () => {},
+      async () => {},
+      () => undefined,
+    );
+    const bridgeInternals = bridge as unknown as { attachClient: (client: unknown) => Promise<unknown> };
+    await bridgeInternals.attachClient(hostSeat);
+    await bridgeInternals.attachClient(guestSeat);
+
     // Guest has a parked ordinary submission that arrived after ingress drain:
     const guestAction: GameAction = {
       type: "ChooseUnlessCostBranch",
@@ -755,94 +802,249 @@ describe("P2P saying reply lane", () => {
 
     // Wire up host.send to deliver to guest via fake connection
     host.send = vi.fn(async (_session, msg) => {
-      sentWireMessages.push(msg);
+      sentWireMessages.push(msg as P2PMessage);
       await conn.simulateData(msg as P2PMessage);
       return true;
     });
 
-    const hostReport = {
-      kind: "update",
-      update: {
-        snapshot: { state: remoteState("host-state"), legalResult: { actions: [] } },
-        events: [],
-        logEntries: [],
-      },
-    };
+    // 1. Detached expiry first publication (lapse) driven through the real publication boundary:
+    hostSeat.emit({
+      type: "stateChanged",
+      saying: true,
+      serverRevision: 2,
+      snapshot: { state: remoteState("host-state"), legalResult: { actions: [] } },
+      events: [],
+      logEntries: [],
+    });
+    guestSeat.emit({
+      type: "stateChanged",
+      saying: true,
+      serverRevision: 2,
+      snapshot: { state: remoteState("lapse-applied"), legalResult: { actions: [] } },
+      events: [{ marker: "lapse-events" } as unknown as GameEvent],
+      logEntries: [],
+    });
 
-    // 1. Detached expiry first publication (lapse) is delivered to guest:
-    const lapseReports = new Map<number, unknown>([
-      [0, hostReport],
-      [
-        1,
-        {
-          kind: "update",
-          update: {
-            snapshot: { state: remoteState("lapse-applied"), legalResult: { actions: [] } },
-            events: [{ marker: "lapse-events" } as unknown as GameEvent],
-            logEntries: [],
-          },
-        },
-      ],
-    ]);
-    await host.handleNativeRevision(2, lapseReports, true);
-
-    // 2. Detached expiry follow-up AI publication (e.g. Blood Artist trigger target) is withheld for guest:
-    const aiReports = new Map<number, unknown>([
-      [0, hostReport],
-      [
-        1,
-        {
-          kind: "withheld",
-          notice: { revision: 3 },
-        },
-      ],
-    ]);
-    await host.handleNativeRevision(3, aiReports, true);
-
-    // Verify both frames were broadcast to guest with saying: true:
-    // 1. Delivered state_update with saying: true
-    // 2. Withheld state_withheld with saying: true
-    expect(sentWireMessages).toContainEqual(
-      expect.objectContaining({
-        type: "state_update",
-        revision: 2,
-        saying: true,
-      }),
+    await vi.waitFor(() =>
+      expect(sentWireMessages).toContainEqual(
+        expect.objectContaining({
+          type: "state_update",
+          revision: 2,
+          saying: true,
+        }),
+      ),
     );
-    expect(sentWireMessages).toContainEqual(
-      expect.objectContaining({
-        type: "state_withheld",
-        revision: 3,
-        saying: true,
-      }),
+
+    // 2. Detached expiry follow-up AI publication (e.g. Blood Artist trigger target) withheld for guest:
+    hostSeat.emit({
+      type: "stateDelivery",
+      saying: true,
+      withheld: { revision: 3, reason: "ai" },
+    });
+    guestSeat.emit({
+      type: "stateDelivery",
+      saying: true,
+      withheld: { revision: 3, reason: "ai" },
+    });
+
+    await vi.waitFor(() =>
+      expect(sentWireMessages).toContainEqual(
+        expect.objectContaining({
+          type: "state_withheld",
+          revision: 3,
+          saying: true,
+        }),
+      ),
     );
 
     // Crucially: guest's ordinary parked submission was NOT settled by either frame!
     expect(ordinarySettled).toBe(false);
 
     // When guest's own ordinary completion arrives without saying, it settles:
-    const ordinaryReports = new Map<number, unknown>([
-      [0, hostReport],
-      [
-        1,
-        {
-          kind: "update",
-          update: {
-            snapshot: { state: remoteState("ordinary-completed"), legalResult: { actions: [] } },
-            events: [{ marker: "ordinary-done" } as unknown as GameEvent],
-            logEntries: [],
-          },
-        },
-      ],
-    ]);
-    await host.handleNativeRevision(4, ordinaryReports, false);
+    hostSeat.emit({
+      type: "stateChanged",
+      saying: false,
+      serverRevision: 4,
+      snapshot: { state: remoteState("host-state"), legalResult: { actions: [] } },
+      events: [],
+      logEntries: [],
+    });
+    guestSeat.emit({
+      type: "stateChanged",
+      saying: false,
+      serverRevision: 4,
+      snapshot: { state: remoteState("ordinary-completed"), legalResult: { actions: [] } },
+      events: [{ marker: "ordinary-done" } as unknown as GameEvent],
+      logEntries: [],
+    });
 
-    expect(ordinarySettled).toBe(true);
+    await vi.waitFor(() => expect(ordinarySettled).toBe(true));
     await expect(ordinary).resolves.toEqual({
       events: [{ marker: "ordinary-done" }],
       log_entries: [],
     });
 
+    bridge.dispose();
+    guest.dispose();
+  });
+
+  it("carries saying classification through AI follow-ups for ordinary host and guest submissions", async () => {
+    const conn = new FakeDataConnection();
+    const guest = await authenticatedGuest(conn);
+    const guestSession = {
+      send: vi.fn(async () => true),
+      drain: vi.fn(async () => {}),
+      latencyMs: 10,
+    } as unknown as PeerSession;
+
+    // Guest has an unrelated parked submission:
+    const guestParkedAction: GameAction = {
+      type: "ChooseUnlessCostBranch",
+      data: { choice: { type: "Decline" } },
+    };
+    const ordinary = guest.submitAction(guestParkedAction, 1);
+    let ordinarySettled = false;
+    void ordinary.then(
+      () => { ordinarySettled = true; },
+      () => { ordinarySettled = true; },
+    );
+
+    // Test Host submission of a saying with AI follow-up:
+    const hostBroadcasts: Array<{ saying?: boolean }> = [];
+    const host = Object.create(P2PHostAdapter.prototype) as unknown as {
+      disposed: boolean;
+      ownsAuthority: () => boolean;
+      concedingSeats: Set<number>;
+      gameRunState: string;
+      wasm: {
+        submitAction: (action: GameAction, actor: number) => Promise<{ events: GameEvent[]; log_entries: string[] }>;
+        getState: () => Promise<GameState>;
+        getAiActionProposal: (difficulty: unknown, actor: number) => Promise<{ proposal: unknown } | null>;
+        submitAiActionProposal: (p: unknown) => Promise<{ status: string; result: { events: GameEvent[]; log_entries: string[] } }>;
+      };
+      applyBrowserMutation: <T>(fn: () => Promise<T>) => Promise<{ result: T }>;
+      stampBrowserMutation: <T>(result: T) => { result: T };
+      scheduleSayPhraseExpiry: () => void;
+      broadcastStateUpdate: (transition: unknown, terminalReason?: string, saying?: boolean) => Promise<void>;
+      runAiLoop: (saying?: boolean) => Promise<void>;
+      persistAuthoritativeState: () => void;
+      submitAction: (action: GameAction, actor: number) => Promise<SubmitResult>;
+      publishHostSnapshot: (result: SubmitResult) => Promise<boolean>;
+      gameStarted: boolean;
+      pregameSeatState: { seats: Record<number, { type: string; data: { difficulty: string } }> };
+    };
+    host.disposed = false;
+    host.ownsAuthority = () => true;
+    host.concedingSeats = new Set();
+    host.gameRunState = "running";
+    host.gameStarted = true;
+    host.pregameSeatState = {
+      seats: {
+        0: { type: "Human", data: { difficulty: "Medium" } },
+        1: { type: "Human", data: { difficulty: "Medium" } },
+        2: { type: "Ai", data: { difficulty: "Medium" } },
+      },
+    };
+    host.scheduleSayPhraseExpiry = vi.fn();
+    host.persistAuthoritativeState = vi.fn();
+    host.publishHostSnapshot = vi.fn(async () => true);
+    host.applyBrowserMutation = async (fn) => ({ result: await fn() });
+    host.stampBrowserMutation = (r) => ({ result: r });
+    host.broadcastStateUpdate = vi.fn(async (_transition, _terminalReason, saying) => {
+      hostBroadcasts.push({ saying });
+      // deliver to guest connection:
+      await conn.simulateData({
+        type: "state_update",
+        revision: hostBroadcasts.length + 1,
+        saying,
+        state: remoteState("ai-state"),
+        events: [],
+        logEntries: [],
+        ...EMPTY_LEGAL_ACTIONS,
+      } as unknown as P2PMessage);
+    });
+
+    let aiRuns = 0;
+    host.wasm = {
+      submitAction: vi.fn(async () => ({ events: [], log_entries: [] })),
+      getState: vi.fn(async () => {
+        aiRuns += 1;
+        if (aiRuns === 1) {
+          // AI seat 2 is acting (e.g. Blood Artist trigger):
+          return {
+            ...remoteState("ai-turn"),
+            waiting_for: { type: "TargetSelection", data: { player: 2 } },
+            priority_player: 2,
+          } as unknown as GameState;
+        }
+        return remoteState("done");
+      }),
+      getAiActionProposal: vi.fn(async () => ({ proposal: "target-opponent" })),
+      submitAiActionProposal: vi.fn(async () => ({ status: "ok", result: { events: [], log_entries: [] } })),
+    };
+
+    // Host submits SayPhrase:
+    const sayingAction: GameAction = {
+      type: "SayPhrase",
+      data: { payment: 7, seq: 1, at_ms: 100, report: "Saying" },
+    };
+    await host.submitAction(sayingAction, 0);
+
+    // Both the initial saying broadcast and the AI follow-up broadcast carried saying: true!
+    expect(hostBroadcasts.length).toBe(2);
+    expect(hostBroadcasts[0].saying).toBe(true);
+    expect(hostBroadcasts[1].saying).toBe(true);
+    // Crucially: guest's ordinary parked submission was NOT settled by the AI follow-up!
+    expect(ordinarySettled).toBe(false);
+
+    // Now test guest submission of a saying with AI follow-up:
+    hostBroadcasts.length = 0;
+    aiRuns = 0;
+    const hostWithGuest = host as unknown as {
+      handlePendingTerminalReconnectFrame: () => boolean;
+      authenticatedGuestPlayerId: () => number;
+      guestPlayerIdForSession: () => number;
+      guestSessions: Map<number, unknown>;
+      concedingSeats: Set<number>;
+      eliminatedSeats: Set<number>;
+      sendSayingFailure: () => void;
+      send: (s: unknown, m: unknown) => Promise<boolean>;
+    };
+    hostWithGuest.handlePendingTerminalReconnectFrame = () => false;
+    hostWithGuest.authenticatedGuestPlayerId = () => 1;
+    hostWithGuest.guestPlayerIdForSession = () => 1;
+    hostWithGuest.guestSessions = new Map([[1, guestSession]]);
+    hostWithGuest.concedingSeats = new Set();
+    hostWithGuest.eliminatedSeats = new Set();
+    hostWithGuest.sendSayingFailure = vi.fn();
+    hostWithGuest.send = vi.fn(async () => true);
+    await P2PHostAdapter.prototype["handleGuestMessage"].call(
+      hostWithGuest,
+      guestSession,
+      {
+        type: "action",
+        action: sayingAction,
+        senderPlayerId: 1,
+      },
+      100,
+    );
+
+    expect(hostBroadcasts.length).toBe(2);
+    expect(hostBroadcasts[0].saying).toBe(true);
+    expect(hostBroadcasts[1].saying).toBe(true);
+    expect(ordinarySettled).toBe(false);
+
+    // Now deliver ordinary reply without saying — it settles:
+    await conn.simulateData({
+      type: "state_update",
+      revision: 10,
+      state: remoteState("guest-action-settled"),
+      events: [{ marker: "guest-resolved" } as unknown as GameEvent],
+      logEntries: [],
+      ...EMPTY_LEGAL_ACTIONS,
+    } as unknown as P2PMessage);
+
+    await vi.waitFor(() => expect(ordinarySettled).toBe(true));
     guest.dispose();
   });
 

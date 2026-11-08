@@ -10301,8 +10301,11 @@ pub(crate) fn claim_say_phrase_expiry(session: &mut GameSession) -> Option<SayPh
 /// current deadline. A saying accepted while the owner slept moves the
 /// deadline; a lapse, a rekey or another payment ends the claim.
 fn owned_say_phrase_deadline(session: &GameSession, claim: &SayPhraseExpiryClaim) -> Option<u64> {
-    if session.active_say_expiry_task != Some(claim.payment_id)
-        || session.active_say_expiry_claim != Some((claim.payment_id, claim.claim_id))
+    if session.active_say_expiry_claim
+        != Some(server_core::session::ActiveSayPhraseExpiryClaim {
+            payment_id: claim.payment_id,
+            claim_id: claim.claim_id,
+        })
     {
         return None;
     }
@@ -10529,8 +10532,11 @@ async fn handle_native_say_phrase_expiry(
     };
     let read = |session: &GameSession| {
         live_say_phrase_payment(session).map(|(payer, payment, deadline_ms)| {
+            let submitter =
+                engine::game::turn_control::authorized_submitter_for_player(&session.state, payer);
             server_core::protocol::SayPhraseExpiryTarget {
                 payer,
+                submitter,
                 payment,
                 deadline_ms,
             }

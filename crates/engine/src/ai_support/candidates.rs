@@ -1,6 +1,7 @@
 use std::cell::OnceCell;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::game::casting;
 use crate::game::combat::AttackTarget;
@@ -31,6 +32,7 @@ use crate::types::mana::ManaType;
 use crate::types::match_config::DeckCardCount;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
+use crate::types::un_actions::SayPhraseReport;
 use crate::types::zones::Zone;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2923,21 +2925,38 @@ pub fn candidate_actions_broad_with_probe(
             )))
             .collect(),
         // Un-card (no CR entry) + CR 118.12a: a TIMED spoken payment (Toy
-        // Boat's "Say \"Toy Boat\" quickly") is paid only by host-stamped
-        // `GameAction::SayPhrase` observations, which carry a real-time instant
-        // no candidate list can author — the same reason a
-        // `WaitingFor::PhysicalContest` offers no candidates. The boolean pay
-        // answer would be judged unpaid, so it is not advertised; declining is
-        // the only exact response, and the saying itself arrives through the
-        // host's input channel.
+        // Boat's "Say \"Toy Boat\" quickly") is paid by host-stamped
+        // `GameAction::SayPhrase` observations. The AI can author a saying using
+        // its local clock (it runs in the engine process); relay clients receive
+        // the prompt through the generic interaction projection and submit a
+        // `SayPhrase` action that the host stamps. Offer both the saying and the
+        // explicit decline so the AI can choose to pay or let the effect happen.
         WaitingFor::UnlessPayment { player, cost, .. }
             if crate::game::un_actions::is_timed_saying(cost) =>
         {
-            vec![candidate(
-                GameAction::PayUnlessCost { pay: false },
-                TacticalClass::Selection,
-                Some(*player),
-            )]
+            let payment_id = state.say_payment.as_ref().map(|p| p.id).unwrap_or(0);
+            let next_seq = state.say_payment.as_ref().map(|p| p.said + 1).unwrap_or(1);
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            vec![
+                candidate(
+                    GameAction::SayPhrase {
+                        payment: payment_id,
+                        seq: next_seq,
+                        at_ms: now_ms,
+                        report: SayPhraseReport::Saying,
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ),
+                candidate(
+                    GameAction::PayUnlessCost { pay: false },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ),
+            ]
         }
         // CR 118.12: "Counter unless pays" — opponent chooses pay or decline.
         WaitingFor::UnlessPayment { player, .. } => {

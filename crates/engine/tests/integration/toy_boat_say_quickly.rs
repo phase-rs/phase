@@ -746,22 +746,45 @@ fn a_restored_payment_lapses_on_its_retained_clock() {
     assert_eq!(runner.state().objects[&toy_boat].zone, Zone::Battlefield);
 }
 
-/// The exact-candidate surface (AI and the interaction API) never advertises a
-/// boolean "pay" for a timed spoken cost — the engine would judge it unpaid —
-/// and offers the decline, which is the only answer a candidate list can
-/// author. The saying itself arrives as a host-stamped observation.
+/// The exact-candidate surface (AI and the interaction API) offers both the
+/// saying (`SayPhrase`) and the explicit decline (`PayUnlessCost { pay: false }`).
+/// The AI can author a saying using its local clock; relay clients receive the
+/// prompt through the generic interaction projection and submit a `SayPhrase`
+/// action that the host stamps. The interaction API sorts candidates via
+/// `GameAction::cmp_stable`, which orders `PayUnlessCost` before `SayPhrase`
+/// (by `GameActionKind` discriminant), so index 0 is the explicit decline and
+/// index 1 is the saying.
 #[test]
-fn timed_spoken_prompt_advertises_only_the_decline() {
+fn timed_spoken_prompt_advertises_both_saying_and_decline() {
     let (mut runner, _toy_boat) = setup_at_unless_prompt(1, true);
     let actions = legal_actions(runner.state());
     assert_eq!(
-        actions,
-        vec![GameAction::PayUnlessCost { pay: false }],
-        "only the decline is an exact response to a timed spoken payment"
+        actions.len(),
+        2,
+        "legal actions offer both saying and decline"
     );
+    // Stable sort puts PayUnlessCost before SayPhrase.
+    assert_eq!(
+        actions[0],
+        GameAction::PayUnlessCost { pay: false },
+        "index 0 is the decline"
+    );
+    match &actions[1] {
+        GameAction::SayPhrase {
+            payment,
+            seq,
+            report,
+            ..
+        } => {
+            assert_eq!(*payment, 1);
+            assert_eq!(*seq, 1);
+            assert_eq!(*report, SayPhraseReport::Saying);
+        }
+        other => panic!("expected SayPhrase at index 1, got {other:?}"),
+    }
 
     // CR 118.12a: The interaction API derives exact choices for the prompt.
-    // Confirm it advertises only the decline choice, matching legal_actions.
+    // Confirm it advertises both the saying and the decline.
     engine::game::interaction::bind_interaction_authority(
         runner.state_mut(),
         engine::types::interaction::InteractionSessionId("say-prompt".to_string()),
@@ -786,24 +809,53 @@ fn timed_spoken_prompt_advertises_only_the_decline() {
     };
     assert_eq!(
         choices.len(),
-        1,
-        "interaction choices offer only the decline"
+        2,
+        "interaction choices offer both saying and decline"
     );
-
-    let submission = engine::types::interaction::InteractionSubmission {
+    // Index 0: Explicit decline (PayUnlessCost { pay: false })
+    let submission_decline = engine::types::interaction::InteractionSubmission {
         interaction_id: opportunity.interaction_id.clone(),
         response: engine::types::interaction::InteractionResponse::Choose {
             choice_id: choices[0].id.clone(),
         },
     };
-    let resolved =
-        engine::game::interaction::resolve_interaction_response(runner.state(), P0, &submission)
-            .expect("resolves interaction response");
+    let resolved_decline = engine::game::interaction::resolve_interaction_response(
+        runner.state(),
+        P0,
+        &submission_decline,
+    )
+    .expect("resolves interaction response");
     assert_eq!(
-        resolved,
+        resolved_decline,
         GameAction::PayUnlessCost { pay: false },
         "resolved action is the decline"
     );
+    // Index 1: Say the phrase
+    let submission_say = engine::types::interaction::InteractionSubmission {
+        interaction_id: opportunity.interaction_id.clone(),
+        response: engine::types::interaction::InteractionResponse::Choose {
+            choice_id: choices[1].id.clone(),
+        },
+    };
+    let resolved_say = engine::game::interaction::resolve_interaction_response(
+        runner.state(),
+        P0,
+        &submission_say,
+    )
+    .expect("resolves interaction response");
+    match resolved_say {
+        GameAction::SayPhrase {
+            payment,
+            seq,
+            report,
+            ..
+        } => {
+            assert_eq!(payment, 1);
+            assert_eq!(seq, 1);
+            assert_eq!(report, SayPhraseReport::Saying);
+        }
+        other => panic!("expected SayPhrase at index 1, got {other:?}"),
+    }
 }
 
 /// A host relaying a remote seat's observation replaces the claimed instant

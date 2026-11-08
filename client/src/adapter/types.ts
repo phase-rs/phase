@@ -1456,10 +1456,12 @@ export interface SayPhrasePayment {
 }
 
 /// Mirrors `server_core::protocol::SayPhraseExpiryTarget`: the live timed
-/// spoken payment an expiry authority must time — its payer, engine-minted
-/// payment id and the epoch-millisecond deadline of the next saying.
+/// spoken payment an expiry authority must time — its payer, authorized
+/// submitter, engine-minted payment id and the epoch-millisecond deadline of
+/// the next saying.
 export interface SayPhraseExpiryTarget {
   payer: PlayerId;
+  submitter: PlayerId;
   payment: number;
   deadline_ms: number;
 }

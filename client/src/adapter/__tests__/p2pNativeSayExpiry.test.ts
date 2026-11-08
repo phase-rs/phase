@@ -229,7 +229,7 @@ describe("native P2P spoken-payment expiry", () => {
     await vi.waitFor(() => expect(hostSeat.sayPhraseExpiry).toHaveBeenCalledTimes(3));
 
     const deadline = NOW() + 60_000;
-    newer.resolve({ payer: 0, payment: 7, deadline_ms: deadline });
+    newer.resolve({ payer: 0, submitter: 0, payment: 7, deadline_ms: deadline });
     await vi.waitFor(() => expect(host.sayExpiryPayment).toBe(7));
     expect(host.sayExpiryDeadline).toBe(deadline);
     expect(host.sayExpiryTimer).not.toBeNull();
@@ -257,13 +257,14 @@ describe("native P2P spoken-payment expiry", () => {
       // The first read receives no reply / times out with an error.
       hostSeat.sayPhraseExpiry.mockRejectedValueOnce(new Error("request timed out with no reply"));
 
-      // Trigger multiple schedules while absent:
+      // Trigger scheduled refresh and waking timer read concurrently while absent:
       host.scheduleSayPhraseExpiry();
-      host.scheduleSayPhraseExpiry();
+      const timerRead = host.expireSayPhrase(7, 0);
 
-      // Only one in-flight read occurred:
+      // Only one in-flight read occurred (waking timer read shares the in-flight scheduled read):
       expect(hostSeat.sayPhraseExpiry).toHaveBeenCalledTimes(1);
 
+      await timerRead;
       // Flush microtasks for rejection:
       await Promise.resolve();
       await Promise.resolve();
@@ -273,6 +274,7 @@ describe("native P2P spoken-payment expiry", () => {
       const deadline = NOW() + 1000;
       hostSeat.sayPhraseExpiry.mockResolvedValueOnce({
         payer: 1,
+        submitter: 1,
         payment: 7,
         deadline_ms: deadline,
       });
@@ -284,10 +286,85 @@ describe("native P2P spoken-payment expiry", () => {
       expect(host.sayExpiryPayment).toBe(7);
       expect(host.sayExpiryDeadline).toBe(deadline);
       expect(bridge.isGuestAttached(1)).toBe(false);
+
+      // Advance timer past deadline to exercise eventual lapse:
+      hostSeat.sayPhraseExpiry.mockImplementation(async (lapse?: number) => {
+        if (lapse === 7) return null; // lapsed
+        return { payer: 1, submitter: 1, payment: 7, deadline_ms: deadline };
+      });
+      await vi.advanceTimersByTimeAsync(1001);
+      await Promise.resolve();
+      await Promise.resolve();
+      // The expiry timer fired and requested the lapse on hostSeat:
+      expect(hostSeat.sayPhraseExpiry).toHaveBeenCalledWith(7);
+      expect(host.sayExpiryPayment).toBeNull();
       host.clearSayExpiryTimer();
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("drains through the engine-authorized seat under turn control and revalidates when authority changes", async () => {
+    const host = makeHost();
+    const hostSeat = new FakeSeatClient(0, viewState("host"));
+    const controllerSeat = new FakeSeatClient(1, viewState("controller", 1));
+    const payerSeat = new FakeSeatClient(2, viewState("payer", 2));
+    await makeBridge(host, [hostSeat, controllerSeat, payerSeat]);
+
+    // Scenario 1: Timely queued controller frame.
+    // Payer is seat 2, but under turn control (CR 723.5 / Mindslaver), controller/submitter is seat 1.
+    let controllerFrameApplied = false;
+    const controllerSession = {
+      drain: vi.fn(async () => {
+        // Simulates timely saying frame queued on controller's WebRTC channel arriving and being applied:
+        controllerFrameApplied = true;
+      }),
+    };
+    const payerSession = {
+      drain: vi.fn(async () => {}),
+    };
+    host.guestSessions.set(1, controllerSession);
+    host.guestSessions.set(2, payerSession);
+
+    // Initial read: payer is 2, submitter is 1 (distinct seats).
+    // When controllerSession drains, controllerFrameApplied becomes true and the engine advances deadline.
+    hostSeat.sayPhraseExpiry.mockImplementation(async (lapse?: number) => {
+      if (lapse !== undefined) return null;
+      if (controllerFrameApplied) {
+        // A timely saying from controller moved the deadline:
+        return { payer: 2, submitter: 1, payment: 7, deadline_ms: NOW() + 5000 };
+      }
+      return { payer: 2, submitter: 1, payment: 7, deadline_ms: NOW() - 1 };
+    });
+
+    host.sayExpiryTimerGeneration = 1;
+    host.sayExpiryPayment = 7;
+    await host.expireSayPhrase(7, 1);
+
+    // Drained the authorized controller seat (1), NOT the semantic payer (2):
+    expect(controllerSession.drain).toHaveBeenCalled();
+    expect(payerSession.drain).not.toHaveBeenCalled();
+    // Because the timely frame arrived during drain, lapse was NOT called!
+    expect(hostSeat.sayPhraseExpiry).not.toHaveBeenCalledWith(7);
+    // And expiry was re-armed with the new deadline:
+    expect(host.sayExpiryDeadline).toBeGreaterThan(NOW());
+
+    // Scenario 2: Controller stops responding after the first saying.
+    // Expiry fires past the deadline. Controller sends nothing more.
+    controllerFrameApplied = false;
+    hostSeat.sayPhraseExpiry.mockImplementation(async (lapse?: number) => {
+      if (lapse === 7) return null; // successfully lapsed under controller authority
+      return { payer: 2, submitter: 1, payment: 7, deadline_ms: NOW() - 1 };
+    });
+    host.sayExpiryTimerGeneration = 2;
+    host.sayExpiryPayment = 7;
+    await host.expireSayPhrase(7, 2);
+
+    // Drain was called again on controller seat:
+    expect(controllerSession.drain).toHaveBeenCalledTimes(2);
+    // Lapse was submitted and settled:
+    expect(hostSeat.sayPhraseExpiry).toHaveBeenCalledWith(7);
+    expect(host.sayExpiryPayment).toBeNull();
   });
 
   it("lapses through the host-only authority and leaves a suspended payer absent", async () => {
@@ -313,14 +390,14 @@ describe("native P2P spoken-payment expiry", () => {
     hostSeat.sayPhraseExpiry.mockImplementation(async (lapse?: number) => {
       order.push(lapse === undefined ? "read" : `lapse ${lapse}`);
       expect(bridge.isGuestAttached(1)).toBe(false);
-      return lapse === undefined ? { payer: 1, payment: 7, deadline_ms: NOW() - 1 } : null;
+      return lapse === undefined ? { payer: 1, submitter: 1, payment: 7, deadline_ms: NOW() - 1 } : null;
     });
     host.sayExpiryTimerGeneration = 3;
     host.sayExpiryPayment = 7;
 
     await host.expireSayPhrase(7, 3);
 
-    expect(order).toEqual(["read", "drain", "lapse 7"]);
+    expect(order).toEqual(["read", "drain", "read", "lapse 7"]);
     expect(reconnect).not.toHaveBeenCalled();
     expect(payerSeat.submitAction).not.toHaveBeenCalled();
     expect(hostSeat.submitAction).not.toHaveBeenCalled();
@@ -348,6 +425,7 @@ describe("native P2P spoken-payment expiry", () => {
     // The socket is open and payer is absent (payer === 1).
     hostSeat.sayPhraseExpiry.mockImplementation(async () => ({
       payer: 1,
+      submitter: 1,
       payment: 7,
       deadline_ms: NOW() - 1,
     }));
@@ -357,7 +435,7 @@ describe("native P2P spoken-payment expiry", () => {
     host.scheduleSayPhraseExpiry = schedule;
 
     await host.expireSayPhrase(7, 1);
-    expect(hostSeat.sayPhraseExpiry.mock.calls).toEqual([[undefined], [7]]);
+    expect(hostSeat.sayPhraseExpiry.mock.calls).toEqual([[undefined], [undefined], [7]]);
     expect(drain).toHaveBeenCalled();
     expect(bridge.isGuestAttached(1)).toBe(false);
     expect(schedule).not.toHaveBeenCalled();
@@ -388,7 +466,7 @@ describe("native P2P spoken-payment expiry", () => {
     const hostSeat = new FakeSeatClient(0, viewState("host"));
     const guestSeat = new FakeSeatClient(1, viewState("guest", 1));
     const deadline = NOW() + 60_000;
-    hostSeat.sayPhraseExpiry.mockImplementation(async () => ({ payer: 0, payment: 7, deadline_ms: deadline }));
+    hostSeat.sayPhraseExpiry.mockImplementation(async () => ({ payer: 0, submitter: 0, payment: 7, deadline_ms: deadline }));
     await makeBridge(host, [hostSeat, guestSeat]);
 
     // The sidecar withholds revision 3 from both seats; only the submitting

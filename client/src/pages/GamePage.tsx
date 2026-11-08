@@ -3962,6 +3962,7 @@ function SayPhrasePanel({
   // judged by the engine and this panel only renders the result.
   const said = sayPayment?.said ?? 0;
   const total = Math.max(1, sayPayment?.owed ?? repetitions);
+  const required = total;
   const paymentId = sayPayment?.id ?? 0;
   // Continue the host sequence the engine already accepted. A client that
   // reconnects mid-payment must not replay a sequence number: the engine rejects
@@ -4103,9 +4104,15 @@ function SayPhrasePanel({
   // A fresh prompt with said = 0 has no pause to measure; the window starts
   // on the first click. A restored payment (said > 0) arms from the engine's
   // retained deadline_ms.
+  //
+  // CR 118.12a: the pace times the gap BETWEEN sayings. A payment requiring
+  // only one saying (required === 1) has no gap to measure and must never
+  // expire before that saying is made. Once said >= required the payment is
+  // complete and no timer runs.
   useEffect(() => {
     // No saying made yet and no local click: no pause to time, don't run.
-    if (said === 0 && lastSaidAt.current === null) {
+    // Also don't run if the payment is already complete (said >= required).
+    if ((said === 0 && lastSaidAt.current === null) || said >= required) {
       if (timerRef.current) {
         clearTimeout(timerRef.current);
         timerRef.current = undefined;
@@ -4129,7 +4136,7 @@ function SayPhrasePanel({
       if (timerRef.current) clearTimeout(timerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dispatch, paymentId, quickWindowMs, retainedDeadline, said]);
+  }, [dispatch, paymentId, quickWindowMs, retainedDeadline, said, required]);
 
   const submitSaying = (at: number, retriesLeft: number) => {
     seq.current += 1;
@@ -4195,8 +4202,6 @@ function SayPhrasePanel({
     deadlineRef.current = at + quickWindowMs;
     submitSaying(at, 2);
   };
-
-  const required = total;
 
   return (
     <AnimatePresence>

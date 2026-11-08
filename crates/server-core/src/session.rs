@@ -648,12 +648,17 @@ pub struct GameSession {
     /// Runtime state for the online sustained-clicking contests (Eye to Eye,
     /// Mouth to Mouth). Never persisted; see `crate::contest`.
     pub contest: crate::contest::ContestRuntime,
-    /// Payment ID of the live background expiry task for spoken payments, if one is running.
-    pub active_say_expiry_task: Option<u64>,
-    /// Active expiry claim identity `(payment_id, claim_id)`.
-    pub active_say_expiry_claim: Option<(u64, u64)>,
+    /// Active expiry claim identity for spoken payments, if one is running.
+    pub active_say_expiry_claim: Option<ActiveSayPhraseExpiryClaim>,
     /// Monotonic claim allocator for spoken-payment expiry owners.
     pub next_say_expiry_claim_id: u64,
+}
+
+/// Active expiry claim identity for a live spoken-payment background expiry task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveSayPhraseExpiryClaim {
+    pub payment_id: u64,
+    pub claim_id: u64,
 }
 
 impl GameSession {
@@ -661,21 +666,27 @@ impl GameSession {
     /// if this caller claimed it (no task was running for this payment), or `None`
     /// if a task for this payment ID is already live.
     pub fn claim_say_phrase_expiry(&mut self, payment_id: u64) -> Option<u64> {
-        if self.active_say_expiry_task == Some(payment_id) {
+        if self.active_say_expiry_claim.as_ref().map(|c| c.payment_id) == Some(payment_id) {
             None
         } else {
             self.next_say_expiry_claim_id += 1;
             let claim_id = self.next_say_expiry_claim_id;
-            self.active_say_expiry_task = Some(payment_id);
-            self.active_say_expiry_claim = Some((payment_id, claim_id));
+            self.active_say_expiry_claim = Some(ActiveSayPhraseExpiryClaim {
+                payment_id,
+                claim_id,
+            });
             Some(claim_id)
         }
     }
 
     /// Releases the active background expiry task claim if it matches `(payment_id, claim_id)`.
     pub fn release_say_phrase_expiry(&mut self, payment_id: u64, claim_id: u64) {
-        if self.active_say_expiry_claim == Some((payment_id, claim_id)) {
-            self.active_say_expiry_task = None;
+        if self.active_say_expiry_claim
+            == Some(ActiveSayPhraseExpiryClaim {
+                payment_id,
+                claim_id,
+            })
+        {
             self.active_say_expiry_claim = None;
         }
     }
@@ -1755,7 +1766,6 @@ impl GameSession {
             takeback,
             deck_pools_cache: None,
             contest: Default::default(),
-            active_say_expiry_task: None,
             active_say_expiry_claim: None,
             next_say_expiry_claim_id: 0,
         })
@@ -2794,7 +2804,6 @@ impl SessionManager {
             takeback,
             deck_pools_cache: None,
             contest: Default::default(),
-            active_say_expiry_task: None,
             active_say_expiry_claim: None,
             next_say_expiry_claim_id: 0,
         };
@@ -8284,7 +8293,6 @@ mod tests {
             takeback: TakebackLedger::new(1),
             deck_pools_cache: None,
             contest: Default::default(),
-            active_say_expiry_task: None,
             active_say_expiry_claim: None,
             next_say_expiry_claim_id: 0,
         };
