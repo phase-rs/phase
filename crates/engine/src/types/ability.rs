@@ -6060,6 +6060,19 @@ impl ResolvedAbility {
                 .as_ref()
                 .is_some_and(MultiTargetSpec::min_is_fixed_zero)
     }
+
+    /// CR 115.6 + CR 601.2c: Whether one declared `Fight` target slot may be
+    /// left unchosen. Each instance of "target" is announced separately, and
+    /// the "up to one" (`multi_target` minimum zero) a fight prints belongs to
+    /// the creature being fought ("target creature you control fights up to one
+    /// target creature you don't control"), so it never makes the fighter
+    /// optional. The fighter follows only the ability-wide `optional_targeting`.
+    pub fn fight_slot_is_optional(&self, role: FightSlotRole) -> bool {
+        match role {
+            FightSlotRole::Subject => self.optional_targeting,
+            FightSlotRole::Opponent => self.targeting_is_optional(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

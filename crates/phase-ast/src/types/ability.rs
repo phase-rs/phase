@@ -26666,16 +26666,35 @@ pub fn fight_subject_needs_target_slot(subject: &TargetFilter) -> bool {
     }
 }
 
+/// CR 701.14a: Which of a fight's two creatures a declared target slot names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FightSlotRole {
+    /// The fighter (`Effect::Fight::subject`): "target creature you control
+    /// fights …".
+    Subject,
+    /// The creature it fights (`Effect::Fight::target`).
+    Opponent,
+}
+
+/// CR 601.2c + CR 701.14a: Only declared fighters occupy announcement slots,
+/// each tagged with the fighter it names, in announcement order.
+pub fn fight_declared_slots<'a>(
+    subject: &'a TargetFilter,
+    target: &'a TargetFilter,
+) -> impl Iterator<Item = (FightSlotRole, &'a TargetFilter)> {
+    fight_subject_needs_target_slot(subject)
+        .then_some((FightSlotRole::Subject, subject))
+        .into_iter()
+        .chain(std::iter::once((FightSlotRole::Opponent, target)))
+        .filter(|(_, filter)| !filter.is_context_ref())
+}
+
 /// CR 601.2c + CR 701.14a: Only declared fighters occupy announcement slots.
 pub fn fight_declared_slot_filters<'a>(
     subject: &'a TargetFilter,
     target: &'a TargetFilter,
 ) -> impl Iterator<Item = &'a TargetFilter> {
-    fight_subject_needs_target_slot(subject)
-        .then_some(subject)
-        .into_iter()
-        .chain(std::iter::once(target))
-        .filter(|filter| !filter.is_context_ref())
+    fight_declared_slots(subject, target).map(|(_, filter)| filter)
 }
 
 /// CR 115.1a + CR 601.2c: the effect's announced roles, without resolved-node

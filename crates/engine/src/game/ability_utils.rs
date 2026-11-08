@@ -6,7 +6,7 @@ use crate::types::ability::{
     effect_needs_parent_target_combat_relation_slot, effect_needs_target_creature_quantity_slot,
     effect_references_target_player, effect_stack_target_declaration_matching,
     effect_target_filter_references_chosen_player, effect_target_slot_filter,
-    extract_target_filter_from_effect, fight_declared_slot_filters,
+    extract_target_filter_from_effect, fight_declared_slot_filters, fight_declared_slots,
     fight_subject_needs_target_slot, filter_references_target_opponent, is_any_target_filter,
     mass_all_target_filter, move_counter_stack_target_filters,
     one_sided_fight_source_supplies_quantity_creature, paired_subject_filters,
@@ -5366,7 +5366,7 @@ fn collect_target_slots_inner(
     // fights …" only surface the opponent as a target slot — the fighter is the
     // ability source or the host permanent.
     if let Effect::Fight { subject, target } = &ability.effect {
-        for filter in fight_declared_slot_filters(subject, target) {
+        for (role, filter) in fight_declared_slots(subject, target) {
             // CR 608.2c + CR 701.14a: A context-ref fighter (SelfRef, ParentTarget,
             // ParentTargetSlot, TrackedSet — the reciprocal "those creatures fight
             // each other") resolves from chain context, never a cast-time choice,
@@ -5377,16 +5377,17 @@ fn collect_target_slots_inner(
             // cast (Malamet Battle Glyph).
             let legal_targets =
                 legal_targets_for_ability_filter(state, ability, filter, acc.built());
-            // CR 115.6: "up to one" is optional even when `optional_targeting` is
-            // false (`targeting_is_optional` also reads `multi_target.min == 0`).
-            if legal_targets.is_empty() && !ability.targeting_is_optional() {
+            // CR 115.6 + CR 601.2c: optionality is per slot — "up to one" frees
+            // only the creature being fought, never the fighter.
+            let optional = ability.fight_slot_is_optional(role);
+            if legal_targets.is_empty() && !optional {
                 return Err(no_legal_target_slots());
             }
             acc.push(
                 filter,
                 TargetSelectionSlot {
                     legal_targets,
-                    optional: ability.targeting_is_optional(),
+                    optional,
                     chooser: None,
                     effect_kind: acc.current_effect_kind,
                     effect_detail: acc.current_effect_detail,
@@ -7555,13 +7556,13 @@ fn collect_target_slot_specs(
     // CR 701.14a + CR 115.1: Mirror the dual-fighter `Fight` branch in
     // `collect_target_slots` so per-slot specs line up one-for-one.
     if let Effect::Fight { subject, target } = &ability.effect {
-        for filter in fight_declared_slot_filters(subject, target) {
+        for (role, filter) in fight_declared_slots(subject, target) {
             // Keep per-slot metadata aligned with the surfaced cast-time slots.
             let id = TargetInstanceId(*next_instance);
             *next_instance += 1;
             specs.push(TargetSlotSpec {
                 filter: filter.clone(),
-                optional: ability.targeting_is_optional(),
+                optional: ability.fight_slot_is_optional(role),
                 instance: id,
                 group: ability.declares_chosen_group,
                 path: Vec::new(),
@@ -10525,25 +10526,19 @@ fn assign_targets_recursive(
     }
 
     if let Effect::Fight { subject, target } = &ability.effect {
-        let mut filters: Vec<&TargetFilter> = Vec::new();
-        if fight_subject_needs_target_slot(subject) {
-            filters.push(subject);
-        }
-        filters.push(target);
         // Mirror `collect_target_slots`: a context-ref fighter (SelfRef,
         // ParentTarget, ParentTargetSlot, reciprocal-fight TrackedSet)
         // surfaces no slot, so it consumes no selected target here either —
         // otherwise the assign/slot-gen counts diverge and a valid two-target
         // selection reports a spurious "Missing required target".
-        let slot_count = filters
-            .into_iter()
-            .filter(|filter| !filter.is_context_ref())
-            .count();
-        for _ in 0..slot_count {
+        let roles: Vec<_> = fight_declared_slots(subject, target)
+            .map(|(role, _)| role)
+            .collect();
+        for role in roles {
             if let Some(chosen) = targets.get(*next_target) {
                 ability.push_chosen_target(chosen.clone());
                 *next_target += 1;
-            } else if !ability.targeting_is_optional() {
+            } else if !ability.fight_slot_is_optional(role) {
                 return Err(EngineError::InvalidAction(
                     "Missing required target".to_string(),
                 ));
@@ -10939,19 +10934,13 @@ fn assign_selected_slots_recursive(
     }
 
     if let Effect::Fight { subject, target } = &ability.effect {
-        let mut filters: Vec<&TargetFilter> = Vec::new();
-        if fight_subject_needs_target_slot(subject) {
-            filters.push(subject);
-        }
-        filters.push(target);
         // Mirror `collect_target_slots` and `assign_targets_recursive`:
         // context-reference fighters resolve from the ability chain, so they
         // consume no interactive target-selection slot.
-        let slot_count = filters
-            .into_iter()
-            .filter(|filter| !filter.is_context_ref())
-            .count();
-        for _ in 0..slot_count {
+        let roles: Vec<_> = fight_declared_slots(subject, target)
+            .map(|(role, _)| role)
+            .collect();
+        for role in roles {
             let Some(selected_slot) = selected_slots.get(*next_slot) else {
                 return Err(EngineError::InvalidAction(
                     "Missing target selection".to_string(),
@@ -10959,7 +10948,9 @@ fn assign_selected_slots_recursive(
             };
             match selected_slot {
                 Some(chosen) => ability.push_chosen_target(chosen.clone()),
-                None if ability.targeting_is_optional() => {}
+                // CR 115.6 + CR 601.2c: a declined slot is legal only when that
+                // fighter's own slot is optional.
+                None if ability.fight_slot_is_optional(role) => {}
                 None => {
                     return Err(EngineError::InvalidAction(
                         "Missing required target".to_string(),
