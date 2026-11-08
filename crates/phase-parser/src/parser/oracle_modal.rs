@@ -20,7 +20,7 @@ use crate::types::triggers::TriggerMode;
 
 use super::oracle::{find_activated_colon, strip_activated_constraints};
 use super::oracle_classifier::has_trigger_prefix;
-use super::oracle_cost::parse_oracle_cost;
+use super::oracle_cost::{parse_oracle_cost, parse_oracle_cost_in};
 #[cfg(test)]
 use super::oracle_effect::lower_ability_ir;
 use super::oracle_effect::{
@@ -44,6 +44,7 @@ use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives::{
     self as nom_primitives, scan_at_word_boundaries, scan_preceded,
 };
+use super::oracle_nom::target::CostChannel;
 use super::oracle_quantity::parse_cda_quantity;
 #[cfg(test)]
 use super::oracle_static::parse_static_line;
@@ -1382,9 +1383,17 @@ pub(crate) fn lower_oracle_block_ir(
                 // the trigger parser already produced.
                 let body = match &reflexive_parent {
                     Some(ReflexiveModalParent::MayPay(cost_text)) => {
+                        // CR 118.12 + CR 603.12 + CR 608.2c: "you may <cost>. When
+                        // you do, …" is an optional payment made as the ability
+                        // resolves, not a printed source cost, so a bare "it" in
+                        // it names an object the trigger introduced (Gorbag of
+                        // Minas Morgul's "you may sacrifice it") and the cost
+                        // grammar's sacrifice and self-exile legs do not bind it
+                        // to the source.
+                        let cost = parse_oracle_cost_in(cost_text, CostChannel::ResolutionPayment);
                         TriggerBody::Reflexive(Box::new(ReflexiveParentIr {
                             parent: ReflexiveParent::MayPay {
-                                cost: parse_oracle_cost(cost_text),
+                                cost: cost.clone(),
                                 payment_chain: Some(
                                     parse_ability_ir_with_context(
                                         cost_text,
@@ -1407,7 +1416,7 @@ pub(crate) fn lower_oracle_block_ir(
                                 cost_text,
                                 AbilityKind::Spell,
                                 parsed_clause(Effect::PayCost {
-                                    cost: parse_oracle_cost(cost_text),
+                                    cost,
                                     scale: None,
                                     payer: TargetFilter::Controller,
                                 }),
