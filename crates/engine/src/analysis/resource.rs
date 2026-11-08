@@ -2175,10 +2175,9 @@ impl PeriodicDelta {
     ///
     /// A [`TargetSchedule::Piecewise`] — the existing pre-declared switch-over, whose switch
     /// points are fixed in advance and therefore CR 732.2a-predictable — replacing only the pins
-    /// of the charged slots that took life (`taking_slots`) on `observed`, the offer's own
-    /// published declaration. Every other pin and the `ReplayMode` are carried through untouched,
-    /// so the witness differs from a declaration the publisher already validated in exactly the
-    /// aim.
+    /// of the slots it re-aims on `observed`, the offer's own published declaration. Every other
+    /// pin and the `ReplayMode` are carried through untouched, so the witness differs from a
+    /// declaration the publisher already validated in exactly the aim.
     ///
     /// Each segment aims at one living reachable seat, and each re-aimed slot switches to the next
     /// segment at its first resolution after the previous seat's departure, so no segment aims at
@@ -2190,14 +2189,12 @@ impl PeriodicDelta {
     /// `legal_targets` order, except that a seat where a slot measured taking nothing — the
     /// observation's own seat for a non-taking slot, or a seat `seat_takes` measured at 0 for a
     /// taking one — goes last, with that slot pinned there, unless it is built with
-    /// `WitnessParking::Never`, because that slot keeps the aim its zero was measured at and its
-    /// take at any other seat is unmeasured.
+    /// `WitnessParking::Never`.
     ///
     /// # The two refusals, and the one over-charge
     ///
-    /// `None` where no charged slot took life, so there is none to re-aim: the offer's own
-    /// declaration is then the only declaration there is and a witness would be a copy of it. The
-    /// walk also stops at a segment whose start COLLIDES with an earlier one, because
+    /// `None` where no slot is left to re-aim: none took life, or every one that did is parked.
+    /// The walk also stops at a segment whose start COLLIDES with an earlier one, because
     /// `evaluate_schedule` selects the greatest start at or below an index and a duplicated start
     /// is a segment no drive reads.
     ///
@@ -2238,7 +2235,7 @@ impl PeriodicDelta {
         if !parks {
             charged.extend(self.victim_slot.iter().map(|(slot, _)| slot));
         }
-        // A slot that took nothing keeps the one seat the observation pinned it to.
+        // With parking, a slot that took nothing keeps the seat the observation pinned it to.
         let seen = decision_template::resolve(observed, 0, state).unwrap_or_default();
         let mut parked: BTreeSet<PlayerId> = self
             .victim_slot

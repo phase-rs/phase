@@ -3433,8 +3433,9 @@ pub(crate) fn perform_declared_on(
     )
 }
 
-/// CR 119.3 + CR 601.2c: per charged slot, the life one resolution takes at its recorded aim and
-/// at each other living opponent, replayed from the offer frame with the slot declared there.
+/// CR 119.3 + CR 601.2c: per slot that took life at an opponent, the life one resolution takes at
+/// its recorded aim and at each reachable living opponent where that is at most the recorded take,
+/// replayed from the offer frame with the slot declared there.
 fn measure_seat_takes(
     frame: &GameState,
     holder: PlayerId,
