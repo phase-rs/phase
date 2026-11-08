@@ -10334,13 +10334,15 @@ pub(crate) static SAY_EXPIRY_DRAINS: std::sync::Mutex<Vec<(String, u64)>> =
 /// the table (replace the host's socket, let an AI seat reply) at exactly the
 /// moment the expiry authority has let go of the session lock.
 #[cfg(test)]
-pub(crate) static SAY_EXPIRY_DRAIN_GATES: std::sync::Mutex<
-    Vec<(
-        String,
-        std::sync::Arc<tokio::sync::Notify>,
-        std::sync::Arc<tokio::sync::Notify>,
-    )>,
-> = std::sync::Mutex::new(Vec::new());
+pub(crate) type SayExpiryDrainGate = (
+    String,
+    std::sync::Arc<tokio::sync::Notify>,
+    std::sync::Arc<tokio::sync::Notify>,
+);
+
+#[cfg(test)]
+pub(crate) static SAY_EXPIRY_DRAIN_GATES: std::sync::Mutex<Vec<SayExpiryDrainGate>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// Drain the submitter's already-received frames so a timely saying still in
 /// that seat's ingress is applied before the lapse is judged. A submitter with no

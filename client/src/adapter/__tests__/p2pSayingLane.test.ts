@@ -807,7 +807,11 @@ describe("P2P saying reply lane", () => {
       return true;
     });
 
-    // 1. Detached expiry first publication (lapse) driven through the real publication boundary:
+    // 1. Detached expiry first publication (lapse) driven through the real publication boundary.
+    // These seat events stand for what the real `WebSocketAdapter` emits for the
+    // sidecar's marked frames; that the adapter produces them from the raw
+    // publication is covered in ws-adapter.test.ts ("hands a native bridge the
+    // sidecar's saying marker from a detached publication").
     hostSeat.emit({
       type: "stateChanged",
       saying: true,

@@ -21,6 +21,7 @@ import {
   PROTOCOL_VERSION,
   WebSocketAdapter,
 } from "../ws-adapter";
+import { NativeP2PBridge } from "../p2p-adapter";
 import { AdapterError, AdapterErrorCode, supportsMatchConcede, supportsTakeback, supportsTurnRewind } from "../types";
 import type { FormatConfig, GameAction, GameState, SubmitResult } from "../types";
 import type {
@@ -306,6 +307,64 @@ describe("WebSocketAdapter", () => {
       }),
     );
     await initPromise;
+  });
+
+  it("hands a native bridge the sidecar's saying marker from a detached publication", async () => {
+    // Toy Boat: the sidecar lapses a spoken payment with no command of this
+    // seat's in flight, and its AI follow-up is withheld. The only evidence
+    // that these revisions were a saying is the publisher's `saying` field on
+    // the raw frames, so the bridge must learn it from this adapter's events.
+    const onRevision = vi.fn(async (_revision: number, _reports: unknown, _saying?: boolean) => {});
+    const bridge = new NativeP2PBridge(
+      { main_deck: [], sideboard: [] } as never,
+      "Host",
+      1,
+      undefined,
+      undefined,
+      { expectedServerVersion: "test" } as never,
+      onRevision,
+      async () => {},
+      async () => {},
+      async () => {},
+      () => undefined,
+    );
+    (adapter as unknown as { initializePregame: () => Promise<unknown> }).initializePregame = async () => ({
+      gameCode: "GAME01",
+      playerId: 0,
+      playerToken: "host-token",
+      fullKey: { game_code: "GAME01", generation: 1 },
+    });
+    await (bridge as unknown as { attachClient: (client: unknown) => Promise<unknown> }).attachClient(adapter);
+
+    const publish = (type: "StateUpdate" | "StateWithheld", revision: number, saying: boolean) =>
+      ws.dispatchSynthetic("message", JSON.stringify({
+        type,
+        data: type === "StateUpdate"
+          ? {
+            state_revision: revision,
+            state: { ...createMockState(), turn_number: revision },
+            events: [],
+            log_entries: [],
+            ...(saying ? { saying: true } : {}),
+          }
+          : {
+            state_revision: revision,
+            withheld: { type: "StateUpdate" },
+            reason: "over bound",
+            ...(saying ? { saying: true } : {}),
+          },
+      }));
+
+    publish("StateUpdate", 2, true);
+    publish("StateWithheld", 3, true);
+    publish("StateUpdate", 4, false);
+    await vi.waitFor(() => expect(onRevision).toHaveBeenCalledTimes(3));
+    expect(onRevision.mock.calls.map(([revision, , saying]) => [revision, saying])).toEqual([
+      [2, true],
+      [3, true],
+      [4, false],
+    ]);
+    bridge.dispose();
   });
 
   it("sends the payload-free authenticated whole-match concession intent", () => {
