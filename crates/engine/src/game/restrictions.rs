@@ -7,7 +7,9 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
-use crate::types::game_state::{BattlefieldEntryRecord, CastOccurrence, CastingVariant};
+use crate::types::game_state::{
+    AbilityUsageKey, BattlefieldEntryRecord, CastOccurrence, CastingVariant,
+};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
@@ -932,6 +934,33 @@ pub(crate) fn tap_permanent_for_cost(
 /// CR 602.5b: If an activated ability has a restriction on its use (e.g., "Activate only once
 /// each turn"), the restriction continues to apply even if its controller changes.
 ///
+/// CR 602.5b + CR 602.5c + CR 113.2c: the per-instance usage key for the
+/// ability at `ability_index` on `source_id`, bound at activation-check or
+/// record time from the resolved definition — never stored on the def. The
+/// index is not in the key: layer recomputes shift indices while the
+/// acquisition (provenance stamp + rules text) stays the same. `None` when
+/// the source or slot no longer resolves (e.g. the source was sacrificed to
+/// pay its own cost before the placement recorded): the check side then reads
+/// a missing entry as count 0 and the record side skips, matching today's
+/// missing-entry semantics.
+///
+/// Shared with phase-ai's AI loop guards, which fold the same per-acquisition
+/// budget through this helper rather than rebuilding the key. Keep the
+/// `None` => count-0 / record-skip contract when changing this.
+pub fn ability_usage_key(
+    state: &crate::types::game_state::GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> Option<AbilityUsageKey> {
+    let definition =
+        super::casting::activation_ability_definition(state, source_id, ability_index)?;
+    Some(AbilityUsageKey {
+        source: source_id,
+        provenance: definition.granting_object,
+        description: definition.description.clone(),
+    })
+}
+
 /// CR 602.2 + CR 601.2i: `record` is the activation's facts captured before
 /// its cost was paid; it joins the activator's turn journal here.
 pub fn record_ability_activation(
@@ -940,7 +969,13 @@ pub fn record_ability_activation(
     ability_index: usize,
     record: Option<crate::types::game_state::AbilityActivationRecord>,
 ) {
-    crate::game::ledger::record_ability_activation(state, source_id, ability_index, record)
+    // CR 400.7: a cost may have moved the source (self-sacrifice) before the
+    // placement recorded, so the slot can no longer resolve. Skipping keeps
+    // the counters' missing-entry semantics; it never panics.
+    let Some(key) = ability_usage_key(state, source_id, ability_index) else {
+        return;
+    };
+    crate::game::ledger::record_ability_activation(state, key, record)
         .expect("activated ability must have a valid ledger prefix");
 }
 
@@ -1220,7 +1255,9 @@ fn activation_restriction_applies(
     restriction: &ActivationRestriction,
     gates: &ActivationRestrictionStaticGates,
 ) -> bool {
-    let key = (source_id, ability_index);
+    // CR 602.5c: the usage budget is per acquisition, not per index. A slot
+    // that no longer resolves reads a missing entry as count 0.
+    let key = ability_usage_key(state, source_id, ability_index);
 
     match restriction {
         // CR 602.5d: "Activate only as a sorcery" means the player must follow sorcery timing rules.
@@ -1270,10 +1307,9 @@ fn activation_restriction_applies(
         // CR 602.5b: Per-turn activation limit tracked via ability activation counter.
         // CR 702.142b: ModifyActivationLimit statics may raise the limit for tagged abilities.
         ActivationRestriction::OnlyOnceEachTurn => {
-            let current_count = state
-                .activated_abilities_this_turn
-                .get(&key)
-                .copied()
+            let current_count = key
+                .as_ref()
+                .and_then(|key| state.activated_abilities_this_turn.get(key).copied())
                 .unwrap_or(0);
             let limit = effective_activation_limit(state, player, source_id, ability_index, gates);
             current_count < limit
@@ -1283,10 +1319,9 @@ fn activation_restriction_applies(
         // ModifyActivationLimit statics (Wonder Man) may raise the per-game cap
         // above 1, so the gate is `count < limit`, not `count == 0`.
         ActivationRestriction::OnlyOnce => {
-            let count = state
-                .activated_abilities_this_game
-                .get(&key)
-                .copied()
+            let count = key
+                .as_ref()
+                .and_then(|key| state.activated_abilities_this_game.get(key).copied())
                 .unwrap_or(0);
             count
                 < effective_activation_limit_per_game(
@@ -1299,10 +1334,8 @@ fn activation_restriction_applies(
         }
         // CR 602.5b: Per-turn activation count limit (e.g. "Activate only twice each turn").
         ActivationRestriction::MaxTimesEachTurn { count } => {
-            state
-                .activated_abilities_this_turn
-                .get(&key)
-                .copied()
+            key.as_ref()
+                .and_then(|key| state.activated_abilities_this_turn.get(key).copied())
                 .unwrap_or(0)
                 < u32::from(*count)
         }
@@ -2920,13 +2953,39 @@ mod tests {
     #[test]
     fn activation_once_each_turn_uses_shared_counter() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
-        record_ability_activation(&mut state, ObjectId(10), 1, None);
+        // CR 602.5c: the counter is keyed by the resolved acquisition, so the
+        // fixture installs a real printed ability — a bare id records nothing.
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+        std::sync::Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&source)
+                .expect("just created")
+                .abilities,
+        )
+        .push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .activation_restrictions(vec![ActivationRestriction::OnlyOnceEachTurn]),
+        );
+        record_ability_activation(&mut state, source, 0, None);
 
         let result = check_activation_restrictions(
             &state,
             PlayerId(0),
-            ObjectId(10),
-            1,
+            source,
+            0,
             &[ActivationRestriction::OnlyOnceEachTurn],
         );
 

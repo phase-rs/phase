@@ -259,10 +259,10 @@ pub(crate) fn apply_zone_exit_cleanup(
     // at the zone-change boundary before the same id can represent a new object.
     state
         .activated_abilities_this_turn
-        .retain(|(id, _), _| *id != object_id);
+        .retain(|key, _| key.source != object_id);
     state
         .activated_abilities_this_game
-        .retain(|(id, _), _| *id != object_id);
+        .retain(|key, _| key.source != object_id);
     clear_exert_history_on_zone_change(state, object_id, from, to);
 
     // CR 400.7: Snapshot LKI before a zone change out of any zone whose
@@ -5063,22 +5063,65 @@ mod tests {
             Zone::Battlefield,
         );
 
-        state.activated_abilities_this_turn.insert((id, 0), 1);
-        state.activated_abilities_this_game.insert((id, 0), 1);
-        state.activated_abilities_this_turn.insert((other, 0), 1);
-        state.activated_abilities_this_game.insert((other, 0), 1);
+        // CR 400.7 + CR 602.5c: entries are keyed by per-acquisition usage
+        // keys; the zone exit clears every key naming the moved source (both
+        // the printed and an acquired instance) while the other source keeps
+        // its entries.
+        let native = crate::types::game_state::AbilityUsageKey {
+            source: id,
+            provenance: None,
+            description: None,
+        };
+        let acquired = crate::types::game_state::AbilityUsageKey {
+            source: id,
+            provenance: Some(crate::types::identifiers::ObjectIncarnationRef::of(
+                other, 0,
+            )),
+            description: Some("acquired".to_string()),
+        };
+        let other_key = crate::types::game_state::AbilityUsageKey {
+            source: other,
+            provenance: None,
+            description: None,
+        };
+        state
+            .activated_abilities_this_turn
+            .insert(native.clone(), 1);
+        state.activated_abilities_this_game.insert(native, 1);
+        state
+            .activated_abilities_this_turn
+            .insert(acquired.clone(), 1);
+        state.activated_abilities_this_game.insert(acquired, 1);
+        state
+            .activated_abilities_this_turn
+            .insert(other_key.clone(), 1);
+        state
+            .activated_abilities_this_game
+            .insert(other_key.clone(), 1);
+
+        // Reach-guard: both of the source's keys are present before the move.
+        assert_eq!(state.activated_abilities_this_turn.len(), 3);
+        assert_eq!(state.activated_abilities_this_game.len(), 3);
 
         let mut events = Vec::new();
         move_to_zone(&mut state, id, Zone::Hand, &mut events);
 
-        assert!(!state.activated_abilities_this_turn.contains_key(&(id, 0)));
-        assert!(!state.activated_abilities_this_game.contains_key(&(id, 0)));
+        // Both of the moved source's keys are gone …
+        assert!(!state
+            .activated_abilities_this_turn
+            .keys()
+            .any(|key| key.source == id));
+        assert!(!state
+            .activated_abilities_this_game
+            .keys()
+            .any(|key| key.source == id));
+        // … while the unmoved source keeps its entries.
         assert_eq!(
-            state.activated_abilities_this_turn.get(&(other, 0)),
+            state.activated_abilities_this_turn.get(&other_key),
             Some(&1)
         );
         assert_eq!(
-            state.activated_abilities_this_game.get(&(other, 0)),
+            state.activated_abilities_this_game.get(&other_key),
             Some(&1)
         );
     }

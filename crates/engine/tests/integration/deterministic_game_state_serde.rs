@@ -462,16 +462,19 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "HashMap",
         Classification::Canonical(HASH_MAP_ENTRIES),
     );
+    // CR 602.5c: the activation counters are keyed by the per-acquisition
+    // `AbilityUsageKey`, so they name the dedicated adapter (`tuple_key_map`
+    // stays with the index-keyed resolution tally).
     for (field, shape, adapter) in [
         (
             "activated_abilities_this_turn",
             "im::HashMap",
-            "with=\"tuple_key_map\"",
+            "with=\"ability_usage_key_map\"",
         ),
         (
             "activated_abilities_this_game",
             "im::HashMap",
-            "with=\"tuple_key_map\"",
+            "with=\"ability_usage_key_map\"",
         ),
         (
             "ability_resolutions_this_turn",

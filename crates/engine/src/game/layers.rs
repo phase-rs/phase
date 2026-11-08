@@ -9114,14 +9114,18 @@ fn expand_granted_activated_abilities(
                         donated.activation_restrictions.push(restriction.clone());
                     }
                 }
-                // CR 113.2c + CR 201.5a + CR 400.7: stamp the donated copy
-                // with its provider incarnation so reference-granted copies
-                // from distinct providers stay distinct instances that
-                // function independently. `get_or_insert` preserves an
-                // existing stamp, so transitive re-donation collapses onto
-                // the original provider.
+                // CR 113.2c + CR 201.5a + CR 400.7 + CR 602.5c: stamp the
+                // donated copy with its IMMEDIATE provider incarnation so
+                // each acquisition is a distinct instance that functions
+                // independently — even a re-donated copy acquired from an
+                // intermediate carrier (the carrier's hop OVERWRITES the
+                // original stamp; the restriction on an acquired ability
+                // applies only to that ability as acquired from that
+                // object). Repeat expansion from the same provider
+                // re-emits a byte-identical def, which Tier-2 dedup still
+                // collapses.
                 let provider_stamp = ObjectIncarnationRef::from_object(provider);
-                donated.granting_object.get_or_insert(provider_stamp);
+                donated.granting_object = Some(provider_stamp);
                 // CR 201.5a: bind ONLY unbound granter symbols to the
                 // provider incarnation. Printed donors can carry unbound
                 // `GrantingObject` symbols (e.g. by-name self costs); those
@@ -11638,37 +11642,20 @@ fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zo
     }
 }
 
-/// CR 113.2c + CR 201.5a + CR 614.1c + CR 611.2c: two-tier `GrantAbility`
-/// dedup. Tier-1 (base, intentionally preserved collapse including
-/// stamped-vs-base): collapse iff some ability in `obj.abilities[..base_end]`
-/// with a `None` head `granting_object` is equal-modulo-HEAD-`granting_object`
-/// to the grant — modulo strips EXACTLY the head `granting_object: Option`
-/// field (clone, set head `None`, full `==`); every nested field, including
-/// nested `TargetFilter::GrantingObject { bound }` filters and `ObjectScope`
-/// symbols, compares byte-exact. Tier-1 applies ONLY against existing entries
-/// with head `granting_object` `None`; grant-vs-grant pairs use Tier-2 only.
-/// Tier-2 (grants): collapse iff FULL equality (stamp included) with an
-/// already-pushed grant at index `>= base_end`. Full-`==` fast path first
-/// covers all pinned unstamped cases with zero clones; clone-strip-compare
-/// runs only on the unequal path.
+/// CR 113.2c + CR 201.5a + CR 614.1c + CR 611.2c + CR 602.5c: Tier-2-only
+/// `GrantAbility` dedup. Collapse iff FULL derived `AbilityDefinition ==`
+/// (head `granting_object` stamp PARTICIPATING, plus sub-symbol stamps and
+/// injected `cap` restrictions) with an already-pushed grant at index `>=
+/// base_end`. A printed base ability and a stamped grant of the same body are
+/// distinct instances (CR 113.2c + CR 602.5c "other, identically worded
+/// abilities") and coexist; only a byte-identical re-expansion from the same
+/// provider incarnation (same stamp, same body) collapses. The `[..base_end]`
+/// range is never consulted, so no cross-tier comparison can occur.
 fn grant_ability_is_duplicate(
     obj: &crate::game::game_object::GameObject,
     granted: &AbilityDefinition,
 ) -> bool {
     let base_end = obj.granted_abilities_from.unwrap_or(obj.abilities.len());
-    if obj.abilities[..base_end].iter().any(|a| a == granted) {
-        return true;
-    }
-    if granted.granting_object.is_some() {
-        let mut stripped = granted.clone();
-        stripped.granting_object = None;
-        if obj.abilities[..base_end]
-            .iter()
-            .any(|a| a.granting_object.is_none() && *a == stripped)
-        {
-            return true;
-        }
-    }
     obj.abilities[base_end..].iter().any(|a| a == granted)
 }
 
@@ -12583,11 +12570,11 @@ fn apply_continuous_effect_filtered(
             // modifications (e.g., Ragost parses the "have ..." clause twice)
             // or from multiple sources granting the same ability — must not
             // stack, unless a granter stamp (CR 201.5a) keeps each granter's copy
-            // apart (CR 113.2c). Two-tier dedup (`grant_ability_is_duplicate`)
-            // keeps the grant idempotent: Tier-1 collapses against a base
-            // ability equal modulo EXACTLY the head stamp; Tier-2 collapses
-            // only on FULL equality (stamp included) with an already-pushed
-            // grant, so copies donated by distinct providers stay distinct.
+            // apart (CR 113.2c). Tier-2-only dedup
+            // (`grant_ability_is_duplicate`) keeps the grant idempotent:
+            // collapse only on FULL equality (stamp included) with an
+            // already-pushed grant, so copies donated by distinct providers
+            // stay distinct while byte-identical re-expansion still merges.
             ContinuousModification::GrantAbility { definition } => {
                 let granted = *definition.clone();
                 if !grant_ability_is_duplicate(obj, &granted) {
@@ -15565,7 +15552,12 @@ mod tests {
             AbilityProvenance::Granted
         );
 
-        // (ii) base [A] + an identical grant of A → deduplicated; still printed.
+        // (ii) base [A] + an identical grant of A → the grant coexists as a
+        // second instance. CR 113.2c + CR 602.5c ("other, identically worded
+        // abilities"): Tier-2 dedup compares grants only against the granted
+        // tail (`[base_end..]`), never against the printed base, so the
+        // printed A and the granted A are distinct instances that function
+        // independently. Reverting Tier-1 collapses this back to 1 (RED).
         let mut state = setup();
         let host = creature_with_abilities(&mut state, "Host", vec![draw_ability(1)]);
         install_until_end_of_turn(
@@ -15577,9 +15569,13 @@ mod tests {
         );
         relayer(&mut state);
         let obj = &state.objects[&host];
-        assert_eq!(obj.abilities.len(), 1);
-        assert_eq!(obj.granted_abilities_from, None);
+        assert_eq!(obj.abilities.len(), 2);
+        assert_eq!(obj.granted_abilities_from, Some(1));
         assert_eq!(obj.activated_ability_provenance(0), own);
+        assert_eq!(
+            obj.activated_ability_provenance(1),
+            AbilityProvenance::Granted
+        );
 
         // (iii) base [A], B granted, all abilities removed, then an identical A
         // granted (timestamp order) → the live A is the grant, not the printed
@@ -21479,8 +21475,10 @@ mod tests {
     /// own source (per-recipient self-skip); once the provider enters, the
     /// host holds exactly the three donated loyalty defs. A second pass
     /// re-derives the same three (per-pass reset idempotence), and a second
-    /// recipient under a different controller sharing the provider gains the
-    /// same three (per-controller memoization + per-recipient self-skip).
+    /// recipient under a different controller sharing the provider gains SIX —
+    /// three direct copies plus three re-donated through the first host (the
+    /// Branch-B transitive chain with per-acquisition stamps; per-controller
+    /// memoization + per-recipient self-skip still hold).
     ///
     /// Reverting the expander filter to kind-only lets the `{T}` def through
     /// (RED); reverting the L9 dispatch arm donates nothing (RED).
@@ -21644,20 +21642,54 @@ mod tests {
         );
 
         // A second recipient under a DIFFERENT controller sharing the provider
-        // gains the same three (per-controller memoization entry per
-        // controller + per-recipient self-skip).
+        // gains SIX: the three direct donor copies plus the three re-donated
+        // through the first host. CR 113.2c + CR 602.5c: the first host is
+        // itself a battlefield planeswalker holding three loyalty abilities,
+        // so it is a second provider for the newcomer (Branch-B transitive
+        // chain), and each hop stamps its immediate provider. Timestamp order
+        // keeps the first host at three (it expands before the newcomer holds
+        // anything). Reverting OVERWRITE collapses the newcomer back to three
+        // (RED).
         let host_p1 = make_walker(&mut state, 802, PlayerId(1), "Second Stand-in");
         state.objects.get_mut(&host_p1).unwrap().static_definitions = vec![grant_static()].into();
         state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
-        for id in [host, host_p1] {
-            assert_eq!(
-                state.objects.get(&id).unwrap().abilities.len(),
-                3,
-                "each recipient must hold exactly the three donated defs; got {:?}",
-                state.objects.get(&id).unwrap().abilities
-            );
-        }
+        assert_eq!(
+            state.objects.get(&host).unwrap().abilities.len(),
+            3,
+            "the first host still holds exactly the three donated defs; got {:?}",
+            state.objects.get(&host).unwrap().abilities
+        );
+        let host_p1_abilities = &state.objects.get(&host_p1).unwrap().abilities;
+        assert_eq!(
+            host_p1_abilities.len(),
+            6,
+            "the newcomer must hold three direct copies plus three via-host copies; got {:?}",
+            host_p1_abilities
+        );
+        let donor_stamp = ObjectIncarnationRef::from_object(&state.objects[&provider]);
+        let host_stamp = ObjectIncarnationRef::from_object(&state.objects[&host]);
+        let mut stamps: Vec<_> = host_p1_abilities
+            .iter()
+            .map(|def| {
+                def.granting_object
+                    .expect("a reference-granted def is stamped")
+            })
+            .collect();
+        stamps.sort();
+        let mut expected = vec![
+            donor_stamp,
+            donor_stamp,
+            donor_stamp,
+            host_stamp,
+            host_stamp,
+            host_stamp,
+        ];
+        expected.sort();
+        assert_eq!(
+            stamps, expected,
+            "three copies must name the donor, three the first host"
+        );
     }
 
     /// CR 611.3a: the loyalty reference grant tracks the battlefield live —
@@ -22301,46 +22333,79 @@ mod tests {
         let donor = make_walker(&mut state, 922, PlayerId(0), "Donor Walker");
         give_printed(&mut state, donor, &donor_defs);
 
-        // Two consecutive passes: identical composition each time.
-        for pass in 1..=2 {
-            state.layers_dirty.mark_full();
-            evaluate_layers(&mut state);
-            for (id, own, other_id, other) in [
-                (bolas_a, &a_printed, bolas_b, &b_printed),
-                (bolas_b, &b_printed, bolas_a, &a_printed),
-            ] {
+        // CR 113.2c + CR 201.5a + CR 602.5c: every donated copy carries its
+        // IMMEDIATE provider's incarnation stamp on the head — the other
+        // Bolas's defs name the other Bolas, the donor's defs name the donor.
+        // A re-donated hop OVERWRITES the original stamp, so a def acquired
+        // via an intermediate carrier is a distinct instance from the same
+        // body acquired straight from its printer (CR 602.5c "other,
+        // identically worded abilities"). Own printed defs stay unstamped.
+        let stamped_with =
+            |def: &AbilityDefinition, stamp: ObjectIncarnationRef| -> AbilityDefinition {
+                let mut stamped = def.clone();
+                stamped.granting_object = Some(stamp);
+                stamped
+            };
+        let assert_holdings =
+            |state: &GameState, id: ObjectId, label: &str, expected: &[AbilityDefinition]| {
                 let held = &state.objects.get(&id).unwrap().abilities;
                 assert_eq!(
                     held.len(),
-                    8,
-                    "pass {pass}: Bolas must hold own 3 + other's 3 + donor's 2; got {held:?}"
+                    expected.len(),
+                    "{label}: holdings must be exactly the derived set; got {held:?}"
                 );
-                // CR 113.2c + CR 201.5a: donated copies carry their
-                // provider's incarnation stamp on the head — the other
-                // Bolas's defs name the other Bolas, the donor's defs name
-                // the donor (transitive re-donation preserves the original
-                // stamp). Own printed defs stay unstamped.
-                let mut expected: Vec<AbilityDefinition> = own.to_vec();
-                let other_stamp = ObjectIncarnationRef::from_object(&state.objects[&other_id]);
-                for def in other.iter() {
-                    let mut stamped = def.clone();
-                    stamped.granting_object = Some(other_stamp);
-                    expected.push(stamped);
-                }
-                let donor_stamp = ObjectIncarnationRef::from_object(&state.objects[&donor]);
-                for def in donor_defs.iter() {
-                    let mut stamped = def.clone();
-                    stamped.granting_object = Some(donor_stamp);
-                    expected.push(stamped);
-                }
-                for def in &expected {
+                for def in expected {
                     assert_eq!(
                         held.iter().filter(|a| a == &def).count(),
                         1,
-                        "pass {pass}: single copy of {def:?} expected (re-donation dedup); got {held:?}"
+                        "{label}: single copy of {def:?} expected; got {held:?}"
                     );
                 }
-            }
+            };
+
+        // Pass 1 is order-split by effect timestamps (bolas_a < bolas_b <
+        // donor): bolas_a's GrantAll expands against pristine providers (8),
+        // while bolas_b's expands after bolas_a's grants have applied, so it
+        // also re-donates bolas_a's fresh holdings with its OWN stamp (13).
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        let stamp_a = ObjectIncarnationRef::from_object(&state.objects[&bolas_a]);
+        let stamp_b = ObjectIncarnationRef::from_object(&state.objects[&bolas_b]);
+        let stamp_d = ObjectIncarnationRef::from_object(&state.objects[&donor]);
+        let mut expected_a: Vec<AbilityDefinition> = a_printed.to_vec();
+        expected_a.extend(b_printed.iter().map(|def| stamped_with(def, stamp_b)));
+        expected_a.extend(donor_defs.iter().map(|def| stamped_with(def, stamp_d)));
+        assert_holdings(&state, bolas_a, "pass 1 bolas_a", &expected_a);
+        let mut expected_b: Vec<AbilityDefinition> = b_printed.to_vec();
+        expected_b.extend(a_printed.iter().map(|def| stamped_with(def, stamp_a)));
+        expected_b.extend(b_printed.iter().map(|def| stamped_with(def, stamp_a)));
+        expected_b.extend(donor_defs.iter().map(|def| stamped_with(def, stamp_a)));
+        expected_b.extend(donor_defs.iter().map(|def| stamped_with(def, stamp_d)));
+        assert_holdings(&state, bolas_b, "pass 1 bolas_b", &expected_b);
+
+        // Passes 2 and 3 repeat the pass-1 composition exactly: each pass
+        // resets abilities to base first, so bolas_a's GrantAll (earlier
+        // timestamp) always expands against pristine providers while
+        // bolas_b's always expands against bolas_a's granted holdings.
+        // Identical composition across consecutive passes proves the
+        // per-acquisition fixpoint — no unbounded growth.
+        for pass in 2..=3 {
+            state.layers_dirty.mark_full();
+            evaluate_layers(&mut state);
+            assert_holdings(
+                &state,
+                bolas_a,
+                &format!("pass {pass} bolas_a"),
+                &expected_a,
+            );
+            assert_holdings(
+                &state,
+                bolas_b,
+                &format!("pass {pass} bolas_b"),
+                &expected_b,
+            );
+            // The donor carries no grant static: its two printed defs only.
+            assert_holdings(&state, donor, &format!("pass {pass} donor"), &donor_defs);
         }
     }
 

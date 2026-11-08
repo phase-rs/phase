@@ -305,7 +305,7 @@ fn cancelling_a_manual_activation_during_payment_reverses_it() {
             .state()
             .activated_abilities_this_turn
             .keys()
-            .any(|key| key.0 == bonesplitter),
+            .any(|key| key.source == bonesplitter),
         "a reversed activation is not counted"
     );
     assert!(!tapped(&runner, sol_ring), "Sol Ring was never touched");

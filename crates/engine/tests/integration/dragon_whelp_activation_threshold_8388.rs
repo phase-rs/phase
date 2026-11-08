@@ -10,8 +10,8 @@
 //!
 //! Fix: `AbilityCondition::AbilityUseCountThisTurn { tally: Activated, .. }`
 //! reads the CR 602.2a announcement ledger
-//! (`GameState::activated_abilities_this_turn`, keyed by the same
-//! `(source_id, ability_index)` the stamp in `push_ability_entry` uses).
+//! (`GameState::activated_abilities_this_turn`, keyed by the per-acquisition
+//! `AbilityUsageKey`).
 //!
 //! These tests drive the real production path — `GameAction::ActivateAbility`
 //! through the stack, then the end step — rather than calling the condition
@@ -92,11 +92,27 @@ fn cross_to_resolved_end_step(runner: &mut GameRunner) {
     );
 }
 
+/// CR 602.5c: the activation counter is keyed by the resolved acquisition
+/// (provenance stamp + rules text), not the index.
+fn usage_key(
+    state: &engine::types::game_state::GameState,
+    id: ObjectId,
+    idx: usize,
+) -> engine::types::game_state::AbilityUsageKey {
+    let def = &state.objects[&id].abilities[idx];
+    engine::types::game_state::AbilityUsageKey {
+        source: id,
+        provenance: def.granting_object,
+        description: def.description.clone(),
+    }
+}
+
 fn activation_count(runner: &GameRunner, whelp: ObjectId) -> u32 {
+    let key = usage_key(runner.state(), whelp, 0);
     runner
         .state()
         .activated_abilities_this_turn
-        .get(&(whelp, 0))
+        .get(&key)
         .copied()
         .unwrap_or(0)
 }

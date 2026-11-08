@@ -34,6 +34,21 @@ fn pool(runner: &GameRunner, player: PlayerId) -> usize {
     runner.state().players[player.0 as usize].mana_pool.total()
 }
 
+/// CR 602.5c: the activation counter is keyed by the resolved acquisition
+/// (provenance stamp + rules text), not the index.
+fn usage_key(
+    state: &engine::types::game_state::GameState,
+    id: ObjectId,
+    idx: usize,
+) -> engine::types::game_state::AbilityUsageKey {
+    let def = &state.objects[&id].abilities[idx];
+    engine::types::game_state::AbilityUsageKey {
+        source: id,
+        provenance: def.granting_object,
+        description: def.description.clone(),
+    }
+}
+
 fn mana(s: &mut GameScenario, player: PlayerId, n: usize) {
     s.with_mana_pool(
         player,
@@ -3071,7 +3086,9 @@ fn mana_abilities_are_not_journaled_manual_or_automatic() {
     )
     .expect("color");
     assert_eq!(
-        r.state().activated_abilities_this_turn.get(&(prism, 0)),
+        r.state()
+            .activated_abilities_this_turn
+            .get(&usage_key(r.state(), prism, 0)),
         Some(&1),
         "reach guard: the manual mana ability completed and was counted"
     );

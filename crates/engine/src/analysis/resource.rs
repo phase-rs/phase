@@ -30,7 +30,8 @@ use crate::types::ability::{
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{
-    loop_states_equal, GameState, LKISnapshot, StackEntry, StackEntryKind, TrackedMemberOrigin,
+    loop_states_equal, AbilityUsageKey, GameState, LKISnapshot, StackEntry, StackEntryKind,
+    TrackedMemberOrigin,
 };
 use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
 use crate::types::mana::ManaType;
@@ -8709,22 +8710,22 @@ fn project_out_resources(state: &GameState) -> GameState {
     //      while `evaluate_condition` answers differently for them. See that
     //      function for why the straddle argument, and not a per-comparator
     //      monotonicity argument, is what governs here.
-    let keep_turn: HashSet<(ObjectId, usize)> = s
+    let keep_turn: HashSet<AbilityUsageKey> = s
         .activated_abilities_this_turn
         .keys()
         .filter(|key| {
             ability_has_per_turn_activation_gate(&s, key)
                 || ability_reads_own_activation_count(&s, key)
         })
-        .copied()
+        .cloned()
         .collect();
     s.activated_abilities_this_turn
         .retain(|key, _| keep_turn.contains(key));
-    let keep_game: HashSet<(ObjectId, usize)> = s
+    let keep_game: HashSet<AbilityUsageKey> = s
         .activated_abilities_this_game
         .keys()
         .filter(|key| ability_has_per_game_activation_gate(&s, key))
-        .copied()
+        .cloned()
         .collect();
     s.activated_abilities_this_game
         .retain(|key, _| keep_game.contains(key));
@@ -9073,25 +9074,38 @@ pub(crate) fn driving_resources_non_decreasing_carried(
     true
 }
 
-/// CR 602.5b: does the ability at `key=(source,index)` carry a PER-TURN activation
-/// gate? Single authority for "is this activated-tally key a per-turn gate?".
-/// Exhaustive-by-listing `matches!` (no wildcard) so a future per-turn restriction
-/// variant forces an explicit keep/drop decision. A key whose source object is
-/// absent (un-activatable, gate moot) is treated as not-gated and projected out.
-fn ability_has_per_turn_activation_gate(state: &GameState, key: &(ObjectId, usize)) -> bool {
+/// CR 602.5c: the ability a usage key names, re-derived by acquisition
+/// (provenance stamp + rules text) — the same derivation the record and check
+/// paths use. A key naming no current ability (stale stamp, synthesized
+/// runtime grant outside `abilities[]`) classifies as not-gated, matching the
+/// old absent-index read.
+fn ability_definition_for_usage_key<'s>(
+    state: &'s GameState,
+    key: &AbilityUsageKey,
+) -> Option<&'s AbilityDefinition> {
     state
         .objects
-        .get(&key.0)
-        .and_then(|o| o.abilities.get(key.1))
-        .is_some_and(|def| {
-            def.activation_restrictions.iter().any(|r| {
-                matches!(
-                    r,
-                    ActivationRestriction::OnlyOnceEachTurn
-                        | ActivationRestriction::MaxTimesEachTurn { .. }
-                )
-            })
+        .get(&key.source)?
+        .abilities
+        .iter()
+        .find(|def| def.granting_object == key.provenance && def.description == key.description)
+}
+
+/// CR 602.5b: does the ability at `key` carry a PER-TURN activation
+/// gate? Single authority for "is this activated-tally key a per-turn gate?".
+/// Exhaustive-by-listing `matches!` (no wildcard) so a future per-turn restriction
+/// variant forces an explicit keep/drop decision. A key naming no current
+/// ability (un-activatable, gate moot) is treated as not-gated and projected out.
+fn ability_has_per_turn_activation_gate(state: &GameState, key: &AbilityUsageKey) -> bool {
+    ability_definition_for_usage_key(state, key).is_some_and(|def| {
+        def.activation_restrictions.iter().any(|r| {
+            matches!(
+                r,
+                ActivationRestriction::OnlyOnceEachTurn
+                    | ActivationRestriction::MaxTimesEachTurn { .. }
+            )
         })
+    })
 }
 
 /// CR 602.2a + CR 608.2c: does the printed ability at `key` gate anything on its
@@ -9108,7 +9122,7 @@ fn ability_has_per_turn_activation_gate(state: &GameState, key: &(ObjectId, usiz
 /// reachable, retain the count for any ability that reads it at all: retention
 /// can only make states compare DIFFERENT, which is the fail-closed direction
 /// (a loop is rejected, never falsely certified).
-fn ability_reads_own_activation_count(state: &GameState, key: &(ObjectId, usize)) -> bool {
+fn ability_reads_own_activation_count(state: &GameState, key: &AbilityUsageKey) -> bool {
     fn condition_reads_activation_tally(condition: &AbilityCondition) -> bool {
         match condition {
             AbilityCondition::AbilityUseCountThisTurn {
@@ -9149,24 +9163,16 @@ fn ability_reads_own_activation_count(state: &GameState, key: &(ObjectId, usize)
                 .any(definition_reads_activation_tally)
     }
 
-    state
-        .objects
-        .get(&key.0)
-        .and_then(|o| o.abilities.get(key.1))
-        .is_some_and(definition_reads_activation_tally)
+    ability_definition_for_usage_key(state, key).is_some_and(definition_reads_activation_tally)
 }
 
 /// CR 602.5b: per-GAME activation gate. Single authority.
-fn ability_has_per_game_activation_gate(state: &GameState, key: &(ObjectId, usize)) -> bool {
-    state
-        .objects
-        .get(&key.0)
-        .and_then(|o| o.abilities.get(key.1))
-        .is_some_and(|def| {
-            def.activation_restrictions
-                .iter()
-                .any(|r| matches!(r, ActivationRestriction::OnlyOnce))
-        })
+fn ability_has_per_game_activation_gate(state: &GameState, key: &AbilityUsageKey) -> bool {
+    ability_definition_for_usage_key(state, key).is_some_and(|def| {
+        def.activation_restrictions
+            .iter()
+            .any(|r| matches!(r, ActivationRestriction::OnlyOnce))
+    })
 }
 
 #[cfg(test)]
@@ -10748,7 +10754,10 @@ mod tests {
             vec![ActivationRestriction::OnlyOnceEachTurn],
         );
         let mut b = a.clone();
-        b.activated_abilities_this_turn.insert((oid, 0), 1); // gate progressed
+        // CR 602.5c: the gate tally is keyed by the resolved acquisition.
+        let usage = crate::game::restrictions::ability_usage_key(&b, oid, 0)
+            .expect("the gated ability resolves");
+        b.activated_abilities_this_turn.insert(usage, 1); // gate progressed
         b.players[1].life -= 1; // projected-out resource gain
         assert!(
             !loop_states_equal_modulo_resources(&a, &b),
@@ -10759,7 +10768,10 @@ mod tests {
         let mut c = GameState::new_two_player(7);
         let oid2 = battlefield_creature_with_restrictions(&mut c, 701, 0, Vec::new());
         let mut d = c.clone();
-        d.activated_abilities_this_turn.insert((oid2, 0), 1);
+        // CR 602.5c: keyed by the resolved acquisition, not the index.
+        let usage2 = crate::game::restrictions::ability_usage_key(&d, oid2, 0)
+            .expect("the ungated ability resolves");
+        d.activated_abilities_this_turn.insert(usage2, 1);
         d.players[1].life -= 1;
         assert!(
             loop_states_equal_modulo_resources(&c, &d),
@@ -11138,7 +11150,10 @@ mod tests {
             vec![ActivationRestriction::OnlyOnce],
         );
         let mut b = a.clone();
-        b.activated_abilities_this_game.insert((oid, 0), 1);
+        // CR 602.5c: the gate tally is keyed by the resolved acquisition.
+        let usage = crate::game::restrictions::ability_usage_key(&b, oid, 0)
+            .expect("the gated ability resolves");
+        b.activated_abilities_this_game.insert(usage, 1);
         b.players[1].life -= 1;
         assert!(
             !loop_states_equal_modulo_resources(&a, &b),
@@ -11148,7 +11163,10 @@ mod tests {
         let mut c = GameState::new_two_player(7);
         let oid2 = battlefield_creature_with_restrictions(&mut c, 711, 0, Vec::new());
         let mut d = c.clone();
-        d.activated_abilities_this_game.insert((oid2, 0), 1);
+        // CR 602.5c: keyed by the resolved acquisition, not the index.
+        let usage2 = crate::game::restrictions::ability_usage_key(&d, oid2, 0)
+            .expect("the ungated ability resolves");
+        d.activated_abilities_this_game.insert(usage2, 1);
         d.players[1].life -= 1;
         assert!(
             loop_states_equal_modulo_resources(&c, &d),
@@ -11321,42 +11339,35 @@ mod tests {
             vec![ActivationRestriction::AsSorcery],
         );
 
+        // CR 602.5c: predicates classify the re-derived acquisition.
+        let usage_key = |id: ObjectId| {
+            crate::game::restrictions::ability_usage_key(&state, id, 0)
+                .expect("the fixture ability resolves")
+        };
+        let per_turn_key = usage_key(per_turn);
+        let max_turn_key = usage_key(max_turn);
+        let per_game_key = usage_key(per_game);
+        let non_gate_key = usage_key(non_gate);
         // Per-turn predicate: true for the two per-turn limits, false otherwise.
-        assert!(ability_has_per_turn_activation_gate(&state, &(per_turn, 0)));
-        assert!(ability_has_per_turn_activation_gate(&state, &(max_turn, 0)));
-        assert!(!ability_has_per_turn_activation_gate(
-            &state,
-            &(per_game, 0)
-        ));
-        assert!(!ability_has_per_turn_activation_gate(
-            &state,
-            &(non_gate, 0)
-        ));
+        assert!(ability_has_per_turn_activation_gate(&state, &per_turn_key));
+        assert!(ability_has_per_turn_activation_gate(&state, &max_turn_key));
+        assert!(!ability_has_per_turn_activation_gate(&state, &per_game_key));
+        assert!(!ability_has_per_turn_activation_gate(&state, &non_gate_key));
 
         // Per-game predicate: true ONLY for OnlyOnce.
-        assert!(ability_has_per_game_activation_gate(&state, &(per_game, 0)));
-        assert!(!ability_has_per_game_activation_gate(
-            &state,
-            &(per_turn, 0)
-        ));
-        assert!(!ability_has_per_game_activation_gate(
-            &state,
-            &(max_turn, 0)
-        ));
-        assert!(!ability_has_per_game_activation_gate(
-            &state,
-            &(non_gate, 0)
-        ));
+        assert!(ability_has_per_game_activation_gate(&state, &per_game_key));
+        assert!(!ability_has_per_game_activation_gate(&state, &per_turn_key));
+        assert!(!ability_has_per_game_activation_gate(&state, &max_turn_key));
+        assert!(!ability_has_per_game_activation_gate(&state, &non_gate_key));
 
         // A missing source object is not-gated (gate moot).
-        assert!(!ability_has_per_turn_activation_gate(
-            &state,
-            &(ObjectId(9999), 0)
-        ));
-        assert!(!ability_has_per_game_activation_gate(
-            &state,
-            &(ObjectId(9999), 0)
-        ));
+        let absent = AbilityUsageKey {
+            source: ObjectId(9999),
+            provenance: None,
+            description: None,
+        };
+        assert!(!ability_has_per_turn_activation_gate(&state, &absent));
+        assert!(!ability_has_per_game_activation_gate(&state, &absent));
     }
 
     /// Build a `TriggeredAbility` stack entry from `source`/`controller` with the
@@ -15736,15 +15747,22 @@ mod tests {
             inert(),
         )]);
 
-        state.activated_abilities_this_turn.insert((gated, 0), 3);
-        state.activated_abilities_this_turn.insert((plain, 0), 3);
+        // CR 602.5c: tallies are keyed by the resolved acquisition.
+        let gated_key = crate::game::restrictions::ability_usage_key(&state, gated, 0)
+            .expect("the gated ability resolves");
+        let plain_key = crate::game::restrictions::ability_usage_key(&state, plain, 0)
+            .expect("the plain ability resolves");
+        state
+            .activated_abilities_this_turn
+            .insert(gated_key.clone(), 3);
+        state.activated_abilities_this_turn.insert(plain_key, 3);
 
         let projected = project_out_resources(&state);
 
         assert_eq!(
             projected
                 .activated_abilities_this_turn
-                .get(&(gated, 0))
+                .get(&gated_key)
                 .copied(),
             Some(3),
             "a count the ability's own condition reads must survive projection"
@@ -15752,7 +15770,10 @@ mod tests {
         assert_eq!(
             projected
                 .activated_abilities_this_turn
-                .get(&(plain, 0))
+                .get(
+                    &crate::game::restrictions::ability_usage_key(&projected, plain, 0)
+                        .expect("the plain ability resolves after projection")
+                )
                 .copied(),
             None,
             "an ability that neither gates nor reads the count keeps the existing \

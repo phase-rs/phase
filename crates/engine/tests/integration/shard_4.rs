@@ -487,6 +487,7 @@ mod peer_into_the_abyss;
 mod peerless_recycling_gift_recipient;
 mod pelt_collector_intervening_if;
 mod pendrell_flux_unless_pay_own_cost;
+mod per_acquisition_usage_budgets;
 mod per_opponent_binder_autofill;
 mod per_turn_exile_ledger_reentry;
 mod perpetual_last_created_empty_no_source_fallback;

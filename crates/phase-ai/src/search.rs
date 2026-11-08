@@ -3228,14 +3228,17 @@ fn priority_action_is_allowed_by_loop_guards(
             ability_index,
             ..
         } => {
+            // CR 602.5c: fold the per-acquisition budget; an unresolvable
+            // slot reads a missing entry as count 0.
+            let usage =
+                engine::game::restrictions::ability_usage_key(state, *source_id, *ability_index);
             !state.cancelled_casts.contains(source_id)
                 && !state
                     .pending_activations
                     .contains(&(*source_id, *ability_index))
-                && state
-                    .activated_abilities_this_turn
-                    .get(&(*source_id, *ability_index))
-                    .copied()
+                && usage
+                    .as_ref()
+                    .and_then(|key| state.activated_abilities_this_turn.get(key).copied())
                     .unwrap_or(0)
                     < MAX_ACTIVATIONS_PER_SOURCE_PER_TURN
         }
@@ -13049,14 +13052,20 @@ mod tests {
                     ability_index,
                     ..
                 } => {
+                    // CR 602.5c: fold the per-acquisition budget; an
+                    // unresolvable slot reads a missing entry as count 0.
+                    let usage = engine::game::restrictions::ability_usage_key(
+                        &state,
+                        *source_id,
+                        *ability_index,
+                    );
                     !state.cancelled_casts.contains(source_id)
                         && !state
                             .pending_activations
                             .contains(&(*source_id, *ability_index))
-                        && state
-                            .activated_abilities_this_turn
-                            .get(&(*source_id, *ability_index))
-                            .copied()
+                        && usage
+                            .as_ref()
+                            .and_then(|key| state.activated_abilities_this_turn.get(key).copied())
                             .unwrap_or(0)
                             < MAX_ACTIVATIONS_PER_SOURCE_PER_TURN
                 }
@@ -13079,9 +13088,30 @@ mod tests {
         // source, further activations are rejected regardless of stack state.
         let mut state = make_state();
         let creature = add_creature(&mut state, PlayerId(0), 1, 1);
+        // CR 602.5c: the per-turn budget is keyed by the resolved acquisition
+        // (provenance stamp + rules text), and an unresolvable slot reads
+        // count 0 — so the bare `add_creature` object (no abilities) cannot
+        // carry a budget. Attach a real printed ability at slot 0 and derive
+        // the insert key with the same helper the filter reads, instead of
+        // hand-building the key and duplicating the helper's binding.
+        let parsed = engine::parser::oracle::parse_oracle_text(
+            "{T}: Add {G}.",
+            "Creature",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert!(
+            !parsed.abilities.is_empty(),
+            "tap ability parses to a definition"
+        );
+        Arc::make_mut(&mut state.objects.get_mut(&creature).unwrap().abilities)
+            .extend(parsed.abilities);
+        let usage = engine::game::restrictions::ability_usage_key(&state, creature, 0)
+            .expect("slot 0 resolves after attaching the ability");
         state
             .activated_abilities_this_turn
-            .insert((creature, 0), MAX_ACTIVATIONS_PER_SOURCE_PER_TURN);
+            .insert(usage, MAX_ACTIVATIONS_PER_SOURCE_PER_TURN);
 
         let blocked = CandidateAction {
             action: GameAction::ActivateAbility {
@@ -13100,14 +13130,20 @@ mod tests {
                     ability_index,
                     ..
                 } => {
+                    // CR 602.5c: fold the per-acquisition budget; an
+                    // unresolvable slot reads a missing entry as count 0.
+                    let usage = engine::game::restrictions::ability_usage_key(
+                        &state,
+                        *source_id,
+                        *ability_index,
+                    );
                     !state.cancelled_casts.contains(source_id)
                         && !state
                             .pending_activations
                             .contains(&(*source_id, *ability_index))
-                        && state
-                            .activated_abilities_this_turn
-                            .get(&(*source_id, *ability_index))
-                            .copied()
+                        && usage
+                            .as_ref()
+                            .and_then(|key| state.activated_abilities_this_turn.get(key).copied())
                             .unwrap_or(0)
                             < MAX_ACTIVATIONS_PER_SOURCE_PER_TURN
                 }

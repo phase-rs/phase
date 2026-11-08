@@ -1024,8 +1024,7 @@ pub enum ResolvedLedgerEdit {
     /// journal existed; it replays its counts and appends nothing (never a
     /// defaulted historical activation). A half-present pair is refused.
     AbilityActivated {
-        source: super::identifiers::ObjectId,
-        ability_index: usize,
+        key: super::game_state::AbilityUsageKey,
         expected_turn_count: u32,
         expected_game_count: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3888,7 +3887,7 @@ pub(crate) fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
                 || *expected_game_history_len == u32::MAX
         }
         ResolvedLedgerEdit::AbilityActivated {
-            source,
+            key,
             expected_turn_count,
             expected_game_count,
             record,
@@ -3901,7 +3900,7 @@ pub(crate) fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
                 || *expected_turn_history_len == Some(u32::MAX)
                 // CR 602.2: the record describes the very activation the
                 // command counts; a record for another source is malformed.
-                || record.as_ref().is_some_and(|record| record.source != *source)
+                || record.as_ref().is_some_and(|record| record.source != key.source)
         }
         ResolvedLedgerEdit::CrimeCommitted {
             expected_turn_count,
@@ -4441,8 +4440,11 @@ mod tests {
         journal
             .record_ledger_edit(ResolvedLedgerEditCommand {
                 edit: ResolvedLedgerEdit::AbilityActivated {
-                    source: ObjectId(9),
-                    ability_index: 0,
+                    key: crate::types::game_state::AbilityUsageKey {
+                        source: ObjectId(9),
+                        provenance: None,
+                        description: None,
+                    },
                     expected_turn_count: 0,
                     expected_game_count: 0,
                     record: None,
@@ -4506,8 +4508,11 @@ mod tests {
             panic!("entry 2 must be the ledger command");
         };
         command.edit = ResolvedLedgerEdit::AbilityActivated {
-            source: ObjectId(9),
-            ability_index: 0,
+            key: crate::types::game_state::AbilityUsageKey {
+                source: ObjectId(9),
+                provenance: None,
+                description: None,
+            },
             expected_turn_count: u32::MAX,
             expected_game_count: 0,
             record: None,
@@ -4549,8 +4554,11 @@ mod tests {
             journal
                 .record_ledger_edit(ResolvedLedgerEditCommand {
                     edit: ResolvedLedgerEdit::AbilityActivated {
-                        source: ObjectId(9),
-                        ability_index: 0,
+                        key: crate::types::game_state::AbilityUsageKey {
+                            source: ObjectId(9),
+                            provenance: None,
+                            description: None,
+                        },
                         expected_turn_count: 0,
                         expected_game_count: 0,
                         record,
