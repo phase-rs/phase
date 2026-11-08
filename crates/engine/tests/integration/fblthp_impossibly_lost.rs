@@ -21,11 +21,18 @@
 //! proving its input got past the upstream short-circuit the negation relies on.
 
 use engine::game::combat::AttackTarget;
+use engine::game::deck_loading::{load_and_hydrate_decks, DeckPayload, MOMIR_SNOW_BASICS};
+use engine::game::engine::start_game;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
+use engine::types::card::CardFace;
+use engine::types::card_type::{CardType, CoreType, Supertype};
 use engine::types::events::GameEvent;
-use engine::types::game_state::WaitingFor;
+use engine::types::format::FormatConfig;
+use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::ManaCost;
+use engine::types::match_config::{DeckCardCount, MatchPhase, MatchType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -51,6 +58,19 @@ fn library_len(runner: &GameRunner, player: PlayerId) -> usize {
         .find(|p| p.id == player)
         .map(|p| p.library.len())
         .expect("player must exist")
+}
+
+fn snow_basic_face(name: &str) -> CardFace {
+    CardFace {
+        name: name.to_string(),
+        mana_cost: ManaCost::NoCost,
+        card_type: CardType {
+            supertypes: vec![Supertype::Basic, Supertype::Snow],
+            core_types: vec![CoreType::Land],
+            subtypes: vec![name.trim_start_matches("Snow-Covered ").to_string()],
+        },
+        ..Default::default()
+    }
 }
 
 fn drive_to_declare_attackers(runner: &mut GameRunner) {
@@ -283,4 +303,72 @@ fn win_survives_a_draw_from_an_empty_library() {
             .any(|event| matches!(event, GameEvent::PlayerLost { player_id } if *player_id == P0)),
         "no PlayerLost for the winner may be emitted after the win"
     );
+}
+
+/// CR 104.1 + CR 704.3 + the 2026-08-21 ruling: the between-games boundary is
+/// terminal for the game just won. `game_end` is `#[serde(skip)]`, so a
+/// Full-server restart restores `None` while the winner's serialized
+/// `drew_from_empty_library` flag survives; the next `SubmitSideboard` must not
+/// run the player-loss safety net against that earlier game's winner.
+#[test]
+fn restored_between_games_state_does_not_eliminate_the_winner() {
+    let faces: Vec<CardFace> = MOMIR_SNOW_BASICS
+        .iter()
+        .map(|name| snow_basic_face(name))
+        .collect();
+    let mut state = GameState::new(FormatConfig::momir(), 2, 42);
+    state.match_config.match_type = MatchType::Bo3;
+    let db = crate::support::install_synthetic_card_db(&mut state, &faces);
+    load_and_hydrate_decks(&mut state, &DeckPayload::default(), Some(&db));
+    let started = start_game(&mut state);
+    assert!(
+        started
+            .events
+            .iter()
+            .any(|e| matches!(e, GameEvent::GameStarted)),
+        "reach: game one started"
+    );
+    let mut runner = GameRunner::from_state(state);
+
+    // P1 concedes game one; P0 wins and the match pauses for sideboarding.
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("P1 concedes game one");
+    assert_eq!(runner.state().match_phase, MatchPhase::BetweenGames);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::BetweenGamesSideboard { .. }
+    ));
+
+    // Restore boundary: the persisted state loses `game_end` but keeps the
+    // winner's empty-library flag.
+    runner.state_mut().game_end = None;
+    runner.state_mut().players[0].drew_from_empty_library = true;
+
+    let fixed_deck: Vec<DeckCardCount> = MOMIR_SNOW_BASICS
+        .iter()
+        .map(|name| DeckCardCount {
+            name: name.to_string(),
+            count: 12,
+        })
+        .collect();
+    let events = runner
+        .act(GameAction::SubmitSideboard {
+            main: fixed_deck,
+            sideboard: vec![],
+        })
+        .expect("sideboard submission is a supported between-games action")
+        .events;
+
+    assert!(
+        !runner.state().players[0].is_eliminated,
+        "the restored winner must not be eliminated by its earlier empty-library flag"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, GameEvent::PlayerLost { player_id } if *player_id == P0)),
+        "no PlayerLost for the winner may be emitted after the restore"
+    );
+    assert_eq!(runner.state().match_phase, MatchPhase::BetweenGames);
 }

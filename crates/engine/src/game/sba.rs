@@ -13,6 +13,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::match_config::MatchPhase;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::statics::{StaticMode, StaticModeKind};
@@ -140,8 +141,16 @@ fn run_state_based_actions(
     // Fblthp, Impossibly Lost; issue #10451). `game_end` is the CR 104.1
     // terminal record, written only by `elimination::end_game`; the
     // `WaitingFor::GameOver` arm also covers a restored/terminal wait whose
-    // record predates the field.
-    if state.game_end.is_some() || matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+    // record predates the field. `match_phase` covers the persisted Bo3
+    // between-games boundary: `game_end` is `#[serde(skip)]`, so a restored
+    // state keeps the prior winner's serialized empty-library flag but loses
+    // the record, and the next `SubmitSideboard` would otherwise run this net
+    // against that earlier game's winner. This is the same InGame predicate
+    // `elimination::check_game_over` uses.
+    if state.game_end.is_some()
+        || state.match_phase != MatchPhase::InGame
+        || matches!(state.waiting_for, WaitingFor::GameOver { .. })
+    {
         return;
     }
 

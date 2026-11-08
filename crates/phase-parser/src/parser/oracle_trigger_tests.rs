@@ -43337,8 +43337,11 @@ fn fblthp_impossibly_lost_head_is_batched_opponent_combat_damage_with_turn_windo
     );
 }
 
-/// CR 603.2 + CR 506.1: the window is the shared `parse_event_window` building
-/// block, not a Fblthp-specific turn tag.
+/// CR 603.2 + CR 506.1: no printed card has a received-damage head with a
+/// "during combat" window; the nearest printed received-damage head is
+/// Fblthp, Impossibly Lost, and the nearest printed "during combat" event
+/// window is Mongrel Pack's dies trigger. This row exercises the shared
+/// `parse_event_window` building block, not a Fblthp-specific turn tag.
 #[test]
 fn received_damage_event_window_types_the_combat_phase() {
     let def = parse_trigger_line(
@@ -43349,8 +43352,10 @@ fn received_damage_event_window_types_the_combat_phase() {
     assert_eq!(def.condition, Some(event_time(combat_window())));
 }
 
-/// CR 603.2: a window the combinator cannot type declines the head, so the line
-/// stays coverage-red instead of firing ungated on every combat-damage batch.
+/// CR 603.2: no printed card has an untypeable received-damage window; the
+/// nearest printed received-damage head is Fblthp, Impossibly Lost. This row
+/// pins the fail-closed guard that keeps a future untyped window coverage-red
+/// instead of firing ungated on every combat-damage batch.
 #[test]
 fn received_damage_event_window_declines_untyped_windows() {
     let bad = parse_trigger_line(
@@ -43366,7 +43371,7 @@ fn received_damage_event_window_declines_untyped_windows() {
     // above comes from the window guard, not from the head.
     let good = parse_trigger_line(
         "When one or more of your opponents are dealt combat damage during your turn, draw two cards.",
-        "Synthetic Received Damage Typed Window",
+        "Fblthp, Impossibly Lost",
     );
     assert_eq!(good.mode, TriggerMode::DamageReceived);
 }
