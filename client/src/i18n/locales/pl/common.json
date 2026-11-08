@@ -13,7 +13,8 @@
   "quantityRef": {
     "highestNumber": "najwyższa liczba",
     "lowestNumber": "najniższa liczba",
-    "chosenNumber": "wybrana liczba"
+    "chosenNumber": "wybrana liczba",
+    "energyPaidOrLostThisTurn": "energia zapłacona lub utracona w tej turze"
   },
   "scryOutcome": {
     "title": "Wróżenie zakończone",
@@ -179,6 +180,7 @@
       "exportedTo": "Wyeksportowano do {{path}}.",
       "exportRequested": "Zażądano eksportu: {{filename}}.",
       "exportFailed": "Nie można wyeksportować stanu gry.",
+      "exportFailedDetail": "Nie można wyeksportować stanu gry. {{detail}}",
       "replayExported": "Powtórka zapisana jako {{filename}}.",
       "replayExportUnavailable": "Brak dostępnego nagrania powtórki dla tej rozgrywki.",
       "replayExportFailed": "Nie udało się wyeksportować powtórki."

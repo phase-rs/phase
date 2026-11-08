@@ -22,6 +22,7 @@
 //! node below a non-ChangeZone parent survives the parent→child hand-off
 //! (Kitesail Freebooter's hand reveal, Shire Shirriff's reflexive trigger).
 
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{Effect, EffectKind, TargetRef};
 use engine::types::actions::GameAction;

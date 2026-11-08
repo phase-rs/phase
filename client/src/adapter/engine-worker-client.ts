@@ -20,6 +20,8 @@ import type {
   ReplayHeader,
   RestoredStackAutomationPresentation,
   SubmitResult,
+  TakebackReply,
+  TakebackVote,
   ViewerSnapshot,
   ViewerTransitionSnapshot,
 } from "./types";
@@ -35,6 +37,7 @@ import type {
   InteractionSubmission,
 } from "./generated/interaction";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
+import type { EngineQueryArgs, EngineQueryName, EngineQueryResult } from "./engine-queries";
 import { debugLog } from "../game/debugLog";
 import { notifyEngineSlow } from "../game/engineRecovery";
 
@@ -239,6 +242,12 @@ export class EngineWorkerClient {
     return this.request<unknown>({ type: "evaluateDeckFormatGate", request });
   }
 
+  /** Engine resource-bound check of one guest deck's printings sidecar; rejects
+   *  with the engine's reason on abuse. See `P2PHostAdapter.handleNewGuest`. */
+  async checkDeckPrintingsBounds(printings: unknown): Promise<void> {
+    await this.request<null>({ type: "checkDeckPrintingsBounds", printings });
+  }
+
   async customFormatFromLobbyConfig(name: string, formatConfig: unknown): Promise<unknown> {
     return this.request<unknown>({ type: "customFormatFromLobbyConfig", name, formatConfig });
   }
@@ -261,6 +270,13 @@ export class EngineWorkerClient {
 
   async canonicalCardNames(names: string[]): Promise<unknown> {
     return this.request<unknown>({ type: "canonicalCardNames", names });
+  }
+
+  async query<K extends EngineQueryName>(
+    name: K,
+    args: EngineQueryArgs<K>,
+  ): Promise<EngineQueryResult<K>> {
+    return this.request<EngineQueryResult<K>>({ type: "query", name, args });
   }
 
   async initializeGame(
@@ -338,6 +354,38 @@ export class EngineWorkerClient {
     );
   }
 
+  async requestTakeback(actor: number, aiPlayers: number[]): Promise<TakebackReply> {
+    return this.request<TakebackReply>(
+      { type: "requestTakeback", actor, aiPlayers },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async respondTakeback(
+    actor: number,
+    approve: boolean,
+    aiPlayers: number[],
+  ): Promise<TakebackReply> {
+    return this.request<TakebackReply>(
+      { type: "respondTakeback", actor, approve, aiPlayers },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async cancelTakeback(actor: number): Promise<TakebackReply> {
+    return this.request<TakebackReply>(
+      { type: "cancelTakeback", actor },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async pendingTakeback(): Promise<TakebackVote | null> {
+    return this.request<TakebackVote | null>(
+      { type: "pendingTakeback" },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
   async submitInteraction(actor: number, submission: InteractionSubmission): Promise<SubmitResult> {
     return this.request<SubmitResult>(
       { type: "submitInteraction", actor, submission },
@@ -371,6 +419,10 @@ export class EngineWorkerClient {
       { type: "getFilteredState", viewerId },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
+  }
+
+  async setDebugHandReveal(enabled: boolean): Promise<void> {
+    await this.request<null>({ type: "setDebugHandReveal", enabled }, ENGINE_REQUEST_TIMEOUT_MS);
   }
 
   async getLegalActions(viewerId: number): Promise<LegalActionsResult> {

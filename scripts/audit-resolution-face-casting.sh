@@ -810,8 +810,8 @@ fn production_route() {
 EOF
   build_cfg_test_module_index \
     crates/engine/src/game \
-    crates/engine/src/parser \
-    crates/engine/src/parser/oracle_effect \
+    crates/phase-parser/src/parser \
+    crates/phase-parser/src/parser/oracle_effect \
     "$scratch"
   classified=$(
     rust_route_records "$fixture" "$cfg_child" "$nested_cfg_child" "$file_cfg" "$production_child" |
@@ -854,8 +854,8 @@ EOF
   actual=
   for fixture in \
     crates/engine/src/game/casting_tests.rs \
-    crates/engine/src/parser/oracle_tests.rs \
-    crates/engine/src/parser/oracle_effect/tests.rs; do
+    crates/phase-parser/src/parser/oracle_tests.rs \
+    crates/phase-parser/src/parser/oracle_effect/tests.rs; do
     record=$(rust_route_records "$fixture" | sed -n '1p')
     actual+="$(classify_route_line "$record")"$'\n'
   done

@@ -1,8 +1,9 @@
-use crate::game::game_object::GameObject;
+use crate::game::cost_payability::AbilityCostPayability;
+use crate::game::game_object::{CastOrigin, GameObject};
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission, CastingRestriction,
-    CommanderOwnership, ControllerRef, FilterProp, ParsedCondition, QuantityExpr,
-    SpellCastingOptionKind, TargetFilter, TypeFilter,
+    AbilityCost, AbilityDefinition, ActivationRestriction, CastTimingPermission, CastingPermission,
+    CastingRestriction, CommanderOwnership, ControllerRef, FilterProp, ParsedCondition,
+    QuantityExpr, SpellCastingOptionKind, TargetFilter, TypeFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -155,9 +156,107 @@ pub fn flash_timing_cost(
         match &option.cost {
             None => Some(ManaCost::NoCost),
             Some(AbilityCost::Mana { cost }) => Some(cost.clone()),
-            Some(cost) if cost.is_payable(state, player, obj.id) => Some(ManaCost::NoCost),
+            Some(cost) if cost.is_payable_for_spell(state, player, obj.id) => {
+                Some(ManaCost::NoCost)
+            }
             Some(_) => None,
         }
+    })
+}
+
+/// CR 117.1a + CR 307.1: Is `player`'s cast of `object_id` confined to
+/// sorcery timing (a main phase of their turn with an empty stack), or could
+/// they begin to cast it at another time? An instant's own timing never
+/// confines it (CR 304.1). Otherwise it is confined unless an instant-speed
+/// route is open now: flash, its own or granted, or an exile-cast permission
+/// that grants it (CR 702.8a + CR 601.3b; `casting::spell_has_effective_flash`);
+/// an "as though it had flash" option whose condition can be met (CR 601.3c +
+/// CR 601.3d; [`flash_timing_cost`], `target_dependent_flash_permission_feasible`);
+/// a payable alternative cost carrying that timing (CR 118.9); or a payable
+/// offering (CR 702.48a). A card with Sneak in its owner's hand is not
+/// confined either (CR 702.190a); that route is read by presence, because its
+/// unblocked-creature cost can exist only in the declare blockers step. These
+/// are the routes by which a player can begin this cast at priority outside
+/// sorcery timing, read through the same authorities as they stand now; no
+/// later state is predicted, and the sorcery window is not tested; a permission
+/// bound to a turn answers for the turn it is asked in. Casts made during
+/// another object's resolution (CR 608.2g) are not routes here, and an
+/// opponent's prohibition on casting outside sorcery timing is not read. Nor is
+/// a window narrower than the object's own timing: its `casting_restrictions`,
+/// or a plotted instant's main-phase cast (CR 702.170d). A missing object makes
+/// no claim.
+///
+/// The object's current characteristics are read: a face chosen later in the
+/// cast (CR 709.3, CR 715.3a) is not projected, and a fused split spell is
+/// read unfused. While the object's own cast is being proposed (its mode
+/// prompt, for example), it keeps its origin zone, so the answer is the one its
+/// proposal got. The zone holds until `finalize_cast`, but a cost paid before
+/// then is gone: an Offering sacrifice closes its own route.
+pub fn spell_confined_to_sorcery_timing(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    // CR 304.1: first, so an instant reaches none of the scans below.
+    if obj.card_types.core_types.contains(&CoreType::Instant) {
+        return false;
+    }
+    // CR 702.190a (the last operand): Sneak opens a cast from hand in the declare
+    // blockers step. Its unblocked-creature cost can exist only in that step, so
+    // the keyword's presence decides, not the cost's payability now.
+    let instant_speed_route_open =
+        super::casting::spell_has_effective_flash(state, player, object_id, false)
+            || (flash_timing_cost(state, player, obj).is_some()
+                && target_dependent_flash_permission_feasible(state, player, object_id, false))
+            || super::casting_costs::payable_spell_alternative_cost_for_timing(
+                state,
+                player,
+                object_id,
+                CastTimingPermission::AsThoughHadFlash,
+            )
+            .is_some()
+            || super::casting_costs::can_pay_offering_additional_cost(state, player, object_id)
+            || (obj.zone == Zone::Hand
+                && obj.owner == player
+                && super::keywords::effective_sneak_cost(state, object_id).is_some());
+    !instant_speed_route_open
+}
+
+/// CR 307.5 + CR 602.5d: Is `player`'s activation of ability `ability_index`
+/// of `source_id` confined to sorcery timing now? It is when one of its
+/// activation restrictions confines it (`restriction_confines_to_sorcery_timing`,
+/// the classification legality uses). Loyalty abilities carry CR 606.3's
+/// timing as `AsSorcery`, the restriction the loyalty authority reads. The
+/// ability is resolved through the activation authority's own lookup, so
+/// runtime-granted abilities are covered. A `MatchesCardCastTiming` ability is
+/// read by the source's card type only, as legality reads it; a flash route
+/// for the card is not consulted. The sorcery window is not tested. A missing
+/// object or ability makes no claim.
+pub fn ability_confined_to_sorcery_timing(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> bool {
+    let Some(ability) =
+        super::casting::activation_ability_definition(state, source_id, ability_index)
+    else {
+        return false;
+    };
+    // Gates are computed only on reaching an `AsSorcery` restriction, so an
+    // unrestricted or count-limited ability reaches no static scan.
+    ability.activation_restrictions.iter().any(|restriction| {
+        restriction_confines_to_sorcery_timing(
+            state,
+            player,
+            source_id,
+            ability_index,
+            restriction,
+            None,
+        )
     })
 }
 
@@ -582,67 +681,6 @@ pub(crate) fn battlefield_entry_matches_filter(
     }
 }
 
-/// CR 403.3 + CR 608.2h: can [`battlefield_entry_matches_filter`] actually answer this filter
-/// against a `BattlefieldEntryRecord`?
-///
-/// The record is an entry-time snapshot carrying only `object_id / name / core_types / subtypes /
-/// supertypes / colors / keywords / controller` (`types::game_state::BattlefieldEntryRecord`). Every other
-/// characteristic a `FilterProp` can name is live-object state the snapshot never captured, so the
-/// matcher fails closed at the `FilterProp` match's fail-closed arm inside
-/// `battlefield_entry_matches_filter`'s `TargetFilter::Typed` case, and at the fail-closed
-/// `_ => false` arm that closes out that function's outer `match`, and the whole tally reads
-/// a silent constant 0 — but see the `Or` exception documented beside that function's
-/// `TargetFilter::Or` arm: an `Or` with one unsupported leaf yields a SILENT PARTIAL COUNT
-/// instead. Measured: 100
-/// `FilterProp` variants exist (`types::ability::FilterProp`); the matcher answers 4.
-///
-/// This is an ALLOW-LIST, deliberately not an exhaustive `match`. A `FilterProp` added later is
-/// absent from the list and therefore defaults to "not evaluable" — the conservative side, which
-/// yields an honest `Effect::Unimplemented` at the parser guard and an honest `Unhandled` in the
-/// coverage classifier. A deny-list would need exhaustiveness; a positive allow-list does not.
-/// The list (this function's own `TargetFilter::Typed` arm, below) must name exactly the props
-/// the matcher answers; the binder is
-/// `ledger_guard_agrees_with_matcher` (test, below).
-///
-/// Upgrade path, ascending cost: `HasSupertype` and `Named` are answerable from `record.supertypes`
-/// / `record.name` TODAY — one matcher arm plus one line here. `FaceDown` (Tunnel Tipster),
-/// `Token`/`NonToken` and `Tapped` need a new snapshot field on `BattlefieldEntryRecord`.
-///
-/// `TypedFilter::type_filters` is intentionally NOT screened: `entry_type_filter_matches` is
-/// exhaustive; `Instant`/`Sorcery` answer `false` per CR 403.3, whose negation is correctly
-/// `true` for every permanent.
-pub(crate) fn ledger_filter_is_evaluable(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Any => true,
-        TargetFilter::Typed(typed) => {
-            // CR 109.5: `entry_controller_matches` answers only these two.
-            typed
-                .controller
-                .as_ref()
-                .is_none_or(|c| matches!(c, ControllerRef::You | ControllerRef::Opponent))
-                && typed.properties.iter().all(|prop| {
-                    matches!(
-                        prop,
-                        FilterProp::HasColor { .. }
-                            | FilterProp::InZone { .. }
-                            | FilterProp::WithKeyword { .. }
-                            | FilterProp::Another
-                    )
-                })
-        }
-        // CR 608.2i: mirrors the monotone connectives (the `TargetFilter::Or` and
-        // `TargetFilter::And` arms) of `battlefield_entry_matches_filter`; every leaf must be
-        // answerable, otherwise the composite silently drops one.
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().all(ledger_filter_is_evaluable)
-        }
-        // Everything else is the fail-closed `_ => false` arm that closes out
-        // `battlefield_entry_matches_filter`'s outer `match`, including the anti-monotone
-        // `TargetFilter::Not`.
-        _ => false,
-    }
-}
-
 /// CR 400.7: Record a zone-change snapshot for data-driven condition queries.
 /// Returns the per-turn zone-change index assigned to this record.
 pub fn record_zone_change(
@@ -1056,50 +1094,122 @@ fn has_activate_as_instant_permission(
     let ability_tag = ability.ability_tag;
 
     crate::game::perf_counters::record_restriction_static_exact_scan();
-    crate::game::functioning_abilities::battlefield_active_statics(state).any(
-        |(static_source, def)| {
-            if static_source.controller != player {
-                return false;
-            }
-            let StaticMode::ActivateAsInstant {
-                cost_category: permitted_category,
-                keyword,
-            } = &def.mode
-            else {
-                return false;
-            };
-            // CR 702.6a class-narrowing: when the static names an ability tag
-            // (Leonin Shikari's "equip abilities"), match the activating
-            // ability's `AbilityTag` directly instead of its cost category.
-            // The tagged class isn't defined by cost shape — an Equip ability
-            // with a non-mana cost (e.g. a sacrifice cost) still carries
-            // `AbilityTag::Equip` and must still gain the permission — so
-            // `cost_category` is only consulted when there's no tag to match.
-            match keyword {
-                Some(keyword) => {
-                    if ability_tag != Some(*keyword) {
-                        return false;
-                    }
+    // CR 114.4: emblem abilities function in the command zone, so the
+    // permission scan is game-scoped (battlefield + command zone), not
+    // battlefield-only — Teferi's Talent / Temporal Archmage emblems grant
+    // instant loyalty timing from the command zone. This aligns the exact
+    // scan with its presence gate, which already folds command-zone statics
+    // (the layers refresh builds it from `game_functioning_statics`).
+    crate::game::functioning_abilities::game_active_statics(state).any(|(static_source, def)| {
+        if static_source.controller != player {
+            return false;
+        }
+        let StaticMode::ActivateAsInstant {
+            cost_category: permitted_category,
+            keyword,
+        } = &def.mode
+        else {
+            return false;
+        };
+        // CR 702.6a class-narrowing: when the static names an ability tag
+        // (Leonin Shikari's "equip abilities"), match the activating
+        // ability's `AbilityTag` directly instead of its cost category.
+        // The tagged class isn't defined by cost shape — an Equip ability
+        // with a non-mana cost (e.g. a sacrifice cost) still carries
+        // `AbilityTag::Equip` and must still gain the permission — so
+        // `cost_category` is only consulted when there's no tag to match.
+        match keyword {
+            Some(keyword) => {
+                if ability_tag != Some(*keyword) {
+                    return false;
                 }
-                None => {
-                    if !cost_categories.contains(permitted_category) {
-                        return false;
-                    }
+            }
+            None => {
+                if !cost_categories.contains(permitted_category) {
+                    return false;
                 }
             }
-            def.affected.as_ref().is_some_and(|filter| {
-                super::filter::matches_target_filter(
+        }
+        def.affected.as_ref().is_some_and(|filter| {
+            super::filter::matches_target_filter(
+                state,
+                source_id,
+                filter,
+                &super::filter::FilterContext::from_source_with_controller(
+                    static_source.id,
+                    static_source.controller,
+                ),
+            )
+        })
+    })
+}
+
+/// CR 307.5: Does `restriction` confine `player`'s activation of ability
+/// `ability_index` of `source_id` to sorcery timing (priority in a main phase
+/// of their turn with an empty stack), as things stand now? The one timing
+/// classification that activation legality (`activation_restriction_applies`)
+/// and [`ability_confined_to_sorcery_timing`] share, so neither restates it and
+/// a new restriction must be classified here. `gates` are the caller's
+/// precomputed static gates; `None` computes them only for the arm that reads
+/// them (as [`loyalty_activation_cap_from_statics`] does).
+fn restriction_confines_to_sorcery_timing(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    restriction: &ActivationRestriction,
+    gates: Option<&ActivationRestrictionStaticGates>,
+) -> bool {
+    match restriction {
+        // CR 602.5d + CR 606.3: "Activate only as a sorcery", which is also a
+        // loyalty ability's timing, unless an ActivateAsInstant static lets
+        // `player` activate it any time they could cast an instant (CR 304.5;
+        // The Wandering Emperor, Leonin Shikari).
+        ActivationRestriction::AsSorcery => {
+            let permitted = match gates {
+                Some(gates) => has_activate_as_instant_permission(
                     state,
+                    player,
                     source_id,
-                    filter,
-                    &super::filter::FilterContext::from_source_with_controller(
-                        static_source.id,
-                        static_source.controller,
-                    ),
-                )
-            })
-        },
-    )
+                    ability_index,
+                    gates,
+                ),
+                None => has_activate_as_instant_permission(
+                    state,
+                    player,
+                    source_id,
+                    ability_index,
+                    &ActivationRestrictionStaticGates::compute(state),
+                ),
+            };
+            !permitted
+        }
+        // CR 702.62a: "If you could begin to cast this card": a noninstant
+        // card is confined to its sorcery timing. A missing source makes no
+        // claim; legality refuses it separately. Only the card type is read,
+        // as legality has always read it.
+        ActivationRestriction::MatchesCardCastTiming => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|obj| !obj.card_types.core_types.contains(&CoreType::Instant)),
+        // Not sorcery timing: other windows, activation counts, conditions
+        // and source states.
+        ActivationRestriction::AsInstant
+        | ActivationRestriction::DuringYourTurn
+        | ActivationRestriction::DuringYourUpkeep
+        | ActivationRestriction::DuringCombat
+        | ActivationRestriction::BeforeAttackersDeclared
+        | ActivationRestriction::BeforeCombatDamage
+        | ActivationRestriction::OnlyOnceEachTurn
+        | ActivationRestriction::OnlyOnce
+        | ActivationRestriction::MaxTimesEachTurn { .. }
+        | ActivationRestriction::RequiresCondition { .. }
+        | ActivationRestriction::IsSolved
+        | ActivationRestriction::SourceIsHarnessed
+        | ActivationRestriction::ClassLevelIs { .. }
+        | ActivationRestriction::LevelCounterRange { .. }
+        | ActivationRestriction::CounterThreshold { .. } => false,
+    }
 }
 
 fn activation_restriction_applies(
@@ -1114,14 +1224,16 @@ fn activation_restriction_applies(
 
     match restriction {
         // CR 602.5d: "Activate only as a sorcery" means the player must follow sorcery timing rules.
+        // The window is tested first, so the ActivateAsInstant scan runs only outside it.
         ActivationRestriction::AsSorcery => {
             is_sorcery_speed_window(state, player)
-                || has_activate_as_instant_permission(
+                || !restriction_confines_to_sorcery_timing(
                     state,
                     player,
                     source_id,
                     ability_index,
-                    gates,
+                    restriction,
+                    Some(gates),
                 )
         }
         // CR 304.5 + CR 605.3a: This printed restriction limits mana activation to priority.
@@ -1135,17 +1247,18 @@ fn activation_restriction_applies(
         // (and other non-instant card types) require the sorcery-speed window.
         // Used by Suspend's hand-activated ability so future
         // cast-timing-mirroring activations (Foretell, etc.) reuse this primitive.
-        ActivationRestriction::MatchesCardCastTiming => state
-            .objects
-            .get(&source_id)
-            .map(|obj| {
-                if obj.card_types.core_types.contains(&CoreType::Instant) {
-                    true
-                } else {
-                    is_sorcery_speed_window(state, player)
-                }
-            })
-            .unwrap_or(false),
+        // A missing source can't be activated.
+        ActivationRestriction::MatchesCardCastTiming => {
+            state.objects.contains_key(&source_id)
+                && (!restriction_confines_to_sorcery_timing(
+                    state,
+                    player,
+                    source_id,
+                    ability_index,
+                    restriction,
+                    Some(gates),
+                ) || is_sorcery_speed_window(state, player))
+        }
         ActivationRestriction::DuringYourTurn => state.active_player == player,
         ActivationRestriction::DuringYourUpkeep => {
             state.active_player == player && state.phase == Phase::Upkeep
@@ -1323,6 +1436,100 @@ fn casting_restriction_applies(
         // CR 601.2b / CR 601.2h: "Spend only ... on X" restricts how the cost is paid,
         // never when. Always satisfied here; enforced in the mana-payment path.
         CastingRestriction::SpendOnlyOnX { .. } => true,
+        // CR 601.3 + CR 113.6f: the cast's ORIGIN zone must be one the object
+        // may be cast from. Consulted at announcement, where the object still
+        // occupies its origin — unless an in-flight pending cast (CR 601.2a has
+        // already moved it to the stack) records it. The persisted post-finalize
+        // origin is deliberately NOT consulted: at a NEW announcement it can only
+        // describe a PREVIOUS cast of this object, and a stale graveyard stamp
+        // must not admit a later hand cast. The origin zone's owner is the
+        // object's owner (CR 400.3).
+        CastingRestriction::OnlyFromZones { .. } => {
+            let origin = state.objects.get(&source_id).map(|obj| CastOrigin {
+                zone: super::casting::pending_cast_origin_zone_for(state, source_id)
+                    .unwrap_or(obj.zone),
+                zone_owner: obj.owner,
+            });
+            restriction_permits_cast_origin(restriction, player, origin)
+        }
+    }
+}
+
+/// CR 601.3 + CR 113.6f: whether an object's own casting restrictions permit
+/// `caster` to cast it from `origin`. The single answer to the cast-origin
+/// question, shared by the announcement check ([`check_casting_restrictions`])
+/// and the CR 707.12 cast-a-copy routes, which create the copy in the
+/// original's zone and cast it from there without announcing through the cast
+/// pipeline.
+///
+/// `origin: None` means the caller can't establish the origin. A restriction on
+/// the origin then refuses (fail closed); every other restriction is
+/// origin-independent and permits.
+pub(crate) fn restrictions_permit_cast_origin(
+    restrictions: &[CastingRestriction],
+    caster: PlayerId,
+    origin: Option<CastOrigin>,
+) -> bool {
+    restrictions
+        .iter()
+        .all(|restriction| restriction_permits_cast_origin(restriction, caster, origin))
+}
+
+fn restriction_permits_cast_origin(
+    restriction: &CastingRestriction,
+    caster: PlayerId,
+    origin: Option<CastOrigin>,
+) -> bool {
+    match restriction {
+        CastingRestriction::OnlyFromZones { zones, pool } => origin.is_some_and(|origin| {
+            zones.contains(&origin.zone) && cast_origin_in_pool(origin, *pool, caster)
+        }),
+        // Timing, condition and payment restrictions say nothing about origin.
+        CastingRestriction::AsSorcery
+        | CastingRestriction::DuringCombat
+        | CastingRestriction::DuringOpponentsTurn
+        | CastingRestriction::DuringYourTurn
+        | CastingRestriction::DuringYourUpkeep
+        | CastingRestriction::DuringOpponentsUpkeep
+        | CastingRestriction::DuringAnyUpkeep
+        | CastingRestriction::DuringYourEndStep
+        | CastingRestriction::DuringOpponentsEndStep
+        | CastingRestriction::DeclareAttackersStep
+        | CastingRestriction::DeclareBlockersStep
+        | CastingRestriction::BeforeAttackersDeclared
+        | CastingRestriction::BeforeBlockersDeclared
+        | CastingRestriction::AfterBlockersDeclared
+        | CastingRestriction::BeforeCombatDamage
+        | CastingRestriction::AfterCombat
+        | CastingRestriction::RequiresCondition { .. }
+        | CastingRestriction::CantSpendMana
+        | CastingRestriction::SpendOnlyOnX { .. } => true,
+    }
+}
+
+/// CR 109.5 + CR 400.1: whether `origin` lies in the graveyard pool an
+/// `OnlyFromZones` restriction names. "Your graveyard" is the caster's
+/// (CR 109.5: the would-be controller's), and each player has their own
+/// graveyard (CR 400.1), so an `OwnGraveyard` pool admits a graveyard origin
+/// only when the caster owns it. The pool says nothing about other zones.
+fn cast_origin_in_pool(
+    origin: CastOrigin,
+    pool: crate::types::statics::GraveyardPermissionPool,
+    caster: PlayerId,
+) -> bool {
+    use crate::types::statics::GraveyardPermissionPool;
+    match (origin.zone, pool) {
+        (Zone::Graveyard, GraveyardPermissionPool::OwnGraveyard) => origin.zone_owner == caster,
+        (Zone::Graveyard, GraveyardPermissionPool::AnyGraveyard)
+        | (
+            Zone::Library
+            | Zone::Hand
+            | Zone::Battlefield
+            | Zone::Stack
+            | Zone::Exile
+            | Zone::Command,
+            GraveyardPermissionPool::OwnGraveyard | GraveyardPermissionPool::AnyGraveyard,
+        ) => true,
     }
 }
 
@@ -2520,6 +2727,10 @@ pub(crate) fn is_source_blocked(
 /// scopes.
 pub(crate) fn attack_target_matches_defended_scope(
     state: &crate::types::game_state::GameState,
+    // CR 508.6: the object carrying the restriction — required by the
+    // source-object-relative scopes ("a player it has already attacked this
+    // turn"), which read that object's own attack history.
+    source_id: ObjectId,
     attack_target: Option<&crate::game::combat::AttackTarget>,
     filter: &crate::types::triggers::AttackTargetFilter,
     source_controller: PlayerId,
@@ -2572,6 +2783,18 @@ pub(crate) fn attack_target_matches_defended_scope(
         (AttackTargetFilter::PlayerOrPermanents, AttackTarget::Battle(b_id)) => {
             permanent_controller(*b_id) == Some(source_controller)
         }
+        // CR 508.1c + CR 508.6: "a player it has already attacked this turn" —
+        // match only a PLAYER the source has already attacked this turn, read from
+        // `creature_attacked_defenders_this_turn` (the single per-creature attack
+        // ledger, written at declaration and cleared at cleanup). Kind-gated: a
+        // planeswalker or battle attack is not an attack on a player (CR 506.3),
+        // so those pairings never match and the restriction leaves them legal
+        // (Port Razer ruling 2024-04-12).
+        (AttackTargetFilter::PlayerAttackedBySourceThisTurn, AttackTarget::Player(p)) => state
+            .creature_attacked_defenders_this_turn
+            .get(&source_id)
+            .is_some_and(|defenders| defenders.contains(p)),
+        (AttackTargetFilter::PlayerAttackedBySourceThisTurn, _) => false,
         _ => false,
     }
 }
@@ -2582,12 +2805,76 @@ mod tests {
     use crate::game::game_object::{PhaseOutCause, PhaseStatus};
     use crate::game::zones::create_object;
     use crate::parser::oracle_condition::parse_restriction_condition;
-    use crate::types::ability::{AbilityKind, Effect, ParsedCondition, QuantityExpr};
+    use crate::types::ability::{
+        ledger_filter_is_evaluable, AbilityKind, Effect, ParsedCondition, QuantityExpr,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::game_state::{ArrivalIdentity, WaitingFor, ZoneChangeRecord};
     use crate::types::identifiers::CardId;
     use crate::types::zones::Zone;
+
+    /// CR 109.5 + CR 400.1: the shared cast-origin predicate's whole matrix —
+    /// caster vs the origin zone's owner, each pool, a graveyard vs a shared
+    /// zone, a zone outside the list, and an unknown origin. Every caller (the
+    /// announcement check and both CR 707.12 copy routes) reaches the
+    /// ownership question only through this predicate.
+    #[test]
+    fn only_from_zones_origin_matrix() {
+        use crate::types::statics::GraveyardPermissionPool::{AnyGraveyard, OwnGraveyard};
+        let only = |zones: Vec<Zone>, pool| vec![CastingRestriction::OnlyFromZones { zones, pool }];
+        let at = |zone, owner| {
+            Some(CastOrigin {
+                zone,
+                zone_owner: PlayerId(owner),
+            })
+        };
+        let me = PlayerId(0);
+        let graveyard = only(vec![Zone::Graveyard], OwnGraveyard);
+        assert!(restrictions_permit_cast_origin(
+            &graveyard,
+            me,
+            at(Zone::Graveyard, 0)
+        ));
+        assert!(
+            !restrictions_permit_cast_origin(&graveyard, me, at(Zone::Graveyard, 1)),
+            "another player's graveyard is not \"your graveyard\""
+        );
+        assert!(!restrictions_permit_cast_origin(
+            &graveyard,
+            me,
+            at(Zone::Hand, 0)
+        ));
+        assert!(!restrictions_permit_cast_origin(
+            &graveyard,
+            me,
+            at(Zone::Exile, 0)
+        ));
+        assert!(
+            !restrictions_permit_cast_origin(&graveyard, me, None),
+            "an unknown origin fails closed"
+        );
+        let any = only(vec![Zone::Graveyard], AnyGraveyard);
+        assert!(restrictions_permit_cast_origin(
+            &any,
+            me,
+            at(Zone::Graveyard, 1)
+        ));
+        let with_exile = only(vec![Zone::Graveyard, Zone::Exile], OwnGraveyard);
+        assert!(
+            restrictions_permit_cast_origin(&with_exile, me, at(Zone::Exile, 1)),
+            "exile is shared, so the graveyard pool doesn't scope it"
+        );
+        assert!(!restrictions_permit_cast_origin(
+            &with_exile,
+            me,
+            at(Zone::Graveyard, 1)
+        ));
+        assert!(
+            restrictions_permit_cast_origin(&[CastingRestriction::AsSorcery], me, None),
+            "an origin-independent restriction permits any origin"
+        );
+    }
 
     #[test]
     fn cards_left_your_graveyard_counts_the_departure_owner() {

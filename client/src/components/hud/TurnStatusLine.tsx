@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { Trans, useTranslation } from "react-i18next";
 
+import type { WaitingReasonId } from "../../game/waitingForRegistry.ts";
 import { usePriorityAttentionClass } from "../../hooks/usePriorityAttention.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { useTurnStatus } from "../../hooks/useTurnStatus.ts";
@@ -28,7 +29,7 @@ export function TurnStatusLine() {
   // Nothing pending to narrate (between turns, mid-animation, game over).
   if (waitingSeatId == null) return null;
 
-  const reasonText = reason ? t(reason.key, reason.params) : "";
+  const reasonText = reason ? t(`status.reason.${reason.id}`, reason.params) : "";
 
   // Your decision reads as a positive prompt; waiting on someone else reads as
   // a muted, patient state. The controller's pending alert adds a CSS-only
@@ -64,7 +65,7 @@ export function TurnStatusLine() {
         className={`pointer-events-none absolute -left-1 -top-1 z-10 flex h-4 w-4 items-center justify-center rounded-[5px] border shadow-[0_2px_6px_rgba(0,0,0,0.45)] ${badgeTone}`}
         style={canIActNow ? undefined : { color: waitingSeatColor, borderColor: `${waitingSeatColor}99` }}
       >
-        <ReasonIcon reasonKey={reason?.key} />
+        <ReasonIcon reasonId={reason?.id} />
       </span>
       <span className="truncate">
         {canIActNow ? (
@@ -164,11 +165,11 @@ REASON_ICON_PATHS.respondingToStack = REASON_ICON_PATHS.orderingTriggers;
 REASON_ICON_PATHS.priorityMain = REASON_ICON_PATHS.priority;
 REASON_ICON_PATHS.thinking = REASON_ICON_PATHS.priority;
 
-/** Reason glyph for the overlap badge. Strips the `status.reason.` namespace and
- *  looks up the shared path set; unmapped or absent reasons fall back to the
- *  generic hourglass. Purely decorative — the words live in the tooltip. */
-function ReasonIcon({ reasonKey }: { reasonKey?: string }) {
-  const name = reasonKey?.replace("status.reason.", "") ?? "";
+/** Reason glyph for the overlap badge. Looks up the shared path set by reason
+ *  id; unmapped or absent reasons fall back to the generic hourglass. Purely
+ *  decorative — the words live in the tooltip. */
+function ReasonIcon({ reasonId }: { reasonId?: WaitingReasonId }) {
+  const name = reasonId ?? "";
   const glyph = REASON_ICON_PATHS[name] ?? REASON_ICON_PATHS.priority;
   return (
     <svg

@@ -1238,6 +1238,38 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 /// broker's window went disjoint from the shipped client's. This constant is
 /// the fix — it moves only for reasons the lobby can actually observe.
 ///
+/// 19 — Prospective: no lobby variant or field changes shape in this
+///      commit. Moved ahead of the `PlanechaseCommander` `GameFormat`
+///      variant, on the same terms as 11 and 16 (see those entries for the
+///      full mechanism). [`MIN_SUPPORTED_LOBBY_PROTOCOL`] stays
+///      at 2 and [`PROTOCOL_VERSION`] does not move alongside it. The
+///      client-side floor is
+///      `MIN_LOBBY_PROTOCOL_FOR_PLANECHASE_COMMANDER` in
+///      `client/src/adapter/ws-adapter.ts`. (Written as one unbroken
+///      paragraph on purpose, per the reason entry 5 gives: a blank `///`
+///      line before 4-space indented prose is an indented CODE block to
+///      rustdoc.)
+/// 18 — Prospective: no lobby variant or field changes shape in this
+///      commit. Moved ahead of the `ArchenemyCommander` `GameFormat`
+///      variant, on the same terms as 11 and 16 (see those entries for the
+///      full mechanism). [`MIN_SUPPORTED_LOBBY_PROTOCOL`] stays at 2 and
+///      [`PROTOCOL_VERSION`] does not move alongside it. The client-side
+///      floor is `MIN_LOBBY_PROTOCOL_FOR_ARCHENEMY_COMMANDER` in
+///      `client/src/adapter/ws-adapter.ts`. (Written as one unbroken
+///      paragraph on purpose, per the reason entry 5 gives: a blank `///`
+///      line before 4-space indented prose is an indented CODE block to
+///      rustdoc.)
+/// 17 — Prospective: no lobby variant or field changes shape in this
+///      commit. Moved ahead of the `TwoHeadedGiantCommander` `GameFormat`
+///      variant, on the same terms as 11 and 16 (see those entries for the
+///      full mechanism: `FromStr`'s unknown-name arm hard-errors on builds that
+///      predate the new name, one-directionally). [`MIN_SUPPORTED_LOBBY_PROTOCOL`]
+///      stays at 2 and [`PROTOCOL_VERSION`] does not move alongside it. The
+///      client-side floor is `MIN_LOBBY_PROTOCOL_FOR_TWO_HEADED_GIANT_COMMANDER`
+///      in `client/src/adapter/ws-adapter.ts`. (Written as one unbroken
+///      paragraph on purpose, per the reason entry 5 gives: a blank `///`
+///      line before 4-space indented prose is an indented CODE block to
+///      rustdoc.)
 /// 16 — `GameFormat` gains `Dandan` (see `PROTOCOL_VERSION` 110). Every lobby frame that carries a `GameFormat` (entry 11 names the carriers) can now name it, and a Rust broker below 16 rejects that frame because `GameFormat::deserialize` fails on the unknown name; the client-side floor for that pairing is `MIN_LOBBY_PROTOCOL_FOR_DANDAN` in `client/src/adapter/ws-adapter.ts`, frozen at 16. [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does not move, for the reasons entry 11 gives, and [`PROTOCOL_VERSION`] moves for its own reason, `GameState` carrying the name (110).
 /// 15 — `FormatConfig` loses `allow_experimental_dungeons` (see
 ///      `PROTOCOL_VERSION` 103 for the full entry): the per-session toggle is
@@ -1835,6 +1867,12 @@ impl From<&crate::tournament::TournamentMeta> for TournamentView {
 /// `serde_json::from_str` — that routes unknown tags to the reject path.
 /// (No `PartialEq`: `DeckData` is not `PartialEq`, matching the canonical
 /// `ClientMessage`, which is also not `PartialEq`.)
+// clippy::large_enum_variant: `CreateGameWithSettings` is the outlier. This
+// enum is a short-lived per-frame deserialize target that is matched and
+// destructured at once, never stored or queued, so boxing that variant's fields
+// buys nothing but call-site churn. (Same allow as the canonical
+// `ClientMessage`; this subset's variant balance trips the lint on its own.)
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum LobbyClientMessage {
@@ -2450,7 +2488,8 @@ mod tests {
         // report gate that has no production emitter yet; 15 removes that
         // `FormatConfig` field again, which parses cleanly in both directions
         // because neither side sets `deny_unknown_fields`; 16 adds a built-in
-        // format name, guarded by a client floor. See the constant's own
+        // format name, guarded by a client floor, and 17, 18, and 19 add
+        // built-in format names the same way. See the constant's own
         // changelog.
         assert_eq!(MIN_SUPPORTED_LOBBY_PROTOCOL, 2);
         // A `const` block, not a runtime assert: both operands are constants, so
@@ -2618,7 +2657,7 @@ mod tests {
     ///
     /// This historical introduction chain remains valid as the current version advances.
     #[test]
-    fn the_tournament_chain_spans_lobby_versions_four_through_sixteen() {
+    fn the_tournament_chain_spans_lobby_versions_four_through_nineteen() {
         const PRE_TOURNAMENT_LOBBY_VERSION: u32 = 3;
         const TOURNAMENT_SET_LOBBY_VERSION: u32 = PRE_TOURNAMENT_LOBBY_VERSION + 1;
         const CORRELATED_SETTLEMENT_LOBBY_VERSION: u32 = TOURNAMENT_SET_LOBBY_VERSION + 1;

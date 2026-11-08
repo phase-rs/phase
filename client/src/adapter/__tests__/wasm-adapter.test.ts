@@ -40,9 +40,10 @@ const setMultiplayerModeJs = vi.hoisted(() => vi.fn());
 const clearGameStateJs = vi.hoisted(() => vi.fn());
 const canonicalCardNamesJs = vi.hoisted(() => vi.fn());
 
-vi.mock("../../services/cardData", () => ({
+vi.mock("../main-thread-engine", () => ({
   ensureWasmInit,
   ensureCardDatabase: vi.fn().mockResolvedValue(100),
+  loadEngineModule: () => import("@wasm/engine"),
 }));
 
 vi.mock("@wasm/engine", () => ({
@@ -72,12 +73,14 @@ const mockWorkerClient = {
       color_distribution: [],
     }),
   evaluateDeckFormatGate: vi.fn().mockResolvedValue({ compatible: true, reasons: [] }),
+  checkDeckPrintingsBounds: vi.fn().mockResolvedValue(undefined),
   customFormatFromLobbyConfig: vi.fn().mockResolvedValue({ label: "My Format" }),
   formatConfigForCustomRules: vi.fn().mockResolvedValue({ format: "Custom:0" }),
   getCardFaceData: vi.fn().mockResolvedValue({ name: "Lightning Bolt" }),
   getCardParseDetails: vi.fn().mockResolvedValue([{ category: "ability" }]),
   getCardRulings: vi.fn().mockResolvedValue([{ date: "2020-01-01", text: "Test" }]),
   canonicalCardNames: vi.fn().mockResolvedValue([]),
+  query: vi.fn().mockResolvedValue("answer"),
   initializeGame: vi
     .fn()
     .mockResolvedValue({ events: [{ type: "GameStarted" }], log_entries: [] }),
@@ -632,6 +635,36 @@ describe("WasmAdapter", () => {
     });
   });
 
+  // Every p2p-adapter suite mocks `WasmAdapter` out, so this is the only layer
+  // that sees a forwarding slip in `checkDeckPrintingsBounds`, and on a
+  // fail-closed admission a slip kicks every P2P guest. The check reads no card
+  // database, so a stray `requireCardDb` (or a copy of the format-gate body)
+  // must fail here.
+  describe("checkDeckPrintingsBounds", () => {
+    const printings = [
+      { section: "main_deck", name: "Plains", count: 1, printing: { set_code: "M21", collector_number: "1" } },
+      { section: "main_deck", name: "Island", count: 1, printing: { set_code: "M21", collector_number: "2" } },
+    ];
+
+    it("forwards to the sidecar worker method without a card-database gate", async () => {
+      await expect(adapter.checkDeckPrintingsBounds(printings)).resolves.toBeUndefined();
+      // Reach guard: the adapter initialized and reached the worker.
+      expect(mockWorkerClient.initialize).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.checkDeckPrintingsBounds).toHaveBeenCalledWith(printings);
+      expect(mockWorkerClient.loadCardDbFromUrl).not.toHaveBeenCalled();
+      expect(mockWorkerClient.evaluateDeckFormatGate).not.toHaveBeenCalled();
+    });
+
+    it("rejects with the engine's reason", async () => {
+      mockWorkerClient.checkDeckPrintingsBounds.mockRejectedValueOnce(
+        new Error("printings must contain at most 2048 entries"),
+      );
+      await expect(adapter.checkDeckPrintingsBounds(printings)).rejects.toThrow(
+        "printings must contain at most 2048 entries",
+      );
+    });
+  });
+
   describe("custom format save/select", () => {
     it("delegates a lobby-config save to the engine", async () => {
       const config = { format: "Commander" };
@@ -681,6 +714,24 @@ describe("WasmAdapter", () => {
         "Revival/Revenge",
         "Not A Card",
       ]);
+    });
+  });
+
+  describe("query", () => {
+    it("loads the card database before a query that reads it", async () => {
+      await expect(adapter.query("classifyDeck", ["Forest"])).resolves.toBe("answer");
+
+      expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.query).toHaveBeenCalledWith("classifyDeck", [["Forest"]]);
+    });
+
+    // The Play setup screen asks for the format's deck supply before any game
+    // starts; it must not pull the ~90 MB database in to answer.
+    it("answers a format query without loading the card database", async () => {
+      await expect(adapter.query("deckSupplyForFormat", "Standard")).resolves.toBe("answer");
+
+      expect(mockWorkerClient.loadCardDbFromUrl).not.toHaveBeenCalled();
+      expect(mockWorkerClient.query).toHaveBeenCalledWith("deckSupplyForFormat", ["Standard"]);
     });
   });
 

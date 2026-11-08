@@ -21,12 +21,15 @@ export interface WsSessionData {
   fullKey: FullSessionKey;
   serverUrl: string;
   timestamp: number;
+  /** Pending terminal ACK routing must outlive playable reconnect expiry. */
+  terminalOnly?: true;
   hostSession?: WsHostSessionData;
   hostIsPublic?: boolean;
 }
 
 export function isWsSessionValid(session: WsSessionData): boolean {
-  return Date.now() - (session.timestamp ?? 0) < WS_SESSION_TTL_MS;
+  return session.terminalOnly === true
+    || Date.now() - (session.timestamp ?? 0) < WS_SESSION_TTL_MS;
 }
 
 // The latest session the store refused; null once a write lands.
@@ -59,8 +62,20 @@ export function loadWsSession(): WsSessionData | null {
   }
 }
 
-export function saveWsSession(session: WsSessionData): void {
+type WsSessionIdentity = Pick<WsSessionData, "fullKey" | "serverUrl" | "playerToken">;
+
+function matchesStoredWsSession(expected: WsSessionIdentity): boolean {
+  const current = loadWsSession();
+  return current !== null
+    && current.serverUrl === expected.serverUrl
+    && current.fullKey.game_code === expected.fullKey.game_code
+    && current.fullKey.generation === expected.fullKey.generation
+    && current.playerToken === expected.playerToken;
+}
+
+export function saveWsSession(session: WsSessionData, expected?: WsSessionIdentity): void {
   try {
+    if (expected && !matchesStoredWsSession(expected)) return;
     localStorage.setItem(WS_SESSION_STORAGE_KEY, JSON.stringify(session));
     pageSession = null;
   } catch {
@@ -69,7 +84,8 @@ export function saveWsSession(session: WsSessionData): void {
   }
 }
 
-export function clearWsSession(): void {
+export function clearWsSession(expected?: WsSessionIdentity): void {
+  if (expected && !matchesStoredWsSession(expected)) return;
   pageSession = null;
   try {
     localStorage.removeItem(WS_SESSION_STORAGE_KEY);

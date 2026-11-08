@@ -214,6 +214,83 @@ describe("SetSelector", () => {
     ]);
   });
 
+  it("picks one random set for every pack on the player's behalf", async () => {
+    // Sets are listed newest first (DKA, ISD); a high draw lands on the
+    // second, so the result is not the grid's default first tile.
+    vi.spyOn(Math, "random").mockReturnValue(0.9);
+    const onStartDraft = vi.fn();
+    render(<SetSelector onStartDraft={onStartDraft} defaultPackCount={3} />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Random Set" }));
+
+    expect(await packEntries()).toHaveLength(3);
+    await userEvent.click(screen.getByRole("button", { name: "Start Draft" }));
+    expect(onStartDraft).toHaveBeenCalledWith([
+      { code: "ISD", name: "Innistrad" },
+      { code: "ISD", name: "Innistrad" },
+      { code: "ISD", name: "Innistrad" },
+    ]);
+  });
+
+  it("picks a random set for each pack of a fixed-length Sealed event", async () => {
+    vi.spyOn(Math, "random")
+      .mockReturnValueOnce(0.9)
+      .mockReturnValueOnce(0.1)
+      .mockReturnValueOnce(0.9)
+      .mockReturnValueOnce(0.1);
+    const onStartDraft = vi.fn();
+    render(
+      <SetSelector
+        onStartDraft={onStartDraft}
+        defaultPackCount={4}
+        fixedPackCount
+        startLabel="Start Sealed"
+      />,
+    );
+
+    // A pack added by hand is replaced, not appended to: the random lineup
+    // is the whole event, so it starts at exactly the fixed count.
+    await addPack("Innistrad");
+    await userEvent.click(screen.getByRole("button", { name: "Random Packs" }));
+
+    expect(screen.getByRole("button", { name: "Start Sealed" })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: "Start Sealed" }));
+    expect(onStartDraft).toHaveBeenCalledWith([
+      { code: "ISD", name: "Innistrad" },
+      { code: "DKA", name: "Dark Ascension" },
+      { code: "ISD", name: "Innistrad" },
+      { code: "DKA", name: "Dark Ascension" },
+    ]);
+  });
+
+  it("picks distinct random candidate sets for a Chaos host", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.9);
+    const onStartDraft = vi.fn();
+    render(<SetSelector onStartDraft={onStartDraft} defaultPackCount={3} candidatePool />);
+
+    // Chaos already assigns boosters at random, so it offers only the
+    // candidate draw; the per-pack lineups belong to ordered events.
+    await userEvent.click(await screen.findByRole("button", { name: "Random Sets" }));
+    expect(screen.queryByRole("button", { name: "Random Set" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Random Packs" })).not.toBeInTheDocument();
+
+    // Three boosters asked of two sets: every set once, never a repeat.
+    expect(await packEntries()).toHaveLength(2);
+    await userEvent.click(screen.getByRole("button", { name: "Start Draft" }));
+    expect(onStartDraft).toHaveBeenCalledWith([
+      { code: "ISD", name: "Innistrad" },
+      { code: "DKA", name: "Dark Ascension" },
+    ]);
+  });
+
+  it("offers no random pick until the sets have loaded", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})));
+    render(<SetSelector onStartDraft={vi.fn()} defaultPackCount={3} />);
+
+    expect(screen.getByRole("button", { name: "Random Set" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Random Packs" })).toBeDisabled();
+  });
+
   it("trims a flexible selection when the event pack count decreases", async () => {
     const onStartDraft = vi.fn();
     const { rerender } = render(

@@ -1,6 +1,7 @@
 use crate::game::ability_utils::build_resolved_from_def;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::GameObject;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::targeting::{TriggeringActivation, TriggeringSpell};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, CopyRetargetPermission,
@@ -145,6 +146,9 @@ pub fn resolve(
         // cast from a graveyard" riders (Sevinne's Reclamation, issue #3283)
         // re-fire when a flashback copy resolves.
         copy_obj.cast_from_zone = None;
+        // CR 707.12: if this copy is later cast ("you may cast the copy"), it is
+        // cast from the zone the copied object is in.
+        copy_obj.copied_from_zone = Some(crate::game::game_object::CastOrigin::of(source_obj));
         copy_obj.cast_controller = None;
         // CR 707.10: no mana was spent to cast a spell copy — reset the
         // cast-payment stamps so spend-color riders ("if {W}{W} was spent to
@@ -1007,11 +1011,8 @@ fn set_copied_kind_controller(kind: &mut StackEntryKind, controller: PlayerId) {
 
 fn set_resolved_controller_recursive(ability: &mut ResolvedAbility, controller: PlayerId) {
     ability.controller = controller;
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        set_resolved_controller_recursive(sub_ability, controller);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        set_resolved_controller_recursive(else_ability, controller);
+    for (_, child) in ability.child_links_mut() {
+        set_resolved_controller_recursive(child, controller);
     }
 }
 
@@ -1023,11 +1024,8 @@ fn set_resolved_controller_recursive(ability: &mut ResolvedAbility, controller: 
 /// `source_id` and a second-generation copy could not find its source.
 pub(crate) fn set_resolved_source_recursive(ability: &mut ResolvedAbility, source_id: ObjectId) {
     ability.source_id = source_id;
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        set_resolved_source_recursive(sub_ability, source_id);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        set_resolved_source_recursive(else_ability, source_id);
+    for (_, child) in ability.child_links_mut() {
+        set_resolved_source_recursive(child, source_id);
     }
 }
 
@@ -1064,11 +1062,8 @@ fn rewrite_copy_spell_object_targets(
         })
         .collect();
     ability.replace_target_occurrences(occurrences);
-    if let Some(sub) = ability.sub_ability.as_mut() {
-        rewrite_copy_spell_object_targets(sub, new_target, new_target_pin);
-    }
-    if let Some(else_ab) = ability.else_ability.as_mut() {
-        rewrite_copy_spell_object_targets(else_ab, new_target, new_target_pin);
+    for (_, child) in ability.child_links_mut() {
+        rewrite_copy_spell_object_targets(child, new_target, new_target_pin);
     }
 }
 
@@ -1086,11 +1081,8 @@ fn stack_entry_source_id_for_copy(kind: &StackEntryKind, copy_id: ObjectId) -> O
 /// the copied ability chain before the copy resolves.
 fn clear_cast_from_zone_recursive(ability: &mut ResolvedAbility) {
     ability.context.cast_from_zone = None;
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        clear_cast_from_zone_recursive(sub_ability);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        clear_cast_from_zone_recursive(else_ability);
+    for (_, child) in ability.child_links_mut() {
+        clear_cast_from_zone_recursive(child);
     }
 }
 
@@ -2269,6 +2261,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Ref {
                     qty: crate::types::ability::QuantityRef::AdditionalCostPaymentCount,
@@ -2622,6 +2616,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -4498,6 +4494,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
             incarnation: 0,
         });

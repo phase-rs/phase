@@ -5,12 +5,15 @@ use rand::Rng;
 
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
+#[cfg(test)]
+use crate::types::ability::AbilityDefinition;
 use crate::types::ability::{
-    AbilityDefinition, CoinFlipResult, CoinFlipRun, Effect, EffectError, EffectKind,
-    ResolvedAbility, TargetRef,
+    CoinFlipResult, CoinFlipRun, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, ResolutionCoinFlip, WaitingFor};
+use crate::types::game_state::{
+    GameState, ResolutionCoinFlip, ResolvingTriggerContext, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
@@ -32,6 +35,50 @@ enum CoinFlipOutcome {
     Prevented,
 }
 
+/// CR 705.3: where a run stands in the set of coins one instruction flips at
+/// once. An `Exactly` run ("flip five coins") is one set; an `UntilLoss` run
+/// flips one coin at a time, so each of its flips is its own set.
+///
+/// Run-local and never persisted: under the currently supported coin-flip
+/// replacements, a set with an indicated result never parks a `PendingCoinFlip`
+/// frame (it settles inline in `flip_through_replacement`, and `FlipRun::park`
+/// asserts it), so a run resumed from a Krark's Thumb keep choice continues a
+/// set that had none. Branch or reward choices can still suspend and abandon a
+/// run under the pre-existing behavior of `settle_flip` and `complete_run`:
+/// they return `Suspended` without parking a frame, so nothing resumes the run.
+#[derive(Debug, Clone, Copy)]
+enum FlipSet {
+    /// No coin of the current set has been flipped.
+    Unstarted,
+    /// The set is underway; `fixed` is the result CR 705.3 indicates for each
+    /// of its coins.
+    Underway { fixed: Option<CoinFlipResult> },
+}
+
+impl FlipSet {
+    /// CR 705.3 + CR 109.5: the indicated result for the coins `player` is
+    /// flipping now. The first coin of a set records `player` in the per-turn
+    /// flipper set; if that is the player's first set this turn and a
+    /// `WinFirstCoinFlipSetEachTurn` static applies to them (Edgar, King of
+    /// Figaro), the whole set comes up heads and is won. The result is captured
+    /// once per set: every coin of a set is flipped at once.
+    fn begin(&mut self, state: &mut GameState, player: PlayerId) -> Option<CoinFlipResult> {
+        match *self {
+            FlipSet::Underway { fixed } => fixed,
+            FlipSet::Unstarted => {
+                let first_set_this_turn = state.players_who_flipped_coins_this_turn.insert(player);
+                let fixed = (first_set_this_turn
+                    && crate::game::static_abilities::player_wins_first_coin_flip_set_each_turn(
+                        state, player,
+                    ))
+                .then_some(CoinFlipResult::Won);
+                *self = FlipSet::Underway { fixed };
+                fixed
+            }
+        }
+    }
+}
+
 /// CR 705.1 + CR 614.1a: Route one logical coin flip through the CR 614
 /// replacement pipeline before touching the RNG, mirroring `draw`/`scry`/`mill`.
 ///
@@ -40,10 +87,12 @@ enum CoinFlipOutcome {
 /// performed and `CoinFlipped` emitted inline (`Resolved`). When `count > 1` the
 /// coins are flipped but the controller must keep one — the resolver suspends on
 /// `WaitingFor::CoinFlipKeepChoice` (`Suspended`) and `resume_after_keep` emits
-/// the single surviving `CoinFlipped`.
+/// the single surviving `CoinFlipped` — unless the run's `set` has a CR 705.3
+/// indicated result, in which case every coin agrees and the flip settles inline.
 fn flip_through_replacement(
     state: &mut GameState,
     player: PlayerId,
+    set: &mut FlipSet,
     events: &mut Vec<GameEvent>,
 ) -> CoinFlipOutcome {
     let proposed = ProposedEvent::CoinFlip {
@@ -84,12 +133,23 @@ fn flip_through_replacement(
         return CoinFlipOutcome::Prevented;
     }
 
-    // CR 705.1: flip each coin with the game's seeded RNG.
+    // CR 705.3: the coins this flip adds belong to the run's current set; the
+    // set's indicated result (if any) is fixed when its first coin is flipped.
+    let fixed = set.begin(state, player);
+
+    // CR 705.1: flip each coin with the game's seeded RNG. CR 705.3: an
+    // indicated result replaces each coin's actual result.
     let results: Vec<bool> = (0..count)
-        .map(|_| state.rng.draw(RandomDraw::Outcome).random_bool(0.5))
+        .map(|_| {
+            let actual = state.rng.draw(RandomDraw::Outcome).random_bool(0.5);
+            fixed.map_or(actual, |result| result == CoinFlipResult::Won)
+        })
         .collect();
 
-    if count == 1 {
+    // CR 614.1a + CR 705.3: under an indicated result every coin of a doubled
+    // flip has the same result, so "ignore one" has a single outcome and the
+    // flip settles inline rather than asking for the keep choice.
+    if count == 1 || fixed.is_some() {
         let won = results[0];
         events.push(GameEvent::CoinFlipped {
             player_id: player,
@@ -116,50 +176,62 @@ fn flip_through_replacement(
     }
 }
 
-/// CR 705.2: Execute a flip's win/lose branch, preserving its
-/// `optional`/`sub_ability`/`condition`/`duration` via the canonical converter.
-///
-/// CR 608.2c: the branch is part of the same resolution as the flip, so it
-/// inherits what that resolution produced earlier (`branch_context`): the
-/// players it chose, and a completed-but-empty result for an object it was
-/// asked to choose when none existed (CR 609.3). This is the single place both
-/// the inline and the resumed (Krark's Thumb) paths build a branch.
-#[allow(clippy::too_many_arguments)]
+/// CR 705.2 + CR 601.2c: execute only the selected, already-bound outcome.
+/// CR 608.2b: its target occurrences retain the outer resolution's legality
+/// verdicts; entering a child is not a second whole-ability fizzle check.
 fn run_flip_branch(
     state: &mut GameState,
-    branch: Option<&AbilityDefinition>,
-    source_id: ObjectId,
-    controller: PlayerId,
-    targets: &[TargetRef],
+    branch: Option<&ResolvedAbility>,
     chain_root_targets: &[TargetRef],
     branch_context: &FlipBranchContext,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    if let Some(def) = branch {
-        // CR 608.2h: propagate so a counter-gated "that many" nested in the
-        // branch still resolves against the live chain-root target (see
-        // `build_resolved_from_def_with_chain_root`'s doc).
-        let mut sub =
-            crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
-                def,
-                source_id,
-                controller,
-                targets.to_vec(),
-                chain_root_targets.to_vec(),
-            );
-        // CR 608.2d + CR 115.10: the flip's targets reach the branch root, since
-        // they include the branch's OWN announced targets ("if you win the flip,
-        // ~ deals 2 damage to target opponent"). Only an untargeted
-        // resolution-time chooser at the branch root is denied them: it makes
-        // its own pick ("choose a creature you control and an opponent"), and
-        // handing it an object chosen before the flip would answer that choice
-        // with the wrong object.
-        if !targets.is_empty() {
-            let mut probe = sub.clone();
-            probe.clear_targets();
-            if super::awaits_resolution_object_choice(&probe) {
-                sub.clear_targets();
+    if let Some(bound) = branch {
+        // CR 705.2 + CR 608.2c: each settled flip starts from the pristine
+        // binding, so one execution's mutations cannot alter later rewards.
+        let mut sub = bound.clone();
+        sub.set_chain_root_targets_recursive(chain_root_targets.to_vec());
+        // CR 113.7a + CR 400.7: the outcome acts only for the permanent that
+        // flipped; a source that left and returned is a new object. Source
+        // identity only: the targets, pins, provenance and controller announced
+        // for this outcome are untouched.
+        crate::game::ability_utils::inherit_result_branch_source_identity(state, &mut sub);
+        sub.context.forwarded_result_context = branch_context.forwarded_result_context.clone();
+        // CR 601.2c + CR 608.2d: only coin entry protects independently
+        // declared/unchosen branch slots; ordinary legacy hand-offs keep their
+        // existing forwarded-result binding behavior.
+        if !crate::game::ability_utils::node_has_stack_target_declaration(&sub)
+            && !super::awaits_resolution_object_choice(&sub)
+        {
+            super::bind_forwarded_result_targets_for_legacy_effect(&mut sub);
+        }
+        // CR 601.2c + CR 608.2d: declarations belong to this branch, not the
+        // parent's incoming referent. Resolution-time choosers make their own
+        // choice. Preserve the incoming channel through independent instructions
+        // when a later instruction in this branch still names its antecedent.
+        if !crate::game::ability_utils::node_has_stack_target_declaration(&sub)
+            && super::can_inherit_parent_targets(&sub)
+            && !super::awaits_resolution_object_choice(&sub)
+            && (super::ability_refs_parent_target(&sub)
+                || matches!(sub.effect, Effect::FlipCoins { .. }))
+        {
+            if let Some(reason) = branch_context.parent_target_missing_reason {
+                sub.parent_target_missing_reason = Some(reason.inherited());
             }
+            sub.replace_target_occurrences(branch_context.parent_occurrences.occurrences());
+            // CR 400.7 + CR 603.7c: these are incoming references, not this
+            // branch's announcements. Legacy reference readers use the keyed
+            // authority; preserve the captured pins rather than re-pinning to
+            // the board after a keep-choice restore.
+            sub.set_target_incarnations_recursive(
+                branch_context
+                    .parent_occurrences
+                    .pins
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .collect(),
+            );
         }
         // CR 608.2c: "that opponent" in the branch names the player chosen
         // earlier in this resolution.
@@ -171,11 +243,10 @@ fn run_flip_branch(
         // still happens. The shared missing-forward-result authority drops
         // exactly the dependent nodes; if the whole branch depended on the
         // absent object, there is nothing left to run.
-        let named_nothing = targets.is_empty()
-            && branch_context
-                .forwarded_result_context
-                .as_deref()
-                .is_some_and(|context| context.targets.is_empty());
+        let named_nothing = branch_context
+            .forwarded_result_context
+            .as_deref()
+            .is_some_and(|context| context.targets.is_empty());
         if named_nothing {
             let Some(pruned) = super::without_missing_forward_result_dependencies(&sub) else {
                 return Ok(());
@@ -209,30 +280,65 @@ struct FlipRun<'a> {
     source_id: ObjectId,
     controller: PlayerId,
     flipper: PlayerId,
-    targets: &'a [TargetRef],
     chain_root_targets: &'a [TargetRef],
-    win_effect: Option<&'a AbilityDefinition>,
-    lose_effect: Option<&'a AbilityDefinition>,
-    /// CR 608.2c: what the branches inherit from the flipping resolution (chosen players,
-    /// completed-empty result), carried across a Krark's Thumb suspension.
+    win_effect: Option<&'a ResolvedAbility>,
+    lose_effect: Option<&'a ResolvedAbility>,
+    /// CR 608.2c: incoming pinned references and chosen players, retained
+    /// across a Krark's Thumb suspension.
     branch_context: &'a FlipBranchContext,
+    trigger_context: &'a Option<ResolvingTriggerContext>,
 }
 
 impl FlipRun<'_> {
     /// CR 614.1a + CR 705.1: the frame a run parks while a doubled flip waits for its keep
     /// choice. `kind` is the position after the paused flip. The branches are cloned only here,
     /// on suspension.
-    fn park(&self, kind: PendingCoinFlipKind) -> PendingCoinFlip {
+    ///
+    /// Fresh coin-keep, pre-roll replacement-ordering, and post-roll die suspensions
+    /// retain their owning scope, including explicit emptiness; legacy missing scope
+    /// is not reconstructed. A die roll started by a coin's continuation drain still
+    /// loses its published per-survivor result at the drain's whole-snapshot restore
+    /// (pre-existing, unchanged).
+    ///
+    /// CR 705.3: the frame does not carry the run's `set`. A set with an indicated
+    /// result settles every flip inline (`flip_through_replacement`), so only an
+    /// unfixed set can park, and the resumed run restarts `Underway { fixed: None }`.
+    /// Every park goes through here, so this is where that contract is enforced.
+    fn park(
+        &self,
+        state: &GameState,
+        kind: PendingCoinFlipKind,
+        start: &FlipRunStart,
+        set: FlipSet,
+    ) -> PendingCoinFlip {
+        debug_assert!(
+            !matches!(set, FlipSet::Underway { fixed: Some(_) }),
+            "CR 705.3: a coin-flip set with an indicated result must never park"
+        );
         PendingCoinFlip {
             source_id: self.source_id,
             controller: self.controller,
             flipper: self.flipper,
-            targets: self.targets.to_vec(),
             win_effect: self.win_effect.map(|d| Box::new(d.clone())),
             lose_effect: self.lose_effect.map(|d| Box::new(d.clone())),
             kind,
             chain_root_targets: self.chain_root_targets.to_vec(),
             branch_context: self.branch_context.clone(),
+            // CR 608.2c + CR 400.7e: fresh absence is owned emptiness;
+            // resumed absence is legacy authority and must not be recaptured.
+            trigger_context: match start {
+                FlipRunStart::Fresh(_) => {
+                    Some(ResolvingTriggerContext::capture(state).unwrap_or_else(|| {
+                        ResolvingTriggerContext {
+                            event: None,
+                            events: Vec::new(),
+                            match_count: None,
+                            die_result: None,
+                        }
+                    }))
+                }
+                FlipRunStart::Kept { .. } => self.trigger_context.clone(),
+            },
         }
     }
 
@@ -252,9 +358,6 @@ impl FlipRun<'_> {
         run_flip_branch(
             state,
             branch,
-            self.source_id,
-            self.controller,
-            self.targets,
             self.chain_root_targets,
             self.branch_context,
             events,
@@ -376,9 +479,16 @@ fn drive_flip_run(
     test: RunCompletionTest,
     events: &mut Vec<GameEvent>,
 ) -> Result<FlipRunOutcome, EffectError> {
-    let mut step = match start {
-        FlipRunStart::Fresh(kind) => next_step(kind),
-        FlipRunStart::Kept { kind, won } => settle_flip(state, run, kind, won, events)?,
+    let mut step = match &start {
+        FlipRunStart::Fresh(kind) => next_step(kind.clone()),
+        FlipRunStart::Kept { kind, won } => settle_flip(state, run, kind.clone(), *won, events)?,
+    };
+    // CR 705.3: a fresh run has flipped no coin yet. A resumed run continues a set
+    // whose first coin was the paused doubled flip, which was not fixed — a set
+    // with an indicated result settles inline and never parks.
+    let mut set = match &start {
+        FlipRunStart::Fresh(_) => FlipSet::Unstarted,
+        FlipRunStart::Kept { .. } => FlipSet::Underway { fixed: None },
     };
     loop {
         match step {
@@ -392,10 +502,13 @@ fn drive_flip_run(
                         remaining: remaining - 1,
                     },
                     PendingCoinFlipKind::UntilLoss { wins_so_far } => {
+                        // CR 705.3: "flip a coin until you lose a flip" flips one
+                        // coin at a time, so each flip starts a new set.
+                        set = FlipSet::Unstarted;
                         PendingCoinFlipKind::UntilLoss { wins_so_far }
                     }
                 };
-                step = match flip_through_replacement(state, run.flipper, events) {
+                step = match flip_through_replacement(state, run.flipper, &mut set, events) {
                     CoinFlipOutcome::Resolved(won) => {
                         settle_flip(state, run, kind_after, won, events)?
                     }
@@ -406,7 +519,7 @@ fn drive_flip_run(
                     CoinFlipOutcome::Suspended => {
                         // CR 614.1a: doubled flip — stash the run position and resume after
                         // the keep choice. The position excludes the paused flip itself.
-                        state.push_coin_flip_frame(run.park(kind_after));
+                        state.push_coin_flip_frame(run.park(state, kind_after, &start, set));
                         FlipRunStep::Suspended
                     }
                 };
@@ -478,6 +591,16 @@ pub fn resolve(
         return Err(EffectError::MissingParam("FlipCoins".to_string()));
     };
 
+    let branches = ability.coin_branches.as_deref();
+    if win_effect.is_some() != branches.is_some_and(|branches| branches.won.is_some())
+        || lose_effect.is_some() != branches.is_some_and(|branches| branches.lost.is_some())
+        || (win_effect.is_none() && lose_effect.is_none() && branches.is_some())
+    {
+        return Err(EffectError::MissingParam(
+            "resolved coin branches".to_string(),
+        ));
+    }
+
     // CR 705.2: "only the player who flips a coin wins or loses the flip." The
     // `flipper` names that player ("that player flips a coin" → the triggering
     // player, Mirrored Depths / Planar Chaos); the bare "flip a coin" defaults
@@ -514,17 +637,17 @@ pub fn resolve(
 
     // CR 608.2c: every flip's branch inherits this resolution's chosen players and
     // completed-empty result, inline or across a Krark's Thumb suspension.
-    let branch_context = FlipBranchContext::from_ability(ability);
+    let branch_context = FlipBranchContext::from_ability(ability, state);
 
     let run = FlipRun {
         source_id: ability.source_id,
         controller: ability.controller,
         flipper,
-        targets: &ability.targets,
         chain_root_targets: &ability.context.chain_root_targets,
-        win_effect: win_effect.as_deref(),
-        lose_effect: lose_effect.as_deref(),
+        win_effect: branches.and_then(|branches| branches.won.as_ref()),
+        lose_effect: branches.and_then(|branches| branches.lost.as_ref()),
         branch_context: &branch_context,
+        trigger_context: &None,
     };
     drive_flip_run(state, &run, FlipRunStart::Fresh(kind), test, events)?;
     Ok(())
@@ -556,12 +679,12 @@ pub fn resume_after_keep(
         source_id,
         controller,
         flipper,
-        targets,
         win_effect,
         lose_effect,
         kind,
         chain_root_targets,
         branch_context,
+        trigger_context,
     } = pending;
 
     // CR 705.1 + CR 614.1a + CR 705.2: the single surviving flip is recorded for
@@ -578,6 +701,10 @@ pub fn resume_after_keep(
         flipper,
         result: CoinFlipResult::from_won(won),
     });
+    // CR 705.3: the kept flip happened, so the flipper's "first time … each turn"
+    // window is spent. Already recorded when its set began; idempotent here so a
+    // state saved before the per-turn record existed resumes with it spent.
+    state.players_who_flipped_coins_this_turn.insert(flipper);
 
     // Clear the resolving keep choice so a re-suspension is unambiguous.
     state.waiting_for = WaitingFor::Priority { player: controller };
@@ -586,11 +713,11 @@ pub fn resume_after_keep(
         source_id,
         controller,
         flipper,
-        targets: &targets,
         chain_root_targets: &chain_root_targets,
         win_effect: win_effect.as_deref(),
         lose_effect: lose_effect.as_deref(),
         branch_context: &branch_context,
+        trigger_context: &trigger_context,
     };
     // CR 608.2c: every resumed path completes once no interactive resolution choice is pending.
     match drive_flip_run(
@@ -603,6 +730,21 @@ pub fn resume_after_keep(
         FlipRunOutcome::Suspended => Ok(Some(state.waiting_for.clone())),
         FlipRunOutcome::Complete => Ok(None),
     }
+}
+
+#[cfg(test)]
+fn bound_coin(
+    effect: Effect,
+    targets: Vec<TargetRef>,
+    source_id: ObjectId,
+    controller: PlayerId,
+) -> ResolvedAbility {
+    crate::game::ability_utils::build_resolved_from_def_with_targets(
+        &AbilityDefinition::new(crate::types::ability::AbilityKind::Spell, effect),
+        source_id,
+        controller,
+        targets,
+    )
 }
 
 #[cfg(test)]
@@ -653,7 +795,7 @@ mod tests {
             },
         ));
 
-        let ability = ResolvedAbility::new(
+        let ability = bound_coin(
             Effect::FlipCoins {
                 flips: CoinFlipRun::single(),
                 win_effect: Some(win_effect),
@@ -693,7 +835,7 @@ mod tests {
             );
         }
 
-        let ability = ResolvedAbility::new(
+        let ability = bound_coin(
             Effect::FlipCoins {
                 flips: CoinFlipRun::UntilLoss,
                 win_effect: Some(Box::new(AbilityDefinition::new(
@@ -800,7 +942,7 @@ mod tests {
             },
         ));
 
-        let ability = ResolvedAbility::new(
+        let ability = bound_coin(
             Effect::FlipCoins {
                 flips: CoinFlipRun::Exactly {
                     count: QuantityExpr::Fixed { value: 4 },
@@ -840,12 +982,14 @@ mod tests {
                 owner: crate::types::ability::TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
             },
         ));
-        let ability = ResolvedAbility::new(
+        let ability = bound_coin(
             Effect::FlipCoins {
                 flips: CoinFlipRun::Exactly {
                     count: QuantityExpr::Fixed { value: 8 },
@@ -1514,7 +1658,7 @@ mod tests {
         let p1_initial = state.players[1].life;
         let p0_initial = state.players[0].life;
 
-        let ability = ResolvedAbility::new(
+        let ability = bound_coin(
             triggering_player_flip(Some(lose)),
             vec![],
             source,
@@ -2058,8 +2202,7 @@ mod tests {
             let mut state = GameState::new_two_player(42);
             state.rng = crate::types::game_state::GameRng::seed_from_u64(seed);
             let start_life = state.players[0].life;
-            let ability =
-                ResolvedAbility::new(until_loss_gain_life(), vec![], ObjectId(1), PlayerId(0));
+            let ability = bound_coin(until_loss_gain_life(), vec![], ObjectId(1), PlayerId(0));
             let mut events = Vec::new();
             resolve(&mut state, &ability, &mut events).unwrap();
 
@@ -2113,7 +2256,7 @@ mod tests {
             let mut state = GameState::new_two_player(42);
             state.rng = crate::types::game_state::GameRng::seed_from_u64(seed);
             let start_life = state.players[0].life;
-            let ability = ResolvedAbility::new(
+            let ability = bound_coin(
                 Effect::FlipCoins {
                     flips: CoinFlipRun::UntilLoss,
                     win_effect: Some(Box::new(gain_life_definition(1))),
@@ -2209,7 +2352,7 @@ mod tests {
                 "the run starts with 2 cards"
             );
 
-            let ability = ResolvedAbility::new(
+            let ability = bound_coin(
                 Effect::FlipCoins {
                     flips: CoinFlipRun::Exactly {
                         count: QuantityExpr::Ref {
@@ -2265,12 +2408,18 @@ mod tests {
             source_id: ObjectId(1),
             controller: PlayerId(0),
             flipper: PlayerId(0),
-            targets: vec![],
-            win_effect: Some(Box::new(gain_life_definition(1))),
+            win_effect: Some(Box::new(
+                crate::game::ability_utils::build_resolved_from_def(
+                    &gain_life_definition(1),
+                    ObjectId(1),
+                    PlayerId(0),
+                ),
+            )),
             lose_effect: None,
             kind: PendingCoinFlipKind::UntilLoss { wins_so_far },
             chain_root_targets: vec![],
             branch_context: FlipBranchContext::default(),
+            trigger_context: None,
         }
     }
 
@@ -2347,7 +2496,7 @@ mod tests {
             };
             state
         };
-        let ability = |effect: Effect| ResolvedAbility::new(effect, vec![], source, PlayerId(0));
+        let ability = |effect: Effect| bound_coin(effect, vec![], source, PlayerId(0));
 
         // Single flip, no branches.
         let mut state = fresh_state();
@@ -2494,7 +2643,7 @@ mod branch_context_tests {
         targets: Vec<TargetRef>,
         source: ObjectId,
     ) -> ResolvedAbility {
-        ResolvedAbility::new(
+        bound_coin(
             Effect::FlipCoins {
                 flips: CoinFlipRun::single(),
                 win_effect: None,
@@ -2509,20 +2658,26 @@ mod branch_context_tests {
 
     /// The Krark's-Thumb-parked image of `ability`'s flip, as `resolve` would
     /// push it.
-    fn parked(ability: &ResolvedAbility) -> PendingCoinFlip {
-        let Effect::FlipCoins { lose_effect, .. } = &ability.effect else {
-            unreachable!("fixture is a FlipCoins");
-        };
+    fn parked(ability: &ResolvedAbility, state: &GameState) -> PendingCoinFlip {
+        let branches = ability
+            .coin_branches
+            .as_deref()
+            .expect("bound coin fixture");
         PendingCoinFlip {
             source_id: ability.source_id,
             controller: ability.controller,
             flipper: ability.controller,
-            targets: ability.targets.clone(),
             win_effect: None,
-            lose_effect: lose_effect.clone(),
+            lose_effect: branches.lost.clone().map(Box::new),
             kind: PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: ability.context.chain_root_targets.clone(),
-            branch_context: FlipBranchContext::from_ability(ability),
+            branch_context: FlipBranchContext::from_ability(ability, state),
+            trigger_context: Some(ResolvingTriggerContext {
+                event: None,
+                events: vec![],
+                match_count: None,
+                die_result: None,
+            }),
         }
     }
 
@@ -2559,7 +2714,8 @@ mod branch_context_tests {
 
             let mut events = Vec::new();
             if resumed {
-                resume_after_keep(&mut state, parked(&ability), vec![false], &mut events).unwrap();
+                let pending = parked(&ability, &state);
+                resume_after_keep(&mut state, pending, vec![false], &mut events).unwrap();
             } else {
                 resolve(&mut state, &ability, &mut events).unwrap();
             }
@@ -2590,7 +2746,8 @@ mod branch_context_tests {
 
             let mut events = Vec::new();
             if resumed {
-                resume_after_keep(&mut state, parked(&ability), vec![false], &mut events).unwrap();
+                let pending = parked(&ability, &state);
+                resume_after_keep(&mut state, pending, vec![false], &mut events).unwrap();
             } else {
                 resolve(&mut state, &ability, &mut events).unwrap();
             }
@@ -2741,24 +2898,14 @@ mod branch_context_tests {
             }
             Path::Resumed => {
                 runner.state_mut().rng = GameRng::seed_from_u64(seed_for(&[nested_won]));
-                resume_after_keep(
-                    runner.state_mut(),
-                    parked(&ability),
-                    vec![false],
-                    &mut events,
-                )
-                .unwrap();
+                let pending = parked(&ability, runner.state());
+                resume_after_keep(runner.state_mut(), pending, vec![false], &mut events).unwrap();
             }
             Path::NestedKrark => {
                 runner.state_mut().rng =
                     GameRng::seed_from_u64(seed_for(&[nested_won, !nested_won]));
-                resume_after_keep(
-                    runner.state_mut(),
-                    parked(&ability),
-                    vec![false],
-                    &mut events,
-                )
-                .unwrap();
+                let pending = parked(&ability, runner.state());
+                resume_after_keep(runner.state_mut(), pending, vec![false], &mut events).unwrap();
                 let WaitingFor::CoinFlipKeepChoice { results, .. } =
                     runner.state().waiting_for.clone()
                 else {
@@ -2972,11 +3119,8 @@ mod branch_context_tests {
         assert_eq!(runner.state().objects[&other_bear].controller, P0);
     }
 
-    /// A winning-branch instruction that declares its own player target (the
-    /// shape of Goblin Lyre's and Ral Zarek's branches): the flip's targets
-    /// include the announced player, so the branch root must receive them even
-    /// though it declares a chosen group. Only an untargeted resolution-time
-    /// chooser at the branch root is denied the flip's targets.
+    /// A winning-branch instruction with its own announced player occurrence,
+    /// independent of the coin parent's incoming context.
     fn declaring_branch(effect: Effect) -> AbilityDefinition {
         let mut branch = AbilityDefinition::new(AbilityKind::Spell, effect);
         branch.declares_chosen_group =
@@ -3000,17 +3144,23 @@ mod branch_context_tests {
             damage_source: None,
             excess: None,
         });
-        let ability = ResolvedAbility::new(
+        let mut ability = bound_coin(
             Effect::FlipCoins {
                 flips: CoinFlipRun::single(),
                 win_effect: Some(Box::new(win)),
                 lose_effect: None,
                 flipper: TargetFilter::Controller,
             },
-            vec![TargetRef::Player(P2)],
+            vec![],
             source,
             P0,
         );
+        crate::game::ability_utils::assign_targets_in_chain(
+            &state,
+            &mut ability,
+            &[TargetRef::Player(P2)],
+        )
+        .expect("announce the win branch's player");
         let before = state.players.iter().map(|p| p.life).collect::<Vec<_>>();
 
         let mut events = Vec::new();
@@ -3036,7 +3186,7 @@ mod branch_context_tests {
             target: opponent(),
             count: QuantityExpr::Fixed { value: 1 },
         });
-        let ability = ResolvedAbility::new(
+        let mut ability = bound_coin(
             Effect::FlipCoins {
                 flips: CoinFlipRun::Exactly {
                     count: QuantityExpr::Fixed { value: 5 },
@@ -3045,10 +3195,16 @@ mod branch_context_tests {
                 lose_effect: None,
                 flipper: TargetFilter::Controller,
             },
-            vec![TargetRef::Player(P2)],
+            vec![],
             source,
             P0,
         );
+        crate::game::ability_utils::assign_targets_in_chain(
+            &state,
+            &mut ability,
+            &[TargetRef::Player(P2)],
+        )
+        .expect("announce the win branch's player");
 
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();

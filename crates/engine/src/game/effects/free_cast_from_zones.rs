@@ -64,6 +64,11 @@ pub(in crate::game) fn free_cast_window_resolution_request(
                 member_pool,
             },
         delayed_trigger_receipts: Vec::new(),
+        // CR 603.2h: a free-cast window is never a CR 603.2h indicated instruction:
+        // the lowering guard admits only a single-card `DuringResolution`
+        // `CastFromZone`, so a `ResolutionWindow` driver and a `FreeCastFromZones`
+        // node strict-fail.
+        indicated_action: None,
     };
     crate::game::casting::ResolutionCastRequest {
         face_policy,
@@ -204,6 +209,9 @@ pub(crate) fn resolve_with_face_policy(
             face_policy.controller,
             face_policy.constraint,
         )
+        // CR 701.18b: residualizing the filter must not narrow a Play
+        // instruction back to Cast.
+        .with_play_mode(face_policy.play_mode)
     };
 
     let cast_request = free_cast_window_resolution_request(
@@ -325,10 +333,25 @@ pub(in crate::game) fn eligible_candidates(
         // spell face through the exact request that will be announced. A
         // policy-only front check would admit a spell with no legal targets or
         // erase a legal back-only spell before it could be elected.
-        if projection
-            .spell_face_legality(face_policy.controller, id, request)
-            .count()
-            == 0
+        //
+        // CR 701.18b: under a Play policy the window also offers a land — a
+        // spell//land modal card's land face (`face_legality`, which equals the
+        // spell-face legality under a Cast policy) or a land card played as a
+        // land now (`resolution_land_front_admission`). A Cast policy admits
+        // neither.
+        let playable_land = projection.with_flushed_baseline(|baseline| {
+            crate::game::casting::resolution_land_front_admission(
+                baseline,
+                face_policy.controller,
+                id,
+                face_policy,
+            )
+        });
+        if !playable_land
+            && projection
+                .face_legality(face_policy.controller, id, request)
+                .count()
+                == 0
         {
             continue;
         }
@@ -428,6 +451,7 @@ fn member_pool_filter(filter: &TargetFilter) -> TargetFilter {
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -436,6 +460,9 @@ fn member_pool_filter(filter: &TargetFilter) -> TargetFilter {
         | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — nothing to rewrite,
+        // identity like the neighboring anchors.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::OriginalSource

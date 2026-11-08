@@ -1,50 +1,11 @@
 use std::collections::BTreeSet;
-use std::fmt;
-use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
 use crate::types::format::FormatConfig;
 use crate::types::player::PlayerId;
 
-// ─── Dungeon Identity ────────────────────────────────────────────────────────
-
-/// CR 309: The five dungeon cards across D&D crossover sets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum DungeonId {
-    LostMineOfPhandelver,
-    DungeonOfTheMadMage,
-    TombOfAnnihilation,
-    Undercity,
-    BaldursGateWilderness,
-}
-
-impl fmt::Display for DungeonId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::LostMineOfPhandelver => write!(f, "Lost Mine of Phandelver"),
-            Self::DungeonOfTheMadMage => write!(f, "Dungeon of the Mad Mage"),
-            Self::TombOfAnnihilation => write!(f, "Tomb of Annihilation"),
-            Self::Undercity => write!(f, "Undercity"),
-            Self::BaldursGateWilderness => write!(f, "Baldur's Gate Wilderness"),
-        }
-    }
-}
-
-impl FromStr for DungeonId {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "LostMineOfPhandelver" => Ok(Self::LostMineOfPhandelver),
-            "DungeonOfTheMadMage" => Ok(Self::DungeonOfTheMadMage),
-            "TombOfAnnihilation" => Ok(Self::TombOfAnnihilation),
-            "Undercity" => Ok(Self::Undercity),
-            "BaldursGateWilderness" => Ok(Self::BaldursGateWilderness),
-            _ => Err(format!("Unknown dungeon: {s}")),
-        }
-    }
-}
+pub use crate::types::dungeon::DungeonId;
 
 // ─── Venture Source ──────────────────────────────────────────────────────────
 
@@ -559,8 +520,8 @@ use crate::types::ability::{
     CastFromZoneDriver, CastingPermission, ContinuousModification, ControllerRef, Duration, Effect,
     FilterProp, ObjectProperty, ObjectSelectionCardinality, PlayerFilter, PlayerScope,
     PropertyAggregate, PtValue, QuantityExpr, QuantityRef, ResolvedAbility,
-    SearchSelectionConstraint, StaticDefinition, TargetFilter, TrackedAnaphorSource, TypeFilter,
-    TypedFilter,
+    SearchSelectionConstraint, StaticDefinition, TargetFilter, TokenAttackDestination,
+    TrackedAnaphorSource, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -908,6 +869,7 @@ pub fn room_effects(
                     owner: TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination: TokenAttackDestination::ControllerChooses,
                     // CR 205.4a: The Atropal is legendary.
                     supertypes: vec![crate::types::card_type::Supertype::Legendary],
                     static_abilities: vec![],
@@ -1320,6 +1282,7 @@ fn creature_token(
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -1552,6 +1515,7 @@ fn patch_ansur_drain(mut root: ResolvedAbility) -> ResolvedAbility {
                 CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
                     caused_by: None,
+                    filter: None,
                 },
             )
             .expect("Sum over ManaValue of the chain set is statically valid");
@@ -1639,6 +1603,7 @@ fn treasure_token() -> Effect {
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -2029,6 +1994,8 @@ pub fn has_completed_dungeon(
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::*;
     use crate::types::mana::ManaCost;
     use crate::types::statics::CostModifyMode;

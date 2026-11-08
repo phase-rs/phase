@@ -102,7 +102,7 @@ fn lists_activation(state: &GameState, source: ObjectId) -> bool {
 fn expect_announcement(state: &GameState, source: ObjectId) -> u32 {
     match &state.waiting_for {
         WaitingFor::PayAmountChoice {
-            resource: PayableResource::ManaGeneric { base_cost },
+            resource: PayableResource::Mana { base_cost, .. },
             min,
             max,
             accumulated,
@@ -661,7 +661,7 @@ fn rockets_reserved_for_a_spell_sacrifice_is_neither_listed_nor_announced() {
         state.pending_cast.as_ref().is_some_and(|pending| pending
             .deferred_sacrificed_permanents
             .iter()
-            .any(|selection| selection.object_id == reserved)),
+            .any(|selection| selection.selected_object() == Some(reserved))),
         "Rockets is reserved as the spell's deferred sacrifice"
     );
     assert_eq!(zone(state, reserved), Zone::Battlefield);

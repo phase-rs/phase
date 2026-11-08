@@ -46,6 +46,7 @@ mod dash_tests;
 pub mod day_night;
 pub mod deck_loading;
 pub mod deck_validation;
+pub mod decks;
 pub mod derived;
 pub mod derived_views;
 pub mod devotion;
@@ -54,6 +55,8 @@ pub mod effects;
 pub mod elimination;
 pub mod engine;
 pub(crate) mod engine_casting;
+#[cfg(feature = "test-support")]
+pub use engine_casting::CastUndoReferenceCheck;
 pub(crate) mod engine_combat;
 pub(crate) mod engine_debug;
 pub(crate) mod engine_modes;
@@ -110,7 +113,9 @@ mod omnath_tests;
 // Tests for `merge` live in a sibling file (declared here, not in `merge.rs`,
 // so `merge.rs` stays implementation-only).
 pub mod archenemy;
+pub mod boss;
 pub mod conspiracy;
+pub mod horde;
 // Tests for `conspiracy` live in a sibling file (declared here, not in
 // `conspiracy.rs`, so `conspiracy.rs` stays implementation-only).
 #[cfg(test)]
@@ -192,6 +197,7 @@ pub mod stickers;
 #[cfg(test)]
 #[path = "stickers_tests.rs"]
 mod stickers_tests;
+pub mod takeback;
 pub mod target_occurrences;
 pub mod targeting;
 pub mod text_substitution;
@@ -209,6 +215,7 @@ pub(crate) mod trigger_matchers;
 pub mod triggers;
 pub mod turn_control;
 pub mod turns;
+pub mod un_actions;
 pub mod visibility;
 pub(crate) mod wish_scope;
 pub mod zone_pipeline;
@@ -229,13 +236,14 @@ pub use bracket_estimate::{
     BracketViolation, CommanderBracketTier,
 };
 // Plumbing: read-only re-export of the X-affordability authority
-// (`max_x_value`) and the cost-leg extractor that feeds it
-// (`extract_x_mana_cost`) so the `phase-ai` consumer crate can price "the only
-// legal X is 0" without duplicating the cost machinery. `casting_costs` is otherwise
-// `pub(crate)`; this exposes exactly that one function from it. The governing
-// rule annotation lives on the function definition in `casting_costs.rs`, not
-// on this visibility re-export.
-pub use casting_costs::{extract_x_mana_cost, max_x_value};
+// (`max_x_value`) and the cost-leg extractors that feed it
+// (`extract_x_mana_cost`, `extract_mana_leg`) so the `phase-ai` consumer crate
+// can price "the only legal X is 0" and the mana an activation commits without
+// duplicating the cost machinery. `casting_costs` is otherwise `pub(crate)`;
+// this exposes exactly those functions from it. The governing rule annotations
+// live on the function definitions in `casting_costs.rs`, not on this
+// visibility re-export.
+pub use casting_costs::{extract_mana_leg, extract_x_mana_cost, max_x_value};
 pub use deck_loading::{
     create_commander_from_card_face, load_and_hydrate_decks, load_deck_into_state,
     resolve_deck_list, resolve_player_deck_list, DeckEntry, DeckList, DeckPayload, PlayerDeckList,

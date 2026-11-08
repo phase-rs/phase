@@ -16,7 +16,8 @@ use engine::types::mana::ManaCost;
 use engine::types::player::PlayerId;
 use engine::types::GameLogEntry;
 use server_core::game_state_snapshot_wire_guard::{
-    guard_state_snapshot_broadcast, StateSnapshotParts,
+    guard_state_snapshot_broadcast, StateSnapshotParts, MAX_SNAPSHOT_EVENTS,
+    MAX_SNAPSHOT_LOG_ENTRIES,
 };
 use server_core::protocol::ServerMessage;
 use server_core::session::{
@@ -25,6 +26,7 @@ use server_core::session::{
 use server_core::takeback::RewindOption;
 use server_core::FullSessionKey;
 use tokio::sync::{OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
+use tracing::warn;
 
 #[cfg(test)]
 use tokio::sync::mpsc;
@@ -326,6 +328,7 @@ impl GameExecutor {
 }
 
 /// Borrow a complete decision without cloning its action and cost domains.
+#[derive(Clone, Copy)]
 pub(crate) struct DecisionInputs<'a> {
     pub(crate) legal_actions: &'a [GameAction],
     pub(crate) spell_costs: &'a HashMap<ObjectId, ManaCost>,
@@ -378,7 +381,41 @@ impl<'a> StateUpdateSource<'a> {
         }
     }
 
-    pub(crate) fn guard(&self) -> Result<(), String> {
+    /// Checks every bound except events and log, which `guarded` trims.
+    pub(crate) fn admissible(&self) -> Result<(), String> {
+        Self {
+            events: &[],
+            log_entries: &[],
+            ..*self
+        }
+        .check()
+    }
+
+    /// Trims events and log to their broadcast bounds, warning when it drops
+    /// any, then checks the bounds it cannot trim.
+    pub(crate) fn guarded(mut self, game_code: &str) -> Result<Self, String> {
+        // Newest entries are kept: the state is authoritative, events and log are presentation.
+        let events_dropped = self.events.len().saturating_sub(MAX_SNAPSHOT_EVENTS);
+        let log_dropped = self
+            .log_entries
+            .len()
+            .saturating_sub(MAX_SNAPSHOT_LOG_ENTRIES);
+        self.events = &self.events[events_dropped..];
+        self.log_entries = &self.log_entries[log_dropped..];
+        if events_dropped > 0 || log_dropped > 0 {
+            warn!(
+                game = %game_code,
+                revision = self.revision,
+                events_dropped,
+                log_dropped,
+                "state update events/log trimmed to broadcast bounds"
+            );
+        }
+        self.check()?;
+        Ok(self)
+    }
+
+    fn check(&self) -> Result<(), String> {
         let empty_costs = HashMap::new();
         let empty_by_object = HashMap::new();
         guard_state_snapshot_broadcast(StateSnapshotParts {
@@ -550,8 +587,15 @@ impl StateUpdatePublisher {
             self = executor
                 .run(move || {
                     let source = StateUpdateSource::from_transition(&transition);
-                    if source.guard().is_ok() {
-                        self.publish(&source);
+                    let revision = source.revision;
+                    match source.guarded(&self.full_key.game_code) {
+                        Ok(source) => self.publish(&source),
+                        Err(reason) => warn!(
+                            game = %self.full_key.game_code,
+                            revision,
+                            %reason,
+                            "AI transition exceeds broadcast bounds; not published"
+                        ),
                     }
                     self
                 })
@@ -1171,6 +1215,148 @@ mod tests {
                 };
                 assert!(pending.iter().all(|entry| entry.player != PlayerId(0)));
             }
+        });
+    }
+
+    #[test]
+    fn ai_batch_publishes_oversized_transitions_trimmed_and_skips_only_untrimmable_ones() {
+        crate::socket_test_hooks::run_async_test(|| async {
+            use engine::game::zones::create_object;
+            use engine::types::game_state::WaitingFor;
+            use engine::types::identifiers::CardId;
+            use engine::types::log::{LogCategory, LogSegment};
+            use engine::types::phase::Phase;
+            use engine::types::zones::Zone;
+            use server_core::game_state_snapshot_wire_guard::MAX_SNAPSHOT_OBJECTS;
+
+            let events = |count: i32| -> Vec<GameEvent> {
+                (1..=count)
+                    .map(|amount| GameEvent::LifeChanged {
+                        player_id: PlayerId(0),
+                        amount,
+                        new_total: Default::default(),
+                    })
+                    .collect()
+            };
+            let log = |count: u32| -> Vec<GameLogEntry> {
+                (1..=count)
+                    .map(|seq| GameLogEntry {
+                        seq,
+                        turn: 1,
+                        phase: Phase::PreCombatMain,
+                        category: LogCategory::Game,
+                        segments: vec![LogSegment::Text("entry".to_string())],
+                        presentation: Default::default(),
+                    })
+                    .collect()
+            };
+            let mut state = GameState::new_two_player(42);
+            state.phase = Phase::PreCombatMain;
+            state.waiting_for = WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+            let mut crowded = state.clone();
+            for index in 0..=MAX_SNAPSHOT_OBJECTS as u64 {
+                create_object(
+                    &mut crowded,
+                    CardId(index),
+                    PlayerId(0),
+                    "Token".to_string(),
+                    Zone::Battlefield,
+                );
+            }
+            let small = AiTransition {
+                state_revision: 1,
+                state: state.clone(),
+                events: events(3),
+                log_entries: log(3),
+                decision: None,
+            };
+            let untrimmable = AiTransition {
+                state_revision: 2,
+                state: crowded,
+                events: Vec::new(),
+                log_entries: Vec::new(),
+                decision: None,
+            };
+            let oversized = AiTransition {
+                state_revision: 3,
+                decision: Some(DecisionSnapshot::from_state(&state)),
+                state,
+                events: events(MAX_SNAPSHOT_EVENTS as i32 + 500),
+                log_entries: log(MAX_SNAPSHOT_LOG_ENTRIES as u32 + 500),
+            };
+            let full_key = FullSessionKey {
+                game_code: "TRIM01".to_string(),
+                generation: 1,
+            };
+            let expected_small = serde_json::to_value(build_state_update_message(
+                &StateUpdateSource::from_transition(&small),
+                &full_key,
+                PlayerId(0),
+                Vec::new(),
+                &[],
+            ))
+            .unwrap();
+
+            let (tx, mut messages) = crate::socket_mailbox::channel();
+            let connections: SharedConnections =
+                Arc::new(tokio::sync::Mutex::new(HashMap::from([(
+                    full_key.game_code.clone(),
+                    HashMap::from([(PlayerId(0), tx)]),
+                )])));
+            let executor = GameExecutor::new(NonZeroUsize::MIN);
+            let publisher = StateUpdatePublisher::capture(
+                &connections,
+                None,
+                full_key,
+                2,
+                Vec::new(),
+                Vec::new(),
+            )
+            .await;
+            publisher
+                .publish_ai(&executor, vec![small, untrimmable, oversized])
+                .await
+                .finish(&executor)
+                .await;
+
+            let mut received = Vec::new();
+            while let Ok(message) = messages.try_recv() {
+                received.push(message);
+            }
+            let revisions: Vec<_> = received
+                .iter()
+                .map(|message| match message {
+                    ServerMessage::StateUpdate { state_revision, .. } => *state_revision,
+                    _ => 0,
+                })
+                .collect();
+            assert_eq!(revisions, [1, 3]);
+            assert_eq!(serde_json::to_value(&received[0]).unwrap(), expected_small);
+            let ServerMessage::StateUpdate {
+                state_revision,
+                events,
+                log_entries,
+                legal_actions,
+                ..
+            } = &received[1]
+            else {
+                panic!("expected the decision StateUpdate, got {:?}", received[1]);
+            };
+            assert_eq!(*state_revision, 3);
+            assert!(!legal_actions.is_empty());
+            assert_eq!(events.len(), MAX_SNAPSHOT_EVENTS);
+            assert!(matches!(
+                events.last(),
+                Some(GameEvent::LifeChanged { amount, .. })
+                    if *amount == MAX_SNAPSHOT_EVENTS as i32 + 500
+            ));
+            assert_eq!(log_entries.len(), MAX_SNAPSHOT_LOG_ENTRIES);
+            assert_eq!(
+                log_entries.last().map(|entry| entry.seq),
+                Some(MAX_SNAPSHOT_LOG_ENTRIES as u32 + 500)
+            );
         });
     }
 

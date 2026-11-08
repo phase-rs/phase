@@ -13,7 +13,8 @@
   "quantityRef": {
     "highestNumber": "the highest number",
     "lowestNumber": "the lowest number",
-    "chosenNumber": "the chosen number"
+    "chosenNumber": "the chosen number",
+    "energyPaidOrLostThisTurn": "energy paid or lost this turn"
   },
   "scryOutcome": {
     "title": "Scry complete",
@@ -179,6 +180,7 @@
       "exportedTo": "Exported to {{path}}.",
       "exportRequested": "Export requested — {{filename}}.",
       "exportFailed": "Could not export game state.",
+      "exportFailedDetail": "Could not export game state. {{detail}}",
       "replayExported": "Replay saved as {{filename}}.",
       "replayExportUnavailable": "No replay recording is available for this game.",
       "replayExportFailed": "Could not export the replay."

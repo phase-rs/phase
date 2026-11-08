@@ -236,6 +236,10 @@
     "boundedLoopTooltip": "来自已检出循环的{{resource}}，以{{bound}}次重复为上限",
     "cityBlessing": "城市祝福",
     "cityBlessingTooltip": "城市祝福 —— 操控十个或更多永久物（扬升）",
+    "day": "白天",
+    "dayTooltip": "现在是白天 —— 永久物于白天状态下进入战场；若某牌手在其回合中未施放任何咒语，则下一回合将变为黑夜",
+    "night": "黑夜",
+    "nightTooltip": "现在是黑夜 —— 永久物于黑夜状态下进入战场；若某牌手在其回合中施放了两个或更多咒语，则下一回合将变为白天",
     "companion": "行侣",
     "condCantActivate": "不能起动异能",
     "condCantCast": "不能施放咒语",
@@ -301,7 +305,8 @@
     "unboundedTokens": "衍生物",
     "unboundedTooltip": "无限{{resource}}（∞）",
     "unboundedTriggers": "触发",
-    "unboundedTurns": "回合"
+    "unboundedTurns": "回合",
+    "hordeRulesAriaLabel": "Horde deck rules"
   },
   "battleProtector": {
     "battleFallback": "战役",
@@ -469,7 +474,8 @@
       "tap": "横置",
       "target": "目标",
       "top": "牌库顶",
-      "untap": "竖置"
+      "untap": "竖置",
+      "destroy": "Destroy"
     },
     "behold": {
       "labelBehold": "请援",
@@ -506,7 +512,8 @@
       "searchLabel": "筛选",
       "searchPlaceholder": "牌名",
       "selectAll": "全选",
-      "sortLabel": "排序"
+      "sortLabel": "排序",
+      "counterChoose": "Choose {{selected}} of {{cap}}"
     },
     "buttons": {
       "collectCount": "搜证（{{total}}/{{minimum}}）",
@@ -611,15 +618,18 @@
     },
     "effectZone": {
       "labelAttach": "贴附（{{selected}}/{{count}}）",
+      "labelBottom": "牌库底（{{selected}}/{{count}}）",
       "labelCast": "施放（{{selected}}/{{count}}）",
       "labelConfirm": "确认（{{selected}}/{{count}}）",
       "labelDecline": "拒绝",
       "labelExile": "放逐（{{selected}}/{{count}}）",
       "labelPut": "放置（{{selected}}/{{count}}）",
+      "labelPutOnBottom": "置于牌库底（{{order}}）",
       "labelPutOnTop": "置于牌库顶（{{order}}）",
       "labelReturn": "移回（{{selected}}/{{count}}）",
       "labelSkip": "跳过",
       "labelTop": "牌库顶（{{selected}}/{{count}}）",
+      "orderBottom": "底部",
       "orderFifth": "第5张",
       "orderFourth": "第4张",
       "orderPosition": "第{{position}}位",
@@ -630,6 +640,12 @@
       "subtitleAttachExact_other": "选择{{count}}件要贴附的武具",
       "subtitleAttachRange_one": "选择{{min}}-{{count}}件要贴附的武具",
       "subtitleAttachRange_other": "选择{{min}}-{{count}}件要贴附的武具",
+      "subtitleBottomdeckExact_one": "选择{{count}}张要置于你牌库底的牌",
+      "subtitleBottomdeckExact_other": "选择{{count}}张要置于你牌库底的牌",
+      "subtitleBottomdeckRange_one": "选择{{min}}-{{count}}张要置于你牌库底的牌",
+      "subtitleBottomdeckRange_other": "选择{{min}}-{{count}}张要置于你牌库底的牌",
+      "subtitleBottomdeckUpTo_one": "至多选择{{count}}张要置于你牌库底的牌",
+      "subtitleBottomdeckUpTo_other": "至多选择{{count}}张要置于你牌库底的牌",
       "subtitleCastExact_one": "选择{{count}}张要施放的牌",
       "subtitleCastExact_other": "选择{{count}}张要施放的牌",
       "subtitleCastUpTo_one": "至多选择{{count}}张要施放的牌",
@@ -681,8 +697,9 @@
       "subtitleUntapUpTo_one": "至多选择{{count}}个要竖置的永久物",
       "subtitleUntapUpTo_other": "至多选择{{count}}个要竖置的永久物",
       "titleAttach": "贴附",
-      "titleCast": "施放",
       "titleBattlefield": "放进战场",
+      "titleBottomdeck": "置于牌库底",
+      "titleCast": "施放",
       "titleExile": "放逐",
       "titleHand": "移回",
       "titleSacrifice": "牺牲",
@@ -919,6 +936,42 @@
       "subtitle": "选择一个要牺牲的永久物",
       "title_one": "守护 —— 牺牲一个永久物",
       "title_other": "守护 —— 牺牲{{count}}个永久物"
+    },
+    "heroEvent": {
+      "chromeOverload": {
+        "title": "Chrome Dome's Overload",
+        "subtitle": "Choose a tapped creature you control to sacrifice"
+      },
+      "krangStratagem": {
+        "title": "Krang's Stratagem",
+        "subtitleUpTo_one": "Choose up to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleUpTo_other": "Choose up to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleMin_one": "Choose {{min}} to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleMin_other": "Choose {{min}} to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleExact_one": "Choose {{count}} card to discard",
+        "subtitleExact_other": "Choose {{count}} cards to discard"
+      },
+      "smackdown": {
+        "title": "Leatherhead's Smackdown",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "ratKingRevolution": {
+        "title": "Rat King's Revolution",
+        "subtitle": "Choose a creature you control to tap and stun"
+      },
+      "savantiCurse": {
+        "title": "Savanti Romero's Curse",
+        "subtitle_one": "Choose {{count}} creature you control to return to its owner's hand",
+        "subtitle_other": "Choose {{count}} creatures you control to return to their owners' hands"
+      },
+      "infiltration": {
+        "title": "Villain Infiltration",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "villainMayhem": {
+        "title": "Villain Mayhem!",
+        "subtitle": "As a team, choose {{count}} creatures to spare — every other creature is destroyed"
+      }
     }
   },
   "cardDataMissing": {
@@ -1148,6 +1201,7 @@
     "respondTitle": "有人提议循环捷径",
     "shorten": "缩短循环",
     "untilLethal": "重复直到游戏结束。",
+    "withoutEnd": "无限重复。若所有玩家都接受，本局游戏为平局。",
     "winKind": {
       "Advantage": "此循环能产生无限的优势。",
       "Decking": "此循环让一名对手抓空牌库。",
@@ -1158,6 +1212,7 @@
     }
   },
   "costReductionOrder": {
+    "announcedHybrids": "已宣告的混血法术力支付",
     "appliedFirst": "最先应用",
     "appliedLast": "最后应用",
     "cancel": "取消",
@@ -1326,6 +1381,7 @@
   },
   "distributeAmong": {
     "subtitle": "每个目标至少分配1{{unit}}。剩余：{{remaining}}",
+    "subtitleAnyNumber": "可选择任意数量，每个选中的对象至少分配1{{unit}}。剩余：{{remaining}}",
     "title": "分配{{total}}{{unit}}",
     "unitCounter": "个{{counter}}指示物",
     "unitDamage": "点伤害",
@@ -1376,11 +1432,16 @@
     "castSuffix": "（不支付其法术力费用）",
     "done": "完成",
     "doneSuffix": "（停止以此方式施放咒语）",
+    "doneSuffixPlay": "（停止以此方式使用牌）",
     "eyebrow": "免费施放",
+    "playNamed": "使用{{name}}",
     "remainingAny": "任意数量",
     "subtitle": "选择要施放的咒语，无需支付其法术力费用（剩余{{remaining}}）。剩余总法术力费用：{{budget}}。",
     "subtitleNoBudget": "选择要施放的咒语，无需支付其法术力费用（剩余{{remaining}}）。",
-    "title": "免费施放一个咒语"
+    "subtitleNoBudgetPlay": "选择要使用的地，或要施放的咒语，无需支付其法术力费用（剩余{{remaining}}）。",
+    "subtitlePlay": "选择要使用的地，或要施放的咒语，无需支付其法术力费用（剩余{{remaining}}）。剩余总法术力费用：{{budget}}。",
+    "title": "免费施放一个咒语",
+    "titlePlay": "免费使用牌"
   },
   "fullControl": {
     "label": "控制",
@@ -1619,7 +1680,8 @@
     },
     "toasts": {
       "connectionFailed": "连接失败。请在设置中重试或更改服务器。",
-      "eliminatedSpectating": "你已被淘汰。现在进入观战。"
+      "eliminatedSpectating": "你已被淘汰。现在进入观战。",
+      "retainedTerminalUnreadable": "无法读取已保留的终局投递"
     }
   },
   "gameSetup": {
@@ -1670,7 +1732,12 @@
     "selectDeckPrompt": "选择套牌",
     "startMatch": "开始对局",
     "startMatchWithOpponents": "开始对局（{{count}}名对手）",
-    "title": "开始一场对局。"
+    "title": "开始一场对局。",
+    "hordeDeck": {
+      "title": "Horde Deck",
+      "subtitle": "The self-piloting deck your team faces. The engine supplies it — you don't need an AI deck.",
+      "selected": "Selected"
+    }
   },
   "giftRecipient": {
     "subtitle": "选择由哪位对手获得所承诺的赠礼。",
@@ -1694,6 +1761,22 @@
     "selfManaCost": "其法术力费用",
     "selfManaValue": "其总法术力费用",
     "spliceOnto": "通联于{{subtype}}{{cost}}",
+    "sacrificeArtifact_few": "牺牲{{count}}个神器",
+    "sacrificeArtifact_many": "牺牲{{count}}个神器",
+    "sacrificeArtifact_one": "牺牲一个神器",
+    "sacrificeArtifact_other": "牺牲{{count}}个神器",
+    "sacrificeCreature_few": "牺牲{{count}}个生物",
+    "sacrificeCreature_many": "牺牲{{count}}个生物",
+    "sacrificeCreature_one": "牺牲一个生物",
+    "sacrificeCreature_other": "牺牲{{count}}个生物",
+    "sacrificeLand_few": "牺牲{{count}}个地",
+    "sacrificeLand_many": "牺牲{{count}}个地",
+    "sacrificeLand_one": "牺牲一个地",
+    "sacrificeLand_other": "牺牲{{count}}个地",
+    "sacrificePermanent_few": "牺牲{{count}}个永久物",
+    "sacrificePermanent_many": "牺牲{{count}}个永久物",
+    "sacrificePermanent_one": "牺牲一个永久物",
+    "sacrificePermanent_other": "牺牲{{count}}个永久物",
     "wardDiscardAtRandom_few": "随机弃{{count}}张牌",
     "wardDiscardAtRandom_many": "随机弃{{count}}张牌",
     "wardDiscardAtRandom_one": "随机弃一张牌",
@@ -1709,7 +1792,9 @@
     "title": "将{{name}}移出？"
   },
   "lifeTotal": {
-    "playerLabel": "P{{seat}}"
+    "playerLabel": "P{{seat}}",
+    "libraryLabel": "CARDS",
+    "libraryTooltip": "The Horde has no life total. Damage and life loss mill it instead — it's defeated when its library runs out, so this count is its real clock."
   },
   "log": {
     "abilityActivated": "异能已起动（来源 {{sourceId}}）",
@@ -1970,6 +2055,8 @@
     "numberSubtitle": "输入{{min}}或更大的整数",
     "searchPlaceholder": "按名称搜寻…",
     "searchSubtitle": "输入以搜寻所有牌",
+    "secretAgendaTitle": "秘密指定一个牌名（{{current}}/{{total}}）",
+    "secretAgendaSubtitle": "在你将此阴谋翻为正面之前保持隐藏",
     "title": {
       "basicLandType": "选择基本地类别",
       "cardName": "说出一个牌名",
@@ -2487,7 +2574,7 @@
     "selectedModes": "已选模式",
     "targetingLabel": "正在指定目标：{{label}}",
     "title": "堆叠",
-    "titleContext": "上下文：{{context}}",
+    "titleContext": "上下文：{{items}}",
     "titlePaid": "已支付：{{paid}}",
     "titleTargets": "目标：{{targets}}",
     "triggered": "触发式",
@@ -2560,6 +2647,8 @@
     "chooseTargetForCopySlot": "为复制品选择目标：第 {{current}} 个，共 {{total}} 个",
     "chooseTargetOf": "选择目标：第 {{current}} 个，共 {{total}} 个",
     "chooseTokenHost": "选择一个衍生物的宿主",
+    "chooseOneHighlighted": "从高亮选项中选择一个",
+    "chooseUpToOneHighlighted": "从高亮选项中最多选择一个",
     "collapseDescription": "收起",
     "confirmSacrifice": "牺牲（{{selected}}/{{count}}）",
     "confirmTap": "确认横置（{{selected}}/{{count}}）",
@@ -2606,6 +2695,7 @@
   "topOrBottom": {
     "bottom": "牌库底",
     "cardFallback": "牌",
+    "nthFromTop": "Position {{n}} from the top of library",
     "title": "将{{name}}置于牌库顶或牌库底",
     "top": "牌库顶"
   },
@@ -2667,6 +2757,8 @@
     "companionActivate": "支付{3}：将{{name}}置于你手上",
     "companionTitle": "行侣：{{name}}",
     "companionTitleUsed": "行侣：{{name}}（已使用）",
+    "conspiracy": "谋略",
+    "conspiracyTitle": "谋略: {{name}}",
     "emblem": "徽记",
     "emblemFallback": "徽记",
     "exile": "放逐",
@@ -2690,6 +2782,7 @@
     "signatureSpellTitleTax": "招牌咒语：{{name}}（税：+{{tax}}）",
     "tax": "税：+{{tax}}",
     "topOfLibrary": "牌库顶",
+    "turnFaceUp": "将{{name}}翻回正面",
     "used": "已使用",
     "viewCount": "查看{{count}}",
     "zoneTitle": "{{zone}}（{{count}}）"
@@ -2711,6 +2804,9 @@
     "player": "Player",
     "life": "Life",
     "setLife": "Set Life",
+    "gainLife": "Gain Life",
+    "loseLife": "Lose Life",
+    "amount": "Amount",
     "count": "Count",
     "drawCards": "Draw Cards",
     "mill": "Mill",
@@ -2726,6 +2822,8 @@
     "delta": "Delta",
     "modifyCounters": "Modify Counters",
     "modifyEnergy": "Modify Energy",
+    "givePlayerCounters": "Give Counters",
+    "giveEnergy": "Give Energy",
     "browseDescription": "Opens a modal of your library in randomized order. Click a card to move it to any zone, or use the quick Battlefield / Hand buttons.",
     "browseLibrary": "Browse Library",
     "infiniteMana": "Infinite Mana",
@@ -2878,6 +2976,36 @@
       "winner": "{{name}} 赢得了比赛。",
       "tie": "平局：什么也不会发生。",
       "cancelled": "比赛已取消：什么也不会发生。"
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
     }
   }
 }

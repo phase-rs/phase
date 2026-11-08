@@ -13,7 +13,7 @@
 //! harness run against the UNMODIFIED reconcile body). T-ON replays the same fixture under
 //! the wrapped `On` arm and asserts equality — it fails if wrapping the body in the mode
 //! `match` perturbed even one event. Because the golden is pre-edit, this is not circular.
-//! Re-pinned once since: the cast sorcery's records now carry `cast_from_zone: Some(Hand)` /
+//! Re-pinned since: the cast sorcery's records now carry `cast_from_zone: Some(Hand)` /
 //! `cast_controller: Some(PlayerId(0))`, because `finalize_cast` stamps cast provenance on
 //! every cast spell (CR 601.2a + CR 601.2i), not only on spells without a spell ability.
 
@@ -45,6 +45,12 @@ use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit
 use engine::types::match_config::{MatchConfig, MatchPhase, MatchType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::statics::StaticMode;
+use engine::types::zones::Zone;
+
+use crate::loop_period_remade_token_source::{
+    activate, markers, repetitions, settle, take_recorded, Answers,
+};
 
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
@@ -85,7 +91,7 @@ const BLOODTHIRSTY_CONQUEROR: &str =
 /// HEAD `dc67bd130` on the UNMODIFIED reconcile body. See the module docs.
 /// `subject: None` was appended to each `EffectResolved` when that field was added to the
 /// event — it is `None` on every path this test drives, so the stream is otherwise unchanged.
-const GOLDEN_ON: &str = r#"[StackPushed { object_id: ObjectId(3) }, ZoneChanged { object_id: ObjectId(3), from: Some(Hand), to: Stack, record: ZoneChangeRecord { object_id: ObjectId(3), name: "Test Lifegain Kickoff", core_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], trigger_definitions: [], trigger_source_context: Some(TriggerSourceContext { identity: ObjectIdentityBinding { reference: ObjectIncarnationRef { object_id: ObjectId(3), incarnation: 0 }, expected_zone: Hand }, lki: LKISnapshot { name: "Test Lifegain Kickoff", token_image_ref: None, power: None, toughness: None, base_power: None, base_toughness: None, mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), card_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], colors: [], chosen_attributes: [], counters: {}, tapped: false, is_suspected: false, attachments: [] }, card_id: CardId(3), printed_ref: None, is_token: false, face_down: false, transformed: false, is_renowned: false, is_saddled: false, class_level: None, trigger_entries: [], timestamp: 0, entered_battlefield_turn: None, paired_with: None, pair_controller: None, attached_to: None, attachments: [], linked_exile_snapshot: [], combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, cast_from_zone: Some(Hand), played_from_zone: None, cast_controller: Some(PlayerId(0)), phase_status: PhasedIn, cast_variant_paid: None, cast_timing_permission: None, cost_x_paid: None, cast_spell_keywords: [], mana_spent_to_cast: false, colors_spent_to_cast: ColoredManaCount { white: 0, blue: 0, black: 0, red: 0, green: 0 }, mana_spent_to_cast_amount: 0, kickers_paid: [], additional_cost_payment_count: 0, additional_cost_payments: [], cast_cost_paid_object: None }), power: None, toughness: None, base_power: None, base_toughness: None, colors: [], mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), from_zone: Some(Hand), cast_from_zone: Some(Hand), played_from_zone: None, to_zone: Stack, attachments: [], linked_exile_snapshot: [], is_token: false, combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, co_departed: [], entered_incarnation: None, attached_to: None, turn_zone_change_index: 0, recorded_turn_number: 2, is_suspected: false } }, SpellCast { card_id: CardId(3), controller: PlayerId(0), object_id: ObjectId(3) }, PriorityPassed { player_id: PlayerId(1) }, LifeChanged { player_id: PlayerId(0), amount: 1 }, EffectResolved { kind: GainLife, source_id: ObjectId(3), subject: None }, ZoneChanged { object_id: ObjectId(3), from: Some(Stack), to: Graveyard, record: ZoneChangeRecord { object_id: ObjectId(3), name: "Test Lifegain Kickoff", core_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], trigger_definitions: [], trigger_source_context: Some(TriggerSourceContext { identity: ObjectIdentityBinding { reference: ObjectIncarnationRef { object_id: ObjectId(3), incarnation: 1 }, expected_zone: Stack }, lki: LKISnapshot { name: "Test Lifegain Kickoff", token_image_ref: None, power: None, toughness: None, base_power: None, base_toughness: None, mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), card_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], colors: [], chosen_attributes: [], counters: {}, tapped: false, is_suspected: false, attachments: [] }, card_id: CardId(3), printed_ref: None, is_token: false, face_down: false, transformed: false, is_renowned: false, is_saddled: false, class_level: None, trigger_entries: [], timestamp: 0, entered_battlefield_turn: None, paired_with: None, pair_controller: None, attached_to: None, attachments: [], linked_exile_snapshot: [], combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, cast_from_zone: Some(Hand), played_from_zone: None, cast_controller: Some(PlayerId(0)), phase_status: PhasedIn, cast_variant_paid: None, cast_timing_permission: None, cost_x_paid: None, cast_spell_keywords: [], mana_spent_to_cast: false, colors_spent_to_cast: ColoredManaCount { white: 0, blue: 0, black: 0, red: 0, green: 0 }, mana_spent_to_cast_amount: 0, kickers_paid: [], additional_cost_payment_count: 0, additional_cost_payments: [], cast_cost_paid_object: None }), power: None, toughness: None, base_power: None, base_toughness: None, colors: [], mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), from_zone: Some(Stack), cast_from_zone: Some(Hand), played_from_zone: None, to_zone: Graveyard, attachments: [], linked_exile_snapshot: [], is_token: false, combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, co_departed: [], entered_incarnation: None, attached_to: None, turn_zone_change_index: 1, recorded_turn_number: 2, is_suspected: false } }, StackResolved { object_id: ObjectId(3) }, PriorityPassed { player_id: PlayerId(1) }, LifeChanged { player_id: PlayerId(1), amount: -1 }, EffectResolved { kind: LoseLife, source_id: ObjectId(1), subject: None }, StackResolved { object_id: ObjectId(4) }, PriorityPassed { player_id: PlayerId(1) }, LifeChanged { player_id: PlayerId(0), amount: 1 }, EffectResolved { kind: GainLife, source_id: ObjectId(2), subject: None }, StackResolved { object_id: ObjectId(5) }, GameOver { winner: Some(PlayerId(0)) }]"#;
+const GOLDEN_ON: &str = r#"[StackPushed { object_id: ObjectId(3) }, ZoneChanged { object_id: ObjectId(3), from: Some(Hand), to: Stack, record: ZoneChangeRecord { object_id: ObjectId(3), name: "Test Lifegain Kickoff", core_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], trigger_definitions: [], trigger_source_context: Some(TriggerSourceContext { identity: ObjectIdentityBinding { reference: ObjectIncarnationRef { object_id: ObjectId(3), incarnation: 0 }, expected_zone: Hand }, lki: LKISnapshot { name: "Test Lifegain Kickoff", token_image_ref: None, power: None, toughness: None, base_power: None, base_toughness: None, mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), card_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], colors: [], chosen_attributes: [], counters: {}, tapped: false, is_suspected: false, attachments: [] }, card_id: CardId(3), printed_ref: None, is_token: false, face_down: false, transformed: false, is_renowned: false, is_saddled: false, class_level: None, trigger_entries: [], timestamp: 0, entered_battlefield_turn: None, paired_with: None, pair_controller: None, attached_to: None, attachments: [], linked_exile_snapshot: [], combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, cast_from_zone: Some(Hand), played_from_zone: None, cast_controller: Some(PlayerId(0)), phase_status: PhasedIn, cast_variant_paid: None, cast_timing_permission: None, cost_x_paid: None, cast_spell_keywords: [], mana_spent_to_cast: false, colors_spent_to_cast: ColoredManaCount { white: 0, blue: 0, black: 0, red: 0, green: 0 }, mana_spent_to_cast_amount: 0, kickers_paid: [], additional_cost_payment_count: 0, additional_cost_payments: [], cast_cost_paid_object: None }), power: None, toughness: None, base_power: None, base_toughness: None, colors: [], mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), from_zone: Some(Hand), cast_from_zone: Some(Hand), played_from_zone: None, to_zone: Stack, attachments: [], linked_exile_snapshot: [], is_token: false, combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, co_departed: [], entered_incarnation: None, attached_to: None, turn_zone_change_index: 0, recorded_turn_number: 2, is_suspected: false } }, SpellCast { card_id: CardId(3), controller: PlayerId(0), object_id: ObjectId(3) }, PriorityPassed { player_id: PlayerId(1) }, LifeChanged { player_id: PlayerId(0), amount: 1 }, EffectResolved { kind: GainLife, source_id: ObjectId(3), subject: None }, ZoneChanged { object_id: ObjectId(3), from: Some(Stack), to: Graveyard, record: ZoneChangeRecord { object_id: ObjectId(3), name: "Test Lifegain Kickoff", core_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], trigger_definitions: [], trigger_source_context: Some(TriggerSourceContext { identity: ObjectIdentityBinding { reference: ObjectIncarnationRef { object_id: ObjectId(3), incarnation: 1 }, expected_zone: Stack }, lki: LKISnapshot { name: "Test Lifegain Kickoff", token_image_ref: None, power: None, toughness: None, base_power: None, base_toughness: None, mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), card_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], colors: [], chosen_attributes: [], counters: {}, tapped: false, is_suspected: false, attachments: [] }, card_id: CardId(3), printed_ref: None, is_token: false, face_down: false, transformed: false, is_renowned: false, is_saddled: false, class_level: None, trigger_entries: [], timestamp: 0, entered_battlefield_turn: None, paired_with: None, pair_controller: None, attached_to: None, attachments: [], linked_exile_snapshot: [], combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, cast_from_zone: Some(Hand), played_from_zone: None, cast_controller: Some(PlayerId(0)), phase_status: PhasedIn, cast_variant_paid: None, cast_timing_permission: None, cost_x_paid: None, cast_spell_keywords: [], mana_spent_to_cast: false, colors_spent_to_cast: ColoredManaCount { white: 0, blue: 0, black: 0, red: 0, green: 0 }, mana_spent_to_cast_amount: 0, kickers_paid: [], additional_cost_payment_count: 0, additional_cost_payments: [], cast_cost_paid_object: None }), power: None, toughness: None, base_power: None, base_toughness: None, colors: [], mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), from_zone: Some(Stack), cast_from_zone: Some(Hand), played_from_zone: None, to_zone: Graveyard, attachments: [], linked_exile_snapshot: [], is_token: false, combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, co_departed: [], entered_incarnation: None, attached_to: None, turn_zone_change_index: 1, recorded_turn_number: 2, is_suspected: false } }, StackResolved { object_id: ObjectId(3) }, StackPushed { object_id: ObjectId(4) }, PriorityPassed { player_id: PlayerId(1) }, LifeChanged { player_id: PlayerId(1), amount: -1 }, EffectResolved { kind: LoseLife, source_id: ObjectId(1), subject: None }, StackResolved { object_id: ObjectId(4) }, StackPushed { object_id: ObjectId(5) }, PriorityPassed { player_id: PlayerId(1) }, LifeChanged { player_id: PlayerId(0), amount: 1 }, EffectResolved { kind: GainLife, source_id: ObjectId(2), subject: None }, StackResolved { object_id: ObjectId(5) }, StackPushed { object_id: ObjectId(6) }, GameOver { winner: Some(PlayerId(0)) }]"#;
 
 fn life(runner: &GameRunner, p: PlayerId) -> i32 {
     runner
@@ -109,7 +115,7 @@ fn is_eliminated(runner: &GameRunner, p: PlayerId) -> bool {
 
 /// 2-player self-refilling mutual drain controlled by P0 (constant-depth). P1 starts low so
 /// the OFF natural-death stream is short. Returns runner + kick-off sorcery id.
-fn setup_2p_drain(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
+pub(crate) fn setup_2p_drain(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
     let mut scenario = GameScenario::new_n_player(2, 7);
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_life(P0, 20);
@@ -122,6 +128,473 @@ fn setup_2p_drain(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = mode;
     (runner, kickoff)
+}
+
+// ─────────── #7899: projected cost journals must not veto an unrelated recurrence ───────────
+
+/// Blaster Hulk verbatim (`data/card-data.json`). Its first line is a self-spell cost reduction
+/// whose `active_zones` opt into hand and library (CR 113.6), so the static FUNCTIONS while the
+/// card sits uncast in hand — the metadata that must not veto an energy-free recurrence.
+const BLASTER_HULK: &str = "This spell costs {1} less to cast for each {E} (energy counter) you've paid or lost this turn.\nHaste\nWhenever this creature attacks, you get {E}{E}, then you may pay eight {E}. When you do, this creature deals 8 damage divided as you choose among up to eight targets.";
+
+/// Longtusk Cub verbatim (`data/card-data.json`): a `{E}{E}` ACTIVATION cost — the production
+/// route by which `energy_paid_or_lost_this_turn` advances (CR 107.14), as opposed to the
+/// hand-assigned journal value the helper-level comparison uses.
+const LONGTUSK_CUB: &str = "Whenever this creature deals combat damage to a player, you get {E}{E} (two energy counters).\nPay {E}{E}: Put a +1/+1 counter on this creature.";
+
+/// Park a REAL Blaster Hulk in `P0`'s hand, parsed by the production parser.
+fn add_uncast_blaster_hulk(scenario: &mut GameScenario) -> ObjectId {
+    let mut builder =
+        scenario.add_creature_to_hand_from_oracle(P0, "Blaster Hulk", 8, 8, BLASTER_HULK);
+    builder
+        .as_artifact_creature()
+        .with_subtypes(vec!["Pirate"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+            generic: 6,
+        });
+    builder.id()
+}
+
+/// The shipped 2p constant-depth drain pair (the Exquisite Blood / Marauding Blight-Priest shape)
+/// plus an uncast Hulk in hand, under the production `LoopDetectionMode::On`.
+fn setup_2p_drain_with_uncast_hulk() -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 6);
+    scenario.add_creature_from_oracle(P0, "Test Drain Cleric", 2, 2, DRAIN_CLERIC);
+    scenario.add_creature_from_oracle(P0, "Test Blood Sipper", 2, 2, BLOOD_SIPPER);
+    let kickoff = scenario
+        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .id();
+    let hulk = add_uncast_blaster_hulk(&mut scenario);
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::On;
+    (runner, kickoff, hulk)
+}
+
+/// CR 732.2a + CR 601.2f: an UNCAST Blaster Hulk in hand must not stop an unrelated, energy-free
+/// recurrence from certifying. Its self-spell reduction functions in hand (CR 113.6 —
+/// `active_zones` opts into Hand/Library), but the period pays no energy, so the journal it
+/// prices on is zero on both compared frames and its price cannot differ between repeats. Under
+/// `LoopDetectionMode::On` the winner is crowned EARLY, with the victim still at positive life —
+/// a natural CR 704.5a death would mean the recurrence was refused.
+#[test]
+fn uncast_blaster_hulk_in_hand_does_not_block_drain_loop_certification() {
+    let (mut runner, kickoff, hulk) = setup_2p_drain_with_uncast_hulk();
+
+    // Reach guard: the production parser put the real self-spell reduction on the hand card,
+    // and it functions from Hand — the exact metadata that used to trip the veto.
+    {
+        let state = runner.state();
+        assert_eq!(state.objects[&hulk].zone, Zone::Hand);
+        let reduction = state.objects[&hulk]
+            .static_definitions
+            .iter_all()
+            .find(|def| {
+                matches!(
+                    def.mode,
+                    StaticMode::ModifyCost {
+                        dynamic_count: Some(
+                            engine::types::ability::QuantityRef::EnergyPaidOrLostThisTurn
+                        ),
+                        ..
+                    }
+                )
+            })
+            .expect("the parsed Blaster Hulk carries its energy cost reduction");
+        assert!(
+            reduction.active_zones.contains(&Zone::Hand),
+            "CR 113.6: the self-spell reduction is live from hand"
+        );
+        assert_eq!(
+            state.players[P0.0 as usize].energy_paid_or_lost_this_turn,
+            0
+        );
+    }
+
+    let _ = runner.cast(kickoff).resolve();
+    let (_events, wf) = drive_collect(&mut runner, 500);
+    assert_eq!(
+        wf,
+        WaitingFor::GameOver { winner: Some(P0) },
+        "the drain recurrence must still certify with an uncast Hulk in hand"
+    );
+    assert!(
+        life(&runner, P1) > 0,
+        "the shortcut crowned early — the victim should still be at positive life, not {}",
+        life(&runner, P1)
+    );
+}
+
+/// CR 601.2f + CR 107.14 + CR 732.2a: the control that keeps the test above from being a blanket
+/// exemption. On the SAME production board with the SAME real Hulk, a frame where the journal the
+/// reduction reads has MOVED (the shape one `{E}{E}` payment leaves) must compare UNEQUAL: the
+/// journal is projected out of the comparison, so without the period-tied veto these frames would
+/// certify an energy-paying recurrence whose price changes every repeat.
+#[test]
+fn moved_energy_journal_with_live_hulk_rejects_the_recurrence() {
+    let (runner, _kickoff, hulk) = setup_2p_drain_with_uncast_hulk();
+    assert_eq!(runner.state().objects[&hulk].zone, Zone::Hand);
+    assert!(
+        loop_states_equal_modulo_resources(runner.state(), &runner.state().clone()),
+        "control: unchanged frames compare EQUAL"
+    );
+
+    let mut paid = runner.state().clone();
+    paid.players[P0.0 as usize].energy_paid_or_lost_this_turn = 2;
+    assert!(
+        !loop_states_equal_modulo_resources(runner.state(), &paid),
+        "CR 601.2f: the live Hulk prices the moved journal ⇒ the recurrence is not constant"
+    );
+}
+
+/// The shipped 2p drain pair plus a REAL Longtusk Cub holding two energy counters.
+/// `include_hulk` parks the uncast Blaster Hulk in `P0`'s hand — the only variable between the
+/// two runs below. Returns runner, kickoff, and the payer.
+fn setup_2p_drain_with_energy_payer(include_hulk: bool) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 6);
+    scenario.add_creature_from_oracle(P0, "Test Drain Cleric", 2, 2, DRAIN_CLERIC);
+    scenario.add_creature_from_oracle(P0, "Test Blood Sipper", 2, 2, BLOOD_SIPPER);
+    let kickoff = scenario
+        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .id();
+    let cub = {
+        let mut builder = scenario.add_creature_from_oracle(P0, "Longtusk Cub", 2, 2, LONGTUSK_CUB);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        });
+        builder.id()
+    };
+    if include_hulk {
+        add_uncast_blaster_hulk(&mut scenario);
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::On;
+    // CR 107.14: the Cub holds, but has not spent, two energy counters.
+    runner.state_mut().players[P0.0 as usize].energy = 2;
+    (runner, kickoff, cub)
+}
+
+/// CR 107.14 + CR 601.2f: SUPPLEMENTAL payment coverage — the production route that advances the
+/// journal, isolated from the recurrence machinery.
+/// `GameRunner::activate` pays the Cub's `{E}{E}` through the shared cost resolver (`costs.rs`),
+/// the only production route that advances `energy_paid_or_lost_this_turn`, and the engine's own
+/// comparator refuses the resulting pair while a live modifier prices the journal. The no-Hulk
+/// control is the SAME payment on the SAME board: with nothing pricing the journal (its reserve,
+/// counter and journal are all projected out) the frames compare EQUAL, so the refusal in the
+/// first half is the modifier's, not the payment's.
+///
+/// This row does NOT claim a recurrence was presented to production: it activates once in
+/// `LoopDetectionMode::On`, where the mandatory-loop winner route — not the recorded/interactive
+/// offer — is what runs, and no take is declared.
+/// `printed_energy_activation_period_reaches_the_recorded_offer_and_replays_each_payment`
+/// carries the production proof through the recorded offer and its take.
+#[test]
+fn real_energy_payment_through_game_runner_updates_the_journal_it_prices() {
+    let (mut with_hulk, _kickoff, cub) = setup_2p_drain_with_energy_payer(true);
+    let before = with_hulk.state().clone();
+    with_hulk.activate(cub, 0).resolve();
+
+    // Reach guard: the production resolver really paid, so the journal the Hulk prices on moved.
+    assert_eq!(
+        with_hulk.state().players[P0.0 as usize].energy,
+        0,
+        "CR 107.14: paying {{E}}{{E}} removes both counters"
+    );
+    assert_eq!(
+        with_hulk.state().players[P0.0 as usize].energy_paid_or_lost_this_turn,
+        2,
+        "the production cost resolver advances the journal Blaster Hulk's reduction reads"
+    );
+    assert!(
+        !loop_states_equal_modulo_resources(&before, with_hulk.state()),
+        "CR 601.2f: the live Hulk prices the journal the real payment moved ⇒ the pair is not \
+         constant"
+    );
+
+    // Control: identical payment, nothing pricing the journal ⇒ the frames compare EQUAL.
+    let (mut no_hulk, _kickoff, cub) = setup_2p_drain_with_energy_payer(false);
+    let before = no_hulk.state().clone();
+    no_hulk.activate(cub, 0).resolve();
+    assert_eq!(
+        no_hulk.state().players[P0.0 as usize].energy_paid_or_lost_this_turn,
+        2,
+        "reach guard: the control ran the same real payment"
+    );
+    assert!(
+        loop_states_equal_modulo_resources(&before, no_hulk.state()),
+        "control: with no live modifier reading the journal the same payment stays projected \
+         history ⇒ EQUAL"
+    );
+}
+
+/// Automated Assembly Line verbatim (Scryfall). A PRINTED `{E}`-paying activation whose effect
+/// mints one inert vanilla token per period — the production route by which
+/// `energy_paid_or_lost_this_turn` advances once per repeat, with nothing else moving.
+const AUTOMATED_ASSEMBLY_LINE: &str = "Whenever one or more artifact creatures you control deal combat damage to a player, you get {E} (an energy counter).\nPay {E}{E}{E}: Create a tapped 3/3 colorless Robot artifact creature token.";
+
+/// Decoction Module verbatim (MTGJSON): three copies refund each Robot's three-energy payment.
+const DECOCTION_MODULE: &str = "Whenever a creature you control enters, you get {E} (an energy counter).\n{4}, {T}: Return target creature you control to its owner's hand.";
+
+/// The activation's banked energy: enough for every repetition these rows drive.
+const BANKED_ENERGY: u32 = 30;
+
+/// The 2p recorded-road board: P0 controls Automated Assembly Line with `BANKED_ENERGY` energy
+/// banked. `include_hulk` parks the REAL Blaster Hulk in P0's hand — the only variable between
+/// the bounded runs below. Each Module refunds one energy on entry. Interactive mode, so the
+/// recorded road (and the `take_route` it feeds) runs.
+fn setup_energy_activation_loop(include_hulk: bool, module_count: usize) -> (GameState, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 40);
+    scenario.with_life(P1, 40);
+    let mut builder =
+        scenario.add_artifact_from_oracle(P0, "Automated Assembly Line", AUTOMATED_ASSEMBLY_LINE);
+    builder.with_mana_cost(ManaCost::Cost {
+        shards: vec![],
+        generic: 2,
+    });
+    let line = builder.id();
+    for _ in 0..module_count {
+        scenario.add_artifact_from_oracle(P0, "Decoction Module", DECOCTION_MODULE);
+    }
+    if include_hulk {
+        add_uncast_blaster_hulk(&mut scenario);
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    runner.state_mut().players[P0.0 as usize].energy = BANKED_ENERGY;
+    (runner.state().clone(), line)
+}
+
+/// The parsed `{E}{E}{E}` activation — the index the drive activates, and a reach guard on the
+/// production parser.
+fn energy_activation_index(state: &GameState, line: ObjectId) -> usize {
+    state.objects[&line]
+        .abilities
+        .iter()
+        .position(|ability| {
+            ability.kind == engine::types::ability::AbilityKind::Activated
+                && matches!(
+                    ability.cost,
+                    Some(engine::types::ability::AbilityCost::PayEnergy { .. })
+                )
+        })
+        .expect("the production parser must give Automated Assembly Line its {E}{E}{E} activation")
+}
+
+/// One recorded period: the printed `{E}{E}{E}` activation and its resolution.
+fn energy_activation_period(state: &mut GameState, line: ObjectId, index: usize) {
+    activate(state, line, index);
+    settle(
+        state,
+        &Answers {
+            color: ManaType::Red,
+            aim: None,
+            cost: None,
+            accept: false,
+        },
+    );
+}
+
+/// The Robot tokens P0 controls.
+fn robots(state: &GameState) -> usize {
+    state
+        .battlefield
+        .iter()
+        .filter(|id| {
+            let object = &state.objects[id];
+            object.is_token && object.name == "Robot" && object.controller == P0
+        })
+        .count()
+}
+
+/// CR 107.14 + CR 601.2f + CR 732.2a/c: a PRINTED `{E}{E}{E}` period driven through the
+/// production recorded road. Its first activation is enough for the confirmer to name, CONFIRM
+/// and OFFER the period (reach control: the recurrence/offer boundary really is reached), and the
+/// offer is the counting replay's SPEND bound — the reserve left at the offer divided by three —
+/// not an unbounded ∞ certificate, because every repetition consumes counters. A
+/// bounded period is PERFORMED, so an accepted take replays the printed payment each time
+/// instead of marking the period and omitting the journal change (CR 732.2c).
+///
+/// The real Blaster Hulk in hand is the ONLY variable between the two runs (CR 601.2f): its
+/// projection-priced reduction must neither suppress the confirmed period nor change what the
+/// take performs, and the journal assertions are exactly what a mark route would omit.
+#[test]
+fn printed_energy_activation_period_reaches_the_recorded_offer_and_replays_each_payment() {
+    let (mut control, line) = setup_energy_activation_loop(false, 0);
+    let index = energy_activation_index(&control, line);
+    let mut offered_after = 0;
+    for cycle in 1..=3 {
+        energy_activation_period(&mut control, line, index);
+        if let WaitingFor::LoopShortcut {
+            road,
+            schema,
+            period,
+            ..
+        } = &control.waiting_for
+        {
+            assert_eq!(
+                *road,
+                engine::analysis::loop_check::OfferRoad::RecordedPeriod
+            );
+            assert!(
+                !period.is_empty(),
+                "the offer must carry the confirmed period"
+            );
+            assert_eq!(
+                schema.measured_repetition_bound,
+                Some((BANKED_ENERGY - 3 * cycle) / 3),
+                "the counting replay bounds the spend by the reserve left at the offer"
+            );
+            offered_after = cycle;
+            break;
+        }
+    }
+    assert!(
+        offered_after > 0,
+        "reach control: the printed energy loop must reach the recorded offer boundary; got {:?}",
+        control.waiting_for
+    );
+    assert_eq!(
+        control.players[P0.0 as usize].energy_paid_or_lost_this_turn,
+        3 * offered_after,
+        "each confirmed period paid {{E}}{{E}}{{E}}"
+    );
+
+    let (mut refused, line) = setup_energy_activation_loop(true, 0);
+    let index = energy_activation_index(&refused, line);
+    // Reach guard: the parsed reduction FUNCTIONS from hand — the metadata the veto prices.
+    {
+        let hulk = refused
+            .objects
+            .values()
+            .find(|object| object.name == "Blaster Hulk")
+            .expect("the uncast Hulk");
+        assert_eq!(hulk.zone, Zone::Hand);
+        let reduction = hulk
+            .static_definitions
+            .iter_all()
+            .find(|def| {
+                matches!(
+                    def.mode,
+                    StaticMode::ModifyCost {
+                        dynamic_count: Some(
+                            engine::types::ability::QuantityRef::EnergyPaidOrLostThisTurn
+                        ),
+                        ..
+                    }
+                )
+            })
+            .expect("the parsed Blaster Hulk carries its energy cost reduction");
+        assert!(
+            reduction.active_zones.contains(&Zone::Hand),
+            "CR 113.6: the self-spell reduction is live from hand"
+        );
+    }
+    for cycle in 1..=3 {
+        energy_activation_period(&mut refused, line, index);
+        assert_eq!(
+            refused.players[P0.0 as usize].energy_paid_or_lost_this_turn,
+            3 * cycle,
+            "the production activation paid {{E}}{{E}}{{E}} each period"
+        );
+        assert_eq!(
+            refused.players[P0.0 as usize].energy,
+            BANKED_ENERGY - 3 * cycle
+        );
+        if matches!(refused.waiting_for, WaitingFor::LoopShortcut { .. }) {
+            break;
+        }
+    }
+    assert!(
+        matches!(refused.waiting_for, WaitingFor::LoopShortcut { .. }),
+        "reach guard: the printed, repeated energy activation must reach the offer boundary; got {:?}",
+        refused.waiting_for
+    );
+    let journal = refused.players[P0.0 as usize].energy_paid_or_lost_this_turn;
+    let reserve = refused.players[P0.0 as usize].energy;
+    let take = take_recorded(&mut refused, 3);
+    assert_eq!(
+        markers(&take.events),
+        vec![(P0, 1), (P0, 3)],
+        "the accepted shortcut commits the first and last markers (middle markers are elided)"
+    );
+    assert_eq!(
+        refused.players[P0.0 as usize].energy_paid_or_lost_this_turn,
+        journal + 9,
+        "CR 601.2f: Replay performs the agreed payment that Mark would omit"
+    );
+    assert_eq!(
+        refused.players[P0.0 as usize].energy,
+        reserve - 9,
+        "CR 107.14: every replayed period removes its three energy counters"
+    );
+    assert!(
+        robots(&refused) >= 4,
+        "each replayed period creates its Robot"
+    );
+}
+
+/// CR 107.14 + CR 601.2f + CR 732.2a/c: three printed Modules refund Assembly Line's
+/// payment, so the recorded offer is unbounded even though Hulk's cost journal keeps moving.
+/// The accepted fixed take must replay those gross payments, not merely mark token growth.
+#[test]
+fn printed_refunding_energy_period_replays_the_journal_at_the_accepted_take() {
+    let (mut state, line) = setup_energy_activation_loop(true, 3);
+    let index = energy_activation_index(&state, line);
+    for cycle in 1..=3 {
+        energy_activation_period(&mut state, line, index);
+        assert_eq!(state.players[P0.0 as usize].energy, BANKED_ENERGY);
+        assert_eq!(
+            state.players[P0.0 as usize].energy_paid_or_lost_this_turn,
+            3 * cycle,
+            "the settled printed payment is refunded, not removed from its journal"
+        );
+        if matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }) {
+            break;
+        }
+    }
+    let WaitingFor::LoopShortcut {
+        road,
+        schema,
+        period,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!(
+            "the refunding printed period must reach its offer: {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(
+        *road,
+        engine::analysis::loop_check::OfferRoad::RecordedPeriod
+    );
+    assert!(!period.is_empty());
+    assert_eq!(
+        schema.measured_repetition_bound, None,
+        "reach guard: refunds leave no net spend bound on this offer"
+    );
+    let journal = state.players[P0.0 as usize].energy_paid_or_lost_this_turn;
+    let tokens = robots(&state);
+    let take = take_recorded(&mut state, 3);
+    assert_eq!(markers(&take.events), vec![(P0, 1), (P0, 3)]);
+    assert_eq!(
+        state.players[P0.0 as usize].energy_paid_or_lost_this_turn,
+        journal + 9,
+        "Replay preserves the three payments that Mark would omit"
+    );
+    assert_eq!(state.players[P0.0 as usize].energy, BANKED_ENERGY);
+    assert_eq!(robots(&state), tokens + 3);
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 }
 
 /// 2p ESCALATING TARGETED drain (PR-7 gate-relax witness): Vito + Sanguine Bond (two
@@ -150,7 +623,9 @@ fn setup_2p_vito(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
 /// 2-player drain (as above) but P1 also holds a castable Lightning Bolt off an untapped
 /// Mountain — a meaningful priority action that makes the loop OPTIONAL (CR 732.5 probe
 /// FALSE). Returns runner + (kickoff, bolt, drain-cleric enabler id).
-fn setup_2p_optional_drain(mode: LoopDetectionMode) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+pub(crate) fn setup_2p_optional_drain(
+    mode: LoopDetectionMode,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new_n_player(2, 7);
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_life(P0, 20);
@@ -304,7 +779,7 @@ fn setup_2p_symmetric_plague(mode: LoopDetectionMode) -> (GameRunner, ObjectId) 
 /// Drive PassPriority/OrderTriggers beats, accumulating events, until a state OTHER than
 /// `Priority`/`OrderTriggers` (a `LoopShortcut`/`RespondToShortcut`/`GameOver`/…) or the
 /// cap. Returns accumulated events + the terminal `waiting_for`.
-fn drive_collect(runner: &mut GameRunner, cap: usize) -> (Vec<GameEvent>, WaitingFor) {
+pub(crate) fn drive_collect(runner: &mut GameRunner, cap: usize) -> (Vec<GameEvent>, WaitingFor) {
     let mut all: Vec<GameEvent> = Vec::new();
     for _ in 0..cap {
         match runner.state().waiting_for.clone() {
@@ -516,10 +991,15 @@ fn on_shortcut_byte_identical_to_pre_pr7_golden() {
         .replace(", cast_mana_value: None", "")
         .replace(", new_total: LifeTotalReading(None)", "")
         .replace(", was_prepared: false", "")
+        // `block_pairs` joined `ZoneChangeRecord` after the golden was cut; no
+        // creature in this fixture is in combat, so every record's is empty.
+        .replace(", block_pairs: []", "")
+        .replace(", departure: Moved", "")
         // `attack_target` was added to the combat status after the golden was cut;
         // no combat is live in this fixture, so its derived value is None (CR 506.3).
         .replace(", attack_target: None", "")
-        .replace(", attack_target_identity: None", "");
+        .replace(", attack_target_identity: None", "")
+        .replace(", intensity: 0", "");
     for owner in 0..2 {
         for controller in 0..2 {
             event_stream = event_stream.replace(
@@ -1100,6 +1580,7 @@ fn declare_and_respond_authorization() {
 fn loop_shortcut_acting_player_reads_proposer() {
     let cert = LoopCertificate {
         unbounded: vec![],
+        rising: vec![],
         win_kind: Some(WinKind::LethalDamage),
         win_kind_at: None,
         mandatory: false,
@@ -1113,6 +1594,7 @@ fn loop_shortcut_acting_player_reads_proposer() {
         schema: ShortcutDecisionSchema::default(),
         declaration: None,
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
     let wf_b = WaitingFor::LoopShortcut {
@@ -1122,6 +1604,7 @@ fn loop_shortcut_acting_player_reads_proposer() {
         schema: ShortcutDecisionSchema::default(),
         declaration: None,
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
     assert_eq!(wf_a.acting_player(), Some(P1));
@@ -1133,6 +1616,7 @@ fn loop_shortcut_acting_player_reads_proposer() {
         predicted_winner: Some(P0),
         count: IterationCount::UntilLethal,
         unbounded: vec![],
+        rising: vec![],
         win_kind: Some(WinKind::LethalDamage),
         win_kind_at: None,
         template: None,
@@ -1141,6 +1625,7 @@ fn loop_shortcut_acting_player_reads_proposer() {
         published_declaration: None,
         leading_aims: Vec::new(),
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
     let wf_r = WaitingFor::RespondToShortcut {
@@ -1164,6 +1649,7 @@ fn loop_shortcut_acting_player_reads_proposer() {
         schema: ShortcutDecisionSchema::default(),
         declaration: None,
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
     apply(&mut delegated, P0, GameAction::DeclineShortcut)
@@ -1643,6 +2129,7 @@ fn setup_3p_both_fall(
 fn synthetic_lethal_cert() -> LoopCertificate {
     LoopCertificate {
         unbounded: vec![],
+        rising: vec![],
         win_kind: Some(WinKind::LethalDamage),
         win_kind_at: None,
         mandatory: false,
@@ -1757,6 +2244,7 @@ fn injected_3p_one_faller_no_crown() {
         schema: ShortcutDecisionSchema::default(),
         declaration: None,
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
     runner
@@ -1792,11 +2280,9 @@ fn injected_3p_one_faller_no_crown() {
     );
 }
 
-/// Test C ⭐ (LATENT FIX, item 5 object-growth branch): an object-growth ADVANTAGE token loop
-/// declared `UntilLethal` (the AI hardcode shape) does NOT crown — the E1 object-growth branch
-/// drives one recast, measures NO life/poison faller (only tokens grew), so
-/// `live_mandatory_loop_winner` returns None and the shortcut falls back to manual play.
-/// REVERT-PROBE: the pre-E1 unconditional UntilLethal crown wrongly ends the game here.
+/// CR 732.2a: an object-growth ADVANTAGE token loop's offer names no winner, so an `UntilLethal`
+/// declaration names no ending point where a player loses and is refused with the offer, the
+/// board and the trace unchanged.
 #[test]
 fn object_growth_advantage_untillethal_no_crown() {
     let (mut runner, sprout, fodder) = sprout_swarm_scenario(4);
@@ -1820,30 +2306,35 @@ fn object_growth_advantage_untillethal_no_crown() {
         "the real cast must have grown the board (object-growth branch reachable)"
     );
 
-    runner
+    let board = |state: &GameState| {
+        (
+            state.waiting_for.clone(),
+            state.stack.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+            state
+                .objects
+                .iter()
+                .map(|(id, object)| (*id, object.zone))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+            state.players.iter().map(|p| p.life).collect::<Vec<_>>(),
+            format!("{:?}", engine::game::play_trace_view(state)),
+        )
+    };
+    let offer = board(runner.state());
+    let refused = runner
         .act(GameAction::DeclareShortcut {
             count: IterationCount::UntilLethal,
             template: None,
         })
-        .expect("P0 declares UntilLethal on the Advantage offer (AI-hardcode shape)");
-    accept_all_opponents(&mut runner);
-
+        .err();
     assert!(
-        !matches!(runner.state().waiting_for, WaitingFor::GameOver { .. }),
-        "an inert Advantage token loop must NOT crown under UntilLethal, got {:?}",
-        runner.state().waiting_for
+        matches!(refused, Some(EngineError::InvalidAction(_))),
+        "{refused:?}"
     );
     assert!(
-        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-        "the E1 object-growth measure hands back to manual play, got {:?}",
+        board(runner.state()) == offer,
+        "the offer, the board and the trace are the offer's, got {:?}",
         runner.state().waiting_for
     );
-    for p in [P0, P1] {
-        assert!(
-            life(&runner, p) > 0,
-            "no player crossed lethal (no drain axis)"
-        );
-    }
 }
 
 /// Test E ⭐ (SOUNDNESS #1 firewall, item 3): the declare-time `validate_pins` firewall REJECTS
@@ -1906,6 +2397,7 @@ fn declare_illegal_pin_falls_back_legal_ingests() {
         schema: schema.clone(),
         declaration: None,
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
     runner
@@ -1929,6 +2421,7 @@ fn declare_illegal_pin_falls_back_legal_ingests() {
         schema,
         declaration: None,
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
     runner2
@@ -1988,6 +2481,7 @@ fn injected_3p_unequal_life_pin_all_no_crown() {
             schema: ShortcutDecisionSchema::default(),
             declaration: None,
             road: engine::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         };
         runner
@@ -2574,7 +3068,7 @@ fn b3_declare_refuses_a_schedule_breaking_inside_the_declared_count() {
     );
 }
 
-// ═══════════════════ PR-7 Phase 4c — B5 revocable-∞ + LOW-2 ═══════════════════
+// ═══════════════════ Interactive draw gate ═══════════════════
 
 /// Poison rider for the DRAW-gate behavioral test: fires on the SAME "whenever you gain
 /// life" event the SELF_LIFE_ENGINE cascade pumps, dripping a poison counter onto each
@@ -2582,19 +3076,9 @@ fn b3_declare_refuses_a_schedule_breaking_inside_the_declared_count() {
 const POISON_RIDER: &str = "Whenever you gain life, each opponent gets a poison counter.";
 
 /// 3-player MANDATORY self-sustaining lifegain cascade (SELF_LIFE_ENGINE) that ALSO drips
-/// poison onto each opponent every cycle (POISON_RIDER, a SEPARATE second trigger). Nobody
-/// loses LIFE (so Path A's `live_mandatory_loop_winner` finds no faller ⇒ nonfallers≠1 ⇒
-/// None); opponents accrue POISON.
-///
-/// MEASURED reachability (this 2-trigger fixture does NOT reach the Path-B bridge): the two
-/// simultaneous triggers per lifegain event open OrderTriggers beats, and every non-
-/// `Priority{active_player}` beat CLEARS `loop_detect_ring` (`game/engine.rs`'s
-/// `pass_priority_once_with_pipeline` sample-or-clear arm). So the ring never accumulates, the
-/// `!ring.is_empty()` bridge gate in `reconcile_terminal_result` never passes, and
-/// `interactive_loop_bridge` is never entered (measured: 0 bridge invocations). The loop
-/// instead resolves via the CR 704.5c 10-poison SBA to GameOver{Some(P0)} (both opponents
-/// reach 10 poison and are eliminated). It therefore does NOT exercise the Path-B
-/// `has_no_loss_axis` veto — see the test doc below.
+/// poison onto each opponent every cycle (POISON_RIDER, a SEPARATE second trigger), so P0 orders
+/// the two triggers each cycle. Nobody loses LIFE, so Path A's `live_mandatory_loop_winner` finds
+/// no faller; opponents accrue POISON.
 fn setup_3p_poison_draw(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
     let mut scenario = GameScenario::new_n_player(3, 7);
     scenario.at_phase(Phase::PreCombatMain);
@@ -2611,40 +3095,9 @@ fn setup_3p_poison_draw(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
     (runner, kickoff)
 }
 
-/// Path-B DRAW-GATE behavioral test (two halves):
-///   - CONTROL (`setup_3p_draw`, pure lifegain, no poison) is a POSITIVE test that the Path-B
-///     draw gate CERTIFIES a benign no-loss loop: it draws `GameOver{None}` via
-///     `interactive_loop_bridge`'s `has_no_loss_axis` draw arm — the one that pushes
-///     `GameEvent::GameOver { winner: None }` (measured P0 life 22, cycle ~2; and neutering that
-///     arm makes this control STOP drawing — confirmed the draw originates AT that gate, not at
-///     the stricter arm of the same fn, which additionally requires
-///     `classify_win_kind(..) == WinKind::Advantage` and emits no `GameOver` at all).
-///   - VARIANT (`setup_3p_poison_draw`, IDENTICAL + a poison-rider creature) locks that a
-///     poison-accruing loop is NOT wrongly drawn: it resolves via the CR 704.5c 10-poison SBA
-///     to `GameOver{Some(P0)}` (measured P0 life 30, poisons [0,10,10], both opponents
-///     eliminated).
-///
-/// SCOPE (measured — do NOT overclaim): this does NOT isolate `has_no_loss_axis`'s Path-B
-/// conjunct. That conjunct IS load-bearing BY CONSTRUCTION (it is the SOLE loss-axis veto in that
-/// draw arm, which has NO `== Advantage` backstop — a poison loop that reached the gate would
-/// be wrongly drawn without it), but it is currently NOT runtime-discriminable, so there is NO
-/// claim here that deleting it flips the variant. MEASURED: deleting `has_no_loss_axis` from
-/// Path B leaves the variant terminal `GameOver{Some(P0)}` UNCHANGED — because the variant
-/// never REACHES the gate with poison>0. A single-compound-trigger poison loop DOES reach the
-/// Path-B bridge, but the "you gain N life and [each opponent gets a poison counter]" parser
-/// drop removes the poison conjunct (card-build keeps only `GainLife`), so poison is 0 in the
-/// loop delta at the gate → it draws as a benign lifegain loop and never exercises
-/// has_no_loss_axis's poison veto. No constructible fixture carries poison>0 to the Path-B gate
-/// (the 2-trigger form clears `loop_detect_ring` on its OrderTriggers beats, in
-/// `pass_priority_once_with_pipeline`'s sample-or-clear arm;
-/// the single-compound-trigger form drops the poison at parse). So the Path-B veto is proven
-/// load-bearing IN CODE and its runtime discriminator is WAIVED pending the poison-drop parser
-/// fix.
-///
-/// POST-RE-KEY NOTE (PR-7 poison pass): `has_no_loss_axis`'s poison veto now reads the
-/// per-victim `delta.poison` map (was the aggregate `delta.counters[(Poison, Player)]`).
-/// The veto FIELD moved; the Path-B reachability did NOT — this test is unchanged and stays
-/// the SBA-terminal behavioral anchor.
+/// CR 732.4 + CR 704.5c: the pure lifegain loop is a draw; the same loop with a poison rider is
+/// no draw. The loop continues whichever of P0's two triggers resolves first (CR 603.3b), so the
+/// order is no decision and P0 wins the mandatory loop outright.
 #[test]
 fn interactive_recurring_poison_is_not_drawn() {
     // CONTROL (differential anchor): the SHARED pure-lifegain structure reaches the CR 732.4
@@ -2660,43 +3113,17 @@ fn interactive_recurring_poison_is_not_drawn() {
          fixture change (the poison rider) is what makes the variant below not-draw"
     );
 
-    // VARIANT: identical structure + exactly one poison-rider creature (the single-line delta).
     let (mut runner, kickoff) = setup_3p_poison_draw(LoopDetectionMode::Interactive);
     let _ = runner.cast(kickoff).resolve();
     let (events, wf) = drive_collect(&mut runner, 500);
-
-    // Positive reach-guard (non-vacuity): the poison LOSS axis was genuinely driven to its
-    // CR 704.5c terminal — BOTH opponents reached ≥10 poison and were eliminated. Without this,
-    // "not drawn" could hold trivially (the loop never ran / poison never applied).
-    let poisons: Vec<u32> = runner
-        .state()
-        .players
-        .iter()
-        .map(|p| p.poison_counters)
-        .collect();
+    let players = &runner.state().players;
+    assert_eq!(wf, WaitingFor::GameOver { winner: Some(P0) });
     assert_eq!(
-        runner
-            .state()
-            .players
+        players
             .iter()
-            .filter(|p| p.is_eliminated && p.poison_counters >= 10)
-            .count(),
-        2,
-        "reach-guard: both opponents must be poisoned out (CR 704.5c, ≥10 poison + eliminated), \
-         proving the loss axis genuinely drove a determinate loss; got poisons {poisons:?}"
-    );
-
-    // The guard: the poison loop must NOT be a CR 732.4 draw, and must resolve to the correct
-    // determinate CR 704.5c poison loss (P0 the sole survivor).
-    assert_ne!(
-        wf,
-        WaitingFor::GameOver { winner: None },
-        "recurring poison loop must NOT be certified a CR 732.4 draw; got {wf:?}"
-    );
-    assert_eq!(
-        wf,
-        WaitingFor::GameOver { winner: Some(P0) },
-        "the poison loop resolves to P0's determinate win (both opponents poisoned out), not a draw"
+            .map(|p| p.poison_counters)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 1]
     );
     assert!(
         !events
@@ -2830,234 +3257,6 @@ fn interactive_poison_axis_surfaces_in_offer_certificate() {
         runner.state().waiting_for,
         WaitingFor::GameOver { winner: Some(P0) },
         "accepted ⇒ the shortcut resolves to P0's win"
-    );
-}
-
-/// Drive PassPriority/OrderTriggers beats like `drive_collect`, but stop as soon as
-/// `stop` is satisfied rather than waiting for a non-Priority/OrderTriggers terminal
-/// state. Path C (B5) is a SILENT mark — it never changes `waiting_for` — so
-/// `drive_collect`'s stop condition never fires for it; callers that need to observe a
-/// mid-grind fact (the mark landing, a specific player's priority window) poll state
-/// directly each beat instead.
-fn drive_until(
-    runner: &mut GameRunner,
-    cap: usize,
-    mut stop: impl FnMut(&GameState) -> bool,
-) -> bool {
-    for _ in 0..cap {
-        if stop(runner.state()) {
-            return true;
-        }
-        match runner.state().waiting_for.clone() {
-            WaitingFor::Priority { .. } => {
-                if runner.act(GameAction::PassPriority).is_err() {
-                    return false;
-                }
-            }
-            WaitingFor::OrderTriggers { triggers, .. } => {
-                let order: Vec<usize> = (0..triggers.len()).collect();
-                if runner.act(GameAction::OrderTriggers { order }).is_err()
-                    && runner
-                        .act(GameAction::OrderTriggers { order: vec![] })
-                        .is_err()
-                {
-                    return false;
-                }
-            }
-            _ => return false,
-        }
-    }
-    stop(runner.state())
-}
-
-/// Stop as soon as `controller`'s revocable-∞ capability is marked.
-fn drive_until_marked(runner: &mut GameRunner, controller: PlayerId, cap: usize) -> bool {
-    drive_until(runner, cap, |s| {
-        s.unbounded_resources.contains_key(&controller)
-    })
-}
-
-/// Stop as soon as `player` holds a live priority window (used to reach a specific
-/// player's priority inside a self-sustaining loop, where a plain drive just alternates
-/// between players indefinitely).
-fn advance_to_player_priority(runner: &mut GameRunner, player: PlayerId, cap: usize) -> bool {
-    drive_until(
-        runner,
-        cap,
-        |s| matches!(s.waiting_for, WaitingFor::Priority { player: p } if p == player),
-    )
-}
-
-/// 2-player OPTIONAL beneficial (self-lifegain) loop controlled by P0 — the live B5
-/// producer class (R4: triggered-ability beneficial cascades). No faller (Path A finds no
-/// winner: `find_live_loop_winner` requires an opponent life-faller). P1 holds a castable
-/// Bolt off an untapped Mountain (a meaningful priority action) so the loop is OPTIONAL
-/// (`mandatory == false`); the Bolt targets the life-engine creature for B5-2's defuse.
-/// Returns runner + (kickoff, bolt, life-engine creature id).
-fn setup_2p_optional_beneficial(
-    mode: LoopDetectionMode,
-) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
-    let mut scenario = GameScenario::new_n_player(2, 7);
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_life(P0, 20);
-    scenario.with_life(P1, 20);
-    let engine_creature = scenario
-        .add_creature_from_oracle(P0, "Test Life Engine", 2, 2, SELF_LIFE_ENGINE)
-        .id();
-    scenario.add_basic_land(P1, ManaColor::Red);
-    let bolt = scenario.add_bolt_to_hand(P1);
-    let kickoff = scenario
-        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
-        .id();
-    let mut runner = scenario.build();
-    runner.state_mut().loop_detection = mode;
-    (runner, kickoff, bolt, engine_creature)
-}
-
-/// B5-1 (positive): an OPTIONAL beneficial loop under `Interactive` is neither crowned
-/// (Path A: no faller) nor drawn (Path B: `!mandatory`) — it is marked as a revocable-∞
-/// capability (Path C) and the game continues at live priority.
-#[test]
-fn b5_optional_beneficial_marks_revocable_unbounded() {
-    let (mut runner, kickoff, _bolt, creature) =
-        setup_2p_optional_beneficial(LoopDetectionMode::Interactive);
-    let _ = runner.cast(kickoff).resolve();
-
-    assert!(
-        drive_until_marked(&mut runner, P0, 500),
-        "B5-1: the optional self-lifegain cascade must reach the revocable-∞ mark"
-    );
-
-    // Path C is a silent mark: neither drawn nor crowned. The game continues at Priority.
-    assert!(
-        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-        "B5-1: an optional beneficial loop must fall through to a live priority window, \
-         not GameOver; got {:?}",
-        runner.state().waiting_for
-    );
-    let axes = runner
-        .state()
-        .unbounded_resources
-        .get(&P0)
-        .cloned()
-        .unwrap_or_default();
-    assert!(
-        axes.contains(&ResourceAxis::Life(P0)),
-        "B5-1: P0's revocable-∞ capability must be marked on the Life axis; got {axes:?}"
-    );
-    let enablers = runner
-        .state()
-        .unbounded_loop_enablers
-        .get(&P0)
-        .cloned()
-        .unwrap_or_default();
-    assert!(
-        enablers.contains(&creature),
-        "B5-1: the enabler set must include the life-engine creature; got {enablers:?}"
-    );
-
-    // Control (a): Off never marks — the sampler never records under Off (Interactive-only).
-    let (mut orunner, okickoff, _ob, _oc) = setup_2p_optional_beneficial(LoopDetectionMode::Off);
-    let _ = orunner.cast(okickoff).resolve();
-    let _ = drive_collect(&mut orunner, 500);
-    assert!(
-        !orunner.state().unbounded_resources.contains_key(&P0),
-        "Off must never populate unbounded_resources (Interactive-only)"
-    );
-
-    // Control (b): the mandatory sibling (same SELF_LIFE_ENGINE pattern, no opponent
-    // action — `setup_3p_draw`) reaches Path B's draw, NOT a Path C mark — proves the
-    // `!mandatory` gate discriminates, not merely "any beneficial loop marks."
-    let (mut drunner, dkickoff) = setup_3p_draw(LoopDetectionMode::Interactive);
-    let _ = drunner.cast(dkickoff).resolve();
-    let (_de, dwf) = drive_collect(&mut drunner, 500);
-    assert_eq!(
-        dwf,
-        WaitingFor::GameOver { winner: None },
-        "control: the mandatory sibling must still draw via Path B"
-    );
-    assert!(
-        !drunner.state().unbounded_resources.contains_key(&P0),
-        "control: a mandatory draw (Path B) must not ALSO mark via Path C"
-    );
-}
-
-/// B5-2: an enabler leaving the battlefield (a real zone change through the shared
-/// `apply_zone_exit_cleanup` chokepoint) revokes the whole revocable-∞ capability.
-#[test]
-fn b5_2_enabler_departure_clears_the_mark() {
-    let (mut runner, kickoff, bolt, creature) =
-        setup_2p_optional_beneficial(LoopDetectionMode::Interactive);
-    let _ = runner.cast(kickoff).resolve();
-
-    assert!(
-        drive_until_marked(&mut runner, P0, 500),
-        "reach-guard: must be marked before testing the defuse"
-    );
-    assert!(
-        runner
-            .state()
-            .unbounded_loop_enablers
-            .get(&P0)
-            .is_some_and(|e| e.contains(&creature)),
-        "reach-guard: the creature must actually be a registered enabler"
-    );
-
-    // The driver may have stopped mid-cycle with P0 holding priority; advance to P1's
-    // window so P1 (the Bolt's controller) can cast it.
-    assert!(
-        advance_to_player_priority(&mut runner, P1, 50),
-        "must be able to reach P1's priority window to cast the Bolt"
-    );
-
-    let _ = runner.cast(bolt).target_object(creature).resolve();
-    assert_ne!(
-        runner.state().objects.get(&creature).map(|o| o.zone),
-        Some(engine::types::zones::Zone::Battlefield),
-        "the enabler creature must have left the battlefield (a real zone change)"
-    );
-
-    assert!(
-        !runner.state().unbounded_resources.contains_key(&P0),
-        "B5-2: the enabler's departure must clear unbounded_resources"
-    );
-    assert!(
-        !runner.state().unbounded_loop_enablers.contains_key(&P0),
-        "B5-2: the enabler's departure must clear unbounded_loop_enablers"
-    );
-}
-
-/// Defuse-inert (Team-lead-B hard gate): under `Off`, the SAME real zone-change path
-/// through `apply_zone_exit_cleanup` never populates or mutates either B5 map — the
-/// empty-map guard makes the shared `zones.rs` hook a structural no-op.
-#[test]
-fn defuse_hook_inert_under_off() {
-    let (mut runner, kickoff, bolt, creature) =
-        setup_2p_optional_beneficial(LoopDetectionMode::Off);
-    let _ = runner.cast(kickoff).resolve();
-    let _ = drive_until(&mut runner, 50, |_| false);
-    assert!(
-        runner.state().unbounded_loop_enablers.is_empty(),
-        "reach-guard: Off must never populate unbounded_loop_enablers (only the Interactive \
-         B5 arm does) — this is what makes the defuse hook's guard a no-op below"
-    );
-
-    assert!(
-        advance_to_player_priority(&mut runner, P1, 50),
-        "must be able to reach P1's priority window to cast the Bolt"
-    );
-    let _ = runner.cast(bolt).target_object(creature).resolve();
-    assert_ne!(
-        runner.state().objects.get(&creature).map(|o| o.zone),
-        Some(engine::types::zones::Zone::Battlefield),
-        "positive reach-guard: the creature really did leave the battlefield under Off too"
-    );
-
-    assert!(
-        runner.state().unbounded_resources.is_empty()
-            && runner.state().unbounded_loop_enablers.is_empty(),
-        "Off: both maps must stay empty across a real battlefield departure — the shared \
-         zones.rs hook body never executes when the enabler map starts empty"
     );
 }
 
@@ -4552,6 +4751,7 @@ fn loop_shortcut_schema_redacts_hidden_targets_for_non_controller() {
     };
     let cert = LoopCertificate {
         unbounded: vec![],
+        rising: vec![],
         win_kind: Some(WinKind::LethalDamage),
         win_kind_at: None,
         mandatory: false,
@@ -4565,6 +4765,7 @@ fn loop_shortcut_schema_redacts_hidden_targets_for_non_controller() {
         schema,
         declaration: None,
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
 
@@ -4673,6 +4874,7 @@ fn respond_to_shortcut_template_redacts_a_hidden_pin_for_non_proposers() {
                 predicted_winner: Some(P0),
                 count: IterationCount::Fixed(3),
                 unbounded: vec![],
+                rising: vec![],
                 win_kind: Some(WinKind::LethalDamage),
                 win_kind_at: None,
                 template: Some(DecisionTemplate {
@@ -4698,6 +4900,7 @@ fn respond_to_shortcut_template_redacts_a_hidden_pin_for_non_proposers() {
                 published_declaration: None,
                 leading_aims: Vec::new(),
                 road: engine::analysis::loop_check::OfferRoad::Ring,
+                counted_take: Default::default(),
                 period: Default::default(),
             },
         };
@@ -5072,8 +5275,8 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // ── the classifier's own reach-guard: the enum was actually found ──
     let total = enum_variants(&enum_src, "WaitingFor").len();
     assert_eq!(
-        total, 144,
-        "`WaitingFor` has 144 variants at this tip, read off the `syn` parse. This number is \
+        total, 147,
+        "`WaitingFor` has 147 variants at this tip, read off the `syn` parse. This number is \
          pinned so a variant REMOVED is as visible as one added; if you added a variant and it \
          carries no `DecisionTemplate`, update this number. A wildly different count means the \
          reader lost its anchor, and every assertion below would then be measuring an empty enum"
@@ -5147,6 +5350,20 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // `PhysicalContest { state: ContestState }`. Measured, not inferred from the diff:
     // that body holds NO `DecisionTemplate` (zero matches) — it is an actorless
     // real-time physical clicking contest driven by the host engine contest driver,
+    // not a shortcut-style template — so it is not a third carrier and the carrier
+    // assertion below is unchanged by it.
+    // 144 ⇒ 145 is ADJUDICATED: the conspiracy agenda prompt added
+    // `SecretAgendaChoice { player, object_id, name_count }`. That body holds NO
+    // `DecisionTemplate`, so it is not a third carrier either.
+    // 145 ⇒ 146 is ADJUDICATED: Petals of Insight's bottom ordering added
+    // `DigBottomOrder { player, source_id, cards }`. Its body holds NO
+    // `DecisionTemplate` — it is a card-permutation prompt answered by
+    // `SelectCards` — so it is not a third carrier and the carrier assertion
+    // below is unchanged by it.
+    // 146 ⇒ 147 is ADJUDICATED: Turtle Team-Up added `HeroEventChoice` (hero-choice
+    // Events answered with `GameAction::SelectCards`, handled in
+    // `engine_resolution_choices`). Measured, not inferred from the diff: that body
+    // holds NO `DecisionTemplate` (zero matches) — it is a resolution-choice prompt,
     // not a shortcut-style template — so it is not a third carrier and the carrier
     // assertion below is unchanged by it.
 
@@ -6339,6 +6556,7 @@ fn a_wire_zero_frames_per_period_fails_the_load_and_a_wire_two_does_not() {
                 predicted_winner: None,
                 count: engine::analysis::decision_template::IterationCount::Fixed(3),
                 unbounded: vec![],
+                rising: vec![],
                 win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
                 win_kind_at: None,
                 template: None,
@@ -6358,6 +6576,7 @@ fn a_wire_zero_frames_per_period_fails_the_load_and_a_wire_two_does_not() {
                 published_declaration: None,
                 leading_aims: Vec::new(),
                 road: engine::analysis::loop_check::OfferRoad::Ring,
+                counted_take: Default::default(),
                 period: Default::default(),
             },
         };
@@ -7477,6 +7696,7 @@ fn template_none_against_a_pin_consuming_schema_falls_back_to_manual_play() {
                 schema: schema.clone(),
                 declaration: None,
                 road: engine::analysis::loop_check::OfferRoad::Ring,
+                counted_take: Default::default(),
                 period,
             };
             runner
@@ -8376,13 +8596,12 @@ fn r6a_drive_to_boundary(state: &mut GameState) {
 /// which bounds the boundary prompt per CR 732.2c); what this engine defers is APPLYING it, until
 /// the CR 500.5 boundary (`game::turns`), while the game advances to the proposal's ending point
 /// (CR 732.2c; `types::game_state`'s `scheduled_collapse_axes` doc has the full reading). This test
-/// pins what the engine DOES during that window: the marks and their enablers are still live, so the
+/// pins what the engine DOES during that window: the marks are still live, so the
 /// projection KEEPS every `∞` surface. CR 732.2c bounds the collapse; it never licensed hiding a
 /// mark the store still carries, which is what the BASE gate used it for.
 ///
 /// NEVER HIDE — and never filter the store either. The store must still carry the mark
-/// (the engine-state enabler lockstep and `zones::apply_zone_exit_cleanup`'s defuse read it until
-/// the boundary applies the growth), so this row asserts store AND wire.
+/// (the boundary reads it until it applies the growth), so this row asserts store AND wire.
 ///
 /// NON-VACUITY: every wire assertion here is a NON-emptiness paired with the store's own
 /// non-emptiness at (1), so a projection that returned nothing fails immediately.
@@ -8584,8 +8803,7 @@ fn scheduled_collapse_still_renders_the_unbounded_badge() {
     assert_eq!(
         state.unbounded_resources.get(&P0),
         Some(&marked),
-        "the ∞ store must survive the projection (the engine-state enabler lockstep + the \
-         zone-exit defuse still need it until the boundary)"
+        "the ∞ store must survive the projection (the boundary still reads it)"
     );
     assert!(
         !state.unbounded_loop_pile.is_empty(),
@@ -8599,7 +8817,7 @@ fn scheduled_collapse_still_renders_the_unbounded_badge() {
 /// fixture (nothing is stale there) — this test is what makes the distinction bite.
 ///
 /// The store/wire split is the whole contract: `unbounded_loop_pile` must stay unfiltered
-/// because the boundary collapse and `zones::apply_zone_exit_cleanup`'s defuse both read it,
+/// because the boundary collapse reads it,
 /// so the liveness filter has to live in the projection.
 ///
 /// MUTATIONS (RUN, measured over the 164-test loop/∞ blast radius):
@@ -8657,8 +8875,7 @@ fn stale_pile_member_is_omitted_from_the_wire_but_kept_in_the_store() {
 
     // (3) THE STORE IS NOT FILTERED. This is the discriminator against a "fix" that prunes
     //     `unbounded_loop_pile` itself: that mutation satisfies (1), (2) and (4) and reds only
-    //     this row. The store must survive because the boundary collapse and the zone-exit
-    //     defuse both read it.
+    //     this row. The store must survive because the boundary collapse reads it.
     assert!(
         state
             .unbounded_loop_pile
@@ -8939,6 +9156,8 @@ pub(crate) enum TakeHistoryMap {
     ActivatedAbilities,
     TrackedObjectSets,
     TrackedSetMemberCauses,
+    LkiCopiableValues,
+    ActivatedAbilitiesThisGame,
 }
 
 impl TakeHistoryMap {
@@ -8948,6 +9167,8 @@ impl TakeHistoryMap {
             Self::ActivatedAbilities => state.activated_abilities_this_turn.len(),
             Self::TrackedObjectSets => state.tracked_object_sets.len(),
             Self::TrackedSetMemberCauses => state.tracked_set_member_causes.len(),
+            Self::LkiCopiableValues => state.lki_copiable_values.len(),
+            Self::ActivatedAbilitiesThisGame => state.activated_abilities_this_game.len(),
         }
     }
 }
@@ -9090,6 +9311,74 @@ fn sprout_take_history_work_is_flat_per_cycle() {
             let mut state = r6a_offer_state();
             engine::game::perf_counters::reset();
             r6a_declare_and_accept_all(&mut state, P0, n);
+            state
+        },
+    );
+}
+
+/// A Smaug + Mayhem Devil Treasure-sacrifice take shares the LKI copiable values and per-game
+/// activation counts each cycle grows, so its per-cycle copy work does not grow with its count.
+#[test]
+fn treasure_sacrifice_take_history_work_is_flat_per_cycle() {
+    use crate::play_trace::{ability, activate, cast, is_offer, names, settle};
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::zones::Zone;
+
+    let db = crate::support::shared_card_db().expect("the committed card fixture loads");
+    let offer = || {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let smaug = scenario.add_real_card(P0, "Smaug the Impenetrable", Zone::Battlefield, db);
+        let devil = scenario.add_real_card(P0, "Mayhem Devil", Zone::Battlefield, db);
+        let breaker =
+            scenario.add_real_card(P0, "Professional Face-Breaker", Zone::Battlefield, db);
+        scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+        let shock = scenario.add_real_card(P0, "Shock", Zone::Hand, db);
+        for _ in 0..60 {
+            scenario.add_real_card(P0, "Swamp", Zone::Library, db);
+            scenario.add_real_card(P1, "Swamp", Zone::Library, db);
+        }
+        let mut runner = scenario.build();
+        runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+        let score = |a: &GameAction| 2 * names(&[smaug])(a) + names(&[devil, breaker])(a);
+        cast(&mut runner, shock, vec![smaug], CastPaymentMode::Auto);
+        settle(&mut runner, &score);
+        for _ in 0..8 {
+            let state = runner.state();
+            let treasure = state
+                .battlefield
+                .iter()
+                .copied()
+                .find(|id| state.objects[id].name == "Treasure" && !state.objects[id].tapped)
+                .expect("an untapped Treasure to sacrifice");
+            let index = ability(state, treasure, true);
+            activate(&mut runner, treasure, index);
+            settle(&mut runner, &score);
+            if is_offer(runner.state()) {
+                return runner.state().clone();
+            }
+        }
+        panic!("reach-guard: the Treasure loop surfaces a CR 732.2a offer within 8 cycles");
+    };
+    assert_take_history_work_is_flat(
+        32,
+        &[
+            TakeHistoryVector::JournalEntries,
+            TakeHistoryVector::BattlefieldEntries,
+        ],
+        &[
+            TakeHistoryMap::LkiCopiableValues,
+            TakeHistoryMap::ActivatedAbilitiesThisGame,
+        ],
+        |n| {
+            let mut state = offer();
+            engine::game::perf_counters::reset();
+            r6a_declare_and_accept_all(&mut state, P0, n);
+            let copy = state.clone();
+            assert!(state.lki_copiable_values.ptr_eq(&copy.lki_copiable_values));
+            assert!(state
+                .activated_abilities_this_game
+                .ptr_eq(&copy.activated_abilities_this_game));
             state
         },
     );
@@ -9659,6 +9948,7 @@ fn bounded_offer_parts(
             schema,
             declaration: _,
             road: _,
+            counted_take: _,
             period: _,
         } => (*proposer, certificate, schema),
         other => panic!("expected a bounded LoopShortcut offer, got {other:?}"),
@@ -9925,17 +10215,17 @@ fn dina_untargeted_drain_4p_offers_at_three_live_opponents() {
         schema.measured_repetition_bound
     );
 
-    // ── siblings: nothing terminal happened, and no revocable-infinity was marked ──
+    // ── siblings: nothing terminal happened, and no unbounded mark was written ──
     assert_eq!(
         certificate.win_kind,
         Some(engine::analysis::loop_check::WinKind::LethalDamage),
         "CR 704.5a: a life drain is not `Advantage`, which is the conjunct that keeps this \
-         seam disjoint from the Path C revocable-infinity mark"
+         seam disjoint from Path C's class"
     );
     assert!(
         state.unbounded_resources.is_empty(),
-        "an OFFER is not a grant: CR 104.4b's revocable-infinity mark belongs to Path C and \
-         must not be written by raising a bounded offer; got {:?}",
+        "an OFFER is not a grant: no unbounded mark may be written by raising a bounded \
+         offer; got {:?}",
         state.unbounded_resources
     );
 
@@ -11550,6 +11840,67 @@ fn bounded_fixed_count_commits_exactly_n_periods() {
     }
 }
 
+/// CR 732.1b + CR 732.2c: a Ring take of the real Dina/Conqueror drain keeps its first and last
+/// repetition. One repetition: a Dina, Soul Steeper trigger ("Whenever you gain life, each opponent
+/// loses 1 life.") makes P1, P2 and P3 each lose 1 (CR 119.3); each loss triggers Bloodthirsty
+/// Conqueror ("Whenever an opponent loses life, you gain that much life.") once (CR 603.2c); one of
+/// those resolves and P0 gains 1, and the Dina trigger that gain makes goes on top of the other two
+/// (CR 405.2) and resolves first (CR 405.5).
+#[test]
+fn a_ring_take_of_the_dina_drain_keeps_its_first_and_last_repetition() {
+    const P3: PlayerId = PlayerId(3);
+    for (count, kept) in [(1, vec![1]), (2, vec![1, 2]), (3, vec![1, 3])] {
+        let mut state = restore_dump(&gunzip_dump(include_bytes!(
+            "../fixtures/dina_conqueror_4p.json.gz"
+        )));
+        drive_to_bounded_offer(&mut state, 400).expect("the bounded offer");
+        let WaitingFor::LoopShortcut {
+            proposer, period, ..
+        } = &state.waiting_for
+        else {
+            unreachable!("the bounded offer")
+        };
+        assert!(period.is_empty(), "the Ring route takes an empty period");
+        assert_eq!(*proposer, P0);
+        let offered: Vec<i32> = state.players.iter().map(|p| p.life).collect();
+
+        let result = take_recorded(&mut state, count);
+
+        assert_eq!(
+            markers(&result.events),
+            kept.iter()
+                .map(|repetition| (P0, *repetition))
+                .collect::<Vec<_>>(),
+            "Fixed({count})"
+        );
+        for events in repetitions(&result.events) {
+            let mut changes: Vec<(PlayerId, i32)> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::LifeChanged {
+                        player_id, amount, ..
+                    } => Some((*player_id, *amount)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(changes.pop(), Some((P0, 1)), "Fixed({count})");
+            changes.sort();
+            assert_eq!(changes, [(P1, -1), (P2, -1), (P3, -1)], "Fixed({count})");
+        }
+        let per_repetition = [1, -1, -1, -1];
+        let expected: Vec<i32> = offered
+            .iter()
+            .zip(per_repetition)
+            .map(|(life, delta)| life + count as i32 * delta)
+            .collect();
+        assert_eq!(
+            state.players.iter().map(|p| p.life).collect::<Vec<_>>(),
+            expected,
+            "Fixed({count})"
+        );
+    }
+}
+
 /// ITEM 2 (CR 732.2a) — the ACCEPT side: an opponent's play in the window's trace must not divert
 /// an accepted bounded grant away from the drain materializer.
 ///
@@ -11708,8 +12059,8 @@ fn declining_a_shortcut_discards_only_the_decliners_own_driving_period() {
 /// CR 732.2a — an aborted `UntilLethal` drive ends at priority without re-raising the offer it
 /// abandoned, and discards only the proposer's own plays from the window's trace.
 ///
-/// The object-growth fixture is used because the fallback is reached only when the drive refuses
-/// to crown, and `object_growth_advantage_untillethal_no_crown` shows this board does exactly that.
+/// The three-player drain with unequal opponent lives is used because its take refuses to crown
+/// (`injected_3p_unequal_life_pin_all_no_crown`) on an offer naming P0.
 ///
 /// | arm | trace at the accept | assertion |
 /// |---|---|---|
@@ -11717,72 +12068,78 @@ fn declining_a_shortcut_discards_only_the_decliners_own_driving_period() {
 /// | OWN | the proposer's own, as played | discarded, no re-offer |
 #[test]
 fn an_aborted_until_lethal_drive_discards_only_the_proposers_own_driving_period() {
-    // The shipped abort path, re-derived per arm: cast the recast, take the object-growth offer,
-    // declare `UntilLethal` (the AI's hardcoded shape), and let every opponent accept.
     let offer_state = || {
-        let (mut runner, sprout, fodder) = sprout_swarm_scenario(4);
-        let _ = runner
-            .cast(sprout)
-            .accept_optional()
-            .convoke_with(&[fodder[0]])
-            .commit()
-            .resolve();
-        let WaitingFor::LoopShortcut { proposer, .. } = runner.state().waiting_for.clone() else {
-            panic!(
-                "REACH-GUARD: the object-growth cast must OFFER, got {:?}",
-                runner.state().waiting_for
-            )
+        let (mut runner, kickoff) = setup_3p_both_fall(LoopDetectionMode::Interactive, 1000, 1050);
+        let _ = runner.cast(kickoff).resolve();
+        let (_events, _wf, primed, _declined) =
+            drive_collect_primed(&mut runner, PRIMED_LOOP_BEATS);
+        assert!(primed, "REACH-GUARD: the drain reached its recurring state");
+        runner.state_mut().waiting_for = WaitingFor::LoopShortcut {
+            proposer: P0,
+            predicted_winner: Some(P0),
+            certificate: synthetic_lethal_cert(),
+            schema: ShortcutDecisionSchema::default(),
+            declaration: None,
+            road: engine::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
+            period: Default::default(),
         };
         runner
             .act(GameAction::DeclareShortcut {
                 count: IterationCount::UntilLethal,
                 template: None,
             })
-            .expect("the proposer declares UntilLethal on its own object-growth offer");
-        (runner, proposer, sprout)
+            .expect("P0 declares UntilLethal on an offer naming P0");
+        runner
     };
-    // ── FOREIGN: seat B's play stands in the trace when seat A's drive aborts ──
-    let (mut runner, proposer, _) = offer_state();
-    let opp = runner
-        .state()
-        .players
-        .iter()
-        .map(|p| p.id)
-        .find(|p| *p != proposer)
-        .expect("REACH-GUARD: the foreign period needs a second seat to belong to");
+    let lives = |runner: &GameRunner| (life(runner, P1), life(runner, P2));
+
+    // ── FOREIGN: P1's play stands in the trace when P0's drive aborts ──
+    let mut runner = offer_state();
     engine::game::install_plays_for_tests(
         runner.state_mut(),
-        &[(opp, engine::game::PlayLocus::Unread)],
+        &[(P1, engine::game::PlayLocus::Unread)],
     );
+    let before = lives(&runner);
     accept_all_opponents(&mut runner);
-    assert!(
-        !matches!(runner.state().waiting_for, WaitingFor::GameOver { .. }),
-        "REACH-GUARD: this row is about the FALLBACK, so the drive must refuse to crown — a \
-         crowned drive never reaches the clear and the assertion below would be vacuous; got {:?}",
-        runner.state().waiting_for
+    assert_eq!(
+        lives(&runner),
+        before,
+        "REACH-GUARD: the take fell back to the offer's board rather than crowning"
     );
     assert_eq!(
         trace_seats(runner.state()),
-        vec![opp],
-        "CR 732.2a: {proposer:?}'s aborted drive must leave {opp:?}'s accumulating period intact"
+        vec![P1],
+        "CR 732.2a: P0's aborted drive must leave P1's accumulating period intact"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "no re-offer; got {:?}",
+        runner.state().waiting_for
     );
 
     // ── OWN: the must-not-flip half. The clear is the anti-livelock suppressor for the proposer. ──
-    let (mut runner, proposer, _) = offer_state();
+    let mut runner = offer_state();
     assert!(
-        trace_seats(runner.state()).contains(&proposer),
-        "REACH-GUARD: the real recast must have traced the PROPOSER'S own plays, else this arm \
-         tests an empty trace that is cleared by doing nothing"
+        trace_seats(runner.state()).contains(&P0),
+        "REACH-GUARD: the drain traced the PROPOSER'S own plays, else this arm tests an empty \
+         trace that is cleared by doing nothing"
     );
+    let before = lives(&runner);
     accept_all_opponents(&mut runner);
+    assert_eq!(
+        lives(&runner),
+        before,
+        "REACH-GUARD: the take fell back to the offer's board rather than crowning"
+    );
     assert!(
-        !trace_seats(runner.state()).contains(&proposer),
+        !trace_seats(runner.state()).contains(&P0),
         "CR 732.2a: the proposer's OWN plays must still be discarded — without them gone the \
          reconcile re-names the loop just abandoned and livelocks; seats = {:?}",
         trace_seats(runner.state())
     );
     assert!(
-        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
         "and the abandoned offer must not have been re-raised; got {:?}",
         runner.state().waiting_for
     );
@@ -12467,7 +12824,17 @@ fn bounded_fixed_drive_commits_the_terminal_cycle_that_eliminates_one_seat() {
         let mut doctored = state.clone();
         let n = u32::try_from(first_crossing).expect("fits");
 
-        r6a_declare_and_accept_all(&mut doctored, proposer, n);
+        let result = take_recorded(&mut doctored, n);
+
+        // CR 732.1b + CR 704.5a: each repetition is Dina, Soul Steeper's "Whenever you gain life,
+        // each opponent loses 1 life." answered by Bloodthirsty Conqueror's "Whenever an opponent
+        // loses life, you gain that much life."; all `n` commit, the n-th taking the first victim
+        // to 0, and the record keeps the first and the n-th.
+        assert_eq!(
+            markers(&result.events),
+            [(proposer, 1), (proposer, n)],
+            "n={n}"
+        );
 
         // (a) EXACTLY the unique first crosser is eliminated. Not zero (the terminal cycle
         //     COMMITS) and not the whole table (that is the mirror row's arm).
@@ -12626,6 +12993,7 @@ fn restored_proposal(
         predicted_winner: None,
         count: IterationCount::Fixed(n),
         unbounded: certificate.unbounded.clone(),
+        rising: certificate.rising.clone(),
         win_kind: certificate.win_kind,
         win_kind_at: None,
         template: None,
@@ -12634,6 +13002,7 @@ fn restored_proposal(
         published_declaration: None,
         leading_aims: Vec::new(),
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     }
 }
@@ -14300,7 +14669,17 @@ fn the_honest_count_reaches_the_cross_lethal_arm_when_the_crossing_takes_the_las
          vs crossing {crossing}"
     );
 
-    r6a_declare_and_accept_all(&mut state, proposer, honest);
+    let result = take_recorded(&mut state, honest);
+
+    // CR 732.1b + CR 104.2a: each repetition is Psychosis Crawler's "Whenever you draw a card,
+    // each opponent loses 1 life." answered by a draw, as Kefka, Ruler of Ruin's "Whenever an
+    // opponent loses life during your turn, you draw that many cards." does on P0's turn at a
+    // loss of 1; the crossing repetition ends the game, and the record keeps the first and it.
+    let crossing = u32::try_from(crossing).expect("fits");
+    assert_eq!(
+        markers(&result.events),
+        [(proposer, 1), (proposer, crossing)]
+    );
 
     assert_eq!(
         state.waiting_for,
@@ -14903,6 +15282,7 @@ fn g1_declare_verdict(
         schema,
         declaration: None,
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
     runner
@@ -14968,6 +15348,137 @@ fn declared_count_beyond_the_published_schedule_window_is_refused() {
         ),
         "attribution control: with BOTH arms published, count 8 is conforming — so A's \
          refusal is the published set and not the count"
+    );
+}
+
+/// CR 732.2a + CR 732.2b: an unbounded declaration names no count, and a shorten may name any
+/// place, so its pins are validated over the schedule's extent: a schedule switching to an
+/// unpublished target at index 5 is refused into the manual-play handback without end and until
+/// lethal, as at count 7, while a count short of the switch, or both targets published, is
+/// ingested. On the live drain the same refusal leaves P1's life untouched, and the schedule that
+/// stays on the published Cleric crowns P0.
+#[test]
+fn an_unbounded_declaration_is_validated_over_its_schedules_extent() {
+    for count in [IterationCount::UntilLethal, IterationCount::WithoutEnd] {
+        assert!(
+            matches!(
+                g1_declare_verdict(false, count.clone(), &piecewise_a_then_b, false),
+                WaitingFor::Priority { player: P0 }
+            ),
+            "{count:?}: the schedule reaches the unpublished target"
+        );
+        assert!(
+            matches!(
+                g1_declare_verdict(true, count.clone(), &piecewise_a_then_b, false),
+                WaitingFor::RespondToShortcut { .. }
+            ),
+            "{count:?}: attribution: with both targets published the declaration is ingested"
+        );
+    }
+    assert!(
+        matches!(
+            g1_declare_verdict(false, IterationCount::Fixed(5), &piecewise_a_then_b, false),
+            WaitingFor::RespondToShortcut { .. }
+        ),
+        "reach-guard: a count short of the switch is ingested"
+    );
+
+    let drain_template = |cleric: ObjectId, later: ObjectId| {
+        let source = |id: ObjectId| YieldTarget::ThisObject {
+            source_id: id,
+            incarnation: None,
+            trigger_description: None,
+        };
+        DecisionTemplate {
+            owner: P0,
+            decisions: vec![PinnedDecision::Targets {
+                slot: pin_slot(source(cleric)),
+                targets: vec![TargetPin::Scheduled(TargetSchedule::Piecewise(vec![
+                    (0, obj_rank(source(cleric))),
+                    (5, obj_rank(source(later))),
+                ]))],
+            }],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::UntilLethal,
+            },
+            key: DecisionGroupKey::from_sources(
+                std::slice::from_ref(&source(cleric)),
+                DecisionKind::LoopChoice,
+            ),
+        }
+    };
+    let drained = |unpublished: bool| {
+        let (mut runner, l0, cleric) = reach_2p_optional_drain_offer();
+        let source = YieldTarget::ThisObject {
+            source_id: cleric,
+            incarnation: None,
+            trigger_description: None,
+        };
+        publish_targets_point(
+            &mut runner,
+            pin_slot(source),
+            vec![TargetRef::Object(cleric)],
+        );
+        let later = if unpublished {
+            ObjectId(u64::MAX)
+        } else {
+            cleric
+        };
+        runner
+            .act(GameAction::DeclareShortcut {
+                count: IterationCount::UntilLethal,
+                template: Some(drain_template(cleric, later)),
+            })
+            .expect("declare dispatch succeeds (a refusal is a manual handback)");
+        (runner, l0)
+    };
+    let (refused, l0) = drained(true);
+    assert!(
+        matches!(
+            refused.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ),
+        "{:?}",
+        refused.state().waiting_for
+    );
+    assert_eq!(
+        life(&refused, P1),
+        l0,
+        "the refused declaration drives nothing"
+    );
+    let (mut admitted, _) = drained(false);
+    assert!(
+        matches!(
+            admitted.state().waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ),
+        "reach-guard: the published schedule is ingested, got {:?}",
+        admitted.state().waiting_for
+    );
+    accept_all_opponents(&mut admitted);
+    assert_eq!(
+        admitted.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    );
+}
+
+/// CR 732.2b: a shortened proposal without end drives the template, so the declare firewall
+/// validates it over the drive period.
+#[test]
+fn a_without_end_declaration_is_validated_over_the_drive_period() {
+    assert!(
+        matches!(
+            g1_declare_verdict(false, IterationCount::WithoutEnd, &round_robin_a_b, false),
+            WaitingFor::Priority { .. }
+        ),
+        "a rotation into an unpublished arm is refused without end as it is at count 2"
+    );
+    assert!(
+        matches!(
+            g1_declare_verdict(true, IterationCount::WithoutEnd, &round_robin_a_b, false),
+            WaitingFor::RespondToShortcut { .. }
+        ),
+        "with both arms published the same declaration is ingested"
     );
 }
 
@@ -15603,6 +16114,7 @@ fn r28_empty_schema_offer(runner: &mut GameRunner) {
         schema,
         declaration: _,
         road,
+        counted_take: _,
         period: _,
     } = runner.state().waiting_for.clone()
     else {
@@ -15624,6 +16136,7 @@ fn r28_empty_schema_offer(runner: &mut GameRunner) {
         // publishes no declaration, at the very fixture that stages an empty schema.
         declaration: None,
         road,
+        counted_take: Default::default(),
         period: Default::default(),
     };
 }
@@ -15642,6 +16155,7 @@ fn r28_nonempty_schema_offer(runner: &mut GameRunner, slot: DecisionSlot) {
         schema,
         declaration: _,
         road,
+        counted_take: _,
         period: _,
     } = runner.state().waiting_for.clone()
     else {
@@ -15672,6 +16186,7 @@ fn r28_nonempty_schema_offer(runner: &mut GameRunner, slot: DecisionSlot) {
         // `Some` here would add a second axis to a pair whose whole value is being one apart.
         declaration: None,
         road,
+        counted_take: Default::default(),
         period: Default::default(),
     };
 }
@@ -16412,6 +16927,7 @@ fn d7_a_pre_declaration_save_decodes_with_no_declaration() {
             key: DecisionGroupKey::from_sources(&[slot.source], DecisionKind::LoopChoice),
         }),
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
 
@@ -16507,12 +17023,9 @@ fn d7_a_pre_declaration_save_decodes_with_no_declaration() {
 /// documents. MEASURED on this drive: 2 forced-window minting beats (5, 14), 3 non-forced ones
 /// (0, 9, 18), 5 frames minted and validated in total, offer at beat 19 over a 5-frame ring.
 ///
-/// THIS FIXTURE REACHES NEITHER of the two paths that break a length delta, measured rather than
-/// assumed: 0 evicting beats and 0 clear-and-rebuild beats over the drive, max ring 5 against a
-/// capacity of 16. Both are reached — and the deleted scalar shown wrong on each — by
-/// `an_evicting_beat_mints_without_growing_the_ring` and
-/// `a_clearing_beat_rebuilds_the_ring_inside_the_same_beat`, on boards driven through the same
-/// production `apply()`.
+/// This fixture never fills the ring, so eviction at capacity, the route the deleted scalar is
+/// shown wrong on, is reached instead by `an_evicting_beat_mints_without_growing_the_ring` on a
+/// board driven through the same production `apply()`.
 ///
 /// ⚠ WHAT THIS ROW DOES **NOT** CATCH, stated rather than implied. A PURE REVERT of the reorder
 /// leaves all three arms GREEN, and that is a measurement rather than an oversight: an
@@ -16719,6 +17232,7 @@ fn answer_beat_frames_carry_the_synced_window_and_the_offer_certificate_is_exact
     );
     let LoopCertificate {
         unbounded,
+        rising,
         win_kind,
         win_kind_at,
         mandatory,
@@ -16739,6 +17253,11 @@ fn answer_beat_frames_carry_the_synced_window_and_the_offer_certificate_is_exact
         ],
         "CR 119.3: the Dina/Conqueror drain moves EVERY seat's life each period — the three \
          opponents down and the controller up — so all four axes are unbounded"
+    );
+    assert_eq!(
+        *rising,
+        vec![ResourceAxis::Life(P0)],
+        "CR 119.3: only the controller's life rises; the three opponents are drained"
     );
     assert_eq!(
         *win_kind,
@@ -16844,9 +17363,9 @@ fn ring_membership_delta<'a, T>(
 /// `answer_beat_frames_carry_the_synced_window_and_the_offer_certificate_is_exact` reads a beat's
 /// minted frames as the `loop_detect_ring`'s pre/post `Arc`-identity MEMBERSHIP DIFFERENCE. It
 /// previously read them as `rev().take(after_len - before_len)` off a changed `back()`, and this
-/// row plus its ⓒ sibling are the reachability half of the #7023 review that replaced that: the
-/// scalar is wrong on two production routes, and the `dina_conqueror_4p` drive that row performs
-/// reaches NEITHER — measured on it: max ring 5 against a capacity of 16, 0 evicting beats, 0
+/// row is the reachability half of the #7023 review that replaced that: the scalar is wrong on
+/// this production route, and the `dina_conqueror_4p` drive that row performs
+/// does not reach it — measured on it: max ring 5 against a capacity of 16, 0 evicting beats, 0
 /// clearing beats. Correcting a detector against routes no fixture reaches would re-open the
 /// evidential hole the correction exists to close, so each route gets a board.
 ///
@@ -16932,67 +17451,45 @@ fn an_evicting_beat_mints_without_growing_the_ring() {
     );
 }
 
-/// CR 732.2a. ROUTE ⓒ — CLEAR-AND-REBUILD INSIDE ONE BEAT: a beat that MINTS MORE THAN IT GROWS.
-///
-/// Sibling of `an_evicting_beat_mints_without_growing_the_ring`; the shared argument for why both
-/// routes need a board of their own is stated there.
-///
-/// THE MECHANISM. `game::engine::apply_action` clears the ring at its top for any action that is
-/// neither `PassPriority` nor `OrderTriggers` answering a non-forced window.
-/// `GameAction::SetAutoPass` at a `Priority` window is exactly that, and its own arm then calls
-/// `pass_priority_once_with_pipeline`, whose settle sampler mints — after which `apply`'s
-/// auto-pass loop can call it again inside the SAME beat. Net growth is therefore
-/// `minted - cleared`, strictly below `minted` whenever the ring was non-empty, so `take(net)`
-/// skips frames the answer-beat row claims to validate. MEASURED here: ring 2 -> 1, 2 dropped, 1
-/// minted, i.e. net 0 against a real mint — the same blindness route ⓔ produces, reached the
-/// other way, and the shallow-clear case (`0 < net < minted`) is the same defect with a smaller
-/// margin.
+/// CR 732.1 + CR 117.3d: a "Resolve All" press mid-cascade keeps the loop-detection ring. The
+/// request is a shortcut over passes, so the beat drops no accumulated frame and its own pass
+/// mints one, growing the ring by exactly one.
 ///
 /// `SetAutoPass { UntilStackEmpty }` IS NOT A TEST HOOK. It is the exact payload the client's
 /// Arena-style "Resolve All" control dispatches (`client/src/game/dispatch.ts`), so this beat is
 /// a player pressing that button mid-cascade. It is absent from
 /// `ai_support::legal_actions_for_viewer`'s enumeration — `classify_flat_priority_action` files
 /// it with the preference-propagation actions — which is why the generic dump driver never picks
-/// it and why the route is dispatched by name here instead of being found by the driver's "first
+/// it and why it is dispatched by name here instead of being found by the driver's "first
 /// legal action" policy. Dispatching it by name changes nothing about the beat: it is one
 /// ordinary `apply()`, validated by the production reducer like any other.
 ///
-/// FIXTURE: the tracked `dina_conqueror_4p` dump — the SAME board the answer-beat row drives, so
-/// the contrast is exact. Left to itself that drive never clears (measured: 0 clearing beats);
-/// one "Resolve All" press at the first `Priority` window carrying 2 accumulated frames puts it
-/// on this route at beat 6.
-///
-/// SEARCH PREDICATE STRUCTURAL, ASSERTION THE CONSEQUENCE: the witness is the dispatched
-/// `SetAutoPass` beat that lost EVERY pre-beat frame, and the assertion is what the beat minted
-/// and what it left behind. The threshold of 2 accumulated frames is not cosmetic: below it a
-/// wiped ring and a merely-evicted one are indistinguishable by membership.
+/// FIXTURE: the tracked `dina_conqueror_4p` dump — the SAME board the answer-beat row drives,
+/// pressed at the first `Priority` window carrying 2 accumulated frames, so a dropped frame is
+/// visible by membership.
 #[test]
-fn a_clearing_beat_rebuilds_the_ring_inside_the_same_beat() {
+fn a_resolve_all_press_keeps_the_ring_and_mints_inside_the_same_beat() {
     let mut state = restore_dump(&gunzip_dump(include_bytes!(
         "../fixtures/dina_conqueror_4p.json.gz"
     )));
     assert_eq!(
         state.loop_detect_ring.len(),
         0,
-        "reach-guard: the dump ships with an EMPTY ring, so the frames the clear below discards \
+        "reach-guard: the dump ships with an EMPTY ring, so the frames the press below keeps \
          were accumulated by THIS drive through the production sampler"
     );
 
     let pin = engine_live_opponents(&state, P0).first().copied();
-    let mut fired = false;
     let mut max_ring = 0usize;
     let mut beats_run = 0usize;
-    let mut clearing = None;
+    let mut pressed = None;
     for beat in 0..120usize {
         if matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }) {
             break;
         }
         let before: Vec<_> = state.loop_detect_ring.iter().cloned().collect();
         max_ring = max_ring.max(before.len());
-        let dispatched_here =
-            !fired && before.len() >= 2 && matches!(state.waiting_for, WaitingFor::Priority { .. });
-        let outcome = if dispatched_here {
-            fired = true;
+        if before.len() >= 2 && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             let who = state
                 .waiting_for
                 .acting_player()
@@ -17004,49 +17501,34 @@ fn a_clearing_beat_rebuilds_the_ring_inside_the_same_beat() {
                     mode: AutoPassRequest::UntilStackEmpty,
                 },
             )
-            .map(|_| ())
-            .map_err(|e| format!("resolve-all err: {e:?}"))
-        } else {
-            dump_drive_one_beat(&mut state, pin).map(|_| ())
-        };
-        if outcome.is_err() {
+            .unwrap_or_else(|e| panic!("resolve-all err: {e:?}"));
+            let (minted_frames, dropped) = ring_membership_delta(&before, &state.loop_detect_ring);
+            pressed = Some((
+                beat,
+                before.len(),
+                state.loop_detect_ring.len(),
+                minted_frames.len(),
+                dropped,
+            ));
+            break;
+        }
+        if dump_drive_one_beat(&mut state, pin).is_err() {
             break;
         }
         beats_run = beat + 1;
-        let (minted_frames, dropped) = ring_membership_delta(&before, &state.loop_detect_ring);
-        let minted = minted_frames.len();
-        if !dispatched_here || before.is_empty() || dropped != before.len() {
-            continue;
-        }
-        clearing = Some((
-            beat,
-            before.len(),
-            state.loop_detect_ring.len(),
-            minted,
-            dropped,
-        ));
-        break;
     }
 
-    let (beat, before_len, after_len, minted, _dropped) = clearing.unwrap_or_else(|| {
+    let (beat, before_len, after_len, minted, dropped) = pressed.unwrap_or_else(|| {
         panic!(
-            "reach-guard: no beat lost EVERY pre-beat ring frame, so `apply_action`'s \
-             top-of-beat clear never ran on an accumulated ring and the clear-and-rebuild route \
-             is untested. resolve-all dispatched={fired}, max ring {max_ring} over {beats_run} \
-             beats"
+            "reach-guard: no `Priority` window carried 2 accumulated frames, so the press was \
+             never dispatched. max ring {max_ring} over {beats_run} beats"
         )
     });
     assert_eq!(
-        (minted, after_len),
-        (1, 1),
-        "beat {beat}: `apply_action` cleared all {before_len} accumulated frames at the top of \
-         this beat; a sampler must then have MINTED inside the SAME beat, leaving exactly one \
-         frame — a left of `(0, 0)` means the beat only cleared, which is a different route and \
-         proves nothing about the detector. THE DELETED SCALAR ON THE REBUILD BEAT: \
-         `after_len - before_len` saturates to 0 against a real mint, so `take(grew)` validates \
-         none of the frames the answer-beat row claims — and where the clear is shallower than \
-         the rebuild the scalar is positive but still short. Net growth is `minted - cleared`; \
-         it can never name `minted`"
+        (minted, dropped, after_len),
+        (1, 0, before_len + 1),
+        "beat {beat}: a Resolve-All press must keep all {before_len} accumulated frames and \
+         mint its own pass's sample"
     );
 }
 
@@ -17752,7 +18234,7 @@ fn ended(match_type: MatchType, winner: Option<PlayerId>) -> MatchReading {
 }
 
 /// Declares `count` on the standing offer and has every opponent accept; the events emitted.
-fn declare_and_accept(runner: &mut GameRunner, count: IterationCount) -> Vec<GameEvent> {
+pub(crate) fn declare_and_accept(runner: &mut GameRunner, count: IterationCount) -> Vec<GameEvent> {
     let mut events = runner
         .act(GameAction::DeclareShortcut {
             count,
@@ -18048,7 +18530,7 @@ fn a_take_ending_at_an_answer_beat_ends_where_play_by_hand_does() {
                 .into_iter()
                 .filter(|event| matches!(event, GameEvent::GameOver { .. }))
                 .collect();
-            stacks.push((runner.state().stack.len(), by_hand_stack + 2));
+            stacks.push((runner.state().stack.len(), by_hand_stack));
             got.push((
                 count.clone(),
                 match_type,
@@ -18067,9 +18549,9 @@ fn a_take_ending_at_an_answer_beat_ends_where_play_by_hand_does() {
     }
     assert_eq!(got, want);
     assert!(
-        stacks.iter().all(|(taken, answered)| taken == answered),
-        "reach: play by hand ends at the pass, before P0 orders the lethal loss's two triggers; \
-         a take ending on that answer leaves both on the stack: {stacks:?}"
+        stacks.iter().all(|(taken, by_hand)| taken == by_hand),
+        "reach: play by hand and a take ending on the answer both end with the lethal loss's \
+         two triggers on the stack: {stacks:?}"
     );
 }
 /// What each Sprout Swarm recast offers on the board of [`sprout_swarm_scenario_with_drain`]: the

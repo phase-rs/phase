@@ -152,6 +152,7 @@ fn kylox_cast_rider_lowers_to_library_bottom_parent_target() {
             target,
             count,
             position,
+            arranger: _,
         } => {
             assert_eq!(
                 *target,

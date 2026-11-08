@@ -1,22 +1,28 @@
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::game::quantity::try_resolve_quantity_in_source_context;
-use engine::types::ability::{
-    AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Effect, EffectScope,
-    PerpetualGrantModification, PerpetualModification, PlayerFilter, PtValue, QuantityExpr,
-    ResolvedAbility, SubAbilityLink, TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef,
-    TriggerDefinition, TypeFilter,
+use engine::game::restrictions::{
+    ability_confined_to_sorcery_timing, spell_confined_to_sorcery_timing,
 };
+use engine::types::ability::{
+    AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Duration,
+    Effect, EffectScope, PerpetualGrantModification, PerpetualModification, PlayerFilter, PtValue,
+    QuantityExpr, ResolvedAbility, StaticDefinition, SubAbilityLink, TapStateChange,
+    TargetChoiceTiming, TargetFilter, TargetRef, TriggerDefinition, TypeFilter,
+};
+use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{CastingVariant, GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, KeywordKind};
+use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 use super::context::PolicyContext;
+use crate::cast_facts::{cast_object_for_action, collect_definition_effects, CastFacts};
 
 /// Player-impact magnitude above which target selection has a directional
 /// preference rather than falling back to the spell's broader polarity.
@@ -120,6 +126,182 @@ fn pt_value_is_non_negative(value: &PtValue) -> bool {
         PtValue::Variable(name) => !name.starts_with('-'),
         PtValue::Quantity(QuantityExpr::Multiply { factor, .. }) => *factor >= 0,
         PtValue::Quantity(_) => true,
+    }
+}
+
+/// CR 608.2: the net value of `ability`'s resolution to its controller, on
+/// `player_impact`'s scale — positive a gain, negative a harm, zero nothing
+/// this classifier can establish.
+///
+/// Walks the chain the way it resolves: a `player_scope` chain is split by the
+/// engine's own `split_player_scope_chain` into the template that runs per
+/// iterated player and the tail that runs once, unscoped (CR 109.5 + CR
+/// 608.2c). An optional instruction is the controller's choice, so a net harm
+/// in it and its continuation is declined (CR 608.2d); an else branch counts
+/// only for the harm it may bring. Modal modes aren't read.
+pub(crate) fn resolved_ability_value_for_controller(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> f64 {
+    resolved_node_value(state, ability, None)
+}
+
+fn resolved_node_value(
+    state: &GameState,
+    node: &ResolvedAbility,
+    scope: Option<&PlayerFilter>,
+) -> f64 {
+    if let Some(node_scope) = node.player_scope.as_ref() {
+        let (template, tail) = engine::game::effects::split_player_scope_chain(node, node_scope);
+        return resolved_node_value(state, &template, Some(node_scope))
+            + tail.map_or(0.0, |tail| resolved_node_value(state, &tail, None));
+    }
+    let total = resolved_effect_value(state, node, scope)
+        + node
+            .sub_ability
+            .as_deref()
+            .map_or(0.0, |sub| resolved_node_value(state, sub, scope))
+        + node.else_ability.as_deref().map_or(0.0, |other| {
+            resolved_node_value(state, other, scope).min(0.0)
+        });
+    if !(node.optional || node.optional_for.is_some()) {
+        return total;
+    }
+    // CR 608.2d: whoever makes an optional instruction's choice takes the
+    // reading that favors them — the controller declines a net harm, an
+    // opponent (an "opponent may" grant, or the iterated opponent of a scope)
+    // declines a net gain.
+    let opponent_chooses = node.optional_for.is_some()
+        || node
+            .optional_player
+            .as_ref()
+            .is_some_and(|player| boon_filter_side(player) == BoonTargetSide::Enemy)
+        || scope.is_some_and(|scope| boon_player_filter_side(scope) == BoonTargetSide::Enemy);
+    if opponent_chooses {
+        total.min(0.0)
+    } else {
+        total.max(0.0)
+    }
+}
+
+/// One instruction's value to the controller: its `player_impact` magnitude,
+/// signed by whose side its recipient is on (`resolved_recipient_side`). A
+/// recipient the controller chooses (CR 115.1) is aimed their way. Two shapes
+/// take their own reading:
+/// - a temporary combat modifier (a pump) is worth nothing apart from the
+///   combat damage it changes;
+/// - a resource counter (charge, quest) the ability puts on its own source is
+///   that source's own currency (CR 122.1).
+///
+/// The controller losing at least their life total is no trade at all (CR
+/// 704.5a).
+fn resolved_effect_value(
+    state: &GameState,
+    node: &ResolvedAbility,
+    scope: Option<&PlayerFilter>,
+) -> f64 {
+    let effect = &node.effect;
+    if effect_with_duration_is_temporary_combat_modifier(effect, node.duration.as_ref()) {
+        return 0.0;
+    }
+    let side = resolved_recipient_side(effect, scope);
+    if let (BoonTargetSide::Holder, Effect::LoseLife { amount, .. }) = (&side, effect) {
+        let life = state.players[node.controller.0 as usize].life;
+        if try_resolve_quantity_in_source_context(state, amount, node.controller, node.source_id)
+            .is_some_and(|loss| loss >= life)
+        {
+            return f64::NEG_INFINITY;
+        }
+    }
+    let magnitude = match effect {
+        Effect::PutCounter {
+            counter_type: CounterType::Generic(_),
+            target: TargetFilter::SelfRef,
+            ..
+        } => 1.0,
+        // CR 107.14: energy is a spendable player resource. Use the same
+        // per-counter weight as the board evaluation's energy offset.
+        Effect::GainEnergy { amount } => quantity_weight(
+            Some(state),
+            Some(node.controller),
+            Some(node.source_id),
+            amount,
+            0.1,
+        ),
+        // CR 701.17a: milling yourself fills your own graveyard, which is as
+        // often fuel as loss, so it names no direction.
+        Effect::Mill { .. } if side == BoonTargetSide::Holder => 0.0,
+        _ => player_impact(
+            Some(state),
+            Some(node.controller),
+            Some(node.source_id),
+            effect,
+        ),
+    };
+    match side {
+        BoonTargetSide::Holder => magnitude,
+        BoonTargetSide::Enemy => -magnitude,
+        BoonTargetSide::Chosen => magnitude.abs(),
+        BoonTargetSide::Unknown => 0.0,
+    }
+}
+
+/// Whose side an instruction's recipient is on.
+///
+/// The acting player is the controller, or inside a per-player iteration the
+/// iterated player (CR 109.5 + CR 608.2c). A targetless instruction lands on
+/// them, and so do the controller roles and a "you control" population.
+/// - A sacrifice is the acting player's own (CR 701.21a): its filter narrows
+///   which permanents, not whose, unless it names the defending player or an
+///   opponent (annihilator, CR 702.86a). A parent-target sacrifice is made by
+///   that object's controller, unknown until resolution.
+/// - A mass effect's population (`DamageAll`, `DestroyAll`, `PumpAll`) is read
+///   by whose permanents it covers; one covering everyone's names no side.
+/// - Otherwise the recipient is the engine's own `Effect::target_filter`, read
+///   by the shared side vocabulary. A parent-target anaphor is bound only at
+///   resolution, so it names no side here.
+fn resolved_recipient_side(effect: &Effect, scope: Option<&PlayerFilter>) -> BoonTargetSide {
+    let actor = scope.map_or(BoonTargetSide::Holder, boon_player_filter_side);
+    match effect {
+        Effect::Sacrifice {
+            target: TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. },
+            ..
+        } => return BoonTargetSide::Unknown,
+        Effect::Sacrifice { target, .. } => {
+            return population_side(target, actor).unwrap_or(actor);
+        }
+        Effect::DamageAll { target, .. }
+        | Effect::DestroyAll { target, .. }
+        | Effect::PumpAll { target, .. } => {
+            return population_side(target, actor).unwrap_or(BoonTargetSide::Unknown);
+        }
+        _ => {}
+    }
+    match effect.target_filter() {
+        None | Some(TargetFilter::Controller | TargetFilter::ScopedPlayer) => actor,
+        Some(TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }) => {
+            BoonTargetSide::Unknown
+        }
+        Some(filter) => population_side(filter, actor).unwrap_or_else(|| boon_filter_side(filter)),
+    }
+}
+
+/// Whose permanents a `Typed` population names: the acting player's for "you
+/// control", an enemy's for the defending player's or an opponent's, and no
+/// one in particular otherwise (`None`).
+fn population_side(filter: &TargetFilter, actor: BoonTargetSide) -> Option<BoonTargetSide> {
+    let TargetFilter::Typed(typed) = filter else {
+        return None;
+    };
+    match typed.controller {
+        Some(ControllerRef::You | ControllerRef::ScopedPlayer) => Some(actor),
+        // CR 506.2: the defending player is always an opponent of the attacker.
+        Some(
+            ControllerRef::Opponent
+            | ControllerRef::TargetOpponent
+            | ControllerRef::DefendingPlayer,
+        ) => Some(BoonTargetSide::Enemy),
+        _ => None,
     }
 }
 
@@ -305,6 +487,10 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::AdditionalPhase { .. }
         | Effect::AddPendingETBCounters { .. }
         | Effect::AddPendingEntersModifications { .. }
+        // CR 701.33: abandoning an ongoing scheme turns it face down onto the
+        // bottom of its owner's scheme deck — whether that is good depends on
+        // the scheme (ongoing pressure vs. cycling to the next scheme).
+        | Effect::AbandonScheme
         | Effect::AddRestriction { .. }
         | Effect::AddTargetReplacement { .. }
         | Effect::Amass { .. }
@@ -404,6 +590,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::HideawayConceal { .. }
+        | Effect::HordePlayCard { .. }
         | Effect::Incubate { .. }
         | Effect::Intensify { .. }
         | Effect::Learn
@@ -929,6 +1116,9 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
         // unlike `EventTarget` (the recipient object itself) below.
         | TargetFilter::EventTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — denotes players,
+        // never the affected objects themselves.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
@@ -964,6 +1154,7 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::OriginalSource
@@ -1845,7 +2036,9 @@ fn boon_inner_target_side(exec: &AbilityDefinition) -> BoonTargetSide {
 fn boon_player_filter_side(player: &PlayerFilter) -> BoonTargetSide {
     match player {
         PlayerFilter::Controller => BoonTargetSide::Holder,
+        // CR 506.2: the defending player is always an opponent of the attacker.
         PlayerFilter::Opponent
+        | PlayerFilter::DefendingPlayer
         | PlayerFilter::OpponentLostLife
         | PlayerFilter::OpponentGainedLife => BoonTargetSide::Enemy,
         _ => BoonTargetSide::Unknown,
@@ -1861,16 +2054,22 @@ fn boon_filter_side(filter: &TargetFilter) -> BoonTargetSide {
     match filter {
         TargetFilter::Controller
         | TargetFilter::SourceController
+        | TargetFilter::OriginalController
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::SelfRef
         | TargetFilter::ParentTarget => BoonTargetSide::Holder,
-        TargetFilter::Opponent => BoonTargetSide::Enemy,
+        // CR 506.2: the defending player is always an opponent of the attacker.
+        TargetFilter::Opponent | TargetFilter::DefendingPlayer => BoonTargetSide::Enemy,
         TargetFilter::Player | TargetFilter::Any => BoonTargetSide::Chosen,
         TargetFilter::Typed(typed) => match typed.controller {
             // Unrestricted "target creature" — the holder aims it.
             None => BoonTargetSide::Chosen,
             Some(ControllerRef::You) => BoonTargetSide::Holder,
-            Some(ControllerRef::Opponent | ControllerRef::TargetOpponent) => BoonTargetSide::Enemy,
+            Some(
+                ControllerRef::Opponent
+                | ControllerRef::TargetOpponent
+                | ControllerRef::DefendingPlayer,
+            ) => BoonTargetSide::Enemy,
             // The holder targets the player first, then aims within.
             Some(ControllerRef::TargetPlayer) => BoonTargetSide::Chosen,
             _ => BoonTargetSide::Unknown,
@@ -2014,6 +2213,422 @@ fn filter_excludes_parent_target(filter: &TargetFilter) -> bool {
         TargetFilter::And { filters } => filters.iter().any(filter_excludes_parent_target),
         _ => false,
     }
+}
+
+/// CR 611.2a + CR 514.2: a continuous effect from resolution lasts as stated, and "until end of
+/// turn" effects end in the cleanup step, so a P/T (CR 613.4c) or keyword grant that lasts until
+/// end of turn is bound to this turn, whatever the keyword. [`effect_is_combat_trick_payload`]
+/// is the narrower reading of which such grants are priced as combat tricks.
+pub(crate) fn ability_is_temporary_combat_modifier(ability: &AbilityDefinition) -> bool {
+    ability_effect_is_temporary_combat_modifier(ability)
+        && ability
+            .sub_ability
+            .as_deref()
+            .is_none_or(ability_is_temporary_combat_modifier)
+        && ability
+            .else_ability
+            .as_deref()
+            .is_none_or(ability_is_temporary_combat_modifier)
+        && ability
+            .mode_abilities
+            .iter()
+            .all(ability_is_temporary_combat_modifier)
+}
+
+fn ability_effect_is_temporary_combat_modifier(ability: &AbilityDefinition) -> bool {
+    effect_with_duration_is_temporary_combat_modifier(&ability.effect, ability.duration.as_ref())
+}
+
+/// `effect` under its ability's `duration`: an until-end-of-turn pump, or a
+/// temporary combat modifier grant.
+fn effect_with_duration_is_temporary_combat_modifier(
+    effect: &Effect,
+    duration: Option<&Duration>,
+) -> bool {
+    match effect {
+        Effect::Pump { .. } => matches!(duration, Some(Duration::UntilEndOfTurn)),
+        effect => effect_is_temporary_combat_modifier(effect),
+    }
+}
+
+pub(crate) fn effect_is_temporary_combat_modifier(effect: &Effect) -> bool {
+    match effect {
+        Effect::GenericEffect {
+            static_abilities,
+            duration: Some(Duration::UntilEndOfTurn),
+            ..
+        } => {
+            // An empty grant modifies nothing, so it is no combat modifier.
+            !static_abilities.is_empty()
+                && static_abilities
+                    .iter()
+                    .all(static_definition_is_temporary_combat_modifier)
+        }
+        _ => false,
+    }
+}
+
+fn static_definition_is_temporary_combat_modifier(static_def: &StaticDefinition) -> bool {
+    matches!(static_def.mode, StaticMode::Continuous)
+        && !static_def.modifications.is_empty()
+        && static_def
+            .modifications
+            .iter()
+            .all(continuous_modification_is_temporary_combat_modifier)
+}
+
+fn continuous_modification_is_temporary_combat_modifier(
+    modification: &ContinuousModification,
+) -> bool {
+    matches!(
+        modification,
+        ContinuousModification::AddPower { .. }
+            | ContinuousModification::AddToughness { .. }
+            | ContinuousModification::AddKeyword { .. }
+    )
+}
+
+/// Is this keyword's value bound to this turn's combat (CR 506.1), so that granting it until
+/// end of turn is a combat trick's payload? The rules read each of these as attackers or
+/// blockers are declared or as combat damage is dealt: evasion and blocking restrictions,
+/// combat-damage modifiers, and attack, block and combat-damage triggers. Deathtouch, lifelink,
+/// wither, infect and haste are not confined to combat by their rules, but combat is where a
+/// grant of them pays out. Double team is Alchemy's and has no CR entry; it is an attack trigger.
+///
+/// A keyword whose value lands elsewhere is refused by not being listed: a dies trigger pays
+/// off in any phase (undying, persist, afterlife: CR 702.93a, CR 702.79a, CR 702.135a), a
+/// graveyard keyword pays off from the graveyard (flashback, escape, embalm: CR 702.34a,
+/// CR 702.138a, CR 702.128a), and a protective keyword pays off against removal in any phase
+/// (hexproof, indestructible, protection, shroud: CR 702.11b, CR 702.12b, CR 702.16b,
+/// CR 702.18a). Like `keyword_is_defensive`, this is an allowlist rather than an exhaustive
+/// `match`, so that an unclassified or future keyword fails closed and takes no combat-window
+/// penalty.
+fn keyword_is_bound_to_combat(keyword: &Keyword) -> bool {
+    matches!(
+        keyword,
+        Keyword::Flying
+            | Keyword::Fear
+            | Keyword::Intimidate
+            | Keyword::Skulk
+            | Keyword::Shadow
+            | Keyword::Horsemanship
+            | Keyword::Menace
+            | Keyword::Landwalk(_)
+            | Keyword::Reach
+            | Keyword::Defender
+            | Keyword::Banding
+            | Keyword::BandsWithOther(_)
+            | Keyword::FirstStrike
+            | Keyword::DoubleStrike
+            | Keyword::Trample
+            | Keyword::TrampleOverPlaneswalkers
+            | Keyword::Deathtouch
+            | Keyword::Lifelink
+            | Keyword::Wither
+            | Keyword::Infect
+            | Keyword::Toxic(_)
+            | Keyword::Poisonous(_)
+            | Keyword::Vigilance
+            | Keyword::Haste
+            | Keyword::Afflict(_)
+            | Keyword::Annihilator(_)
+            | Keyword::Battlecry
+            | Keyword::Bushido(_)
+            | Keyword::Decayed
+            | Keyword::Dethrone
+            | Keyword::DoubleTeam
+            | Keyword::Enlist
+            | Keyword::Exalted
+            | Keyword::Firebending(_)
+            | Keyword::Flanking
+            | Keyword::Frenzy(_)
+            | Keyword::Ingest
+            | Keyword::Melee
+            | Keyword::Mentor
+            | Keyword::Mobilize(_)
+            | Keyword::Myriad
+            | Keyword::Provoke
+            | Keyword::Rampage(_)
+            | Keyword::Renown(_)
+            | Keyword::Training
+    )
+}
+
+fn modification_is_bound_to_combat(modification: &ContinuousModification) -> bool {
+    match modification {
+        ContinuousModification::AddPower { .. } | ContinuousModification::AddToughness { .. } => {
+            true
+        }
+        ContinuousModification::AddKeyword { keyword } => keyword_is_bound_to_combat(keyword),
+        _ => false,
+    }
+}
+
+/// CR 702.73a: a creature-type grant pays off neither in combat nor anywhere else in
+/// particular. Beside a P/T change it leaves a trick a trick (Blades of Velis Vel), and alone
+/// it is none (Amoeboid Changeling).
+fn modification_is_creature_type_rider(modification: &ContinuousModification) -> bool {
+    matches!(
+        modification,
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Changeling
+        }
+    )
+}
+
+/// The payload of a combat trick, read one effect at a time: a P/T change (`Pump`,
+/// `DoublePT`) or an until-end-of-turn `GenericEffect` made only of P/T and keyword
+/// modifications (`effect_is_temporary_combat_modifier`), whose value is bound to the
+/// combat window (CR 611.2a + CR 514.2). A `GenericEffect` needs a modification bound to
+/// that window and none whose value lands elsewhere ([`keyword_is_bound_to_combat`]), so
+/// a grant that also protects its creature or brings it back is not a trick in any part.
+/// `Pump`/`DoublePT` carry their duration on the ability, not the effect, so at this
+/// granularity they are accepted as the effect-timing and hint call sites always have;
+/// the ability-level [`ability_is_temporary_combat_modifier`] stays the authority where
+/// the definition is in hand. [`CombatBinding`] reads a candidate's whole resolution.
+pub(crate) fn effect_is_combat_trick_payload(effect: &Effect) -> bool {
+    match effect {
+        Effect::Pump { .. } | Effect::DoublePT { .. } => true,
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => {
+            let modifications = || {
+                static_abilities
+                    .iter()
+                    .flat_map(|static_def| &static_def.modifications)
+            };
+            effect_is_temporary_combat_modifier(effect)
+                && modifications().any(modification_is_bound_to_combat)
+                && modifications().all(|modification| {
+                    modification_is_bound_to_combat(modification)
+                        || modification_is_creature_type_rider(modification)
+                })
+        }
+        _ => false,
+    }
+}
+
+/// How much of a candidate's resolution is bound to the combat window. CR 601.2b + CR 700.2a:
+/// the caller's walk decides which modes are read: every mode of a spell not yet announced,
+/// only the chosen modes at the prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CombatBinding {
+    /// No combat-trick payload.
+    Unbound,
+    /// A payload beside value that lands elsewhere. Combat still pays the payload, but
+    /// waiting costs the rest, so timing takes no penalty out of the window.
+    Partial,
+    /// A payload and only riders of it: the combat window is the candidate's whole value
+    /// (CR 611.2a + CR 514.2).
+    Whole,
+}
+
+impl CombatBinding {
+    pub(crate) fn of_resolution(effects: &[&Effect]) -> Self {
+        if !effects.iter().copied().any(effect_is_combat_trick_payload) {
+            return Self::Unbound;
+        }
+        if effects.iter().copied().all(|effect| {
+            effect_is_combat_trick_payload(effect) || effect_has_no_value_outside_combat(effect)
+        }) {
+            Self::Whole
+        } else {
+            Self::Partial
+        }
+    }
+
+    /// The binding of the candidate that resolves `effects`: [`Self::of_resolution`], except
+    /// that an activation putting loyalty counters on its permanent keeps them whatever the
+    /// phase (CR 606.4), and the permanent's one loyalty activation of the turn (CR 606.3) is
+    /// not banked by passing, so combat is not its whole value. The cost is read through
+    /// [`PolicyContext::effective_activated_ability`], so a granted loyalty ability counts.
+    pub(crate) fn of_candidate(ctx: &PolicyContext<'_>, effects: &[&Effect]) -> Self {
+        match Self::of_resolution(effects) {
+            Self::Whole
+                if ctx
+                    .effective_activated_ability()
+                    .and_then(|ability| ability.cost)
+                    .is_some_and(|cost| net_loyalty_cost(&cost) > 0) =>
+            {
+                Self::Partial
+            }
+            binding => binding,
+        }
+    }
+}
+
+/// CR 606.4 + CR 606.5: the loyalty counters a cost puts on its permanent, net of those it
+/// removes, its loyalty costs combining into one. A `[−X]` ability, modeled as removing counters,
+/// reads 0: it puts none on.
+fn net_loyalty_cost(cost: &AbilityCost) -> i32 {
+    match cost {
+        AbilityCost::Loyalty { amount } => *amount,
+        AbilityCost::Composite { costs } => costs.iter().map(net_loyalty_cost).sum(),
+        _ => 0,
+    }
+}
+
+/// Does this effect, beside a combat-trick payload, add no value outside the combat window?
+/// This is an allowlist, as [`keyword_is_bound_to_combat`] is, so that an unclassified or
+/// future effect fails closed: it reads as value elsewhere and takes no combat-window penalty.
+fn effect_has_no_value_outside_combat(effect: &Effect) -> bool {
+    match effect {
+        // CR 613.4c: a group's P/T change, in the window a `Pump` is.
+        Effect::PumpAll { .. }
+        // CR 701.26a + CR 701.26b: a tap or untap beside a pump decides a combat's attackers
+        // and blockers.
+        | Effect::SetTapState { .. }
+        // CR 509.1c: a requirement on this turn's blocks.
+        | Effect::ForceBlock { .. } => true,
+        Effect::GenericEffect {
+            static_abilities,
+            duration: Some(Duration::UntilEndOfTurn),
+            ..
+        } => {
+            !static_abilities.is_empty()
+                && static_abilities.iter().all(|static_def| {
+                    !static_def.modifications.is_empty()
+                        && static_def
+                            .modifications
+                            .iter()
+                            .all(modification_rides_a_trick)
+                })
+        }
+        // CR 603.7: a delayed removal of what was pumped is the pump's drawback, not a payoff.
+        Effect::CreateDelayedTrigger { effect, .. } => collect_definition_effects(effect)
+            .into_iter()
+            .all(effect_removes_its_own_subject),
+        _ => false,
+    }
+}
+
+fn modification_rides_a_trick(modification: &ContinuousModification) -> bool {
+    modification_is_bound_to_combat(modification)
+        || modification_is_creature_type_rider(modification)
+        || matches!(
+            modification,
+            ContinuousModification::AddStaticMode { mode } if static_mode_is_bound_to_combat(mode)
+        )
+}
+
+/// CR 508.1c + CR 508.1d + CR 509.1b + CR 509.1c: the restrictions and requirements read as
+/// attackers and blockers are declared, among them goad's (CR 701.15b), plus the permissions to
+/// attack despite defender (CR 702.3b) and to block more than the one attacker of CR 509.1a.
+/// Unlisted modes fail closed.
+fn static_mode_is_bound_to_combat(mode: &StaticMode) -> bool {
+    matches!(
+        mode,
+        StaticMode::CantAttack
+            | StaticMode::CantBlock
+            | StaticMode::CantAttackOrBlock
+            | StaticMode::AttackOnlyNeighbor
+            | StaticMode::MaxAttackersEachCombat { .. }
+            | StaticMode::MaxBlockersEachCombat { .. }
+            | StaticMode::MustAttack
+            | StaticMode::MustAttackDefender { .. }
+            | StaticMode::MustAttackAwayFromSource
+            | StaticMode::Goaded
+            | StaticMode::MustBlock
+            | StaticMode::MustBlockAttacker { .. }
+            | StaticMode::ExtraBlockers { .. }
+            | StaticMode::BlockRestriction { .. }
+            | StaticMode::CombatAlone { .. }
+            | StaticMode::CantBeBlocked
+            | StaticMode::CantBeBlockedExceptBy { .. }
+            | StaticMode::CantBeBlockedBy { .. }
+            | StaticMode::CantBeBlockedByMoreThan { .. }
+            | StaticMode::CantBeBlockedUnlessAllBlock
+            | StaticMode::MustBeBlocked { .. }
+            | StaticMode::MustBeBlockedByAll { .. }
+            | StaticMode::CanAttackWithDefender
+    )
+}
+
+/// CR 701.21a + CR 701.8a: sacrificing, destroying or bouncing the creature that was pumped, or
+/// the source, only takes it away. Any other subject is a payoff, or fails closed.
+fn effect_removes_its_own_subject(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Sacrifice { target, .. }
+            | Effect::Destroy { target, .. }
+            | Effect::Bounce { target, .. }
+            if matches!(target, TargetFilter::ParentTarget | TargetFilter::SelfRef)
+    )
+}
+
+/// The effects a cast spell itself resolves: its spell abilities (CR 113.3a + CR 608.2), read
+/// through `CastFacts::primary_effects`' `AbilityKind::Spell` filter. A permanent spell's
+/// activated and triggered abilities (CR 113.3b + CR 113.3c) resolve only once activated or
+/// triggered, after the permanent has entered (CR 608.3a + CR 603.6a), so a combat-window
+/// payload among them is not the cast's.
+pub(crate) fn spell_resolution_effects<'a>(facts: &CastFacts<'a>) -> Vec<&'a Effect> {
+    facts
+        .primary_effects
+        .iter()
+        .copied()
+        .flat_map(collect_definition_effects)
+        .collect()
+}
+
+/// The object whose timing governs a candidate's own resolution: a spell being cast
+/// (CR 601.2a), or having its modes chosen (CR 601.2b + CR 700.2a), or an activated ability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TimingSubject {
+    Spell(ObjectId),
+    Ability {
+        source_id: ObjectId,
+        ability_index: usize,
+    },
+}
+
+impl TimingSubject {
+    /// A cast through the AI's cast object authority, an activation by its engine index, a
+    /// spell's mode prompt by the pending cast's object. Anything else has no subject, so a
+    /// modal ability's prompt keeps its pricing.
+    pub(crate) fn of_candidate(ctx: &PolicyContext<'_>) -> Option<Self> {
+        match (&ctx.candidate.action, &ctx.decision.waiting_for) {
+            (GameAction::CastSpell { .. }, _) => {
+                cast_object_for_action(ctx.state, &ctx.candidate.action, ctx.ai_player)
+                    .map(|object| Self::Spell(object.id))
+            }
+            (
+                GameAction::ActivateAbility {
+                    source_id,
+                    ability_index,
+                    ..
+                },
+                _,
+            ) => Some(Self::Ability {
+                source_id: *source_id,
+                ability_index: *ability_index,
+            }),
+            (GameAction::SelectModes { .. }, WaitingFor::ModeChoice { pending_cast, .. }) => {
+                Some(Self::Spell(pending_cast.object_id))
+            }
+            _ => None,
+        }
+    }
+
+    fn confined_to_sorcery_timing(self, state: &GameState, player: PlayerId) -> bool {
+        match self {
+            Self::Spell(object_id) => spell_confined_to_sorcery_timing(state, player, object_id),
+            Self::Ability {
+                source_id,
+                ability_index,
+            } => ability_confined_to_sorcery_timing(state, player, source_id, ability_index),
+        }
+    }
+}
+
+/// CR 505.1a + CR 307.1 + CR 307.5: is this the precombat main phase, the first main phase of
+/// the turn, for a subject confined to sorcery timing? Then no later window reaches this turn's
+/// combat, and an until-end-of-turn payload lasts through it (CR 611.2a + CR 514.2).
+pub(crate) fn precombat_main_is_last_trick_window(
+    state: &GameState,
+    player: PlayerId,
+    subject: TimingSubject,
+) -> bool {
+    state.phase == Phase::PreCombatMain && subject.confined_to_sorcery_timing(state, player)
 }
 
 #[cfg(test)]
@@ -2247,6 +2862,658 @@ mod suspect_scope_tests {
             extract_target_filter(&all_unsuspect).is_none(),
             "mass Unsuspect{{All}} (Absolving Lammasu) is a population effect, not target-filtered"
         );
+    }
+}
+
+#[cfg(test)]
+mod temporary_combat_modifier_tests {
+    use super::CombatBinding::{Partial, Unbound, Whole};
+    use super::*;
+    use crate::cast_facts::{collect_definition_effects_with, ModeWalk};
+    use engine::types::ability::{
+        BounceSelection, DelayedTriggerCondition, EffectKind, EffectKind as K, TypedFilter,
+    };
+    use engine::types::identifiers::ObjectIncarnationRef;
+    use engine::types::keywords::{EmbalmCost, EscapeCost, FlashbackCost};
+    use engine::types::statics::{
+        BlockExceptionKind, CombatAloneAction, CombatAloneRequirement, RequiredDefender,
+    };
+
+    fn until_end_of_turn(static_abilities: Vec<StaticDefinition>) -> Effect {
+        Effect::GenericEffect {
+            static_abilities,
+            target: Some(TargetFilter::ParentTarget),
+            duration: Some(Duration::UntilEndOfTurn),
+            end_cost: None,
+        }
+    }
+
+    fn pump(modifications: Vec<ContinuousModification>) -> StaticDefinition {
+        StaticDefinition::continuous()
+            .affected(TargetFilter::ParentTarget)
+            .modifications(modifications)
+    }
+
+    #[test]
+    fn empty_until_end_of_turn_grant_is_no_combat_modifier() {
+        let control = until_end_of_turn(vec![pump(vec![ContinuousModification::AddPower {
+            value: 1,
+        }])]);
+        assert!(
+            effect_is_temporary_combat_modifier(&control),
+            "reach-guard: a +1/+0 grant is a combat modifier"
+        );
+        assert!(!effect_is_temporary_combat_modifier(&until_end_of_turn(
+            vec![]
+        )));
+        assert!(!effect_is_temporary_combat_modifier(&until_end_of_turn(
+            vec![pump(vec![])]
+        )));
+        assert!(!effect_is_combat_trick_payload(&until_end_of_turn(vec![])));
+    }
+
+    fn grant(keyword: Keyword) -> ContinuousModification {
+        ContinuousModification::AddKeyword { keyword }
+    }
+
+    fn trick_payload(modifications: Vec<ContinuousModification>) -> bool {
+        effect_is_combat_trick_payload(&until_end_of_turn(vec![pump(modifications)]))
+    }
+
+    /// Every keyword kind an until-end-of-turn grant adds in the card pool whose value is bound
+    /// to combat, plus the class's other attack, block and combat-damage keywords.
+    #[test]
+    fn a_keyword_bound_to_combat_is_a_trick_payload_alone() {
+        for keyword in [
+            Keyword::Flying,
+            Keyword::Fear,
+            Keyword::Intimidate,
+            Keyword::Skulk,
+            Keyword::Shadow,
+            Keyword::Horsemanship,
+            Keyword::Menace,
+            Keyword::Landwalk("Island".to_string()),
+            Keyword::Reach,
+            Keyword::Defender,
+            Keyword::FirstStrike,
+            Keyword::DoubleStrike,
+            Keyword::Trample,
+            Keyword::TrampleOverPlaneswalkers,
+            Keyword::Deathtouch,
+            Keyword::Lifelink,
+            Keyword::Wither,
+            Keyword::Infect,
+            Keyword::Toxic(1),
+            Keyword::Banding,
+            Keyword::Vigilance,
+            Keyword::Haste,
+            Keyword::Annihilator(1),
+            Keyword::Myriad,
+            Keyword::Melee,
+            Keyword::Firebending(QuantityExpr::Fixed { value: 5 }),
+            Keyword::DoubleTeam,
+            Keyword::Exalted,
+            Keyword::Battlecry,
+            Keyword::Rampage(2),
+            Keyword::Bushido(1),
+            Keyword::Flanking,
+            Keyword::Provoke,
+        ] {
+            assert!(
+                trick_payload(vec![grant(keyword.clone())]),
+                "{keyword:?} pays out in combat"
+            );
+        }
+    }
+
+    /// CR 702.93a + CR 702.79a + CR 702.135a: a dies trigger pays off in any phase. CR 702.34a +
+    /// CR 702.138a + CR 702.128a: a graveyard keyword pays off from the graveyard. CR 702.73a: a
+    /// creature-type grant has no combat value. An unclassified keyword fails closed. Beside a
+    /// +1/+0 reach guard, none of them is a payload alone.
+    #[test]
+    fn a_keyword_whose_value_lands_elsewhere_is_no_trick_payload() {
+        let mana = || engine::types::mana::ManaCost::zero();
+        assert!(
+            trick_payload(vec![ContinuousModification::AddPower { value: 1 }]),
+            "reach-guard: a +1/+0 grant is a trick payload"
+        );
+        for keyword in [
+            Keyword::Undying,
+            Keyword::Persist,
+            Keyword::Afterlife(1),
+            Keyword::Flashback(FlashbackCost::Mana(mana())),
+            Keyword::Escape(EscapeCost::Mana(mana())),
+            Keyword::Embalm(EmbalmCost::Mana(mana())),
+            Keyword::JumpStart,
+            Keyword::Unearth(mana()),
+            Keyword::Changeling,
+            Keyword::Flash,
+            Keyword::Absorb(1),
+            Keyword::Unknown("unclassified".to_string()),
+        ] {
+            assert!(
+                !trick_payload(vec![grant(keyword.clone())]),
+                "{keyword:?} is not bound to combat"
+            );
+        }
+    }
+
+    /// A mixed grant reads as the protective one does: value that lands elsewhere refuses the
+    /// whole payload, however much of it is bound to combat. A creature-type grant does not,
+    /// since it pays off nowhere else either, but it does not make a payload by itself.
+    #[test]
+    fn a_mixed_grant_is_a_trick_payload_only_if_nothing_in_it_lands_elsewhere() {
+        let plus_one = || ContinuousModification::AddPower { value: 1 };
+        assert!(trick_payload(vec![plus_one(), grant(Keyword::Trample)]));
+        assert!(trick_payload(vec![plus_one(), grant(Keyword::Changeling)]));
+        assert!(trick_payload(vec![
+            grant(Keyword::Flying),
+            grant(Keyword::Changeling)
+        ]));
+        assert!(!trick_payload(vec![plus_one(), grant(Keyword::Undying)]));
+        assert!(!trick_payload(vec![
+            grant(Keyword::Flying),
+            grant(Keyword::Persist)
+        ]));
+        assert!(!trick_payload(vec![
+            plus_one(),
+            grant(Keyword::Indestructible)
+        ]));
+    }
+
+    fn parsed(oracle_text: &str, name: &str, core_type: &str) -> Vec<AbilityDefinition> {
+        engine::parser::oracle::parse_oracle_text(
+            oracle_text,
+            name,
+            &[],
+            &[core_type.to_string()],
+            &[],
+        )
+        .abilities
+    }
+
+    /// A cast reads every Spell ability and every mode (CR 601.2b).
+    fn cast_walk(abilities: &[AbilityDefinition]) -> Vec<&Effect> {
+        abilities
+            .iter()
+            .filter(|ability| ability.kind == AbilityKind::Spell)
+            .flat_map(collect_definition_effects)
+            .collect()
+    }
+
+    /// An activation reads the one ability it activates, here the card's first.
+    fn activation_walk(abilities: &[AbilityDefinition]) -> Vec<&Effect> {
+        let ability = abilities
+            .iter()
+            .find(|ability| ability.kind == AbilityKind::Activated)
+            .expect("the card prints an activated ability");
+        collect_definition_effects_with(ability, ModeWalk::RootOnly)
+    }
+
+    /// `Whole` needs every effect to be a payload or a rider of one; the premise pins each
+    /// card's parsed shape, so a row cannot pass by parsing into a different chain.
+    #[test]
+    fn combat_binding_reads_the_whole_resolution() {
+        type Row = (
+            &'static str,
+            &'static str,
+            &'static str,
+            &'static [EffectKind],
+            CombatBinding,
+        );
+
+        let instant_or_sorcery: [Row; 22] = [
+            (
+                "Giant Growth",
+                "Instant",
+                "Target creature gets +3/+3 until end of turn.",
+                &[K::Pump],
+                Whole,
+            ),
+            (
+                "Barge In",
+                "Instant",
+                "Target attacking creature gets +2/+2 until end of turn. Each attacking non-Human creature gains trample until end of turn.",
+                &[K::Pump, K::GenericEffect],
+                Whole,
+            ),
+            (
+                "Arm the Cathars",
+                "Sorcery",
+                "Until end of turn, target creature gets +3/+3, up to one other target creature gets +2/+2, and up to one other target creature gets +1/+1. Those creatures gain vigilance until end of turn.",
+                &[K::Pump, K::Pump, K::Pump, K::GenericEffect],
+                Whole,
+            ),
+            (
+                "Coordinated Assault",
+                "Instant",
+                "Up to two target creatures each get +1/+0 and gain first strike until end of turn. (They deal combat damage before creatures without first strike.)",
+                &[K::GenericEffect],
+                Whole,
+            ),
+            (
+                "Gerrard's Command",
+                "Instant",
+                "Untap target creature. It gets +3/+3 until end of turn.",
+                &[K::Untap, K::Pump],
+                Whole,
+            ),
+            (
+                "Stabbing Pain",
+                "Instant",
+                "Target creature gets -1/-1 until end of turn. Tap that creature.",
+                &[K::Pump, K::Tap],
+                Whole,
+            ),
+            (
+                "Echoing Courage",
+                "Instant",
+                "Target creature and all other creatures with the same name as that creature get +2/+2 until end of turn.",
+                &[K::Pump, K::PumpAll],
+                Whole,
+            ),
+            (
+                "Monstrous Step",
+                "Sorcery",
+                "Target creature gets +7/+7 until end of turn. Up to one other target creature blocks it this turn if able.\nCycling {2} ({2}, Discard this card: Draw a card.)",
+                &[K::Pump, K::ForceBlock],
+                Whole,
+            ),
+            (
+                "Give No Ground",
+                "Instant",
+                "Target creature gets +2/+6 until end of turn and can block any number of creatures this turn.",
+                &[K::Pump, K::GenericEffect],
+                Whole,
+            ),
+            (
+                "Emergent Growth",
+                "Sorcery",
+                "Target creature gets +5/+5 until end of turn and must be blocked this turn if able.",
+                &[K::Pump, K::GenericEffect],
+                Whole,
+            ),
+            (
+                "Blood Frenzy",
+                "Instant",
+                "Cast this spell only before the combat damage step.\nTarget attacking or blocking creature gets +4/+0 until end of turn. Destroy that creature at the beginning of the next end step.",
+                &[K::Pump, K::CreateDelayedTrigger],
+                Whole,
+            ),
+            (
+                "Invigorated Rampage",
+                "Instant",
+                "Choose one —\n• Target creature gets +4/+0 and gains trample until end of turn.\n• Two target creatures each get +2/+0 and gain trample until end of turn.",
+                &[K::GenericEffect, K::GenericEffect],
+                Whole,
+            ),
+            (
+                "Heroic Reinforcements",
+                "Sorcery",
+                "Create two 1/1 white Soldier creature tokens. Until end of turn, creatures you control get +1/+1 and gain haste. (They can attack and {T} this turn.)",
+                &[K::Token, K::GenericEffect],
+                Partial,
+            ),
+            (
+                "Deafening Clarion",
+                "Sorcery",
+                "Choose one or both —\n• Deafening Clarion deals 3 damage to each creature.\n• Creatures you control gain lifelink until end of turn.",
+                &[K::DamageAll, K::GenericEffect],
+                Partial,
+            ),
+            (
+                "Goblin War Party",
+                "Sorcery",
+                "Choose one —\n• Create three 1/1 red Goblin creature tokens.\n• Creatures you control get +1/+1 and gain haste until end of turn.\nEntwine {2}{R} (Choose both if you pay the entwine cost.)",
+                &[K::Token, K::GenericEffect],
+                Partial,
+            ),
+            (
+                "Monstrous Rage",
+                "Instant",
+                "Target creature gets +2/+0 until end of turn. Create a Monster Role token attached to it. (If you control another Role on it, put that one into the graveyard. Enchanted creature gets +1/+1 and has trample.)",
+                &[K::Pump, K::Token],
+                Partial,
+            ),
+            (
+                "Afflict",
+                "Instant",
+                "Target creature gets -1/-1 until end of turn.\nDraw a card.",
+                &[K::Pump, K::Draw],
+                Partial,
+            ),
+            (
+                "Moment of Triumph",
+                "Instant",
+                "Target creature gets +2/+2 until end of turn. You gain 2 life.",
+                &[K::Pump, K::GainLife],
+                Partial,
+            ),
+            (
+                "A Good Day to Die",
+                "Instant",
+                "Target creature gets +2/+0 until end of turn. When that creature dies this turn, you draw a card.",
+                &[K::Pump, K::CreateDelayedTrigger],
+                Partial,
+            ),
+            (
+                "Karametra's Blessing",
+                "Instant",
+                "Target creature gets +2/+2 until end of turn. If it's an enchanted creature or enchantment creature, it also gains hexproof and indestructible until end of turn. (It can't be the target of spells or abilities your opponents control. Damage and effects that say \"destroy\" don't destroy it.)",
+                &[K::Pump, K::GenericEffect],
+                Partial,
+            ),
+            (
+                "Unnatural Endurance",
+                "Instant",
+                "Devoid (This card has no color.)\nTarget creature gets +2/+0 until end of turn. Regenerate it.",
+                &[K::Pump, K::Regenerate],
+                Partial,
+            ),
+            (
+                "Act of Treason",
+                "Sorcery",
+                "Gain control of target creature until end of turn. Untap that creature. It gains haste until end of turn. (It can attack and {T} this turn.)",
+                &[K::GainControl, K::Untap, K::GenericEffect],
+                Partial,
+            ),
+        ];
+        let activated: [Row; 5] = [
+            (
+                "Vectis Agents",
+                "Creature",
+                "{U}{B}: This creature gets -2/-0 until end of turn and can't be blocked this turn.",
+                &[K::Pump, K::GenericEffect],
+                Whole,
+            ),
+            (
+                "Mobile Fort",
+                "Creature",
+                "Defender (This creature can't attack.)\n{3}: This creature gets +3/-1 until end of turn and can attack this turn as though it didn't have defender. Activate only once each turn.",
+                &[K::Pump, K::GenericEffect],
+                Whole,
+            ),
+            (
+                "Pyric Salamander",
+                "Creature",
+                "{R}: This creature gets +1/+0 until end of turn. Sacrifice this creature at the beginning of the next end step.",
+                &[K::Pump, K::CreateDelayedTrigger],
+                Whole,
+            ),
+            (
+                "Dragon Mask",
+                "Artifact",
+                "{3}, {T}: Target creature you control gets +2/+2 until end of turn. Return it to its owner's hand at the beginning of the next end step. (Return it only if it's on the battlefield.)",
+                &[K::Pump, K::CreateDelayedTrigger],
+                Whole,
+            ),
+            (
+                "The Wandering Emperor",
+                "Planeswalker",
+                "Flash\nAs long as The Wandering Emperor entered this turn, you may activate her loyalty abilities any time you could cast an instant.\n[+1]: Put a +1/+1 counter on up to one target creature. It gains first strike until end of turn.\n[−1]: Create a 2/2 white Samurai creature token with vigilance.\n[−2]: Exile target tapped creature. You gain 2 life.",
+                &[K::PutCounter, K::GenericEffect],
+                Partial,
+            ),
+        ];
+
+        let check = |name: &str, walk: Vec<&Effect>, kinds: &[EffectKind], binding| {
+            let parsed_kinds: Vec<EffectKind> = walk
+                .iter()
+                .map(|effect| EffectKind::from(*effect))
+                .collect();
+            assert_eq!(parsed_kinds, kinds, "premise: {name} parses to this chain");
+            assert_eq!(CombatBinding::of_resolution(&walk), binding, "{name}");
+        };
+        for (name, core_type, oracle_text, kinds, binding) in instant_or_sorcery {
+            let abilities = parsed(oracle_text, name, core_type);
+            check(name, cast_walk(&abilities), kinds, binding);
+        }
+        for (name, core_type, oracle_text, kinds, binding) in activated {
+            let abilities = parsed(oracle_text, name, core_type);
+            check(name, activation_walk(&abilities), kinds, binding);
+        }
+    }
+
+    /// CR 606.5: loyalty costs combine into one, so its example's `[−4]` with an additional
+    /// `[+1]` removes counters and an added mana cost changes nothing. A `[0]` puts no counter.
+    #[test]
+    fn net_loyalty_cost_combines_the_loyalty_parts_of_a_cost() {
+        let loyalty = |amount| AbilityCost::Loyalty { amount };
+        let mana = || AbilityCost::Mana {
+            cost: engine::types::mana::ManaCost::generic(2),
+        };
+        let composite = |costs| AbilityCost::Composite { costs };
+
+        for (cost, net) in [
+            (loyalty(1), 1),
+            (loyalty(0), 0),
+            (loyalty(-3), -3),
+            (mana(), 0),
+            (AbilityCost::Tap, 0),
+            (composite(vec![mana(), loyalty(1)]), 1),
+            (composite(vec![mana(), loyalty(-1)]), -1),
+            (composite(vec![loyalty(-4), loyalty(1)]), -3),
+            (composite(vec![loyalty(1), loyalty(1)]), 2),
+            (composite(vec![mana(), composite(vec![loyalty(2)])]), 2),
+        ] {
+            assert_eq!(net_loyalty_cost(&cost), net, "{cost:?}");
+        }
+    }
+
+    fn bare_pump() -> Effect {
+        Effect::Pump {
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            target: TargetFilter::ParentTarget,
+        }
+    }
+
+    fn static_grant(mode: StaticMode, duration: Option<Duration>) -> Effect {
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::new(mode.clone())
+                .affected(TargetFilter::ParentTarget)
+                .modifications(vec![ContinuousModification::AddStaticMode { mode }])],
+            target: Some(TargetFilter::ParentTarget),
+            duration,
+            end_cost: None,
+        }
+    }
+
+    fn delayed(ability: AbilityDefinition) -> Effect {
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            effect: Box::new(ability),
+            uses_tracked_set: false,
+        }
+    }
+
+    fn sacrifice(target: TargetFilter) -> Effect {
+        Effect::Sacrifice {
+            target,
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        }
+    }
+
+    fn draw() -> Effect {
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    }
+
+    fn set_tap_state() -> Effect {
+        Effect::SetTapState {
+            target: TargetFilter::ParentTarget,
+            scope: EffectScope::Single,
+            state: TapStateChange::Untap,
+        }
+    }
+
+    fn pump_all() -> Effect {
+        Effect::PumpAll {
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            target: TargetFilter::ParentTarget,
+        }
+    }
+
+    fn beside_a_pump(effect: &Effect) -> CombatBinding {
+        CombatBinding::of_resolution(&[&bare_pump(), effect])
+    }
+
+    /// The riders read in full: every attack and block static of CR 508.1c, CR 508.1d, CR 509.1b
+    /// and CR 509.1c, with the permissions beside them, and a delayed removal of what was pumped.
+    /// A rider alone is no payload, and anything else beside a payload fails closed.
+    #[test]
+    fn only_attack_and_block_statics_and_self_removal_ride_a_trick() {
+        let until_eot = Some(Duration::UntilEndOfTurn);
+        for mode in [
+            StaticMode::CantAttack,
+            StaticMode::CantBlock,
+            StaticMode::CantAttackOrBlock,
+            StaticMode::AttackOnlyNeighbor,
+            StaticMode::MaxAttackersEachCombat {
+                max: 1,
+                defender: None,
+            },
+            StaticMode::MaxBlockersEachCombat { max: 1 },
+            StaticMode::MustAttack,
+            StaticMode::MustAttackDefender {
+                defender: RequiredDefender::Fixed {
+                    player: PlayerId(1),
+                },
+            },
+            StaticMode::MustAttackAwayFromSource,
+            StaticMode::Goaded,
+            StaticMode::MustBlock,
+            StaticMode::MustBlockAttacker {
+                attacker: ObjectIncarnationRef::of(ObjectId(1), 0),
+            },
+            StaticMode::ExtraBlockers { count: None },
+            StaticMode::BlockRestriction {
+                filter: TargetFilter::Any,
+            },
+            StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            },
+            StaticMode::CantBeBlocked,
+            StaticMode::CantBeBlockedExceptBy {
+                kind: BlockExceptionKind::MinBlockers { min: 2 },
+            },
+            StaticMode::CantBeBlockedBy {
+                filter: TargetFilter::Any,
+            },
+            StaticMode::CantBeBlockedByMoreThan { max: 1 },
+            StaticMode::CantBeBlockedUnlessAllBlock,
+            StaticMode::MustBeBlocked { by: None },
+            StaticMode::MustBeBlockedByAll { blockers: None },
+            StaticMode::CanAttackWithDefender,
+        ] {
+            let rider = static_grant(mode.clone(), until_eot.clone());
+            assert_eq!(beside_a_pump(&rider), Whole, "{mode:?} rides a pump");
+            assert_eq!(
+                CombatBinding::of_resolution(&[&rider]),
+                Unbound,
+                "{mode:?} alone is no payload"
+            );
+        }
+
+        assert_eq!(CombatBinding::of_resolution(&[]), Unbound);
+        let forced_block = Effect::ForceBlock {
+            target: TargetFilter::ParentTarget,
+            attacker: None,
+            duration: Duration::UntilEndOfTurn,
+        };
+        for rider in [set_tap_state(), pump_all(), forced_block] {
+            assert_eq!(beside_a_pump(&rider), Whole, "{rider:?} rides a pump");
+            assert_eq!(
+                CombatBinding::of_resolution(&[&rider]),
+                Unbound,
+                "{rider:?} alone is no payload"
+            );
+        }
+
+        for target in [TargetFilter::ParentTarget, TargetFilter::SelfRef] {
+            for removal in [
+                sacrifice(target.clone()),
+                Effect::Destroy {
+                    target: target.clone(),
+                    cant_regenerate: false,
+                },
+                Effect::Bounce {
+                    target: target.clone(),
+                    destination: None,
+                    selection: BounceSelection::Targeted,
+                },
+            ] {
+                let rider = delayed(AbilityDefinition::new(AbilityKind::Spell, removal));
+                assert_eq!(beside_a_pump(&rider), Whole, "{rider:?} rides a pump");
+                assert_eq!(
+                    CombatBinding::of_resolution(&[&rider]),
+                    Unbound,
+                    "{rider:?} alone is no payload"
+                );
+            }
+        }
+
+        for (why, effect) in [
+            (
+                "a rule modification outside declarations",
+                static_grant(StaticMode::CantGainLife, until_eot.clone()),
+            ),
+            (
+                "a protective grant",
+                until_end_of_turn(vec![pump(vec![grant(Keyword::Hexproof)])]),
+            ),
+            (
+                "a grant that outlasts the turn",
+                static_grant(StaticMode::CantBlock, Some(Duration::Permanent)),
+            ),
+            ("an empty grant", until_end_of_turn(vec![])),
+            ("empty modifications", until_end_of_turn(vec![pump(vec![])])),
+            (
+                "an empty static beside a rider",
+                until_end_of_turn(vec![
+                    pump(vec![]),
+                    pump(vec![ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantBlock,
+                    }]),
+                ]),
+            ),
+            (
+                "another creature's sacrifice",
+                delayed(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    sacrifice(TargetFilter::Typed(TypedFilter::default())),
+                )),
+            ),
+            (
+                "a token's sacrifice",
+                delayed(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    sacrifice(TargetFilter::LastCreated),
+                )),
+            ),
+            (
+                "a delayed draw",
+                delayed(AbilityDefinition::new(AbilityKind::Spell, draw())),
+            ),
+            (
+                "a delayed draw behind a removal",
+                delayed(
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        sacrifice(TargetFilter::ParentTarget),
+                    )
+                    .sub_ability(AbilityDefinition::new(AbilityKind::Spell, draw())),
+                ),
+            ),
+            ("a draw", draw()),
+        ] {
+            assert_eq!(beside_a_pump(&effect), Partial, "{why} is value elsewhere");
+        }
     }
 }
 
@@ -4978,5 +6245,178 @@ mod attacked_referent_domain_tests {
             filter_domain(&TargetFilter::AttackedPlayerOrPlaneswalker),
             FilterDomain::ANYTHING
         );
+    }
+}
+
+#[cfg(test)]
+mod controller_value_tests {
+    use super::*;
+    use engine::game::scenario::{GameScenario, P0};
+
+    /// How one card's attack-trigger body reads to its controller.
+    #[derive(Debug, PartialEq)]
+    enum Reading {
+        Gain,
+        Harm,
+        Nothing,
+    }
+
+    /// The value of a parser-emitted (card-data) trigger body, resolved for a
+    /// creature P0 controls at `life`.
+    fn value_at(json: &str, life: i32) -> f64 {
+        let definition: AbilityDefinition =
+            serde_json::from_str(json).expect("card-data trigger body");
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_creature(P0, "Source", 2, 2).id();
+        let mut state = scenario.build().state().clone();
+        state.players[0].life = life;
+        let ability =
+            engine::game::ability_utils::build_resolved_from_def(&definition, source, PlayerId(0));
+        resolved_ability_value_for_controller(&state, &ability)
+    }
+
+    fn reading(value: f64) -> Reading {
+        if value > 0.0 {
+            Reading::Gain
+        } else if value < 0.0 {
+            Reading::Harm
+        } else {
+            Reading::Nothing
+        }
+    }
+
+    /// Real attack-trigger bodies across the class, each read for its
+    /// controller at 20 life.
+    #[test]
+    fn attack_trigger_bodies_read_by_recipient() {
+        for (json, expected) in [
+            (
+                // Sanguine Syphoner: each opponent loses 1; the engine runs "you gain 1" as the unscoped tail (CR 608.2c).
+                r#"{"kind":"Spell","effect":{"type":"LoseLife","amount":{"type":"Fixed","value":1}},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"GainLife","amount":{"type":"Fixed","value":1}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false,"player_scope":{"type":"Opponent"}}"#,
+                Reading::Gain,
+            ),
+            (
+                // Pulse Tracker: a targetless LoseLife under "each opponent" hits each opponent.
+                r#"{"kind":"Spell","effect":{"type":"LoseLife","amount":{"type":"Fixed","value":1}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false,"player_scope":{"type":"Opponent"}}"#,
+                Reading::Gain,
+            ),
+            (
+                // Aclazotz: each opponent discards; you draw for each who can't.
+                r#"{"kind":"Spell","effect":{"type":"Discard","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"Draw","count":{"type":"Fixed","value":1},"target":{"type":"OriginalController"}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":{"type":"Not","condition":{"type":"EffectOutcome","signal":"CurrentScopeSucceeded"}},"optional_targeting":false,"optional":false,"forward_result":false},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false,"player_scope":{"type":"Opponent"}}"#,
+                Reading::Gain,
+            ),
+            (
+                // Abyssal Nightstalker: the defending player discards.
+                r#"{"kind":"Spell","effect":{"type":"Discard","count":{"type":"Fixed","value":1},"target":{"type":"DefendingPlayer"}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+                Reading::Gain,
+            ),
+            (
+                // Annihilator 6 (CR 702.86a): the defending player sacrifices.
+                r#"{"kind":"Spell","effect":{"type":"Sacrifice","target":{"type":"Typed","type_filters":["Permanent"],"controller":"DefendingPlayer","properties":[]},"count":{"type":"Fixed","value":6}},"cost":null,"sub_ability":null,"duration":null,"description":"Defending player sacrifices 6 permanents","target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+                Reading::Gain,
+            ),
+            (
+                // Inferno Titan: damage divided among targets its controller chooses (CR 115.1).
+                r#"{"kind":"Spell","effect":{"type":"DealDamage","amount":{"type":"Fixed","value":3},"target":{"type":"Any"}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"multi_target":{"min":1,"max":{"type":"Fixed","value":3}},"distribute":{"type":"Damage"},"forward_result":false}"#,
+                Reading::Gain,
+            ),
+            (
+                // Audacious Thief: you draw a card and lose 1 life.
+                r#"{"kind":"Spell","effect":{"type":"Draw","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"LoseLife","amount":{"type":"Fixed","value":1},"target":{"type":"Controller"}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+                Reading::Gain,
+            ),
+            (
+                // Smuggler's Copter: an optional loot nets below zero, so its controller declines it (CR 608.2d).
+                r#"{"kind":"Spell","effect":{"type":"Draw","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"Discard","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":{"type":"EffectOutcome","signal":"OptionalEffectPerformed"},"optional_targeting":false,"optional":false,"forward_result":false,"sub_link":"SequentialSibling"},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":true,"forward_result":false}"#,
+                Reading::Nothing,
+            ),
+            (
+                // Goblin Guide: a reveal and a parent-target move name no gain for you.
+                r#"{"kind":"Spell","effect":{"type":"RevealTop","player":{"type":"DefendingPlayer"},"count":1},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"ChangeZone","origin":null,"destination":"Hand","target":{"type":"ParentTarget"},"owner_library":false,"enter_transformed":false,"enter_tapped":false,"enters_attacking":false},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":{"type":"RevealedHasCardType","card_types":["Land"]},"optional_targeting":false,"optional":false,"forward_result":false,"sub_link":"SequentialSibling"},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+                Reading::Nothing,
+            ),
+            (
+                // Master of Cruelties: "that player" is an unbound parent target.
+                r#"{"kind":"Spell","effect":{"type":"SetLifeTotal","target":{"type":"ParentTarget"},"amount":{"type":"Fixed","value":1}},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"GenericEffect","static_abilities":[{"mode":"AssignNoCombatDamage","affected":{"type":"SelfRef"},"modifications":[{"type":"AssignNoCombatDamage"}],"condition":null,"affected_zone":null,"effect_zone":null,"active_zones":[],"characteristic_defining":false,"description":null}],"duration":"UntilEndOfTurn","target":null},"cost":null,"sub_ability":null,"duration":"UntilEndOfTurn","description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false,"sub_link":"SequentialSibling"},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+                Reading::Nothing,
+            ),
+            (
+                // Daemogoth Titan: "sacrifice a creature" is your own (CR 701.21a).
+                r#"{"kind":"Spell","effect":{"type":"Sacrifice","target":{"type":"Typed","type_filters":["Creature"],"controller":null,"properties":[]},"count":{"type":"Fixed","value":1}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+                Reading::Harm,
+            ),
+            (
+                // Lesser Gargadon: "sacrifice a land" is your own.
+                r#"{"kind":"Spell","effect":{"type":"Sacrifice","target":{"type":"Typed","type_filters":["Land"],"controller":null,"properties":[]},"count":{"type":"Fixed","value":1}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+                Reading::Harm,
+            ),
+            (
+                // Shard of the Void Dragon: under "each opponent", "you control" is the iterated opponent's.
+                r#"{"kind":"Spell","effect":{"type":"Sacrifice","target":{"type":"Typed","type_filters":["Permanent",{"Non":"Land"}],"controller":"You","properties":[]},"count":{"type":"Fixed","value":1}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false,"player_scope":{"type":"Opponent"}}"#,
+                Reading::Gain,
+            ),
+            (
+                // Swathcutter Giant: damage to each creature the defending player controls.
+                r#"{"kind":"Spell","effect":{"type":"DamageAll","amount":{"type":"Fixed","value":1},"target":{"type":"Typed","type_filters":["Creature"],"controller":"DefendingPlayer","properties":[]}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+                Reading::Gain,
+            ),
+            (
+                // Sludge Titan: milling yourself names no direction (CR 701.17a).
+                r#"{"kind":"Spell","effect":{"type":"Mill","count":{"type":"Fixed","value":5},"target":{"type":"Controller"},"destination":"Graveyard"},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"ChangeZone","origin":null,"destination":"Hand","target":{"type":"TrackedSetFiltered","id":0,"filter":{"type":"Or","filters":[{"type":"Typed","type_filters":["Creature"],"controller":null,"properties":[]},{"type":"Typed","type_filters":["Land"],"controller":null,"properties":[]}]}},"owner_library":false,"enter_transformed":false,"enter_tapped":false,"enters_attacking":false,"up_to":true},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+                Reading::Nothing,
+            ),
+            (
+                // Harbor Guardian: the defending player may draw, and chooses to (CR 608.2d).
+                r#"{"kind":"Spell","effect":{"type":"Draw","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":true,"forward_result":false,"player_scope":{"type":"DefendingPlayer"}}"#,
+                Reading::Harm,
+            ),
+        ] {
+            assert_eq!(reading(value_at(json, 20)), expected, "{json}");
+        }
+    }
+
+    /// CR 107.14: Aethergeode Miner's two energy are a controller resource;
+    /// a known zero gain supplies no value.
+    #[test]
+    fn energy_gain_value_tracks_the_resolved_quantity() {
+        for (amount, expected) in [(0, 0.0), (2, 0.2), (4, 0.4)] {
+            let json = format!(
+                r#"{{ "kind": "Spell", "effect": {{ "type": "GainEnergy", "amount": {{ "type": "Fixed", "value": {amount} }} }} }}"#
+            );
+            assert_eq!(value_at(&json, 20), expected, "energy amount {amount}");
+        }
+    }
+
+    /// Ebonblade Reaper: "you lose half your life, rounded up" is a harm, and
+    /// at 1 life it is losing the game (CR 704.5a), which no gain offsets.
+    #[test]
+    fn controller_life_loss_is_a_harm_and_lethal_loss_is_absolute() {
+        let reaper = r#"{"kind":"Spell","effect":{"type":"LoseLife","amount":{"type":"DivideRounded","inner":{"type":"Ref","qty":{"type":"LifeTotal","player":{"type":"Controller"}}},"divisor":2,"rounding":"Up"},"target":{"type":"Controller"}}}"#;
+        assert_eq!(reading(value_at(reaper, 20)), Reading::Harm);
+        assert_eq!(value_at(reaper, 1), f64::NEG_INFINITY);
+    }
+
+    /// CR 122.1: a resource counter on the ability's own source is a gain, a
+    /// -1/-1 counter a harm, and a clock counter (time) nothing.
+    #[test]
+    fn counters_on_the_source_carry_their_own_reading() {
+        for (counter, expected) in [
+            ("charge", Reading::Gain),
+            ("M1M1", Reading::Harm),
+            ("time", Reading::Nothing),
+        ] {
+            let json = format!(
+                r#"{{"kind":"Spell","effect":{{"type":"PutCounter","counter_type":"{counter}","count":{{"type":"Fixed","value":1}},"target":{{"type":"SelfRef"}}}}}}"#
+            );
+            assert_eq!(reading(value_at(&json, 20)), expected, "{counter}");
+        }
+    }
+
+    /// A pump until end of turn is worth nothing on its own: its value is the
+    /// combat damage it changes.
+    #[test]
+    fn temporary_pump_is_worth_nothing_by_itself() {
+        let pump = r#"{"kind":"Spell","effect":{"type":"Pump","power":{"type":"Fixed","value":2},"toughness":{"type":"Fixed","value":0},"target":{"type":"SelfRef"}},"duration":"UntilEndOfTurn"}"#;
+        assert_eq!(reading(value_at(pump, 20)), Reading::Nothing);
     }
 }
