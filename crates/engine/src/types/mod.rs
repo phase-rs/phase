@@ -15,6 +15,9 @@ mod game_state_size;
 pub mod history_snapshot;
 pub mod identifiers;
 pub mod interaction;
+/// Test-only migrations for committed capture fixtures; see the module docs.
+#[cfg(any(test, feature = "test-support"))]
+pub mod legacy_capture_fixture;
 pub mod log;
 pub mod mana;
 pub mod match_config;
