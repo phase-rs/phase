@@ -13335,8 +13335,9 @@ mod tests {
     ///   uncharged, P1's magnitude is `-1`, `elimination_bounds`' `narrow` guard
     ///   (`magnitude > 0`) never fires and P1's life axis is DISARMED outright, leaving only
     ///   the proposer's own term. Charged, the aim subtraction has nothing to take —
-    ///   `(-1 - 2).max(0)` is already zero on a net gain — so P1 is charged the bare reach
-    ///   term `2` over headroom `7 - 1`, a strict 3 carried to P1's crossing at **4**.
+    ///   `(-1 - 1).max(0)` is already zero on a net gain — so P1 is charged the bare reach
+    ///   term `1`, the life its resolution took, over headroom `7 - 1`, a strict 6 below the
+    ///   proposer's strict 10, carried to P1's crossing at **7**.
     ///   Uncharged, only the proposer's own strict 10 survives, carried to **11**.
     ///   `Ordering::Less`, which pins the
     ///   DIRECTION: a charge may only shrink the bound. Case (o) of
@@ -13349,7 +13350,7 @@ mod tests {
     ///   equal ⇒ the VICTIM-SET assertions below, not the equality, are what reject it.
     /// * *republish the forced point* (revert the sibling row's withhold): the two derivations
     ///   coincide again and equality holds ⇒ the withhold reach-guard rejects it.
-    /// * *charge the victim but not the magnitude* (or vice versa): arm (B)'s bound leaves 4 ⇒
+    /// * *charge the victim but not the magnitude* (or vice versa): arm (B)'s bound leaves 7 ⇒
     ///   the exact-value assertions reject it.
     /// * *drop the aim subtraction*: arm (A)'s P1 is charged `1 + 1 = 2` and its bound falls
     ///   to 4 ⇒ the exact-value assertion rejects it AND the ORDER assertion reads `Less`
@@ -13378,10 +13379,15 @@ mod tests {
         use std::cmp::Ordering;
 
         /// Step (7)'s own derivation, verbatim — the charged announcements, each carrying its
-        /// reach, its `worst_seat_life_loss` magnitude and the aim of the announcement that
-        /// resolved in the window. One function, so neither arm can compute them a different way.
+        /// reach, its magnitude (the life its resolutions took, capped by
+        /// `worst_seat_life_loss`) and the aim of the announcement that resolved in the window.
+        /// One function, so neither arm can compute them a different way.
         fn step_seven(state: &GameState, delta: &ResourceVector) -> Vec<SlotCharge> {
-            let earlier = earlier_resolving_frame(state);
+            let mut earlier = earlier_resolving_frame(state);
+            // CR 119.3: the drains resolving into `state` took 1 life from P1, their aim.
+            for p in earlier.players.iter_mut().filter(|p| p.id == PlayerId(1)) {
+                p.life += 1;
+            }
             let touch = certified_period_touch(
                 &[&earlier],
                 state,
@@ -13451,7 +13457,7 @@ mod tests {
             (
                 "(B) victim nets a life GAIN",
                 life_delta(&[(PlayerId(1), 1), (PlayerId(0), -2)]),
-                4,
+                7,
                 11,
                 Ordering::Less,
             ),
@@ -13648,8 +13654,24 @@ mod tests {
         // Frame 1 — the grantor board, so the announcement is forced to P1 alone; frame 2 and
         // the live board — where both opponents are legal again. All announce P1, and frames
         // 1 and 2's announcements resolve inside the window.
-        let narrow = hexproof_window_frame(true, 10, PlayerId(1));
-        let wide = hexproof_window_frame(false, 20, PlayerId(1));
+        // CR 119.3: each drain resolving out of a frame takes 1 life from the seat it names, so
+        // a frame stands that much above the live board for each such drain.
+        let above = |mut frame: GameState, losses: &[(PlayerId, i32)]| {
+            for (seat, lost) in losses {
+                for p in frame.players.iter_mut().filter(|p| p.id == *seat) {
+                    p.life += lost;
+                }
+            }
+            frame
+        };
+        let narrow = above(
+            hexproof_window_frame(true, 10, PlayerId(1)),
+            &[(PlayerId(1), 2)],
+        );
+        let wide = above(
+            hexproof_window_frame(false, 20, PlayerId(1)),
+            &[(PlayerId(1), 1)],
+        );
         let current = hexproof_window_frame(false, 30, PlayerId(1));
 
         let legal = |state: &GameState, entry: usize| {
@@ -13794,7 +13816,10 @@ mod tests {
         // keeps that refusal, and the arm would stay green under the mutation it exists to
         // catch. That refusal is `a_charge_refuses_an_aim_outside_its_own_legal_set`'s
         // subject, with ONE resolved announcement, where nothing else can produce the `None`.
-        let divergent_wide = hexproof_window_frame(false, 20, PlayerId(2));
+        let divergent_wide = above(
+            hexproof_window_frame(false, 20, PlayerId(2)),
+            &[(PlayerId(1), 1), (PlayerId(2), 1)],
+        );
         let divergent_touch = certified_period_touch(
             &[&head, &narrow, &divergent_wide],
             &current,

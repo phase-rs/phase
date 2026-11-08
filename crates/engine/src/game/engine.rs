@@ -4094,8 +4094,9 @@ fn bounded_offer_tail(
         )
         .map(|cascade| truncate_to_declared_seats(cascade, pins.as_ref(), state))
         .ok_or(TailRefusal::NoThreshold)?;
-    // The witness needs a published declaration to re-aim and a charged slot to re-aim; without
-    // either it is `None` and the ceiling degenerates to the own count.
+    // Re-aiming a chosen recorded target after its seat leaves is this witness's alone, over the
+    // slots `entry_announces` charges; a slot it refuses keeps the record's aim, and the count ends
+    // at that seat's departure.
     let witness = pins
         .as_ref()
         .and_then(|observed| periodic.piecewise_witness(state, proposer, observed, &points, lead));
@@ -4894,7 +4895,8 @@ struct EntryAnnouncement {
 /// player-target shape (shape (A): asked of the announcement authority itself,
 /// `ability_utils::build_target_slots` — the function the relief's own
 /// `forced_unique_targeting` rebuilds slots with — rather than of a proxy, plus
-/// [`declares_opponent_player_target`]), or NO announcement choice at all (shape (B):
+/// [`declares_opponent_player_target`]; on the recorded road, any entry that announced exactly
+/// one player target, whatever its head filter), or NO announcement choice at all (shape (B):
 /// `targets.is_empty()` and zero built slots); and its source object still exists, so the
 /// slot can re-bind (CR 400.7 incarnation, fail-closed on absence).
 ///
@@ -5225,20 +5227,17 @@ fn entry_announces(
         return None;
     }
     let slot = slots.swap_remove(0);
-    // CR 115.4 + CR 601.2c (via CR 603.3d): on the recorded road, an "any target" entry that
-    // announced exactly one player is a seat aim the replay re-answers; its legal set keeps its
-    // objects, and only its players are charged (CR 120.3a).
-    let any_target_at_a_player = road == crate::analysis::loop_check::OfferRoad::RecordedPeriod
-        && matches!(
-            ability.effect.target_filter(),
-            Some(crate::types::ability::TargetFilter::Any)
-        )
+    // CR 115.1d + CR 115.2 + CR 115.4 + CR 601.2c (via CR 603.3d): on the recorded road, an entry
+    // that announced exactly one player target is a seat aim the replay re-answers, whatever its
+    // head filter; its legal set keeps any objects, and only its players are charged (CR 119.3,
+    // CR 120.3a).
+    let player_aim_on_record = road == crate::analysis::loop_check::OfferRoad::RecordedPeriod
         && matches!(
             ability.targets.as_slice(),
             [crate::types::ability::TargetRef::Player(_)]
         );
     if slot.optional
-        || (!any_target_at_a_player
+        || (!player_aim_on_record
             && !slot
                 .legal_targets
                 .iter()
@@ -5252,7 +5251,7 @@ fn entry_announces(
     // "target opponent" declaration, which an all-`Player` legal set alone does not
     // (`controller: You` builds exactly one mandatory slot whose legal set is the
     // controller — measured).
-    if !any_target_at_a_player && !declares_opponent_player_target(ability) {
+    if !player_aim_on_record && !declares_opponent_player_target(ability) {
         return None;
     }
     // SHAPE (A′) — NOT THE PROPOSER'S CHOICE, so there is no CHOICE OF THEIRS to publish.
@@ -5501,7 +5500,9 @@ pub(crate) fn bounded_cycle_pin_slots_for_window(
 ///
 /// A slot's magnitude is the most one of its resolutions in the window took from the single
 /// player it targeted (CR 119.3, CR 120.3a), capped by the caller's `magnitude` — the period's
-/// `ResourceVector::worst_seat_life_loss` — which a slot with no measured resolution keeps.
+/// `ResourceVector::worst_seat_life_loss` — which a slot keeps when its resolutions took nothing,
+/// unless they all aimed at one seat other than the proposer (a self-aim can net its loss out
+/// within one resolution).
 ///
 /// DELIBERATELY NOT A FILTER OVER [`bounded_cycle_pin_slots_for_window`]'s OUTPUT, and that
 /// is the entire reason this exists as its own reader. Publication answers CR 732.2a — "a
@@ -5661,7 +5662,9 @@ pub(crate) fn bounded_cycle_charged_targets_for_window(
             });
         }
         charge.aimed_at = aim.flatten();
-        if let Some(took) = took.filter(|took| *took > 0) {
+        if let Some(took) =
+            took.filter(|took| *took > 0 || charge.aimed_at.is_some_and(|seat| seat != proposer))
+        {
             charge.magnitude = charge.magnitude.min(took);
         }
     }

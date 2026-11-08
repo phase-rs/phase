@@ -1,6 +1,6 @@
 //! CR 732.2a: the confirmer's replay of a trace candidate, and the cover it certifies on.
 
-use engine::analysis::decision_template::{IterationCount, PinnedDecision};
+use engine::analysis::decision_template::{IterationCount, PinnedDecision, ReplayMode};
 use engine::analysis::loop_check::{LoopCertificate, OfferRoad, ShortcutResponse, WinKind};
 use engine::analysis::loop_states_equal_modulo_resources;
 use engine::analysis::resource::{
@@ -2298,70 +2298,135 @@ fn an_altar_zulaport_period_is_offered_a_bounded_shortcut_and_taken() {
     }
 }
 
-/// CR 800.4a + CR 732.2a: on four seats, P0 sacrifices Gravecrawler to Phyrexian Altar beside
-/// Blood Artist ("Whenever this creature or another creature dies, target player loses 1 life and
-/// you gain 1 life."), aiming each trigger at P1, and recasts it. The row checks that the
-/// repetition P1 leaves in is counted: the measured bound reaches P1's whole life.
+/// CR 603.3d + CR 601.2c + CR 800.4a + CR 104.2a: on four seats, P0 sacrifices Gravecrawler to
+/// Phyrexian Altar and recasts it beside a death trigger aimed at P1: Blood Artist ("Whenever this
+/// creature or another creature dies, target player loses 1 life and you gain 1 life."), Spiteful
+/// Prankster ("Whenever another creature dies, this creature deals 1 damage to target player or
+/// planeswalker."), or Blood Artist beside Extractor Demon ("Whenever another creature leaves the
+/// battlefield, you may have target player mill two cards."). Each trigger's target is chosen as
+/// it goes on the stack, so the period re-aims at each seat left: P1 leaves at repetition 19, P2 at
+/// 39 and P3 at 59, and P0 wins. The record aims at P1 alone, so its own declaration reaches 19.
 #[test]
-fn a_targeted_drain_on_four_seats_counts_the_repetition_its_seat_leaves_in() {
+fn a_single_player_death_trigger_on_four_seats_re_aims_at_each_seat_left() {
     let Some(db) = shared_card_db() else { return };
-    let mut scenario = GameScenario::new_n_player(4, 42);
-    scenario.at_phase(Phase::PreCombatMain);
-    let altar = scenario.add_real_card(P0, "Phyrexian Altar", Zone::Battlefield, db);
-    for card in ["Blood Artist", "Walking Corpse"] {
-        scenario.add_real_card(P0, card, Zone::Battlefield, db);
-    }
-    let gravecrawler = scenario.add_real_card(P0, "Gravecrawler", Zone::Battlefield, db);
-    for seat in 0..4 {
-        for _ in 0..8 {
-            scenario.add_real_card(PlayerId(seat), "Swamp", Zone::Library, db);
+    for (payoffs, frame, end) in [
+        (&["Blood Artist"][..], [21, 19, 20, 20], [80, 0, 0, 0]),
+        (&["Spiteful Prankster"][..], [20, 19, 20, 20], [20, 0, 0, 0]),
+        (
+            &["Blood Artist", "Extractor Demon"][..],
+            [21, 19, 20, 20],
+            [80, 0, 0, 0],
+        ),
+    ] {
+        let mut scenario = GameScenario::new_n_player(4, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let altar = scenario.add_real_card(P0, "Phyrexian Altar", Zone::Battlefield, db);
+        for card in payoffs.iter().chain(&["Walking Corpse"]) {
+            scenario.add_real_card(P0, card, Zone::Battlefield, db);
         }
-    }
-    let mut runner = scenario.build();
-    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
-    let score = |action: &GameAction| {
-        2 * names(&[gravecrawler])(action)
-            + chooses_color(ManaType::Black)(action)
-            + i32::from(matches!(
-                action,
-                GameAction::ChooseTarget {
-                    target: Some(TargetRef::Player(P1))
-                }
-            ))
-    };
-    for _ in 0..4 {
-        let index = ability(runner.state(), altar, true);
-        activate(&mut runner, altar, index);
-        settle(&mut runner, &score);
-        if is_offer(runner.state()) {
-            break;
+        let gravecrawler = scenario.add_real_card(P0, "Gravecrawler", Zone::Battlefield, db);
+        for seat in 0..4 {
+            for _ in 0..50 {
+                scenario.add_real_card(PlayerId(seat), "Swamp", Zone::Library, db);
+            }
         }
-        cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
-        settle(&mut runner, &score);
-        if is_offer(runner.state()) {
-            break;
+        let mut runner = scenario.build();
+        runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+        let score = |action: &GameAction| {
+            2 * names(&[gravecrawler])(action)
+                + chooses_color(ManaType::Black)(action)
+                + i32::from(matches!(
+                    action,
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(P1))
+                    } | GameAction::DecideOptionalEffect { accept: true }
+                ))
+        };
+        for _ in 0..4 {
+            let index = ability(runner.state(), altar, true);
+            activate(&mut runner, altar, index);
+            settle(&mut runner, &score);
+            if is_offer(runner.state()) {
+                break;
+            }
+            cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
+            settle(&mut runner, &score);
+            if is_offer(runner.state()) {
+                break;
+            }
         }
+        let offered = runner.state().clone();
+        assert_eq!(
+            (offered.stack.len(), lives(&offered)),
+            (payoffs.len(), frame.to_vec()),
+            "reach {payoffs:?}: the triggers stand at the offer frame"
+        );
+        let WaitingFor::LoopShortcut {
+            schema,
+            predicted_winner,
+            declaration,
+            ..
+        } = &offered.waiting_for
+        else {
+            panic!("{payoffs:?}: no offer: {:?}", latest_verdict(&offered));
+        };
+        assert_eq!(
+            (
+                &schema.iteration_count,
+                schema.measured_repetition_bound,
+                *predicted_winner
+            ),
+            (&IterationCount::Fixed(59), Some(59), Some(P0)),
+            "{payoffs:?}"
+        );
+        bounded_recorded_offer(&offered, 59);
+        assert_eq!(
+            declaration.as_ref().map(|own| own.replay.clone()),
+            Some(ReplayMode::Scheduled {
+                count: IterationCount::Fixed(19)
+            }),
+            "{payoffs:?}"
+        );
+        let suggestion = schema
+            .suggested_declaration
+            .clone()
+            .unwrap_or_else(|| panic!("{payoffs:?}: a suggestion"));
+        assert_eq!(
+            suggestion.replay,
+            ReplayMode::Scheduled {
+                count: IterationCount::Fixed(59)
+            },
+            "{payoffs:?}"
+        );
+
+        let mut events = act_events(
+            &mut runner,
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(59),
+                template: Some(suggestion),
+            },
+        );
+        events.extend(accept(&mut runner));
+        let taken = runner.state();
+        assert_eq!(
+            taken.waiting_for,
+            WaitingFor::GameOver { winner: Some(P0) },
+            "{payoffs:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::GameOver { .. }))
+                .count(),
+            1,
+            "{payoffs:?}"
+        );
+        assert_eq!(
+            (lives(taken), eliminated(taken)),
+            (end.to_vec(), vec![P1, PlayerId(2), PlayerId(3)]),
+            "{payoffs:?}"
+        );
     }
-    let offered = runner.state();
-    assert_eq!(
-        offered.stack.len(),
-        1,
-        "reach: Blood Artist's trigger stands at the offer"
-    );
-    let life = offered.players[1].life as u32;
-    bounded_recorded_offer(offered, life);
-    let WaitingFor::LoopShortcut {
-        schema,
-        predicted_winner,
-        ..
-    } = &offered.waiting_for
-    else {
-        unreachable!("asserted an offer");
-    };
-    assert_eq!(
-        (schema.measured_repetition_bound, *predicted_winner),
-        (Some(life), None)
-    );
 }
 
 fn in_a_best_of_three(runner: &mut GameRunner) {
