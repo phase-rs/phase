@@ -152,6 +152,8 @@ export const EMPTY_DRAFT_POOL_GROUPS: DraftPoolGroups = {
 
 // @sync-with: crates/draft-core/src/view.rs
 export interface SeatPublicView {
+  /** FIFO-only progress metadata. Legacy views omit it entirely. */
+  fifo_progress?: FifoProgressView;
   seat_index: number;
   display_name: string;
   is_bot: boolean;
@@ -185,6 +187,7 @@ export interface SeatPublicView {
 export type DraftStatus =
   | "Lobby"
   | "Drafting"
+  | "Review"
   | "Paused"
   | "Deckbuilding"
   | "Pairing"
@@ -553,7 +556,224 @@ export interface SharedStackView {
 }
 
 // @sync-with: crates/draft-core/src/view.rs
-export interface SpectatorDraftView {
+/** Rust-mirrored FIFO identity, prompt, and clock metadata. Read only; never
+ * manufacture these identifiers or deadlines on the client. */
+export interface FifoPromptId {
+  session_id: string;
+  seat: number;
+  generation: number;
+}
+
+export type FifoClockTarget =
+  | { type: "Pick"; prompt_id: FifoPromptId }
+  | { type: "Review"; next_round: number };
+
+export type FifoClockState =
+  | { type: "Running"; deadline_ms: number }
+  | { type: "Frozen"; remaining_ms: number };
+
+export interface FifoClock {
+  target: FifoClockTarget;
+  state: FifoClockState;
+}
+
+export interface FifoPausedState {
+  phase: "Drafting" | "Review";
+  reason: "PlayerDisconnected" | "PausedByHost" | "DisconnectGraceExpired";
+}
+
+export interface FifoPublicView {
+  session_id: string;
+  revision: number;
+  paused: FifoPausedState | null;
+  review_clock: FifoClock | null;
+}
+
+export interface FifoProgressView {
+  completed_steps: number;
+  round_completed_steps: number;
+}
+
+export interface FifoHeadView {
+  pack_id: number;
+  opening_seat: number;
+  round: number;
+  original_size: number;
+}
+
+export interface FifoSelectionRequirements {
+  picks: number;
+  burns: number;
+}
+
+/** The draft-effect cards a seat may use on its head pack, and the exact
+ * picks and burns for each number of them it may use. */
+export interface FifoEffectOptions {
+  /** The seat's eligible draft-effect pool cards, in pool order. */
+  card_instance_ids: string[];
+  /** Entry `i` is the requirement when `i + 1` of those cards are used. */
+  requirements: FifoSelectionRequirements[];
+}
+
+export interface FifoPlayerView {
+  state: FifoPublicView;
+  progress: FifoProgressView;
+  queue_count: number;
+  head: FifoHeadView | null;
+  prompt_id: FifoPromptId | null;
+  requirements: FifoSelectionRequirements;
+  /** `null` when the seat is not drafting, holds no eligible card, or has a
+   * head that cannot supply one additional card. */
+  effects: FifoEffectOptions | null;
+  clock: FifoClock | null;
+}
+
+/** Legacy views omit both transport-flow fields rather than sending a value. */
+export interface LegacyDraftViewArm {
+  flow?: undefined;
+  fifo?: undefined;
+}
+
+export interface FifoPlayerDraftViewArm {
+  flow: "FifoAsync";
+  fifo: FifoPlayerView;
+}
+
+/**
+ * Compatibility input for existing fixture-facing view values.  Complete FIFO
+ * views retain the arm above; consumers must still call `isFifoPlayerView`
+ * before treating this partial wire shape as actionable.
+ */
+export interface FifoPlayerDraftViewCompatibilityArm {
+  flow?: "FifoAsync";
+  fifo?: FifoPlayerView;
+}
+
+export interface FifoSpectatorDraftViewArm {
+  flow: "FifoAsync";
+  fifo: FifoPublicView;
+}
+
+export type DraftViewPodPhase =
+  | "lobby"
+  | "drafting"
+  | "review"
+  | "deckbuilding"
+  | "pairing"
+  | "matchInProgress"
+  | "roundComplete"
+  | "complete"
+  | "error";
+
+export interface DraftViewPresentation {
+  podPhase: DraftViewPodPhase;
+  isReadOnly: boolean;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isFifoPromptId(value: unknown): value is FifoPromptId {
+  return isRecord(value)
+    && typeof value.session_id === "string"
+    && isCount(value.seat)
+    && isCount(value.generation);
+}
+
+function isFifoClock(value: unknown): value is FifoClock {
+  if (!isRecord(value) || !isRecord(value.target) || !isRecord(value.state)) return false;
+  const target = value.target;
+  const state = value.state;
+  const validTarget = (target.type === "Pick" && isFifoPromptId(target.prompt_id))
+    || (target.type === "Review" && isCount(target.next_round));
+  const validState = (state.type === "Running" && isCount(state.deadline_ms))
+    || (state.type === "Frozen" && isCount(state.remaining_ms));
+  return validTarget && validState;
+}
+
+function isFifoPlayerView(view: DraftPlayerView): view is DraftPlayerViewFields & FifoPlayerDraftViewArm {
+  if (view.flow !== "FifoAsync" || !isRecord(view.fifo)) return false;
+  const fifo = view.fifo;
+  const state = fifo.state;
+  const paused = isRecord(state) ? state.paused : undefined;
+  const validPause = paused === null || (isRecord(paused)
+    && (paused.phase === "Drafting" || paused.phase === "Review")
+    && typeof paused.reason === "string");
+  const validHead = fifo.head === null || (isRecord(fifo.head)
+    && isCount(fifo.head.pack_id)
+    && isCount(fifo.head.opening_seat)
+    && isCount(fifo.head.round)
+    && isCount(fifo.head.original_size));
+  const effects = fifo.effects;
+  const validEffects = effects === null || (isRecord(effects)
+    && Array.isArray(effects.card_instance_ids)
+    && effects.card_instance_ids.every((id) => typeof id === "string")
+    && Array.isArray(effects.requirements)
+    && effects.requirements.every((entry) => isRecord(entry)
+      && isCount(entry.picks)
+      && isCount(entry.burns)));
+  return isRecord(state)
+    && typeof state.session_id === "string"
+    && isCount(state.revision)
+    && validPause
+    && (state.review_clock === null || isFifoClock(state.review_clock))
+    && isRecord(fifo.progress)
+    && isCount(fifo.progress.completed_steps)
+    && isCount(fifo.progress.round_completed_steps)
+    && isCount(fifo.queue_count)
+    && validHead
+    && (fifo.prompt_id === null || isFifoPromptId(fifo.prompt_id))
+    && isRecord(fifo.requirements)
+    && isCount(fifo.requirements.picks)
+    && isCount(fifo.requirements.burns)
+    && validEffects
+    && (fifo.clock === null || isFifoClock(fifo.clock));
+}
+
+/**
+ * The sole received-view presentation decision. It represents FIFO metadata
+ * already emitted by Rust but never activates a transport or fabricates a
+ * missing FIFO identity, revision, clock, or paused effective phase.
+ */
+export function draftViewPresentation(view: DraftPlayerView): DraftViewPresentation {
+  switch (view.status) {
+    case "Lobby":
+      return { podPhase: "lobby", isReadOnly: false };
+    case "Drafting": {
+      const legacy = view.flow === undefined && view.fifo === undefined;
+      return { podPhase: "drafting", isReadOnly: !legacy && !isFifoPlayerView(view) };
+    }
+    case "Review":
+      return { podPhase: "review", isReadOnly: true };
+    case "Paused": {
+      if (isFifoPlayerView(view) && view.fifo.state.paused?.phase === "Review") {
+        return { podPhase: "review", isReadOnly: true };
+      }
+      // Legacy or incomplete FIFO pause data deliberately keeps the prior safe
+      // drafting composition locked instead of guessing an effective phase.
+      return { podPhase: "drafting", isReadOnly: true };
+    }
+    case "Deckbuilding":
+      return { podPhase: "deckbuilding", isReadOnly: false };
+    case "Pairing":
+      return { podPhase: "pairing", isReadOnly: false };
+    case "MatchInProgress":
+      return { podPhase: "matchInProgress", isReadOnly: false };
+    case "RoundComplete":
+      return { podPhase: "roundComplete", isReadOnly: false };
+    case "Complete":
+      return { podPhase: "complete", isReadOnly: false };
+    case "Abandoned":
+      return { podPhase: "error", isReadOnly: true };
+  }
+}
+
+export interface SpectatorDraftViewFields {
   status: DraftStatus;
   kind: DraftKind;
   /** Candidate intent only for Chaos; no seat assignment is present. */
@@ -614,7 +834,10 @@ export interface GrantableCommanderFiller {
 }
 
 // @sync-with: crates/draft-core/src/view.rs
-export interface DraftPlayerView {
+export type SpectatorDraftView = SpectatorDraftViewFields
+  & (LegacyDraftViewArm | FifoSpectatorDraftViewArm);
+
+export interface DraftPlayerViewFields {
   status: DraftStatus;
   kind: DraftKind;
   /** Candidate intent plus the viewer-scoped Chaos metadata from the engine. */
@@ -736,6 +959,9 @@ export interface DraftPlayerView {
   play_first_chooser?: number | null;
 }
 
+export type DraftPlayerView = DraftPlayerViewFields
+  & (LegacyDraftViewArm | FifoPlayerDraftViewArm | FifoPlayerDraftViewCompatibilityArm);
+
 export type MultiplayerSeatDescriptor =
   | { type: "Human"; player_id: number; display_name: string }
   | { type: "Bot"; name: string };
@@ -844,6 +1070,16 @@ export interface CubeDraftSettings {
   };
 }
 
+/**
+ * The draft engine's verdict on a saved session, from
+ * `check_restorable_draft_session`: admitted or refused by its legacy
+ * admission, or unreadable as a draft session.
+ */
+export type RestorableDraftSessionVerdict =
+  | { type: "Admitted" }
+  | { type: "Incompatible" }
+  | { type: "Unreadable" };
+
 // ── Lazy WASM singleton ─────────────────────────────────────────────────
 
 let wasmModule: typeof DraftWasm | null = null;
@@ -878,6 +1114,10 @@ export class DraftEngineOperationLease {
 
   poolFilterOptions(pool: DraftCardInstance[]): PoolFilterOptions {
     return this.wasm.pool_filter_options(JSON.stringify(pool)) as PoolFilterOptions;
+  }
+
+  checkRestorableSession(json: string): RestorableDraftSessionVerdict {
+    return this.wasm.check_restorable_draft_session(json) as RestorableDraftSessionVerdict;
   }
 
   initializeSealed(setPoolJson: string, difficulty: number, seed: number): DraftPlayerView {
@@ -1214,6 +1454,15 @@ export class DraftAdapter {
    */
   async poolFilterOptions(pool: DraftCardInstance[]): Promise<PoolFilterOptions> {
     return withDraftEngineOperation((lease) => lease.poolFilterOptions(pool));
+  }
+
+  /**
+   * Ask the draft engine whether a saved session passes its legacy admission,
+   * without restoring it. Stateless: no draft session is installed, read or
+   * changed.
+   */
+  async checkRestorableSession(json: string): Promise<RestorableDraftSessionVerdict> {
+    return withDraftEngineOperation((lease) => lease.checkRestorableSession(json));
   }
 
   async initializeSealed(
