@@ -1107,13 +1107,22 @@ fn stamp_permission_printed_slot(
     }
 }
 
-/// Rewrite the printed slot on the retain modifications for `kind`.
+/// Rewrite the printed slot on the printed-slot modifications for `kind`.
 ///
 /// A trigger item only ever holds `RetainPrintedTriggerFromSource`, an ability
 /// item only `RetainPrintedAbilityFromSource` — `parse_has_this_ability` selects
 /// the variant from whichever `ParseContext` index is set — so the stamp is
 /// keyed on `kind`. The modification-variant match keeps a `_` arm on purpose:
-/// only two of `ContinuousModification`'s many variants carry a printed slot.
+/// only three of `ContinuousModification`'s many variants carry a printed slot.
+///
+/// CR 113.10 + CR 602.1: `RemoveSourceAbility` ("loses this ability") is the
+/// third, and unlike the retains it is emitted by a context-free recognizer
+/// (`oracle_static::parse_continuous_modifications`), so it arrives unbound and
+/// is stamped only on the ABILITY track. A trigger item's "this ability" names
+/// a `base_trigger_definitions` entry (CR 603.1), which this printed activated
+/// ability index cannot address, so it is deliberately left unbound there — a
+/// no-op removal rather than a removal of the wrong slot. No printed card has
+/// that shape today.
 fn stamp_retained_mods(mods: &mut [ContinuousModification], slot: usize, kind: PrintedItemKind) {
     for m in mods.iter_mut() {
         match (kind, m) {
@@ -1129,6 +1138,10 @@ fn stamp_retained_mods(mods: &mut [ContinuousModification], slot: usize, kind: P
                     source_ability_index,
                 },
             ) => *source_ability_index = slot,
+            (
+                PrintedItemKind::Ability,
+                ContinuousModification::RemoveSourceAbility { ability_index, .. },
+            ) => *ability_index = Some(slot),
             _ => {}
         }
     }
