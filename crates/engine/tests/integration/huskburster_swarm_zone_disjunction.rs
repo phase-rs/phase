@@ -8,11 +8,11 @@
 //! The regression under guard: the zone list's second half was dropped. The
 //! shared zone-suffix grammar accepted only `" or "` as a zone-list separator,
 //! and additionally required every entry to carry the same possessive, so
-//! "in exile and in your graveyard" parsed as the bare head "in exile" and the
-//! graveyard half was silently discarded. The spell then counted only exiled
-//! creature cards and cost MORE than it should, with nothing flagging it: the
-//! emitted `ObjectCount` is well formed, so the card reported
-//! `supported: true, gap_count: 0` and `cargo semantic-audit` found nothing.
+//! "in exile and in your graveyard" never folded into one population. At
+//! upstream/main the static parser fails closed on the same line: the card
+//! carries `Unimplemented { name: "static_structure" }` and reports
+//! `supported: false, gap_count: 1`. This fix restores the printed reduction
+//! and flips the card to supported.
 //!
 //! CR 601.2f is the authorizing rule for the reduction itself ("The total cost
 //! is the mana cost or alternative cost ..., plus all additional costs and cost
@@ -28,9 +28,10 @@
 //! `display_spell_cost` is the production cost-determination readout, and each
 //! case then pays EXACTLY that cost through `runner.cast(..)`, so a cost that is
 //! off by even one generic leaves the spell in hand. Reverting the parser fix
-//! drops the graveyard half: the combined case's cost rises from {2}{B} to
-//! {5}{B} and the graveyard-only case's from {4}{B} to {7}{B}, failing both the
-//! readout assertion and the exact-payment cast.
+//! restores the unsupported `static_structure` line, so no reduction applies:
+//! the combined case's cost rises from {2}{B} to the printed {7}{B} and the
+//! graveyard-only case's from {4}{B} to {7}{B}, failing both the readout
+//! assertion and the exact-payment cast.
 
 use engine::game::casting::display_spell_cost;
 use engine::game::scenario::{GameScenario, P0, P1};
@@ -148,13 +149,13 @@ fn huskburster_reduction_reads_each_zone_of_the_union_alone() {
 /// cost. Nor may an opponent's graveyard or a noncreature card in either zone
 /// reduce it.
 ///
-/// What this discriminates is the zone-list ENCODING, not the presence of an
-/// `Owned` property: "you own" contributes `Owned { You }` on its own (which is
-/// why the zone suffix's identical property is deduped). Had the mixed list kept
-/// the `TypedFilter.controller` owner-zone encoding instead, the population
-/// would be filtered by a control test that `filter::typed_filter_is_owner_scoped`
-/// declines to re-read as ownership for a list naming a shared zone — so the
-/// count would be wrong for a reason this test's costs would expose.
+/// What this discriminates is the PRESENCE of an ownership constraint on both
+/// legs, not the `Owned`-versus-controller encoding: in graveyard and exile the
+/// controller-or-owner read is the owner, so either encoding would exclude
+/// these opponent cards. A dropped `Owned` property would count them and this
+/// test's costs would expose it. The encoding itself (`Owned { You }` plus
+/// `controller: None`) is pinned by the parser test
+/// `huskburster_noun_phrase_folds_to_one_owned_prop_and_the_zone_union`.
 ///
 /// Paired positive reach-guard in the SAME test: the identical board plus one
 /// creature card P0 owns in each of the two zones reduces by exactly 2, so the
