@@ -111,6 +111,17 @@ pub struct PriorTargetBindingCounters {
     pub selection_bindings: u64,
 }
 
+/// Test-only counter for the CR 704.5a life-crossing read in `analysis::resource::PeriodicDelta`:
+/// how many repetitions' life charges were computed, by the one closure every reader of those
+/// charges goes through. It pins that an offer's work does not grow with a life total. Kept out of
+/// [`PerfCounterSnapshot`] for the same reason as the counter sets above: that struct's
+/// serialized field set powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeclaredLifeChargeCounters {
+    pub reads: u64,
+}
+
 /// Test-only counters for the CR 601.2f + CR 602.2b activation cost-determination
 /// routes. They pin that a target-first activation's mana leg is priced at the
 /// settlement write-back, and that the separate "is there mana left to pay?"
@@ -157,6 +168,20 @@ pub struct CompletionWalkWork {
 pub struct ExileReturnLatchCounters {
     /// Searches of the pass's event buffer for a holder's trigger event.
     pub trigger_origin_lookups: u64,
+}
+
+/// Test-only work counters for the CR 603.10a co-departure arm of trigger
+/// collection (`triggers::CoDepartureObserverIndex`). Kept out of
+/// [`PerfCounterSnapshot`] for the same reason as the counter sets above: that
+/// struct's serialized field set powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CoDepartureObserverCounters {
+    /// Per-pass index builds (one per pass that sees a co-departure group).
+    pub index_builds: u64,
+    /// (departure, co-departed observer) pairs whose observer source context
+    /// was resolved because the observer left with a trigger.
+    pub observer_resolutions: u64,
 }
 
 /// Test-only counters for the stack's bulk token executor
@@ -519,6 +544,10 @@ thread_local! {
         })
     };
     #[cfg(feature = "test-support")]
+    static DECLARED_LIFE_CHARGE_COUNTERS: Cell<DeclaredLifeChargeCounters> = const {
+        Cell::new(DeclaredLifeChargeCounters { reads: 0 })
+    };
+    #[cfg(feature = "test-support")]
     static ATTACK_DECLARATION_SOLVER_COUNTERS: Cell<AttackDeclarationSolverCounters> = const {
         Cell::new(AttackDeclarationSolverCounters {
             target_table_builds: 0,
@@ -588,6 +617,13 @@ thread_local! {
     static EXILE_RETURN_LATCH_COUNTERS: Cell<ExileReturnLatchCounters> = const {
         Cell::new(ExileReturnLatchCounters {
             trigger_origin_lookups: 0,
+        })
+    };
+    #[cfg(feature = "test-support")]
+    static CO_DEPARTURE_OBSERVER_COUNTERS: Cell<CoDepartureObserverCounters> = const {
+        Cell::new(CoDepartureObserverCounters {
+            index_builds: 0,
+            observer_resolutions: 0,
         })
     };
     #[cfg(feature = "test-support")]
@@ -696,6 +732,17 @@ pub fn record_prior_target_binding_selection() {
     PRIOR_TARGET_BINDING_COUNTERS.with(|cell| {
         let mut counters = cell.get();
         counters.selection_bindings += 1;
+        cell.set(counters);
+    });
+}
+
+/// CR 704.5a: recorded once per repetition's life charge that `analysis::resource::PeriodicDelta`
+/// computes, in the closure every reader of those charges calls.
+#[cfg(feature = "test-support")]
+pub fn record_declared_life_charge_read() {
+    DECLARED_LIFE_CHARGE_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.reads += 1;
         cell.set(counters);
     });
 }
@@ -965,6 +1012,11 @@ pub fn prior_target_binding_snapshot() -> PriorTargetBindingCounters {
     PRIOR_TARGET_BINDING_COUNTERS.with(Cell::get)
 }
 
+#[cfg(feature = "test-support")]
+pub fn declared_life_charge_snapshot() -> DeclaredLifeChargeCounters {
+    DECLARED_LIFE_CHARGE_COUNTERS.with(Cell::get)
+}
+
 /// One targeted-cast offer witness run: its spend, and whether it certified.
 #[cfg(feature = "test-support")]
 pub fn record_targeted_offer_witness(witness: &crate::ai_support::TargetedCastWitness) {
@@ -1133,10 +1185,41 @@ pub fn exile_return_latch_snapshot() -> ExileReturnLatchCounters {
     EXILE_RETURN_LATCH_COUNTERS.with(Cell::get)
 }
 
+/// CR 603.10a: one co-departure observer index build.
+#[cfg(feature = "test-support")]
+pub fn record_co_departure_index_build() {
+    CO_DEPARTURE_OBSERVER_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.index_builds += 1;
+        cell.set(counters);
+    });
+}
+
+/// CR 603.10a: one co-departed observer whose source context was resolved.
+#[cfg(feature = "test-support")]
+pub fn record_co_departure_observer_resolution() {
+    CO_DEPARTURE_OBSERVER_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.observer_resolutions += 1;
+        cell.set(counters);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn co_departure_observer_snapshot() -> CoDepartureObserverCounters {
+    CO_DEPARTURE_OBSERVER_COUNTERS.with(Cell::get)
+}
+
 #[cfg(feature = "test-support")]
 pub fn reset_prior_target_binding_counters() {
     PRIOR_TARGET_BINDING_COUNTERS
         .with(|counters| counters.set(PriorTargetBindingCounters::default()));
+}
+
+#[cfg(feature = "test-support")]
+pub fn reset_declared_life_charge_counters() {
+    DECLARED_LIFE_CHARGE_COUNTERS
+        .with(|counters| counters.set(DeclaredLifeChargeCounters::default()));
 }
 
 #[cfg(feature = "test-support")]
@@ -1273,6 +1356,8 @@ pub fn reset() {
     #[cfg(feature = "test-support")]
     reset_prior_target_binding_counters();
     #[cfg(feature = "test-support")]
+    reset_declared_life_charge_counters();
+    #[cfg(feature = "test-support")]
     ATTACK_DECLARATION_SOLVER_COUNTERS
         .with(|counters| counters.set(AttackDeclarationSolverCounters::default()));
     #[cfg(feature = "test-support")]
@@ -1286,6 +1371,9 @@ pub fn reset() {
     PLAY_TRACE_COUNTERS.with(|counters| counters.set(PlayTraceCounters::default()));
     #[cfg(feature = "test-support")]
     EXILE_RETURN_LATCH_COUNTERS.with(|counters| counters.set(ExileReturnLatchCounters::default()));
+    #[cfg(feature = "test-support")]
+    CO_DEPARTURE_OBSERVER_COUNTERS
+        .with(|counters| counters.set(CoDepartureObserverCounters::default()));
     #[cfg(feature = "test-support")]
     STACK_BULK_COUNTERS.with(|counters| counters.set(StackBulkCounters::default()));
     #[cfg(feature = "test-support")]

@@ -14,7 +14,7 @@ use crate::types::ability::{
     TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerOccurrenceState, TriggerPrintedOrigin,
 };
 use crate::types::card::{
-    LayoutKind, PrintedCardRef, PrintedLoyalty, TokenArtDescriptor, TokenImageRef,
+    LayoutKind, PrintedCardRef, PrintedLoyalty, Rarity, TokenArtDescriptor, TokenImageRef,
 };
 use crate::types::card_printing::SharedPrinting;
 use crate::types::card_type::{CardType, CoreType};
@@ -863,6 +863,35 @@ pub struct GameObject {
     /// (command zone), tracked via `Player::contraption_deck`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub in_contraption_deck: bool,
+    /// Horde enemy-deck token instance (casual Horde Magic variant): a token
+    /// that IS a Horde deck card, so it lives outside the battlefield by
+    /// design — library placeholders, the Boss pile, the command zone, and
+    /// (in boss-deck games) graveyard instances awaiting recursion. While
+    /// flagged it is exempt from the CR 704.5d cease-to-exist sweep
+    /// (`check_token_cease_to_exist`) AND from the CR 111.8 "can't change
+    /// zones" movement freeze (`token_cannot_change_zones`): boss-deck loops
+    /// move these tokens by design (Events library↔graveyard, Shredder's
+    /// Challenge returns, stage-clear exiles). Classic decks never move
+    /// theirs, so the freeze carve-out is inert there. Not a CR-sanctioned
+    /// rule; Horde Magic is casual, so the flag names the mechanism.
+    /// (Renamed from `in_horde_library` when boss decks widened it past the
+    /// library; the alias keeps old saves loading.) Skipped on the wire when
+    /// false so hidden stubs of ordinary objects carry no horde marker.
+    #[serde(
+        default,
+        alias = "in_horde_library",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub is_horde_deck_token: bool,
+    /// The card's rarity while it sits in the Horde library, consulted by
+    /// `WaveTermination::UntilRarityAtLeast` to decide when a reveal-and-resolve
+    /// wave ends (the D&D Horde: a wave ends when an uncommon-or-better card is
+    /// revealed). Set from the resolved card face's lowest printing rarity when
+    /// the library is seeded; `None` for every non-Horde object and for library
+    /// tokens (which have no rarity and never end a rarity wave). Not a CR
+    /// concept — Horde Magic is a casual community format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horde_library_rarity: Option<Rarity>,
     /// Unstable Contraptions: the sprocket this Contraption occupies on the
     /// battlefield. `None` when it is not assembled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1372,6 +1401,22 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_emblem: bool,
 
+    /// CR 905: True when this game object represents a conspiracy card in the
+    /// command zone. Stamped at creation so the object's identity as a conspiracy
+    /// is preserved even while face down (CR 905.4a), when all rules characteristics
+    /// (name, card types, abilities) are blanked (CR 315.5b). Not a characteristic:
+    /// it is the public display classification, since a face-down card in the
+    /// command zone is visibly a conspiracy without revealing which one.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_conspiracy: bool,
+
+    /// CR 702.106a / CR 702.106f: How many card names this conspiracy's agenda
+    /// secretly chooses (1 for hidden agenda, 2 for double agenda, 0 otherwise).
+    /// Stamped at creation because a face-down conspiracy has no text to read.
+    /// Private until revealed: CR 702.106f hides that more than one name exists.
+    #[serde(default, skip_serializing_if = "is_zero_u8_field")]
+    pub agenda_name_count: u8,
+
     /// CR 114: Display-only provenance of the source that created this emblem
     /// (planeswalker, spell, etc.). Populated at creation in `create_emblem`;
     /// `None` for every non-emblem object. See [`EmblemSource`].
@@ -1449,6 +1494,14 @@ pub struct GameObject {
     /// Persists for the object's lifetime on the battlefield.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_attributes: Vec<ChosenAttribute>,
+
+    /// CR 702.106a / CR 702.106f: Secretly chosen card names for face-down
+    /// hidden-agenda / double-agenda conspiracies in the command zone.
+    /// Kept secret from observers until the conspiracy is turned face up,
+    /// at which point they are revealed and transferred to `chosen_attributes`
+    /// as `ChosenAttribute::CardName` (CR 702.106c).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_chosen_names: Vec<String>,
 
     /// CR 701.15c: Which players have goaded this creature. A goaded creature must attack
     /// each combat if able and must attack a player other than the goading player(s) if able.
@@ -1920,6 +1973,8 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         commander_tax: _,
         is_renowned: _,
         is_emblem: _,
+        is_conspiracy: _,
+        agenda_name_count: _,
         emblem_source: _,
         // omitted-safe-by-write-site: written once at emblem creation, immutable after.
         linked_ability_source: _,
@@ -1935,6 +1990,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         foretold: _,
         exiled_by: _,
         chosen_attributes: _,
+        secret_chosen_names: _,
         goaded_by: _,
         detained_by: _,
         is_suspected: _,
@@ -1982,6 +2038,11 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         // synchronously by `push_ability_entry` into the resolving
         // `ResolvedAbility`'s own `noted_mana_payment` snapshot (§5.2c).
         mana_spent_to_activate: _,
+        // Horde-deck-token provenance: compared in `object_content_eq`
+        // (fail-closed — the flag flips alongside the zone change on reveal,
+        // and rarity is immutable display info).
+        is_horde_deck_token: _,
+        horde_library_rarity: _,
     } = o;
 }
 
@@ -2794,6 +2855,22 @@ impl GameObject {
         }
     }
 
+    /// CR 601.2a + CR 202.3e: The mana value of the spell this object represents
+    /// once its caster has announced `x` for the `{X}` in its mana cost. A spell
+    /// being cast is on the stack (CR 601.2a), so its announced X counts — even
+    /// though the engine keeps the card in its origin zone until the cast is
+    /// finalized and only stamps `cost_x_paid` after payment. Casting-legality
+    /// checks that read the spell's qualities after the X announcement project
+    /// the mana value through here rather than through the zone-gated
+    /// [`spell_mana_value_for`](Self::spell_mana_value_for).
+    pub fn spell_mana_value_with_announced_x(&self, fused: bool, x: u32) -> u32 {
+        match self.fused_split_half_for(fused) {
+            // Fuse cards carry no {X} in either half (see `spell_mana_value_for`).
+            Some(bf) => self.mana_cost.mana_value() + bf.mana_cost.mana_value(),
+            None => self.mana_cost.mana_value_with_x(Zone::Stack, Some(x)),
+        }
+    }
+
     /// CR 202.3d + CR 709.4d + CR 702.102b: The colors of the SPELL this object
     /// represents while being cast / on the stack — the COMBINED colors of both
     /// halves for a fused split spell, otherwise the object's own colors. See
@@ -3150,6 +3227,8 @@ impl GameObject {
             attraction_lights: Vec::new(),
             in_attraction_deck: false,
             in_contraption_deck: false,
+            is_horde_deck_token: false,
+            horde_library_rarity: None,
             contraption_sprocket: None,
             stickers: Vec::new(),
             mana_cost: ManaCost::default(),
@@ -3232,6 +3311,8 @@ impl GameObject {
             commander_tax: None,
             is_renowned: false,
             is_emblem: false,
+            is_conspiracy: false,
+            agenda_name_count: 0,
             emblem_source: None,
             linked_ability_source: None,
             is_token: false,
@@ -3246,6 +3327,7 @@ impl GameObject {
             foretold: false,
             exiled_by: None,
             chosen_attributes: Vec::new(),
+            secret_chosen_names: Vec::new(),
             goaded_by: std::collections::HashSet::new(),
             detained_by: std::collections::HashSet::new(),
             is_suspected: false,
@@ -4392,6 +4474,10 @@ impl GameObject {
 }
 
 /// Serde helper: skip serialization when a `u32` field is zero.
+fn is_zero_u8_field(n: &u8) -> bool {
+    *n == 0
+}
+
 fn is_zero_u32_field(n: &u32) -> bool {
     *n == 0
 }

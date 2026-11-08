@@ -209,6 +209,8 @@ fn core_type_name(core_type: &CoreType) -> &'static str {
         CoreType::Phenomenon => "Phenomenon",
         CoreType::Scheme => "Scheme",
         CoreType::Conspiracy => "Conspiracy",
+        CoreType::Boss => "Boss",
+        CoreType::Event => "Event",
         CoreType::Planeswalker => "Planeswalker",
         CoreType::Sorcery => "Sorcery",
         CoreType::Tribal => "Tribal",

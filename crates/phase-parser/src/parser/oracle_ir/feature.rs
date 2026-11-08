@@ -123,6 +123,10 @@ pub(crate) enum OracleSemanticFeature {
     /// parse that leaves the relative clause unrepresented has widened the
     /// effect to every object of the type.
     CombatPairingRelation,
+    /// CR 106.3 + CR 601.2h: a cast trigger's "using mana produced by <source>"
+    /// qualifier — a parse that leaves it unrepresented fires on every matching
+    /// spell, whichever source's mana paid for it.
+    CastManaSourceQualifier,
 }
 
 impl OracleSemanticFeature {
@@ -158,6 +162,7 @@ impl OracleSemanticFeature {
             Self::DamageSubjectConjunction => "DamageSubjectConjunction",
             Self::CombatHistoryRelation => "CombatHistoryRelation",
             Self::CombatPairingRelation => "CombatPairingRelation",
+            Self::CastManaSourceQualifier => "CastManaSourceQualifier",
         }
     }
 }
@@ -631,6 +636,7 @@ mod tests {
             (F::DamageSubjectConjunction, "DamageSubjectConjunction"),
             (F::CombatHistoryRelation, "CombatHistoryRelation"),
             (F::CombatPairingRelation, "CombatPairingRelation"),
+            (F::CastManaSourceQualifier, "CastManaSourceQualifier"),
         ];
         for (feature, label) in expected {
             assert_eq!(feature.detector_label(), label);
