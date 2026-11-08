@@ -803,8 +803,10 @@ pub(crate) fn zone_move_is_primitive_noop(
     object: &GameObject,
     to: Zone,
 ) -> bool {
-    // CR 111.8: a token outside the battlefield (and not stack-resident) stays put.
-    zones::token_is_outside_battlefield_and_stack(state, object)
+    // CR 111.8: a token outside the battlefield (and not stack-resident) stays
+    // put — except a Horde-deck token, which moves by design in boss-deck
+    // games (see `zones::token_cannot_change_zones`).
+    zones::token_cannot_change_zones(state, object)
         // CR 400.6 + CR 603.6d: Battlefield -> Battlefield is no entry event.
         || (object.zone == Zone::Battlefield && to == Zone::Battlefield)
 }
@@ -1638,6 +1640,14 @@ fn anticipated_zone_change_delivery(
 /// `mill_double_redirect_choice_continuation` (two sequential parks, no
 /// completion) and `surveil_rest_pile_redirect_continuation` (two sequential
 /// parks WITH a completion that must fire once after the second park drains).
+///
+/// CLASSIFICATION CONTRACT (issue #10431): the resumed segment's
+/// `terminal_completion` is recorded by the resume seam
+/// (`engine_replacement::handle_replacement_choice_inner`) before either
+/// terminal, so a delivery that parks again in its own tail (ETB counter
+/// ordering, entering-attacker choice) is still classified `Moved` here. `None`
+/// at this point means the delivery never reached a terminal decision and is a
+/// contract violation, not a state this function may paper over.
 pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if let Some(pending) = state.active_batch_delivery().cloned() {
         let PendingBatchDeliveries {
@@ -1690,9 +1700,24 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 &paused_current.delivery_events,
             )
             .expect("resumed batch retains its exact paused delivery");
-            let terminal_completion = paused_current
-                .terminal_completion
-                .expect("resumed batch delivery records its exact terminal completion");
+            // CR 616.1 + CR 603.10a: a resumed batch member must be classified
+            // before its owner can be drained. The resume seam records it whether
+            // the delivery returns `Done` or parks again
+            // (`engine_replacement::handle_replacement_choice_inner`), so `None`
+            // here means a delivery that never reached a terminal decision — a
+            // contract violation, never a fallback (settlement would leave the
+            // member `Pending`).
+            let terminal_completion =
+                paused_current
+                    .terminal_completion
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "resumed batch member {} (incarnation {}) has no terminal completion ({} retained delivery events)",
+                            paused_current.member.object_id.0,
+                            paused_current.member.incarnation,
+                            paused_current.delivery_events.len()
+                        )
+                    });
             logical_zone_change_group
                 .record_delivery_completion(paused_current.member.object_id, terminal_completion)
                 .expect("resumed batch member records its exact terminal outcome");
@@ -4730,6 +4755,23 @@ fn execute_zone_move_with_applied_terminal(
     if from_zone == Zone::Library && dest_zone == Zone::Library && library_placement.is_none() {
         return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
     }
+    // Boss-stage Horde (Turtle Team-Up booklet, printed p. 7): Boss-owned
+    // cards bound for hand go to their graveyard "instead". Normalize the
+    // PROPOSED destination — before `replace_event` consults — so
+    // graveyard-scoped replacements (Rest in Peace) observe the real
+    // destination and survive CR 616.1 ordering pauses on the parked event.
+    // CR 400.6 applies replacements before the move happens; CR 616.1f
+    // repeats the process for effects that would now be applicable. The
+    // classic top-of-library redirect stays a mover-level mapping in
+    // `zones::move_to_zone` (unchanged); that mover also keeps this mapping
+    // as a backstop for consult-bypassing paths. The object exists (the
+    // missing-object arm returned above), so the owner read is total.
+    let dest_zone = {
+        let owner = state.objects.get(&obj_id).map(|obj| obj.owner);
+        owner.map_or(dest_zone, |owner| {
+            zones::boss_hand_redirect_destination(state, owner, dest_zone)
+        })
+    };
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
     if let ProposedEvent::ZoneChange {
         applied,
