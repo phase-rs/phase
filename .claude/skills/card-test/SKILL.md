@@ -217,13 +217,14 @@ fn my_card_does_the_thing() {
   `client/public/card-data.json` and compares it against the committed fixture, exiting
   non-zero at the FIRST mismatch, in this order: a referenced card the fixture does not
   cover (`error: fixture is stale — N card(s) not covered`, followed by the list), a
-  parser-backed card that leaked into the fixture, a stored value that differs from the
-  fresh export (`error: fixture semantic values are stale`), or a payload that is not
-  canonical `gzip -9 -n` output (`error: fixture bytes are not canonical gzip -9 -n
-  output`). On a match it prints `ok: fixture covers all N referenced cards with
-  canonical gzip bytes`. So the check is stricter than a key-set comparison — a parser
-  change that alters a fixture card's stored parse FAILS it, which is the signal to
-  re-run `python3 scripts/gen-test-fixture.py` (no `--check`) and commit the regenerated
-  fixture in the same PR. Note what does not run it: no CI workflow invokes `--check`, so
-  a stale fixture still reaches the integration suite — the gate is the command you run,
-  not a green build.
+  parser-backed card that leaked into the fixture, stored values or keys that differ
+  from the on-disk export (`error: fixture semantic values are stale`), or a payload
+  that is not canonical `gzip -9 -n` output (`error: fixture bytes are not canonical
+  gzip -9 -n output`). On a match it prints `ok: fixture covers all N referenced cards
+  with canonical gzip bytes`. The check is stricter than a key-set comparison, but it
+  does not rerun the parser or refresh `client/public/card-data.json`. After changing
+  the parser, first regenerate that export through the card-data pipeline, then run
+  `--check`. If the fixture differs from the refreshed export, re-run
+  `python3 scripts/gen-test-fixture.py` (no `--check`) and commit the regenerated fixture
+  in the same PR. An unchanged export can leave `--check` green after a parser change.
+  No CI workflow invokes `--check`, so a green build is not proof of fixture freshness.
