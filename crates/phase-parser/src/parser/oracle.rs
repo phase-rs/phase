@@ -12167,23 +12167,17 @@ fn parse_loyalty_ability_ir(
     cost: AbilityCost,
     ctx: &mut ParseContext,
 ) -> AbilityIr {
-    // CR 602.1b + CR 602.5: a loyalty ability is an activated ability, so a
-    // printed "Activate only if …" rider is an activation restriction on the
-    // ability — not part of the effect body. Strip it before parsing (otherwise
-    // the rider's imperative remains as an unrecognized effect clause) and
-    // replay it through the shared `ActivatedConstraintAst` lowering so loyalty
-    // abilities reach the same restrictions/activator-filter surface as every
-    // other activated ability.
+    // CR 602.1b + CR 602.5: lower printed activation restrictions through the
+    // shared stripper so the loyalty activation gate can enforce them.
     //
-    // Keep the original effect text byte-for-byte when the line prints no
-    // recognized constraint, so this routing adds no parser blast radius to the
-    // hundreds of loyalty abilities whose text carries no rider (the shared
-    // stripper also trims the terminal period).
+    // Keep the original text when the stripper finds no restriction or peels
+    // an activator permission. The loyalty gate only supports the controller,
+    // so an explicit permission must remain visible to coverage.
     let (stripped_effect_text, constraints) = strip_activated_constraints(effect_text);
-    let has_constraints = !constraints.restrictions.is_empty()
-        || constraints.activator_filter.is_some()
-        || constraints.any_player_may_activate;
-    let effect_text = if has_constraints {
+    let has_supported_restrictions = !constraints.restrictions.is_empty()
+        && constraints.activator_filter.is_none()
+        && !constraints.any_player_may_activate;
+    let effect_text = if has_supported_restrictions {
         stripped_effect_text.as_str()
     } else {
         effect_text
@@ -12193,14 +12187,9 @@ fn parse_loyalty_ability_ir(
     let mut ir = parse_ability_ir_with_context(effect_text, AbilityKind::Activated, ctx);
     ir.shell.cost = Some(cost);
     ir.shell.description = Some(description.to_string());
-    if !constraints.restrictions.is_empty() {
+    if has_supported_restrictions {
         ir.shell.activation_restrictions = constraints.restrictions;
     }
-    ir.shell.activator_filter = constraints.activator_filter.or_else(|| {
-        constraints
-            .any_player_may_activate
-            .then_some(PlayerFilter::All)
-    });
     apply_loyalty_restrictions(&mut ir.shell);
     ir
 }
