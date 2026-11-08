@@ -22238,6 +22238,13 @@ fn resolve_chain_body(
     depth: u32,
     payment_choice: Option<AutoMayChoice>,
 ) -> Result<ResolutionProgress, EffectError> {
+    // CR 104.1: a game that ended earlier in this resolution is terminal — no
+    // player receives priority again, so no later instruction resolves. This
+    // is the shared boundary every chained instruction enters through.
+    if state.game_end.is_some() {
+        return Ok(ResolutionProgress::Complete);
+    }
+
     let mut progress = ResolutionProgress::Complete;
     let mut tail_ownership = TailOwnership::Caller;
     // CR 608.2c: a printed placement instruction establishes a fresh "that
@@ -25079,6 +25086,17 @@ fn resolve_chain_body(
     } else {
         ability
     };
+
+    // CR 104.1 + CR 608.2c: the instruction that just resolved recorded the
+    // game's end (an effect-based win, or a loss that left one player/team).
+    // No later instruction of this chain resolves. In particular, Fblthp's
+    // "owner shuffles him into their library" tail must not move or shuffle
+    // him after its conditional "you win the game" has ended the game. The
+    // per-instruction entry guard in `resolve_chain_body` catches every
+    // recursive step; this guard stops the tail of the CURRENT instruction.
+    if state.game_end.is_some() {
+        return Ok(ResolutionProgress::Complete);
+    }
 
     // CR 608.2c + CR 613.1: A chained sub-ability is the next instruction in the
     // same resolution (instructions are followed "in the order written"), so it

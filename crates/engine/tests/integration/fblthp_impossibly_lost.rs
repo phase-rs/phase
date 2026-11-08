@@ -27,7 +27,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType, Supertype};
-use engine::types::events::GameEvent;
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -200,6 +200,44 @@ fn combat_damage_outside_the_controllers_turn_does_not_fire() {
     assert!(runner.state().stack.iter().all(|e| e.source_id != fblthp));
 }
 
+/// CR 805.4 + CR 102.1: Two-Headed Giant takes turns by team, not by player.
+/// P0 is the active team's representative; Fblthp's controller P1 is the same
+/// team's nonrepresentative seat. Combat damage during P0's shared turn still
+/// satisfies Fblthp's "during your turn" (the controller's team's turn).
+#[test]
+fn combat_damage_on_the_shared_team_turn_triggers_for_a_teammate() {
+    let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for name in ["Lib A", "Lib B", "Lib C", "Lib D", "Lib E"] {
+        scenario.add_card_to_library_top(P1, name);
+    }
+    let fblthp = scenario
+        .add_creature_from_oracle(P1, "Fblthp, Impossibly Lost", 1, 1, ORACLE)
+        .id();
+    let attacker = scenario.add_creature(P0, "Attacker", 1, 1).id();
+    let mut runner = scenario.build();
+    let hand_before = hand_len(&runner, P1);
+    let p2_life_before = runner.life(P2);
+
+    let _ = drive_combat_damage(&mut runner, &[(attacker, AttackTarget::Player(P2))]);
+
+    assert!(
+        runner.life(P2) < p2_life_before,
+        "reach guard: P2's team took combat damage"
+    );
+    assert_eq!(
+        hand_len(&runner, P1),
+        hand_before + 2,
+        "the active team's shared turn is the controller's turn"
+    );
+    assert_eq!(
+        library_len(&runner, P1),
+        4,
+        "5 - 2 drawn + Fblthp shuffled in"
+    );
+    assert_eq!(runner.state().objects[&fblthp].zone, Zone::Library);
+}
+
 /// Card text + CR 104.2b + CR 608.2c: the effect states that its controller
 /// wins, and the controller follows the instructions in the order written — so
 /// the win check reads the library AFTER the draw, and drawing the last two
@@ -211,12 +249,14 @@ fn win_after_the_draw_empties_the_library() {
     for name in ["L1", "L2"] {
         scenario.add_card_to_library_top(P0, name);
     }
-    scenario.add_creature_from_oracle(P0, "Fblthp, Impossibly Lost", 1, 1, ORACLE);
+    let fblthp = scenario
+        .add_creature_from_oracle(P0, "Fblthp, Impossibly Lost", 1, 1, ORACLE)
+        .id();
     let attacker = scenario.add_creature(P0, "Attacker", 1, 1).id();
     let mut runner = scenario.build();
     let hand_before = hand_len(&runner, P0);
 
-    let _ = drive_combat_damage(&mut runner, &[(attacker, AttackTarget::Player(P1))]);
+    let events = drive_combat_damage(&mut runner, &[(attacker, AttackTarget::Player(P1))]);
 
     assert_eq!(
         runner.life(P1),
@@ -233,6 +273,28 @@ fn win_after_the_draw_empties_the_library() {
         .players
         .iter()
         .all(|p| p.id == P0 || p.is_eliminated));
+    // CR 104.1: the win ends the game before the printed shuffle tail, so
+    // Fblthp stays on the battlefield and the library is not shuffled.
+    assert_eq!(
+        library_len(&runner, P0),
+        0,
+        "the post-win shuffle tail must not run"
+    );
+    assert_eq!(
+        runner.state().objects[&fblthp].zone,
+        Zone::Battlefield,
+        "the post-win move tail must not run"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            }
+        )),
+        "no post-win shuffle may be emitted"
+    );
     // CR 704.5b never fires for P0 here: the library held exactly two cards and
     // the draw took exactly two, so `attempted_empty_library` is `2 < 2 == false`
     // (game/effects/draw.rs) and `drew_from_empty_library` stays false; the
@@ -258,7 +320,9 @@ fn win_survives_a_draw_from_an_empty_library() {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
     // No library cards at all: the Draw 2 is an empty-library draw.
-    scenario.add_creature_from_oracle(P0, "Fblthp, Impossibly Lost", 1, 1, ORACLE);
+    let fblthp = scenario
+        .add_creature_from_oracle(P0, "Fblthp, Impossibly Lost", 1, 1, ORACLE)
+        .id();
     let attacker = scenario.add_creature(P0, "Attacker", 1, 1).id();
     let mut runner = scenario.build();
 
@@ -287,6 +351,27 @@ fn win_survives_a_draw_from_an_empty_library() {
         "the draw really came from an empty library"
     );
     assert_eq!(hand_len(&runner, P0), 0, "there was nothing to draw");
+    // CR 104.1: the win ends the game before the printed shuffle tail.
+    assert_eq!(
+        library_len(&runner, P0),
+        0,
+        "the post-win shuffle tail must not run"
+    );
+    assert_eq!(
+        runner.state().objects[&fblthp].zone,
+        Zone::Battlefield,
+        "the post-win move tail must not run"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            }
+        )),
+        "no post-win shuffle may be emitted"
+    );
     assert!(
         !p0.is_eliminated,
         "the winner must not be eliminated by the empty-library loss SBA"
