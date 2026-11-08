@@ -37347,6 +37347,8 @@ impl GameState {
             // `is_loop_comparable` requires both empty, so no sampled position holds one.
             deferred_entry_events: _,
             pending_attack_trigger_events: _,
+            // The hero-event batch is likewise excluded by `is_loop_comparable`.
+            pending_hero_event: _,
             // NOT AT A SAMPLE — each carries `ObjectIncarnationRef` and is compared, but it
             // is non-empty only while `waiting_for` is that search's own non-Priority
             // prompt; every loop sample is taken at `WaitingFor::Priority`, so it cannot be
@@ -37354,6 +37356,10 @@ impl GameState {
             active_library_searches: _,
             pending_scoped_library_search: _,
             pending_library_search_delivery: _,
+            // Pin-bearing damage/discard pauses drain before Priority is restored;
+            // see their existing classification in `_gamestate_partition_is_total`.
+            pending_damage_post_loss: _,
+            pending_single_discard: _,
             // NOT THIS CLASS — no incarnation id, a stable `ObjectId`/`PlayerId` only, or an
             // unbounded ledger that grows every cycle, so ranking it cannot equalize a loop:
             turn_number: _,
@@ -37654,6 +37660,16 @@ impl GameState {
             planar_die_actions_this_turn: _,
             scheme_deck: _,
             archenemy: _,
+            pending_horde_reveal: _,
+            horde_wave_remaining: _,
+            horde_wave_nontokens_remaining: _,
+            horde_turn_index: _,
+            horde_postcombat_activation_queue: _,
+            horde_seats: _,
+            active_horde_index: _,
+            boss_deck: _,
+            boss_stage: _,
+            baxter_set_aside: _,
             initiative: _,
             combat_prevention_tally: _,
             combat_one_shot_applications: _,
