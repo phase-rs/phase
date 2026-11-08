@@ -167,7 +167,9 @@ function fullSessionKeysEqual(
 export interface ServerDraftAdapterOptions {
   /**
    * Supplies the negotiated StateCodecV1 decoder session for an attachment.
-   * `undefined` uses the tab's shared engine; `null` keeps snapshot-only
+   * `undefined` uses the shared engine only if already ready, otherwise starts
+   * with snapshots while it warms in the background. Explicit providers retain
+   * bounded preparation and may wait for startup. `null` keeps snapshot-only
    * delivery with no newly introduced await before the handshake.
    */
   stateCodecSessionProvider?: StateCodecSessionProvider | null;
@@ -255,7 +257,7 @@ export class ServerDraftAdapter implements EngineAdapter {
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
   private _serverInfo: ServerInfo | null = null;
-  /** Prepared decoder source: snapshot-only only when an explicit `null` opts out. */
+  /** Ready-only shared decoder by default; explicit providers retain bounded preparation. */
   private readonly stateCodecProvider: StateCodecSessionProvider | null;
   /**
    * Application-bootstrap authority and recovery state for the current socket,
@@ -272,7 +274,7 @@ export class ServerDraftAdapter implements EngineAdapter {
   ) {
     this.stateCodecProvider = options.stateCodecSessionProvider !== undefined
       ? options.stateCodecSessionProvider
-      : () => getSharedAdapter().openStateCodecSession();
+      : () => getSharedAdapter().openStateCodecSession("ifReady");
   }
 
   // ── Public accessors ───────────────────────────────────────────────

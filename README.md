@@ -383,8 +383,10 @@ Transport-agnostic `EngineAdapter` interface with multiple implementations:
 - **WebSocketAdapter** — WebSocket (multiplayer)
 - **P2PHostAdapter / P2PGuestAdapter** — WebRTC peer-to-peer via PeerJS
 
-Server game and draft sockets negotiate `StateCodecV1` when a shared WASM decoder
-lease is available; otherwise they retain snapshot delivery. The codec wrapper
+Default server game and draft sockets negotiate `StateCodecV1` only when the shared
+WASM runtime is already ready. A cold runtime warms in the background while the
+current connection opens snapshot-only; later connections can use the decoder.
+Explicit codec providers retain their bounded preparation wait. The codec wrapper
 runs after optional gzip decompression and preserves frame order. It limits
 outstanding receives (including an active decode) to 64 messages and 16 MiB of
 UTF-16 text; overload closes the transport and releases its lease rather than

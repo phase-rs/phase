@@ -1745,6 +1745,98 @@ describe("WasmAdapter state-codec sessions", () => {
     subject.dispose();
   });
 
+  it("declines a cold lease promptly, warms once, and opens a usable lease only on a later request", async () => {
+    let finishInitialization!: () => void;
+    mockWorkerClient.initialize.mockReturnValueOnce(
+      new Promise<void>((resolve) => { finishInitialization = resolve; }),
+    );
+    let settled = false;
+    const opening = subject.openStateCodecSession("ifReady").then((session) => {
+      settled = true;
+      return session;
+    });
+    try {
+      await vi.waitFor(() => expect(settled).toBe(true));
+      await expect(opening).resolves.toBeNull();
+      await expect(subject.openStateCodecSession("ifReady")).resolves.toBeNull();
+      expect(mockWorkerClient.initialize).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.openStateCodec).not.toHaveBeenCalled();
+    } finally {
+      finishInitialization();
+      await subject.initialize();
+    }
+    expect(mockWorkerClient.openStateCodec).not.toHaveBeenCalled();
+
+    const session = await subject.openStateCodecSession("ifReady");
+    expect(session).not.toBeNull();
+    await expect(session!.decode(new Uint8Array([1]))).resolves.toEqual({
+      kind: "decoded",
+      json: "{}",
+    });
+    expect(mockWorkerClient.openStateCodec).toHaveBeenCalledOnce();
+    session!.close();
+    session!.close();
+    subject.dispose();
+    expect(mockWorkerClient.closeStateCodec).toHaveBeenCalledOnce();
+  });
+
+  it("waits for cold startup by default before returning a codec lease", async () => {
+    let finishInitialization!: () => void;
+    mockWorkerClient.initialize.mockReturnValueOnce(
+      new Promise<void>((resolve) => { finishInitialization = resolve; }),
+    );
+    let settled = false;
+    const opening = subject.openStateCodecSession().then((session) => {
+      settled = true;
+      return session;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(mockWorkerClient.openStateCodec).not.toHaveBeenCalled();
+    finishInitialization();
+    const session = await opening;
+    expect(session).not.toBeNull();
+    await expect(session!.decode(new Uint8Array([1]))).resolves.toEqual({
+      kind: "decoded",
+      json: "{}",
+    });
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "does not revive a disposed facade or leak a lease when background startup later %ss",
+    async (completion) => {
+      let finishInitialization!: () => void;
+      let failInitialization!: (error: Error) => void;
+      mockWorkerClient.initialize.mockReturnValueOnce(
+        new Promise<void>((resolve, reject) => {
+          finishInitialization = resolve;
+          failInitialization = reject;
+        }),
+      );
+      let settled = false;
+      const opening = subject.openStateCodecSession("ifReady").then((session) => {
+        settled = true;
+        return session;
+      });
+      // Observe the public request even if the prompt-return assertion fails;
+      // background initialization itself must still consume its own rejection.
+      void opening.catch(() => undefined);
+      try {
+        await vi.waitFor(() => expect(settled).toBe(true));
+        await expect(opening).resolves.toBeNull();
+      } finally {
+        subject.dispose();
+        if (completion === "resolve") finishInitialization();
+        else failInitialization(new Error("startup canceled"));
+      }
+      await vi.waitFor(() => expect(mockWorkerClient.dispose).toHaveBeenCalledOnce());
+      await expect(subject.openStateCodecSession("ifReady")).resolves.toBeNull();
+      expect(mockWorkerClient.initialize).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.openStateCodec).not.toHaveBeenCalled();
+      expect(ensureWasmInit).not.toHaveBeenCalled();
+    },
+  );
+
   it("binds a lease to its worker session and closes it exactly once", async () => {
     mockWorkerClient.openStateCodec.mockResolvedValueOnce(41);
     mockWorkerClient.decodeStateCodec.mockResolvedValueOnce({
@@ -1883,7 +1975,7 @@ describe("WasmAdapter state-codec sessions", () => {
     expect(mockWorkerClient.closeStateCodec).toHaveBeenCalledWith(7);
   });
 
-  it("opens and decodes through the shared main-thread fallback", async () => {
+  it.each(["wait", "ifReady"] as const)("opens and decodes through the ready main-thread fallback (%s)", async (startup) => {
     mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
     const free = vi.fn();
     stateCodecDecodeJs.mockReturnValue({
@@ -1894,7 +1986,7 @@ describe("WasmAdapter state-codec sessions", () => {
     await subject.initialize();
     expect(subject.getEngineClient()).toBeNull();
 
-    const session = await subject.openStateCodecSession();
+    const session = await subject.openStateCodecSession(startup);
     expect(session).not.toBeNull();
     await expect(session!.decode(new Uint8Array([1]))).resolves.toEqual({
       kind: "decoded",

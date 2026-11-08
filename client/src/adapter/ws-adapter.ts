@@ -224,10 +224,11 @@ export interface WebSocketAdapterOptions {
   nativePregame?: NativePregameAdapterOptions;
   /**
    * Supplies the negotiated StateCodecV1 decoder session for an attachment.
-   * `undefined` selects the default: none for native sidecar sockets (their
-   * sessions stay snapshot-only), otherwise the tab's shared engine. An
-   * explicit `null` opts out and starts the handshake in the same turn, with
-   * no newly introduced await.
+   * `undefined` keeps native sidecar sockets snapshot-only; remote sockets use
+   * the shared engine only if already ready, otherwise start with snapshots
+   * while it warms in the background. Explicit providers retain bounded
+   * preparation and may wait for startup. An explicit `null` opts out with
+   * no newly introduced await before the handshake.
    */
   stateCodecSessionProvider?: StateCodecSessionProvider | null;
 }
@@ -1987,8 +1988,9 @@ export class WebSocketAdapter implements EngineAdapter {
   private readonly disposeAbort = new AbortController();
   /**
    * Prepared decoder source for this adapter. Resolved once at construction:
-   * native sidecar sockets keep snapshot-only bring-up, everything else gets
-   * the tab's shared engine. `null` means no preparation and no advertisement.
+   * native sidecars stay snapshot-only; the remote default never waits for
+   * shared-engine startup. Explicit providers retain bounded preparation.
+   * `null` means no preparation and no advertisement.
    */
   private readonly stateCodecProvider: StateCodecSessionProvider | null;
   /** Identifies the newest attachment; aborting it supersedes the older one. */
@@ -2058,7 +2060,7 @@ export class WebSocketAdapter implements EngineAdapter {
       ? options.stateCodecSessionProvider
       : this.isNativeSocket()
         ? null
-        : () => getSharedAdapter().openStateCodecSession();
+        : () => getSharedAdapter().openStateCodecSession("ifReady");
   }
 
   get gameCode(): string | null {

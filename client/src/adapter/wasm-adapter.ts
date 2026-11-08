@@ -1507,9 +1507,21 @@ export class WasmAdapter
    *
    * The returned lease is live until `close()`; closing it never resets the
    * game, disposes the shared engine, or affects another session.
+   * `ifReady` warms a cold runtime in the background without delaying the
+   * caller or allocating a lease when that startup eventually completes.
    */
-  async openStateCodecSession(): Promise<StateCodecSession | null> {
-    await this.initialize();
+  async openStateCodecSession(
+    startup: "wait" | "ifReady" = "wait",
+  ): Promise<StateCodecSession | null> {
+    if (startup === "ifReady") {
+      if (this.disposed) return null;
+      if (!this.initialized) {
+        void this.initialize().catch(() => undefined);
+        return null;
+      }
+    } else {
+      await this.initialize();
+    }
     if (this.disposed) return null;
     const generation = this.lifecycleGeneration;
     if (this.engine) {
