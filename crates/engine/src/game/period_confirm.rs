@@ -65,9 +65,6 @@ pub enum OfferRefusal {
     Cover(ObjectGrowthVerdict),
     /// The period makes no progress for its controller.
     NoAxis,
-    /// CR 704.5a / CR 704.5b / CR 704.5c + CR 732.2a: the period moves some player toward losing
-    /// the game, and its proposer survives no repetition of the declaration it would be offered.
-    SurvivesNoRepetition,
     /// CR 732.2a + CR 613.4c: the period grows history a static reads, so each repetition's delta
     /// grows and neither a threshold count nor a constant per-repetition delta is true of it.
     GrowingLoss,
@@ -2558,7 +2555,7 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
             )? {
                 Some(mut parts) => {
                     (performed_reaches, recorded) =
-                        perform_published(&mut parts, &s_n, &items, span.reach, holder)?;
+                        perform_published(&mut parts, &s_n, &items, span.reach, holder);
                     let delta = ResourceVector::period(prior, current);
                     (delta, None, Some(parts), growth, CountedBy::Threshold)
                 }
@@ -3438,10 +3435,10 @@ fn perform_published(
     items: &[PeriodItem],
     reach: PeriodReach,
     holder: PlayerId,
-) -> Result<(Vec<PerformedReach>, Option<PerformedReach>), OfferRefusal> {
+) -> (Vec<PerformedReach>, Option<PerformedReach>) {
     use crate::analysis::decision_template::{IterationCount, ReplayMode};
     let IterationCount::Fixed(n) = parts.schema.iteration_count else {
-        return Ok((Vec::new(), None));
+        return (Vec::new(), None);
     };
     let mut recorded = None;
     let mut performed = Vec::new();
@@ -3474,10 +3471,6 @@ fn perform_published(
         }
     }
     if let Some(record) = published {
-        // CR 732.2a: a published declaration its proposer survives no repetition of commits nothing.
-        if record.reach == 0 {
-            return Err(OfferRefusal::SurvivesNoRepetition);
-        }
         parts.schema.iteration_count = IterationCount::Fixed(record.reach);
         parts.schema.deliverable_capacity = record.reach;
         // CR 800.4a: a performance that went on past a departure measured the bound itself.
@@ -3486,7 +3479,7 @@ fn perform_published(
         }
         parts.predicted_winner = record.winner;
     }
-    Ok((performed, recorded))
+    (performed, recorded)
 }
 
 /// Every span the current trace names, with the confirmer's verdict on each at `state`, which
@@ -4068,45 +4061,6 @@ mod tests {
             OfferRefusal::LifeChangeUnrepresentable {
                 player: PlayerId(0)
             }
-        );
-    }
-
-    /// CR 732.2a + CR 704.5a: a published declaration its proposer survives no repetition of is
-    /// refused, never offered at `Fixed(0)`.
-    #[test]
-    fn a_published_declaration_reaching_no_repetition_is_refused() {
-        use crate::analysis::decision_template::{
-            DecisionGroupKey, DecisionKind, DecisionTemplate, IterationCount, ReplayMode,
-        };
-        let mut start = GameState::new_two_player(7);
-        start.waiting_for = WaitingFor::Priority {
-            player: PlayerId(0),
-        };
-        start.players[0].life = 0;
-        let declared = DecisionTemplate {
-            owner: PlayerId(0),
-            decisions: Vec::new(),
-            replay: ReplayMode::Scheduled {
-                count: IterationCount::Fixed(1),
-            },
-            key: DecisionGroupKey::from_sources(&[], DecisionKind::LoopChoice),
-        };
-        let reached = perform_declared(
-            &start,
-            &[],
-            PeriodReach::InStep,
-            PlayerId(0),
-            Some(&declared),
-            1,
-        )
-        .reach;
-        assert_eq!(reached, 0);
-        let mut parts =
-            crate::game::engine::counted_offer(&[start.clone()], Vec::new(), 1, 1, None);
-        parts.declaration = Some(declared);
-        assert_eq!(
-            perform_published(&mut parts, &start, &[], PeriodReach::InStep, PlayerId(0)),
-            Err(OfferRefusal::SurvivesNoRepetition)
         );
     }
 

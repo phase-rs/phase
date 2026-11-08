@@ -128,9 +128,7 @@ pub struct LoopCertificate {
     pub win_kind_at: Option<u32>,
     /// CR 732.5 / CR 732.2b: whether NO living player has a meaningful priority action
     /// that could break the loop — the producer's own measurement, not a property of the
-    /// cycle's contents. (`game::engine::interactive_loop_bridge` assigns it from
-    /// `no_living_player_has_meaningful_priority_action`, which probes EVERY living player
-    /// as the priority holder.) CR 732.5 is why that is the right question: no player can
+    /// cycle's contents. CR 732.5 is why that is the right question: no player can
     /// be forced to take an action that would end a loop, so a loop is unbreakable exactly
     /// when nobody HAS such an action to take voluntarily; CR 732.2b is the shortcut-side
     /// counterpart — the window in which another player would name a different choice.

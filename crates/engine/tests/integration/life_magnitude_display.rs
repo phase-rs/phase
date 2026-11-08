@@ -19,8 +19,8 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
 use crate::loop_shortcut::{
-    declare_and_accept, drive_collect, gunzip_dump, restore_dump, setup_2p_drain,
-    setup_2p_optional_drain,
+    declare_and_accept, drive_collect, gunzip_dump, restore_dump, setup_2p_blight_priest_drain,
+    setup_2p_drain,
 };
 use crate::play_trace::{
     ability, activate, altar_board, cast, chooses_color, is_offer, names, place, settle,
@@ -360,11 +360,12 @@ fn a_pre_field_certificate_marks_no_seat_as_rising() {
 
 /// A synthetic drain, not a printed board ("Whenever you gain life, each opponent loses 1 life."
 /// and "Whenever an opponent loses life, you gain 1 life."): P0's life rises and P1's falls
-/// (CR 704.5a), so on every crowning producer only P0 reads ∞.
+/// (CR 704.5a), so on both crowning producers only P0 reads ∞. A counted take of Marauding
+/// Blight-Priest's drain ends the game with nothing marked unbounded.
 #[test]
 fn crowned_drains_read_only_the_gaining_seat_as_unbounded() {
     type Crown = fn() -> GameRunner;
-    let crowns: [(&str, Crown); 3] = [
+    let crowns: [(&str, Crown); 2] = [
         ("On", || {
             let (mut runner, kickoff) = setup_2p_drain(LoopDetectionMode::On);
             let _ = runner.cast(kickoff).resolve();
@@ -375,15 +376,6 @@ fn crowned_drains_read_only_the_gaining_seat_as_unbounded() {
             let (mut runner, kickoff) = setup_2p_drain(LoopDetectionMode::Interactive);
             let _ = runner.cast(kickoff).resolve();
             let _ = drive_collect(&mut runner, 500);
-            runner
-        }),
-        ("UntilLethal", || {
-            let (mut runner, kickoff, _bolt, _cleric) =
-                setup_2p_optional_drain(LoopDetectionMode::Interactive);
-            let _ = runner.cast(kickoff).resolve();
-            let (_events, offer) = drive_collect(&mut runner, 2000);
-            assert!(matches!(offer, WaitingFor::LoopShortcut { .. }));
-            declare_and_accept(&mut runner, IterationCount::UntilLethal);
             runner
         }),
     ];
@@ -415,6 +407,19 @@ fn crowned_drains_read_only_the_gaining_seat_as_unbounded() {
             "{route}"
         );
     }
+
+    let (mut runner, wine, _bolt, _priest) = setup_2p_blight_priest_drain();
+    let _ = runner.cast(wine).resolve();
+    let (_events, offer) = drive_collect(&mut runner, 500);
+    assert!(
+        matches!(offer, WaitingFor::LoopShortcut { .. }),
+        "{offer:?}"
+    );
+    declare_and_accept(&mut runner, IterationCount::Fixed(19));
+    let state = runner.state();
+    assert_eq!(state.waiting_for, WaitingFor::GameOver { winner: Some(P0) });
+    assert!(state.unbounded_resources.is_empty() && state.unbounded_rising.is_empty());
+    assert!(derive_views(state, None).life_magnitude.is_empty());
 }
 
 /// CR 732.2a: the rising subset is `unbounded_axes_for` minus every axis the delta drives down.

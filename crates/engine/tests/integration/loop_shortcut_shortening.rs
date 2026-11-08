@@ -30,7 +30,8 @@ use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 use crate::loop_shortcut::{
-    arm_responders, gunzip_dump, reach_2p_optional_drain_offer, restore_dump,
+    arm_responders, gunzip_dump, reach_2p_blight_priest_drain_offer, reach_2p_optional_drain_offer,
+    restore_dump,
 };
 use crate::loop_shortcut_drain_boards::weird_drain_board;
 
@@ -132,10 +133,30 @@ fn rig_window(count: IterationCount) -> GameState {
 }
 
 /// The driven two-player optional-drain rig, `prepare`d at its offer, declared at `count` and
-/// parked at its responder. This is the only reachable board whose schema admits `UntilLethal`:
-/// both committed dumps refuse that declaration against their bounded offers.
+/// parked at its responder.
 fn rig_window_with(count: IterationCount, prepare: fn(&mut GameState)) -> GameState {
-    let (mut runner, _life, _cleric) = reach_2p_optional_drain_offer();
+    let (runner, _life, _cleric) = reach_2p_optional_drain_offer();
+    declared_window(runner, count, prepare)
+}
+
+/// Marauding Blight-Priest's two-player drain, its responder armed, declared at `count` and parked
+/// at its responder.
+fn priest_window(count: IterationCount) -> GameState {
+    priest_window_with(count, arm_responders)
+}
+
+/// Marauding Blight-Priest's two-player drain, offered at P1's 19, `prepare`d at its offer,
+/// declared at `count` and parked at its responder.
+fn priest_window_with(count: IterationCount, prepare: fn(&mut GameState)) -> GameState {
+    let (runner, _life, _priest) = reach_2p_blight_priest_drain_offer();
+    declared_window(runner, count, prepare)
+}
+
+fn declared_window(
+    mut runner: engine::game::scenario::GameRunner,
+    count: IterationCount,
+    prepare: fn(&mut GameState),
+) -> GameState {
     prepare(runner.state_mut());
     runner
         .act(GameAction::DeclareShortcut {
@@ -198,53 +219,6 @@ fn a_place_at_the_proposed_count_is_refused_and_the_place_below_it_is_answered()
         state.waiting_for,
         WaitingFor::Priority { player: responder },
         "CR 732.2b/c: the shortcut is taken to the place the shortener named, and they hold it"
-    );
-}
-
-/// CR 704.5a: an `UntilLethal` proposal is ended by the loss state-based action rather than by
-/// a count, so it names no place past its end and CR 732.2b's range is not reopened. The largest
-/// place it admits would rewrite the count above the budget this engine drives, so `apply()`
-/// refuses it — before the event take and before any state write, which is why the poll is still
-/// the responder's afterwards and the next place they name is taken on the same board.
-///
-/// The window clause is what a bare `Err` cannot be: the refusal is scoped to the answer, not to
-/// the seat, so the same responder answers again and the shortcut is then TAKEN. Reds under
-/// restoring the responder's seam to its old `Ok` path — the place is answered for, the shortcut
-/// is dropped, and the window the second leg runs from is gone.
-#[test]
-fn the_largest_place_an_until_lethal_proposal_admits_is_refused_at_the_responders_seam() {
-    let mut state = rig_window(IterationCount::UntilLethal);
-    let poll = window(&state);
-    assert!(
-        poll.1.is_empty(),
-        "reach-guard: this shortener is the last responder, so nothing below is attributable to \
-         a queued seat"
-    );
-    let before: Vec<i32> = state.players.iter().map(|p| p.life).collect();
-
-    let refused = shorten(&mut state, u32::MAX);
-    assert!(
-        matches!(refused, Err(EngineError::InvalidAction(_))),
-        "the largest place an unbounded proposal admits is one this engine will not drive: \
-         {refused:?}"
-    );
-    assert_eq!(
-        window(&state),
-        poll,
-        "the refusal precedes the event take and every state write, so the poll is untouched"
-    );
-    assert_eq!(
-        state.players.iter().map(|p| p.life).collect::<Vec<_>>(),
-        before,
-        "NOT ONE cycle commits"
-    );
-
-    shorten(&mut state, 0).expect("the window the refusal left behind still takes a place");
-    assert_eq!(
-        state.waiting_for,
-        WaitingFor::Priority { player: poll.0 },
-        "CR 732.2b/c: the second answer is taken and its namer holds the ending point — so the \
-         refusal above was scoped to the place, not to the seat"
     );
 }
 
@@ -536,6 +510,33 @@ fn the_loop_edge_that_looks_like_the_answer_leaves_the_loop_standing() {
     );
 }
 
+/// The drain dump's responder window with its count tampered to the budget plus 2 and restored
+/// through the production decode. The tamper is `cap + 2`, not `cap + 1`: at `cap + 1` the
+/// published range ends at `cap`, so the boundary member `cap + 1` would be outside it.
+fn restored_over_cap_window() -> GameState {
+    let cap = ShortcutDecisionSchema::default().deliverable_capacity;
+    let mut state = weird_window(IterationCount::Fixed(weird_offer_bound()));
+    let WaitingFor::RespondToShortcut { proposal, .. } = &mut state.waiting_for else {
+        panic!("declaring on the drain dump opens a responder window")
+    };
+    proposal.count = IterationCount::Fixed(cap + 2);
+    let payload = serde_json::to_value(&state).expect("the tampered board serializes");
+    let state: GameState =
+        serde_json::from_value::<engine::types::game_state::PersistedGameState>(payload)
+            .expect("it decodes through the production restore")
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
+    let WaitingFor::RespondToShortcut { proposal, .. } = &state.waiting_for else {
+        panic!("the restore keeps the responder window")
+    };
+    assert_eq!(
+        proposal.count,
+        IterationCount::Fixed(cap + 2),
+        "the tampered count survives the decode, so no scrubber can be doing the refusing"
+    );
+    state
+}
+
 /// The class boundary on a RESTORED proposal carrying an over-cap `Fixed` count — the ingress the
 /// declare firewall never saw. CR 732.2b publishes every place below that count, and the seam
 /// refuses exactly the ones the drive cannot take: the boundary member one above the global
@@ -549,30 +550,7 @@ fn the_loop_edge_that_looks_like_the_answer_leaves_the_loop_standing() {
 #[test]
 fn a_restored_over_cap_proposal_refuses_what_it_cannot_drive_and_admits_the_repairing_place() {
     let cap = ShortcutDecisionSchema::default().deliverable_capacity;
-    // The tamper is `cap + 2`, not `cap + 1`: at `cap + 1` the published range ends at `cap` and
-    // the boundary member below would be outside it, so the range refusal would do the refusing.
-    let tampered = || {
-        let mut state = weird_window(IterationCount::Fixed(weird_offer_bound()));
-        let WaitingFor::RespondToShortcut { proposal, .. } = &mut state.waiting_for else {
-            panic!("declaring on the drain dump opens a responder window")
-        };
-        proposal.count = IterationCount::Fixed(cap + 2);
-        let payload = serde_json::to_value(&state).expect("the tampered board serializes");
-        let state: GameState =
-            serde_json::from_value::<engine::types::game_state::PersistedGameState>(payload)
-                .expect("it decodes through the production restore")
-                .into_game_state()
-                .expect("persisted test snapshot satisfies the checked restore contract");
-        let WaitingFor::RespondToShortcut { proposal, .. } = &state.waiting_for else {
-            panic!("the restore keeps the responder window")
-        };
-        assert_eq!(
-            proposal.count,
-            IterationCount::Fixed(cap + 2),
-            "the tampered count survives the decode, so no scrubber can be doing the refusing"
-        );
-        state
-    };
+    let tampered = restored_over_cap_window;
 
     let places = admitted_places(&tampered());
     assert_eq!(
@@ -861,8 +839,8 @@ fn the_engine_driven_seat_can_answer_a_window_whose_range_is_empty() {
         .expect("the named place is legal on the proposal that admits it");
 }
 
-/// Place 0 is in range on every proposal whose range holds a place at all — `Fixed(n >= 1)` and
-/// `UntilLethal` — which is the place every emitter that names a constant one emits. `Fixed(1)`
+/// Place 0 is in range on every proposal whose range holds a place at all — `Fixed(n >= 1)` —
+/// which is the place every emitter that names a constant one emits. `Fixed(1)`
 /// carries the boundary: there 0 is simultaneously the only legal place and the last one. The
 /// zero count is the complementary class, and the row above owns it.
 #[test]
@@ -870,8 +848,8 @@ fn place_zero_is_answered_on_every_proposal_whose_range_holds_a_place() {
     let bounded = IterationCount::Fixed(weird_offer_bound());
     for mut state in [
         weird_window(bounded),
-        rig_window(IterationCount::Fixed(1)),
-        rig_window(IterationCount::UntilLethal),
+        priest_window(IterationCount::Fixed(1)),
+        priest_window(IterationCount::Fixed(19)),
     ] {
         let (responder, _) = window(&state);
         let places = admitted_places(&state);
@@ -958,8 +936,8 @@ fn interaction_admits(state: &GameState, at_iteration: u32) -> bool {
 /// responders armed and bare, so both the agreement and that refusal are reached.
 ///
 /// The at-or-below partition keeps its own counting reach-guard — a dead projection and a
-/// blanket refusal both fail it — and the above-budget partition is asserted non-empty, so
-/// routing the submission gate through the same predicate would empty it and fire.
+/// blanket refusal both fail it — and above the budget a restored over-cap proposal's place
+/// `cap + 1` must be published, so routing the submission gate through the same predicate fires.
 ///
 /// A proposal with no counted take publishes and honors the current place alone.
 #[test]
@@ -969,15 +947,14 @@ fn the_published_range_and_the_reducer_agree_below_the_budget_and_part_above_it(
     let mut admitted = 0usize;
     let mut refused = 0usize;
     let mut no_choice = 0usize;
-    let mut above_budget = 0usize;
     let bare: fn(&mut GameState) = |_| {};
 
     for mut state in [arm_responders, bare].into_iter().flat_map(|prepare| {
         [
             weird_window_with(IterationCount::Fixed(0), prepare),
             weird_window_with(IterationCount::Fixed(bound), prepare),
-            rig_window_with(IterationCount::Fixed(1), prepare),
-            rig_window_with(IterationCount::UntilLethal, prepare),
+            priest_window_with(IterationCount::Fixed(1), prepare),
+            priest_window_with(IterationCount::Fixed(19), prepare),
         ]
     }) {
         bind_interaction_authority(&mut state, InteractionSessionId("shortening".to_string()))
@@ -1026,10 +1003,19 @@ fn the_published_range_and_the_reducer_agree_below_the_budget_and_part_above_it(
                     "place {place} is above the budget this engine drives, so the reducer alone \
                      refuses it — which is how the responder is told"
                 );
-                above_budget += 1;
             }
         }
     }
+
+    // No live proposal's range reaches past the budget; a restored over-cap one does.
+    let mut over = restored_over_cap_window();
+    bind_interaction_authority(&mut over, InteractionSessionId("shortening".to_string()))
+        .expect("the responder window binds interaction authority");
+    assert!(
+        interaction_admits(&over, cap + 1) && shorten(&mut over.clone(), cap + 1).is_err(),
+        "place {} is published above the budget and refused by the reducer alone",
+        cap + 1
+    );
 
     assert!(
         admitted > 0 && refused > 0,
@@ -1041,11 +1027,6 @@ fn the_published_range_and_the_reducer_agree_below_the_budget_and_part_above_it(
         no_choice > 0,
         "reach-guard on the no-choice refusal: no published place was refused for a responder \
          with nothing but a pass"
-    );
-    assert!(
-        above_budget > 0,
-        "reach-guard on the parting partition: no probed place landed above the budget, so the \
-         disagreement above was asserted over nothing"
     );
 
     let Some(mut state) = crate::mandatory_loop_draws::two_targets_without_end_window() else {
@@ -1445,23 +1426,12 @@ fn a_shortened_mana_engine_is_performed_while_an_accepted_one_is_marked_unbounde
     }
 }
 
-/// CR 732.2c + CR 704.5a: an in-cap place on an unbounded proposal drives that many cycles and
-/// crowns nobody it was not promised. Below the crossing the cycles commit, no game ends and the
-/// ending point lands on the shortener; at or past it the game ends with the seat the OFFER
-/// named, and the unbounded axes stay unmarked — a finite drive is not the unbounded one.
-///
-/// The admitted member rides the same board: a restored proposal whose `predicted_winner` the
-/// drive contradicts is NOT crowned, however far past the crossing it is shortened to. It reds
-/// under its own restoration — clear the name at the rewrite and the drive's winner is crowned
-/// through an arm left with nothing to gate on.
-///
-/// Both legs red at base, where the response reaches no materializer at all. The crown leg's
-/// reach-guard is the crown itself, without which the no-crown leg passes on a drive that never
-/// reached lethal.
+/// CR 732.2c: an in-cap place drives that many cycles: below the crossing the cycles commit, no
+/// game ends and the ending point lands on the shortener.
 #[test]
-fn an_in_cap_place_drives_its_cycles_and_crowns_only_the_named_seat() {
+fn an_in_cap_place_drives_its_cycles() {
     let below = 5u32;
-    let mut short = rig_window(IterationCount::UntilLethal);
+    let mut short = priest_window(IterationCount::Fixed(19));
     let (shortener, _) = window(&short);
     let victim_before = short
         .players
@@ -1470,7 +1440,7 @@ fn an_in_cap_place_drives_its_cycles_and_crowns_only_the_named_seat() {
         .collect::<Vec<_>>();
 
     let per_cycle = {
-        let mut one = rig_window(IterationCount::UntilLethal);
+        let mut one = priest_window(IterationCount::Fixed(19));
         shorten(&mut one, 1).expect("one cycle is in range");
         one.players
             .iter()
@@ -1501,59 +1471,6 @@ fn an_in_cap_place_drives_its_cycles_and_crowns_only_the_named_seat() {
         short.waiting_for,
         WaitingFor::Priority { player: shortener },
         "below the crossing no game ends and the shortener holds the ending point"
-    );
-
-    let crossing = victim_before
-        .iter()
-        .map(|(_, life)| *life)
-        .max()
-        .expect("the rig has players") as u32
-        + 1;
-    let mut crowned = rig_window(IterationCount::UntilLethal);
-    let WaitingFor::RespondToShortcut { proposal, .. } = &crowned.waiting_for else {
-        panic!("the rig parks on a responder window")
-    };
-    let named = proposal
-        .predicted_winner
-        .expect("this offer's mint is the one that names a winner");
-    shorten(&mut crowned, crossing).expect("a place past the crossing is still in range");
-    assert_eq!(
-        crowned.waiting_for,
-        WaitingFor::GameOver {
-            winner: Some(named)
-        },
-        "CR 704.5a: past the crossing the game ends with the seat the offer named"
-    );
-    assert!(
-        crowned.unbounded_resources.is_empty(),
-        "a finite drive is not the unbounded one, so no axis is marked"
-    );
-
-    // The admitted member: the same shortening on a proposal whose name the drive contradicts.
-    let mut contradicted = rig_window(IterationCount::UntilLethal);
-    let WaitingFor::RespondToShortcut { proposal, .. } = &mut contradicted.waiting_for else {
-        panic!("the rig parks on a responder window")
-    };
-    proposal.predicted_winner = Some(
-        contradicted
-            .players
-            .iter()
-            .map(|p| p.id)
-            .find(|id| *id != named)
-            .expect("the rig seats an opponent"),
-    );
-    let payload = serde_json::to_value(&contradicted).expect("the tampered board serializes");
-    let mut restored: GameState =
-        serde_json::from_value::<engine::types::game_state::PersistedGameState>(payload)
-            .expect("it decodes through the production restore")
-            .into_game_state()
-            .expect("persisted test snapshot satisfies the checked restore contract");
-    shorten(&mut restored, crossing).expect("the same place is still in range");
-    assert!(
-        !matches!(restored.waiting_for, WaitingFor::GameOver { .. }),
-        "a drive whose CR 704.5a verdict the proposal's own name contradicts crowns nobody, got \
-         {:?}",
-        restored.waiting_for
     );
 }
 

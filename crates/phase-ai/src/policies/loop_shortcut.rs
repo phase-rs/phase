@@ -312,7 +312,7 @@ impl TacticalPolicy for LoopShortcutPolicy {
             // seat, and `PeriodicDelta::elimination_cascade` deliberately lets the PROPOSER's
             // crossing bound it — CR 732.2a's shortcut proposer "need not be the player proposing
             // the shortcut" who benefits, so the producer is right not to gate on proposer
-            // benefit (engine `game/engine.rs`, `bounded_cycle_offer` doc). That makes it the
+            // benefit. That makes it the
             // DECIDING side's job, and nothing was doing it: a bounded offer always carries
             // `predicted_winner: None`, so the "hands somebody else the win" arm above is
             // structurally unreachable here, and the AI's only bounded candidate is `Fixed` at
@@ -815,8 +815,8 @@ mod tests {
         }
     }
 
-    /// A BOUNDED offer — the only shape `try_offer_bounded_cycle_shortcut` mints. `points`
-    /// stays empty because the engine's `Fixed` candidate generator is gated on that too.
+    /// A BOUNDED offer. `points` stays empty because the engine's `Fixed` candidate generator is
+    /// gated on that too.
     fn bounded_offer_state(bound: u32) -> GameState {
         let mut state = GameState::new_two_player(0);
         state.waiting_for = WaitingFor::LoopShortcut {

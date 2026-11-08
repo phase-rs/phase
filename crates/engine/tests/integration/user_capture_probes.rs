@@ -65,19 +65,6 @@ fn wf_label(w: &WaitingFor) -> String {
     }
 }
 
-/// The TYPED refusal of the bounded-offer mint at this exact frame — the discriminating
-/// instrument: it names WHICH conjunct refused instead of collapsing to "no offer". An offer
-/// carrying a confirmed period would take a route other than the drain, so it is named apart.
-fn mint_verdict(state: &GameState) -> String {
-    match engine::game::engine::try_offer_bounded_cycle_shortcut(state, false) {
-        Ok(WaitingFor::LoopShortcut { period, .. }) if !period.is_empty() => {
-            "OFFER-WITH-PERIOD".to_string()
-        }
-        Ok(_) => "OFFER".to_string(),
-        Err(e) => format!("{e:?}"),
-    }
-}
-
 /// The board as PRODUCTION loads it.
 ///
 /// Decodes AS `PersistedGameState` rather than as a bare `GameState`: only the former runs the
@@ -119,32 +106,6 @@ fn period_driver(state: &GameState) -> Option<PlayerId> {
     let seats = play_seats(state);
     let owner = *seats.first()?;
     seats.iter().all(|seat| *seat == owner).then_some(owner)
-}
-
-/// How the window's plays relate to this frame's proposer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PeriodRelation {
-    /// Every play is this proposer's own.
-    Own,
-    /// Every play is one other seat's, so they must not affect this proposer.
-    Foreign,
-    /// No plays, plays of several seats, or not a proposing frame.
-    AbsentOrHeterogeneous,
-}
-
-/// One driven beat's mint census entry, in the ISOLATED form.
-///
-/// `live` is the verdict on the board as driven; `cleared` is the verdict the SAME board returns
-/// with the window's trace emptied and nothing else touched, so a difference between them is
-/// attributable to the plays alone.
-struct MintFrame {
-    beat: u32,
-    /// The seat proposing at this frame; `None` when the frame is not a `Priority` beat, in which
-    /// case no seat proposes and neither classification below applies.
-    proposer: Option<PlayerId>,
-    relation: PeriodRelation,
-    live: String,
-    cleared: String,
 }
 
 /// Generic mandatory-chain beat: pass at `Priority`, otherwise take the first legal action.
@@ -197,37 +158,11 @@ fn dina_drive_one_beat(state: &mut GameState) -> Result<String, String> {
         .map_err(|e| format!("apply err ({action:?}): {e:?}"))
 }
 
-/// The ISOLATED census entry for the board as it stands after one driven beat.
-fn mint_frame(state: &GameState, beat: u32) -> MintFrame {
-    let proposer = match state.waiting_for {
-        WaitingFor::Priority { player } => Some(player),
-        _ => None,
-    };
-    let mut cleared_board = state.clone();
-    engine::game::install_plays_for_tests(&mut cleared_board, &[]);
-    let relation = match (proposer, period_driver(state)) {
-        (Some(proposer), Some(driver)) if driver == proposer => PeriodRelation::Own,
-        (Some(_), Some(_)) => PeriodRelation::Foreign,
-        _ => PeriodRelation::AbsentOrHeterogeneous,
-    };
-    MintFrame {
-        beat,
-        proposer,
-        relation,
-        live: mint_verdict(state),
-        cleared: mint_verdict(&cleared_board),
-    }
-}
-
 /// Drives IN PLACE (`&mut`), so the caller can inspect the board the drive stopped on — the
 /// offer's proposer, the ring depth, the window's plays — instead of only the beat.
 ///
-/// Returns the beat the drive stopped on and the per-beat ISOLATED mint census.
-fn dina_drive_and_report(
-    state: &mut GameState,
-    label: &str,
-    beats: u32,
-) -> (Option<u32>, Vec<MintFrame>) {
+/// Returns the beat the drive stopped on.
+fn dina_drive_and_report(state: &mut GameState, label: &str, beats: u32) -> Option<u32> {
     eprintln!(
         "[{label}] START turn={} active={} wf={} stack={} ring={} seq={} life={:?}",
         state.turn_number,
@@ -239,7 +174,6 @@ fn dina_drive_and_report(
         state.players.iter().map(|p| p.life).collect::<Vec<_>>(),
     );
     let mut fired = None;
-    let mut census: Vec<MintFrame> = vec![];
     for beat in 0..beats {
         if matches!(
             state.waiting_for,
@@ -248,26 +182,16 @@ fn dina_drive_and_report(
             fired = Some(beat);
             break;
         }
-        let at_priority = matches!(state.waiting_for, WaitingFor::Priority { .. });
         let before = wf_label(&state.waiting_for);
         match dina_drive_one_beat(state) {
             Ok(act) => {
-                let after_priority = matches!(state.waiting_for, WaitingFor::Priority { .. });
-                // Same frame selection the published census used, so the two are comparable.
-                let verdicts = (after_priority || at_priority).then(|| {
-                    let frame = mint_frame(state, beat);
-                    let rendered = format!("{}/cleared={}", frame.live, frame.cleared);
-                    census.push(frame);
-                    rendered
-                });
                 eprintln!(
-                    "[{label}] beat {beat:3} {before:>26} -> {:<26} stack={} ring={} seq={} life={:?} mint={} act={}",
+                    "[{label}] beat {beat:3} {before:>26} -> {:<26} stack={} ring={} seq={} life={:?} act={}",
                     wf_label(&state.waiting_for),
                     state.stack.len(),
                     state.loop_detect_ring.len(),
                     play_seats(state).len(),
                     state.players.iter().map(|p| p.life).collect::<Vec<_>>(),
-                    verdicts.unwrap_or_else(|| "-".to_string()),
                     &act.chars().take(40).collect::<String>()
                 );
             }
@@ -284,22 +208,7 @@ fn dina_drive_and_report(
         play_seats(state).len(),
         state.players.iter().map(|p| p.life).collect::<Vec<_>>(),
     );
-    report_census(label, &census);
-    (fired, census)
-}
-
-/// The census, reduced and printed in the ISOLATED form: each frame's verdict beside its cleared
-/// twin's.
-fn report_census(label: &str, census: &[MintFrame]) {
-    let mut tally: std::collections::BTreeMap<(&str, &str), usize> = Default::default();
-    for f in census {
-        *tally
-            .entry((f.live.as_str(), f.cleared.as_str()))
-            .or_default() += 1;
-    }
-    for ((live, cleared), n) in &tally {
-        eprintln!("[{label}] CENSUS {n:3} x mint={live} cleared={cleared}");
-    }
+    fired
 }
 
 /// (beat the offer fired at, ring depth, life vector) — the axes the two arms are compared on.
@@ -327,7 +236,7 @@ fn the_user_captures_offer_is_reached_with_its_driving_period_cleared() {
          cannot apply here)"
     );
     let mut state = state;
-    let (fired, _) = dina_drive_and_report(&mut state, "DINA-LOADED", 140);
+    let fired = dina_drive_and_report(&mut state, "DINA-LOADED", 140);
     eprintln!("[DINA-LOADED] fired={fired:?}");
     assert!(
         fired.is_some(),
@@ -377,12 +286,6 @@ fn the_user_captures_offer_is_reached_with_its_driving_period_cleared() {
 /// **THE FIX BAR, on the user's own capture.** The drive must reach the SAME offer the trace-free
 /// control reaches, at the same beat, with the same ring depth and the same life vector: a play
 /// another seat made describes no sequence this proposer takes (CR 732.2a), so it is inert.
-///
-/// **THE PER-FRAME BAR.** Each frame is asserted against its CLEARED twin — the identical board with
-/// the window's trace emptied:
-/// * FOREIGN frames: the live verdict must EQUAL the cleared verdict.
-/// * Every frame: no mint offers a bounded offer carrying a confirmed period, which would take
-///   a route other than the drain.
 #[test]
 fn the_user_captures_offer_is_reached_with_its_own_foreign_period_live() {
     let mut state = load_dina_raw();
@@ -394,12 +297,12 @@ fn the_user_captures_offer_is_reached_with_its_own_foreign_period_live() {
         "reach-guard: the window holds the opponent's play"
     );
 
-    let (fired, census) = dina_drive_and_report(&mut state, "DINA-LIVE", 140);
+    let fired = dina_drive_and_report(&mut state, "DINA-LIVE", 140);
     eprintln!("[DINA-LIVE] fired={fired:?}");
 
     // The CONTROL, re-driven in this process: same board, no trace.
     let mut control = load_dina_raw();
-    let (control_fired, _) = dina_drive_and_report(&mut control, "DINA-CONTROL", 140);
+    let control_fired = dina_drive_and_report(&mut control, "DINA-CONTROL", 140);
 
     // IN-ROW REACH-GUARD, not inherited from ARM D1's: the equality below compares this arm to a
     // control re-driven HERE, so on a board where NEITHER side reaches an offer both sides are
@@ -410,51 +313,6 @@ fn the_user_captures_offer_is_reached_with_its_own_foreign_period_live() {
         control_fired.is_some(),
         "REACH-GUARD: the trace-free control re-driven in THIS row must reach the offer, else \
          the fix bar below compares two absences and passes vacuously"
-    );
-
-    // ── THE PER-FRAME BAR, asserted BEFORE the endpoint one: it is the finer instrument.
-    //    Reach-guards first: the foreign shape must occur, and the instrument must demonstrably be
-    //    able to answer more than one way. ──
-    let foreign_frames: Vec<&MintFrame> = census
-        .iter()
-        .filter(|f| f.proposer.is_some() && f.relation == PeriodRelation::Foreign)
-        .collect();
-    let distinct: std::collections::BTreeSet<&str> =
-        census.iter().map(|f| f.live.as_str()).collect();
-    assert!(
-        distinct.len() >= 2,
-        "REACH-GUARD: a mint that answered one constant across the whole drive would satisfy both \
-         assertions below without discriminating anything; got {distinct:?}"
-    );
-    assert!(
-        !foreign_frames.is_empty(),
-        "REACH-GUARD: no beat had a seat OTHER than {foreign:?} proposing, so FOREIGN-INERTNESS \
-         below quantifies over an empty set and passes having measured nothing"
-    );
-
-    let diverged: Vec<_> = foreign_frames
-        .iter()
-        .filter(|f| f.live != f.cleared)
-        .map(|f| (f.beat, f.proposer, f.live.as_str(), f.cleared.as_str()))
-        .collect();
-    assert!(
-        diverged.is_empty(),
-        "CR 732.2a FOREIGN-INERTNESS, per frame: at every beat where the window's plays are \
-         another seat's, the mint must return exactly what it returns with the trace empty. \
-         {} of {} foreign frames diverged: {diverged:?}",
-        diverged.len(),
-        foreign_frames.len()
-    );
-
-    let misrouted: Vec<_> = census
-        .iter()
-        .filter(|f| f.live == "OFFER-WITH-PERIOD")
-        .map(|f| (f.beat, f.proposer))
-        .collect();
-    assert!(
-        misrouted.is_empty(),
-        "CR 732.2a: a bounded offer carries no confirmed period, so its take is the ring drain: \
-         {misrouted:?}"
     );
 
     // ── THE ENDPOINT BAR: the whole trajectory, not one frame. ──

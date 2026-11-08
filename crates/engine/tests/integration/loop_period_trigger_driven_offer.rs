@@ -704,45 +704,6 @@ fn each_apply_evaluates_the_loop_shortcut_at_most_once() {
     }
 }
 
-/// The ring road is asked first and the recorded road mints only while the ring leaves priority
-/// standing, on Board B and on the Fantastic Four board alike.
-#[test]
-fn the_ring_road_is_asked_before_the_recorded_road() {
-    let Some((_, applies)) = offered(Board::B) else {
-        return;
-    };
-    assert_eq!(
-        applies
-            .last()
-            .expect("the offer apply")
-            .cost
-            .reconcile_calls,
-        1,
-        "Board B: the ring bridge was entered and refused before the recorded road minted"
-    );
-
-    let mut state = crate::committed_dump_walk::restore_committed(
-        &Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/fantastic_four_bounded_loop_4p.json.gz"),
-    )
-    .expect("the committed board restores");
-    let mut aimed_at = None;
-    for _ in 0..BEAT_CAP {
-        reset_loop_detect_cost();
-        crate::loop_shortcut_drain_boards::drive_one_beat(&mut state, &mut aimed_at);
-        if let WaitingFor::LoopShortcut { road, .. } = state.waiting_for {
-            let cost = loop_detect_cost();
-            assert_eq!(
-                (road, cost.reconcile_calls, cost.object_growth_calls),
-                (OfferRoad::RecordedPeriod, 1, 1),
-                "the ring bridge was entered and refused before the recorded road minted"
-            );
-            return;
-        }
-    }
-    panic!("the committed board reached no offer in {BEAT_CAP} beats");
-}
-
 /// Offers `board` and takes it at `n`, metering only the take.
 fn metered_take(board: Board, n: u32) -> GameState {
     let (mut drive, _) = offered(board).expect("the board builds from the card fixture");

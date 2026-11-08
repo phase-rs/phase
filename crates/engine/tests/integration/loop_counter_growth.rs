@@ -1,11 +1,9 @@
-//! PR-7 — live preserved-`Generic` counter-growth loop detection (Path C).
+//! PR-7 — live preserved-`Generic` counter-growth loop detection.
 //!
-//! Covers the live `interactive_loop_bridge` Path-C arm for a self-refilling OPTIONAL cascade
-//! that grows a `Generic` charge counter each cycle (CR 122.1) — the axis
-//! `loop_states_cover_modulo_counter_growth` was built for. Because the growing charge
-//! is a PRESERVED counter, the constant-depth `loop_states_equal_modulo_resources`
-//! disjunct FAILS on this fixture, so the Path-C offer can only be reached via the
-//! counter-growth disjunct.
+//! Covers a self-refilling OPTIONAL cascade that grows a `Generic` charge counter each cycle
+//! (CR 122.1) — the axis `loop_states_cover_modulo_counter_growth` was built for. Because the
+//! growing charge is a PRESERVED counter, the constant-depth
+//! `loop_states_equal_modulo_resources` disjunct FAILS on this fixture.
 //!
 //! The live proliferate loop (Pentad Prism cast + Kilo/Freed/Relic) is NOT sampled by
 //! construction — a `ProliferateChoice` beat every cycle hits the sampler's ring-CLEAR

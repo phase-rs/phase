@@ -3047,9 +3047,6 @@ fn b5f_the_declared_term_can_suppress_an_otherwise_legal_offer() {
          starved seat anywhere; got {:?}",
         beta_schema.iteration_count
     );
-    // The typed refusal is still the producer's answer where the CASCADE measures nothing, and
-    // that arm is exercised by the rows about a board no living seat is consumed on. Asserted here
-    // only that it is NOT what this board reaches, so the arm above is attributable.
     assert!(
         matches!(
             beta.waiting_for,
@@ -3058,9 +3055,7 @@ fn b5f_the_declared_term_can_suppress_an_otherwise_legal_offer() {
                 ..
             }
         ),
-        "(β) the verdict on this very board is the recorded road's OFFER and not \
-         `NoNarrowedLegalCount` — the divisor's tie at the floor no longer suppresses, because \
-         the published count is not divisor-derived"
+        "(β) the verdict on this very board is the recorded road's OFFER"
     );
 
     // (β)'s own control, ONE life point away: lift P3 alone and the DIVISOR's floor is P2's
@@ -3366,9 +3361,7 @@ fn assert_axis_scales(label: &str, axis: &str, at_1: i64, at_3: i64) {
 ///   is guard (b) discriminating between a stored answer and an open choice on ONE board;
 /// * every axis is asserted exactly, against the offer's own published per-cycle signature.
 ///
-/// REVERT-PROBE: ablate the CR 603.5 auto-answer relief in `auto_may_choice_relief` ⇒ gate (6)
-/// can no longer be discharged for Sue's withheld slot ⇒ no offer fires ⇒ the reach-guard in
-/// `accept_a_fixed_grant` FLIPS. Positive control: the same drive on MODE2, whose
+/// Positive control: the same drive on MODE2, whose
 /// `may_trigger_auto_choices` is EMPTY, reaches its offer through the ordinary publication
 /// path (the row below) — so "the drive reaches an offer" is not a property of the harness.
 #[test]
@@ -4985,9 +4978,7 @@ fn the_f4_offer_splits_each_published_count_over_its_announced_candidates() {
 ///
 /// (i) drop the token term from `period` ⇒ the rate guard and (a) red; (ii) point the
 /// conformance site back at the raw snapshot pair while leaving the mint fed ⇒ zero cycles
-/// commit, so (b) reds while (a) still passes — that coupling is the assertion; (iii) revert
-/// `ring_delta_signature`'s `per_period` binding ⇒ this board certifies on the
-/// resource-signature basis, the published rate returns to zero and the guard reds.
+/// commit, so (b) reds while (a) still passes — that coupling is the assertion.
 #[test]
 fn t3_the_published_token_rate_is_delivered_by_the_accepted_drive() {
     use engine::game::interaction::{bind_interaction_authority, derive_viewer_interaction};

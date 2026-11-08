@@ -270,58 +270,10 @@ fn census(needle: &str) -> Vec<Hit> {
 /// R8 CONJUNCT 1 — the offer-writer surface, pinned BIDIRECTIONALLY (an EQUALITY
 /// on each half, so a REMOVED site fails too) and by per-file multiset.
 ///
-/// ⚠ THE `#[cfg(test)]` HALF HAS MOVED REPEATEDLY — 12 ⇒ 13 ⇒ 14 ⇒ 16 ⇒ 17 ⇒ 21 ⇒ 22
-/// ⇒ the value the assert below pins — AND EACH ADJUDICATION IS RECORDED RATHER
-/// THAN THE ASSERT RELAXED.
-/// * 12 ⇒ 13: §6 R27 (b)
-///   (`analysis::resource::tests::r27_b_a_stored_may_auto_choice_survives_the_ring`)
-///   destructures the offer the mint RETURNED to count its published CR 603.5
-///   `MayChoice` points.
-/// * 13 ⇒ 14 (5d U4): `game::engine::stage2_injector_tests::u4_park_on_offer`
-///   parks a constructed board on a `LoopShortcut { proposer: P0 }` so §6 R28's
-///   arm (b) can assert that the DECLARE firewall refuses a hostile
-///   `template.owner` — i.e. that arm (b)'s drive-seam configuration is
-///   production-unreachable.
-/// * 14 ⇒ 16: both in `phase-ai/src/policies/loop_shortcut.rs`'s `#[cfg(test)]`
-///   module — `bounded_offer_declaring`, a builder minting an offer whose
-///   certificate carries a real `per_cycle` so the proposer-elimination arm can
-///   be driven, and `certificate_of`, a READ accessor for the same rows.
-/// * 16 ⇒ 17: the cap-round row
-///   `the_bounded_offer_charges_a_forced_victim_it_publishes_no_point_for` in
-///   `engine/src/analysis/resource.rs` — A READ, NOT A WRITER: it destructures
-///   the offer it minted to assert an EMPTY `schema.points` beside a
-///   `victim_slot` that still names the forced victim.
-/// * 17 ⇒ 21: the CR 732.2a declaration change's two in-crate
-///   rows spell the anchor FOUR
-///   times between them — `game/visibility.rs` row D5-h's mint and its projection
-///   read, and `ai_support/candidates.rs` row D6-n's mint and its reach-guard read.
-/// * 21 ⇒ 22: the frame-wise charge row
-///   `the_bound_charges_the_frame_wise_loss_not_the_period_endpoint_pair` in
-///   `engine/src/game/engine.rs` — A READ: it destructures the offer it minted
-///   through the production seam to assert the published `victim_slot` magnitude
-///   and `seat_life_charge` divisor.
-/// * 22 ⇒ 24: the consumption-ceiling rows' shared fixture helper
-///   `signmix_offer_at_responder_beat` in `engine/src/game/engine.rs`, which
-///   spells the anchor TWICE — once destructuring the offer the production mint
-///   returned, once re-reading its schema for the published count before taking
-///   the declare path to the response window. Both READS in one `#[cfg(test)]`
-///   helper, shared by the ceiling row and the accepted-count row.
-/// * 24 ⇒ 28: the reduction's typed-absence rows — three READS in
-///   `engine/src/game/engine.rs` and one fixture WRITER in
-///   `engine/src/game/interaction.rs`.
-/// * 28 ⇒ 29: `offer_period` in `phase-ai/src/policies/loop_shortcut.rs`'s
-///   `#[cfg(test)]` module — a READ of an offer `apply()` minted (its period and
-///   declaration), minting none.
-/// * 29 ⇒ the pinned value: `kilo_interruptibility_tests` in `engine/src/game/engine.rs`
-///   — three `matches!` READS of `waiting_for` added and one `=> return` arm removed,
-///   minting none.
-///
-/// EVERY addition listed above is in a `#[cfg(test)]` scope — mints and reads
-/// both — which is the benign case this row's own failure message names: a test
-/// fixture cannot make the period machinery certify. The PRODUCTION half is
-/// UNCHANGED across all of them — and so is the per-file multiset below, which is
-/// the half §10 ruling condition (2) is about. Its VALUE is the assert's, not this
-/// comment's.
+/// A `#[cfg(test)]` site is the benign case this row's own failure message names: a test
+/// fixture cannot make the period machinery certify. The per-file multiset below pins the
+/// PRODUCTION half, the half §10 ruling condition (2) is about. Its VALUE is the assert's, not
+/// this comment's.
 ///
 /// ⚠ THE PRODUCTION HALF HAS BEEN ADJUDICATED TOO — `game/derived_views.rs`'s
 /// `derive_views` arm, on the ground the failure message already excludes
@@ -381,12 +333,12 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
 
     assert_eq!(
         (production.len(), in_test.len()),
-        (30, 31),
+        (28, 22),
         "CR 732.2a OFFER-WRITER SURFACE CHANGED (not re-measured — this number is an \
          INVARIANCE pin over the whole 5d U-series).\n\
-         The four CERTIFICATION-PATH writers are `reconcile_terminal_result` (object-growth \
-         arm), `interactive_loop_bridge` (drain bridge arm), `offer_draw_without_end` \
-         (out-only ring arm) and `try_offer_bounded_cycle_shortcut` (bounded arm), all in `engine/src/game/engine.rs`. \
+         The two CERTIFICATION-PATH writers are `reconcile_loop_shortcut` (the recorded road's \
+         offer) and `offer_draw_without_end` (its out-only arm), both in \
+         `engine/src/game/engine.rs`. \
          `game/visibility.rs`'s `filter_state_for_viewer` writer is EXCLUDED by name and not \
          silently: it re-emits an ALREADY-minted offer into a per-viewer projection and cannot \
          run unless `state.waiting_for` is already a `LoopShortcut`. `game/derived_views.rs`'s \
@@ -413,7 +365,7 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
             ("engine/src/analysis/corpus.rs".to_string(), 1),
             ("engine/src/analysis/corpus_tests.rs".to_string(), 1),
             ("engine/src/game/derived_views.rs".to_string(), 1),
-            ("engine/src/game/engine.rs".to_string(), 6),
+            ("engine/src/game/engine.rs".to_string(), 4),
             ("engine/src/game/interaction.rs".to_string(), 5),
             ("engine/src/game/play_trace.rs".to_string(), 1),
             ("engine/src/game/scenario.rs".to_string(), 1),
@@ -515,14 +467,15 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
         authority_per_file.into_iter().collect::<Vec<_>>(),
         vec![
             ("engine/src/analysis/decision_template.rs", 1),
-            ("engine/src/game/engine.rs", 3),
+            ("engine/src/game/engine.rs", 2),
             ("engine/src/game/interaction.rs", 1),
         ],
-        "expected 1 definition + 4 call sites: \
+        "expected 1 definition + 3 call sites: \
          `game/engine.rs::handle_declare_shortcut` (accept), \
          `game/engine.rs::build_bounded_declaration` (publish), \
-         `game/engine.rs::bounded_offer_tail` (publish the suggestion), \
-         `game/interaction.rs::materialize_loop_shortcut_response` (human emit). A MISSING \
+         `game/interaction.rs::materialize_loop_shortcut_response` (human emit); \
+         `game/engine.rs::bounded_offer_tail` publishes its suggestion through \
+         `declaration_pins_conform`, the same gates less the aim walk. A MISSING \
          call site is a path that publishes or accepts a declaration under its own predicate; \
          a NEW one is benign but must be named here rather than absorbed. \
          got {authority_production:?}"

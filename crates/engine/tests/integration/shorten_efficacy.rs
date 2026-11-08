@@ -61,7 +61,7 @@ const P3: PlayerId = PlayerId(3);
 // "verbatim Oracle text" is a claim about a printing and only some of these
 // make it.
 //
-// (1) SIBLING-FIXTURE PROVENANCE — the four loop-shape constants below are
+// (1) SIBLING-FIXTURE PROVENANCE — the three loop-shape constants below are
 //     byte-identical copies of the shipped constants in
 //     `tests/integration/loop_shortcut.rs`, which does not present them as any
 //     card's Oracle text either. They exist to reproduce that file's mutual-drain
@@ -70,10 +70,10 @@ const P3: PlayerId = PlayerId(3);
 //       * `DRAIN_CLERIC` IS one printing's complete Oracle text (Epicure of Blood,
 //         Marauding Blight-Priest — 2 exact matches);
 //       * `BLOOD_SIPPER` matches NO card, not even as a substring;
-//       * `KICKOFF` / `TARGETED_KICKOFF` match no card's complete text; they are
-//         single-clause fragments (substrings of 53 and 3 cards respectively).
+//       * `KICKOFF` matches no card's complete text; it is a single-clause
+//         fragment (a substring of 53 cards).
 //     So do NOT cite this block as card-derived: only `DRAIN_CLERIC` would
-//     survive that claim, and it is not why any of the four is here.
+//     survive that claim, and it is not why any of the three is here.
 //
 // (2) CARD PROVENANCE — `TERRAMORPHIC` and `DEATHRITE_SHAMAN` (below) ARE their
 //     named printing's complete Oracle text, verified byte-for-byte against
@@ -84,7 +84,6 @@ const P3: PlayerId = PlayerId(3);
 const DRAIN_CLERIC: &str = "Whenever you gain life, each opponent loses 1 life.";
 const BLOOD_SIPPER: &str = "Whenever an opponent loses life, you gain 1 life.";
 const KICKOFF: &str = "You gain 1 life.";
-const TARGETED_KICKOFF: &str = "Target player gains 1 life.";
 
 /// Terramorphic Expanse, verbatim. Acceptance (a): a fetchland is the canonical
 /// action that is legal, meaningful to stage 1, and totally confined.
@@ -411,120 +410,6 @@ fn v3_matched_pair_empty_seat_accepts_and_bolt_seat_still_shortens() {
 // ===========================================================================
 // V4 / V6 / V7 — arm (A): the crowned seat, keyed on `predicted_winner`.
 // ===========================================================================
-
-/// CR 732.2a lets the player with priority propose a
-/// shortcut whose predictable result crowns SOMEONE ELSE. This fixture is the
-/// shipped `interactive_offer_separates_priority_proposer_from_predicted_winner`
-/// shape: P1 proposes, P0 is the measured winner, and P1 (the proposer) is
-/// excluded from the response queue, so P0 is polled.
-///
-/// P0 also holds a Mountain and a Bolt — the reach-guard the measurement proved
-/// load-bearing. WITHOUT them P0 has no meaningful action and Accepts via
-/// stage 1, making the row vacuous; WITH them the shipped predicate returns
-/// `Shorten`, i.e. the crowned player shortens its own guaranteed win.
-///
-/// Three claims ride this one board:
-/// * **V4** — arm (A) fires: the crowned seat Accepts.
-/// * **V6** — it is keyed on `predicted_winner`, never `proposer`. The row
-///   asserts `proposer != predicted_winner` and `polled == predicted_winner`,
-///   so a `proposer`-keyed implementation (which passes every other row) fails
-///   exactly here.
-/// * **V7** — read order. Arm (A) reads the proposal off the ORIGINAL state;
-///   `smart_shortcut_response` overwrites its probe clone's `waiting_for` with
-///   `Priority` before enumerating. Moving that read after the clone makes
-///   `crowned_winner` unconditionally `None` and this row FAILS — it is the
-///   only row that can detect the mis-ordering.
-///
-/// MUTANTS — both flip the `Accept` assertion: DROP ⇒ `Shorten`; TRIVIALIZE
-/// arm (A) (delete the `crowned_winner` guard) ⇒ `Shorten` via arm (B), because
-/// the Bolt is genuine interference.
-#[test]
-fn v4_the_crowned_seat_accepts_its_own_predicted_win() {
-    let mut scenario = GameScenario::new_n_player(2, 7);
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_life(P0, 20);
-    scenario.with_life(P1, 20);
-    scenario.add_creature_from_oracle(P0, "Test Drain Cleric", 2, 2, DRAIN_CLERIC);
-    scenario.add_creature_from_oracle(P0, "Test Blood Sipper", 2, 2, BLOOD_SIPPER);
-    scenario.add_basic_land(P1, ManaColor::Red);
-    scenario.add_bolt_to_hand(P1);
-    // The reach-guard: P0 must hold a meaningful action or stage 1 answers first.
-    scenario.add_basic_land(P0, ManaColor::Red);
-    scenario.add_bolt_to_hand(P0);
-    let kickoff = scenario
-        .add_spell_to_hand_from_oracle(P1, "P0 Lifegain Kickoff", false, TARGETED_KICKOFF)
-        .id();
-    let mut runner = scenario.build();
-    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
-    runner.state_mut().active_player = P1;
-    runner.state_mut().priority_player = P1;
-    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
-
-    let _ = runner.cast(kickoff).target_player(P0).resolve();
-    let wf = drive_collect(&mut runner, 500);
-    let WaitingFor::LoopShortcut {
-        proposer,
-        predicted_winner,
-        ..
-    } = wf
-    else {
-        panic!("reach-guard: P1's priority window must receive an offer, got {wf:?}");
-    };
-    assert_eq!(
-        proposer, P1,
-        "CR 732.2a routes the offer to the priority holder"
-    );
-    assert_eq!(
-        predicted_winner,
-        Some(P0),
-        "reach-guard: the two authorities must actually DIFFER, or the winner-keyed and \
-         proposer-keyed implementations are indistinguishable here"
-    );
-
-    runner
-        .act(GameAction::DeclareShortcut {
-            count: IterationCount::UntilLethal,
-            template: None,
-        })
-        .expect("P1 declares");
-    let WaitingFor::RespondToShortcut {
-        player,
-        ref proposal,
-        ..
-    } = runner.state().waiting_for
-    else {
-        panic!(
-            "reach-guard: a response window must open, got {:?}",
-            runner.state().waiting_for
-        );
-    };
-    assert_eq!(
-        player, P0,
-        "the proposer is excluded from its own response queue, so the crowned seat is polled"
-    );
-    assert_ne!(
-        proposal.proposer,
-        proposal
-            .predicted_winner
-            .expect("this offer names a winner"),
-        "V6: the multi-authority premise — a proposer-keyed rule would read P1 here"
-    );
-
-    let actions = probe_actions(runner.state(), P0);
-    assert!(
-        stage_one_meaningful(runner.state(), P0),
-        "REACH-GUARD: without a meaningful action P0 would Accept via stage 1 and this row \
-         would be vacuous; got {actions:?}"
-    );
-
-    assert_eq!(
-        engine::ai_support::smart_shortcut_response(runner.state(), P0),
-        ShortcutResponse::Accept,
-        "arm (A): the offer's predicted result already crowns this seat. CR 732.2c grants a \
-         shortening player nothing but the obligation to choose differently, so shortening \
-         here moves the game away from a win it already holds"
-    );
-}
 
 // ===========================================================================
 // V1 / V5 — REAL 4-player board, loaded through the production restore

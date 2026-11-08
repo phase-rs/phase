@@ -3676,8 +3676,7 @@ fn preview_offer_with_points(
     state
 }
 
-/// The slots the synthetic preview offers speak through — one source, the shape
-/// `certified_bounded_cycle_offer` publishes.
+/// The slots the synthetic preview offers speak through — one source.
 ///
 /// It takes BOTH axes because its callers use both: most pair it with successive CR 601.2c
 /// announcements on that one source (the INSTANCE axis), while others pair it with that

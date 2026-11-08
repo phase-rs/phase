@@ -9,7 +9,8 @@ use std::collections::BTreeMap;
 
 use engine::ai_support::{legal_actions, legal_actions_full};
 use engine::analysis::decision_template::IterationCount;
-use engine::analysis::loop_check::{CountedTake, ShortcutResponse, UnperformableCause};
+use engine::analysis::loop_check::{CountedTake, ShortcutResponse, UnperformableCause, WinKind};
+use engine::analysis::resource::ResourceAxis;
 use engine::game::engine::{apply, EngineError};
 use engine::game::game_object::{AttachTarget, GameObject};
 use engine::game::interaction::{
@@ -160,6 +161,8 @@ struct Board {
     dee_kay: bool,
     /// The game's random seed, in place of the scenario's.
     seed: Option<u64>,
+    /// Poison counters P0 starts with.
+    p0_poison: u32,
 }
 
 #[derive(Debug, PartialEq)]
@@ -363,6 +366,7 @@ fn build(board: Board, mode: LoopDetectionMode) -> Option<Built> {
     }
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = mode;
+    runner.state_mut().players[0].poison_counters = board.p0_poison;
     if let Some(seed) = board.seed {
         runner.state_mut().rng = GameRng::seed_from_u64(seed);
     }
@@ -731,6 +735,7 @@ const PLAIN: Board = Board {
     remember_order: false,
     dee_kay: false,
     seed: None,
+    p0_poison: 0,
 };
 
 const ANCHOR: Board = Board {
@@ -2704,6 +2709,82 @@ fn mandatory_poison_loop_is_offered_short_of_ten_poison(drive: Drive) {
             1
         ),
         "{drive:?}"
+    );
+    let WaitingFor::LoopShortcut { certificate, .. } = &offered.state().waiting_for else {
+        unreachable!("the terminal above is an offer");
+    };
+    assert!(
+        certificate.unbounded.contains(&ResourceAxis::Poison(P1))
+            && certificate.win_kind == Some(WinKind::PoisonLoss),
+        "{drive:?}: {certificate:?}"
+    );
+}
+
+/// CR 704.5c + CR 732.2a: from seven poison counters P0 survives the Ichor Rats loop's first
+/// repetition and loses at its second; the proposer's own elimination is no repetition, so the
+/// offer is 1 and its bound and capacity 2, naming no winner.
+#[test]
+fn a_poison_loop_one_repetition_short_of_the_proposers_tenth_counter_is_offered_one() {
+    let board = Board {
+        ichor_rats: true,
+        first: Some("Ichor Rats"),
+        p0_poison: 7,
+        ..PLAIN
+    };
+    let Some(offered) = run(board, LoopDetectionMode::Interactive, Drive::Pass, 250) else {
+        return;
+    };
+    assert!(
+        offered.prompted("OrderTriggers") >= 1
+            && offered.replays.iter().any(|&(_, _, replays)| replays > 0),
+        "reach: the triggers were ordered and a period was replayed"
+    );
+    assert_eq!(
+        (
+            &offered.terminal,
+            offer_schema(offered.state()),
+            offered.poison(P0),
+            offered.poison(P1)
+        ),
+        (
+            &Terminal::Offer {
+                predicted_winner: None,
+                mandatory: false
+            },
+            (IterationCount::Fixed(1), 2, Some(2)),
+            8,
+            1
+        )
+    );
+}
+
+/// CR 704.5c: from eight poison counters P0 survives no repetition of the Ichor Rats loop, so
+/// nothing is offered and the loop plays on to P0's tenth counter, the terminal Off reaches.
+#[test]
+fn a_poison_loop_the_proposer_survives_no_repetition_of_is_not_offered() {
+    let board = Board {
+        ichor_rats: true,
+        first: Some("Ichor Rats"),
+        p0_poison: 8,
+        ..PLAIN
+    };
+    let Some(off) = run(board, LoopDetectionMode::Off, Drive::Pass, 250) else {
+        return;
+    };
+    let Some(played) = run(board, LoopDetectionMode::Interactive, Drive::Pass, 250) else {
+        return;
+    };
+    assert!(
+        played.prompted("OrderTriggers") >= 1
+            && played.replays.iter().any(|&(_, _, replays)| replays > 0),
+        "reach: the triggers were ordered and a period was replayed"
+    );
+    assert_eq!(
+        [
+            (&off.terminal, off.poison(P0), off.poison(P1)),
+            (&played.terminal, played.poison(P0), played.poison(P1)),
+        ],
+        [(&Terminal::GameOver(Some(P1)), 10, 2); 2]
     );
 }
 

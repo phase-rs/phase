@@ -1754,8 +1754,7 @@ pub fn stage_two_action_set(
 
 /// PR-7 Phase 4c (LOW-2): CR 732.2b/c + CR 104.4b — an AI opponent polled on an
 /// OPTIONAL or bounded loop shortcut. The win is a loss condition for every
-/// polled opponent (single-faller: see `interactive_loop_bridge`'s Path A gate,
-/// CR 104.2a).
+/// polled opponent (CR 104.2a).
 ///
 /// SINGLE AUTHORITY, and what it does NOT cover. MEASURED — production (i.e.
 /// non-`#[cfg(test)]`) code under `crates/*/src/` builds a

@@ -1844,30 +1844,6 @@ fn read_legality(state: &GameState, holder: PlayerId, locus: &PlayLocus) -> Opti
     Some(legal)
 }
 
-/// CR 104.4b + CR 732.4: the span back to the last instance of the triggered node on top of the
-/// stack, when nothing optional was asked or played since; `None` outside a recording boundary.
-pub(crate) fn mandatory_recurrence(state: &GameState) -> Option<NamedSpan> {
-    if !recording(state) {
-        return None;
-    }
-    mandatory_recurrence_span(state)
-}
-
-/// [`mandatory_recurrence`] without its recording gate.
-pub(crate) fn mandatory_recurrence_span(state: &GameState) -> Option<NamedSpan> {
-    let trace = current(state)?;
-    let end = trace.entries.len();
-    let node = trigger_node(state, state.stack.back()?, end).and_then(|key| trace.find(&key))?;
-    match trigger_top_cause(trace, node)? {
-        (start, NamingCause::MandatoryRecurrence) => Some(NamedSpan::in_window(
-            start,
-            end,
-            NamingCause::MandatoryRecurrence,
-        )),
-        _ => None,
-    }
-}
-
 /// CR 104.4b + CR 732.4: how the span back to the last instance of the recurring triggered `node`
 /// is named — `TriggerTop` when its resolution asked an optional answer, or an optional answer
 /// and another node's repeat were made since with no play; `MandatoryRecurrence` when neither a

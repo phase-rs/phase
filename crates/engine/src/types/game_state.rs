@@ -23169,9 +23169,8 @@ impl<'de> Deserialize<'de> for PendingLiminalEntryResume {
 /// separated at the type level.
 ///
 /// `normalized` is the **CR 104.4b comparand** — the only half
-/// `loop_states_equal_modulo_resources` / `loop_states_cover_modulo_growth*` /
-/// `ring_delta_signature` may read. It is byte-identical to the frame the ring held
-/// before the split, because [`GameState::normalize_for_loop`] is unchanged.
+/// `loop_states_equal_modulo_resources` / `loop_states_cover_modulo_growth*` may read. It is
+/// byte-identical to the frame the ring held before the split, because [`GameState::normalize_for_loop`] is unchanged.
 ///
 /// `live` is the **CR 732.2a evaluable** — the same beat un-normalized, and the only
 /// half the period-touch consumers may read. Normalization zeroes `next_object_id` and
@@ -36825,14 +36824,12 @@ impl GameState {
     ///    pre-priority window never appeared in any settle frame's stack.
     ///
     /// "Only the settle sampler" was the pre-(2) premise and it is no longer true; the two
-    /// share every other conjunct, including `WaitingFor::Priority{active_player}`, which is
-    /// what keeps the ring homogeneous for `analysis::resource::ring_delta_signature`.
+    /// share every other conjunct, including `WaitingFor::Priority{active_player}`.
     pub(crate) fn record_loop_detect_sample(&mut self) {
         // CR 104.4b + CR 732.2a: the restricted normalization contract. A beat
         // holding an unsettled delivery carrier is never sampled, and it breaks
         // the ring's contiguity like the settle sampler's own `else` clear, so
-        // no route (strict equality, growth cover, or `ring_delta_signature`'s
-        // bounded offer) certifies a period across it.
+        // no route (strict equality or growth cover) certifies a period across it.
         if !self.is_loop_comparable() {
             self.clear_loop_detect_window();
             return;
@@ -37051,10 +37048,8 @@ impl GameState {
     /// batch that both drains and lifelinks back inside one CR 510.2 event is exactly the
     /// dip-and-recover shape this prohibition exists to bar.
     ///
-    /// Fail-safe by construction: clearing can only SHRINK the prior set every
-    /// offer/crown/draw path is gated on (`game::engine::find_live_loop_winner` and the
-    /// Path-B / Path-C bridges all scan `loop_detect_ring` for a satisfying prior), so
-    /// this can produce a conservative MISS and never a wrong certification.
+    /// Fail-safe by construction: clearing can only SHRINK the prior set the ring's
+    /// readers scan, so this can produce a conservative MISS and never a wrong certification.
     ///
     /// `lives_before` is positional over `self.players`, the fixed seat vector — seats are
     /// never removed (elimination sets `Player::is_eliminated`) and the sole caller
@@ -37344,9 +37339,7 @@ impl GameState {
     ///     would in manual play.
     /// (c) BECAME OBSERVED IN-WINDOW → `engine_resolution_choices::boundary_declines` → manual
     ///     play, where the player performs the actions.
-    /// (d) DRAIN PATH → the bounded-cycle certificate producer
-    ///     (`game::engine::try_offer_bounded_cycle_shortcut`) and the interactive loop bridge
-    ///     (`game::engine::interactive_loop_bridge`) both materialize through
+    /// (d) DRAIN PATH → a ring offer materializes through
     ///     `materialize_fixed_shortcut` / `apply_until_lethal_shortcut`, which LITERALLY PERFORM
     ///     the iterations beat by beat through `pass_priority_once_with_pipeline`. Identity holds
     ///     the way it holds on route (b), and for the same reason: nothing is elided that
@@ -50553,9 +50546,7 @@ mod tests {
             "an unsettled carrier is never loop-equal, even to itself"
         );
 
-        // Every certification route reads the sample ring, so the sampler is
-        // gated too. Reach guard: three settled beats with a steady life delta
-        // certify a bounded offer.
+        // The sampler is gated too. Reach guard: settled beats sample.
         let mut ring = GameState::new_two_player(7);
         for life in [40, 39, 38] {
             ring.players[1].life = life;
@@ -50566,22 +50557,13 @@ mod tests {
             3,
             "reach guard: settled beats sample"
         );
-        assert!(
-            crate::analysis::resource::ring_delta_signature(&ring).is_some(),
-            "reach guard: a steady settled ring certifies"
-        );
-        // An unsettled beat records no sample and breaks the ring, so nothing
-        // is certified from it.
+        // An unsettled beat records no sample and breaks the ring.
         ring.players[1].life = 37;
         ring.deferred_entry_events = unsettled.deferred_entry_events.clone();
         ring.record_loop_detect_sample();
         assert!(
             ring.loop_detect_ring.is_empty(),
             "no sample from an unsettled beat"
-        );
-        assert!(
-            crate::analysis::resource::ring_delta_signature(&ring).is_none(),
-            "no shortcut is certified across an unsettled beat"
         );
     }
 
