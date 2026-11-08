@@ -16212,7 +16212,12 @@ mod tests {
         });
         std::sync::Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities)
             .push(ability);
-        state.pending_activations.push((source, 0));
+        // CR 602.2a: the pending entry is the announcement-bound usage key,
+        // not a `(source, index)` pair — the unbound read below must ignore
+        // it either way.
+        let pending = crate::game::restrictions::ability_usage_key(&state, source, 0)
+            .expect("the pushed ability resolves at slot 0");
+        state.pending_activations.push(pending);
 
         let filter = TargetFilter::And {
             filters: vec![

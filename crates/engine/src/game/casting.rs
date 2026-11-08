@@ -31780,7 +31780,19 @@ pub(crate) fn record_activated_ability_placed(
     }
     // CR 117.1b: Priority permits unbounded activation. `pending_activations`
     // is a per-priority-window AI-guard — see `GameState::pending_activations`.
-    state.pending_activations.push((source_id, ability_index));
+    // CR 602.2a: the pending entry is the announcement-bound usage key read
+    // off the placed entry — never re-derived from `(source_id,
+    // ability_index)`. Post-payment re-derivation would mis-record whenever a
+    // cost moved the source or its slot (the same staleness the ledger block
+    // avoids above), and an index-keyed entry goes stale when a later layer
+    // recompute shifts indices. A missing key skips the guard exactly like
+    // the missing-entry ledger semantics above.
+    if let Some(key) = state.stack.back().and_then(|entry| match &entry.kind {
+        StackEntryKind::ActivatedAbility { ability, .. } => ability.announced_usage_key.clone(),
+        _ => None,
+    }) {
+        state.pending_activations.push(key);
+    }
     super::casting_targets::emit_ability_activated(
         state,
         player,

@@ -24567,18 +24567,25 @@ declare_game_state! {
     #[serde(default)]
     pub cancelled_casts: Vec<ObjectId>,
 
-    /// (source_id, ability_index) pairs for activated abilities pushed to the
-    /// stack during the current priority window. Transient AI-guard that
-    /// prevents the AI's softmax policy from re-choosing the same activated
-    /// ability while its prior activation is still unresolved on the stack —
-    /// a pathological scoring outcome when the effect is redundant (e.g.
-    /// self-exile with delayed return, or gain indestructible UEOT when the
-    /// buff is already active). CR 117.1b permits unbounded activation at
-    /// priority, and absent a CR 602.5b restriction there is no per-turn cap,
-    /// so this is a pure AI-pathology mitigation, not a rules concern.
+    /// [`AbilityUsageKey`]s for activated abilities pushed to the stack during
+    /// the current priority window. Transient AI-guard that prevents the AI's
+    /// softmax policy from re-choosing the same activated ability while its
+    /// prior activation is still unresolved on the stack — a pathological
+    /// scoring outcome when the effect is redundant (e.g. self-exile with
+    /// delayed return, or gain indestructible UEOT when the buff is already
+    /// active). CR 117.1b permits unbounded activation at priority, and
+    /// absent a CR 602.5b restriction there is no per-turn cap, so this is a
+    /// pure AI-pathology mitigation, not a rules concern.
     /// Cleared on PassPriority (when the stack will begin resolving).
+    ///
+    /// CR 602.2a: the entry is the announcement-bound usage key read off the
+    /// placed stack entry — never a `(source_id, ability_index)` pair. Layer
+    /// recomputes shift indices while the acquisition stays the same, so an
+    /// index-keyed entry goes stale when a grant is withdrawn (a cost exiles
+    /// its provider) and would then suppress the innocent ability that
+    /// shifted into the recorded slot.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pending_activations: Vec<(ObjectId, usize)>,
+    pub pending_activations: Vec<AbilityUsageKey>,
 
     // Triggered ability targeting
     #[serde(default)]

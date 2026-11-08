@@ -9083,12 +9083,20 @@ fn ability_definition_for_usage_key<'s>(
     state: &'s GameState,
     key: &AbilityUsageKey,
 ) -> Option<&'s AbilityDefinition> {
+    // CR 602.5b: the fingerprint discriminates same-acquisition twins that
+    // differ only in body (two equip costs, reconfigure attach vs unattach —
+    // all `description: None`). Without it the lookup returns the first twin
+    // and a gated tally is misclassified as unrestricted.
     state
         .objects
         .get(&key.source)?
         .abilities
         .iter()
-        .find(|def| def.granting_object == key.provenance && def.description == key.description)
+        .find(|def| {
+            def.granting_object == key.provenance
+                && def.description == key.description
+                && crate::game::restrictions::ability_fingerprint(def) == key.fingerprint
+        })
 }
 
 /// CR 602.5b: does the ability at `key` carry a PER-TURN activation
@@ -15779,6 +15787,141 @@ mod tests {
             None,
             "an ability that neither gates nor reads the count keeps the existing \
              pumped-history projection"
+        );
+    }
+
+    /// CR 602.5c + CR 602.2a: same-source, same-provenance, same-description
+    /// twins that differ only in body must NOT share a loop-projection fate.
+    /// The usage-key lookup binds the full key (fingerprint included), so the
+    /// gated twin's tally survives `project_out_resources` while the
+    /// unrestricted twin's is projected out. Reverting the fingerprint
+    /// conjunct returns the FIRST twin for the gated key, so the gated tally
+    /// is misclassified as unrestricted and dropped (RED).
+    ///
+    /// Synthetic twins: no printed card exhibits two same-description
+    /// abilities on one source differing only in body (per F2); the nearest
+    /// printed shape is reconfigure's attach vs unattach pair (both
+    /// undescribed). Both the per-turn (`OnlyOnceEachTurn`) and the per-game
+    /// (`OnlyOnce`) mirrors are pinned here.
+    #[test]
+    fn projection_retains_only_the_gated_twin_of_same_description_pair() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ActivationRestriction, Effect, EffectScope,
+            QuantityExpr, TapStateChange, TargetFilter, TypedFilter,
+        };
+        use std::sync::Arc;
+
+        let mut state = GameState::new_two_player(7);
+        state.phase = Phase::PreCombatMain;
+
+        let holder = inert_token(&mut state, 903, 0, "Twin Holder");
+
+        // Twin 0: unrestricted untap. Twin 1: the same description, a
+        // different body (life gain), gated once per turn / once per game.
+        // Same source, same (absent) provenance, same description — the
+        // fingerprints alone tell them apart.
+        let untap = || Effect::SetTapState {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            scope: EffectScope::All,
+            state: TapStateChange::Untap,
+        };
+        let mut plain = AbilityDefinition::new(AbilityKind::Activated, untap());
+        plain.description = Some("Twin ability".to_string());
+        let mut gated = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        );
+        gated.description = Some("Twin ability".to_string());
+        gated.activation_restrictions = vec![ActivationRestriction::OnlyOnceEachTurn];
+        let mut game_open = AbilityDefinition::new(AbilityKind::Activated, untap());
+        game_open.description = Some("Twin game ability".to_string());
+        let mut game_once = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+        );
+        game_once.description = Some("Twin game ability".to_string());
+        game_once.activation_restrictions = vec![ActivationRestriction::OnlyOnce];
+        state.objects.get_mut(&holder).unwrap().abilities =
+            Arc::new(vec![plain, gated, game_open, game_once]);
+
+        // CR 602.5c: tallies are keyed by the resolved acquisition.
+        let key = |index: usize| {
+            crate::game::restrictions::ability_usage_key(&state, holder, index)
+                .expect("the twin ability resolves")
+        };
+        let plain_key = key(0);
+        let gated_key = key(1);
+        let game_open_key = key(2);
+        let game_once_key = key(3);
+        // The twins share everything but the fingerprint.
+        assert_eq!(plain_key.source, gated_key.source);
+        assert_eq!(plain_key.provenance, gated_key.provenance);
+        assert_eq!(plain_key.description, gated_key.description);
+        assert_ne!(
+            plain_key.fingerprint, gated_key.fingerprint,
+            "the twins must differ in body for the fingerprint to discriminate"
+        );
+        assert_eq!(game_open_key.description, game_once_key.description);
+        assert_ne!(
+            game_open_key.fingerprint, game_once_key.fingerprint,
+            "the per-game twins must differ in body too"
+        );
+
+        // Reach-guard: both tallies are present before projection.
+        state
+            .activated_abilities_this_turn
+            .insert(plain_key.clone(), 1);
+        state
+            .activated_abilities_this_turn
+            .insert(gated_key.clone(), 1);
+        state
+            .activated_abilities_this_game
+            .insert(game_open_key.clone(), 1);
+        state
+            .activated_abilities_this_game
+            .insert(game_once_key.clone(), 1);
+        assert_eq!(state.activated_abilities_this_turn.len(), 2);
+        assert_eq!(state.activated_abilities_this_game.len(), 2);
+
+        let projected = project_out_resources(&state);
+
+        assert_eq!(
+            projected
+                .activated_abilities_this_turn
+                .get(&gated_key)
+                .copied(),
+            Some(1),
+            "the gated twin's per-turn tally must survive projection"
+        );
+        assert_eq!(
+            projected
+                .activated_abilities_this_turn
+                .get(&plain_key)
+                .copied(),
+            None,
+            "the unrestricted twin's per-turn tally keeps the pumped-history projection"
+        );
+        assert_eq!(
+            projected
+                .activated_abilities_this_game
+                .get(&game_once_key)
+                .copied(),
+            Some(1),
+            "the gated twin's per-game tally must survive projection"
+        );
+        assert_eq!(
+            projected
+                .activated_abilities_this_game
+                .get(&game_open_key)
+                .copied(),
+            None,
+            "the unrestricted twin's per-game tally keeps the pumped-history projection"
         );
     }
 
