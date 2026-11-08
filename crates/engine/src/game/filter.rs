@@ -32,9 +32,9 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
 use crate::types::events::EventObjectSnapshot;
 use crate::types::game_state::{
-    ActivationTargetFact, AttackDeclarationRecord, CounterAddedRecord, DamageRecord, GameState,
-    LKISnapshot, ManaSpentSourceSnapshot, SpellCastRecord, StackEntryKind, TriggerSourceContext,
-    ZoneChangeRecord,
+    ActivationTargetFact, AnnouncedTargetZone, AttackDeclarationRecord, CounterAddedRecord,
+    DamageRecord, GameState, LKISnapshot, ManaSpentSourceSnapshot, SpellCastRecord, StackEntryKind,
+    TriggerSourceContext, ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TriggeringObjectRef};
 use crate::types::keywords::Keyword;
@@ -6255,11 +6255,17 @@ pub fn matches_target_filter_on_lki_snapshot(
 /// description: "targets a creature" is `InZone { Battlefield }`, which a target
 /// announced in a graveyard ("target creature card from a graveyard",
 /// CR 109.2a) must fail even though its snapshot is a `Creature`.
+///
+/// A fact whose save states no zone leaves the zone axis unanswerable, exactly
+/// as [`matches_target_filter_on_lki_snapshot`] does, so a zone-scoped predicate
+/// cannot hold on an unstated zone rather than assuming the battlefield.
+/// `PersistedRestoreError::UnknownActivationTargetZone` refuses such a save, so
+/// only an in-memory carrier ever reaches this arm.
 pub(crate) fn matches_target_filter_on_announced_lki(
     state: &GameState,
     object_id: ObjectId,
     lki: &LKISnapshot,
-    zone: Zone,
+    zone: AnnouncedTargetZone,
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
 ) -> bool {
@@ -6270,7 +6276,7 @@ pub(crate) fn matches_target_filter_on_announced_lki(
         filter,
         ctx,
         None,
-        Some(zone),
+        zone.zone(),
     )
 }
 

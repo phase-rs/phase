@@ -16,6 +16,7 @@ use crate::types::game_state::{
     PendingEmptyPoolLifeLoss, TurnBoundary, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
+use crate::types::mana::ManaType;
 use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
@@ -1368,6 +1369,33 @@ pub(crate) fn resume_deferred_step_triggers(
         // a player in the untap step.
         super::engine::auto_advance_settling_deferral(state, events)
     })
+}
+
+/// CR 106.4 + CR 500.5 + CR 703.4q + CR 614.6: would a step-end mana handler keep
+/// `unit` in `player`'s pool past the boundary that is about to empty it?
+///
+/// [`scan_step_end_mana_handlers`] is the single authority over which handlers are
+/// live for a player — the same scan the boundary itself drains — so this asks it
+/// rather than re-deriving the class. A handler whose `filter` is `None` (Upwelling's
+/// "Players don't lose unspent mana as steps and phases end") keeps every unit; a
+/// color-filtered one (Kruphix, Horizon Stone, Omnath) keeps the units it names,
+/// and both `Retain` and `Transform` leave the unit in the pool.
+///
+/// The distinction matters to provenance, not just to the pool: a unit a handler
+/// keeps survives EVERY boundary, the turn's last included, so it can predate the
+/// turn whose zone-change journal a restore reads.
+pub(crate) fn step_end_handler_retains_pooled_mana(
+    state: &GameState,
+    player: PlayerId,
+    unit: &crate::types::mana::ManaUnit,
+) -> bool {
+    scan_step_end_mana_handlers(state, player)
+        .iter()
+        .any(|entry| {
+            entry
+                .filter
+                .is_none_or(|filter| ManaType::from(filter) == unit.color)
+        })
 }
 
 /// CR 703.4q + CR 616.1 + CR 611.2b: Scan active step-end mana handlers for

@@ -10,6 +10,7 @@ mod source_census;
 
 mod abdel_adrian_animate_dead_altar_board;
 mod abigale_integration;
+mod activation_target_zone_restore;
 mod active_damage_trigger_recipient_anaphor;
 mod adapter_contract_fixtures;
 mod additional_cost_declaration_tail;

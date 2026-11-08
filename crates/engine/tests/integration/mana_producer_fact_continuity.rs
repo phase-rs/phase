@@ -216,6 +216,24 @@ fn pass_until(runner: &mut GameRunner, mut done: impl FnMut(&GameRunner) -> bool
                     .act(GameAction::ChooseReplacement { index: 0 })
                     .expect("the first replacement option must be accepted");
             }
+            // CR 508.1: a board that happens to hold a creature stops at combat.
+            // Declaring no attackers is the empty declaration, which keeps the
+            // drive to the phases the callers are waiting for.
+            WaitingFor::DeclareAttackers { .. } => {
+                runner
+                    .act(GameAction::DeclareAttackers {
+                        attacks: Vec::new(),
+                        bands: Vec::new(),
+                    })
+                    .expect("declaring no attackers must be accepted");
+            }
+            WaitingFor::DeclareBlockers { .. } => {
+                runner
+                    .act(GameAction::DeclareBlockers {
+                        assignments: Vec::new(),
+                    })
+                    .expect("declaring no blockers must be accepted");
+            }
             other => panic!("unhandled waiting state while {what}: {other:?}"),
         }
     }
@@ -623,8 +641,11 @@ fn legacy_pinless_pool_is_refused_and_pinned_pool_still_pays() {
             .next()
             .expect("the unit survives");
         assert_eq!(
-            unit.source_incarnation, None,
-            "reach: the over-rejection leg really is pin-less"
+            unit.source_incarnation,
+            Some(live_incarnation),
+            "CR 106.3 + CR 400.7: admission BINDS the proved epoch. The save proves \
+             the live object is the producer, so leaving the unit pin-less would let \
+             a later blink of that same storage id re-point the read at its successor"
         );
     }
 
@@ -679,6 +700,21 @@ fn legacy_pinless_pool_is_refused_and_pinned_pool_still_pays() {
 // 3 — a triggered ability's mana comes from the trigger's own source
 // ---------------------------------------------------------------------------
 
+/// CR 106.4 + CR 500.5 + CR 703.4q: whether the shared board is under a step-end
+/// retention effect — the only way a floating unit outlives the turn whose
+/// zone-change journal a save carries. A typed choice rather than a `bool`
+/// because "no retention" is a claim about what the pool does at every boundary,
+/// not a switch on one card.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ManaRetention {
+    /// Nothing keeps the pool: CR 106.4 empties it at the end of every step and
+    /// phase, so every floating unit was produced during the turn in play.
+    Empties,
+    /// Upwelling — "Players don't lose unspent mana as steps and phases end."
+    /// The pool survives every boundary, the turn's last included.
+    Upwelling,
+}
+
 /// The shared board of tests 3 and 5, driven to the moment the original
 /// Emissary trigger has resolved and its two pinned units are floating.
 ///
@@ -688,11 +724,19 @@ fn legacy_pinless_pool_is_refused_and_pinned_pool_still_pays() {
 /// storage id holds a LIVE battlefield object that is not the producer. Returns
 /// the runner, that storage id, the epoch that generated the trigger, and the
 /// `{2}` spell the floating mana is spent on.
-fn clever_impersonator_trigger_pool() -> (GameRunner, ObjectId, u64, ObjectId) {
+fn clever_impersonator_trigger_pool(
+    retention: ManaRetention,
+) -> (GameRunner, ObjectId, u64, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    // CR 704.5b: the opponent must be able to draw, or crossing a turn ends the
+    // game before the pool this test is about can be saved.
+    scenario.with_library_top(P1, &["Forest", "Forest", "Forest", "Forest"]);
     scenario.add_enchantment_from_oracle(P0, "Rain of Riches", RAIN_OF_RICHES);
+    if retention == ManaRetention::Upwelling {
+        scenario.add_enchantment_from_oracle(P0, "Upwelling", UPWELLING);
+    }
     let donor = scenario
         .add_creature_from_oracle(P0, "Burning-Tree Emissary", 2, 2, BURNING_TREE_EMISSARY)
         .id();
@@ -899,7 +943,7 @@ fn clever_impersonator_trigger_pool() -> (GameRunner, ObjectId, u64, ObjectId) {
 #[test]
 fn trigger_source_mana_is_not_the_returned_copy() {
     let (mut runner, impersonator, _copied_incarnation, sciences) =
-        clever_impersonator_trigger_pool();
+        clever_impersonator_trigger_pool(ManaRetention::Empties);
 
     // --- Act 4: spend that mana on the turn's first spell.
     {
@@ -1154,7 +1198,8 @@ fn retained_producer_fact_is_stripped_from_the_opponent_view() {
 /// save the engine writes today, pins intact) stays admitted.
 #[test]
 fn legacy_pinless_pool_is_not_attributed_to_a_battlefield_successor() {
-    let (runner, impersonator, copied_incarnation, sciences) = clever_impersonator_trigger_pool();
+    let (runner, impersonator, copied_incarnation, sciences) =
+        clever_impersonator_trigger_pool(ManaRetention::Empties);
 
     // Reach guards: the storage id holds a live battlefield Treasure that is a
     // different object from the epoch that produced the mana (CR 400.7).
@@ -1232,7 +1277,168 @@ fn legacy_pinless_pool_is_not_attributed_to_a_battlefield_successor() {
 }
 
 // ---------------------------------------------------------------------------
-// 6 — the over-rejection edge of that rule: a Stack → Battlefield arrival
+// 6 — the same board one TURN later: Upwelling outlives the journal
+// ---------------------------------------------------------------------------
+
+/// CR 106.3 + CR 106.4 + CR 400.7 + CR 500.5 + CR 703.4q: the turn journal is not
+/// an evidence base once a step-end retention effect is in play.
+///
+/// Test 5's proof is this turn's `zone_changes_this_turn`: it records the
+/// pristine copy leaving the battlefield, so the storage id provably had an
+/// earlier producing tenure. Turn advancement clears that journal
+/// (`turns::prune_turn_scoped_state`), and Upwelling — "Players don't lose
+/// unspent mana as steps and phases end" — is exactly what lets the `{R}{G}` the
+/// copied Emissary's trigger made outlive the arm of the game that recorded it.
+/// With the journal gone, a guard keyed on it is blind precisely where the mana
+/// is still alive: the pin-less restore admits the units and the live read prices
+/// them from the Treasure now holding the storage id, which is CR 106.3's source
+/// question answered about the wrong object and earns Rain of Riches cascade.
+///
+/// CR 106.4 makes the pool empty at the end of every step and phase, so a unit
+/// still floating while no step-end handler keeps it MUST have been produced in
+/// the turn whose journal the save carries — that is what makes the journal a
+/// complete evidence base, and it is a claim about retention, not about the
+/// journal's length. With a handler in play the claim fails, the producing tenure
+/// is unprovable, and the shared chokepoint refuses the pool.
+///
+/// The current-format control (the save the engine writes today, pins intact)
+/// stays admitted, and test 2's third leg keeps the no-retention pin-less shape
+/// admitted — and now BOUND — so this rule convicts only the ambiguous save.
+#[test]
+fn legacy_pinless_pool_is_refused_when_upwelling_carries_it_past_the_turn_boundary() {
+    let (mut runner, impersonator, copied_incarnation, sciences) =
+        clever_impersonator_trigger_pool(ManaRetention::Upwelling);
+
+    // Reach guard: the retention effect is the real parsed static the boundary
+    // drains, not a hand-set marker.
+    assert!(
+        runner
+            .state()
+            .objects
+            .values()
+            .any(|object| object.zone == Zone::Battlefield
+                && object.name == "Upwelling"
+                && object
+                    .static_definitions
+                    .iter_all()
+                    .any(|def| matches!(def.mode, StaticMode::StepEndUnspentMana { .. }))),
+        "reach: Upwelling must be on the battlefield as a step-end unspent-mana static"
+    );
+
+    // --- Cross a turn so the journal that proved the earlier tenure is gone.
+    // Land on P0's next precombat main, where the retained mana can still pay for
+    // a spell (CR 106.4: only a retention effect lets it live this long).
+    let opening_turn = runner.state().turn_number;
+    pass_until(
+        &mut runner,
+        |r| {
+            r.state().turn_number > opening_turn
+                && r.state().phase == Phase::PreCombatMain
+                && r.state().active_player == P0
+        },
+        "crossing a full turn boundary with Upwelling holding the pool",
+    );
+
+    // Reach guards: the units survived with their pins, and the journal proof is
+    // gone — this is the shape the old guard could not see.
+    {
+        let state = runner.state();
+        let units = pool_units(&runner);
+        assert_eq!(
+            units.len(),
+            2,
+            "CR 106.4: Upwelling must keep both trigger units in the pool, got {units:?}"
+        );
+        for unit in &units {
+            assert_eq!(unit.source_id, impersonator);
+            assert_eq!(
+                unit.source_incarnation,
+                Some(copied_incarnation),
+                "reach: the current-format save still pins the producing epoch"
+            );
+        }
+        assert!(
+            state
+                .zone_changes_this_turn
+                .iter()
+                .all(|record| record.object_id != impersonator),
+            "reach: turn advancement cleared the journal that convicted this id"
+        );
+        assert_eq!(
+            state.objects[&impersonator].zone,
+            Zone::Battlefield,
+            "reach: the storage id still holds a LIVE battlefield object"
+        );
+        assert_ne!(
+            state.objects[&impersonator].incarnation, copied_incarnation,
+            "CR 400.7: the Treasure now holding the id is not the producer"
+        );
+        assert!(
+            state.objects[&impersonator]
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Treasure"),
+            "reach: the successor is a Treasure, so a live read would earn cascade"
+        );
+    }
+
+    // The current-format control: the save the engine writes today is admitted.
+    assert!(
+        admitted(persisted_json(runner.state())).is_ok(),
+        "a current-format save (pins intact) must stay admitted"
+    );
+
+    // --- The legacy shape: the same pool, saved before the pin existed. ---
+    let mut legacy = persisted_json(runner.state());
+    assert_eq!(
+        strip_pool_pins(&mut legacy),
+        2,
+        "both retained units must lose their pin to reproduce the legacy save"
+    );
+
+    match admitted(legacy) {
+        Err(PersistedRestoreError::AmbiguousFloatingManaProvenance { player, source_id }) => {
+            assert_eq!(player, P0);
+            assert_eq!(
+                source_id, impersonator,
+                "the refused unit is the one whose producer the save cannot prove"
+            );
+        }
+        Err(other) => panic!("expected an ambiguous-provenance refusal, got {other:?}"),
+        Ok(state) => {
+            // The adjudication a turn-scoped guard permits: with the journal
+            // cleared, the pool is admitted and the legacy live read prices the
+            // ORIGINAL trigger's mana from the returned Treasure. Demonstrated
+            // rather than asserted, so a rule that stays keyed on the journal
+            // fails here with its own consequence.
+            let mut restored = GameRunner::from_state(state);
+            let commit = restored.cast(sciences).commit();
+            let state = commit.state();
+            let record = state.spells_cast_this_turn_by_player[&P0]
+                .back()
+                .expect("the admitted cast must be recorded");
+            let named: Vec<&str> = record
+                .mana_source_snapshots()
+                .iter()
+                .map(|snapshot| snapshot.lki.name.as_str())
+                .collect();
+            let cascade = state.objects[&sciences]
+                .cast_spell_keywords
+                .iter()
+                .any(|keyword| matches!(keyword, Keyword::Cascade));
+            panic!(
+                "CR 106.3 + CR 106.4 + CR 400.7: a pin-less unit Upwelling carried past \
+                 the turn boundary must be refused — the turn journal it was keyed on no \
+                 longer covers the producing tenure. This save was admitted and attributed \
+                 the trigger's mana to {named:?} (cascade granted: {cascade})"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 7 — the over-rejection edge of that rule: a Stack → Battlefield arrival
 // ---------------------------------------------------------------------------
 
 /// CR 106.3 + CR 400.7: the refusal above must convict only on an EARLIER producing
@@ -1314,8 +1520,10 @@ fn a_stack_arrival_this_turn_is_not_an_earlier_producing_tenure() {
         .next()
         .expect("the unit survives");
     assert_eq!(
-        unit.source_incarnation, None,
-        "reach: the admitted unit really is pin-less"
+        unit.source_incarnation,
+        Some(admitted_state.objects[&dork].incarnation),
+        "CR 106.3: the admitted unit is bound to the epoch the save proved — the \
+         permanent that is there now — so a later blink cannot re-point it"
     );
     assert_eq!(unit.source_id, dork);
 }

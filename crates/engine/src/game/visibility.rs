@@ -5621,7 +5621,7 @@ mod tests {
         let fact = |id: ObjectId| crate::types::game_state::ActivationTargetFact::Object {
             id,
             lki: Box::new(state.objects[&id].snapshot_public_characteristics()),
-            zone: state.objects[&id].zone,
+            zone: crate::types::game_state::AnnouncedTargetZone::Known(state.objects[&id].zone),
         };
 
         // (1) A fully-hidden cast naming a hidden target.
@@ -5685,7 +5685,9 @@ mod tests {
             crate::types::game_state::ActivationTargetFact::Object {
                 id: hidden_target,
                 lki: Box::new(state.objects[&hidden_target].snapshot_public_characteristics()),
-                zone: state.objects[&hidden_target].zone,
+                zone: crate::types::game_state::AnnouncedTargetZone::Known(
+                    state.objects[&hidden_target].zone,
+                ),
             },
             "reach: the authoritative record still carries the hidden target's snapshot"
         );
@@ -11188,7 +11190,9 @@ mod tests {
             crate::types::game_state::ActivationTargetFact::Object {
                 id: hidden,
                 lki: Box::new(state.objects[&hidden].snapshot_public_characteristics()),
-                zone: state.objects[&hidden].zone,
+                zone: crate::types::game_state::AnnouncedTargetZone::Known(
+                    state.objects[&hidden].zone,
+                ),
             },
         ]);
         state.pending_cast = Some(pending);

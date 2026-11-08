@@ -62998,7 +62998,9 @@ fn an_activation_journal_row_round_trips() {
             ActivationTargetFact::Object {
                 id: target,
                 lki: Box::new(state.objects[&target].snapshot_public_characteristics()),
-                zone: state.objects[&target].zone,
+                zone: crate::types::game_state::AnnouncedTargetZone::Known(
+                    state.objects[&target].zone,
+                ),
             },
         ],
     };

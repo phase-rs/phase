@@ -1471,6 +1471,75 @@ fn is_battlefield_zone(zone: &Zone) -> bool {
     *zone == Zone::Battlefield
 }
 
+/// CR 601.2c + CR 109.2 + CR 109.2a: the zone a committed target occupied when
+/// it was announced, as the save STATES it.
+///
+/// The zone is not a default. CR 109.2 scopes a bare type description ("targets
+/// a creature") to a permanent on the battlefield while CR 109.2a scopes a
+/// "card … in [zone]" description to that zone, so the zone decides whether a
+/// recorded target qualifies for a target-gated rule. A save that does not say
+/// which zone the target was in has not answered that question, and answering
+/// it with the battlefield would fabricate the answer that makes the widest
+/// class of target-gated rules fire (Professor Hojo's "targets a creature you
+/// control" reading a card announced in a graveyard as a battlefield
+/// permanent).
+///
+/// So the two states are different values, and silence is [`Self::Unknown`]:
+/// [`PersistedRestoreError::UnknownAnnouncedTargetZone`] refuses a save that
+/// carries one. A record this build writes always states its zone — including
+/// the battlefield — which is what keeps a current-format save admissible while
+/// a payload that predates the field is refused rather than guessed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum AnnouncedTargetZone {
+    /// The save states no zone for this target: the payload predates the field,
+    /// so which zone the target was announced in is unreconstructable.
+    #[default]
+    Unknown,
+    /// CR 601.2c: the zone the target occupied at announcement.
+    Known(Zone),
+}
+
+impl AnnouncedTargetZone {
+    /// The zone this save states, or `None` when it states none.
+    pub fn zone(self) -> Option<Zone> {
+        match self {
+            Self::Unknown => None,
+            Self::Known(zone) => Some(zone),
+        }
+    }
+
+    fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+}
+
+/// Encoded as the bare zone string, exactly as the field was written before the
+/// type existed, so a payload carrying a zone still decodes to [`Known`]. Only
+/// silence means [`Unknown`] — it is never synthesized from a default.
+///
+/// [`Known`]: AnnouncedTargetZone::Known
+/// [`Unknown`]: AnnouncedTargetZone::Unknown
+impl Serialize for AnnouncedTargetZone {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_some(&self.zone())
+    }
+}
+
+impl<'de> Deserialize<'de> for AnnouncedTargetZone {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match Option::<Zone>::deserialize(deserializer)? {
+            Some(zone) => Self::Known(zone),
+            None => Self::Unknown,
+        })
+    }
+}
+
 /// CR 115.1 + CR 400.7: one committed target of a spell or ability, as it was
 /// when the target was committed (CR 601.2c). Carried by
 /// `AbilityActivationRecord.targets` for an activated ability and by
@@ -1495,17 +1564,32 @@ pub enum ActivationTargetFact {
         /// snapshot's characteristics answer for every zone and a graveyard card
         /// reads as a battlefield permanent.
         ///
-        /// Follows the [`AbilityActivationRecord::source_zone`] precedent: a
-        /// record predating the field described a target as every reader at the
-        /// time understood it, which for a bare type description was a
-        /// battlefield permanent, so the default is the battlefield; it is
-        /// omitted on the wire then.
-        #[serde(
-            default = "battlefield_zone",
-            skip_serializing_if = "is_battlefield_zone"
-        )]
-        zone: Zone,
+        /// NOT defaulted to the battlefield. [`AnnouncedTargetZone`] keeps "the
+        /// save states no zone" (`Unknown`) distinct from "the save states the
+        /// battlefield", because the default would silently convert a payload
+        /// that predates the field into the one claim that makes a bare-type
+        /// target qualifier fire. A record this build captures always states its
+        /// zone, so the field is omitted only by an older payload — which
+        /// [`PersistedRestoreError::UnknownAnnouncedTargetZone`] refuses.
+        #[serde(default, skip_serializing_if = "AnnouncedTargetZone::is_unknown")]
+        zone: AnnouncedTargetZone,
     },
+}
+
+impl ActivationTargetFact {
+    /// CR 601.2c + CR 109.2: the object target whose announced zone this save
+    /// does not state, or `None` when it states one (or the fact names a
+    /// player, which has no zone axis).
+    fn object_target_without_announced_zone(&self) -> Option<ObjectId> {
+        match self {
+            Self::Object {
+                id,
+                zone: AnnouncedTargetZone::Unknown,
+                ..
+            } => Some(*id),
+            Self::Object { .. } | Self::Player(_) => None,
+        }
+    }
 }
 
 /// Snapshot of a spell's characteristics at cast time for per-turn history queries.
@@ -16658,91 +16742,206 @@ impl GameState {
         }
     }
 
-    /// CR 106.3 + CR 106.4 + CR 400.7: refuse a save whose floating mana can be
-    /// PROVEN to name the wrong producing object.
+    /// CR 601.2c + CR 109.2 + CR 109.2a: refuse a save whose committed target
+    /// facts do not say which zone the target was announced in.
+    ///
+    /// [`ActivationTargetFact::Object::zone`] is what separates a permanent on
+    /// the battlefield from a card in some other zone for a bare type
+    /// description (CR 109.2) and for a "card … in [zone]" description
+    /// (CR 109.2a). A save that omits it predates the field, and the record's
+    /// characteristics snapshot answers for every zone — so reading the
+    /// omission as the battlefield would let a card announced in a graveyard
+    /// satisfy a battlefield-scoped qualifier. The announcement is gone, so the
+    /// zone is not reconstructable: the honest outcome is refusal at the shared
+    /// chokepoint, the same outcome
+    /// [`PersistedRestoreError::UnknownCastHistoryProvenance`] gives an unknown
+    /// declared-target or paying-source provenance.
+    ///
+    /// Both carriers of an activation's facts are checked. A COMPLETED
+    /// activation's record is already in [`Self::abilities_activated_this_turn_by_player`],
+    /// which is what a "the first activated ability you activate each turn …"
+    /// reader scans; a PENDING activation's record still rides its
+    /// `ability.activation_record` and is published to that same journal by
+    /// `casting::take_activation_record` when payment finishes, so an unchecked
+    /// pending record would become an unchecked journal row one action later.
+    /// The pending walk reuses [`Self::pending_cast_owners`] rather than
+    /// restating the custody list, so a carrier added to it is covered for free.
+    ///
+    /// The resolved-rules command operand
+    /// (`ResolvedLedgerEdit::AbilityActivated { record }`) is deliberately NOT
+    /// refused. It is not a history reader: it is the replay authority that
+    /// appends the record to the journal above, and an unstated zone there
+    /// answers "no zone" all the way down
+    /// (`filter::declared_target_fact_matches` leaves the zone axis
+    /// unanswerable), so it under-grants a target-gated benefit instead of
+    /// fabricating the battlefield claim this guard exists to stop. Any save
+    /// whose journal row exists is refused on that row regardless of the
+    /// operand.
+    fn reject_unknown_activation_target_zone(&self) -> Result<(), PersistedRestoreError> {
+        fn check(record: &AbilityActivationRecord) -> Result<(), PersistedRestoreError> {
+            match record
+                .targets
+                .iter()
+                .find_map(ActivationTargetFact::object_target_without_announced_zone)
+            {
+                Some(target) => Err(PersistedRestoreError::UnknownAnnouncedTargetZone {
+                    owner: Some(record.source),
+                    target,
+                }),
+                None => Ok(()),
+            }
+        }
+        fn check_facts(facts: &[ActivationTargetFact]) -> Result<(), PersistedRestoreError> {
+            match facts
+                .iter()
+                .find_map(ActivationTargetFact::object_target_without_announced_zone)
+            {
+                Some(target) => Err(PersistedRestoreError::UnknownAnnouncedTargetZone {
+                    // A bare fact list names no owning object; the refusal still
+                    // names the target whose zone the save cannot prove, which is
+                    // what a reader needs.
+                    owner: None,
+                    target,
+                }),
+                None => Ok(()),
+            }
+        }
+
+        for record in self
+            .abilities_activated_this_turn_by_player
+            .values()
+            .flat_map(|rows| rows.iter())
+        {
+            check(record)?;
+        }
+        for owner in self.pending_cast_owners() {
+            let Some(pending) = self.pending_cast_at(owner) else {
+                continue;
+            };
+            if let Some(record) = pending.ability.activation_record.as_deref() {
+                check(record)?;
+            }
+            if let Some(facts) = pending.committed_target_facts.as_deref() {
+                check_facts(facts)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// CR 106.3 + CR 106.4 + CR 400.7: BIND a legacy pin-less floating unit to
+    /// the producing epoch the save proves, and refuse the save when it proves
+    /// none.
     ///
     /// A current-format save pins every unit at production
     /// (`ManaUnit::source_incarnation`), so this guard never sees a current pool:
     /// it catches only legacy pools written before the pin existed. For those the
-    /// producing epoch is not recoverable — the only incarnation a save records is
-    /// the CURRENT object's (`GameObject::incarnation`), and which earlier epoch
-    /// produced the mana is exactly what the pin held.
+    /// producing epoch is usually not recoverable — the only incarnation a save
+    /// records is the CURRENT object's (`GameObject::incarnation`), and which
+    /// earlier epoch produced the mana is exactly what the pin held. See
+    /// [`Self::unpinned_producer_epoch`] for the per-unit decision and the
+    /// evidence each answer rests on.
     ///
-    /// What the save CAN still prove is that the legacy fallback's live read would
-    /// describe a different object than the producer (CR 400.7: a moved object
-    /// "becomes a new object with no memory of, or relation to, its previous
-    /// existence"). Two shapes prove it, and neither is "the current object is off
-    /// the battlefield":
-    ///
-    /// * the storage id's current object is not a battlefield permanent. Mana
-    ///   floating in a pool was added by a mana ability of the object named by
-    ///   `source_id` — the ability of a PERMANENT (CR 605.1a) or of a spell/card in
-    ///   the zone it occupied (CR 113.7) — so the unit is refused here rather than
-    ///   priced at the next payment from a card in a graveyard or exile. That is the
-    ///   Minimus Containment shape: the "Treasure" that made the mana is now a card
-    ///   in the graveyard.
-    /// * the storage id's current object IS a battlefield permanent, but this turn's
-    ///   journal records a departure from a MANA-PRODUCING zone for that storage id by
-    ///   an EARLIER tenure — out of the battlefield (CR 605.1a) or out of the stack into
-    ///   any zone but the battlefield (CR 106.3 makes a spell the source of mana it
-    ///   produces). Such a departure is CR 400.7 applied to the id: the object now there
-    ///   arrived after it, so the id has already had a tenure that could have produced
-    ///   the mana. The pin is the only thing that would say WHICH tenure, so the unit's
-    ///   producer is unprovable exactly as in the first shape. Leaving this out is what
-    ///   let the Clever Impersonator / Burning-Tree Emissary / Cloudshift board — the
-    ///   returned card is a Treasure ON the battlefield with the trigger's own storage
-    ///   id — attribute an earlier object's `{R}{G}` to the returned copy, which
-    ///   CR 106.3 never licensed: that mana's source is the object that generated the
-    ///   trigger (CR 113.7), not its successor.
-    ///
-    /// The shapes that stay admitted are the ones the save does not convict:
-    ///
-    /// * a unit whose storage id holds a battlefield permanent whose arrival is the
-    ///   journal's only zone change for it — the live read names the same object the
-    ///   pre-pin engine read, and refusing it would reject historical snapshots this
-    ///   tree still loads (the pump of floating mana off
-    ///   `sprout_witherbloom_realistic_lands_4p`) for an ambiguity the save cannot
-    ///   settle either way;
-    /// * a unit whose storage id appears in NO live object, whether or not the
-    ///   step-scoped `lki_cache` still holds that id's departure snapshot. The
-    ///   ObjectId-keyed cache describes the object that was there when it left, so
-    ///   the read is a last-known-information answer, not a re-derivation from a
-    ///   later occupant.
+    /// Admitting a unit is not enough on its own. A unit admitted without a pin
+    /// re-derives its source from the live board at every later read, so a blink
+    /// that reuses the storage id turns an honest admission into a mis-attributed
+    /// payment (CR 400.7: the returned object is not the producer). When the save
+    /// proves the live object IS the producer, the truthful epoch is that
+    /// object's own and it is stamped here — the same value
+    /// `mana_payment::producing_incarnation_for_ability` would have pinned live —
+    /// so the unit stops depending on what occupies the id later.
     ///
     /// Convoke markers are taps, not mana production (CR 702.51a), and are never
-    /// refused.
-    fn reject_ambiguous_floating_mana_provenance(&self) -> Result<(), PersistedRestoreError> {
-        let ambiguous = self.players.iter().find_map(|player| {
-            player
-                .mana_pool
-                .shapes()
-                .filter(|(shape, _)| {
-                    shape.source_incarnation.is_none() && !shape.is_convoke_payment()
-                })
-                .map(|(shape, _)| shape.source_id)
-                .find(|source_id| self.unpinned_producer_is_unprovable(*source_id))
-                .map(|source_id| (player.id, source_id))
-        });
-        match ambiguous {
-            Some((player, source_id)) => {
-                Err(PersistedRestoreError::AmbiguousFloatingManaProvenance { player, source_id })
+    /// refused or stamped.
+    fn bind_or_reject_floating_mana_provenance(&mut self) -> Result<(), PersistedRestoreError> {
+        let mut binding: Vec<(PlayerId, Vec<(usize, u64)>)> = Vec::new();
+        let mut ambiguous: Option<(PlayerId, ObjectId)> = None;
+        for player in &self.players {
+            let mut stamped: Vec<(usize, u64)> = Vec::new();
+            // Pool position, not pip: `ManaPipId(0)` is the unstamped sentinel, so
+            // two unjournaled units of one pool share a pip and only pool order
+            // tells them apart.
+            for (index, unit) in player.mana_pool.units().enumerate() {
+                if unit.source_incarnation.is_some() || unit.is_convoke_payment() {
+                    continue;
+                }
+                match self.unpinned_producer_epoch(player.id, &unit) {
+                    UnpinnedProducerEpoch::Proven(incarnation) => {
+                        stamped.push((index, incarnation))
+                    }
+                    // CR 400.7: nothing occupies the id, so the legacy read is the
+                    // departed object's own last-known answer rather than a later
+                    // object's. No epoch to stamp: there is no live object.
+                    UnpinnedProducerEpoch::Departed => {}
+                    UnpinnedProducerEpoch::Unprovable => {
+                        ambiguous = Some((player.id, unit.source_id));
+                        break;
+                    }
+                }
             }
-            None => Ok(()),
+            if ambiguous.is_some() {
+                break;
+            }
+            if !stamped.is_empty() {
+                binding.push((player.id, stamped));
+            }
         }
+        if let Some((player, source_id)) = ambiguous {
+            return Err(PersistedRestoreError::AmbiguousFloatingManaProvenance {
+                player,
+                source_id,
+            });
+        }
+        // Rebuilt through `ManaPool::from_units` — the constructor the pool's own
+        // wire codec uses — so slot order, pips and shape merging stay the
+        // engine's, not a second implementation's.
+        for player in &mut self.players {
+            let Some((_, stamped)) = binding.iter().find(|(owner, _)| *owner == player.id) else {
+                continue;
+            };
+            let units: Vec<crate::types::mana::ManaUnit> = player
+                .mana_pool
+                .units()
+                .enumerate()
+                .map(
+                    |(index, unit)| match stamped.iter().find(|(at, _)| *at == index) {
+                        Some((_, incarnation)) => crate::types::mana::ManaUnit {
+                            source_incarnation: Some(*incarnation),
+                            ..unit
+                        },
+                        None => unit,
+                    },
+                )
+                .collect();
+            player.mana_pool = crate::types::mana::ManaPool::from_units(units);
+        }
+        Ok(())
     }
 
-    /// CR 106.3 + CR 400.7 + CR 605.1a: whether `source_id`'s storage id proves a
-    /// pin-less floating unit cannot be attributed to the object a live read
-    /// would return. The two proofs are [`Self::reject_ambiguous_floating_mana_provenance`]'s;
-    /// this is the per-id half so the guard reads as one predicate per unit.
-    fn unpinned_producer_is_unprovable(&self, source_id: ObjectId) -> bool {
+    /// CR 106.3 + CR 106.4 + CR 400.7 + CR 605.1a: what a save proves about the
+    /// producing epoch of ONE pin-less floating unit.
+    ///
+    /// The unit's storage id is the only handle the save carries, so every
+    /// answer below is about the object that id names now (CR 400.7 makes it a
+    /// different object from any earlier tenure of the same id).
+    fn unpinned_producer_epoch(
+        &self,
+        player: PlayerId,
+        unit: &crate::types::mana::ManaUnit,
+    ) -> UnpinnedProducerEpoch {
+        let source_id = unit.source_id;
         let Some(object) = self.objects.get(&source_id) else {
             // CR 400.7: nothing occupies the id, so the legacy read is the departed
             // object's own last-known answer rather than a later object's.
-            return false;
+            return UnpinnedProducerEpoch::Departed;
         };
         if object.zone != Zone::Battlefield {
-            return true;
+            // Mana floating in a pool was added by a mana ability of the object
+            // named by `source_id` — the ability of a PERMANENT (CR 605.1a) or of a
+            // spell/card in the zone it occupied (CR 113.7) — so pricing the unit at
+            // the next payment from a card in a graveyard or exile would name an
+            // object that never made it. That is the Minimus Containment shape: the
+            // "Treasure" that made the mana is now a card in the graveyard.
+            return UnpinnedProducerEpoch::Unprovable;
         }
         // CR 400.7: an object that left a zone and came back is a new object, so a
         // recorded departure from a mana-producing zone — the battlefield per
@@ -16753,14 +16952,36 @@ impl GameState {
         // permanent's own beginning (CR 400.7 makes it the object the spell became), and
         // every creature cast this turn carries one, so convicting on it would refuse
         // saves whose mana came from the very permanent that is there now.
-        self.zone_changes_this_turn.iter().any(|record| {
+        let earlier_producing_tenure = self.zone_changes_this_turn.iter().any(|record| {
             record.object_id == source_id
                 && match record.from_zone {
                     Some(Zone::Battlefield) => true,
                     Some(Zone::Stack) => record.to_zone != Zone::Battlefield,
                     _ => false,
                 }
-        })
+        });
+        if earlier_producing_tenure {
+            return UnpinnedProducerEpoch::Unprovable;
+        }
+        // CR 106.4 + CR 500.5 + CR 703.4q: the journal above is TURN-scoped, so it
+        // only covers every tenure that could have produced the unit while a unit
+        // cannot outlive the turn. That is exactly what CR 106.4 grants — the pool
+        // empties at the end of each step and phase — and a step-end mana handler
+        // ("Players don't lose unspent mana as steps and phases end") is what lifts
+        // it: the unit then survives every boundary, including the turn's last, so
+        // a tenure from an earlier turn could have produced it and this turn's
+        // journal cannot say so. The pin is the only record that would have, so the
+        // producer is unprovable for the same reason it is in the shapes above.
+        // Refusing is the honest answer; reading the live object would attribute
+        // mana CR 106.3 gave to an earlier epoch of the id to whatever holds it now.
+        if crate::game::turns::step_end_handler_retains_pooled_mana(self, player, unit) {
+            return UnpinnedProducerEpoch::Unprovable;
+        }
+        // CR 106.3 + CR 400.7: with no retention in play the pool emptied at every
+        // boundary since the turn began, so the unit was produced this turn, no
+        // journal record leaves the id for an earlier producing tenure, and the
+        // object holding the id is therefore the producer itself.
+        UnpinnedProducerEpoch::Proven(object.incarnation)
     }
 
     /// CR 601.2 / CR 602.2: at most one announcement is in flight, so every live
@@ -17105,6 +17326,24 @@ pub struct PreparedPersistedGameState {
     recovered_terminal_rest: bool,
 }
 
+/// CR 106.3 + CR 106.4 + CR 400.7: what a legacy (pin-less) floating unit's
+/// producing epoch resolves to from the save alone. The three answers are
+/// [`GameState::unpinned_producer_epoch`]'s, named so the restore decision reads
+/// as one value per unit rather than as a pair of booleans.
+enum UnpinnedProducerEpoch {
+    /// The save proves the epoch: the storage id still holds the very object
+    /// that produced the unit, so admission stamps the pin instead of leaving
+    /// the unit to re-derive its source from whatever holds the id later
+    /// (CR 400.7).
+    Proven(u64),
+    /// The storage id holds no live object at all, so the legacy read is the
+    /// departed object's own last-known information and there is no epoch to
+    /// stamp (CR 400.7).
+    Departed,
+    /// The save cannot prove which epoch produced the unit.
+    Unprovable,
+}
+
 /// A persisted state reached a priority window with unresolved resolution
 /// ownership and no exact engine-owned terminal repair.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -17168,6 +17407,26 @@ pub enum PersistedRestoreError {
          {spell_object_id:?} and cannot be resumed"
     )]
     UnknownPendingTargetFacts { spell_object_id: Option<ObjectId> },
+    /// CR 601.2c + CR 109.2 + CR 109.2a: a saved activation record's object
+    /// target does not state the zone it was announced in. CR 109.2 scopes a
+    /// bare type description to a permanent on the battlefield and CR 109.2a
+    /// scopes a "card … in [zone]" description to that zone, so the zone is what
+    /// decides whether the recorded target satisfies a target-gated rule (a
+    /// first-activation cost reduction reading "targets a creature you
+    /// control"). A payload that predates the field is not recoverable — the
+    /// announcement is gone — so restore refuses it rather than defaulting the
+    /// omission to the battlefield, which would fabricate the claim that makes
+    /// the widest class of those rules fire.
+    #[error(
+        "persisted committed target facts owned by {owner:?} carry an unknown announced zone \
+         for target {target:?} and cannot be restored"
+    )]
+    UnknownAnnouncedTargetZone {
+        /// The record's owning object — the activation's source — or `None` for
+        /// the bare fact list a parked cast's latch carries.
+        owner: Option<ObjectId>,
+        target: ObjectId,
+    },
     /// CR 106.3 + CR 400.7: a saved mana pool holds floating mana whose producing
     /// object the save can PROVE it no longer names. `ManaUnit::source_incarnation`
     /// is the pin that binds a unit to the epoch that produced it; a save written
@@ -17417,7 +17676,8 @@ impl PersistedGameState {
             .validate_payment_transaction()
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
         state.reject_unknown_cast_history_provenance()?;
-        state.reject_ambiguous_floating_mana_provenance()?;
+        state.reject_unknown_activation_target_zone()?;
+        state.bind_or_reject_floating_mana_provenance()?;
         state.reject_conflicting_pending_cast_owners()?;
         state.reject_unknown_pending_target_facts()?;
         crate::game::effects::choose_from_zone::migrate_legacy_per_player_frame_on_restore(

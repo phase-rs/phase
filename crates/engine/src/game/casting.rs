@@ -31928,7 +31928,7 @@ pub(crate) fn capture_target_facts(
                         id: *id,
                         lki: Box::new(obj.snapshot_public_characteristics()),
                         // CR 601.2c: the zone the announced target was legal in.
-                        zone: obj.zone,
+                        zone: crate::types::game_state::AnnouncedTargetZone::Known(obj.zone),
                     })
             }
         })

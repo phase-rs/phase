@@ -9,7 +9,7 @@
 //! CR 115.1 + CR 601.2c facts, captured at the target-declaration → payment
 //! boundary and consulted by every carrier that resumes a cast. The fourth is
 //! the CR 106.3 producing epoch a floating [`ManaUnit`] owes
-//! (`GameState::reject_ambiguous_floating_mana_provenance`).
+//! (`GameState::bind_or_reject_floating_mana_provenance`).
 //!
 //! Nothing here is production behaviour. Every entry point is
 //! `#[cfg(any(test, feature = "test-support"))]` and carries the same honesty
@@ -328,7 +328,7 @@ pub fn record_captured_floating_mana_provenance(document: &mut Value) {
         let object = state.objects.get(&source_id)?;
         // A source that is still a battlefield permanent is admitted on the live read
         // only while this turn's journal records NO departure from a producing zone for
-        // its storage id (`GameState::unpinned_producer_is_unprovable`). When it does
+        // its storage id (`GameState::unpinned_producer_epoch`). When it does
         // record one, the id has already had an earlier tenure and this migration
         // declines too: the journal names what that tenure was, but not whether IT or
         // the current object made the unit, and stamping the earlier epoch would be a
@@ -767,14 +767,18 @@ mod tests {
     }
 
     /// The over-rejection guard, matching the production rule's own: a pin-less
-    /// unit whose source is still a battlefield permanent needs no epoch — the
-    /// live read names the same object the producer was — so it is left
-    /// untouched and still admitted.
+    /// unit whose source is still a battlefield permanent needs no epoch from the
+    /// MIGRATION — the capture already proves it — so the migration leaves the
+    /// payload byte-identical. Admission then BINDS the unit to the live object's
+    /// own epoch (`GameState::bind_or_reject_floating_mana_provenance`), because a
+    /// unit left pin-less would re-derive its source from whatever holds the
+    /// storage id later (CR 400.7).
     #[test]
     fn a_unit_whose_source_is_still_a_battlefield_permanent_is_left_untouched() {
         let mut state = GameState::new_two_player(42);
         let star = source_on_battlefield(&mut state);
         add_pinless_red_unit(&mut state, star);
+        let live_incarnation = state.objects[&star].incarnation;
 
         let json = capture_of(state);
         let mut migrated = json.clone();
@@ -785,8 +789,9 @@ mod tests {
         );
         assert_eq!(
             restored_pin(migrated),
-            Some(None),
-            "the unit is admitted with no epoch, exactly as before"
+            Some(Some(live_incarnation)),
+            "CR 106.3: admission binds the epoch the capture proved — the live \
+             object's own — rather than leaving the unit to re-derive its source"
         );
     }
 }

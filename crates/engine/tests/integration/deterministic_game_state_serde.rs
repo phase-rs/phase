@@ -18,12 +18,13 @@ use engine::types::counter::CounterType;
 use engine::types::definitions::Definitions;
 use engine::types::events::{BoundActivationCost, GameEvent, PlayerActionKind};
 use engine::types::game_state::{
-    AbilityActivationRecord, ActivationTargetFact, AutoPassMode, DepartedStackSpell, LKISnapshot,
-    LandPlayRecord, LiminalEntrant, LiminalEntry, LinkedExileLki, LinkedExileSnapshot,
-    ManaSpentSourceSnapshot, PendingConniveReentry, PersistedGameState, PriorityPassingMode,
-    SpellCastRecord, StackEntry, StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay,
-    StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
-    StackResolutionSession, TokenProjection, TrackedMemberOrigin, WaitingFor,
+    AbilityActivationRecord, ActivationTargetFact, AnnouncedTargetZone, AutoPassMode,
+    DepartedStackSpell, LKISnapshot, LandPlayRecord, LiminalEntrant, LiminalEntry, LinkedExileLki,
+    LinkedExileSnapshot, ManaSpentSourceSnapshot, PendingConniveReentry, PersistedGameState,
+    PriorityPassingMode, SpellCastRecord, StackEntry, StackEntryKind, StackPaidSnapshot,
+    StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
+    StackResolutionPolicy, StackResolutionSession, TokenProjection, TrackedMemberOrigin,
+    WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use engine::types::keywords::ProtectionTarget;
@@ -2058,7 +2059,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                 targets: vec![ActivationTargetFact::Object {
                     id: ObjectId(2),
                     lki: Box::new(second_lki.clone()),
-                    zone: engine::types::zones::Zone::Battlefield,
+                    zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
                 }],
             }]),
         ),
@@ -3404,7 +3405,7 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
                     attachments: Vec::new(),
                     intensity: 0,
                 }),
-                zone: engine::types::zones::Zone::Battlefield,
+                zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
             },
             // The player axis carries no snapshot at all.
             ActivationTargetFact::Player(PlayerId(1)),
@@ -3441,33 +3442,27 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
         "reserialization is byte-identical"
     );
 
-    // (1a) CR 601.2c + CR 109.2: the committed target's announcement zone is
-    // omitted on the wire whenever it is the battlefield — what every record
-    // predating the field described — so a battlefield target's payload is
-    // unchanged by the field's addition.
+    // (1a) CR 601.2c + CR 109.2: a record this build captures STATES the
+    // announcement zone, battlefield included. Omission is not a shorthand for
+    // the battlefield: an absent zone means the payload never recorded one, so
+    // writing the battlefield is what keeps a current-format save provably
+    // different from a payload predating the field.
     assert!(
-        !populated_json.contains("\"zone\""),
-        "a battlefield target must not emit the zone key: {populated_json}"
+        populated_json.contains("\"zone\":\"Battlefield\""),
+        "a battlefield target must state its zone: {populated_json}"
     );
 
     // (1b) A NON-battlefield announcement — Reanimate's "target creature card
-    // from a graveyard" (CR 109.2a) — does emit it, and a payload predating the
-    // field still decodes as the battlefield default. Without both halves the
-    // omission above would be indistinguishable from the field never being
-    // written at all.
+    // from a graveyard" (CR 109.2a) — states its zone too, and a payload that
+    // predates the field is UNKNOWN rather than a battlefield claim.
     let ActivationTargetFact::Object { lki, .. } = &populated.targets.as_ref().expect("targets")[0]
     else {
         panic!("index 0 is an object fact");
     };
-    let battlefield_fact = ActivationTargetFact::Object {
-        id: target_id,
-        lki: lki.clone(),
-        zone: engine::types::zones::Zone::Battlefield,
-    };
     let graveyard_fact = ActivationTargetFact::Object {
         id: target_id,
         lki: lki.clone(),
-        zone: engine::types::zones::Zone::Graveyard,
+        zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Graveyard),
     };
     let graveyard_json = serde_json::to_string(&graveyard_fact).expect("fact serializes");
     assert!(
@@ -3484,11 +3479,25 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
         legacy_json, graveyard_json,
         "reach: the zone key really was present"
     );
+    let legacy_fact = serde_json::from_str::<ActivationTargetFact>(&legacy_json)
+        .expect("a legacy payload parses");
+    let ActivationTargetFact::Object { zone, .. } = &legacy_fact else {
+        panic!("the legacy payload is an object fact");
+    };
     assert_eq!(
-        serde_json::from_str::<ActivationTargetFact>(&legacy_json)
-            .expect("a payload predating the field parses"),
-        battlefield_fact,
-        "CR 601.2c: a record predating the field decodes as a battlefield announcement"
+        *zone,
+        AnnouncedTargetZone::Unknown,
+        "CR 601.2c: a record predating the field states no zone; it is not a \
+         battlefield announcement"
+    );
+    assert_ne!(
+        legacy_fact,
+        ActivationTargetFact::Object {
+            id: target_id,
+            lki: lki.clone(),
+            zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
+        },
+        "silence is a different value from a stated battlefield"
     );
 
     // (2) A KNOWN-EMPTY vector is written as an explicit `[]`, so it cannot be

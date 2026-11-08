@@ -42989,6 +42989,38 @@ fn cost_modifier_bare_type_target_qualifier_carries_battlefield_scope() {
         "CR 109.2: 'a creature you control' is still a bare type description"
     );
 
+    // The ACTIVATION-side arm: the same bare-type qualifier on an
+    // activated-ability cost modifier — Professor Hojo (Scryfall lci/224),
+    // verbatim: "The first activated ability you activate during your turn that
+    // targets a creature you control costs {2} less to activate." This line
+    // reaches its filter through `split_ability_target_restriction`, not through
+    // `parse_cost_modifier_target_filter`, so it is asserted on its own: the two
+    // seams share the shaper and must agree, or an ability activated with a
+    // graveyard card as its target consumes the discount a battlefield target
+    // should have taken.
+    let hojo = parse_static_line(
+        "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.",
+    )
+    .expect("Professor Hojo's line must parse");
+    let StaticMode::ReduceAbilityCost { targets, .. } = hojo.mode else {
+        panic!(
+            "expected the once-per-turn activation reducer, got {:?}",
+            hojo.mode
+        );
+    };
+    assert_eq!(
+        targets,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Battlefield
+                }])
+        )),
+        "CR 109.2: an activated ability's bare 'a creature you control' qualifier means a \
+         battlefield permanent"
+    );
+
     // NEGATIVE, on the shared shaper: a qualifier that names its own zone or uses
     // "card"/"spell" keeps exactly what it had. CR 109.2a ("creature card from a
     // graveyard" — Reanimate) and CR 109.2b ("creature spell") are the two printed
