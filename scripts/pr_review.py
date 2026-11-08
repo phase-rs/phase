@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import fcntl
 import fnmatch
 import hashlib
 import json
@@ -617,6 +616,9 @@ def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def append_event(state_dir: Path, event: dict[str, Any]) -> bool:
+    # Pure PR-body consumers do not require POSIX event-log locking.
+    import fcntl
+
     normalized = normalize_event(event)
     state_dir.mkdir(parents=True, exist_ok=True)
     log_path = state_dir / "review-events.jsonl"
@@ -641,6 +643,8 @@ def append_event(state_dir: Path, event: dict[str, Any]) -> bool:
 
 
 def all_events(state_dir: Path) -> list[dict[str, Any]]:
+    import fcntl
+
     log_path = state_dir / "review-events.jsonl"
     if not log_path.exists():
         return []
@@ -4479,6 +4483,8 @@ def unfinished_disposition(row: dict[str, Any], node: dict[str, Any], acting_log
 
 
 def command_dashboard_data(args: argparse.Namespace) -> int:
+    import fcntl
+
     args.state_dir.mkdir(parents=True, exist_ok=True)
     with (args.state_dir / "github-discovery.lock").open("a", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)

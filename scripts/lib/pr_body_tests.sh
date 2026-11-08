@@ -239,6 +239,14 @@ sys.stdout.write(re.sub(r"(PASS head=)([0-9a-f]{40})", lambda m: m.group(1) + m.
 PY
 expect "an uppercase SHA is refused (the audit parses lowercase only)" 1 "$TMP/uppercase.md" "$HEAD_A"
 
+# Body validation does not use the audit's POSIX event-log locks. Exercise the
+# real gate with that module unavailable, as on a native Windows Python.
+mkdir "$TMP/no-locks"
+printf 'import sys\nsys.modules["fcntl"] = None\n' > "$TMP/no-locks/sitecustomize.py"
+PYTHONPATH="$TMP/no-locks${PYTHONPATH:+:$PYTHONPATH}" \
+    expect "body validation works without POSIX event locks" 0 "$TMP/good.md" "$HEAD_A"
+expect_message "no-lock body validation" "PR body PASS head=$HEAD_A"
+
 # ---------------------------------------------------------------- row 7: instrument failures
 expect "a missing body file is an instrument failure" 2 "$TMP/absent.md" "$HEAD_A"
 "$GATE" "$TMP/good.md" "" >/dev/null 2>&1
