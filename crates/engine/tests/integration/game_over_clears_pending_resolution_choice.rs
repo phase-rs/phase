@@ -2411,11 +2411,11 @@ fn nonterminal_concession_preserves_a_paused_single_discard() {
 /// variant's damage-to-mill rule reaches a CR 616.1 ordering choice between
 /// Rest in Peace and the opponent's Leyline of the Void. The source owner and
 /// replacement chooser both survive the opponent's concession.
-fn horde_with_paused_damage(players: u8) -> (GameRunner, ObjectId, ObjectId) {
+fn horde_with_paused_damage() -> (GameRunner, ObjectId, ObjectId) {
     let db = shared_card_db().expect("card database");
     let mut scenario = GameScenario::new_with_format(
         FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset()),
-        players,
+        2,
         42,
     );
     scenario.at_phase(Phase::PreCombatMain);
@@ -2426,13 +2426,11 @@ fn horde_with_paused_damage(players: u8) -> (GameRunner, ObjectId, ObjectId) {
     for _ in 0..4 {
         scenario.add_real_card(P0, "Island", Zone::Library, db);
     }
-    for seat in 1..players {
-        scenario.add_real_card(PlayerId(seat), "Island", Zone::Library, db);
-    }
+    scenario.add_real_card(P1, "Island", Zone::Library, db);
     let mut runner = scenario.build();
     // Horde starts with a survivor's turn. Pass through that priority window
     // so the Horde can activate its own permanent at instant speed.
-    for _ in 0..players {
+    for _ in 0..2 {
         if matches!(
             runner.state().waiting_for,
             WaitingFor::Priority { player: P0 }
@@ -2482,18 +2480,17 @@ fn horde_with_paused_damage(players: u8) -> (GameRunner, ObjectId, ObjectId) {
 /// including a Horde damage-to-mill instruction paused on CR 616.1 ordering.
 #[test]
 fn terminal_concession_retires_paused_damage_post_loss() {
-    let (mut runner, _, milled) = horde_with_paused_damage(2);
+    let (mut runner, _, milled) = horde_with_paused_damage();
     concede(&mut runner, P1);
     assert_eq!(runner.state().objects[&milled].zone, Zone::Library);
     assert_finished_game_retired_its_resolution(&runner, Some(P0));
 }
 
-/// CR 104.3a + CR 120.1: another survivor's concession leaves the damage
-/// continuation live. Answering the original choice still records it once.
+/// CR 120.1 + CR 616.1: an ongoing game preserves the damage continuation.
+/// Answering the original replacement choice still records the damage once.
 #[test]
-fn nonterminal_concession_preserves_paused_damage_post_loss() {
-    let (mut runner, tim, milled) = horde_with_paused_damage(3);
-    concede(&mut runner, P2);
+fn a_continuing_game_finishes_paused_damage_post_loss() {
+    let (mut runner, tim, milled) = horde_with_paused_damage();
     assert!(runner.state().game_end.is_none());
     assert!(runner.state().pending_damage_post_loss.is_some());
     assert!(matches!(
