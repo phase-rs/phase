@@ -20,7 +20,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{AbilityDefinition, Effect, TargetChoiceTiming};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::events::GameEvent;
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{CastPaymentMode, GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, WardCost};
@@ -79,6 +79,10 @@ const TAMIYOS_COMPLEATION: &str = "Flash\nEnchant artifact, creature, or planesw
 const SNAKESKIN_VEIL: &str = "Put a +1/+1 counter on target creature you control. It gains hexproof until end of turn. (It can't be the target of spells or abilities your opponents control.)";
 const SLIP_OUT_THE_BACK: &str = "Put a +1/+1 counter on target creature. It phases out. (Treat it and anything attached to it as though they don't exist until its controller's next turn.)";
 const LIGHTNING_GREAVES: &str = "Equipped creature has haste and shroud. (It can't be the target of spells or abilities.)\nEquip {0}";
+
+const DRAMATIC_ACCUSATION: &str = "Enchant creature\nWhen this Aura enters, tap enchanted creature.\nEnchanted creature doesn't untap during its controller's untap step.\n{U}{U}: Shuffle enchanted creature into its owner's library.";
+
+const DOOM_BLADE: &str = "Destroy target nonblack creature.";
 
 fn free_cost() -> ManaCost {
     ManaCost::Cost {
@@ -2558,6 +2562,51 @@ fn counter_count(state: &GameState, id: ObjectId, kind: &CounterType) -> u32 {
     state.objects[&id].counters.get(kind).copied().unwrap_or(0)
 }
 
+/// PAIRED POSITIVE CONTROL for
+/// `venarian_gold_with_its_host_phased_out_puts_sleep_counters_on_nothing`.
+///
+/// That test asserts three times that no sleep counters land anywhere, which is
+/// exactly the shape that passes vacuously if the enters trigger's X read
+/// regresses: with zero counters placed, "none on the host" and "none on the
+/// Aura" both hold. This test pins the same Aura at the same announced X against
+/// a live host, so the trigger must place TWO sleep counters. It flips if the
+/// `CostXPaid` read behind that trigger ever returns 0.
+#[test]
+fn venarian_gold_etb_places_x_sleep_counters_on_a_live_host() {
+    let sleep = engine::types::counter::parse_counter_type("sleep");
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let host = sc.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let gold = sc
+        .add_spell_to_hand(P0, "Venarian Gold", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![
+                engine::types::mana::ManaCostShard::X,
+                engine::types::mana::ManaCostShard::Blue,
+                engine::types::mana::ManaCostShard::Blue,
+            ],
+            generic: 0,
+        })
+        .from_oracle_text_with_keywords(&["enchant"], VENARIAN_GOLD)
+        .id();
+    sc.with_mana_pool(P0, pool(2, 2));
+    let mut runner = sc.build();
+
+    aura_etb_awaiting_response(&mut runner, gold, host, 2);
+    drive_until(&mut runner, gold, false, stack_settled);
+
+    let s = runner.state();
+    assert_eq!(
+        counter_count(s, host, &sleep),
+        2,
+        "X=2 puts two sleep counters on a live host: {:?}",
+        s.objects[&host].counters
+    );
+    assert!(s.objects[&host].tapped, "and taps it");
+}
+
 /// CR 702.26b + CR 608.2h: Venarian Gold's enters trigger waits on the stack and
 /// P1 phases the enchanted creature out with Slip Out the Back (the Aura phases
 /// out with it, indirectly). A phased-out creature is treated as though it
@@ -2776,4 +2825,138 @@ fn unattached_assault_suit_offers_no_impossible_choice() {
     assert!(s.objects[&suit].tapped, "the Suit stays tapped");
     assert_eq!(s.objects[&suit].controller, P0);
     assert_eq!(s.objects[&creature].controller, P0, "no control change");
+}
+
+/// CR 701.24c + CR 400.3: Dramatic Accusation's "{U}{U}: Shuffle enchanted
+/// creature into its owner's library" puts the host into its OWNER's library and
+/// randomizes that library.
+///
+/// PAIRED POSITIVE CONTROL for the departed-host test below: it proves the
+/// ability is reachable through the activation pipeline and that the shuffle
+/// assertion there can actually fire, so that test cannot pass merely because
+/// nothing resolved.
+#[test]
+fn dramatic_accusation_shuffles_a_live_host_into_its_owners_library() {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    sc.with_library_top(P1, &["Bears Card A", "Bears Card B", "Bears Card C"]);
+    let host = sc.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let aura = aura_on_battlefield(&mut sc, P0, "Dramatic Accusation", DRAMATIC_ACCUSATION);
+    sc.with_mana_pool(P0, pool(2, 0));
+    let mut runner = sc.build();
+    attach(&mut runner, aura, host);
+
+    let index = ability_index(&runner, aura, |e| matches!(e, Effect::ChangeZone { .. }));
+    let outcome = runner.activate(aura, index).resolve();
+
+    let state = outcome.state();
+    assert_eq!(
+        state.objects[&host].zone,
+        Zone::Library,
+        "the host moves into a library"
+    );
+    assert!(
+        state.players[P1.0 as usize].library.contains(&host),
+        "into its OWNER's library, not the activator's"
+    );
+    assert!(
+        outcome.events().iter().any(|e| matches!(
+            e,
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } if *player_id == P1
+        )),
+        "the owner's library is shuffled (CR 701.24c): {:?}",
+        outcome.events()
+    );
+}
+
+/// CR 701.24c + CR 608.2h: the enchanted creature leaves in response, so the
+/// ability's head has nothing to move — and the owner's library is shuffled all
+/// the same. CR 701.24c makes the randomization unconditional on the objects
+/// being in the zone they were expected to be in; CR 608.2h supplies the owner
+/// from the departed creature's last known information. The host is P1's and the
+/// Aura is P0's, so "its owner's library" is not the activator's.
+#[test]
+fn dramatic_accusation_shuffles_a_departed_hosts_owners_library() {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    sc.with_library_top(P1, &["Bears Card A", "Bears Card B", "Bears Card C"]);
+    let host = sc.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let aura = aura_on_battlefield(&mut sc, P0, "Dramatic Accusation", DRAMATIC_ACCUSATION);
+    let blade = sc
+        .add_spell_to_hand_from_oracle(P1, "Doom Blade", true, DOOM_BLADE)
+        .with_mana_cost(free_cost())
+        .id();
+    sc.with_mana_pool(P0, pool(2, 0));
+    let mut runner = sc.build();
+    attach(&mut runner, aura, host);
+
+    let index = ability_index(&runner, aura, |e| matches!(e, Effect::ChangeZone { .. }));
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: aura,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the activation is legal");
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach: the ability is on the stack"
+    );
+
+    // The activator keeps priority after activating (CR 602.2b), so hand it to
+    // P1 before casting the response.
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ) {
+        runner.act(GameAction::PassPriority).expect("P0 passes");
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P1
+        ),
+        "reach: P1 holds priority with the ability on the stack"
+    );
+
+    p1_responds(&mut runner, blade, host);
+    let s = runner.state();
+    assert_eq!(
+        s.objects[&host].zone,
+        Zone::Graveyard,
+        "reach: the host departed"
+    );
+    assert_eq!(
+        s.objects[&aura].zone,
+        Zone::Graveyard,
+        "reach: the Aura followed it as a state-based action"
+    );
+    assert_eq!(
+        s.stack.len(),
+        1,
+        "reach: the ability is still on the stack after its source left"
+    );
+
+    drive_until(&mut runner, aura, false, stack_settled);
+    let s = runner.state();
+    assert_eq!(
+        s.objects[&host].zone,
+        Zone::Graveyard,
+        "the head had nothing to move"
+    );
+    assert!(
+        !s.players[P1.0 as usize].library.contains(&host),
+        "the departed host is not in the library"
+    );
+    assert!(
+        s.player_actions_this_turn
+            .contains(&(P1, PlayerActionKind::ShuffledLibrary)),
+        "the owner's library is shuffled anyway (CR 701.24c): {:?}",
+        s.player_actions_this_turn
+    );
 }
