@@ -71,6 +71,15 @@
 //!   its pip) and pays exactly like the pinned control; and a restored legacy pool
 //!   round trips through a payment, because the boundary stamps the pool's copy AND
 //!   the journal's copies of the same unit.
+//! * **two pin-validation witnesses** (section 10, after the three above), on the
+//!   other half of the same rule: an explicit `ManaUnit::source_incarnation` pin is
+//!   a CLAIM, not proof. A retained pool whose pins are re-pointed at the live
+//!   successor epoch — the ledger beside them left naming the copy that generated
+//!   the trigger — is refused instead of being priced as that successor; and a pin
+//!   that would overwrite the journal's own production record for the same unit is
+//!   refused rather than stamped over it, because the journal's copies are
+//!   independent evidence the save carried and recovery is the only case that
+//!   writes them.
 
 use engine::game::derived_views::ClientGameStateRef;
 use engine::game::effects::token::predefined_token_abilities;
@@ -565,6 +574,41 @@ fn strip_pool_pins(json: &mut serde_json::Value) -> usize {
         }
     }
     stripped
+}
+
+/// Re-point every pooled unit's producing-incarnation PIN at `incarnation`,
+/// leaving the rest of the save — the pool's per-pip producer ledger, the
+/// resolved-rules journal, the object table — exactly as the engine wrote it.
+/// That is the shape the admission boundary must catch: one claim about a unit's
+/// producer, contradicted by the independent per-pip records beside it.
+fn pin_pool_units(json: &mut serde_json::Value, incarnation: u64) -> usize {
+    let mut pinned = 0;
+    let Some(players) = json
+        .get_mut("state")
+        .and_then(|state| state.get_mut("players"))
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        panic!("the save carries players");
+    };
+    for player in players {
+        let Some(mana) = player
+            .get_mut("mana_pool")
+            .and_then(|pool| pool.get_mut("mana"))
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for unit in mana {
+            if let Some(object) = unit.as_object_mut() {
+                object.insert(
+                    "source_incarnation".to_string(),
+                    serde_json::json!(incarnation),
+                );
+                pinned += 1;
+            }
+        }
+    }
+    pinned
 }
 
 /// Strip the pool-carried producer facts (CR 106.3's retained `(source_id,
@@ -2862,5 +2906,288 @@ fn a_pool_save_whose_journal_copies_disagree_never_decodes() {
                 .contains("mana-insert command disagrees with produced mana"),
             "the refusal must come from the journal's own copy comparison, got {error}"
         ),
+    }
+}
+
+/// CR 106.3 + CR 400.7 + CR 118.3a: an explicit `source_incarnation` pin is a
+/// CLAIM about one unit's producer, so admission validates it against the save's
+/// own INDEPENDENT per-pip records before trusting it.
+///
+/// The board is section 10's printed-card witness
+/// (`a_pre_ledger_retained_pool_is_refused_rather_than_bound_to_the_successor`)
+/// carried across its turn boundary: Upwelling held the Clever Impersonator copy's
+/// triggered `{R}{G}`, turn advancement cleared the journal
+/// (`reset_resolved_rules_journal`), the pool's producer ledger
+/// (`pooled_mana_producer_snapshots`) is the record that outlived it, and the
+/// Treasure Cloudshift returned now occupies the storage id with a LATER
+/// incarnation.
+///
+/// The tampering is the one field this rule is about: every retained unit's pin is
+/// re-pointed at the LIVE successor's epoch, and nothing else is touched — the
+/// per-pip ledger still names the copy that generated the trigger, and the journal
+/// is still empty. A boundary that trusts the pin admits this save; the payment
+/// then prices the copy's mana as the Treasure's and Rain of Riches grants cascade
+/// for mana no Treasure made (CR 106.3). The boundary must compare the pin with the
+/// ledger and REFUSE
+/// ([`PersistedRestoreError::ContradictoryFloatingManaProvenance`]) — not prefer
+/// either side, and not rewrite the ledger to match the pin.
+#[test]
+fn a_retained_pool_pin_that_contradicts_its_own_per_pip_ledger_is_refused() {
+    let (mut runner, impersonator, copied_incarnation, sciences) =
+        clever_impersonator_trigger_pool(ManaRetention::Upwelling);
+
+    let opening_turn = runner.state().turn_number;
+    pass_until(
+        &mut runner,
+        |r| {
+            r.state().turn_number > opening_turn
+                && r.state().phase == Phase::PreCombatMain
+                && r.state().active_player == P0
+        },
+        "crossing a full turn boundary with Upwelling holding the pool",
+    );
+
+    // Reach guards: the pool is retained and pinned to the epoch that generated
+    // the trigger, the journal that could have named that producer is empty, and
+    // the ledger beside each unit still names the same epoch.
+    let successor_incarnation = {
+        let state = runner.state();
+        let units = pool_units(&runner);
+        assert_eq!(
+            units.len(),
+            2,
+            "reach: Upwelling kept both units, got {units:?}"
+        );
+        for unit in &units {
+            assert_eq!(unit.source_id, impersonator);
+            assert_eq!(unit.source_incarnation, Some(copied_incarnation));
+            assert_eq!(
+                state
+                    .pooled_mana_producer_snapshots
+                    .iter()
+                    .filter(|snapshot| snapshot.pip_id == unit.pip_id)
+                    .map(|snapshot| (snapshot.source_id, snapshot.source_incarnation))
+                    .collect::<Vec<_>>(),
+                vec![(impersonator, copied_incarnation)],
+                "reach: each retained unit's own per-pip ledger entry names the copy that \
+                 generated the trigger"
+            );
+        }
+        assert!(
+            state.resolved_rules_journal.produced_mana().is_empty(),
+            "reach: turn advancement reset the journal, so the ledger is the only per-pip \
+             record left; got {:?}",
+            state.resolved_rules_journal.produced_mana()
+        );
+        let successor = state.objects[&impersonator].incarnation;
+        assert_ne!(
+            successor, copied_incarnation,
+            "reach: the live occupant of the storage id is a LATER tenure"
+        );
+        assert!(
+            state.objects[&impersonator]
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Treasure"),
+            "reach: the successor is a Treasure, so pinning to it earns cascade"
+        );
+        successor
+    };
+
+    // The contradiction: the pins move to the successor; the ledger does not.
+    let mut tampered = persisted_json(runner.state());
+    assert_eq!(
+        pin_pool_units(&mut tampered, successor_incarnation),
+        2,
+        "both retained units must be re-pinned to the successor"
+    );
+
+    match admitted(tampered) {
+        Err(PersistedRestoreError::ContradictoryFloatingManaProvenance {
+            player,
+            source_id,
+            pinned,
+            recorded,
+        }) => {
+            assert_eq!(player, P0);
+            assert_eq!(
+                source_id, impersonator,
+                "the refused unit is the one whose pin the ledger contradicts"
+            );
+            assert_eq!(
+                pinned, successor_incarnation,
+                "the pin under test is the successor's epoch"
+            );
+            assert_eq!(
+                recorded,
+                vec![copied_incarnation],
+                "the record the pin is checked against is the unit's own per-pip ledger entry"
+            );
+        }
+        Err(other) => panic!("expected the pin/ledger contradiction to be refused, got {other:?}"),
+        Ok(state) => {
+            // The adjudication a trusting guard permits: the copy's retained mana is
+            // priced as the Treasure and Rain of Riches grants cascade for it. Shown,
+            // not asserted, so a reinstated trust-the-pin path fails here with its
+            // consequence.
+            let mut restored = GameRunner::from_state(state);
+            let commit = restored.cast(sciences).commit();
+            let state = commit.state();
+            let named: Vec<&str> = state.spells_cast_this_turn_by_player[&P0]
+                .back()
+                .expect("the admitted cast must be recorded")
+                .mana_source_snapshots()
+                .iter()
+                .map(|snapshot| snapshot.lki.name.as_str())
+                .collect();
+            let cascade = state.objects[&sciences]
+                .cast_spell_keywords
+                .iter()
+                .any(|keyword| matches!(keyword, Keyword::Cascade));
+            panic!(
+                "CR 106.3 + CR 400.7: a pin that contradicts the save's own per-pip ledger must \
+                 be refused. This save was admitted and priced the copy's retained mana as \
+                 {named:?} (cascade granted: {cascade})"
+            );
+        }
+    }
+}
+
+/// CR 118.3a + CR 106.3 + CR 400.7: a pin that ARRIVED in the save is not a
+/// recovery, so admission never rewrites the journal's independent record of the
+/// same unit.
+///
+/// The unit exists twice in a save: in the pool, carrying
+/// `ManaUnit::source_incarnation`, and in the resolved-rules journal that recorded
+/// its production. When the pool's pin is present there is nothing to recover, and
+/// `ResolvedRulesJournal::bind_unit_epoch` — the migration that stamps a
+/// RECOVERED epoch onto the journal's copies — must not run: it writes one record
+/// over another before the decoder that compares records ever sees them, which
+/// launders a contradiction into a loadable save.
+///
+/// This witness states which answer this build gives and why: the save is
+/// **refused**, not silently rewritten. The pool's pin is re-pointed at another
+/// tenure of the same storage id while the journal's own production record is left
+/// naming the Forest's epoch; a boundary that stamps from the pin would overwrite
+/// that record with the pin and admit the save, and this build compares the two and
+/// refuses. The pin-less leg then shows the record still answers for the unit —
+/// admission binds exactly the epoch the refused leg was trying to overwrite.
+#[test]
+fn a_pin_that_arrived_in_the_save_never_rewrites_the_journals_production_record() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    let forest = scenario.add_basic_land(P0, ManaColor::Green);
+
+    let mut runner = scenario.build();
+    let forest_incarnation = runner.state().objects[&forest].incarnation;
+    activate_mana_ability(&mut runner, forest, ManaType::Green);
+
+    // Reach guards: one pinned unit, and the journal's own production record for
+    // that pip names the same epoch the pool's pin does.
+    let pip = {
+        let state = runner.state();
+        let units = pool_units(&runner);
+        assert_eq!(units.len(), 1, "reach: one unit of {{G}}, got {units:?}");
+        assert_eq!(units[0].source_id, forest);
+        assert_eq!(units[0].source_incarnation, Some(forest_incarnation));
+        assert_eq!(
+            state
+                .resolved_rules_journal
+                .produced_unit(units[0].pip_id)
+                .and_then(|unit| unit.source_incarnation),
+            Some(forest_incarnation),
+            "reach: production recorded the unit's epoch against its own pip"
+        );
+        units[0].pip_id
+    };
+    let journal_epoch = |state: &GameState| {
+        state
+            .resolved_rules_journal
+            .produced_unit(pip)
+            .and_then(|unit| unit.source_incarnation)
+    };
+
+    // Control: an intact save is admitted, and admission leaves the journal's copy
+    // exactly as the engine wrote it.
+    {
+        let state = runner.state();
+        let intact = admitted(persisted_json(state)).expect("a current-format save is admitted");
+        assert_eq!(
+            journal_epoch(&intact),
+            Some(forest_incarnation),
+            "a pin that needs no recovery must leave the journal's record alone"
+        );
+    }
+
+    // The contradiction: the pool's pin moves to another tenure of the same storage
+    // id; the journal's independent production record is untouched.
+    let other_incarnation = forest_incarnation + 7;
+    let mut tampered = persisted_json(runner.state());
+    assert_eq!(
+        pin_pool_units(&mut tampered, other_incarnation),
+        1,
+        "exactly one pooled unit must be re-pinned"
+    );
+    assert_eq!(
+        tampered["state"]["resolved_rules_journal"]["produced_mana"][0]["unit"]
+            ["source_incarnation"],
+        serde_json::json!(forest_incarnation),
+        "reach: the tampering re-points the pool's pin only; the journal's record still \
+         names the Forest's epoch"
+    );
+
+    match admitted(tampered) {
+        Err(PersistedRestoreError::ContradictoryFloatingManaProvenance {
+            player,
+            source_id,
+            pinned,
+            recorded,
+        }) => {
+            assert_eq!(player, P0);
+            assert_eq!(source_id, forest);
+            assert_eq!(pinned, other_incarnation, "the pin under test");
+            assert_eq!(
+                recorded,
+                vec![forest_incarnation],
+                "production's own record is the independent fact the pin was checked \
+                 against, and it was not rewritten to agree with the pin"
+            );
+        }
+        Err(other) => panic!("expected the pin/journal contradiction to be refused, got {other:?}"),
+        Ok(state) => panic!(
+            "CR 118.3a: a pin that arrived in the save must never be stamped over the \
+             journal's independently recorded epoch. This save was admitted and the \
+             journal's copy now names {:?} instead of {forest_incarnation}",
+            journal_epoch(&state)
+        ),
+    }
+
+    // The evidence survived, which is what the refusal protected: with the pool's
+    // pin gone, admission binds exactly the epoch the journal recorded.
+    {
+        let mut pinless = persisted_json(runner.state());
+        assert_eq!(strip_pool_pins(&mut pinless), 1);
+        let bound = admitted(pinless).expect(
+            "the journal's production record proves the epoch, so the pin-less pool is admitted",
+        );
+        let unit = bound.players[P0.0 as usize]
+            .mana_pool
+            .units()
+            .next()
+            .expect("the unit survives");
+        assert_eq!(
+            unit.source_incarnation,
+            Some(forest_incarnation),
+            "CR 106.3: the recovered epoch is the one the journal recorded, proving the \
+             refused leg never overwrote it"
+        );
+        assert_eq!(
+            journal_epoch(&bound),
+            Some(forest_incarnation),
+            "a recovered pin stamps the journal's copies from the record it was recovered \
+             from — unchanged, because it already said so"
+        );
     }
 }

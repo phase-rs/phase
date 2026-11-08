@@ -16868,15 +16868,27 @@ impl GameState {
         Ok(())
     }
 
-    /// CR 106.3 + CR 106.4 + CR 400.7: BIND a legacy pin-less floating unit to
-    /// the producing epoch the SAVE proves, and refuse the save when it proves
-    /// none.
+    /// CR 106.3 + CR 106.4 + CR 400.7: ADMIT or refuse every floating unit, and
+    /// BIND a legacy pin-less one to the producing epoch the SAVE proves.
     ///
     /// A current-format save pins every unit at production
-    /// (`ManaUnit::source_incarnation`), so this guard only has work to do on
-    /// legacy pools written before the pin existed. See
+    /// (`ManaUnit::source_incarnation`), so the RECOVERY half of this guard only
+    /// has work to do on legacy pools written before the pin existed. See
     /// [`Self::saved_producer_epoch`] for the per-unit decision and, for each
     /// answer, the record in the save that carries it.
+    ///
+    /// An explicit pin is a claim, not proof, and this boundary VALIDATES it
+    /// against the same independent per-pip records
+    /// ([`Self::pip_recorded_producer_epochs`]): the pin, the journal's production
+    /// record for the pip, and the pool's ledger entry for the same pip are all
+    /// statements about one unit, so two epochs among them are a save that
+    /// contradicts itself. Refusing that
+    /// ([`PersistedRestoreError::ContradictoryFloatingManaProvenance`]) is not
+    /// pedantry: a retained copy's mana re-pinned to the epoch of the Treasure that
+    /// later occupied the same storage id is admitted by a trusting guard and then
+    /// priced as that Treasure at payment time, which is the misattribution the
+    /// whole rule forbids. A save that carries no independent per-pip record
+    /// contradicts nothing, so its pin stands.
     ///
     /// The rule is one sentence: **a unit's producer is a fact about that unit,
     /// recorded where that unit was produced, and nothing re-derived at restore
@@ -16898,13 +16910,21 @@ impl GameState {
     /// the save proves — the same value
     /// `mana_payment::producing_incarnation_for_ability` would have pinned live.
     ///
-    /// The stamp is applied to BOTH copies of the unit: the pool's, and every copy
-    /// the resolved-rules journal holds of the same pip
+    /// A RECOVERED stamp is applied to BOTH copies of the unit: the pool's, and
+    /// every copy the resolved-rules journal holds of the same pip
     /// ([`ResolvedRulesJournal::bind_unit_epoch`]). They must agree or the save is
     /// unreadable — a payment records the spent unit against the produced one and
     /// `ResolvedRulesJournal::validate_serialized_authority` compares them whole,
     /// CR 400.7's epoch included — so a pool-only stamp would let this boundary
     /// admit a save whose successor it writes cannot be loaded.
+    ///
+    /// Recovery is the ONLY case that writes a journal copy. A pin that arrived in
+    /// the save was not recovered here — it is evidence the save carried, and the
+    /// journal's copies of that pip are independent evidence the save also carried.
+    /// Re-stamping them from the pin would overwrite one record with the other
+    /// before the decoder that compares copies ever saw the disagreement, which is
+    /// how a contradiction gets laundered into a loadable save. The pin is validated
+    /// against those copies instead, and the copies are left exactly as recorded.
     ///
     /// Convoke markers are taps, not mana production (CR 702.51a), and are never
     /// refused or stamped. Neither is a unit that names no producing object at all
@@ -16914,9 +16934,9 @@ impl GameState {
     /// to anything either, so admission adds no guess.
     fn bind_or_reject_floating_mana_provenance(&mut self) -> Result<(), PersistedRestoreError> {
         let mut binding: Vec<(PlayerId, Vec<(usize, u64)>)> = Vec::new();
-        // Every pooled unit's binding, for the journal's own copies of it. Deferred
-        // like `binding` so the read pass above runs on an unmodified state.
-        let mut journal_binding: Vec<(PlayerId, ManaPipId, ObjectId, u64)> = Vec::new();
+        // Every RECOVERED binding, for the journal's own copies of it. Deferred like
+        // `binding` so the read pass above runs on an unmodified state.
+        let mut journal_binding: Vec<(ManaPipId, u64)> = Vec::new();
         let mut refusal: Option<PersistedRestoreError> = None;
         for player in &self.players {
             let mut stamped: Vec<(usize, u64)> = Vec::new();
@@ -16927,8 +16947,55 @@ impl GameState {
                 if unit.is_convoke_payment() || unit.source_id == NO_PRODUCING_OBJECT {
                     continue;
                 }
-                let proven = match unit.source_incarnation {
-                    Some(pinned) => pinned,
+                match unit.source_incarnation {
+                    // CR 106.3 + CR 400.7 + CR 118.3a: an explicit pin is a CLAIM
+                    // about this unit's producer, so admission checks it against the
+                    // save's own INDEPENDENT per-pip records — the journal's
+                    // production record for this pip and the pool's producer ledger
+                    // entry keyed by it — before trusting it. When they disagree, one
+                    // tenure's epoch is being applied to another tenure's unit, which
+                    // is exactly the misattribution this boundary exists to stop: a
+                    // copy's retained mana re-pinned to the Treasure that later
+                    // occupied the same storage id would be priced as that Treasure.
+                    // Neither side is preferred and nothing is repaired here, because
+                    // the only repair available is to overwrite one record with the
+                    // other and BOTH are evidence the game itself wrote; the save is
+                    // refused instead (`ContradictoryFloatingManaProvenance`).
+                    Some(pinned) => match self.pip_recorded_producer_epochs(&unit) {
+                        Some(recorded) => {
+                            if recorded.iter().any(|epoch| *epoch != pinned) {
+                                refusal = Some(
+                                    PersistedRestoreError::ContradictoryFloatingManaProvenance {
+                                        player: player.id,
+                                        source_id: unit.source_id,
+                                        pinned,
+                                        recorded,
+                                    },
+                                );
+                                break;
+                            }
+                            // CR 118.3a: the records agree with the pin, or the save
+                            // carries none for this pip (an intact save whose pin is
+                            // the only record of the producer — nothing independent
+                            // to contradict). The pin stands and the journal's copies
+                            // are NOT rewritten: they were not recovered here, and a
+                            // pin that arrived in the save must never overwrite
+                            // independently recorded journal evidence.
+                        }
+                        // CR 118.3a + CR 400.7: a per-pip record names a DIFFERENT
+                        // producing object than this unit does. That is the same
+                        // contradiction stated about the source instead of the epoch.
+                        None => {
+                            refusal =
+                                Some(PersistedRestoreError::ContradictoryFloatingManaProvenance {
+                                    player: player.id,
+                                    source_id: unit.source_id,
+                                    pinned,
+                                    recorded: Vec::new(),
+                                });
+                            break;
+                        }
+                    },
                     None => match self.saved_producer_epoch(&unit) {
                         // CR 106.3 + CR 400.7: the save names this unit's epoch, so
                         // admission BINDS it. An admitted unit left pin-less would
@@ -16937,7 +17004,11 @@ impl GameState {
                         // honest admission into a mis-attributed payment.
                         Some(incarnation) => {
                             stamped.push((index, incarnation));
-                            incarnation
+                            // CR 118.3a: a RECOVERED pin is the one case that writes
+                            // the journal's copies. A pin that arrived in the save was
+                            // admitted above and its journal copies are left exactly as
+                            // the save recorded them.
+                            journal_binding.push((unit.pip_id, incarnation));
                         }
                         // CR 106.3 + CR 400.7: no record in the save names THIS
                         // unit's producer, and the nearest substitute available here
@@ -16955,7 +17026,6 @@ impl GameState {
                         }
                     },
                 };
-                journal_binding.push((player.id, unit.pip_id, unit.source_id, proven));
             }
             if refusal.is_some() {
                 break;
@@ -16972,7 +17042,7 @@ impl GameState {
         // records a produced unit and a spent unit that agree — the journal compares
         // them whole when the save is decoded, and one that did not would write a save
         // the engine could not load back.
-        for (_, pip, _, proven) in journal_binding {
+        for (pip, proven) in journal_binding {
             self.resolved_rules_journal.bind_unit_epoch(pip, proven);
         }
         // Rebuilt through `ManaPool::from_units` — the constructor the pool's own
@@ -16999,6 +17069,69 @@ impl GameState {
             player.mana_pool = crate::types::mana::ManaPool::from_units(units);
         }
         Ok(())
+    }
+
+    /// CR 106.3 + CR 118.3a + CR 400.7: every epoch the save's PER-PIP records
+    /// state for ONE floating unit's producer, or `None` when one of them names a
+    /// different producing object than the unit does.
+    ///
+    /// The two records here are the ones that name a unit by its PIP: the journal's
+    /// production record for that pip (the unit and producer node production wrote a
+    /// moment after the mana was made) and the pool's ledger entry keyed by the same
+    /// pip (`pooled_mana_producer_snapshots`). Both are statements about this one
+    /// unit, so they are directly comparable — to each other, and to an explicit
+    /// `ManaUnit::source_incarnation` pin the save carries. The step-scoped exit LKI
+    /// is deliberately NOT part of this list: it is keyed by the storage id, not by
+    /// the pip, so it can only ever answer the weaker question "which tenure of this
+    /// id left", and that answer belongs to
+    /// [`Self::saved_producer_epoch`]'s recovery path rather than to the validation
+    /// of a pin.
+    ///
+    /// An empty `Vec` means the save names no per-pip producer for this unit at all.
+    fn pip_recorded_producer_epochs(
+        &self,
+        unit: &crate::types::mana::ManaUnit,
+    ) -> Option<Vec<u64>> {
+        let source_id = unit.source_id;
+        let pip = unit.pip_id;
+        // Every per-pip record that names an epoch, one per record.
+        let mut recorded: Vec<u64> = Vec::new();
+        if pip.0 == 0 {
+            return Some(recorded);
+        }
+        // CR 106.3 + CR 118.3a: the journal's production record belongs to this pip;
+        // one naming a different object is a save contradicting itself.
+        if let Some(produced) = self.resolved_rules_journal.produced_unit(pip) {
+            if produced.source_id != source_id {
+                return None;
+            }
+            if let Some(epoch) = produced.source_incarnation {
+                recorded.push(epoch);
+            } else if let Some(note) = self.resolved_rules_journal.produced_source_epoch(pip) {
+                // CR 113.7 + CR 400.7: the producer node names the object that
+                // generated the ability, not whatever holds the id now.
+                if note.object_id != source_id {
+                    return None;
+                }
+                recorded.push(note.incarnation);
+            }
+        }
+        // CR 118.3a: the ledger entry keyed by this unit's own pip.
+        let mut ledger = self
+            .pooled_mana_producer_snapshots
+            .iter()
+            .filter(|snapshot| snapshot.pip_id == pip);
+        if let Some(snapshot) = ledger.next() {
+            if snapshot.source_id != source_id {
+                return None;
+            }
+            recorded.push(snapshot.source_incarnation);
+            if ledger.next().is_some() {
+                // CR 400.7: two epochs for one unit are two tenures it cannot be.
+                return None;
+            }
+        }
+        Some(recorded)
     }
 
     /// CR 106.3 + CR 106.4 + CR 400.7 + CR 605.1a: the producing epoch the SAVE
@@ -17058,43 +17191,10 @@ impl GameState {
     /// its place, and grant cascade for mana a Treasure never made.
     fn saved_producer_epoch(&self, unit: &crate::types::mana::ManaUnit) -> Option<u64> {
         let source_id = unit.source_id;
-        let pip = unit.pip_id;
-        // Every unit-keyed record that names an epoch, one per record.
-        let mut recorded: Vec<u64> = Vec::new();
-        if pip.0 != 0 {
-            // CR 106.3 + CR 118.3a: the journal's production record belongs to this
-            // pip; one naming a different object is a save contradicting itself.
-            if let Some(produced) = self.resolved_rules_journal.produced_unit(pip) {
-                if produced.source_id != source_id {
-                    return None;
-                }
-                if let Some(epoch) = produced.source_incarnation {
-                    recorded.push(epoch);
-                } else if let Some(note) = self.resolved_rules_journal.produced_source_epoch(pip) {
-                    // CR 113.7 + CR 400.7: the producer node names the object that
-                    // generated the ability, not whatever holds the id now.
-                    if note.object_id != source_id {
-                        return None;
-                    }
-                    recorded.push(note.incarnation);
-                }
-            }
-            // CR 118.3a: the ledger entry keyed by this unit's own pip.
-            let mut ledger = self
-                .pooled_mana_producer_snapshots
-                .iter()
-                .filter(|snapshot| snapshot.pip_id == pip);
-            if let Some(snapshot) = ledger.next() {
-                if snapshot.source_id != source_id {
-                    return None;
-                }
-                recorded.push(snapshot.source_incarnation);
-                if ledger.next().is_some() {
-                    // CR 400.7: two epochs for one unit are two tenures it cannot be.
-                    return None;
-                }
-            }
-        }
+        // CR 118.3a: a per-pip record naming a different object than the unit does is
+        // a save contradicting itself about who produced the mana, so it answers
+        // nothing here rather than answering something weaker.
+        let recorded = self.pip_recorded_producer_epochs(unit)?;
         if let Some((first, rest)) = recorded.split_first() {
             // CR 400.7: two epochs recorded for this unit are two tenures, and the
             // save does not say which produced it.
@@ -17580,6 +17680,38 @@ pub enum PersistedRestoreError {
     AmbiguousFloatingManaProvenance {
         player: PlayerId,
         source_id: ObjectId,
+    },
+
+    /// CR 106.3 + CR 400.7 + CR 118.3a: a saved mana pool holds floating mana whose
+    /// explicit producing-incarnation pin CONTRADICTS the save's own independent
+    /// per-pip records for the same unit.
+    ///
+    /// A pin is a claim about one unit's producer, and so is the journal's
+    /// production record for that pip and the pool's producer ledger entry keyed by
+    /// it. All three name the same unit, so two epochs among them are a save that
+    /// contradicts itself about which tenure of the storage id made the mana — and
+    /// the shape that produces it is not hypothetical: a copy's retained mana
+    /// re-pinned to the live successor epoch (the Treasure a blink put under the same
+    /// id, CR 400.7) is admitted by a guard that trusts the pin, and the payment then
+    /// prices that mana as the successor's. Restore refuses instead of preferring
+    /// either side, because the only repair available at this boundary is to overwrite
+    /// one record with the other before the decoder that compares records ever sees
+    /// them, which would launder the contradiction into a loadable save.
+    ///
+    /// `recorded` is every epoch the save's per-pip records state for this unit —
+    /// at least one that disagrees with `pinned`; it is empty when a per-pip record
+    /// instead names a different producing OBJECT than the unit does, which is the
+    /// same contradiction stated about the source.
+    #[error(
+        "persisted mana pool of player {player:?} pins floating mana from {source_id:?} to \
+         incarnation {pinned} but that unit's own per-pip records state {recorded:?}, and the \
+         save cannot be restored"
+    )]
+    ContradictoryFloatingManaProvenance {
+        player: PlayerId,
+        source_id: ObjectId,
+        pinned: u64,
+        recorded: Vec<u64>,
     },
 
     /// CR 601.2 / CR 602.2: at most one announcement is in flight, so every live
