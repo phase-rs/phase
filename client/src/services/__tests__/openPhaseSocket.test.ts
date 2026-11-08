@@ -26,7 +26,7 @@ import {
   MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL,
   PROTOCOL_VERSION,
 } from "../../adapter/ws-adapter";
-import { decodeJsonEnvelope, encodeJsonEnvelope } from "../../network/wireEnvelope";
+import { decodeJsonEnvelope, encodeJsonEnvelope, WIRE_COMPRESSION_THRESHOLD } from "../../network/wireEnvelope";
 
 class MockWebSocket extends EventTarget {
   static OPEN = 1;
@@ -1717,6 +1717,9 @@ describe("openPhaseSocket — bounded expanded codec backlog", () => {
 });
 
 describe("openPhaseSocket — canonical codec discriminator", () => {
+  // Force real gzip, rather than the negotiated format's small raw envelope.
+  const gzipFixtureLength = WIRE_COMPRESSION_THRESHOLD + 1;
+
   async function openWire(compressed: boolean, fake: { session: StateCodecSession }) {
     const recovery: StateCodecRecoveryNotice[] = [];
     const pending = openPhaseSocket("ws://test", {
@@ -1731,7 +1734,13 @@ describe("openPhaseSocket — canonical codec discriminator", () => {
     socket.ws.onmessage = (event) => { received.push(event.data); };
     raw.deliverMessage(confirmationFrame());
     const deliver = async (text: string) => {
-      raw.deliverMessage(compressed ? (await encodeJsonEnvelope(text)).buffer : text);
+      if (!compressed) {
+        raw.deliverMessage(text);
+        return;
+      }
+      const encoded = await encodeJsonEnvelope(text);
+      expect(encoded[0]).toBe(0x01);
+      raw.deliverMessage(encoded.buffer);
     };
     return { raw, socket, received, recovery, deliver };
   }
@@ -1742,7 +1751,7 @@ describe("openPhaseSocket — canonical codec discriminator", () => {
     const fake = fakeSession();
     fake.decode.mockResolvedValueOnce({ kind: "resyncRequired" });
     const wire = await openWire(compressed, fake);
-    const text = `{"type":"${type}","data":not-json}`;
+    const text = `{"type":"${type}","data":not-json}`.padEnd(gzipFixtureLength, " ");
     try {
       await wire.deliver(text);
       await vi.waitFor(() => expect(wire.recovery).toEqual(["recovering"]));
@@ -1755,7 +1764,7 @@ describe("openPhaseSocket — canonical codec discriminator", () => {
         : sent instanceof Uint8Array ? await decodeJsonEnvelope(sent) : null;
       expect(resync).toBe('{"type":"ResyncState"}');
 
-      await wire.deliver(codecFrame("Full"));
+      await wire.deliver(codecFrame("Full").padEnd(gzipFixtureLength, " "));
       await vi.waitFor(() => expect(wire.received).toEqual([DECODED_PONG]));
       expect(wire.recovery).toEqual(["recovering", "ready"]);
       expect(wire.raw.close).not.toHaveBeenCalled();
@@ -1794,7 +1803,7 @@ describe("openPhaseSocket — canonical codec discriminator", () => {
       '{"type":',
       '{"type":"Full" "data":{}}',
       '[{"type":"Full","data":{}}]',
-    ];
+    ].map((text) => text.padEnd(gzipFixtureLength, " "));
     try {
       for (const text of plain) await wire.deliver(text);
       await vi.waitFor(() => expect(wire.received).toEqual(plain));
@@ -1811,7 +1820,7 @@ describe("openPhaseSocket — canonical codec discriminator", () => {
     const frames = [
       ' { "data": {}, "type": "Fu\\u006cl" } ',
       '{"data":{},"type":"Delta"}',
-    ];
+    ].map((text) => text.padEnd(gzipFixtureLength, " "));
     try {
       for (const text of frames) await wire.deliver(text);
       await vi.waitFor(() => expect(wire.received).toEqual([DECODED_PONG, DECODED_PONG]));
