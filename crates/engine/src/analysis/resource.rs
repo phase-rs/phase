@@ -2105,7 +2105,7 @@ impl PeriodicDelta {
     /// so the witness differs from a declaration the publisher already validated in exactly the
     /// aim.
     ///
-    /// Each segment aims at one living reachable seat, and each charged slot switches to the next
+    /// Each segment aims at one living reachable seat, and each re-aimed slot switches to the next
     /// segment at its first resolution after the previous seat's departure, so no segment aims at
     /// a seat an earlier segment crossed. With a leading slot ([`AnnouncedLead`]) announcement
     /// index `i` resolves at repetition `i + 1 + lead`; a slot ranked after the killing
@@ -2118,10 +2118,11 @@ impl PeriodicDelta {
     ///
     /// # The two refusals, and the one over-charge
     ///
-    /// `None` where there is no charged slot to re-aim: the offer's own declaration is then the
-    /// only declaration there is and a witness would be a copy of it. The walk also stops at a
-    /// segment whose start COLLIDES with an earlier one, because `evaluate_schedule` selects the
-    /// greatest start at or below an index and a duplicated start is a segment no drive reads.
+    /// `None` where no charged slot took life, so there is none to re-aim: the offer's own
+    /// declaration is then the only declaration there is and a witness would be a copy of it. The
+    /// walk also stops at a segment whose start COLLIDES with an earlier one, because
+    /// `evaluate_schedule` selects the greatest start at or below an index and a duplicated start
+    /// is a segment no drive reads.
     ///
     /// THIS CONSTRUCTION ASKS FOR [`ChargeBound::Ceiling`], because what it backs is a published
     /// ceiling: its error must lower a count, never raise one. So a segment aiming AWAY from the
