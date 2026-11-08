@@ -174,6 +174,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::ConniveDiscard { .. }
         | WaitingFor::DiscardChoice { .. }
+        | WaitingFor::HeroEventChoice { .. }
         | WaitingFor::EffectZoneChoice { .. }
         | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
         | WaitingFor::LearnChoice { .. }
@@ -999,6 +1000,7 @@ pub(crate) fn identity_projection_for_viewer(
         .planar_deck
         .iter()
         .chain(state.scheme_deck.iter())
+        .chain(state.boss_deck.iter())
         .copied()
         .collect();
     for obj_id in supplementary_deck_ids {
@@ -1161,6 +1163,7 @@ pub(crate) fn identity_projection_for_unseated_viewer(
         .planar_deck
         .iter()
         .chain(state.scheme_deck.iter())
+        .chain(state.boss_deck.iter())
         .chain(state.exile.iter())
     {
         if state
@@ -4008,6 +4011,15 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     obj.spellbook.clear();
     obj.parse_warnings.clear();
     obj.back_face = None;
+    // CR 400.2: a hidden card's token-ness identifies its pile position
+    // (Horde libraries mix tokens and cards), so it redacts like every other
+    // printed characteristic — mirroring `redact_zone_change_record`'s
+    // `record.is_token = false`. The Horde-deck flag and the pinned library
+    // rarity go with it: both are loader-seeded per-card metadata with no
+    // public face while hidden.
+    obj.is_token = false;
+    obj.is_horde_deck_token = false;
+    obj.horde_library_rarity = None;
     obj.specialize_faces = None;
     obj.cleave_variant = None;
     obj.modal = None;
@@ -5232,7 +5244,7 @@ mod tests {
         continue_replacement, replace_event, replacement_choice_waiting_for, ReplacementResult,
     };
     use crate::game::scenario::{GameScenario, P0, P1};
-    use crate::game::zones::create_object;
+    use crate::game::zones::{create_object, move_to_zone};
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, BeholdCostAction, CostPaidObjectSnapshot,
         Effect, FaceDownProfile, QuantityExpr, ReplacementDefinition, ResolvedAbility,
@@ -5260,6 +5272,9 @@ mod tests {
     use crate::types::proposed_event::{ProposedEvent, SearchFoundDisposition};
     use crate::types::replacements::ReplacementEvent;
     use crate::types::resolution::OptionalEffectFrame;
+    use crate::types::resolved_commands::{
+        ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
+    };
     use crate::types::zones::{ExileCostSourceZone, Zone};
     use rand::RngCore;
     use std::collections::BTreeSet;
@@ -10209,6 +10224,72 @@ mod tests {
         );
     }
 
+    /// CR 701.20a: a PUBLIC reveal survives a move into a hand. "To reveal a
+    /// card, show that card to all players" — once they have been shown it,
+    /// putting it into a hand does not unshow it, so the opponent must still
+    /// identify the card (Malevolent Rumble, Narset, Parter of Veils: "reveal …
+    /// and put it into your hand"). CR 401.2: the same card moving into a
+    /// LIBRARY retires the reveal, because library order is not public — the
+    /// neighbouring `public_reveal_memory_clears_when_card_changes_zones` test
+    /// owns that half.
+    ///
+    /// Revert probe: retire the public reveal on every destination (the pre-fix
+    /// behavior) ⇒ the hand assertion below FAILS.
+    #[test]
+    fn public_reveal_memory_survives_a_move_into_a_hand() {
+        let mut state = GameState::new_two_player(42);
+        let card_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Rumbled Card".to_string(),
+            Zone::Library,
+        );
+        // The momentary reveal window a reveal-dig opens (CR 701.20a), plus the
+        // durable publication the `CardsRevealed` event boundary records — the
+        // same pair a `Dig { reveal: true }` produces.
+        state.revealed_cards.insert(card_id);
+        state
+            .resolve_and_apply_information(
+                &[card_id],
+                ResolvedInformationAudience::Public,
+                ResolvedInformationLifetime::UntilZoneChange,
+                ResolvedInformationEdit::Reveal,
+            )
+            .expect("a live library occurrence is published")
+            .expect("the reveal is journaled");
+        assert_eq!(
+            filter_state_for_viewer(&state, PlayerId(1)).objects[&card_id].name,
+            "Rumbled Card",
+            "the reveal is public while the card sits in the library"
+        );
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, card_id, Zone::Hand, &mut events);
+        assert!(
+            state.public_revealed_cards.contains(&card_id),
+            "CR 701.20a: a public reveal must survive a move into a hand"
+        );
+        assert_eq!(
+            filter_state_for_viewer(&state, PlayerId(1)).objects[&card_id].name,
+            "Rumbled Card",
+            "the opponent must still identify the revealed card now that it is a hand card"
+        );
+
+        // CR 401.2: a library destination is the one hidden zone that retires
+        // the publication, so the identity never resurfaces later.
+        move_to_zone(&mut state, card_id, Zone::Library, &mut events);
+        assert!(
+            !state.public_revealed_cards.contains(&card_id),
+            "a move into a library must retire the public reveal"
+        );
+        assert_eq!(
+            filter_state_for_viewer(&state, PlayerId(1)).objects[&card_id].name,
+            "Hidden Card",
+            "a card put back into a library is hidden again"
+        );
+    }
+
     /// Unit 2, site #21 (multi-authority): `viewer_may_look_at_face_down` gates ONLY
     /// its battlefield `MayLookAtFaceDown` scan behind the O(1) presence index (wrap,
     /// not early-return), and falls through UNCHANGED to the duration-bound
@@ -10454,6 +10535,30 @@ mod tests {
         );
         assert_eq!(filtered.planar_deck, im::vector![plane_id]);
         assert_eq!(filtered.scheme_deck, im::vector![scheme_id]);
+    }
+
+    #[test]
+    fn boss_pile_cards_are_hidden_from_all_viewers() {
+        let mut state = GameState::new_two_player(42);
+        let boss_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Secret Boss".to_string(),
+            Zone::Command,
+        );
+        state.objects.get_mut(&boss_id).unwrap().face_down = true;
+        state.boss_deck.push_back(boss_id);
+
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let filtered = filter_state_for_viewer(&state, viewer);
+            assert_eq!(
+                filtered.objects.get(&boss_id).map(|obj| obj.name.as_str()),
+                Some("Hidden Card"),
+                "boss pile identity hidden from {viewer:?}"
+            );
+            assert_eq!(filtered.boss_deck, im::vector![boss_id]);
+        }
     }
 
     /// CR 400.2 makes the command zone public "except for those cards that some rule or
@@ -12746,6 +12851,7 @@ mod tests {
                 prevention_tally: Vec::new(),
                 lives_before: vec![20, 20],
                 sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
+                phase_c_remnant: None,
             }));
 
         let authoritative = serde_json::to_string(&state.pending_combat_lifelink)

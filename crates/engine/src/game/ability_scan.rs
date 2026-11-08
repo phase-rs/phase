@@ -2315,6 +2315,8 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             acc = acc.or(scan_quantity_expr(count, mode));
             acc
         }
+        // A plain `u32` count: no quantity, filter, or bound-storage reads.
+        Effect::HordePlayCard { .. } => Axes::NONE,
         Effect::Specialize => Axes::NONE,
         Effect::Renown { count } => {
             let mut acc = Axes::NONE;
@@ -2894,6 +2896,14 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             restrict: _,
         } => Axes::CONSERVATIVE,
         QuantityRef::CardsExiledBySource => Axes::NONE,
+        // Turtle Team-Up: a live command-zone pile census (sibling read like
+        // ObjectCount, but filterless — no filter to scan, no history/event).
+        QuantityRef::DeployedBossCount => Axes {
+            event: false,
+            sibling: SiblingReads::Any,
+            projected: false,
+            history: HistoryReads::NONE,
+        },
         QuantityRef::ExiledCardPower { index: _ } => Axes::NONE,
         QuantityRef::ZoneCardCount {
             filter,
@@ -7902,6 +7912,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::Amass { .. }
         | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
+        | Effect::HordePlayCard { .. }
         | Effect::Specialize
         | Effect::Renown { .. }
         | Effect::Bolster { .. }
@@ -8301,6 +8312,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::Amass { .. }
         | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
+        | Effect::HordePlayCard { .. }
         | Effect::Specialize
         | Effect::Renown { .. }
         | Effect::Bolster { .. }

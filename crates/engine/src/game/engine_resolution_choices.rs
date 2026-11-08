@@ -6,16 +6,17 @@ use std::collections::{HashMap, HashSet};
 use rand::seq::SliceRandom;
 
 use crate::types::ability::{
-    AbilityCost, ChoiceType, ChosenAttribute, DigRestOrder, DigRestSplitScope, Effect, EffectKind,
-    ForwardedResultContext, GuessOutcome, LibraryPosition, ParentTargetMissingReason, QuantityExpr,
-    QuantityRef, ReciprocalZoneChoiceRole, ResolvedAbility, TapCreaturesSelectionMode, TargetRef,
+    AbilityCost, ChoiceType, ChosenAttribute, CostPaidObjectSnapshot, DigRestOrder,
+    DigRestSplitScope, Effect, EffectKind, ForwardedResultContext, GuessOutcome, LibraryPosition,
+    ParentTargetMissingReason, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    ResolvedAbility, TapCreaturesSelectionMode, TargetRef,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActionResult, BatchCompletion, CastOfferKind, ChosenDamageSource, ContinuationXAnnouncement,
-    CopyChosenSelection, CostResume, GameState, OutsideGameChoiceSource, PayCostKind,
-    PayableResource, PendingContinuation, PendingPlayerScopeSacrificeCompletion,
+    CopyChosenSelection, CostResume, GameState, ManaAmountComposition, OutsideGameChoiceSource,
+    PayCostKind, PayableResource, PendingContinuation, PendingPlayerScopeSacrificeCompletion,
     PersistentAxisMaterialization, WaitingFor, ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::ObjectId;
@@ -1173,6 +1174,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::DiscardToHandSize { .. }
             | WaitingFor::ConniveDiscard { .. }
             | WaitingFor::DiscardChoice { .. }
+            | WaitingFor::HeroEventChoice { .. }
             | WaitingFor::EffectZoneChoice { .. }
             | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::NamedChoice { .. }
@@ -1251,6 +1253,49 @@ fn dig_continuation_wants_rest_pile_for_count(ability: &ResolvedAbility) -> bool
         current = sub.sub_ability.as_deref();
     }
     wants_rest
+}
+
+/// CR 701.20a + CR 701.20d + CR 401.2: a card revealed by an instruction stays
+/// revealed only as long as that instruction needs it (CR 701.20a), and revealed
+/// cards that are shuffled or otherwise reordered inside a library stop being
+/// revealed and become new objects (CR 701.20d). Once a reveal-dig's keep
+/// decision has committed a reordered pile back into the library, no card in
+/// that pile may keep a reveal marker — the rest pile that went to the bottom
+/// AND the card the player kept on top. Leaving any of them marked is issue
+/// #8059: the caster (and every other player) kept seeing cards that the
+/// instruction had already put away.
+///
+/// Callers pass exactly the cards the instruction reordered. A card that leaves
+/// the library loses its marker with the zone change itself (CR 400.7), never
+/// from here, and a card a private "look at" dig never publicly revealed has no
+/// marker to drop — those occurrences are filtered out so this cleanup only ever
+/// hides a reveal that is actually active.
+///
+/// This is the same cleanup the shared `BatchCompletion::RevealRestPile` tail
+/// runs for the delivery shapes that have a completion to ride; the in-place
+/// library-commit branch answers the `DigChoice` without one, so it calls the
+/// authority directly.
+fn hide_dig_reveal_markers(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    cards: &[ObjectId],
+) {
+    let still_revealed: Vec<ObjectId> = cards
+        .iter()
+        .copied()
+        .filter(|card_id| state.revealed_cards.contains(card_id))
+        .collect();
+    if still_revealed.is_empty() {
+        return;
+    }
+    state
+        .resolve_and_apply_information(
+            &still_revealed,
+            ResolvedInformationAudience::Controller(player),
+            ResolvedInformationLifetime::UntilActionBoundary,
+            ResolvedInformationEdit::Hide,
+        )
+        .expect("reveal cleanup must reference live card occurrences");
 }
 
 /// CR 701.20e / CR 701.23a + CR 401.4: Move the "rest" partition of an
@@ -3711,8 +3756,10 @@ pub(super) fn handle_resolution_choice(
                     // CR 107.3a + CR 601.2b via CR 602.2b: the announced X of a
                     // mana ability's `Pay X speed` (CR 702.179f) or `{X}` mana
                     // leg. The activation's own cost cursor pays the leg with X
-                    // concretized; nothing is deducted here.
-                    PayableResource::Speed | PayableResource::ManaGeneric { .. } => {
+                    // concretized; nothing is deducted here. A mana ability's
+                    // `{X}` leg announcement is always `ConcretizeX` (its only
+                    // minter, `mana_abilities`, writes that composition).
+                    PayableResource::Speed | PayableResource::Mana { .. } => {
                         pending.chosen_x = Some(amount)
                     }
                     other @ (PayableResource::Energy
@@ -4071,16 +4118,29 @@ pub(super) fn handle_resolution_choice(
                         });
                     }
                 }
-                PayableResource::ManaGeneric { base_cost } => {
-                    // CR 107.3f + CR 118.1 + CR 118.12: concretize the chosen
-                    // X into the ORIGINAL cost — any colored/generic pips
-                    // alongside the X shard (e.g. Elenda and Azor's
-                    // `{X}{W}{U}{B}`) survive concretization and are paid
-                    // here too. Paying a synthetic all-generic `{N}` cost
-                    // instead would silently drop the colored requirements
-                    // (#6410).
-                    let mut cost = base_cost.clone();
-                    cost.concretize_x(amount);
+                PayableResource::Mana {
+                    base_cost,
+                    composition,
+                } => {
+                    let cost = match composition {
+                        // CR 107.3f + CR 118.1 + CR 118.12: concretize the chosen
+                        // X into the ORIGINAL cost — any colored/generic pips
+                        // alongside the X shard (e.g. Elenda and Azor's
+                        // `{X}{W}{U}{B}`) survive concretization and are paid
+                        // here too. Paying a synthetic all-generic `{N}` cost
+                        // instead would silently drop the colored requirements
+                        // (#6410).
+                        ManaAmountComposition::ConcretizeX => {
+                            let mut cost = base_cost.clone();
+                            cost.concretize_x(amount);
+                            cost
+                        }
+                        // CR 107.1c + CR 118.1: "pay any amount of {R}" — the
+                        // one-unit base cost repeated `amount` times (Leyline
+                        // Tyrant). `concretize_x` would be a no-op here (the
+                        // unit carries no X shard) and pay the unit once.
+                        ManaAmountComposition::PerUnit => base_cost.scaled(amount),
+                    };
                     // CR 605.3b + CR 616.1: `pay_unless_cost` below has no resume
                     // root, so a mana source that would pause for a replacement
                     // choice cannot fund this payment.
@@ -4979,7 +5039,13 @@ pub(super) fn handle_resolution_choice(
                                     rest_remainder: crate::types::ability::DigRestRemainder::Route,
                                     rest_order: DigRestOrder::Preserve,
                                     rest_split_top_count: None,
-                                    clear_markers: Vec::new(),
+                                    // CR 701.20d: the whole looked-at pile was
+                                    // reordered into the library (the kept cards
+                                    // to the top, the rest to the bottom), so
+                                    // none of those cards is still revealed —
+                                    // drop the markers for every card this dig
+                                    // revealed once the pile has landed.
+                                    clear_markers: cards.clone(),
                                     publish_tracked_set: None,
                                     publish_tracked_set_cause: None,
                                     emit_reveal_until_resolved: None,
@@ -4996,6 +5062,14 @@ pub(super) fn handle_resolution_choice(
                         }
                     }
                 }
+                // CR 701.20a + CR 701.20d + CR 401.2: this branch reordered the
+                // whole looked-at pile inside the library — the kept cards to
+                // the top, the rest to the bottom — so the pick no longer needs
+                // ANY of it revealed, not the rest pile and not the kept card
+                // either (a revealed card that is reordered in a library stops
+                // being revealed). Close the window for the whole pile before
+                // the continuation resumes.
+                hide_dig_reveal_markers(state, player, &cards);
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
                     finish_with_continuation(state, player, events),
                 ));
@@ -5031,16 +5105,18 @@ pub(super) fn handle_resolution_choice(
                 let defer_rest_routing = state.active_ability_continuation().is_some_and(|cont| {
                     dig_continuation_needs_full_looked_at_tracked_set(&cont.chain)
                 });
-                // CR 701.20a + CR 701.20e: a silent remainder stays in the
-                // library, so its reveal has to end with the instruction that
-                // caused it. Hand those cards to the completion's marker
+                // CR 701.20a + CR 701.20d + CR 701.20e + CR 401.2: the keep
+                // decision ends the reveal window for the cards it did NOT
+                // keep. They are about to be put away inside the library (or
+                // another rest zone), and a silent remainder stays in the
+                // library — in both shapes the instruction no longer needs
+                // them revealed. Hand those cards to the completion's marker
                 // cleanup, which runs once the kept delivery has settled and
-                // survives any replacement re-park in between.
-                let silent_remainder_markers = if rest_remainder.is_route() {
-                    Vec::new()
-                } else {
-                    unkept.clone()
-                };
+                // survives any replacement re-park in between. The kept cards
+                // leave the looked-at pile for a concrete zone, so their
+                // markers fall with the zone change itself (CR 400.7) — only
+                // the rest pile needs an explicit close here.
+                let rest_marker_cleanup = unkept.clone();
                 let reqs = kept
                     .iter()
                     .map(|&obj_id| {
@@ -5081,7 +5157,11 @@ pub(super) fn handle_resolution_choice(
                         // survives an arbitrary number of replacement re-parks
                         // in between.
                         rest_split_top_count,
-                        clear_markers: silent_remainder_markers,
+                        // CR 701.20a + CR 701.20d + CR 701.20e + CR 401.2: the
+                        // rest pile's reveal markers are dropped once it has
+                        // landed, routed or left silent in the library (see
+                        // `rest_marker_cleanup` above).
+                        clear_markers: rest_marker_cleanup,
                         publish_tracked_set: Some(publish_set),
                         publish_tracked_set_cause: publish_cause,
                         emit_reveal_until_resolved: None,
@@ -5158,7 +5238,11 @@ pub(super) fn handle_resolution_choice(
                     rest_destination,
                     rest_order,
                     rest_split_top_count: None,
-                    clear_markers: Vec::new(),
+                    // CR 701.20a + CR 701.20d + CR 401.2: same rest-pile
+                    // reveal-window close for the reveal-only form whose kept
+                    // cards never move (`kept_destination: None`); the kept
+                    // cards stay revealed for the downstream sub-ability.
+                    clear_markers: unkept.clone(),
                     publish_tracked_set: Some(publish_set),
                     publish_tracked_set_cause: publish_cause,
                     emit_reveal_until_resolved: None,
@@ -5222,11 +5306,28 @@ pub(super) fn handle_resolution_choice(
                 end_reveal_for_cards_left_in_library(state, &unkept);
             }
             effects::publish_fresh_tracked_set(state, publish_set);
+            // CR 608.2c: For Demonstrative scope ("that card", "this way"),
+            // stamp the kept card as the effect context object so downstream
+            // sub_abilities (e.g., GainLife with ObjectManaValue scope) can
+            // resolve it. Only the first kept card is relevant for Reviving
+            // Vapors-style "put one of them into your hand" effects.
+            let effect_context_snapshot = kept.first().and_then(|first_kept| {
+                state.entering_or_live_object(*first_kept).map(|obj| {
+                    let lki = obj.snapshot_public_characteristics();
+                    CostPaidObjectSnapshot::capture(obj, lki)
+                })
+            });
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
                 // CR 608.2c: ParentTarget continuations (Hideaway conceal, dig
                 // conditionals on the kept card) bind to the kept selection.
                 // Hand/bottom/exile tails route via TrackedSetFiltered instead.
                 bind_dig_continuation_targets(&mut frame.pending.chain, &kept);
+                if let Some(snapshot) = effect_context_snapshot {
+                    frame
+                        .pending
+                        .chain
+                        .set_effect_context_object_recursive(snapshot);
+                }
                 frame.pending.chain.context.optional_effect_performed = !kept.is_empty();
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
@@ -6561,6 +6662,130 @@ pub(super) fn handle_resolution_choice(
             if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                 if announced {
                     return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
+                }
+                return Ok(ResolutionChoiceOutcome::WaitingForWithInlineTriggers(
+                    waiting_for,
+                ));
+            }
+            ResolutionChoiceOutcome::WaitingFor(waiting_for)
+        }
+        (
+            WaitingFor::HeroEventChoice {
+                player,
+                event: kind,
+                event_id,
+                cards,
+                count,
+                up_to,
+                min,
+                remaining_heroes,
+                answers,
+                copies_pending,
+                fired_baxters,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            // Turtle Team-Up hero-choice answer: count + distinctness + offer
+            // membership, mirroring DiscardChoice. No zone-freshness check —
+            // answers don't apply until the queue drains, so nothing moves
+            // between the prompt and the answer; membership in the frozen
+            // offer suffices.
+            if up_to && chosen.len() > count {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must choose at most {} card(s), got {}",
+                    count,
+                    chosen.len()
+                )));
+            }
+            if up_to && chosen.len() < min {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must choose at least {} card(s), got {}",
+                    min,
+                    chosen.len()
+                )));
+            }
+            if !up_to && chosen.len() != count {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must choose exactly {} card(s), got {}",
+                    count,
+                    chosen.len()
+                )));
+            }
+            let unique_chosen: HashSet<ObjectId> = chosen.iter().copied().collect();
+            if unique_chosen.len() != chosen.len() {
+                return Err(EngineError::InvalidAction(
+                    "Selected cards must be distinct".to_string(),
+                ));
+            }
+            for card_id in &chosen {
+                if !cards.contains(card_id) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected card not in eligible set".to_string(),
+                    ));
+                }
+            }
+
+            // The Boss seat owns the resolving Event (Events are never owned
+            // by a hero), so ownership re-derives the seat for application.
+            let Some(horde) = state.objects.get(&event_id).map(|o| o.owner) else {
+                return Err(EngineError::InvalidAction(
+                    "Hero-event source left the game".to_string(),
+                ));
+            };
+
+            let events_before_effect = events.len();
+            let progress = super::boss::answer_hero_event_choice(
+                state,
+                horde,
+                event_id,
+                kind,
+                player,
+                chosen,
+                remaining_heroes,
+                answers,
+                fired_baxters,
+                copies_pending,
+                events,
+            );
+            if matches!(progress, super::boss::HeroEventProgress::Prompted) {
+                // The queue advanced (or a nested replacement prompt took
+                // over mid-batch): defer this answer's observer triggers
+                // across the pause, exactly like the discard pause path.
+                defer_observer_triggers_for_paused_choice(state, events, events_before_effect);
+                return Ok(action_result_outcome(events, state.waiting_for.clone()));
+            }
+            let events_after_move = events.len();
+
+            // The Event was the Horde's action, so priority returns to the
+            // active player (not the answering hero) — the post-spell shape —
+            // and any parked chain behind the prompt (Savanti's trigger rest)
+            // resumes through the continuation drain.
+            let active = state.active_player;
+            let waiting_for = finish_with_continuation(state, active, events);
+
+            // Batch this resolution's observer triggers (dies, discards, life)
+            // across the choice pause, like the DiscardChoice completion: the
+            // move slice plus the continuation slice drain together.
+            for (start, end) in [
+                (events_before_effect, events_after_move),
+                (events_after_move, events.len()),
+            ] {
+                if end <= start {
+                    continue;
+                }
+                let trigger_events: Vec<GameEvent> = events[start..end]
+                    .iter()
+                    .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                    .cloned()
+                    .collect();
+                if !trigger_events.is_empty() {
+                    super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+                }
+            }
+
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
                 }
                 return Ok(ResolutionChoiceOutcome::WaitingForWithInlineTriggers(
                     waiting_for,
@@ -10264,9 +10489,11 @@ fn resume_free_cast_window_after_land_play(
 /// the instructions that follow it, keyed by the prompt the payment opened:
 /// * a "tap X untapped ..." payment (`TapCreaturesSelectionMode::VariableX`) announces the
 ///   count tapped; a fixed count or a power threshold (Crew/Saddle shape) announces nothing;
-/// * a "pay any amount of energy / life" or unannounced-X mana payment (CR 107.14, CR 119.4)
-///   announces the amount paid. A mana ability's own amount prompt (`pending_mana_ability`)
-///   and a loop-collapse count are not resolution-time payments of an effect.
+/// * a "pay any amount of energy / life" or mana payment (CR 107.14, CR 119.4) announces the
+///   amount paid — for mana, both an unannounced-X cost (`ManaAmountComposition::ConcretizeX`)
+///   and a per-unit "pay any amount of {R}" cost (`ManaAmountComposition::PerUnit`,
+///   CR 107.1c). A mana ability's own amount prompt (`pending_mana_ability`) and a
+///   loop-collapse count are not resolution-time payments of an effect.
 pub(crate) fn paused_payment_x_announcement(
     paying: &ResolvedAbility,
     waiting_for: &WaitingFor,
@@ -10290,7 +10517,8 @@ pub(crate) fn paused_payment_x_announcement(
         } => match resource {
             PayableResource::Energy
             | PayableResource::Life
-            | PayableResource::ManaGeneric { .. } => Some(ContinuationXAnnouncement::PaidAmount),
+            // Both mana compositions announce the amount paid.
+            | PayableResource::Mana { .. } => Some(ContinuationXAnnouncement::PaidAmount),
             PayableResource::Counters
             | PayableResource::Speed
             | PayableResource::LoopCollapse { .. } => None,
@@ -10389,6 +10617,17 @@ pub(crate) fn run_batch_completion(
         BatchCompletion::MilledDeliveryComplete { player_id, cards } => {
             effects::mill::complete_mill_delivery(state, player_id, cards, events)
         }
+        BatchCompletion::HordeMillFromLossDeliveryComplete {
+            player_id,
+            milled,
+            legendary_cohort,
+        } => crate::game::horde::complete_advanced_mill_from_loss(
+            state,
+            player_id,
+            milled,
+            legendary_cohort,
+            events,
+        ),
         BatchCompletion::ReturnAsAuraNoTargetComplete { source_id } => {
             effects::return_as_aura::complete_no_target_delivery(source_id, events)
         }
@@ -10890,6 +11129,24 @@ pub(crate) fn run_batch_completion(
             // its own completed outcome only after both tails have finished.
             let kept_completed = kept_delivery.completed_ids();
             let rest_completed = rest_delivery.completed_ids();
+            // CR 608.2c: a later instruction that reads the card this Dig put
+            // into its kept destination ("that card's mana value") names THAT
+            // card. Bind the settled kept selection here, ahead of the
+            // event-derived referent below: once the rest pile has also moved,
+            // the batch's events can describe a single REST card instead, and an
+            // event-derived snapshot would then hand the continuation the wrong
+            // object (a three-card reveal with two cards moved would yield no
+            // snapshot at all).
+            let settled_kept_snapshot = kept_delivery
+                .destination
+                .is_some()
+                .then(|| kept_delivery.completed_ids())
+                .and_then(|ids| ids.first().copied())
+                .and_then(|id| {
+                    state.entering_or_live_object(id).map(|obj| {
+                        CostPaidObjectSnapshot::capture(obj, obj.snapshot_public_characteristics())
+                    })
+                });
             if let Some(kept) = publish_tracked_set {
                 let published = if !kept.is_empty()
                     && rest_delivery.destination.is_some()
@@ -10959,7 +11216,9 @@ pub(crate) fn run_batch_completion(
                     subject: reveal_until_hit_snapshot,
                 });
             }
-            if let Some(snapshot) = effects::parent_referent_context_from_events(state, events) {
+            if let Some(snapshot) = settled_kept_snapshot
+                .or_else(|| effects::parent_referent_context_from_events(state, events))
+            {
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
                     frame
                         .pending

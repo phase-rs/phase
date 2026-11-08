@@ -1661,6 +1661,52 @@ fn parse_commander_zone_disjunction(input: &str) -> OracleResult<'_, TargetFilte
     ))
 }
 
+/// CR 903.3e: A characteristic read of "your commander" finds that player's
+/// commander in every zone, including their library and hand, so an aggregate
+/// over your commanders names every zone.
+///
+/// The read does the widening, not the phrase: the shared type-phrase grammar
+/// leaves "your commanders" unzoned because it also names a trigger subject
+/// ("your commander enters or attacks"). Only the population that "your
+/// commanders" and "commanders you own" parse to is widened: a typed filter with
+/// no controller, no type filters, and exactly the properties
+/// `FilterProp::Owned { controller: ControllerRef::You }` and
+/// `FilterProp::IsCommander`, in either order. That is the population of
+/// Tangleweave Armor and Cactus Preserve ("where X is the greatest mana value
+/// among your commanders"). Every other filter stays as written, among them a
+/// controller clause (CR 903.3d: controlling a commander means a permanent on the
+/// battlefield), a named zone (CR 903.3d: a commander in a specific zone), a
+/// tapped or untapped requirement (CR 110.5d: cards not on the battlefield are
+/// neither tapped nor untapped) and any type filter.
+fn your_commanders_in_every_zone(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut typed)
+            if typed.controller.is_none()
+                && typed.type_filters.is_empty()
+                && matches!(
+                    typed.properties.as_slice(),
+                    [
+                        FilterProp::Owned {
+                            controller: ControllerRef::You
+                        },
+                        FilterProp::IsCommander
+                    ] | [
+                        FilterProp::IsCommander,
+                        FilterProp::Owned {
+                            controller: ControllerRef::You
+                        }
+                    ]
+                ) =>
+        {
+            typed.properties.push(FilterProp::InAnyZone {
+                zones: Zone::ALL.to_vec(),
+            });
+            TargetFilter::Typed(typed)
+        }
+        other => other,
+    }
+}
+
 /// Parse "the greatest mana value of a commander you own on the battlefield or in the command zone".
 ///
 /// CR 202.3: Superlative "greatest" requires aggregate-max.
@@ -1669,7 +1715,7 @@ fn parse_commander_zone_disjunction(input: &str) -> OracleResult<'_, TargetFilte
 /// Used for flashback costs with "where X is the greatest mana value of a commander you own
 /// on the battlefield or in the command zone".
 ///
-/// Maps to `QuantityRef::Aggregate` with Max function to handle partner commanders.
+/// Maps to `QuantityRef::PropertyAggregate` with Max function to handle partner commanders.
 fn parse_greatest_commander_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("the greatest ").parse(input)?;
     let (rest, property) = parse_mana_value_phrase(rest)?;
@@ -2213,8 +2259,14 @@ fn parse_object_property_aggregate_ref(input: &str) -> OracleResult<'_, Quantity
     Ok((
         final_remainder,
         QuantityRef::PropertyAggregate(
-            PropertyAggregate::new(function, property, CardTypeSetSource::Objects { filter })
-                .expect("object populations support every aggregate property"),
+            PropertyAggregate::new(
+                function,
+                property,
+                CardTypeSetSource::Objects {
+                    filter: your_commanders_in_every_zone(filter),
+                },
+            )
+            .expect("object populations support every aggregate property"),
         ),
     ))
 }
@@ -4702,7 +4754,7 @@ fn parse_cost_paid_object_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         ObjectProperty::ManaValue => QuantityRef::ObjectManaValue {
             scope: ObjectScope::CostPaidObject,
         },
-        // ManaSymbolCount is produced only via `QuantityRef::Aggregate`, never
+        // ManaSymbolCount is produced only via `QuantityRef::PropertyAggregate`, never
         // as a single cost-paid-object reference.
         ObjectProperty::ManaSymbolCount(_) => return Err(oracle_err(input)),
     };
@@ -14815,6 +14867,224 @@ mod tests {
         };
 
         assert_eq!(owner, ControllerRef::You);
+    }
+
+    /// Reads a fully consumed object aggregate as its function, property and
+    /// population.
+    fn object_aggregate(phrase: &str) -> (AggregateFunction, ObjectProperty, TargetFilter) {
+        let (rest, qty) = parse_quantity_ref_complete(phrase).unwrap();
+        assert_eq!(rest, "", "{phrase}");
+        let QuantityRef::PropertyAggregate(aggregate) = qty else {
+            panic!("{phrase}: expected a property aggregate, got {qty:?}");
+        };
+        let CardTypeSetSource::Objects { filter } = aggregate.source() else {
+            panic!(
+                "{phrase}: expected an object population, got {:?}",
+                aggregate.source()
+            );
+        };
+        (aggregate.function(), aggregate.property(), filter.clone())
+    }
+
+    fn typed_population(
+        controller: Option<ControllerRef>,
+        properties: Vec<FilterProp>,
+    ) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            controller,
+            properties,
+            ..Default::default()
+        })
+    }
+
+    /// CR 903.3e: an aggregate over your commanders reads every zone. The first
+    /// row is the printed text of Tangleweave Armor ("Equipped creature gets
+    /// +X/+X, where X is the greatest mana value among your commanders.") and
+    /// Cactus Preserve. No printed card exhibits the shape of the other rows,
+    /// which vary the aggregate head and the ownership wording; the nearest
+    /// printed card is Tangleweave Armor.
+    #[test]
+    fn your_commanders_aggregate_reads_every_zone() {
+        let every_zone = || FilterProp::InAnyZone {
+            zones: Zone::ALL.to_vec(),
+        };
+        let owned = || FilterProp::Owned {
+            controller: ControllerRef::You,
+        };
+        for (phrase, function, property) in [
+            (
+                "the greatest mana value among your commanders",
+                AggregateFunction::Max,
+                ObjectProperty::ManaValue,
+            ),
+            (
+                "the highest mana value among your commanders",
+                AggregateFunction::Max,
+                ObjectProperty::ManaValue,
+            ),
+            (
+                "the greatest power among your commanders",
+                AggregateFunction::Max,
+                ObjectProperty::Power,
+            ),
+            (
+                "the greatest toughness among your commanders",
+                AggregateFunction::Max,
+                ObjectProperty::Toughness,
+            ),
+            (
+                "the total mana value of your commanders",
+                AggregateFunction::Sum,
+                ObjectProperty::ManaValue,
+            ),
+        ] {
+            let (parsed_function, parsed_property, filter) = object_aggregate(phrase);
+            assert_eq!(
+                (parsed_function, parsed_property),
+                (function, property),
+                "{phrase}"
+            );
+            assert_eq!(
+                filter,
+                typed_population(None, vec![owned(), FilterProp::IsCommander, every_zone()]),
+                "{phrase}"
+            );
+        }
+        let (_, _, filter) = object_aggregate("the greatest mana value among commanders you own");
+        assert_eq!(
+            filter,
+            typed_population(None, vec![FilterProp::IsCommander, owned(), every_zone()])
+        );
+    }
+
+    /// CR 903.3d + CR 109.2 + CR 110.5d: every other commander population stays as
+    /// written, and CR 903.3e's "your commander" does not reach another player's
+    /// commander.
+    #[test]
+    fn other_commander_readings_keep_their_population() {
+        let owned_by = |controller| FilterProp::Owned { controller };
+        for (phrase, expected) in [
+            // CR 903.3d, "controlling a commander". Command Chair: "{T}: Add X mana
+            // of any one color, where X is the greatest mana value among commanders
+            // you control."
+            (
+                "the greatest mana value among commanders you control",
+                typed_population(Some(ControllerRef::You), vec![FilterProp::IsCommander]),
+            ),
+            // No printed card exhibits this shape; the nearest printed card is
+            // Command Chair.
+            (
+                "the greatest mana value among commanders you own and control",
+                typed_population(
+                    Some(ControllerRef::You),
+                    vec![FilterProp::IsCommander, owned_by(ControllerRef::You)],
+                ),
+            ),
+            // CR 903.3d, "a commander in a specific zone". No printed card exhibits
+            // this shape; the nearest printed card is Command Beacon ("Put your
+            // commander into your hand from the command zone.").
+            (
+                "the greatest mana value among your commanders in the command zone",
+                typed_population(
+                    None,
+                    vec![
+                        owned_by(ControllerRef::You),
+                        FilterProp::IsCommander,
+                        FilterProp::InZone {
+                            zone: Zone::Command,
+                        },
+                    ],
+                ),
+            ),
+            // CR 903.3d, named zones. Cloudkill: "All creatures get -X/-X until end
+            // of turn, where X is the greatest mana value of a commander you own on
+            // the battlefield or in the command zone."
+            (
+                "the greatest mana value of a commander you own on the battlefield or in the command zone",
+                typed_population(
+                    None,
+                    vec![
+                        FilterProp::IsCommander,
+                        FilterProp::InAnyZone {
+                            zones: vec![Zone::Battlefield, Zone::Command],
+                        },
+                        owned_by(ControllerRef::You),
+                    ],
+                ),
+            ),
+            // Kept only to pin the population as written; this reading is not derived
+            // from a printed card. No printed card exhibits this shape; the nearest
+            // printed card is Command Chair.
+            (
+                "the greatest mana value among commanders",
+                typed_population(None, vec![FilterProp::IsCommander]),
+            ),
+            // CR 109.2: a card type makes it a permanent on the battlefield. No printed
+            // card exhibits this shape; the nearest printed card is Raised by Giants
+            // ("Commander creatures you own have base power and toughness 10/10 and are
+            // Giants in addition to their other types.").
+            (
+                "the greatest power among commander creatures you own",
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![FilterProp::IsCommander, owned_by(ControllerRef::You)],
+                }),
+            ),
+            // CR 110.5d: only permanents have status; cards not on the battlefield are
+            // neither tapped nor untapped. The population stays as written, and with
+            // no zone it reads the battlefield. No printed card exhibits this shape;
+            // the nearest printed card is Tangleweave Armor.
+            (
+                "the greatest mana value among untapped commanders you own",
+                typed_population(
+                    None,
+                    vec![
+                        FilterProp::Untapped,
+                        FilterProp::IsCommander,
+                        owned_by(ControllerRef::You),
+                    ],
+                ),
+            ),
+            // Not "your commander" (CR 903.3e). No printed card exhibits this shape; the
+            // nearest printed card is Imposing Grandeur ("Each player may discard their
+            // hand and draw cards equal to the greatest mana value of a commander they
+            // own on the battlefield or in the command zone.").
+            (
+                "the greatest mana value among commanders an opponent owns",
+                typed_population(
+                    None,
+                    vec![FilterProp::IsCommander, owned_by(ControllerRef::Opponent)],
+                ),
+            ),
+            // Not "your commander" (CR 903.3e). No printed card exhibits this shape; the
+            // nearest printed card is Imposing Grandeur.
+            (
+                "the greatest mana value among commanders they own",
+                typed_population(
+                    None,
+                    vec![
+                        FilterProp::IsCommander,
+                        owned_by(ControllerRef::ScopedPlayer),
+                    ],
+                ),
+            ),
+        ] {
+            assert_eq!(object_aggregate(phrase).2, expected, "{phrase}");
+        }
+
+        // Tome of Legends: "Whenever your commander enters or attacks, put a page
+        // counter on this artifact." The shared type-phrase grammar is not widened,
+        // so the trigger subject names no zone.
+        let (filter, rest) = parse_type_phrase_folding("your commander enters or attacks");
+        assert_eq!(
+            filter,
+            typed_population(
+                None,
+                vec![owned_by(ControllerRef::You), FilterProp::IsCommander]
+            )
+        );
+        assert_eq!(rest, "enters or attacks");
     }
 
     /// CR 701.17a + CR 701.17c: "the milled card's mana value" routes through

@@ -2423,6 +2423,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::SharedCardTypes { .. }
         | QuantityRef::DistinctSubtypes { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::BasicLandTypeCount { .. }
@@ -2770,6 +2771,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::SelfManaValue
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::TrackedSetSize
@@ -3065,6 +3067,11 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         // CR 400.7 + CR 613.1b: look-back attachment snapshot, optionally scoped
         // by a `ControllerRef` (payload rule 2).
         QuantityRef::AttachmentsOnLeavingObject { .. } => CharacteristicKinds::CONTROLLER,
+        // Turtle Team-Up (no CR section — casual product): the deployed-Boss census
+        // reads live card types (Boss membership) — a layer-4 change to a
+        // command-zone object perturbs the count.
+        QuantityRef::DeployedBossCount => CharacteristicKinds::CARD_TYPES,
+
 
         // ---- Reads no layer-writable characteristic. ----
         // Player-level totals, counters (CR 122.1 — counters are not
@@ -3376,6 +3383,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::SelfManaValue
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::TrackedSetSize
@@ -5772,6 +5780,13 @@ fn resolve_ref(
         QuantityRef::CardsExiledBySource => {
             usize_to_i32_saturating(linked_exile_for_context(state, &ctx).len())
         }
+        // Turtle Team-Up (no CR section — casual product): the number of
+        // Bosses currently deployed. Delegates to the single authority so the
+        // count matches stage sizes, Krang's wave bonus, and Leatherhead's
+        // entry gain on every layer pass.
+        QuantityRef::DeployedBossCount => {
+            usize_to_i32_saturating(crate::game::boss::bosses_in_command_zone(state).len())
+        }
         // CR 607.2a: The power of a specific card exiled by the source, indexed by order.
         // Its only producer is The Mimeoplasm's entry replacement: the ordinal
         // "this way" reading over the per-turn ledger. "The exiled card" readers
@@ -5970,30 +5985,45 @@ fn resolve_ref(
                             .and_then(|causes| causes.get(&oid))
                             .is_some_and(|member_cause| member_cause == cause),
                     };
-                    let matches_filter = if !state.battlefield.contains(&oid) {
-                        // CR 608.2h: Use last-known information to filter a tracked object that has left the battlefield.
-                        state.lki_cache.get(&oid).map_or_else(
-                            || {
-                                crate::game::filter::matches_target_filter(
-                                    state,
-                                    oid,
-                                    filter,
-                                    &filter_ctx,
-                                )
-                            },
-                            |lki| {
-                                crate::game::filter::matches_target_filter_on_lki_snapshot(
-                                    state,
-                                    oid,
-                                    lki,
-                                    filter,
-                                    &filter_ctx,
-                                )
-                            },
-                        )
-                    } else {
+                    // CR 608.2h + CR 400.7: a member stamped with its producing
+                    // departure reads that departure's snapshot; one stamped from a
+                    // zone that records no LKI reads live. An unstamped member that
+                    // is now in a library was never moved by the producing action
+                    // (a reveal, CR 701.20b), so its live characteristics are
+                    // authoritative and any cached snapshot is an earlier,
+                    // unrelated departure.
+                    let read_live = |oid| {
                         crate::game::filter::matches_target_filter(state, oid, filter, &filter_ctx)
                     };
+                    let read_snapshot = |oid, lki| {
+                        crate::game::filter::matches_target_filter_on_lki_snapshot(
+                            state,
+                            oid,
+                            lki,
+                            filter,
+                            &filter_ctx,
+                        )
+                    };
+                    let matches_filter =
+                        match tracked_member_read_authority(state, Some(*set_id), oid) {
+                            TrackedMemberRead::Snapshot(lki) => read_snapshot(oid, lki),
+                            TrackedMemberRead::Live => read_live(oid),
+                            TrackedMemberRead::Legacy
+                                if state.battlefield.contains(&oid)
+                                    || state
+                                        .objects
+                                        .get(&oid)
+                                        .is_some_and(|obj| obj.zone == Zone::Library) =>
+                            {
+                                read_live(oid)
+                            }
+                            // CR 608.2h: an unstamped member that left the
+                            // battlefield is filtered by last-known information.
+                            TrackedMemberRead::Legacy => state
+                                .lki_cache
+                                .get(&oid)
+                                .map_or_else(|| read_live(oid), |lki| read_snapshot(oid, lki)),
+                        };
                     cause_ok && matches_filter
                 })
                 .count();
@@ -20294,6 +20324,90 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr_t, PlayerId(0), source), 3);
+    }
+
+    /// CR 608.2h + CR 701.20b: a revealed card still in its library is read
+    /// live. A same-step snapshot from an earlier battlefield stay (an animated
+    /// land bounced to the top before Game Preserve's reveal) must not make it
+    /// count as a creature, while an unstamped member that left the
+    /// battlefield keeps its last-known characteristics.
+    #[test]
+    fn filtered_tracked_set_size_reads_library_members_live_and_departed_members_by_lki() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Game Preserve".to_string(),
+            Zone::Battlefield,
+        );
+        let revealed = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Revealed Land".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&revealed)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let mut stale_lki = state.objects[&revealed].snapshot_public_characteristics();
+        stale_lki.card_types = vec![CoreType::Land, CoreType::Creature];
+        state.lki_cache.insert(revealed, stale_lki);
+        let departed = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Departed Land".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&departed)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let mut departed_lki = state.objects[&departed].snapshot_public_characteristics();
+        departed_lki.card_types = vec![CoreType::Land, CoreType::Creature];
+        state.lki_cache.insert(departed, departed_lki);
+
+        let creatures = |state: &GameState| {
+            let qty = QuantityRef::FilteredTrackedSetSize {
+                filter: Box::new(TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::new(
+                        crate::types::ability::TypeFilter::Creature,
+                    ),
+                )),
+                caused_by: None,
+            };
+            resolve_ref(
+                state,
+                &qty,
+                PlayerId(0),
+                QuantityContext::new(source),
+                &[],
+                None,
+                None,
+                None,
+            )
+        };
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![revealed]);
+        assert_eq!(creatures(&state), 0, "the revealed land is read live");
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(2), vec![revealed, departed]);
+        assert_eq!(
+            creatures(&state),
+            1,
+            "the departed member keeps its last-known creature type"
+        );
     }
 
     #[test]

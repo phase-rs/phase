@@ -7492,8 +7492,15 @@ pub enum FilterProp {
     NameMatchesAnyPermanent {
         controller: Option<ControllerRef>,
     },
-    /// CR 903.3 + CR 903.3d: Matches permanents on the battlefield that are a
-    /// commander. Reads `GameObject::is_commander`, set during deck construction
+    /// CR 903.3 + CR 903.3d: Matches an object that is a commander. It checks no zone
+    /// itself; whatever reads the filter supplies the zone. A population reads the
+    /// zones `FilterProp::InZone` / `FilterProp::InAnyZone` name (Cloudkill's "a
+    /// commander you own on the battlefield or in the command zone"; every zone for
+    /// Tangleweave Armor's "your commanders", CR 903.3e), or the battlefield when the
+    /// filter names none (Command Chair's "commanders you control"). Other readers
+    /// look where their effect does: Command Beacon's "Put your commander into your
+    /// hand from the command zone" is a move whose `origin` names that zone.
+    /// Reads `GameObject::is_commander`, set during deck construction
     /// per CR 903.3 (the legendary card designated as that deck's commander).
     /// Used for "commander(s) you control", "your commander" subject phrases
     /// and for "target commander" in commander-format effects (Codsworth, Falthis,
@@ -9404,6 +9411,7 @@ pub fn quantity_ref_grammar_any(
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
@@ -10265,6 +10273,7 @@ fn rewrite_quantity_ref_filter_props<C>(
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
@@ -11048,7 +11057,10 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
-        | Effect::Unimplemented { .. } => InstructionObjectReach::Unclassified,
+        | Effect::Unimplemented { .. }
+        // Turtle Team-Up: plays cards whose own instructions introduce objects;
+        // this instruction's reach is not classified.
+        | Effect::HordePlayCard { .. } => InstructionObjectReach::Unclassified,
     }
 }
 
@@ -11717,7 +11729,11 @@ pub enum CardTypeSetSource {
     Zone { zone: ZoneRef, scope: CountScope },
     /// CR 607.2a + CR 406.6: Cards exiled by the source's linked ability.
     ExiledBySource,
-    /// CR 109.2: Objects matching a battlefield-style filter.
+    /// Objects matching `filter`. A typed filter that names no zone reads the
+    /// battlefield; `FilterProp::InZone` / `FilterProp::InAnyZone` name the zones
+    /// it reads otherwise. When the Oracle description has a card type or subtype,
+    /// names no zone and doesn't say "card", "spell", "source" or "scheme", that
+    /// default is CR 109.2's reading: a permanent of that type on the battlefield.
     Objects { filter: TargetFilter },
     /// CR 608.2c + CR 205.2a: distinct card types among the current chain
     /// tracked set, optionally restricted to members produced by `caused_by`.
@@ -12436,6 +12452,7 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         | QuantityRef::NameStickerLetterCount { .. }
         | QuantityRef::SelfManaValue
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::ExiledFromHandThisResolution
@@ -13563,6 +13580,16 @@ pub enum QuantityRef {
     /// with ~" conditional statics (Veteran Survivor, etc.) — composes with
     /// `StaticCondition::QuantityComparison` rather than requiring a dedicated variant.
     CardsExiledBySource,
+    /// Turtle Team-Up: the number of Bosses currently deployed (face-up Boss
+    /// cards in the command zone). Chrome Dome's "+1/+0 for each boss in play"
+    /// reads this live so the bonus tracks stage transitions without
+    /// re-grafting. Not expressible as `ObjectCount { filter }`: there is no
+    /// Boss `TypeFilter` member, no face-up predicate, and undeployed
+    /// (face-down) Bosses share `Zone::Command`, so even a Boss+InZone filter
+    /// would over-count. No CR section (casual product) — the product booklet
+    /// is the authority. Synthesized only (Boss grafts never go through the
+    /// Oracle parser).
+    DeployedBossCount,
     /// CR 607.2b: The power of a specific card exiled by the source, indexed by order.
     /// Its only producer is The Mimeoplasm's entry replacement, which reads the second
     /// card exiled "this way" (the per-turn ledger) for counter placement. Readers of
@@ -14286,6 +14313,7 @@ impl QuantityRef {
             | QuantityRef::SharedCardTypes { .. }
             | QuantityRef::DistinctSubtypes { .. }
             | QuantityRef::CardsExiledBySource
+            | QuantityRef::DeployedBossCount
             | QuantityRef::ExiledCardPower { .. }
             | QuantityRef::ZoneCardCount { .. }
             | QuantityRef::BasicLandTypeCount { .. }
@@ -14442,6 +14470,7 @@ impl QuantityRef {
             | QuantityRef::TargetZoneCardCount { .. }
             | QuantityRef::Devotion { .. }
             | QuantityRef::CardsExiledBySource
+            | QuantityRef::DeployedBossCount
             | QuantityRef::ExiledCardPower { .. }
             | QuantityRef::BasicLandTypeCount { .. }
             | QuantityRef::TrackedSetSize
@@ -14556,6 +14585,7 @@ impl QuantityRef {
             | QuantityRef::SharedCardTypes { .. }
             | QuantityRef::DistinctSubtypes { .. }
             | QuantityRef::CardsExiledBySource
+            | QuantityRef::DeployedBossCount
             | QuantityRef::ExiledCardPower { .. }
             | QuantityRef::ZoneCardCount { .. }
             | QuantityRef::BasicLandTypeCount { .. }
@@ -14697,7 +14727,7 @@ pub enum ObjectProperty {
     Toughness,
     ManaValue,
     /// CR 107.4a + CR 202.1: The number of colored mana symbols of `color` in
-    /// this object's mana cost. Summed (via `QuantityRef::Aggregate`) over a
+    /// this object's mana cost. Summed (via `QuantityRef::PropertyAggregate`) over a
     /// zone-scoped filter, this expresses chroma in any zone — "the number of
     /// black mana symbols in the mana costs of cards in your graveyard" (Umbra
     /// Stalker) is `Sum` of `ManaSymbolCount(Black)` over cards in your
@@ -15438,7 +15468,7 @@ pub fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRead {
         | QuantityRef::SpellsCastThisTurn { .. } | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SpellsCastThisGame { .. } | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::TargetZoneCardCount { .. } | QuantityRef::Devotion { .. }
-        | QuantityRef::BasicLandTypeCount { .. } | QuantityRef::CardsExiledBySource
+        | QuantityRef::BasicLandTypeCount { .. } | QuantityRef::CardsExiledBySource | QuantityRef::DeployedBossCount
         // Numbers, counters on players, and resolution/turn records.
         | QuantityRef::LifeAboveStarting | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount | QuantityRef::TriggeringScryBottomCount
@@ -15780,6 +15810,9 @@ impl Effect {
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
+            // Horde-internal wave instruction: never parser-built, never an
+            // indicated action — no address route from its shape.
+            | Effect::HordePlayCard { .. }
             | Effect::Unimplemented { .. } => {}
         }
         let scoped_change_zone = matches!(
@@ -16085,6 +16118,11 @@ pub fn indicated_action_commit(effect: &Effect) -> IndicatedActionCommit {
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
+        // Horde-internal wave instruction: never parser-built, never an
+        // indicated action. OnAccept fails closed — OnSpellCast would route
+        // to the strict single-card CastFromZone shape check above, which a
+        // Horde wave play can never satisfy.
+        | Effect::HordePlayCard { .. }
         | Effect::Unimplemented { .. } => IndicatedActionCommit::OnAccept,
     }
 }
@@ -22561,7 +22599,8 @@ pub enum Effect {
         /// Filter for keepable cards (Any = no filter).
         #[serde(default = "default_target_filter_any")]
         filter: TargetFilter,
-        /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom).
+        /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom
+        /// unless `rest_split_top_count` names a top position).
         #[serde(default)]
         rest_destination: Option<Zone>,
         /// CR 701.20e: whether the unkept cards are moved at all. A silent
@@ -22581,9 +22620,14 @@ pub enum Effect {
         /// is known only to them).
         ///
         /// `Some(n)` = exactly `n` of the remainder go on top and the rest go
-        /// to the bottom, via a `WaitingFor::DigRestSplitChoice` pause.
-        /// `None` = unchanged behavior: the whole remainder goes uniformly to
-        /// `rest_destination` (defaulting to Graveyard). Note CR 701.20d: the
+        /// to the bottom, via a `WaitingFor::DigRestSplitChoice` pause. `n` is
+        /// clamped to the actual remainder, so a value at or beyond the pile
+        /// size is the DEGENERATE all-top remainder the parser emits for "…
+        /// and the rest on top of your library" (Diabolic Vision) — the whole
+        /// pile goes on top and its CR 401.4 arrangement
+        /// is still the owner's choice. `None` = unchanged behavior: the whole
+        /// remainder goes uniformly to `rest_destination` (defaulting to
+        /// Graveyard). Note CR 701.20d: the
         /// remainder cards are reordered within the library by this split, so
         /// they stop being revealed and become new objects — the shared
         /// `reorder_within_library` primitive that performs the move already
@@ -24265,6 +24309,12 @@ pub enum Effect {
         /// `PaymentCost::ScaledMana`). When `Some(times)` the mana `cost` base
         /// is multiplied by `times` at payment ("pay {N} for each object chosen
         /// this way"); `times == 0` yields `{0}`, a trivial no-op success.
+        /// That first producer is the per-object `TrackedSetSize` payment
+        /// (Thelon's Curse; CR 118.1). The second producer is a `times` that
+        /// still carries the unannounced X (`times.contains_x()`): the
+        /// multiplier is then the player-chosen amount of a resolution-time
+        /// prompt (`pay::resolve` → `PayableResource::Mana { composition:
+        /// PerUnit }`, CR 107.1c; "pay any amount of {R}", Leyline Tyrant).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scale: Option<QuantityExpr>,
         /// CR 608.2c: Player who pays the resolution-time cost. Defaults to
@@ -24466,11 +24516,13 @@ pub enum Effect {
     /// `recipient_scope`.
     PreventDamage {
         amount: PreventionAmount,
-        /// CR 615.11 + CR 107.3i: When present, overrides `amount` at effect
-        /// resolution — the dynamic quantity is resolved to a concrete count and
-        /// the prevention shield is created as a static `Next(n)` depletion shield.
-        /// Set by "prevent X … where X is <quantity>" clauses. `None` for the
-        /// common fixed/All forms.
+        /// CR 615.7 + CR 107.3a + CR 107.3c: when present, overrides `amount` at
+        /// effect resolution — the quantity is resolved to a concrete count and
+        /// the shield is created as a static `Next(n)` depletion shield (CR 615.7).
+        /// Set by the announced `{X}` of a counted prevention clause ('prevent the
+        /// next X damage …', CR 107.3a) or by a trailing 'where X is <quantity>'
+        /// binder (CR 107.3c), which overwrites the announced-X reading. `None`
+        /// for the fixed/All forms.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         amount_dynamic: Option<QuantityExpr>,
         #[serde(default = "default_target_filter_any")]
@@ -25631,6 +25683,18 @@ pub enum Effect {
     Monstrosity {
         /// Number of +1/+1 counters to place.
         count: QuantityExpr,
+    },
+    /// Turtle Team-Up (Savanti Romero, Temporal Rogue): "the bosses play a
+    /// card" — reveal and resolve the top card of the Boss event deck
+    /// immediately, outside the wave (Savanti triggers on combat damage, mid
+    /// combat). Not a cast: creatures enter, Events resolve one-shot, exactly
+    /// as in the Action-phase wave. No CR section (casual product) — the
+    /// product booklet is the authority. Synthesized only (Boss grafts never
+    /// go through the Oracle parser).
+    HordePlayCard {
+        /// How many cards to play.
+        #[serde(default = "default_one")]
+        count: u32,
     },
     /// Digital-only Specialize: permanently become a color-specific face after
     /// paying the synthesized activation cost (mana + discard). Not in CR text.
@@ -27746,6 +27810,7 @@ pub fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
@@ -30323,6 +30388,7 @@ impl Effect {
             // nor the note names a copied stack object.
             | Effect::CreateBoon { .. }
             | Effect::NoteNumber { .. }
+            | Effect::HordePlayCard { .. }
             // CR 701.33b: abandoning names no stack object at all.
             | Effect::AbandonScheme
             | Effect::Unimplemented { .. } => false,
@@ -30575,6 +30641,7 @@ impl Effect {
             // note resolve their slot as operand, never as a donor.
             | Effect::CreateBoon { .. }
             | Effect::NoteNumber { .. }
+            | Effect::HordePlayCard { .. }
             // CR 701.33b: abandoning resolves its slot as operand.
             | Effect::AbandonScheme
             | Effect::Unimplemented { .. } => AttachmentHostSlot::Operand,
@@ -31142,6 +31209,9 @@ impl Effect {
             // surfaced by `collect_target_slots`.
             | Effect::ChooseCounterAdjustment { .. }
             | Effect::Unimplemented { .. }
+            // Turtle Team-Up (no CR section — casual product): HordePlayCard
+            // names no target; the Boss event deck it plays from is implied.
+            | Effect::HordePlayCard { .. }
             // CR 603.7e: ChooseObjectsIntoTrackedSet has no discrete effect-target
             // slot — `chooser` is a player ref resolved like `PayCost.payer`, and
             // `filter` constrains the interactive selection, not a targeting slot.
@@ -31607,6 +31677,7 @@ impl Effect {
             | Effect::ChooseOneOf { .. }
             | Effect::ChooseCounterAdjustment { .. }
             | Effect::Unimplemented { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::SeparateIntoPiles { .. }
             | Effect::ExileTopCardContest { .. }
@@ -31741,7 +31812,12 @@ impl Effect {
             | Effect::Learn
             // Randomly picks card(s) FROM a library matching a filter; the library
             // is always the origin.
-            | Effect::Seek { .. } => true,
+            | Effect::Seek { .. }
+            // Turtle Team-Up (no CR section — casual product): "the bosses
+            // play a card" reveals the top cards of the Boss event deck (a
+            // library) and resolves them onto the battlefield / into the
+            // graveyard; the library is always the origin.
+            | Effect::HordePlayCard { .. } => true,
 
             // CR 701.40a names no source zone ("Put that card onto the
             // battlefield face down"), so the verdict is conditional on the
@@ -32600,6 +32676,9 @@ impl Effect {
             | Effect::VentureInto { .. }
             | Effect::VentureIntoDungeon
             | Effect::WinTheGame { .. }
+            // Turtle Team-Up: plays cards; this node publishes no created referent
+            // (a played card's own token creation is that node's answer).
+            | Effect::HordePlayCard { .. }
             | Effect::AbandonScheme
             => None,
         }
@@ -33319,6 +33398,7 @@ macro_rules! define_effect_quantity_walk {
             // CR 122.1: the per-kind magnitude is `EventCounterReproductionCount`,
             // not a `QuantityExpr`, so there is nothing to visit here.
             | Effect::ReproduceEventCounters { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::Unimplemented { .. } => {}
         }
     }
@@ -33678,6 +33758,7 @@ impl Effect {
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::Unimplemented { .. } => {}
         }
     }
@@ -33958,6 +34039,7 @@ impl Effect {
             // CR 122.1: per-kind magnitude is `EventCounterReproductionCount`,
             // not a `QuantityExpr`.
             | Effect::ReproduceEventCounters { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::WinTheGame { .. } => None,
         }
     }
@@ -34229,6 +34311,7 @@ impl Effect {
             // CR 122.1: per-kind magnitude is `EventCounterReproductionCount`,
             // not a `QuantityExpr`.
             | Effect::ReproduceEventCounters { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::WinTheGame { .. } => None,
         }
     }
@@ -34452,6 +34535,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Amass { .. } => "Amass",
         Effect::EmpowerJace { .. } => "EmpowerJace",
         Effect::Monstrosity { .. } => "Monstrosity",
+        Effect::HordePlayCard { .. } => "HordePlayCard",
         Effect::Specialize => "Specialize",
         Effect::Renown { .. } => "Renown",
         Effect::Bolster { .. } => "Bolster",
@@ -34713,6 +34797,7 @@ pub enum EffectKind {
     Amass,
     EmpowerJace,
     Monstrosity,
+    HordePlayCard,
     Specialize,
     Renown,
     Bolster,
@@ -35007,6 +35092,7 @@ impl From<&Effect> for EffectKind {
             Effect::Amass { .. } => EffectKind::Amass,
             Effect::EmpowerJace { .. } => EffectKind::EmpowerJace,
             Effect::Monstrosity { .. } => EffectKind::Monstrosity,
+            Effect::HordePlayCard { .. } => EffectKind::HordePlayCard,
             Effect::Specialize => EffectKind::Specialize,
             Effect::Renown { .. } => EffectKind::Renown,
             Effect::Bolster { .. } => EffectKind::Bolster,
