@@ -9,7 +9,9 @@ use engine::game::layers::evaluate_layers;
 use engine::game::mana_payment::{
     can_pay_for_spell, compute_phyrexian_shards, pay_cost_with_demand_and_choices, pay_from_pool,
 };
-use engine::game::mana_sources::activatable_mana_source_selections;
+use engine::game::mana_sources::{
+    activatable_land_mana_options, activatable_mana_source_selections,
+};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     ActivationManaPaymentRestriction, ActivationRestriction, ChosenAttribute, Effect,
@@ -63,11 +65,13 @@ fn pay_glint_eye_with_an_enchanted_land(land_name: &str, land_text: &str, count:
         r.state_mut().objects.get_mut(&land).unwrap().tapped = false;
         engine::game::effects::attach::attach_to(r.state_mut(), aura, land);
         evaluate_layers(r.state_mut());
-        let rows = activatable_mana_source_selections(r.state(), P0);
+        // Manual choices intentionally defer the color and omit concrete
+        // combinations. The auto-pay input retains the land and Aura units.
+        let rows = activatable_land_mana_options(r.state(), land, P0);
         assert!(rows.iter().any(|row| {
-            row.source.object_id == land
+            row.object_id == land
                 && row.atomic_combination.as_ref().is_some_and(|combo| combo.len() == count + 1)
-                && row.taps_for_mana.len() == 1
+                && row.taps_for_mana_overrides.len() == 1
         }), "the printed land and Aura expose their separate full outputs");
         let (_, _, grouped) = legal_actions_full(r.state());
         let float = grouped[&wastes].iter().find(|action| matches!(action,
