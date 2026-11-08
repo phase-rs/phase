@@ -2067,7 +2067,7 @@ fn enable_spoken_actions(runner: &mut GameRunner, players: &[PlayerId]) {
 
 /// Both printed permanents enter through fixture setup. Public activation,
 /// targeting and priority passes reach the Rod's spoken payment; P1's public
-/// tell then matches a real graveyard card while that resolution is paused.
+/// tell then matches a real graveyard card while that payment choice is pending.
 fn rod_with_a_queued_gotcha(players: u8) -> (GameRunner, ObjectId, ObjectId) {
     let mut scenario = board(players);
     let rod = scenario
@@ -2151,7 +2151,10 @@ fn rod_with_a_queued_gotcha(players: u8) -> (GameRunner, ObjectId, ObjectId) {
     assert_eq!(pending[0].player, P0);
     assert_eq!(pending[0].source.reference.object_id, source);
     assert_eq!(pending[0].returns.reference.object_id, returns);
-    assert!(carrier_is_live(&runner));
+    assert!(
+        !carrier_is_live(&runner),
+        "the Rod's pending spoken payment outlives its resolution carrier"
+    );
     assert_round_trips(&runner);
     (runner, source, returns)
 }
@@ -2427,6 +2430,21 @@ fn horde_with_paused_damage(players: u8) -> (GameRunner, ObjectId, ObjectId) {
         scenario.add_real_card(PlayerId(seat), "Island", Zone::Library, db);
     }
     let mut runner = scenario.build();
+    // Horde starts with a survivor's turn. Pass through that priority window
+    // so the Horde can activate its own permanent at instant speed.
+    for _ in 0..players {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ) {
+            break;
+        }
+        pass(&mut runner);
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
     runner
         .act(GameAction::ActivateAbility {
             source_id: tim,
