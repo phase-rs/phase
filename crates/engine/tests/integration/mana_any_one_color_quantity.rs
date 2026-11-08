@@ -219,6 +219,38 @@ fn snow_hybrid_payment_preserves_a_quality_eligible_alternative() {
     )
     .is_err());
     assert_eq!(pinned, original);
+
+    // The remaining U/P can use life. It must not force Snow W into W/U;
+    // mana-only residual planning's conservative future demand is not a
+    // requirement of the completed payment (CR 107.4f).
+    let cost = parse_mtgjson_mana_cost("{S}{W/U}{U/P}");
+    let mut pool = ManaPool::from_units(vec![
+        hybrid_reserve_unit(ManaType::White, 1, true, false),
+        snow_regression_unit(ManaType::Blue, 2),
+    ]);
+    let permission = CostPermissionContext {
+        max_life: 1,
+        ..Default::default()
+    };
+    assert!(can_pay_for_spell(&pool, &cost, None, permission));
+    let preview = compute_phyrexian_shards(&pool, &cost, None, permission);
+    assert_eq!(preview.len(), 1);
+    assert_eq!(preview[0].shard_index, 2);
+    assert_eq!(preview[0].options, ShardOptions::LifeOnly);
+    let (spent, life) = pay_cost_with_demand_and_choices(
+        &mut pool,
+        &cost,
+        None,
+        None,
+        None,
+        Some(&[ShardChoice::PayLife]),
+        LifePaymentColors::EMPTY,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(spent.len(), 2);
+    assert_eq!(life.len(), 1);
+    assert!(pool.is_empty());
 }
 
 #[test]
