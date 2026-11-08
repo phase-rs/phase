@@ -1162,7 +1162,7 @@ impl PeriodicDelta {
         })
     }
 
-    /// CR 732.2a: whether every repetition moves what the first does.
+    /// CR 732.2a: whether the period carries no growth, so every repetition moves what the first does.
     fn is_constant(&self) -> bool {
         self.growth.is_zero() && self.seat_life_charge_growth.is_empty()
     }
