@@ -328,6 +328,9 @@ fn resolve_reveal(
                         source_id: Some(ability.source_id),
                         rest_cards: Vec::new(),
                         rest_destination: pile_destination,
+                        // The printed clause named this pile's zone, so it is a
+                        // routed remainder rather than a silent one.
+                        rest_remainder: crate::types::ability::DigRestRemainder::Route,
                         rest_order,
                         rest_split_top_count: None,
                         clear_markers,
@@ -464,6 +467,7 @@ fn resolve_reveal(
                         kept_delivery: Default::default(),
                         continuation_targets: Vec::new(),
                         rest_delivery: Default::default(),
+                        rest_remainder: crate::types::ability::DigRestRemainder::Route,
                     },
                 );
                 return Ok(());
@@ -531,6 +535,7 @@ fn resolve_reveal(
                     kept_delivery: Default::default(),
                     continuation_targets: Vec::new(),
                     rest_delivery: Default::default(),
+                    rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 },
             );
             return Ok(());
@@ -666,6 +671,7 @@ fn resolve_choose_any_number(
         selectable_cards: matched,
         kept_destination: Some(kept_destination),
         rest_destination: Some(rest_destination),
+        rest_remainder: crate::types::ability::DigRestRemainder::Route,
         rest_order,
         rest_split_top_count: None,
         source_id: Some(ability.source_id),
