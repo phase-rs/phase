@@ -27,7 +27,7 @@
 #                        unexpected wording changes.
 #
 # Usage:
-#   scripts/coverage-regression-check.sh <baseline> <current> [--fail-on-engine]
+#   scripts/coverage-regression-check.sh <baseline> <current> [options]
 #
 #   <baseline>  path OR https URL to main-branch coverage-data.json
 #   <current>   path to the newly produced coverage-data.json
@@ -77,9 +77,19 @@ jq_num() {
 BASELINE="$1"
 CURRENT="$2"
 FAIL_ON_ENGINE=0
-if [[ "${3:-}" == "--fail-on-engine" ]]; then
-    FAIL_ON_ENGINE=1
-fi
+shift 2
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --fail-on-engine)
+            FAIL_ON_ENGINE=1
+            shift
+            ;;
+        *)
+            echo "unknown option: $1" >&2
+            exit 2
+            ;;
+    esac
+done
 
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
@@ -101,6 +111,69 @@ fi
 if [[ ! -s "$CURRENT" ]]; then
     echo "Current file missing or empty: $CURRENT" >&2
     exit 2
+fi
+
+# A support/diagnostic comparison is only meaningful when both files were
+# generated from the same raw card-data corpus. `coverage-report` emits this
+# identity from the exact MTGJSON bytes it consumes, keeping every caller on
+# one authority. Never compare mixed epochs (Oracle churn would read as parser
+# regressions), and never skip silently: a corpus mismatch warns and skips, an
+# unstamped legacy baseline warns and compares, and a missing or malformed
+# identity fails closed.
+#
+# `source_corpus_hash` is read as: absent/null -> "" (no identity recorded);
+# a non-empty string -> itself; anything else (including "") -> a
+# `malformed:` marker, which the SHA-256 shape check below rejects.
+read_source_corpus_hash() {
+    jq -r '.source_corpus_hash
+        | if . == null then ""
+          elif type == "string" and . != "" then .
+          else "malformed:" + tojson
+          end' "$1"
+}
+is_sha256_hex() {
+    [[ "$1" =~ ^[0-9a-f]{64}$ ]]
+}
+BASELINE_SOURCE_CORPUS_HASH="$(read_source_corpus_hash "$BASELINE")"
+CURRENT_SOURCE_CORPUS_HASH="$(read_source_corpus_hash "$CURRENT")"
+# The current artifact always comes from this checkout's `coverage-report`,
+# which refuses to run without verified provenance, so a missing or malformed
+# current identity is a pipeline defect and never a bootstrap state.
+if [[ -z "$CURRENT_SOURCE_CORPUS_HASH" ]]; then
+    echo "CORPUS_IDENTITY_MISSING: current has no source_corpus_hash; refusing cross-corpus comparison." >&2
+    echo "CARD DATA DRIFT: refusing comparison without a current corpus identity." >&2
+    exit 2
+fi
+if ! is_sha256_hex "$CURRENT_SOURCE_CORPUS_HASH"; then
+    echo "CORPUS_IDENTITY_MALFORMED: current source_corpus_hash is not a lowercase SHA-256: $CURRENT_SOURCE_CORPUS_HASH" >&2
+    exit 2
+fi
+if [[ -z "$BASELINE_SOURCE_CORPUS_HASH" ]]; then
+    # Legacy-baseline bootstrap. Baselines published before corpus stamping
+    # carry no identity, and stamping one after the fact would be a guess.
+    # Compare exactly as the gate did before corpus identity existed, and say
+    # so loudly. The trusted main publisher uploads the coverage-report output,
+    # which carries the provenance-verified identity of the raw AtomicCards
+    # bytes it consumed, so the fence below engages on its own with the first
+    # stamped baseline. A baseline that records a malformed identity is not
+    # legacy and still fails closed.
+    echo "::warning title=Coverage corpus identity unverified::CORPUS_IDENTITY_UNVERIFIED: baseline has no source_corpus_hash (published before corpus stamping); comparing without corpus identity against current corpus $CURRENT_SOURCE_CORPUS_HASH. The corpus fence engages once main publishes a stamped baseline."
+    echo "CORPUS_IDENTITY_UNVERIFIED: legacy baseline without source_corpus_hash; corpus identity could not be compared." >&2
+elif ! is_sha256_hex "$BASELINE_SOURCE_CORPUS_HASH"; then
+    echo "CORPUS_IDENTITY_MALFORMED: baseline source_corpus_hash is not a lowercase SHA-256: $BASELINE_SOURCE_CORPUS_HASH" >&2
+    echo "CARD DATA DRIFT: refusing comparison against a malformed baseline corpus identity." >&2
+    exit 2
+elif [[ "$BASELINE_SOURCE_CORPUS_HASH" != "$CURRENT_SOURCE_CORPUS_HASH" ]]; then
+    # Different corpora: a support/diagnostic delta would mix Oracle churn
+    # with parser changes, so the comparison is not meaningful and is skipped.
+    # This is deliberately non-blocking. Corpus drift is routine (weekly
+    # MTGJSON rollover, per-branch caches, local inputs), and failing here
+    # would wedge the merge queue: nothing merges, so main never republishes
+    # a baseline for the new corpus. Only producer/publisher defects
+    # (missing or malformed identities above) fail closed.
+    echo "::warning title=Coverage corpus mismatch::CORPUS_MISMATCH: baseline corpus $BASELINE_SOURCE_CORPUS_HASH != current corpus $CURRENT_SOURCE_CORPUS_HASH; coverage comparison skipped (not meaningful across corpora). It resumes once main publishes a baseline for this corpus."
+    echo "CARD DATA DRIFT: baseline and current were generated from different corpora; skipping coverage comparison." >&2
+    exit 0
 fi
 
 # Emit one JSON object per card that flipped, with categorized new gaps.

@@ -421,7 +421,7 @@ jobs:
           fi
 
       - name: Derive card-data cache key
-        # Single authority for the `cardgen-` / `cardgen-gates-v1-` key hash,
+        # Single authority for the `cardgen-provenance-v1-` / `cardgen-gates-v2-` key hash,
         # shared with the AI gate's card-data-cache action. Replaces hashFiles,
         # which intermittently hung to its 120 s limit and failed this job.
         id: cardgen-key
@@ -444,8 +444,8 @@ jobs:
         # write-if-changed rewrite of oracle-subtypes.json cannot feed back in.
         #
         # The AI gate's shared card-data-cache action intentionally uses the
-        # same `cardgen-` key (from the same cardgen-cache-key action), so main
-        # pushes can seed generated
+        # same `cardgen-provenance-v1-` key (from the same cardgen-cache-key
+        # action), so main pushes can seed generated
         # entries that AI PR gates reuse. Both paths download AtomicCards.json
         # before deriving the key so the gitignored MTGJSON input participates
         # in it.
@@ -455,7 +455,8 @@ jobs:
           path: |
             data/card-data.json
             data/card-names.json
-          key: cardgen-${{ steps.cardgen-key.outputs.hash }}
+            data/card-data.provenance.json
+          key: cardgen-provenance-v1-${{ steps.cardgen-key.outputs.hash }}
 
       - name: Cache card-data gate results
         # Proof-of-passage cache for the two expensive steps that are pure
@@ -469,7 +470,7 @@ jobs:
         # Deliberately a SEPARATE key from `cardgen-cache`, not a reuse of it.
         # A cardgen entry proves only that generation succeeded; it is not
         # evidence that anything validated it. ai-gate.yml intentionally shares
-        # `cardgen-` entries but never validates them. If this gate skipped
+        # `cardgen-provenance-v1-` entries but never validates them. If this gate skipped
         # validate/coverage on a shared cardgen hit, an engine change whose
         # generated output fails `card-data-validate` could still seed a false
         # green for the next push. This cache is written by card-data-gate alone,
@@ -480,7 +481,7 @@ jobs:
           path: |
             data/coverage-data.json
             data/coverage-summary.json
-          key: cardgen-gates-v1-${{ steps.cardgen-key.outputs.hash }}
+          key: cardgen-gates-v2-${{ steps.cardgen-key.outputs.hash }}
 
       - name: Generate card data
         # All engine-backed tools in this job use the SAME (profile, features)
@@ -491,6 +492,13 @@ jobs:
         if: steps.cardgen-cache.outputs.cache-hit != 'true'
         run: |
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
+
+      - name: Verify generated card-data provenance
+        run: |
+          test -s data/card-data.provenance.json
+          printf '%s  %s\n' "$(jq -er '.source_corpus_sha256' data/card-data.provenance.json)" data/mtgjson/AtomicCards.json | sha256sum -c -
+          printf '%s  %s\n' "$(jq -er '.card_data_sha256' data/card-data.provenance.json)" data/card-data.json | sha256sum -c -
+          jq -r '"source_corpus_hash=\(.source_corpus_sha256)"' data/card-data.provenance.json
 
       - name: Verify Gemstone Caverns production-export drift guard
         run: |
@@ -588,6 +596,12 @@ jobs:
           cargo run --profile tool --features cli --bin coverage-report -- data/ --all > data/coverage-data.json
           jq '{total_cards, supported_cards, coverage_pct, coverage_by_format}' data/coverage-data.json > data/coverage-summary.json
 
+      - name: Coverage regression check self-test
+        # jq-only fixture matrix for the corpus-identity handling below:
+        # matching, mismatched, malformed and legacy (unstamped) baselines. Unconditional:
+        # gates-cache does not hash scripts/**, so a cache hit must not skip it.
+        run: ./scripts/coverage-regression-check.test.sh
+
       - name: Coverage regression check (engine vs parser-honesty)
         # Fails the build if a previously-supported card loses support because
         # the engine now lacks a handler (non-ParseWarning gap). Parser-honesty
@@ -597,6 +611,17 @@ jobs:
         # happened, and failing here blocks the R2 baseline republish below,
         # wedging main red until a manual baseline upload (the PR #2339 /
         # PR #2802 ratchet deadlock). PR and merge_group runs remain blocking.
+        #
+        # Corpus identity (`source_corpus_hash`, the provenance-verified
+        # AtomicCards SHA-256 that coverage-report emits):
+        #   same corpus               -> normal comparison
+        #   baseline unstamped        -> ::warning:: CORPUS_IDENTITY_UNVERIFIED,
+        #                                then the normal comparison (bootstrap
+        #                                until main publishes a stamped baseline)
+        #   stamped, different corpus -> ::warning:: CORPUS_MISMATCH, comparison
+        #                                skipped, exit 0 (weekly MTGJSON rollover
+        #                                must not wedge the merge queue)
+        #   missing/malformed current, or malformed baseline -> exit 2
         continue-on-error: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: |
           ./scripts/coverage-regression-check.sh \
