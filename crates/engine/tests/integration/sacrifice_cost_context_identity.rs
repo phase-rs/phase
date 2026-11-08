@@ -81,7 +81,11 @@ fn fixture(stolen: bool, replacement: bool) -> (GameRunner, ObjectId, ObjectId) 
     }
     scenario.with_mana_pool(
         P0,
-        vec![ManaUnit::new(ManaType::Green, ObjectId(9999), false, vec![]); 4],
+        // Filler mana for the {1}: it names no producing object (`ObjectId(0)` is
+        // the pool's "no source" sentinel), because no real ability made it and the
+        // checked restore refuses a unit that names a storage id answering for no
+        // object (the CR 704.5d shape).
+        vec![ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]); 4],
     );
     (scenario.build(), source, other)
 }
@@ -624,7 +628,9 @@ fn x_mana_sacrifice_keeps_payer_after_source_exits() {
         .id();
     scenario.with_mana_pool(
         P0,
-        vec![ManaUnit::new(ManaType::Green, ObjectId(9999), false, vec![]); 4],
+        // Filler mana for the {X}; it names no producing object (see the sibling
+        // fixture above).
+        vec![ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]); 4],
     );
     let mut runner = scenario.build();
     runner

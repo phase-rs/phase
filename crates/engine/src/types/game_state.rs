@@ -16829,29 +16829,41 @@ impl GameState {
     }
 
     /// CR 106.3 + CR 106.4 + CR 400.7: BIND a legacy pin-less floating unit to
-    /// the producing epoch the save proves, and refuse the save when it proves
+    /// the producing epoch the SAVE proves, and refuse the save when it proves
     /// none.
     ///
     /// A current-format save pins every unit at production
     /// (`ManaUnit::source_incarnation`), so this guard never sees a current pool:
-    /// it catches only legacy pools written before the pin existed. For those the
-    /// producing epoch is usually not recoverable — the only incarnation a save
-    /// records is the CURRENT object's (`GameObject::incarnation`), and which
-    /// earlier epoch produced the mana is exactly what the pin held. See
-    /// [`Self::unpinned_producer_epoch`] for the per-unit decision and the
-    /// evidence each answer rests on.
+    /// it catches only legacy pools written before the pin existed. See
+    /// [`Self::saved_producer_epoch`] for the per-unit decision and, for each
+    /// answer, the record in the save that carries it.
+    ///
+    /// The rule is one sentence: **what a retained unit's producer was is decided
+    /// by the boundary that retained it, and only a record saved at that boundary
+    /// survives to tell us.** Anything re-derived at restore time — the object
+    /// that occupies the storage id now, this turn's zone-change journal, which
+    /// step-end handlers happen to be in play — describes the state at RESTORE,
+    /// and the evidence that mattered is already gone: turn advancement clears the
+    /// journal (`turns::prune_turn_scoped_state`), and a retention effect
+    /// ("Players don't lose unspent mana as steps and phases end") can be destroyed
+    /// in the very step the saved pool is restored into, leaving the scan empty
+    /// while the mana it retained is still floating.
     ///
     /// Admitting a unit is not enough on its own. A unit admitted without a pin
     /// re-derives its source from the live board at every later read, so a blink
     /// that reuses the storage id turns an honest admission into a mis-attributed
-    /// payment (CR 400.7: the returned object is not the producer). When the save
-    /// proves the live object IS the producer, the truthful epoch is that
-    /// object's own and it is stamped here — the same value
-    /// `mana_payment::producing_incarnation_for_ability` would have pinned live —
-    /// so the unit stops depending on what occupies the id later.
+    /// payment (CR 400.7: the returned object is not the producer). That is why
+    /// every admitted unit leaves here STAMPED: with the epoch the save carries, or
+    /// with the live object's own incarnation when the save proves that object is
+    /// the producer — the same value
+    /// `mana_payment::producing_incarnation_for_ability` would have pinned live.
     ///
     /// Convoke markers are taps, not mana production (CR 702.51a), and are never
-    /// refused or stamped.
+    /// refused or stamped. Neither is a unit that names no producing object at all
+    /// ([`NO_PRODUCING_OBJECT`]): CR 106.3 asks which object produced the mana, and
+    /// a unit naming none has no source to bind — and, because that id answers for
+    /// no object and for no last-known information, no later read can attribute it
+    /// to anything either, so admission adds no guess.
     fn bind_or_reject_floating_mana_provenance(&mut self) -> Result<(), PersistedRestoreError> {
         let mut binding: Vec<(PlayerId, Vec<(usize, u64)>)> = Vec::new();
         let mut ambiguous: Option<(PlayerId, ObjectId)> = None;
@@ -16861,18 +16873,26 @@ impl GameState {
             // two unjournaled units of one pool share a pip and only pool order
             // tells them apart.
             for (index, unit) in player.mana_pool.units().enumerate() {
-                if unit.source_incarnation.is_some() || unit.is_convoke_payment() {
+                if unit.source_incarnation.is_some()
+                    || unit.is_convoke_payment()
+                    || unit.source_id == NO_PRODUCING_OBJECT
+                {
                     continue;
                 }
-                match self.unpinned_producer_epoch(player.id, &unit) {
-                    UnpinnedProducerEpoch::Proven(incarnation) => {
-                        stamped.push((index, incarnation))
-                    }
-                    // CR 400.7: nothing occupies the id, so the legacy read is the
-                    // departed object's own last-known answer rather than a later
-                    // object's. No epoch to stamp: there is no live object.
-                    UnpinnedProducerEpoch::Departed => {}
-                    UnpinnedProducerEpoch::Unprovable => {
+                match self.saved_producer_epoch(&unit) {
+                    // CR 106.3 + CR 400.7: the save names the epoch, so admission
+                    // BINDS it. An admitted unit left pin-less would re-derive its
+                    // source from the live board at every later read, so a blink
+                    // that reuses the storage id would turn an honest admission
+                    // into a mis-attributed payment.
+                    Some(incarnation) => stamped.push((index, incarnation)),
+                    // CR 106.3 + CR 400.7: no record in the save names the producer,
+                    // and the nearest substitute available here — the object that
+                    // occupies the storage id now — is a different object from the
+                    // one that made the mana (CR 400.7), so reading it would
+                    // fabricate the source-qualified answer the game never
+                    // established.
+                    None => {
                         ambiguous = Some((player.id, unit.source_id));
                         break;
                     }
@@ -16917,41 +16937,100 @@ impl GameState {
         Ok(())
     }
 
-    /// CR 106.3 + CR 106.4 + CR 400.7 + CR 605.1a: what a save proves about the
-    /// producing epoch of ONE pin-less floating unit.
+    /// CR 106.3 + CR 106.4 + CR 400.7 + CR 605.1a: the producing epoch the SAVE
+    /// itself proves for ONE pin-less floating unit, or `None` when it proves none.
     ///
-    /// The unit's storage id is the only handle the save carries, so every
-    /// answer below is about the object that id names now (CR 400.7 makes it a
-    /// different object from any earlier tenure of the same id).
-    fn unpinned_producer_epoch(
-        &self,
-        player: PlayerId,
-        unit: &crate::types::mana::ManaUnit,
-    ) -> UnpinnedProducerEpoch {
+    /// The unit carries only a storage id, so the question is which of the id's
+    /// tenures made this mana (CR 400.7: a moved object "becomes a new object with
+    /// no memory of, or relation to, its previous existence"). Five records in the
+    /// save are consulted, in the order that decides the answer, and none of them
+    /// is a read of the board at restore time:
+    ///
+    /// 1. **The pool's own producer fact**
+    ///    ([`GameState::pooled_mana_producer_snapshots`]). The engine writes one,
+    ///    keyed by `(source_id, source_incarnation)`, for every still-pooled unit
+    ///    whose producing incarnation is no longer live at a step or phase boundary
+    ///    (`mana_payment::retain_pooled_mana_producer_snapshots`, immediately
+    ///    before the boundary clears the incarnation-keyed LKI caches). That is
+    ///    the ledger of exactly this question, written at exactly the boundary
+    ///    that retained the unit, so it is the one record that survives a
+    ///    retention effect being destroyed afterwards. Exactly one epoch for the
+    ///    id is an answer; two are two tenures the save cannot tell apart, and an
+    ///    unprovable producer is refused rather than guessed.
+    /// 2. **The save's step-scoped, incarnation-keyed exit LKI**
+    ///    ([`GameState::lki_by_incarnation`]) when the id holds no object at all.
+    ///    A departure this step writes the departed object's epoch and its
+    ///    last-known information there (CR 400.7 + CR 608.2h), so exactly one
+    ///    epoch for the id names the tenure that left and what it was — the record
+    ///    the payment itself reads (`filter::exit_lki_for_incarnation`). Two are
+    ///    two tenures the save cannot tell apart, and no entry means the only
+    ///    record was cleared with the step, which is refusal 3.
+    /// 3. **Nothing occupies the id and no epoch is recorded** → no answer. CR
+    ///    704.5d makes a token in a non-battlefield zone cease to exist, and a
+    ///    boundary clears the step-scoped LKI, so a save taken after one names
+    ///    nothing at all about a producer that is gone — which is exactly the epoch
+    ///    the missing pin held. Refusing is what keeps an admitted payment from
+    ///    silently losing the producer fact a cascade or a "spend only on" gate
+    ///    owed it.
+    /// 4. **The live object is off the battlefield** → no answer. Mana floating in
+    ///    a pool was added by a mana ability of the object named by `source_id` —
+    ///    the ability of a PERMANENT (CR 605.1a) or of a spell/card in the zone it
+    ///    occupied (CR 113.7) — so pricing the unit at the next payment from a card
+    ///    in a graveyard or exile would name an object that never made it. That is
+    ///    the Minimus Containment shape: the "Treasure" that made the mana is now a
+    ///    card in the graveyard.
+    /// 5. **The id already had an earlier producing tenure this turn** → no answer.
+    ///    The one record that is not evidence of an earlier tenure is the
+    ///    Stack → Battlefield arrival: that is the current permanent's own
+    ///    beginning (CR 400.7 makes it the object the spell became), and every
+    ///    creature cast this turn carries one, so convicting on it would refuse
+    ///    saves whose mana came from the very permanent that is there now.
+    ///
+    /// Only when none of those fires does the live object answer, and it answers as
+    /// itself: with the fact ledger silent for this id (record 1), no epoch recorded
+    /// for a departed one (record 2), the object on the battlefield (record 4) and
+    /// no earlier tenure recorded (record 5), the object occupying the id is the
+    /// object that produced the unit.
+    ///
+    /// Both reported defects are shapes record 1 or record 3 catches, and neither
+    /// is decided by a scan of the live board: a unit Upwelling carried past a turn
+    /// boundary whose producer has since been replaced at its storage id is named by
+    /// record 1 even after the Upwelling is destroyed and the journal is cleared,
+    /// and a unit whose producer is simply gone is record 3's refusal instead of an
+    /// admission the payment would then answer from nothing.
+    fn saved_producer_epoch(&self, unit: &crate::types::mana::ManaUnit) -> Option<u64> {
         let source_id = unit.source_id;
+        let mut facts = self
+            .pooled_mana_producer_snapshots
+            .iter()
+            .filter(|snapshot| snapshot.source_id == source_id)
+            .map(|snapshot| snapshot.source_incarnation);
+        if let Some(proven) = facts.next() {
+            // CR 400.7: a second epoch for the same id is a second tenure, and the
+            // save does not say which of them produced this unit.
+            return facts.next().is_none().then_some(proven);
+        }
         let Some(object) = self.objects.get(&source_id) else {
-            // CR 400.7: nothing occupies the id, so the legacy read is the departed
-            // object's own last-known answer rather than a later object's.
-            return UnpinnedProducerEpoch::Departed;
+            // CR 400.7 + CR 608.2h: with no object to read, the only record left is
+            // the exit LKI this save carries for the id, keyed by the epoch that
+            // left — exactly one of them is an answer.
+            let mut epochs = self
+                .lki_by_incarnation
+                .get(&source_id)
+                .into_iter()
+                .flat_map(|history| history.keys().copied());
+            return epochs
+                .next()
+                .and_then(|proven| epochs.next().is_none().then_some(proven));
         };
         if object.zone != Zone::Battlefield {
-            // Mana floating in a pool was added by a mana ability of the object
-            // named by `source_id` — the ability of a PERMANENT (CR 605.1a) or of a
-            // spell/card in the zone it occupied (CR 113.7) — so pricing the unit at
-            // the next payment from a card in a graveyard or exile would name an
-            // object that never made it. That is the Minimus Containment shape: the
-            // "Treasure" that made the mana is now a card in the graveyard.
-            return UnpinnedProducerEpoch::Unprovable;
+            return None;
         }
         // CR 400.7: an object that left a zone and came back is a new object, so a
         // recorded departure from a mana-producing zone — the battlefield per
         // CR 605.1a, the stack per CR 106.3 — proves this storage id has already had an
         // EARLIER tenure that could have produced the mana. Which tenure did is exactly
-        // what the missing pin would have said. The one record that is not evidence of
-        // an earlier tenure is the Stack → Battlefield arrival: that is the current
-        // permanent's own beginning (CR 400.7 makes it the object the spell became), and
-        // every creature cast this turn carries one, so convicting on it would refuse
-        // saves whose mana came from the very permanent that is there now.
+        // what the missing pin would have said.
         let earlier_producing_tenure = self.zone_changes_this_turn.iter().any(|record| {
             record.object_id == source_id
                 && match record.from_zone {
@@ -16961,27 +17040,11 @@ impl GameState {
                 }
         });
         if earlier_producing_tenure {
-            return UnpinnedProducerEpoch::Unprovable;
+            return None;
         }
-        // CR 106.4 + CR 500.5 + CR 703.4q: the journal above is TURN-scoped, so it
-        // only covers every tenure that could have produced the unit while a unit
-        // cannot outlive the turn. That is exactly what CR 106.4 grants — the pool
-        // empties at the end of each step and phase — and a step-end mana handler
-        // ("Players don't lose unspent mana as steps and phases end") is what lifts
-        // it: the unit then survives every boundary, including the turn's last, so
-        // a tenure from an earlier turn could have produced it and this turn's
-        // journal cannot say so. The pin is the only record that would have, so the
-        // producer is unprovable for the same reason it is in the shapes above.
-        // Refusing is the honest answer; reading the live object would attribute
-        // mana CR 106.3 gave to an earlier epoch of the id to whatever holds it now.
-        if crate::game::turns::step_end_handler_retains_pooled_mana(self, player, unit) {
-            return UnpinnedProducerEpoch::Unprovable;
-        }
-        // CR 106.3 + CR 400.7: with no retention in play the pool emptied at every
-        // boundary since the turn began, so the unit was produced this turn, no
-        // journal record leaves the id for an earlier producing tenure, and the
-        // object holding the id is therefore the producer itself.
-        UnpinnedProducerEpoch::Proven(object.incarnation)
+        // CR 106.3 + CR 400.7: no record names a departed producer for this id, so
+        // the object holding it is the producer itself.
+        Some(object.incarnation)
     }
 
     /// CR 601.2 / CR 602.2: at most one announcement is in flight, so every live
@@ -17326,23 +17389,14 @@ pub struct PreparedPersistedGameState {
     recovered_terminal_rest: bool,
 }
 
-/// CR 106.3 + CR 106.4 + CR 400.7: what a legacy (pin-less) floating unit's
-/// producing epoch resolves to from the save alone. The three answers are
-/// [`GameState::unpinned_producer_epoch`]'s, named so the restore decision reads
-/// as one value per unit rather than as a pair of booleans.
-enum UnpinnedProducerEpoch {
-    /// The save proves the epoch: the storage id still holds the very object
-    /// that produced the unit, so admission stamps the pin instead of leaving
-    /// the unit to re-derive its source from whatever holds the id later
-    /// (CR 400.7).
-    Proven(u64),
-    /// The storage id holds no live object at all, so the legacy read is the
-    /// departed object's own last-known information and there is no epoch to
-    /// stamp (CR 400.7).
-    Departed,
-    /// The save cannot prove which epoch produced the unit.
-    Unprovable,
-}
+/// CR 106.3: the mana-pool sentinel for "this unit names no producing object".
+///
+/// The object allocator starts at 1 and never reissues a retired id
+/// (`GameState::next_object_id`), so `ObjectId(0)` names no object in any state —
+/// production always names the source that made the mana. Frames that assemble a
+/// pool without one (scenario scaffolding, analysis previews) use it, and such a
+/// unit carries no source for CR 106.3 to resolve, in this engine or any other.
+const NO_PRODUCING_OBJECT: ObjectId = ObjectId(0);
 
 /// A persisted state reached a priority window with unresolved resolution
 /// ownership and no exact engine-owned terminal repair.
@@ -17428,17 +17482,25 @@ pub enum PersistedRestoreError {
         target: ObjectId,
     },
     /// CR 106.3 + CR 400.7: a saved mana pool holds floating mana whose producing
-    /// object the save can PROVE it no longer names. `ManaUnit::source_incarnation`
-    /// is the pin that binds a unit to the epoch that produced it; a save written
-    /// before the pin existed carries `None` there, and the epoch is not
-    /// recoverable from anything else the save holds — `GameObject::incarnation`
-    /// names only the CURRENT object under the storage id, so the producing epoch
-    /// would have to be guessed. What the save does establish is that a live read
-    /// of that id describes a different object (CR 400.7: a moved object "becomes a
-    /// new object with no memory of, or relation to, its previous existence"), and
-    /// pricing the mana from it would be a source-qualified payment answer the game
-    /// never established — the same class of unknown `UnknownCastHistoryProvenance`
-    /// refuses. Restore therefore refuses rather than admitting that pool.
+    /// object the save does not name. `ManaUnit::source_incarnation` is the pin
+    /// that binds a unit to the epoch that produced it, and
+    /// `pooled_mana_producer_snapshots` is the pool's own record of the epochs its
+    /// floating units were produced at; a save written before the pin existed
+    /// carries neither, and neither does any other record it holds supply the
+    /// epoch — `GameObject::incarnation` names only the CURRENT object under the
+    /// storage id, so the producing epoch would have to be guessed. What the save
+    /// does establish is that no reading of it names the producer: the id is empty
+    /// with its step-scoped exit LKI cleared too
+    /// (CR 704.5d: a token in a non-battlefield zone ceases to exist), or the live
+    /// object there is off the battlefield so pricing the unit from it would name
+    /// an object that never made the mana (CR 400.7: a moved object "becomes a new
+    /// object with no memory of, or relation to, its previous existence"), or the
+    /// journal records an earlier tenure of the id, or two epochs are recorded for
+    /// it. Restore therefore refuses rather than admitting that pool, because a
+    /// source-qualified payment answer the game never established is the same class
+    /// of unknown `UnknownCastHistoryProvenance` refuses — and because an admitted
+    /// pin-less unit silently loses the producer fact a cascade or SpendOnlyOn
+    /// payment owed it.
     #[error(
         "persisted mana pool of player {player:?} holds floating mana whose producing object \
          {source_id:?} cannot be proven and cannot be restored"

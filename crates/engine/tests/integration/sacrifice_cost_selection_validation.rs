@@ -621,7 +621,11 @@ fn normal_and_replacement_sacrifice_settle_once_and_survive_checked_restore() {
                 }
                 scenario.with_mana_pool(
                     P0,
-                    vec![ManaUnit::new(ManaType::Green, ObjectId(9999), false, vec![]); 4],
+                    // Filler mana for the {1}: it names no producing object
+                    // (`ObjectId(0)` is the pool's "no source" sentinel), because no
+                    // real ability made it and the checked restore refuses a unit
+                    // naming a storage id that answers for no object.
+                    vec![ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]); 4],
                 );
                 let mut runner = scenario.build();
                 let mut events = runner

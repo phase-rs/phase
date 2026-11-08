@@ -260,8 +260,13 @@ pub fn record_captured_target_facts_json(json: &str) -> String {
 ///
 /// Only the shape that guard convicts is touched: a unit with no
 /// `ManaUnit::source_incarnation` (and not a CR 702.51a convoke marker) whose
-/// `source_id` still names a LIVE object that is not a battlefield permanent.
-/// Every other pin-less unit is already admitted and is left byte-identical.
+/// `source_id` names a LIVE object that is not a battlefield permanent, in a
+/// capture that carries no producer fact for that id
+/// (`GameState::pooled_mana_producer_snapshots`, which the guard reads first and
+/// which the pre-field capture this migration serves cannot hold). The other two
+/// shapes the guard sees are left byte-identical: a unit whose source is still a
+/// battlefield permanent is admitted on the live object's own epoch, and a unit
+/// the pool's own producer fact names is admitted on that epoch.
 ///
 /// CR 106.3 makes a unit's source the source of the ability that produced it,
 /// and CR 113.7 makes that the object that generated the ability — the object
@@ -328,11 +333,12 @@ pub fn record_captured_floating_mana_provenance(document: &mut Value) {
         let object = state.objects.get(&source_id)?;
         // A source that is still a battlefield permanent is admitted on the live read
         // only while this turn's journal records NO departure from a producing zone for
-        // its storage id (`GameState::unpinned_producer_epoch`). When it does
-        // record one, the id has already had an earlier tenure and this migration
-        // declines too: the journal names what that tenure was, but not whether IT or
-        // the current object made the unit, and stamping the earlier epoch would be a
-        // guess. The guard refuses the unit instead.
+        // its storage id, and the capture carries no producer fact for that id
+        // (`GameState::saved_producer_epoch`). When the journal does record one, the id
+        // has already had an earlier tenure and this migration declines too: the journal
+        // names what that tenure was, but not whether IT or the current object made the
+        // unit, and stamping the earlier epoch would be a guess. The guard refuses the
+        // unit instead.
         if object.zone == Zone::Battlefield {
             return None;
         }

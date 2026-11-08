@@ -15,18 +15,18 @@
 //!   survive the boundary that ends generic exit LKI — but only for the units a
 //!   pool still holds, which is why the generic cache is NOT lengthened here.
 //! * **legacy restore** (`legacy_pinless_pool_is_refused_and_pinned_pool_still_pays`) —
-//!   a save written before `ManaUnit::source_incarnation` existed carries no way
-//!   to prove which object produced its floating mana. The shared restore
-//!   chokepoint refuses the pool when the save PROVES the legacy fallback would
-//!   read the wrong object — a source storage id that no longer holds a
-//!   battlefield permanent, so a live read returns a card in a graveyard
-//!   (CR 400.7) — which is the Minimus Containment shape: **Minimus Containment**
+//!   a save written before `ManaUnit::source_incarnation` existed carries no pin,
+//!   so the shared restore chokepoint asks what the save still records about the
+//!   producer (`GameState::saved_producer_epoch`) and refuses the pool when the
+//!   answer is nothing — here a source storage id whose live object is a card in a
+//!   graveyard, so a live read would price the unit from an object that never made
+//!   it (CR 400.7). That is the Minimus Containment shape: **Minimus Containment**
 //!   `{2}{W}` Aura — "Enchanted permanent is a Treasure artifact with \"{T},
 //!   Sacrifice this artifact: Add one mana of any color,\" and it loses all other
 //!   abilities." The same test carries the two controls that keep the refusal
 //!   honest: a current-format pinned pip must be admitted and still record the
 //!   Treasure, and a pin-less pip whose storage id still names a battlefield
-//!   permanent must stay admitted, because the save proves no wrong read there.
+//!   permanent must stay admitted, because the save proves no earlier tenure there.
 //! * **stacked trigger** (`trigger_source_mana_is_not_the_returned_copy`) —
 //!   **Burning-Tree Emissary** `{R/G}{R/G}` Creature — "When this creature
 //!   enters, add {R}{G}." (a triggered ability, NOT a mana ability per CR 605.1b:
@@ -52,6 +52,17 @@
 //!   live read priced the trigger's mana as the returned Treasure's; the journal
 //!   proves an earlier producing tenure, so the unit's producer is unprovable and
 //!   the pool is refused.
+//! * **the retention effect has already left**
+//!   (`a_retention_effect_that_has_already_left_is_not_evidence`) and **a departed
+//!   producer** (`a_departed_producer_is_admitted_only_when_the_save_names_its_epoch`) —
+//!   the two shapes that decided the rule. Turn advancement clears the journal, so
+//!   a scan of the board at RESTORE describes the wrong moment: Upwelling can be
+//!   destroyed in the very step the pool is restored into (its ruling still gives
+//!   the mana until the phase ends), and a Treasure that paid for its own mana
+//!   ceases to exist under CR 704.5d, leaving its storage id naming no object at
+//!   all. Both are answered from the record the boundary itself wrote —
+//!   `GameState::pooled_mana_producer_snapshots`, keyed by the exact producing
+//!   epoch — and the shape that carries neither that record nor a pin is refused.
 
 use engine::game::derived_views::ClientGameStateRef;
 use engine::game::effects::token::predefined_token_abilities;
@@ -537,6 +548,18 @@ fn strip_pool_pins(json: &mut serde_json::Value) -> usize {
     stripped
 }
 
+/// Strip the pool-carried producer facts (CR 106.3's retained `(source_id,
+/// source_incarnation)` ledger), reproducing a save written before that field
+/// existed. `#[serde(default)]` keeps the stripped save decodable, so again it is
+/// the admission decision — not serde — that must catch what it cannot prove.
+fn strip_pool_producer_facts(json: &mut serde_json::Value) -> usize {
+    json.get_mut("state")
+        .and_then(|state| state.as_object_mut())
+        .and_then(|state| state.remove("pooled_mana_producer_snapshots"))
+        .and_then(|facts| facts.as_array().map(Vec::len))
+        .unwrap_or(0)
+}
+
 /// CR 106.3 + CR 400.7: an older save reaches priority with a Minimus
 /// Containment permanent's floating mana and no pin. The producing epoch is not
 /// recoverable from the save (the only incarnation it records is the CURRENT
@@ -727,6 +750,16 @@ enum ManaRetention {
 fn clever_impersonator_trigger_pool(
     retention: ManaRetention,
 ) -> (GameRunner, ObjectId, u64, ObjectId) {
+    clever_impersonator_trigger_pool_prepared(retention, |_| {})
+}
+
+/// [`clever_impersonator_trigger_pool`] with one hook into the staged scenario,
+/// so a witness can add the cards its own step of the story needs (an opponent's
+/// removal spell, say) without restating the board.
+fn clever_impersonator_trigger_pool_prepared(
+    retention: ManaRetention,
+    prepare: impl FnOnce(&mut GameScenario),
+) -> (GameRunner, ObjectId, u64, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
@@ -764,6 +797,7 @@ fn clever_impersonator_trigger_pool(
         builder.id()
     };
     let sciences = sciences_in_hand(&mut scenario);
+    prepare(&mut scenario);
 
     let mut runner = scenario.build();
     // The copy donor for the RETURNED card: a Treasure token it can become.
@@ -1277,35 +1311,33 @@ fn legacy_pinless_pool_is_not_attributed_to_a_battlefield_successor() {
 }
 
 // ---------------------------------------------------------------------------
-// 6 — the same board one TURN later: Upwelling outlives the journal
+// 6 — the same board one TURN later: the pool's own producer fact answers
 // ---------------------------------------------------------------------------
 
-/// CR 106.3 + CR 106.4 + CR 400.7 + CR 500.5 + CR 703.4q: the turn journal is not
-/// an evidence base once a step-end retention effect is in play.
+/// CR 106.3 + CR 106.4 + CR 400.7: the turn journal is not an evidence base once a
+/// step-end retention effect is in play, and the pool's own producer fact is.
 ///
 /// Test 5's proof is this turn's `zone_changes_this_turn`: it records the
 /// pristine copy leaving the battlefield, so the storage id provably had an
 /// earlier producing tenure. Turn advancement clears that journal
-/// (`turns::prune_turn_scoped_state`), and Upwelling — "Players don't lose
-/// unspent mana as steps and phases end" — is exactly what lets the `{R}{G}` the
-/// copied Emissary's trigger made outlive the arm of the game that recorded it.
-/// With the journal gone, a guard keyed on it is blind precisely where the mana
-/// is still alive: the pin-less restore admits the units and the live read prices
-/// them from the Treasure now holding the storage id, which is CR 106.3's source
-/// question answered about the wrong object and earns Rain of Riches cascade.
+/// (`turns::prune_turn_scoped_state`), and Upwelling — "Players don't lose unspent
+/// mana as steps and phases end" — is exactly what lets the `{R}{G}` the copied
+/// Emissary's trigger made outlive the arm of the game that recorded it. A rule
+/// keyed on the journal is blind precisely where the mana is still alive.
 ///
-/// CR 106.4 makes the pool empty at the end of every step and phase, so a unit
-/// still floating while no step-end handler keeps it MUST have been produced in
-/// the turn whose journal the save carries — that is what makes the journal a
-/// complete evidence base, and it is a claim about retention, not about the
-/// journal's length. With a handler in play the claim fails, the producing tenure
-/// is unprovable, and the shared chokepoint refuses the pool.
+/// The record that DOES survive is the one the engine writes as the boundary
+/// drains: `retain_pooled_mana_producer_snapshots` copies each still-pooled unit's
+/// producing epoch onto the pool's own fact ledger before the step-scoped LKI
+/// caches are cleared, because CR 106.3's answer must last as long as the unit
+/// does. So the pin-less restore of this save BINDS `copied_incarnation` — the
+/// epoch that generated the trigger, not the Treasure now holding the storage id —
+/// and the `{2}` it pays for earns no cascade and records no Treasure.
 ///
-/// The current-format control (the save the engine writes today, pins intact)
-/// stays admitted, and test 2's third leg keeps the no-retention pin-less shape
-/// admitted — and now BOUND — so this rule convicts only the ambiguous save.
+/// The current-format control (the save the engine writes today, pins intact) is
+/// admitted to the same answer, and test 2's third leg keeps the no-retention
+/// pin-less shape admitted and bound, so this rule decides only on saved evidence.
 #[test]
-fn legacy_pinless_pool_is_refused_when_upwelling_carries_it_past_the_turn_boundary() {
+fn pool_producer_fact_keeps_the_trigger_epoch_across_the_turn_boundary() {
     let (mut runner, impersonator, copied_incarnation, sciences) =
         clever_impersonator_trigger_pool(ManaRetention::Upwelling);
 
@@ -1381,6 +1413,15 @@ fn legacy_pinless_pool_is_refused_when_upwelling_carries_it_past_the_turn_bounda
                 .any(|subtype| subtype == "Treasure"),
             "reach: the successor is a Treasure, so a live read would earn cascade"
         );
+        assert!(
+            state.pooled_mana_producer_snapshots.iter().any(|snapshot| {
+                snapshot.source_id == impersonator
+                    && snapshot.source_incarnation == copied_incarnation
+            }),
+            "reach: the boundary that carried the units wrote their producing epoch onto \
+             the pool's own fact ledger; got {:?}",
+            state.pooled_mana_producer_snapshots
+        );
     }
 
     // The current-format control: the save the engine writes today is admitted.
@@ -1397,44 +1438,52 @@ fn legacy_pinless_pool_is_refused_when_upwelling_carries_it_past_the_turn_bounda
         "both retained units must lose their pin to reproduce the legacy save"
     );
 
-    match admitted(legacy) {
-        Err(PersistedRestoreError::AmbiguousFloatingManaProvenance { player, source_id }) => {
-            assert_eq!(player, P0);
-            assert_eq!(
-                source_id, impersonator,
-                "the refused unit is the one whose producer the save cannot prove"
-            );
-        }
-        Err(other) => panic!("expected an ambiguous-provenance refusal, got {other:?}"),
-        Ok(state) => {
-            // The adjudication a turn-scoped guard permits: with the journal
-            // cleared, the pool is admitted and the legacy live read prices the
-            // ORIGINAL trigger's mana from the returned Treasure. Demonstrated
-            // rather than asserted, so a rule that stays keyed on the journal
-            // fails here with its own consequence.
-            let mut restored = GameRunner::from_state(state);
-            let commit = restored.cast(sciences).commit();
-            let state = commit.state();
-            let record = state.spells_cast_this_turn_by_player[&P0]
-                .back()
-                .expect("the admitted cast must be recorded");
-            let named: Vec<&str> = record
-                .mana_source_snapshots()
-                .iter()
-                .map(|snapshot| snapshot.lki.name.as_str())
-                .collect();
-            let cascade = state.objects[&sciences]
-                .cast_spell_keywords
-                .iter()
-                .any(|keyword| matches!(keyword, Keyword::Cascade));
-            panic!(
-                "CR 106.3 + CR 106.4 + CR 400.7: a pin-less unit Upwelling carried past \
-                 the turn boundary must be refused — the turn journal it was keyed on no \
-                 longer covers the producing tenure. This save was admitted and attributed \
-                 the trigger's mana to {named:?} (cascade granted: {cascade})"
-            );
-        }
+    // The fact ledger is the evidence that survives the cleared journal, so the
+    // restore BINDS the epoch it names instead of reading the live board.
+    let restored_state = admitted(legacy).unwrap_or_else(|error| {
+        panic!(
+            "the save carries the producing epoch on the pool's own fact ledger, so the \
+             pin-less pool must be admitted and bound, got {error:?}"
+        )
+    });
+    for unit in restored_state.players[P0.0 as usize].mana_pool.units() {
+        assert_eq!(unit.source_id, impersonator);
+        assert_eq!(
+            unit.source_incarnation,
+            Some(copied_incarnation),
+            "CR 106.3 + CR 400.7: admission must bind the epoch the pool's producer fact \
+             names, not the incarnation of the Treasure now holding the storage id"
+        );
     }
+
+    let mut restored = GameRunner::from_state(restored_state);
+    let commit = restored.cast(sciences).commit();
+    let state = commit.state();
+    let record = state.spells_cast_this_turn_by_player[&P0]
+        .back()
+        .expect("the restored cast must be recorded");
+    let snapshots = record.mana_source_snapshots();
+    assert_eq!(
+        snapshots.len(),
+        2,
+        "the bound epoch's producer fact must answer the payment; got {snapshots:?}"
+    );
+    for snapshot in snapshots {
+        assert!(
+            !snapshot.lki.subtypes.iter().any(|s| s == "Treasure"),
+            "CR 400.7: the trigger's mana must not be attributed to the returned \
+             Treasure; got {:?}",
+            snapshot.lki.subtypes
+        );
+    }
+    let cascade = state.objects[&sciences]
+        .cast_spell_keywords
+        .iter()
+        .any(|keyword| matches!(keyword, Keyword::Cascade));
+    assert!(
+        !cascade,
+        "Rain of Riches must not grant cascade: no Treasure produced this mana"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1526,4 +1575,451 @@ fn a_stack_arrival_this_turn_is_not_an_earlier_producing_tenure() {
          permanent that is there now — so a later blink cannot re-point it"
     );
     assert_eq!(unit.source_id, dork);
+}
+
+// ---------------------------------------------------------------------------
+// 8 — the retention effect has ALREADY LEFT when the save is restored
+// ---------------------------------------------------------------------------
+
+/// Naturalize, verbatim (Scryfall).
+const NATURALIZE: &str = "Destroy target artifact or enchantment.";
+
+/// The id of the first object `name`s in `zone`, which is how a witness names a
+/// card the shared fixture helper staged for it.
+fn object_named(state: &GameState, name: &str, zone: Zone) -> ObjectId {
+    state
+        .objects
+        .values()
+        .find(|object| object.name == name && object.zone == zone)
+        .map(|object| object.id)
+        .unwrap_or_else(|| panic!("reach: no {name} in {zone:?}"))
+}
+
+/// CR 106.3 + CR 106.4 + CR 400.7: a retention effect that has already left is
+/// not evidence, and neither is the object that now occupies the producer's
+/// storage id.
+///
+/// This is test 6's board taken one step further: after the `{R}{G}` the copied
+/// Emissary's trigger made has been carried past a turn boundary by Upwelling, the
+/// OPPONENT destroys Upwelling with Naturalize in the new main phase, and the game
+/// is saved before that phase ends. Upwelling's own ruling gives the player "until
+/// the end of the current step (or phase) to use the mana before it disappears", so
+/// the mana is still legally floating with no retention handler in play (CR 106.4
+/// empties a pool at a boundary; this pool has not reached one), and the current
+/// turn's `zone_changes_this_turn` holds nothing about the copied Emissary because
+/// turn advancement cleared it.
+///
+/// A guard that asks the live board answers "no handler retains this, so the pool
+/// emptied at every boundary, so the unit was produced this turn, so the object at
+/// its storage id (the Treasure Cloudshift returned) is its producer" — and stamps
+/// the Treasure's epoch onto mana CR 106.3 gave to the object that generated the
+/// trigger (CR 400.7: the returned card is a new object). The exact-incarnation read
+/// then prices the `{2}` from the Treasure and Rain of Riches grants cascade.
+///
+/// What the save DOES hold is the pool's own producer fact, written by the boundary
+/// that carried the units: the epoch that generated the trigger. Admission binds it,
+/// so the payment records the Emissary copy and no cascade is earned.
+#[test]
+fn a_retention_effect_that_has_already_left_is_not_evidence() {
+    let (mut runner, impersonator, copied_incarnation, sciences) =
+        clever_impersonator_trigger_pool_prepared(ManaRetention::Upwelling, |scenario| {
+            let mut builder =
+                scenario.add_spell_to_hand_from_oracle(P1, "Naturalize", true, NATURALIZE);
+            builder.with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 1,
+            });
+        });
+    let naturalize = object_named(runner.state(), "Naturalize", Zone::Hand);
+
+    // --- Cross a turn so the journal that recorded the earlier tenure is gone.
+    let opening_turn = runner.state().turn_number;
+    pass_until(
+        &mut runner,
+        |r| {
+            r.state().turn_number > opening_turn
+                && r.state().phase == Phase::PreCombatMain
+                && r.state().active_player == P0
+        },
+        "crossing a full turn boundary with Upwelling holding the pool",
+    );
+    let upwelling = object_named(runner.state(), "Upwelling", Zone::Battlefield);
+    {
+        let state = runner.state();
+        assert_eq!(
+            pool_units(&runner).len(),
+            2,
+            "reach: Upwelling carried both trigger units into this turn"
+        );
+        assert!(
+            state
+                .zone_changes_this_turn
+                .iter()
+                .all(|record| record.object_id != impersonator),
+            "reach: turn advancement cleared the journal that convicted this id"
+        );
+        assert_ne!(
+            state.objects[&impersonator].incarnation, copied_incarnation,
+            "reach: the Treasure now holding the storage id is not the producer"
+        );
+    }
+
+    // --- The OPPONENT destroys Upwelling. It must be the opponent's mana: a
+    // payment from P0's pool would spend the very pips under test, and an empty
+    // pool would make the witness vacuous.
+    {
+        let p1_forest = create_object(
+            runner.state_mut(),
+            CardId(9600),
+            P1,
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = runner.state_mut().objects.get_mut(&p1_forest).unwrap();
+            object.card_types.core_types.push(CoreType::Land);
+            object.card_types.subtypes.push("Forest".to_string());
+            object.base_card_types = object.card_types.clone();
+        }
+        add_mana_from_source(runner.state_mut(), P1, ManaType::Green, 1, p1_forest);
+        add_mana_from_source(runner.state_mut(), P1, ManaType::Colorless, 1, p1_forest);
+    }
+    pass_until(
+        &mut runner,
+        |r| matches!(r.state().waiting_for, WaitingFor::Priority { player } if player == P1),
+        "handing priority to the opponent in the new main phase",
+    );
+    runner.cast(naturalize).target_object(upwelling).commit();
+    pass_until(
+        &mut runner,
+        |r| r.state().stack.is_empty(),
+        "resolving the opponent's Naturalize",
+    );
+    pass_until(
+        &mut runner,
+        |r| matches!(r.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "returning priority to the active player",
+    );
+
+    // Reach guards: the retention effect is GONE, the mana is still floating, no
+    // step-end handler is in play, and the pool's fact ledger names the trigger.
+    {
+        let state = runner.state();
+        assert_eq!(
+            state.objects[&upwelling].zone,
+            Zone::Graveyard,
+            "reach: Naturalize destroyed Upwelling"
+        );
+        assert!(
+            !state.objects.values().any(|object| {
+                object.zone == Zone::Battlefield
+                    && object
+                        .static_definitions
+                        .iter_all()
+                        .any(|def| matches!(def.mode, StaticMode::StepEndUnspentMana { .. }))
+            }),
+            "reach: no step-end retention static is live at restore — this is the whole \
+             point of the witness"
+        );
+        assert_eq!(state.phase, Phase::PreCombatMain);
+        let units = pool_units(&runner);
+        assert_eq!(
+            units.len(),
+            2,
+            "reach: the mana is still floating in the pool, got {units:?}"
+        );
+        for unit in &units {
+            assert_eq!(unit.source_id, impersonator);
+            assert_eq!(
+                unit.source_incarnation,
+                Some(copied_incarnation),
+                "reach: the current-format save pins the epoch that generated the trigger"
+            );
+        }
+        assert!(
+            state.pooled_mana_producer_snapshots.iter().any(|snapshot| {
+                snapshot.source_id == impersonator
+                    && snapshot.source_incarnation == copied_incarnation
+            }),
+            "reach: the boundary that retained the units wrote their epoch onto the pool's \
+             own fact ledger; got {:?}",
+            state.pooled_mana_producer_snapshots
+        );
+    }
+
+    // The intact-pin control: the save the engine writes today is admitted, keeps
+    // the trigger's epoch, and earns nothing.
+    {
+        let mut pinned = GameRunner::from_state(
+            admitted(persisted_json(runner.state())).expect("a current-format save is admitted"),
+        );
+        let unit = pool_units(&pinned)
+            .into_iter()
+            .next()
+            .expect("the pinned unit survives");
+        assert_eq!(
+            unit.source_incarnation,
+            Some(copied_incarnation),
+            "reach: the intact pin still names the producing epoch"
+        );
+        let commit = pinned.cast(sciences).commit();
+        let state = commit.state();
+        assert!(
+            !state.objects[&sciences]
+                .cast_spell_keywords
+                .iter()
+                .any(|keyword| matches!(keyword, Keyword::Cascade)),
+            "the pinned control must earn no cascade: no Treasure produced this mana"
+        );
+    }
+
+    // --- The legacy shape: the same pool, saved before the pin existed.
+    let mut legacy = persisted_json(runner.state());
+    assert_eq!(
+        strip_pool_pins(&mut legacy),
+        2,
+        "both floating units must lose their pin to reproduce the legacy save"
+    );
+    let restored_state = admitted(legacy).unwrap_or_else(|error| {
+        panic!(
+            "the pool's fact ledger names the producing epoch, so the pin-less pool must be \
+             admitted and bound to it, got {error:?}"
+        )
+    });
+    for unit in restored_state.players[P0.0 as usize].mana_pool.units() {
+        assert_eq!(
+            unit.source_incarnation,
+            Some(copied_incarnation),
+            "CR 106.3 + CR 400.7: admission must bind the epoch the pool's producer fact \
+             names — never the incarnation of the Treasure now holding the storage id"
+        );
+    }
+
+    let mut restored = GameRunner::from_state(restored_state);
+    let commit = restored.cast(sciences).commit();
+    let state = commit.state();
+    let record = state.spells_cast_this_turn_by_player[&P0]
+        .back()
+        .expect("the restored cast must be recorded");
+    let snapshots = record.mana_source_snapshots();
+    assert_eq!(
+        snapshots.len(),
+        2,
+        "the bound epoch's producer fact must answer the payment; got {snapshots:?}"
+    );
+    for snapshot in snapshots {
+        assert_eq!(
+            snapshot.source_id, impersonator,
+            "the spent mana came from the storage id the trigger named"
+        );
+        assert!(
+            !snapshot.lki.subtypes.iter().any(|s| s == "Treasure"),
+            "CR 106.3 + CR 400.7: a retention effect that has already left must not hand \
+             the trigger's mana to the Treasure successor; got {:?}",
+            snapshot.lki.subtypes
+        );
+    }
+    let cascade = state.objects[&sciences]
+        .cast_spell_keywords
+        .iter()
+        .any(|keyword| matches!(keyword, Keyword::Cascade));
+    assert!(
+        !cascade,
+        "Rain of Riches must not grant cascade: no Treasure produced this mana"
+    );
+    assert_eq!(
+        state
+            .stack
+            .iter()
+            .filter(|entry| {
+                matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+                    && entry
+                        .ability()
+                        .is_some_and(|ability| matches!(ability.effect, Effect::Cascade))
+            })
+            .count(),
+        0,
+        "no cascade trigger may be enqueued"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 9 — a departed producer needs saved evidence too
+// ---------------------------------------------------------------------------
+
+/// CR 106.3 + CR 106.4 + CR 400.7 + CR 704.5d: a Treasures's mana crossing a step
+/// boundary outlives the Treasure, and a save written before the pin that names it
+/// can only be admitted from the fact the boundary itself recorded.
+///
+/// The board is test 1's — Upwelling holds two Treasure pips from precombat main
+/// into postcombat main — with REAL tokens, so CR 704.5d removes them from the game
+/// once they leave the battlefield. Both step-scoped LKI caches are empty by then
+/// (a step transition clears them), so a pin-less unit's producer is recoverable
+/// from exactly one record: `pooled_mana_producer_snapshots`, which the boundary
+/// wrote while the exit LKI still existed.
+///
+/// Two legs, and they are the two answers the rule has to tell apart:
+///
+/// * pins stripped, facts intact → the save RECOVERS the producer, so it is
+///   admitted, bound to the Treasure's epoch, and the `{2}` still qualifies for
+///   Rain of Riches. Refusing here would throw away a fact the save carries.
+/// * pins and facts stripped (the pre-pin, pre-fact save format) → nothing in the
+///   save names the producer, and the storage id names no object at all, so there is
+///   nothing to read: the pool is REFUSED. Admitting it would record a payment whose
+///   producer fact is silently lost — the cascade below never fires — which is a
+///   worse outcome than refusing the load, because the game would go on to answer a
+///   source-qualified question it can no longer answer.
+#[test]
+fn a_departed_producer_is_admitted_only_when_the_save_names_its_epoch() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    scenario.add_enchantment_from_oracle(P0, "Rain of Riches", RAIN_OF_RICHES);
+    scenario.add_enchantment_from_oracle(P0, "Upwelling", UPWELLING);
+    let sciences = sciences_in_hand(&mut scenario);
+    let mut runner = scenario.build();
+    let first_treasure = treasure_token(runner.state_mut(), 9001);
+    let second_treasure = treasure_token(runner.state_mut(), 9002);
+    // CR 704.5d: these are TOKENS, so leaving the battlefield ends their existence
+    // and the save cannot answer for their storage ids at all.
+    for treasure in [first_treasure, second_treasure] {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&treasure)
+            .unwrap()
+            .is_token = true;
+    }
+    let first_incarnation = runner.state().objects[&first_treasure].incarnation;
+    let second_incarnation = runner.state().objects[&second_treasure].incarnation;
+
+    // --- Act 1: sacrifice both Treasures for their own mana, in precombat main.
+    activate_mana_ability(&mut runner, first_treasure, ManaType::Red);
+    activate_mana_ability(&mut runner, second_treasure, ManaType::Green);
+
+    // --- Act 2: cross the real phase boundary into postcombat main.
+    pass_until(
+        &mut runner,
+        |r| r.state().phase == Phase::PostCombatMain,
+        "crossing combat into postcombat main",
+    );
+
+    // Reach guards: the pips survived, the producers ceased to exist, the generic
+    // LKI is gone, and the only surviving record of the producers is the pool's.
+    {
+        let state = runner.state();
+        assert_eq!(
+            pool_units(&runner).len(),
+            2,
+            "Upwelling must have retained both units across the boundary"
+        );
+        for treasure in [first_treasure, second_treasure] {
+            assert!(
+                !state.objects.contains_key(&treasure),
+                "CR 704.5d: the sacrificed Treasure token ceases to exist, so the save \
+                 answers for no object at {treasure:?}"
+            );
+        }
+        assert!(
+            state.lki_by_incarnation.is_empty() && state.lki_cache.is_empty(),
+            "CR 400.7: both generic LKI caches were cleared at the boundary"
+        );
+        for (treasure, incarnation) in [
+            (first_treasure, first_incarnation),
+            (second_treasure, second_incarnation),
+        ] {
+            assert!(
+                state.pooled_mana_producer_snapshots.iter().any(|snapshot| {
+                    snapshot.source_id == treasure && snapshot.source_incarnation == incarnation
+                }),
+                "reach: the retained fact names the exact producing epoch"
+            );
+        }
+    }
+
+    // --- Leg 1: pins AND facts stripped — the pre-pin save names no producer.
+    let mut pre_pin = persisted_json(runner.state());
+    assert_eq!(strip_pool_pins(&mut pre_pin), 2);
+    assert_eq!(
+        strip_pool_producer_facts(&mut pre_pin),
+        2,
+        "both retained facts must be removed to reproduce the pre-fact save format"
+    );
+    match admitted(pre_pin) {
+        Err(PersistedRestoreError::AmbiguousFloatingManaProvenance { player, source_id }) => {
+            assert_eq!(player, P0);
+            assert!(
+                source_id == first_treasure || source_id == second_treasure,
+                "the refused unit is one of the tokens that ceased to exist; got {source_id:?}"
+            );
+        }
+        Err(other) => panic!("expected an ambiguous-provenance refusal, got {other:?}"),
+        Ok(state) => {
+            // The adjudication a permissive guard permits: the pool is admitted even
+            // though nothing in the save names its producers, and the payment then
+            // records no source fact at all — the cascade the retained mana had
+            // already earned for the turn is silently lost. Demonstrated rather than
+            // asserted, so a loosened rule fails here with its own consequence.
+            let mut restored = GameRunner::from_state(state);
+            let commit = restored.cast(sciences).commit();
+            let state = commit.state();
+            let record = state.spells_cast_this_turn_by_player[&P0]
+                .back()
+                .expect("the admitted cast must be recorded");
+            let named: Vec<&str> = record
+                .mana_source_snapshots()
+                .iter()
+                .map(|snapshot| snapshot.lki.name.as_str())
+                .collect();
+            let cascade = state.objects[&sciences]
+                .cast_spell_keywords
+                .iter()
+                .any(|keyword| matches!(keyword, Keyword::Cascade));
+            panic!(
+                "CR 106.3 + CR 400.7 + CR 704.5d: a save that names no producer for its \
+                 floating mana must be refused. This one was admitted and the payment \
+                 recorded {named:?} (cascade granted: {cascade})"
+            );
+        }
+    }
+
+    // --- Leg 2: the pin is gone, the fact survives — the producer is recoverable.
+    let mut legacy = persisted_json(runner.state());
+    assert_eq!(
+        strip_pool_pins(&mut legacy),
+        2,
+        "both retained units must lose their pin to reproduce the legacy save"
+    );
+    let recovered = admitted(legacy).unwrap_or_else(|error| {
+        panic!(
+            "the save's producer facts name both epochs, so the pin-less pool must be \
+             admitted and bound, got {error:?}"
+        )
+    });
+    let recovered_units: Vec<ManaUnit> =
+        recovered.players[P0.0 as usize].mana_pool.units().collect();
+    assert_eq!(recovered_units.len(), 2);
+    for (unit, (treasure, incarnation)) in recovered_units.iter().zip([
+        (first_treasure, first_incarnation),
+        (second_treasure, second_incarnation),
+    ]) {
+        assert_eq!(unit.source_id, treasure);
+        assert_eq!(
+            unit.source_incarnation,
+            Some(incarnation),
+            "CR 106.3: admission must bind the epoch the retained fact names"
+        );
+    }
+
+    let mut restored = GameRunner::from_state(recovered);
+    let commit = restored.cast(sciences).commit();
+    let state = commit.state();
+    assert_treasure_record(state, &[first_treasure, second_treasure]);
+    assert!(
+        state.objects[&sciences]
+            .cast_spell_keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Cascade)),
+        "a producer the save recovers must still earn Rain of Riches cascade"
+    );
 }
