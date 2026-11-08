@@ -396,6 +396,9 @@ dropping deltas. Leaving a local WASM game, including a native-AI fallback,
 resets game state without disposing the shared runtime or unrelated codec leases.
 Recovery notifications use the active UI language and distinguish an interrupted
 in-flight action from a new action that was never sent.
+A draft recovery Full rejected by the application's identity checks closes its
+current transport before readiness can reopen submissions against a stale snapshot;
+healthy-stream foreign-state ignores are unchanged.
 
 ### Design Principles
 

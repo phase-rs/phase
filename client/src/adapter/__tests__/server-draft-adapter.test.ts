@@ -3180,6 +3180,80 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
     await expect(resumed).resolves.toMatchObject({ events: [] });
     adapter.dispose();
   });
+
+  it.each(["StateUpdate", "GameStarted"] as const)(
+    "closes a rejected %s recovery Full before stale-snapshot submissions can resume",
+    async (type) => {
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, ws } = await startCodecDraft(session.session);
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      // Native close changes readyState before its asynchronous close event.
+      ws.close.mockImplementation(() => { ws.readyState = 3; });
+      const foreignKey = { ...FULL_KEY, generation: FULL_KEY.generation + 1 };
+      const foreign = type === "GameStarted"
+        ? { type, data: { state: matchState("foreign"), your_player: 0, full_key: foreignKey } }
+        : { type, data: { state: matchState("foreign"), events: [], full_key: foreignKey } };
+      try {
+        await enterCodecMatch(ws, events);
+        const accepted = await adapter.getSnapshot();
+
+        // Healthy-stream ignores are intentional and must remain non-terminal.
+        const healthyDecodes = session.decode.mock.calls.length;
+        ws.dispatchSynthetic("message", draftFrame("Full", foreign));
+        await vi.waitFor(() => expect(session.decode).toHaveBeenCalledTimes(healthyDecodes + 1));
+        expect(await adapter.getSnapshot()).toEqual(accepted);
+        expect(ws.close).not.toHaveBeenCalled();
+        ws.dispatchSynthetic("message", draftFrame("Full", {
+          type: "StateUpdate",
+          data: { state: matchState("matching-healthy"), events: [], full_key: FULL_KEY },
+        }));
+        await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+          type: "gameStateUpdated", state: expect.objectContaining({ label: "matching-healthy" }),
+        })));
+        const healthyAction = adapter.submitAction({ type: "PassPriority" }, 0);
+        await vi.waitFor(() => expect(submissionTypes(ws)).toHaveLength(1));
+        ws.dispatchSynthetic("message", draftFrame("Delta", {
+          type: "StateUpdate", command_id: lastSubmissionCommandId(ws),
+          data: { state: matchState("before-recovery"), events: [], full_key: FULL_KEY },
+        }));
+        await expect(healthyAction).resolves.toMatchObject({ events: [] });
+        const beforeRecovery = await adapter.getSnapshot();
+
+        const pending = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+        await vi.waitFor(() => expect(submissionTypes(ws)).toHaveLength(2));
+        session.decode.mockResolvedValueOnce({ kind: "resyncRequired" });
+        ws.dispatchSynthetic("message", draftFrame("Delta", {
+          type: "StateUpdate",
+          data: { state: matchState("rejected-delta"), events: [], full_key: FULL_KEY },
+        }));
+        await expect(pending()).resolves.toMatchObject({ code: "WS_CLOSED", recoverable: true });
+        await expect(adapter.submitInteraction(interactionSubmission("during-recovery"), 0)).rejects
+          .toMatchObject({ code: "ACTION_NOT_SENT" });
+        expect(ws.send).toHaveBeenCalledWith('{"type":"ResyncState"}');
+        const sentBeforeForeign = submissionTypes(ws).length;
+
+        const recoveryDecodes = session.decode.mock.calls.length;
+        ws.dispatchSynthetic("message", draftFrame("Full", foreign));
+        await vi.waitFor(() => expect(session.decode).toHaveBeenCalledTimes(recoveryDecodes + 1));
+        expect(await adapter.getSnapshot()).toEqual(beforeRecovery);
+        expect(events).not.toContainEqual(expect.objectContaining({
+          type: "gameStateUpdated", state: expect.objectContaining({ label: "foreign" }),
+        }));
+
+        const action = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+        const interaction = trackRejection(adapter.submitInteraction(interactionSubmission("after-rejected-full"), 0));
+        expect(submissionTypes(ws)).toHaveLength(sentBeforeForeign);
+        await expect(action()).resolves.toBeInstanceOf(AdapterError);
+        await expect(interaction()).resolves.toBeInstanceOf(AdapterError);
+        expect(ws.close).toHaveBeenCalledOnce();
+        expect(session.close).toHaveBeenCalledOnce();
+        expect(events).toContainEqual({ type: "disconnected" });
+      } finally {
+        adapter.dispose();
+      }
+    },
+  );
 });
 
 describe("ServerDraftAdapter — retired codec transport", () => {

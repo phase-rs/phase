@@ -265,6 +265,17 @@ export class StateCodecAttachment {
     }
   }
 
+  /**
+   * A declined game-state delivery cannot complete recovery against an older
+   * accepted snapshot. Close only its current recovering transport before the
+   * wrapper can publish readiness. Healthy-stream ignore behavior and retired
+   * attachment ownership are unchanged.
+   */
+  rejectRecoveryDelivery(socket: PhaseSocketTransport): void {
+    if (this.recovery !== "recovering" || this.current?.socket !== socket) return;
+    socket.close();
+  }
+
   /** The current attachment's socket is gone: a retired transport can no longer gate submissions. */
   clearRecovery(): void {
     this.recovery = null;

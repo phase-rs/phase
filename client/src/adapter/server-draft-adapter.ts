@@ -1207,6 +1207,7 @@ export class ServerDraftAdapter implements EngineAdapter {
           || this._playerId !== data.your_player
           || !fullSessionKeysEqual(data.full_key, this.activeFullKey)
         ) {
+          this.stateCodec.rejectRecoveryDelivery(sourceSocket);
           break;
         }
         this.acceptedFullKey = data.full_key ?? null;
@@ -1242,6 +1243,7 @@ export class ServerDraftAdapter implements EngineAdapter {
           full_key?: FullSessionKey;
         };
         if (!fullSessionKeysEqual(data.full_key, this.acceptedFullKey)) {
+          this.stateCodec.rejectRecoveryDelivery(sourceSocket);
           break;
         }
         const updated = ServerDraftAdapter.snapshotPair(data);
