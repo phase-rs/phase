@@ -4,6 +4,7 @@
 
 use engine::ai_support::{legal_actions, legal_actions_full};
 use engine::game::casting::activated_ability_definitions;
+use engine::game::game_object::AttachTarget;
 use engine::game::layers::evaluate_layers;
 use engine::game::mana_payment::{
     can_pay_for_spell, compute_phyrexian_shards, pay_cost_with_demand_and_choices, pay_from_pool,
@@ -76,7 +77,7 @@ fn pay_glint_eye_with_an_enchanted_land(land_name: &str, land_text: &str, count:
         assert_eq!(r.state().players[0].mana_pool.count_color(ManaType::Colorless), 1);
         r.cast(nephilim).resolve().assert_zone(&[nephilim], Zone::Battlefield);
         assert!([land, wastes, signet].iter().all(|id| r.state().objects[id].tapped));
-        assert_eq!(r.state().objects[&aura].attached_to, Some(land));
+        assert_eq!(r.state().objects[&aura].attached_to, Some(AttachTarget::Object(land)));
         assert!(r.state().players[0].mana_pool.units().all(|unit| unit.source_id == land));
         assert_complete(&r, count - 1);
     }
@@ -108,7 +109,7 @@ fn snow_hybrid_payment_preserves_a_quality_eligible_alternative() {
         ("{C/U}", ManaType::Colorless, ManaType::Blue),
     ] {
         for (snow_color, plain_color) in [(a, b), (b, a)] {
-            for snow_first in [false, true] {
+            for snow_first in [true, false] {
                 for phyrexian in [false, true] {
                     let text = if snow_first {
                         format!("{{S}}{symbol}")
