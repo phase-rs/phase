@@ -1482,6 +1482,25 @@ pub enum ActivationTargetFact {
         /// [`crate::types::history_snapshot`]'s lossless compact projection.
         #[serde(with = "crate::types::history_snapshot::compact_history_boxed_lki")]
         lki: Box<LKISnapshot>,
+        /// CR 601.2c + CR 109.2: the zone the target occupied when it was
+        /// announced, captured with the commitment above. A target is announced
+        /// in whatever zone it is legal in — Reanimate's "target creature card
+        /// from a graveyard" announces a card in a graveyard — so a bare type
+        /// description ("targets a creature") needs this zone to mean what
+        /// CR 109.2 says it means: a permanent on the BATTLEFIELD. Without it the
+        /// snapshot's characteristics answer for every zone and a graveyard card
+        /// reads as a battlefield permanent.
+        ///
+        /// Follows the [`AbilityActivationRecord::source_zone`] precedent: a
+        /// record predating the field described a target as every reader at the
+        /// time understood it, which for a bare type description was a
+        /// battlefield permanent, so the default is the battlefield; it is
+        /// omitted on the wire then.
+        #[serde(
+            default = "battlefield_zone",
+            skip_serializing_if = "is_battlefield_zone"
+        )]
+        zone: Zone,
     },
 }
 

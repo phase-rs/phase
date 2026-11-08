@@ -2895,6 +2895,11 @@ pub(crate) fn parse_cost_modifier_target_filter(lower: &str) -> Option<TargetFil
             }
         })
     }?;
+    // CR 109.2: "spells that target a creature" is a BATTLEFIELD-creature
+    // qualifier. An explicitly-zoned phrase ("a creature card from a graveyard",
+    // CR 109.2a) and a "spell" phrase (CR 109.2b) keep their own scope, so a
+    // Reanimate-class target can never satisfy the qualifier.
+    let target_filter = scope_type_phrase_to_the_battlefield(target_text, target_filter);
 
     Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
         FilterProp::Targets {

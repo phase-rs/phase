@@ -2772,6 +2772,99 @@ pub fn parse_type_phrase_folding(text: &str) -> (TargetFilter, &str) {
     parse_type_phrase_folding_with_ctx(text, &mut ParseContext::default())
 }
 
+/// CR 109.2a–d: the words that take an object description OUT of CR 109.2's
+/// battlefield default — "card" (CR 109.2a), "spell" (CR 109.2b), "source"
+/// (CR 109.2c), "scheme" (CR 109.2d). A description that uses one of them names
+/// its own zone (or its own object kind) and must not be scoped to the
+/// battlefield.
+const ZONE_NAMING_DESCRIPTION_WORDS: [&str; 4] = ["card", "spell", "source", "scheme"];
+
+/// CR 109.2: apply the battlefield default to a bare type description used as a
+/// "targets <description>" qualifier.
+///
+/// A spell or ability that describes an object with a card type or subtype,
+/// names no zone, and uses none of the CR 109.2a–d words above means "a
+/// permanent of that card type or subtype on the battlefield". So a cost
+/// modifier's "spells that target a creature" (Head of the Class, Killian, Ink
+/// Duelist) is a BATTLEFIELD-creature qualifier, while "target a creature card
+/// from a graveyard" (Reanimate) is its own CR 109.2a description and stays
+/// untouched.
+///
+/// The scope is expressed on the emitted filter rather than in a second reader:
+/// `FilterProp::InZone { Battlefield }` is already the single authority for zone
+/// membership (CR 109.2a), and the cast-history target-fact path already reads
+/// it against the zone the target occupied at announcement (CR 601.2c).
+///
+/// `phrase` is the source text the filter came from, because the parsed filter
+/// alone cannot answer CR 109.2's two exclusions: "creature spell"
+/// (CR 109.2b) lowers to the same zone-less `Creature` filter as "creature",
+/// and an empty `type_filters` list ("opponent") carries no type word at all.
+///
+/// Bounded to the two shapes [`parse_type_phrase_folding`] builds — a `Typed`
+/// description and the `Or` union of them. Every other shape (anaphors,
+/// `CostPaidObject`, `Not`, …) is not a type-line description, so it is returned
+/// unchanged rather than given speculative semantics.
+///
+/// WIRING BOUNDARY (deliberate, measured): today the only caller is
+/// `oracle_static::grammar::parse_cost_modifier_target_filter`, the
+/// "<subject> that target(s) <description> cost(s) {…}" seam that lowers to a
+/// `FilterProp::Targets` gate over CAST and ACTIVATION history. Its sibling
+/// `parse_self_spell_target_cost_filter` — "this spell costs {N} less to cast if
+/// it targets <description>" — is the identical CR 109.2 shape and is the
+/// natural next caller. It is not wired here because its reader is the LIVE
+/// target of the spell being paid for (`filter::stack_entry_targets_satisfy`),
+/// which already reads the announced object's real zone, so no printed card at
+/// that seam is wrong today: a corpus census over `client/public/card-data.json`
+/// finds 42 such cards and every one describes a battlefield-only object
+/// ("a tapped creature", "a legendary creature you control", "a creature that
+/// was dealt damage this turn"). Scoping them would be a correctness
+/// improvement with a 42-card parse-output delta and no witness; wire it in its
+/// own change, with its own red test, rather than as a side effect of this one.
+pub(crate) fn scope_type_phrase_to_the_battlefield(
+    phrase: &str,
+    filter: TargetFilter,
+) -> TargetFilter {
+    let lower = phrase.to_lowercase();
+    if ZONE_NAMING_DESCRIPTION_WORDS
+        .iter()
+        .any(|word| nom_primitives::scan_contains(&lower, word))
+    {
+        return filter;
+    }
+    add_battlefield_scope_to_type_descriptions(filter)
+}
+
+/// CR 109.2: the per-leg half of [`scope_type_phrase_to_the_battlefield`]. Recurses
+/// `Or` so each zone-less disjunct ("a creature or a planeswalker") takes the
+/// default on its own, and skips a leg that already names a zone (CR 109.2a).
+fn add_battlefield_scope_to_type_descriptions(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            // CR 109.2 scopes "a description of an object that includes a card
+            // type or subtype"; an empty `type_filters` list names none.
+            let names_its_own_zone = typed.properties.iter().any(|prop| {
+                matches!(
+                    prop,
+                    FilterProp::InZone { .. } | FilterProp::InAnyZone { .. }
+                )
+            });
+            if !typed.type_filters.is_empty() && !names_its_own_zone {
+                typed.properties.push(FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                });
+            }
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(add_battlefield_scope_to_type_descriptions)
+                .collect(),
+        },
+        other => other,
+    }
+}
+
 /// CR 608.2c: separator byte length for a mass-target union continuation
 /// ("…, all artifacts, and all enchantments"). Longest-match-first over the
 /// comma / "and" / "or" connectors. Returns `None` when `lower` does not start

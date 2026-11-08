@@ -31905,11 +31905,13 @@ pub(crate) fn record_activation_announcement(
 /// CR 115.1 + CR 601.2c + CR 400.7: snapshot one committed target list into the
 /// repo's typed "one committed target, as it was when committed" vocabulary. A
 /// player fact needs no snapshot; an object fact carries the target's public
-/// characteristics as they were at commitment. An id absent from `state.objects`
-/// (a target that has ceased — only reachable for a token) is dropped: a fact
-/// that cannot be snapshotted is not invented. CR 115.9b's "a departed target is
-/// ignored" rule belongs to the live reader in
-/// `filter::stack_entry_targets_satisfy`, not to this capture.
+/// characteristics as they were at commitment, together with the zone it
+/// occupied then (CR 109.2 needs the zone to read a bare type description as a
+/// battlefield permanent). An id absent from `state.objects` (a target that has
+/// ceased — only reachable for a token) is dropped: a fact that cannot be
+/// snapshotted is not invented. CR 115.9b's "a departed target is ignored" rule
+/// belongs to the live reader in `filter::stack_entry_targets_satisfy`, not to
+/// this capture.
 pub(crate) fn capture_target_facts(
     state: &GameState,
     targets: &[TargetRef],
@@ -31925,6 +31927,8 @@ pub(crate) fn capture_target_facts(
                     .map(|obj| ActivationTargetFact::Object {
                         id: *id,
                         lki: Box::new(obj.snapshot_public_characteristics()),
+                        // CR 601.2c: the zone the announced target was legal in.
+                        zone: obj.zone,
                     })
             }
         })

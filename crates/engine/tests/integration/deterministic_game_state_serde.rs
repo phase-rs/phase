@@ -2058,6 +2058,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                 targets: vec![ActivationTargetFact::Object {
                     id: ObjectId(2),
                     lki: Box::new(second_lki.clone()),
+                    zone: engine::types::zones::Zone::Battlefield,
                 }],
             }]),
         ),
@@ -3403,6 +3404,7 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
                     attachments: Vec::new(),
                     intensity: 0,
                 }),
+                zone: engine::types::zones::Zone::Battlefield,
             },
             // The player axis carries no snapshot at all.
             ActivationTargetFact::Player(PlayerId(1)),
@@ -3423,7 +3425,7 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
         "the committed targets survive the round-trip"
     );
     assert_eq!(restored.declared_targets().len(), 2);
-    let ActivationTargetFact::Object { id, lki } = &restored.declared_targets()[0] else {
+    let ActivationTargetFact::Object { id, lki, .. } = &restored.declared_targets()[0] else {
         panic!("index 0 is an object fact");
     };
     assert_eq!(*id, target_id, "the object fact keeps its stable id");
@@ -3437,6 +3439,56 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
         serde_json::to_string(&restored).expect("restored record reserializes"),
         populated_json,
         "reserialization is byte-identical"
+    );
+
+    // (1a) CR 601.2c + CR 109.2: the committed target's announcement zone is
+    // omitted on the wire whenever it is the battlefield — what every record
+    // predating the field described — so a battlefield target's payload is
+    // unchanged by the field's addition.
+    assert!(
+        !populated_json.contains("\"zone\""),
+        "a battlefield target must not emit the zone key: {populated_json}"
+    );
+
+    // (1b) A NON-battlefield announcement — Reanimate's "target creature card
+    // from a graveyard" (CR 109.2a) — does emit it, and a payload predating the
+    // field still decodes as the battlefield default. Without both halves the
+    // omission above would be indistinguishable from the field never being
+    // written at all.
+    let ActivationTargetFact::Object { lki, .. } = &populated.targets.as_ref().expect("targets")[0]
+    else {
+        panic!("index 0 is an object fact");
+    };
+    let battlefield_fact = ActivationTargetFact::Object {
+        id: target_id,
+        lki: lki.clone(),
+        zone: engine::types::zones::Zone::Battlefield,
+    };
+    let graveyard_fact = ActivationTargetFact::Object {
+        id: target_id,
+        lki: lki.clone(),
+        zone: engine::types::zones::Zone::Graveyard,
+    };
+    let graveyard_json = serde_json::to_string(&graveyard_fact).expect("fact serializes");
+    assert!(
+        graveyard_json.contains("Graveyard"),
+        "a graveyard-announced target emits its zone: {graveyard_json}"
+    );
+    assert_eq!(
+        serde_json::from_str::<ActivationTargetFact>(&graveyard_json).expect("fact deserializes"),
+        graveyard_fact,
+        "the announcement zone survives the round-trip"
+    );
+    let legacy_json = graveyard_json.replace(",\"zone\":\"Graveyard\"", "");
+    assert_ne!(
+        legacy_json, graveyard_json,
+        "reach: the zone key really was present"
+    );
+    assert_eq!(
+        serde_json::from_str::<ActivationTargetFact>(&legacy_json)
+            .expect("a payload predating the field parses"),
+        battlefield_fact,
+        "CR 601.2c: a record predating the field decodes as a battlefield announcement"
     );
 
     // (2) A KNOWN-EMPTY vector is written as an explicit `[]`, so it cannot be

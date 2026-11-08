@@ -42882,3 +42882,149 @@ fn repaired_grammar_neighbours_parse_to_their_meaning_or_an_explicit_gap() {
         );
     }
 }
+
+// CR 109.2: a cost modifier's "that targets a <type>" qualifier uses a bare type
+// description — no zone, and none of the words "card"/"spell"/"source"/"scheme" —
+// so it means a permanent of that type ON THE BATTLEFIELD. Without the scope the
+// engine accepted a spell that targeted a creature CARD in a graveyard (Reanimate)
+// as "a spell that targets a creature" and it consumed Head of the Class's slot.
+//
+// Three printed members of the class are asserted on the filter the cost pipeline
+// actually receives (Head of the Class, Killian, Ink Duelist, Strong Back), plus
+// the shaper's positive and negative boundaries. A census over
+// `client/public/card-data.json` measures eight affected cards, named here with
+// two caveats: "The Destined" has no Scryfall match (asserted nowhere here), and
+// only the entries named above were confirmed against Scryfall — Esior, Wardwing
+// Familiar; Kasmina, Enigmatic Mentor; Kopala, Warden of Waves (cast and activate
+// lines); Professor Hojo; The Destined.
+#[test]
+fn cost_modifier_bare_type_target_qualifier_carries_battlefield_scope() {
+    use crate::parser::oracle_target::scope_type_phrase_to_the_battlefield;
+
+    /// The inner `Targets` filter of a `ModifyCost` static's `spell_filter`.
+    fn qualifier(line: &str) -> TargetFilter {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("line must parse: {line}"));
+        let StaticMode::ModifyCost { spell_filter, .. } = def.mode else {
+            panic!(
+                "expected a ModifyCost static for {line}, got {:?}",
+                def.mode
+            );
+        };
+        let Some(TargetFilter::Typed(tf)) = spell_filter else {
+            panic!("expected the qualifier's Typed gate for {line}, got {spell_filter:?}");
+        };
+        let mut quantifiers = tf.properties.into_iter().filter_map(|prop| match prop {
+            FilterProp::Targets { filter } => Some(*filter),
+            _ => None,
+        });
+        let filter = quantifiers
+            .next()
+            .unwrap_or_else(|| panic!("expected a Targets qualifier for {line}"));
+        assert!(
+            quantifiers.next().is_none(),
+            "expected exactly one Targets qualifier for {line}"
+        );
+        filter
+    }
+
+    // Head of the Class (Scryfall ysos/21), verbatim: "The first spell you cast
+    // during each of your turns that targets a creature costs {W}{B} less to cast."
+    // The whole inner filter, so nothing else drifts with it.
+    assert_eq!(
+        qualifier(
+            "The first spell you cast during each of your turns that targets a creature costs {W}{B} less to cast."
+        ),
+        TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::InZone {
+                zone: Zone::Battlefield
+            }])
+        ),
+        "CR 109.2: a bare 'a creature' qualifier means a battlefield permanent"
+    );
+
+    // Killian, Ink Duelist (Scryfall stx/197), verbatim: "Spells you cast that
+    // target a creature cost {2} less to cast." Same bare-type qualifier by a path
+    // with no "first spell" ordinal, so the scope cannot be riding the ordinal seam.
+    assert_eq!(
+        qualifier("Spells you cast that target a creature cost {2} less to cast."),
+        TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
+            zone: Zone::Battlefield
+        }])),
+        "CR 109.2: the scope is a property of the bare-type qualifier, not of one card"
+    );
+
+    // Strong Back (Scryfall pip/83), verbatim: "Aura spells you cast that target
+    // enchanted creature cost {3} less to cast." — a third card in the class,
+    // through a different subject ("Aura spells you cast") and a different type
+    // phrase ("enchanted creature"). Asserted structurally: whichever shape the
+    // phrase lowers to, it must carry the scope.
+    let strong_back =
+        qualifier("Aura spells you cast that target enchanted creature cost {3} less to cast.");
+    let TargetFilter::Typed(strong_back) = strong_back else {
+        panic!("expected a Typed qualifier for Strong Back, got {strong_back:?}");
+    };
+    assert!(
+        strong_back.properties.contains(&FilterProp::InZone {
+            zone: Zone::Battlefield
+        }),
+        "CR 109.2: 'target enchanted creature' is a bare type description and must \
+         carry the battlefield scope, got {strong_back:?}"
+    );
+
+    // The controller axis rides alongside the scope rather than replacing it.
+    // Asserted on the shared shaper: the local card data has no Scryfall-verifiable
+    // card for "a creature you control" in this class, so this leg is a unit check
+    // of the shaper's boundary, not a card claim.
+    let (controlled, remainder) = parse_type_phrase_folding("creature you control");
+    assert!(remainder.is_empty(), "sanity: the phrase must fully parse");
+    assert_eq!(
+        scope_type_phrase_to_the_battlefield("creature you control", controlled),
+        TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Battlefield
+                }])
+        ),
+        "CR 109.2: 'a creature you control' is still a bare type description"
+    );
+
+    // NEGATIVE, on the shared shaper: a qualifier that names its own zone or uses
+    // "card"/"spell" keeps exactly what it had. CR 109.2a ("creature card from a
+    // graveyard" — Reanimate) and CR 109.2b ("creature spell") are the two printed
+    // shapes; both must come back untouched, or the fix would break the very cards
+    // it must leave alone.
+    for (phrase, expected) in [
+        (
+            "creature card from a graveyard",
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }])),
+        ),
+        (
+            "creature card in your graveyard",
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }]),
+            ),
+        ),
+        (
+            "creature spell",
+            TargetFilter::Typed(TypedFilter::creature()),
+        ),
+    ] {
+        let (parsed, remainder) = parse_type_phrase_folding(phrase);
+        assert!(
+            remainder.is_empty(),
+            "the negative leg must parse its whole phrase: {phrase:?} left {remainder:?}"
+        );
+        assert_eq!(
+            scope_type_phrase_to_the_battlefield(phrase, parsed.clone()),
+            expected,
+            "CR 109.2a/109.2b: {phrase:?} names its own zone and must not gain the battlefield scope"
+        );
+    }
+}

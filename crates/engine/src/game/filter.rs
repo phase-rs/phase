@@ -6240,6 +6240,40 @@ pub fn matches_target_filter_on_lki_snapshot(
     )
 }
 
+/// CR 601.2c + CR 109.2: Evaluate a target filter against a committed target's
+/// announcement-time snapshot, read as the object that occupied `zone` when the
+/// target was announced (CR 601.2c).
+///
+/// Distinct from [`matches_target_filter_on_lki_snapshot`] in exactly one
+/// respect: that entry point has no zone, so its synthesized record answers
+/// `InZone` from `None` and a zone-scoped predicate cannot hold. A committed
+/// target always HAS a zone — it is the zone the target was legal in when the
+/// caster chose it — so the caller that holds the fact supplies it instead of
+/// leaving the zone axis unanswerable.
+///
+/// The zone is what makes CR 109.2 mean what it says for a bare type
+/// description: "targets a creature" is `InZone { Battlefield }`, which a target
+/// announced in a graveyard ("target creature card from a graveyard",
+/// CR 109.2a) must fail even though its snapshot is a `Creature`.
+pub(crate) fn matches_target_filter_on_announced_lki(
+    state: &GameState,
+    object_id: ObjectId,
+    lki: &LKISnapshot,
+    zone: Zone,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    matches_target_filter_on_lki_snapshot_with_incarnation(
+        state,
+        object_id,
+        lki,
+        filter,
+        ctx,
+        None,
+        Some(zone),
+    )
+}
+
 /// CR 106.3 + CR 601.2h: does the source of ONE spent mana unit match the
 /// filter, as that source was when the mana was paid? The single predicate
 /// both folds of this question share — the existential property below and
@@ -6285,8 +6319,14 @@ pub(crate) fn declared_target_fact_matches(
     ctx: &FilterContext<'_>,
 ) -> bool {
     match fact {
-        ActivationTargetFact::Object { id, lki } => {
-            matches_target_filter_on_lki_snapshot(state, *id, lki, filter, ctx)
+        // CR 601.2c + CR 109.2: the fact names the zone the target occupied at
+        // announcement, so an `InZone` predicate reads the real zone rather than
+        // the snapshot's assumed one. A bare type description carries
+        // `InZone { Battlefield }` (CR 109.2), which a target announced in a
+        // graveyard — Reanimate's "target creature card from a graveyard"
+        // (CR 109.2a) — must fail.
+        ActivationTargetFact::Object { id, lki, zone } => {
+            matches_target_filter_on_announced_lki(state, *id, lki, *zone, filter, ctx)
         }
         // CR 115.9b: a targeted player is still in the game unless they left it;
         // the player axis has no snapshot to read.
@@ -6459,8 +6499,19 @@ pub(crate) fn source_incarnation_matches_filter(
 /// incarnation. The synthesized record preserves the proven incarnation so
 /// record-side identity predicates such as `OtherThanTriggerObject` do not
 /// collapse a later object at the same storage id into the original object.
-/// `departed_from` is the zone the snapshot was taken leaving, when the caller
-/// knows it; `None` keeps the historical record shape.
+///
+/// `snapshot_zone` is the zone the snapshot was taken IN, whenever the caller
+/// knows it — the zone a departed object left
+/// ([`matches_target_filter_on_departed_battlefield_lki`]) or the zone a
+/// committed target was announced in (CR 601.2c,
+/// [`matches_target_filter_on_announced_lki`]). It becomes the record's
+/// `from_zone`, which is the field this path's `InZone`/`InAnyZone` arms read.
+/// `None` keeps the historical record shape.
+///
+/// The synthesized record's `to_zone` is a fixed battlefield and is deliberately
+/// left alone: no arm on the record-matching path reads it (`to_zone` is read
+/// only by the LIVE `FilterProp::ZoneChangedThisTurn` arm), so it makes no
+/// semantic claim about where the target went and must not be read as one.
 fn matches_target_filter_on_lki_snapshot_with_incarnation(
     state: &GameState,
     object_id: ObjectId,
@@ -6468,7 +6519,7 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
     entered_incarnation: Option<u64>,
-    departed_from: Option<Zone>,
+    snapshot_zone: Option<Zone>,
 ) -> bool {
     let record = ZoneChangeRecord {
         object_id,
@@ -6493,7 +6544,7 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
             owner: lki.owner,
             controller: lki.controller,
         },
-        from_zone: departed_from,
+        from_zone: snapshot_zone,
         cast_from_zone: None,
         played_from_zone: None,
         to_zone: Zone::Battlefield,

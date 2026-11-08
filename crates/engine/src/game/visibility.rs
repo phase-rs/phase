@@ -4848,7 +4848,7 @@ fn redact_target_facts(
     hidden_ids: &HashSet<ObjectId>,
 ) {
     for fact in facts.iter_mut() {
-        if let crate::types::game_state::ActivationTargetFact::Object { id, lki } = fact {
+        if let crate::types::game_state::ActivationTargetFact::Object { id, lki, .. } = fact {
             if hidden_ids.contains(id) {
                 redact_lki_snapshot(lki);
             }
@@ -5607,6 +5607,7 @@ mod tests {
         let fact = |id: ObjectId| crate::types::game_state::ActivationTargetFact::Object {
             id,
             lki: Box::new(state.objects[&id].snapshot_public_characteristics()),
+            zone: state.objects[&id].zone,
         };
 
         // (1) A fully-hidden cast naming a hidden target.
@@ -5670,6 +5671,7 @@ mod tests {
             crate::types::game_state::ActivationTargetFact::Object {
                 id: hidden_target,
                 lki: Box::new(state.objects[&hidden_target].snapshot_public_characteristics()),
+                zone: state.objects[&hidden_target].zone,
             },
             "reach: the authoritative record still carries the hidden target's snapshot"
         );
@@ -5691,7 +5693,7 @@ mod tests {
             1,
             "the slot is kept so a count stays correct"
         );
-        let crate::types::game_state::ActivationTargetFact::Object { id, lki } =
+        let crate::types::game_state::ActivationTargetFact::Object { id, lki, .. } =
             &hidden.declared_targets()[0]
         else {
             panic!("the hidden target is an object fact");
@@ -5719,7 +5721,7 @@ mod tests {
             2,
             "the slot count is unchanged"
         );
-        let crate::types::game_state::ActivationTargetFact::Object { id, lki } =
+        let crate::types::game_state::ActivationTargetFact::Object { id, lki, .. } =
             &public.declared_targets()[0]
         else {
             panic!("the public target is an object fact");
@@ -5729,7 +5731,7 @@ mod tests {
             lki.name, "Grizzly Bears",
             "reach guard (b): the public target's snapshot is untouched"
         );
-        let crate::types::game_state::ActivationTargetFact::Object { id, lki } =
+        let crate::types::game_state::ActivationTargetFact::Object { id, lki, .. } =
             &public.declared_targets()[1]
         else {
             panic!("the hidden target is an object fact");
@@ -11172,6 +11174,7 @@ mod tests {
             crate::types::game_state::ActivationTargetFact::Object {
                 id: hidden,
                 lki: Box::new(state.objects[&hidden].snapshot_public_characteristics()),
+                zone: state.objects[&hidden].zone,
             },
         ]);
         state.pending_cast = Some(pending);
@@ -11188,7 +11191,7 @@ mod tests {
                 .committed_target_facts
                 .as_ref()
                 .expect("the declared-target latch rides the live cast");
-            let [crate::types::game_state::ActivationTargetFact::Object { id, lki }] =
+            let [crate::types::game_state::ActivationTargetFact::Object { id, lki, .. }] =
                 facts.as_slice()
             else {
                 panic!("one object target fact, kept as a slot: {facts:?}");
