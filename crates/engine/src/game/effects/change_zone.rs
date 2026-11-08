@@ -689,16 +689,17 @@ pub(crate) fn until_event_already_occurred(
         })
 }
 
-/// CR 400.7: the zone a picked object actually occupies is its move origin.
+/// CR 400.7 + CR 400.1: the zone a picked object actually occupies is its move
+/// origin.
 ///
 /// A multi-zone origin instruction (Next of Kin's "from your hand or from the
 /// command zone") has no single `origin` to pass to the mover, and the first
 /// entry of the scan set is not necessarily the zone the chosen card is in. The
 /// object itself is the authority once the choice is made; `fallback` covers
 /// only an object that ceased to exist between the scan and the move. A
-/// single-zone scan keeps the historical behavior: the scan zone and the
-/// object's zone already agree when the choice was legal, and an object that
-/// moved mid-resolution must not be followable to its new zone (CR 400.7).
+/// single-zone scan keeps the historical behavior and passes the scan zone
+/// through unchanged — the multi-zone case is the only one whose scan set
+/// cannot name the chosen object's zone.
 fn chosen_object_origin(
     state: &GameState,
     chosen: ObjectId,

@@ -203,11 +203,55 @@ fn drain_priority(runner: &mut GameRunner) -> bool {
     drain_priority_preferring(runner, &[])
 }
 
+/// What a drain observed while it drove the production prompts. Used by the
+/// Next of Kin regressions to prove the optional and card-selection prompts
+/// were actually reached, rather than inferring reach from a post-drain state.
+#[derive(Default)]
+struct DrainObservations {
+    saw_optional: bool,
+    zone_choices: Vec<Vec<engine::types::identifiers::ObjectId>>,
+    zone_changes: Vec<(engine::types::identifiers::ObjectId, Option<Zone>, Zone)>,
+}
+
+impl DrainObservations {
+    fn record_events(&mut self, events: &[engine::types::events::GameEvent]) {
+        for event in events {
+            if let engine::types::events::GameEvent::ZoneChanged {
+                object_id,
+                from,
+                to,
+                ..
+            } = event
+            {
+                self.zone_changes.push((*object_id, *from, *to));
+            }
+        }
+    }
+}
+
+fn act_recorded(
+    runner: &mut GameRunner,
+    action: GameAction,
+    observations: &mut DrainObservations,
+) -> Result<engine::types::game_state::ActionResult, engine::game::engine::EngineError> {
+    let result = runner.act(action)?;
+    observations.record_events(&result.events);
+    Ok(result)
+}
+
 /// Drain priority/resolution prompts, preferring `preferred` object ids when
 /// choosing from EffectZoneChoice / target slots (Cass host, Storm Aura, etc.).
 fn drain_priority_preferring(
     runner: &mut GameRunner,
     preferred: &[engine::types::identifiers::ObjectId],
+) -> bool {
+    drain_priority_preferring_observed(runner, preferred, &mut DrainObservations::default())
+}
+
+fn drain_priority_preferring_observed(
+    runner: &mut GameRunner,
+    preferred: &[engine::types::identifiers::ObjectId],
+    observations: &mut DrainObservations,
 ) -> bool {
     let mut consumed_effect_zone_choice = false;
     for _ in 0..256 {
@@ -248,21 +292,29 @@ fn drain_priority_preferring(
                 engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
             }
             WaitingFor::OptionalEffectChoice { .. } => {
-                runner
-                    .act(GameAction::DecideOptionalEffect { accept: true })
-                    .expect("accept optional");
+                observations.saw_optional = true;
+                act_recorded(
+                    runner,
+                    GameAction::DecideOptionalEffect { accept: true },
+                    observations,
+                )
+                .expect("accept optional");
             }
             WaitingFor::EffectZoneChoice { cards, .. } => {
                 consumed_effect_zone_choice = true;
+                observations.zone_choices.push(cards.clone());
                 let pick = preferred
                     .iter()
                     .copied()
                     .find(|id| cards.contains(id))
                     .or_else(|| cards.first().copied())
                     .expect("zone choice candidate");
-                runner
-                    .act(GameAction::SelectCards { cards: vec![pick] })
-                    .expect("choose zone cards");
+                act_recorded(
+                    runner,
+                    GameAction::SelectCards { cards: vec![pick] },
+                    observations,
+                )
+                .expect("choose zone cards");
             }
             WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
                 if let Some(pref) = preferred.first() {
@@ -324,7 +376,7 @@ fn drain_priority_preferring(
                     .expect("multi-target select");
             }
             _ => {
-                if runner.act(GameAction::PassPriority).is_err() {
+                if act_recorded(runner, GameAction::PassPriority, observations).is_err() {
                     return consumed_effect_zone_choice;
                 }
             }
@@ -437,6 +489,10 @@ fn next_of_kin_delayed_reattach_shape() {
         !effect_is_unimplemented(&execute.effect),
         "Next of Kin must parse supported: {:?}",
         execute.effect
+    );
+    assert!(
+        execute.optional,
+        "the printed \"you may put\" is the optional action the prompt accepts"
     );
     assert_eq!(
         execute.target_choice_timing,
@@ -870,8 +926,32 @@ fn next_of_kin_offers_command_zone_and_moves_the_chosen_creature() {
     let mut events = Vec::new();
     engine::game::zones::move_to_zone(runner.state_mut(), host, Zone::Graveyard, &mut events);
     process_triggers(runner.state_mut(), &events);
-    drain_priority_preferring(&mut runner, &[command]);
+    let mut observations = DrainObservations::default();
+    let consumed_choice =
+        drain_priority_preferring_observed(&mut runner, &[command], &mut observations);
 
+    assert!(
+        observations.saw_optional,
+        "the printed \"you may\" must reach an OptionalEffectChoice prompt"
+    );
+    assert!(
+        consumed_choice,
+        "the two-candidate put must open a card choice"
+    );
+    assert_eq!(
+        observations.zone_choices.len(),
+        1,
+        "one card-selection prompt for the hand/command union"
+    );
+    let offered = &observations.zone_choices[0];
+    assert!(
+        offered.contains(&hand) && offered.contains(&command),
+        "the choice must contain both the hand and command legs; offered {offered:?}"
+    );
+    assert!(
+        !offered.contains(&exiled),
+        "the exile control must not be an eligible choice; offered {offered:?}"
+    );
     assert_eq!(
         runner.state().objects[&command].zone,
         Zone::Battlefield,
@@ -908,9 +988,10 @@ fn next_of_kin_offers_command_zone_and_moves_the_chosen_creature() {
     );
 }
 
-/// The single-eligible shortcut must also move from the object's real zone:
-/// with only a command-zone candidate there is no `EffectZoneChoice` prompt, so
-/// a resolver that assumes the first scan zone (Hand) would move nothing.
+/// The single-eligible shortcut must move the command-zone candidate without a
+/// card-choice prompt, and the move must record Command as its origin. The
+/// object's actual zone is the authority for that origin; the move is driven
+/// through the production trigger and priority pipeline, not a direct mover.
 #[test]
 fn next_of_kin_single_command_zone_candidate_moves_without_a_hand_leg() {
     let mut scenario = GameScenario::new();
@@ -941,19 +1022,28 @@ fn next_of_kin_single_command_zone_candidate_moves_without_a_hand_leg() {
     let mut events = Vec::new();
     engine::game::zones::move_to_zone(runner.state_mut(), host, Zone::Graveyard, &mut events);
     process_triggers(runner.state_mut(), &events);
-    drain_priority(&mut runner);
+    let mut observations = DrainObservations::default();
+    let consumed_choice = drain_priority_preferring_observed(&mut runner, &[], &mut observations);
 
+    assert!(
+        observations.saw_optional,
+        "the printed \"you may\" must still reach an OptionalEffectChoice prompt"
+    );
+    assert!(
+        !consumed_choice && observations.zone_choices.is_empty(),
+        "one eligible card must not open a card-choice prompt"
+    );
+    assert!(
+        observations.zone_changes.iter().any(|(id, from, to)| {
+            *id == command && *from == Some(Zone::Command) && *to == Zone::Battlefield
+        }),
+        "the emitted zone-change event must record Command as the move origin; got {:?}",
+        observations.zone_changes
+    );
     assert_eq!(
         runner.state().objects[&command].zone,
         Zone::Battlefield,
         "the lone command-zone candidate must move from Command, not the first scan zone"
-    );
-    assert!(
-        !matches!(
-            runner.state().waiting_for,
-            WaitingFor::EffectZoneChoice { .. }
-        ),
-        "one eligible card must not open a card-choice prompt"
     );
 
     runner.advance_to_end_step();
@@ -998,16 +1088,24 @@ fn next_of_kin_ignores_a_creature_outside_hand_and_command() {
     let mut events = Vec::new();
     engine::game::zones::move_to_zone(runner.state_mut(), host, Zone::Graveyard, &mut events);
     process_triggers(runner.state_mut(), &events);
-    assert!(
-        !runner.state().stack.is_empty()
-            || matches!(
-                runner.state().waiting_for,
-                WaitingFor::OptionalEffectChoice { .. }
-            ),
-        "the dies trigger must reach the stack before the no-legal-card assertion"
-    );
-    drain_priority(&mut runner);
+    let mut observations = DrainObservations::default();
+    let consumed_choice = drain_priority_preferring_observed(&mut runner, &[], &mut observations);
 
+    assert!(
+        observations.saw_optional,
+        "the dies trigger must reach its \"you may\" prompt before the no-legal-card assertion"
+    );
+    assert!(
+        !consumed_choice && observations.zone_choices.is_empty(),
+        "no legal card means no card-selection prompt"
+    );
+    assert!(
+        !observations
+            .zone_changes
+            .iter()
+            .any(|(id, _, _)| *id == exiled),
+        "the exile control must not move"
+    );
     assert_eq!(
         runner.state().objects[&exiled].zone,
         Zone::Exile,

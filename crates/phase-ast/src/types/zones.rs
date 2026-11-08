@@ -70,11 +70,15 @@ impl Zone {
     ///   `filter::is_owner_scoped_zone` delegates here. A player-scoped query
     ///   over a per-player zone reads the card's OWNER, because CR 400.3 sends a
     ///   card to its owner's copy of such a zone.
-    /// * At parse time it is the possessor question. Only a per-player zone can
-    ///   be written with a possessor ("your graveyard"), so a SHARED zone's
-    ///   absent possessor ("in exile") carries no information about whose cards
-    ///   the phrase names and must not be read as a conflicting possessor when a
-    ///   zone list mixes the two ("in exile and in your graveyard").
+    /// * At parse time it governs how a zone LIST's qualifiers reduce. A
+    ///   per-player zone's possessive ("your graveyard") names whose cards the
+    ///   phrase includes; a SHARED zone's unpossessive `Plain` form ("in
+    ///   exile") carries no possessor information and must not be read as a
+    ///   conflicting possessor when a zone list mixes the two ("in exile and in
+    ///   your graveyard"). Shared zones can still be written with a possessor
+    ///   in other positions ("your command zone"), which the grammar encodes
+    ///   directly — this partition only decides whether a list's qualifiers
+    ///   conflict.
     ///
     /// Exhaustive rather than a `matches!` so that adding a `Zone` variant is a
     /// compile error forcing an explicit per-player/shared decision — that is a

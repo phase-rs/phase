@@ -18530,4 +18530,36 @@ mod change_zone_target_choice_timing_tests {
             "an explicit off-battlefield origin is unchanged",
         );
     }
+
+    /// Real-card witness for the wider class the multi-zone timing rule covers:
+    /// a hand/graveyard put that reaches this classifier through the literal
+    /// origin table rather than the new zone-list grammar. Swift Warkite is one
+    /// of nine cards whose put choice was still Stack-timed at base.
+    #[test]
+    fn real_hand_or_graveyard_put_is_resolution_timed() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Flying\nWhen this creature enters, you may put a creature card with mana value 3 or less from your hand or graveyard onto the battlefield. That creature gains haste. Return it to your hand at the beginning of the next end step.",
+            "Swift Warkite",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let trigger = parsed.triggers.first().expect("Swift Warkite ETB trigger");
+        let execute = trigger.execute.as_ref().expect("ETB execute");
+        assert_eq!(
+            execute.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "the hand/graveyard put is a resolution choice, not a stack target"
+        );
+        let Effect::ChangeZone { origin, target, .. } = execute.effect.as_ref() else {
+            panic!(
+                "Swift Warkite ETB must be ChangeZone, got {:?}",
+                execute.effect
+            );
+        };
+        assert_eq!(origin, &None);
+        let zones = target.extract_zones();
+        assert!(zones.contains(&Zone::Hand));
+        assert!(zones.contains(&Zone::Graveyard));
+    }
 }
