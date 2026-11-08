@@ -3719,10 +3719,33 @@ pub fn trigger_definition_functions_in_zone(def: &TriggerDefinition, zone: Zone)
     }
 }
 
+/// CR 701.17a + CR 119.3: the life a per-card mill observer gains its controller each time it
+/// fires, when that fixed gain is the only thing its resolution can do.
+pub(crate) fn milled_observer_life_gain(def: &TriggerDefinition) -> Option<i64> {
+    let execute = def.execute.as_deref()?;
+    let Effect::GainLife {
+        amount: QuantityExpr::Fixed { value },
+        player: TargetFilter::Controller,
+    } = *execute.effect
+    else {
+        return None;
+    };
+    let mut bare = AbilityDefinition::new(execute.kind, (*execute.effect).clone());
+    bare.description = execute.description.clone();
+    (def.mode == TriggerMode::Milled
+        && !def.batched
+        && !def.optional
+        && def.unless_pay.is_none()
+        && value > 0
+        && bare == *execute)
+        .then_some(i64::from(value))
+}
+
 /// CR 701.17a: a mill puts a card from the top of a library into a graveyard; CR 614.6
 /// lets a replacement send it elsewhere instead, so the shapes a certified id can have
 /// taken are its own landing zone and the graveyard — and only a matcher that excludes
-/// ALL of them provably cannot fire on one. Returns `true` iff so.
+/// ALL of them provably cannot fire on one. Returns `true` iff so, or for a relieved mill
+/// observer ([`milled_observer_life_gain`]).
 ///
 /// Fail-closed: every axis this predicate cannot classify keeps the caller's conservative veto.
 ///
@@ -3757,13 +3780,15 @@ pub(crate) fn departure_observer_provably_excludes(
     class_event_keys: &[crate::types::triggers::TriggerEventKey],
 ) -> bool {
     match def.mode {
-        // CR 701.17a: these fire on the mill by definition. This arm is UNCONDITIONAL and
-        // runs FIRST, which is why the caller carries no separate
+        // CR 701.17a: these fire on the mill by definition. This arm runs FIRST, which is
+        // why the caller carries no separate
         // `TriggerEventKey::Milled` conjunct: `trigger_index::keys_from_trigger_def`
         // sources that key from exactly these three modes, so no definition carrying it
         // reaches the delegation arm at all — and the verdict here is invariant under
-        // which EVENT ends up carrying the mill key.
-        TriggerMode::Milled | TriggerMode::MilledOnce | TriggerMode::MilledAll => false,
+        // which EVENT ends up carrying the mill key. A relieved observer passes here, and the
+        // caller checks that nothing reads the life it writes.
+        TriggerMode::Milled => milled_observer_life_gain(def).is_some(),
+        TriggerMode::MilledOnce | TriggerMode::MilledAll => false,
         TriggerMode::ChangesZone | TriggerMode::ChangesZoneAll => {
             // Fail closed on the fields that make an `origin`/`destination`-based proof
             // invalid: a disjunctive clause list, a non-empty `origin_zones` (when it is
@@ -56754,5 +56779,116 @@ mod object_sweep_sharing_tests {
             clear_post_collection_transients,
             reference_clear_post_collection_transients,
         );
+    }
+}
+
+#[cfg(test)]
+mod milled_observer_life_gain_tests {
+    use super::*;
+    use crate::types::ability::UnlessPayModifier;
+
+    /// The `Milled` trigger of a printed creature card, from its verbatim Oracle text.
+    fn milled_trigger(name: &str, oracle: &str) -> TriggerDefinition {
+        crate::parser::parse_oracle_text(oracle, name, &[], &["Creature".to_string()], &[])
+            .triggers
+            .into_iter()
+            .find(|def| def.mode == TriggerMode::Milled)
+            .expect("the card has a mill trigger")
+    }
+
+    fn glowing_one() -> TriggerDefinition {
+        milled_trigger(
+            "Glowing One",
+            "Deathtouch\nWhenever this creature deals combat damage to a player, they get four \
+             rad counters.\nWhenever a player mills a nonland card, you gain 1 life.",
+        )
+    }
+
+    fn zellix_execute() -> AbilityDefinition {
+        *milled_trigger(
+            "Zellix, Sanity Flayer",
+            "Hive Mind — Whenever a player mills one or more creature cards, you create a 1/1 \
+             black Horror creature token.\n{1}, {T}: Target player mills three cards.\nChoose a \
+             Background (You can have a Background as a second commander.)",
+        )
+        .execute
+        .expect("Zellix's mill trigger creates a token")
+    }
+
+    /// Glowing One with one field changed by `edit`.
+    fn edited(edit: impl FnOnce(&mut TriggerDefinition)) -> Option<i64> {
+        let mut def = glowing_one();
+        edit(&mut def);
+        milled_observer_life_gain(&def)
+    }
+
+    fn edited_gain(amount: QuantityExpr, player: TargetFilter) -> Option<i64> {
+        edited(|def| {
+            *def.execute.as_mut().expect("Glowing One gains life").effect =
+                Effect::GainLife { amount, player };
+        })
+    }
+
+    /// CR 701.17a + CR 119.3: Glowing One's mill trigger gains its controller a fixed 1 life and
+    /// does nothing else; each single field that lets the resolution do more, or less, refuses.
+    #[test]
+    fn only_a_bare_fixed_controller_life_gain_per_card_is_relieved() {
+        assert_eq!(milled_observer_life_gain(&glowing_one()), Some(1));
+        let refused = [
+            ("batched", edited(|def| def.batched = true)),
+            ("optional", edited(|def| def.optional = true)),
+            (
+                "unless_pay",
+                edited(|def| {
+                    def.unless_pay = Some(UnlessPayModifier {
+                        cost: AbilityCost::Tap,
+                        payer: TargetFilter::Controller,
+                    })
+                }),
+            ),
+            (
+                "MilledOnce",
+                edited(|def| def.mode = TriggerMode::MilledOnce),
+            ),
+            (
+                "execute.optional",
+                edited(|def| def.execute.as_mut().expect("execute").optional = true),
+            ),
+            (
+                "execute.sub_ability",
+                edited(|def| {
+                    def.execute.as_mut().expect("execute").sub_ability =
+                        Some(Box::new(zellix_execute()))
+                }),
+            ),
+            (
+                "execute.effect",
+                edited(|def| {
+                    def.execute.as_mut().expect("execute").effect = zellix_execute().effect
+                }),
+            ),
+            (
+                "player",
+                edited_gain(QuantityExpr::Fixed { value: 1 }, TargetFilter::Opponent),
+            ),
+            (
+                "amount",
+                edited_gain(
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal {
+                            player: PlayerScope::Controller,
+                        },
+                    },
+                    TargetFilter::Controller,
+                ),
+            ),
+            (
+                "zero",
+                edited_gain(QuantityExpr::Fixed { value: 0 }, TargetFilter::Controller),
+            ),
+        ];
+        for (field, verdict) in refused {
+            assert_eq!(verdict, None, "{field}");
+        }
     }
 }

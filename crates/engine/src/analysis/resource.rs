@@ -1036,7 +1036,7 @@ pub(crate) fn repetition_growth(
     let charge = |frames: &[&GameState]| -> (ResourceVector, BTreeMap<PlayerId, i64>) {
         match (frames.first(), frames.last()) {
             (Some(&start), Some(&end)) => {
-                let delta = ResourceVector::period(start, end);
+                let delta = ResourceVector::published_period(start, end);
                 let frame_wise = delta.with_frame_wise_life_loss(frames).life;
                 (delta, frame_wise)
             }
@@ -3558,6 +3558,28 @@ impl ResourceVector {
         }
         out
     }
+
+    /// CR 119.3: this delta without the life the relieved mill observers gained.
+    pub(crate) fn without_relieved_life(&self, relieved: &BTreeMap<PlayerId, i64>) -> Self {
+        let mut out = self.clone();
+        for (player, gain) in relieved {
+            let entry = out.life.entry(*player).or_insert(0);
+            *entry -= gain;
+            if *entry == 0 {
+                out.life.remove(player);
+            }
+        }
+        out
+    }
+
+    /// CR 401.2 + CR 732.2a: the delta an offer publishes for the period `before` -> `after`.
+    pub(crate) fn published_period(before: &GameState, after: &GameState) -> ResourceVector {
+        let delta = Self::period(before, after);
+        match certify_instructed_library_departure(before, after, [before, after]) {
+            Some(certified) => delta.without_relieved_life(&certified.relieved_life),
+            None => delta,
+        }
+    }
 }
 
 /// Whether a resource axis is *consumed* (spendable inside a loop) or purely
@@ -5026,6 +5048,8 @@ pub(crate) struct CertifiedInstructedDeparture {
     /// than subtracting a sign it has to remember. `BTreeMap<PlayerId, i64>` to match
     /// `ResourceVector::library_delta` at the seam it is added back into.
     pub(crate) per_victim: BTreeMap<PlayerId, i64>,
+    /// CR 119.3: per controller, the life the relieved mill observers gain across the period.
+    pub(crate) relieved_life: BTreeMap<PlayerId, i64>,
 }
 
 /// CR 701.17b: "If instructed to do so, they mill as many as possible." The certificate
@@ -5289,6 +5313,33 @@ pub(crate) fn certify_instructed_library_departure(
     }) {
         return None;
     }
+    let mut relieved_life: BTreeMap<PlayerId, i64> = BTreeMap::new();
+    for (source, def) in functioning_board_triggers(current) {
+        if let Some(gain) = crate::game::triggers::milled_observer_life_gain(def) {
+            // CR 603.3a: the trigger's controller, who gains the life, is its source's.
+            *relieved_life.entry(source.controller).or_insert(0) += gain * departed.len() as i64;
+        }
+    }
+    // CR 401.2: which hidden cards a take mills decides how often these fire, so nothing may
+    // read the life they write.
+    if !relieved_life.is_empty() {
+        let life = |frame: &GameState, seat: PlayerId| {
+            frame
+                .players
+                .iter()
+                .find(|player| player.id == seat)
+                .map(|player| i64::from(player.life))
+        };
+        let only_these_writes = relieved_life.iter().all(|(&seat, &gain)| {
+            matches!(
+                (life(prior_order, seat), life(current_order, seat)),
+                (Some(before), Some(after)) if after - before == gain
+            )
+        });
+        if !only_these_writes || life_growth_is_observed(current_order) {
+            return None;
+        }
+    }
     // CR 614.6: a replacement that could divert the departure into a graveyard, or into an
     // unpinned destination, observes the very move certified. The `destination_zone`
     // narrowing keeps ordinary self-entry lands, `(Moved, SelfRef, destination_zone
@@ -5305,6 +5356,7 @@ pub(crate) fn certify_instructed_library_departure(
     Some(CertifiedInstructedDeparture {
         departed,
         per_victim,
+        relieved_life,
     })
 }
 
@@ -8632,12 +8684,20 @@ fn fire_time_conditions_read_projected_resource_scoped(
 fn functioning_board_trigger_defs(
     state: &GameState,
 ) -> impl Iterator<Item = &crate::types::ability::TriggerDefinition> {
+    functioning_board_triggers(state).map(|(_, def)| def)
+}
+
+/// [`functioning_board_trigger_defs`], each beside its source.
+fn functioning_board_triggers(
+    state: &GameState,
+) -> impl Iterator<Item = (&GameObject, &crate::types::ability::TriggerDefinition)> {
     state.objects.values().flat_map(move |obj| {
         crate::game::functioning_abilities::active_trigger_definitions(state, obj)
             .map(|active| active.definition)
             .filter(move |def| {
                 crate::game::triggers::trigger_definition_functions_in_zone(def, obj.zone)
             })
+            .map(move |def| (obj, def))
     })
 }
 
@@ -22652,7 +22712,7 @@ mod tests {
 
     /// **C2 refuses a functioning `Milled` observer, INDEPENDENTLY of the delegation arm.**
     ///
-    /// The arm is unconditional and runs FIRST. To show that is not the delegation arm's
+    /// The arm runs FIRST. To show that is not the delegation arm's
     /// verdict wearing its name, the pair's certified id lands in EXILE, where the derived
     /// event key set holds the exile key alone and the delegation arm WOULD have excluded a
     /// `Milled` definition as disjoint. C2 carries no separate `TriggerEventKey::Milled`
@@ -22687,6 +22747,113 @@ mod tests {
             certify(&prior, &current).is_some(),
             "PAIRED POSITIVE: a battlefield-origin dies trigger is provably excluded by its \
              origin leg and does not veto"
+        );
+    }
+
+    /// Glowing One's "Whenever a player mills a nonland card, you gain 1 life." trigger.
+    fn glowing_one_milled() -> crate::types::ability::TriggerDefinition {
+        crate::parser::parse_oracle_text(
+            "Deathtouch\nWhenever this creature deals combat damage to a player, they get four \
+             rad counters.\nWhenever a player mills a nonland card, you gain 1 life.",
+            "Glowing One",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        )
+        .triggers
+        .into_iter()
+        .find(|def| def.mode == TriggerMode::Milled)
+        .expect("Glowing One has a mill trigger")
+    }
+
+    /// `state`'s life for `seat` raised by `gain`.
+    fn cert_gain(state: &mut GameState, seat: PlayerId, gain: i32) {
+        state
+            .players
+            .iter_mut()
+            .find(|player| player.id == seat)
+            .expect("seat exists")
+            .life += gain;
+    }
+
+    /// CR 119.3 + CR 401.2 + CR 603.3a: a bare life-gain mill observer is relieved only when its
+    /// controller's life moved by exactly its gain per departed card, each seat on its own, and
+    /// nothing reads life.
+    #[test]
+    fn a_relieved_mill_observer_certifies_only_its_own_unread_gain() {
+        let (prior, mut unmoved, _) = cert_pair(Zone::Graveyard);
+        cert_with_observer(&mut unmoved, glowing_one_milled());
+        assert!(
+            certify(&prior, &unmoved).is_none(),
+            "a gain the frames do not show is not this observer's alone"
+        );
+
+        let mut gained = unmoved.clone();
+        cert_gain(&mut gained, CERT_VICTIM, 1);
+        assert_eq!(
+            certify(&prior, &gained).map(|certified| certified.relieved_life),
+            Some(BTreeMap::from([(CERT_VICTIM, 1)]))
+        );
+
+        let mut two_seats = gained.clone();
+        let caster_host = bf_object_owned_by(&mut two_seats, 101, CERT_CASTER);
+        two_seats
+            .objects
+            .get_mut(&caster_host)
+            .expect("just-created board object")
+            .trigger_definitions = vec![glowing_one_milled()].into();
+        assert!(
+            certify(&prior, &two_seats).is_none(),
+            "the caster's observer gained nothing on its own seat"
+        );
+        cert_gain(&mut two_seats, CERT_CASTER, 1);
+        assert_eq!(
+            certify(&prior, &two_seats).map(|certified| certified.relieved_life),
+            Some(BTreeMap::from([(CERT_CASTER, 1), (CERT_VICTIM, 1)]))
+        );
+
+        let life_gained = || crate::types::ability::TriggerDefinition::new(TriggerMode::LifeGained);
+        let mut read = gained.clone();
+        let reader = bf_object_owned_by(&mut read, 102, CERT_VICTIM);
+        read.objects
+            .get_mut(&reader)
+            .expect("just-created board object")
+            .trigger_definitions = vec![life_gained()].into();
+        assert!(
+            certify(&prior, &read).is_none(),
+            "a life-gain trigger reads it"
+        );
+
+        let (prior, mut reader_alone, _) = cert_pair(Zone::Graveyard);
+        cert_with_observer(&mut reader_alone, life_gained());
+        assert!(
+            certify(&prior, &reader_alone).is_some(),
+            "PAIRED POSITIVE: the life-gain trigger alone does not veto the departure"
+        );
+    }
+
+    /// CR 401.2 + CR 732.2a: a repetition milling one card and the next milling two, beside a
+    /// relieved observer, grow the library axis and publish no growth in the life it gained.
+    #[test]
+    fn repetition_growth_publishes_no_relieved_life() {
+        let mut first = GameState::new_two_player(7);
+        let cards = [901, 902, 903].map(|id| cert_library_card(&mut first, id, CERT_VICTIM));
+        cert_with_observer(&mut first, glowing_one_milled());
+        let mut second = first.clone();
+        cert_depart(&mut second, cards[0], Zone::Graveyard);
+        cert_gain(&mut second, CERT_VICTIM, 1);
+        let mut third = second.clone();
+        for &card in &cards[1..] {
+            cert_depart(&mut third, card, Zone::Graveyard);
+        }
+        cert_gain(&mut third, CERT_VICTIM, 2);
+        let (growth, _) = repetition_growth(&[&first, &second], &[&second, &third]);
+        assert_eq!(
+            (
+                growth.life.get(&CERT_VICTIM).copied(),
+                growth.library_delta.get(&CERT_VICTIM).copied()
+            ),
+            (None, Some(-1))
         );
     }
 

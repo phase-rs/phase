@@ -10,14 +10,14 @@ use std::collections::BTreeMap;
 use engine::ai_support::{legal_actions, legal_actions_full};
 use engine::analysis::decision_template::IterationCount;
 use engine::analysis::loop_check::{CountedTake, ShortcutResponse, UnperformableCause, WinKind};
-use engine::analysis::resource::ResourceAxis;
+use engine::analysis::resource::{ObjectGrowthVerdict, PeriodSignature, ResourceAxis};
 use engine::game::engine::{apply, EngineError};
 use engine::game::game_object::{AttachTarget, GameObject};
 use engine::game::interaction::{
     bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
 };
 use engine::game::perf_counters::play_trace_counters;
-use engine::game::period_confirm::{confirm_for_tests, mandatory_reading_for_tests};
+use engine::game::period_confirm::{confirm_for_tests, mandatory_reading_for_tests, OfferRefusal};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::filter_state_for_viewer;
@@ -163,6 +163,10 @@ struct Board {
     seed: Option<u64>,
     /// Poison counters P0 starts with.
     p0_poison: u32,
+    /// P1's library: this many cards, named in turn from the list.
+    p1_library: (usize, &'static [&'static str]),
+    /// The life P1 starts with.
+    p1_life: i32,
 }
 
 #[derive(Debug, PartialEq)]
@@ -359,14 +363,17 @@ fn build(board: Board, mode: LoopDetectionMode) -> Option<Built> {
     if board.wood_elves.is_some() {
         scenario.add_real_card(P0, "Wood Elves", Zone::Battlefield, db);
     }
-    for (seat, swamps) in [(P0, board.wood_elves.unwrap_or(10)), (P1, 10)] {
-        for _ in 0..swamps {
-            scenario.add_real_card(seat, "Swamp", Zone::Library, db);
-        }
+    for _ in 0..board.wood_elves.unwrap_or(10) {
+        scenario.add_real_card(P0, "Swamp", Zone::Library, db);
+    }
+    let (p1_cards, p1_names) = board.p1_library;
+    for &name in p1_names.iter().cycle().take(p1_cards) {
+        scenario.add_real_card(P1, name, Zone::Library, db);
     }
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = mode;
     runner.state_mut().players[0].poison_counters = board.p0_poison;
+    runner.state_mut().players[1].life = board.p1_life;
     if let Some(seed) = board.seed {
         runner.state_mut().rng = GameRng::seed_from_u64(seed);
     }
@@ -736,6 +743,8 @@ const PLAIN: Board = Board {
     dee_kay: false,
     seed: None,
     p0_poison: 0,
+    p1_library: (10, &["Swamp"]),
+    p1_life: 20,
 };
 
 const ANCHOR: Board = Board {
@@ -4977,4 +4986,283 @@ fn offer_seats(state: &GameState) -> (PlayerId, PlayerId) {
         );
     };
     (proposer, if proposer == P0 { P1 } else { P0 })
+}
+
+/// Sixty cards in P1's library, alternately Lightning Bolt ("Lightning Bolt deals 3 damage to any
+/// target.") and Swamp.
+const BOLTS_AND_SWAMPS: (usize, &[&str]) = (60, &["Lightning Bolt", "Swamp"]);
+const SIXTY_SWAMPS: (usize, &[&str]) = (60, &["Swamp"]);
+
+/// The Worldgorger Dragon and Animate Dead loop with Altar of the Brood ("Whenever another
+/// permanent you control enters, each opponent mills a card.") under P0, milling P1's `library`.
+const ALTAR_MILL: Board = Board {
+    p0_cards: &["Altar of the Brood"],
+    p1_library: BOLTS_AND_SWAMPS,
+    ..PLAIN
+};
+
+/// The offer at `state`: its count, its unbounded axes, and P1's library at the ask.
+fn mill_offer(state: &GameState) -> (IterationCount, Vec<ResourceAxis>, usize) {
+    let WaitingFor::LoopShortcut { certificate, .. } = &state.waiting_for else {
+        panic!(
+            "expected a loop-shortcut offer, got {:?}",
+            state.waiting_for
+        );
+    };
+    (
+        offer_schema(state).0,
+        certificate.unbounded.clone(),
+        state.library_of(P1).len(),
+    )
+}
+
+/// The life one repetition of the offer at `state` moves, by seat.
+fn per_cycle_life(state: &GameState) -> BTreeMap<PlayerId, i64> {
+    let WaitingFor::LoopShortcut { certificate, .. } = &state.waiting_for else {
+        panic!(
+            "expected a loop-shortcut offer, got {:?}",
+            state.waiting_for
+        );
+    };
+    match certificate
+        .per_cycle
+        .as_ref()
+        .expect("the offer states its period")
+    {
+        PeriodSignature::EveryRepetition(period) | PeriodSignature::OneRepetition(period) => {
+            period.delta.life.clone()
+        }
+    }
+}
+
+/// Asserts `board`'s loop replays a period, runs past P1 library 58, where the board without its
+/// additions is offered, is never offered, and is refused by the cover.
+fn assert_mill_loop_refused(board: Board, leg: &str) {
+    let Some(played) = run(board, LoopDetectionMode::Interactive, Drive::Pass, 40) else {
+        return;
+    };
+    assert_eq!(played.terminal, Terminal::BeatsExhausted, "{leg}");
+    assert!(
+        played.replays.iter().any(|&(_, _, replays)| replays > 0)
+            && played.state().library_of(P1).len() < 58,
+        "{leg}: reach: a period was replayed and the loop ran past the control's ask"
+    );
+    let verdicts: Vec<_> = confirm_for_tests(played.state())
+        .into_iter()
+        .map(|(_, verdict)| verdict)
+        .collect();
+    assert!(
+        verdicts.contains(&Err(OfferRefusal::Cover(
+            ObjectGrowthVerdict::ResourceRecurrence(None)
+        ))) && verdicts.iter().all(Result::is_err),
+        "{leg}: {verdicts:?}"
+    );
+}
+
+/// CR 701.17a + CR 603.2 + CR 401.2 + CR 732.2a: Altar of the Brood mills P1 two cards each
+/// repetition, and Glowing One ("Deathtouch / Whenever this creature deals combat damage to a
+/// player, they get four rad counters. / Whenever a player mills a nonland card, you gain 1
+/// life.") under P1 gains P1 1 life for each nonland card among them. Which cards those are is
+/// hidden and nothing reads P1's life, so the loop against P1's `library` is offered as it is
+/// without Glowing One, and P0's take of `take` repetitions empties P1's library and leaves P1 at
+/// `life_after`.
+fn assert_offered_as_without_glowing_one(
+    library: (usize, &'static [&'static str]),
+    take: u32,
+    life_after: i32,
+) {
+    let leg = format!("{library:?}");
+    let without = Board {
+        p1_library: library,
+        ..ALTAR_MILL
+    };
+    let with = Board {
+        p1_cards: &["Glowing One"],
+        ..without
+    };
+    let (Some(offered), Some(control)) = (
+        run(with, LoopDetectionMode::Interactive, Drive::Pass, 120),
+        run(without, LoopDetectionMode::Interactive, Drive::Pass, 120),
+    ) else {
+        return;
+    };
+    assert_eq!(
+        offered.terminal,
+        Terminal::Offer {
+            predicted_winner: None,
+            mandatory: false
+        },
+        "{leg}"
+    );
+    assert_eq!(
+        mill_offer(offered.state()),
+        (
+            IterationCount::Fixed(1000),
+            vec![ResourceAxis::LibraryDelta(P1)],
+            58
+        ),
+        "{leg}"
+    );
+    assert_eq!(
+        mill_offer(offered.state()),
+        mill_offer(control.state()),
+        "{leg}"
+    );
+    let (taken, _) = accepted_take(offered.state(), take, &leg);
+    assert_eq!(
+        (taken.library_of(P1).len(), taken.players[1].life),
+        (0, life_after),
+        "{leg}"
+    );
+}
+
+/// After the offered 1000 repetitions P1 has milled its 30 Bolts and gained 1 life for each.
+#[test]
+fn a_mill_observer_that_only_gains_its_controller_life_is_offered_as_without_it() {
+    assert_offered_as_without_glowing_one(BOLTS_AND_SWAMPS, 1000, 50);
+}
+
+/// Swamps are land cards, so the 29 repetitions that mill P1's last 58 cards gain P1 nothing.
+#[test]
+fn a_mill_observer_of_only_land_cards_is_offered_as_without_it() {
+    assert_offered_as_without_glowing_one(SIXTY_SWAMPS, 29, 20);
+}
+
+/// CR 120.3a + CR 401.2 + CR 732.2a: with Impact Tremors ("Whenever a creature you control
+/// enters, this enchantment deals 1 damage to each opponent.") under P0, P1 loses 1 life a
+/// repetition beside Glowing One's hidden gains, so when P1 reaches 0 is no predictable result.
+#[test]
+fn a_relieved_mill_observer_beside_other_life_motion_is_refused() {
+    assert_mill_loop_refused(
+        Board {
+            p1_cards: &["Glowing One"],
+            tremors: true,
+            ..ALTAR_MILL
+        },
+        "Impact Tremors",
+    );
+}
+
+/// CR 603.2 + CR 401.2: Ajani's Pridemate ("Whenever you gain life, put a +1/+1 counter on this
+/// creature.") under P1 reads each of Glowing One's gains, so its counters rest on hidden cards.
+#[test]
+fn a_relieved_mill_observer_whose_gain_is_read_is_refused() {
+    assert_mill_loop_refused(
+        Board {
+            p1_cards: &["Glowing One", "Ajani's Pridemate"],
+            ..ALTAR_MILL
+        },
+        "Ajani's Pridemate",
+    );
+}
+
+/// CR 603.2 + CR 401.2: Zellix, Sanity Flayer ("Hive Mind — Whenever a player mills one or more
+/// creature cards, you create a 1/1 black Horror creature token. / {1}, {T}: Target player mills
+/// three cards. / Choose a Background (You can have a Background as a second commander.)") under
+/// P1 creates a token when hidden cards are creatures, so the board the period carries rests on
+/// them.
+#[test]
+fn a_mill_observer_that_writes_the_board_is_refused() {
+    assert_mill_loop_refused(
+        Board {
+            p1_cards: &["Zellix, Sanity Flayer"],
+            ..ALTAR_MILL
+        },
+        "Zellix",
+    );
+}
+
+/// CR 603.6a + CR 120.3a + CR 704.5a + CR 603.3a + CR 401.2: with Impact Tremors and Glowing One
+/// under P0, the Dragon and Glowing One enter each repetition, so P1 loses 2 life a repetition and
+/// reaches 0 at the tenth. Glowing One gains P0, its controller, life for the hidden nonland cards
+/// milled, so no published axis carries P0's life, and a take of 10 ends the game.
+#[test]
+fn a_controller_gain_beside_a_lethal_drain_is_published_on_no_axis() {
+    for library in [BOLTS_AND_SWAMPS, SIXTY_SWAMPS] {
+        let leg = format!("{library:?}");
+        let board = Board {
+            p0_cards: &["Altar of the Brood", "Glowing One"],
+            tremors: true,
+            p1_library: library,
+            ..PLAIN
+        };
+        let Some(offered) = run(board, LoopDetectionMode::Interactive, Drive::Pass, 120) else {
+            return;
+        };
+        assert_eq!(
+            offered.terminal,
+            Terminal::Offer {
+                predicted_winner: Some(P0),
+                mandatory: false
+            },
+            "{leg}"
+        );
+        let state = offered.state();
+        let WaitingFor::LoopShortcut { certificate, .. } = &state.waiting_for else {
+            unreachable!("the terminal above is an offer");
+        };
+        assert_eq!(
+            (offer_schema(state).0, certificate.win_kind),
+            (IterationCount::Fixed(10), Some(WinKind::LethalDamage)),
+            "{leg}"
+        );
+        assert!(
+            !certificate.unbounded.contains(&ResourceAxis::Life(P0))
+                && !certificate.rising.contains(&ResourceAxis::Life(P0)),
+            "{leg}: {certificate:?}"
+        );
+        assert_eq!(per_cycle_life(state), BTreeMap::from([(P1, -2)]), "{leg}");
+        assert_take_wins(state, 10, &leg);
+    }
+}
+
+/// CR 704.5a + CR 732.2a: the same board with P1 at 4 life is at 3 at the ask and dies in the
+/// second repetition, so the counted offer is 2, and its one repetition carries no P0 life.
+#[test]
+fn a_counted_controller_gain_beside_a_lethal_drain_is_published_on_no_axis() {
+    let board = Board {
+        p0_cards: &["Altar of the Brood", "Glowing One"],
+        tremors: true,
+        p1_life: 4,
+        ..ALTAR_MILL
+    };
+    let Some(offered) = run(board, LoopDetectionMode::Interactive, Drive::Pass, 120) else {
+        return;
+    };
+    assert_eq!(
+        offered.terminal,
+        Terminal::Offer {
+            predicted_winner: Some(P0),
+            mandatory: false
+        }
+    );
+    let state = offered.state();
+    let WaitingFor::LoopShortcut { certificate, .. } = &state.waiting_for else {
+        unreachable!("the terminal above is an offer");
+    };
+    assert_eq!(
+        (offer_schema(state).0, certificate.win_kind),
+        (IterationCount::Fixed(2), Some(WinKind::LethalDamage))
+    );
+    assert_eq!(per_cycle_life(state), BTreeMap::from([(P1, -2)]));
+    assert_take_wins(state, 2, "P1 at 4 life");
+}
+
+/// P0's `Fixed(n)` declaration at `offered`, accepted by P1, ends the game with P1 at 0 life and P0
+/// the winner (CR 704.5a).
+fn assert_take_wins(offered: &GameState, n: u32, leg: &str) {
+    let (proposed, _) = admitted(offered, P0, declare(IterationCount::Fixed(n)), leg);
+    let (taken, _) = admitted(
+        &proposed,
+        P1,
+        GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        },
+        leg,
+    );
+    assert_eq!(
+        (&taken.waiting_for, taken.players[1].life),
+        (&WaitingFor::GameOver { winner: Some(P0) }, 0),
+        "{leg}"
+    );
 }

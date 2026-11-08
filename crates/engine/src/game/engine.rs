@@ -7834,7 +7834,7 @@ pub(crate) fn replay_bounded_offer(
     let &prior = window.first().ok_or(OfferRefusal::NoRecurrence)?;
     let periodic = crate::analysis::resource::PeriodicDelta {
         frames_per_period: window.len() as u32,
-        delta: crate::analysis::resource::ResourceVector::period(prior, current),
+        delta: crate::analysis::resource::ResourceVector::published_period(prior, current),
         victim_slot: Vec::new(),
         declarable_victims: Vec::new(),
         forced_aims: Vec::new(),
@@ -7915,12 +7915,18 @@ pub(crate) fn period_sign_check(
     // loss one — CR 121.4 / CR 104.3c / CR 704.5b lose a player for DRAWING from an empty
     // library, never for milling one. `has_no_loss_axis` is therefore
     // asked about the delta with the certified departure added back, and ONLY it:
-    // `progress_for`, `life_falls_for` and `driving_resources_non_decreasing` keep the full delta, and
+    // `progress_for`, `life_falls_for` and `driving_resources_non_decreasing` keep the delta
+    // without it added back, and
     // `has_no_loss_axis` itself is not edited — its other call sites are the CR 732.4
     // mandatory-draw arms, where relieving this would turn an unbreakable mandatory mill loop
     // into a draw (CR 104.4b needs the game state to REPEAT, and a shrinking library does not).
     let certified_departure =
         crate::analysis::resource::certify_instructed_library_departure(s_n1, s_n2, [s_n1, s_n2]);
+    // CR 401.2 + CR 732.2a: the relieved observers' gain rests on hidden cards, so no axis,
+    // progress included, reads it.
+    if let Some(certified) = &certified_departure {
+        delta = delta.without_relieved_life(&certified.relieved_life);
+    }
     let sign_check_delta = match &certified_departure {
         Some(certified) => delta.without_certified_departure(&certified.per_victim),
         None => delta.clone(),
@@ -7975,7 +7981,7 @@ pub(crate) fn counted_offer(
         per_cycle: Some(crate::analysis::resource::PeriodSignature::OneRepetition(
             crate::analysis::resource::PeriodicDelta {
                 frames_per_period: frames.len() as u32 - 1,
-                delta: crate::analysis::resource::ResourceVector::period(prior, current),
+                delta: crate::analysis::resource::ResourceVector::published_period(prior, current),
                 victim_slot: Vec::new(),
                 declarable_victims: Vec::new(),
                 forced_aims: Vec::new(),

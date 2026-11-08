@@ -6044,8 +6044,9 @@ fn scan_count_scope(x: &CountScope) -> Axes<'_> {
 
 /// Axis 3: does this resolved ability (and its chain/conditions) read a
 /// projected player-level resource or journal? (`analysis::resource` item 4.)
+/// CR 732.2a: every caller is loop analysis, so it asks the loop firewall's mode.
 pub(crate) fn ability_reads_projected_resource(ability: &ResolvedAbility) -> bool {
-    resolved_ability_axes(ability, ScanMode::Conservative).projected
+    resolved_ability_axes(ability, ScanMode::LoopFirewall).projected
 }
 
 /// Axis 1: does this resolved ability read the concrete triggering-event /
@@ -13124,6 +13125,69 @@ mod tests {
             }),
         ];
         assert_eq!(retained, [(true, true, true); 3]);
+    }
+
+    /// CR 732.2a: Worldgorger Dragon's two mass moves read no life total, mana pool, counter or
+    /// per-turn journal, so a stack entry of either is no projected read; an entry rider that
+    /// counts its controller's life is one.
+    #[test]
+    fn a_mass_move_of_permanents_reads_no_projected_resource() {
+        let parsed = printed_creature(
+            "Worldgorger Dragon",
+            "Flying, trample\nWhen this creature enters, exile all other permanents you \
+             control.\nWhen this creature leaves the battlefield, return the exiled cards to \
+             the battlefield under their owners' control.",
+        );
+        let moves: Vec<ResolvedAbility> = parsed
+            .triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref())
+            .filter(|execute| matches!(*execute.effect, Effect::ChangeZoneAll { .. }))
+            .map(|execute| {
+                crate::game::ability_utils::build_resolved_from_def(
+                    execute,
+                    ObjectId(1),
+                    PlayerId(0),
+                )
+            })
+            .collect();
+        assert_eq!(moves.len(), 2, "reach: both triggers are mass moves");
+        for ability in &moves {
+            assert!(
+                !ability_reads_projected_resource(ability),
+                "{:?}",
+                ability.effect
+            );
+        }
+
+        let life_counted = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Exile),
+                destination: Zone::Battlefield,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![(
+                    CounterType::Plus1Plus1,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal {
+                            player: PlayerScope::Controller,
+                        },
+                    },
+                )],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert!(ability_reads_projected_resource(&life_counted));
     }
 
     fn copy_of_target(source_filter: Option<TargetFilter>) -> Effect {
