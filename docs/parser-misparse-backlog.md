@@ -21,6 +21,7 @@ The owner/phasing repairs in PR #10635 retain distinct binding authorities:
 - Coordinated owner instructions preserve the actor through the shuffle and draw. Gandalf, Wandering Wizard draws three for its owner even under another player's control; Oblation draws two for the selected permanent's owner.
 - An owner-population shuffle uses the selected objects' owners, but does not rewrite an explicit origin possessor. A stolen Elixir of Immortality still moves its activator's graveyard.
 - Compound phasing distinguishes an announced optional target from an untargeted combat partner. Dream Fighter captures the partner's incarnation when the trigger binds: blinking that partner does not phase out the returned object, including after save/restore. Ordinary mixed source/creature filters still phase out only their announced target.
+- Authoritative raw and trusted restores reject a constructed combat-phase instruction whose live battlefield partner lacks a captured incarnation. Exact stale pins and already-departed partners remain admissible; unplaced trigger blueprints are not mistaken for constructed stack abilities.
 - A target filter containing only properties is still constrained. Forge of Heroes retains both commander designation and entry-this-turn restrictions.
 - An untargeted Aura-host instruction remains a resolution-time attachment operand. Watery Grasp can shuffle its enchanted creature into that creature's owner's library after the host gains shroud; the activation does not announce the host as a target.
 
