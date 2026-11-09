@@ -16422,7 +16422,7 @@ fn phase_out_context_union_requires_parent(effect: &Effect) -> Option<bool> {
     fn requires_parent(filter: &TargetFilter) -> Option<bool> {
         match filter {
             TargetFilter::ParentTarget => Some(true),
-            TargetFilter::SelfRef => Some(false),
+            TargetFilter::SelfRef | TargetFilter::TriggeringSource => Some(false),
             TargetFilter::Or { filters } => filters.iter().try_fold(true, |dependent, filter| {
                 // Inspect every child, even after SelfRef: unsupported later leaves
                 // must invalidate the proof rather than inherit independence.
@@ -16463,7 +16463,6 @@ fn phase_out_context_union_requires_parent(effect: &Effect) -> Option<bool> {
             | TargetFilter::TriggeringSpellController
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringPlayer
-            | TargetFilter::TriggeringSource
             | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::EventTarget
             | TargetFilter::TriggeringSourceController
@@ -16491,7 +16490,9 @@ fn phase_out_context_union_requires_parent(effect: &Effect) -> Option<bool> {
     match effect {
         Effect::PhaseOut {
             target: target @ TargetFilter::Or { .. },
-        } => requires_parent(target),
+        } if crate::types::ability::phase_out_filter_is_context_union(target) => {
+            requires_parent(target)
+        }
         _ => None,
     }
 }
@@ -29304,6 +29305,21 @@ mod tests {
                         Or {
                             filters: vec![TargetFilter::Any],
                         },
+                    ],
+                },
+                None,
+            ),
+            (
+                Or {
+                    filters: vec![ParentTarget, TargetFilter::TriggeringSource],
+                },
+                Some(false),
+            ),
+            (
+                Or {
+                    filters: vec![
+                        SelfRef,
+                        TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
                     ],
                 },
                 None,

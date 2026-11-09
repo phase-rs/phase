@@ -97,6 +97,7 @@ mod frostcliff_siege_anchor_word_modes;
 mod gaeas_liege;
 mod galion_elvenkings_butler_attack_pt_set;
 mod game_over_clears_pending_resolution_choice;
+mod gandalf_owner_shuffle_and_draw;
 mod giggling_skitterspike_issue_890;
 mod gimbal_gremlin_prodigy;
 mod goaded_creature_under_pacifism_visible;
@@ -306,6 +307,7 @@ mod swords_target_legality_recheck;
 mod three_opponent_drain_shortcut;
 mod tromokratis;
 mod veteran_bodyguard_tap_redirect;
+mod watery_grasp_resolution_host;
 mod yurlok_of_scorch_thrash;
 mod zenos_yae_galvus_chosen_object;
 

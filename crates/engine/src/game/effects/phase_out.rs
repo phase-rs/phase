@@ -16,14 +16,15 @@ use std::collections::HashSet;
 use crate::game::filter::{
     matches_target_filter, matches_target_filter_including_phased_out, FilterContext,
 };
-use crate::game::game_object::PhaseOutCause;
+use crate::game::game_object::{ObjectIncarnationRefExt, PhaseOutCause};
 use crate::game::phasing::{phase_in_object, phase_in_player, phase_out_object, phase_out_player};
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    phase_out_filter_is_context_union, Effect, EffectError, EffectKind, ResolvedAbility,
+    TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 
 /// CR 702.26a: Resolve `Effect::PhaseOut` by phasing out every targeted
 /// permanent (or every permanent matching the effect's mass filter, e.g.
@@ -153,6 +154,70 @@ fn attachment_host_in_set(state: &GameState, oid: ObjectId, targets: &HashSet<Ob
         .is_some_and(|host| targets.contains(&host))
 }
 
+/// CR 509.1 + CR 608.2k: a blocking trigger's "that creature" is its combat
+/// partner. The event-only parent reader owns both blocking orientations.
+fn phase_out_event_referent(
+    state: &GameState,
+    source_id: ObjectId,
+    event: &GameEvent,
+) -> Option<ObjectId> {
+    let filter = match event {
+        GameEvent::BlockersDeclared { .. }
+        | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. } => TargetFilter::ParentTarget,
+        _ => TargetFilter::TriggeringSource,
+    };
+    crate::game::targeting::resolve_event_context_target_for_event_or_state(
+        state,
+        &filter,
+        source_id,
+        Some(event),
+    )
+    .and_then(|target| match target {
+        TargetRef::Object(id) => Some(id),
+        TargetRef::Player(_) => None,
+    })
+}
+
+/// CR 400.7 + CR 603.3 + CR 608.2k: capture event referents before response
+/// priority, independently of announced targets. Existing serialized context
+/// pins preserve these identities across saves and non-declaring continuations.
+pub(crate) fn seed_event_context_pins(
+    state: &GameState,
+    ability: &mut ResolvedAbility,
+    event: &GameEvent,
+) {
+    fn uses_triggering_source(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::Or { filters } => filters.iter().any(uses_triggering_source),
+            other => matches!(other, TargetFilter::TriggeringSource),
+        }
+    }
+    if let Effect::PhaseOut {
+        target: target @ TargetFilter::Or { .. },
+    } = &ability.effect
+    {
+        if phase_out_filter_is_context_union(target) && uses_triggering_source(target) {
+            if let Some(pin) = phase_out_event_referent(state, ability.source_id, event)
+                .and_then(|id| state.objects.get(&id))
+                .map(ObjectIncarnationRef::from_object)
+            {
+                if !ability
+                    .target_incarnations
+                    .iter()
+                    .any(|captured| captured.object_id == pin.object_id)
+                {
+                    let mut pins = ability.target_incarnations.clone();
+                    pins.push(pin);
+                    ability.set_target_incarnations_recursive(pins);
+                }
+            }
+        }
+    }
+    for (_, child) in ability.child_links_mut() {
+        seed_event_context_pins(state, child, event);
+    }
+}
+
 /// Resolve the target object set for a `PhaseOut` effect. Explicit
 /// `ability.targets` (from the targeting phase) take precedence; mass filters
 /// (e.g., `Typed Permanent / You`) are expanded against the battlefield.
@@ -161,137 +226,133 @@ pub(super) fn collect_object_targets(
     ability: &ResolvedAbility,
     target: &TargetFilter,
 ) -> Vec<ObjectId> {
-    if let TargetFilter::Or { filters } = target {
-        // CR 702.26g + CR 702.26h: gather the whole batch before phasing any
-        // member, so an attachment selected with its host phases indirectly.
-        let mut seen = HashSet::new();
-        return filters
-            .iter()
-            .flat_map(|filter| {
-                match filter {
-                    // CR 201.5 + CR 400.7: source identity is independent of the
-                    // announced target list, including a later same-ID incarnation.
-                    TargetFilter::SelfRef => {
-                        if ability.self_ref_is_current(state)
-                            && state
-                                .battlefield_phased_in_ids()
-                                .contains(&ability.source_id)
-                        {
-                            vec![ability.source_id]
-                        } else {
-                            Vec::new()
+    match target {
+        TargetFilter::Or { filters } if phase_out_filter_is_context_union(target) => {
+            // CR 702.26a + CR 702.26h: gather the whole batch before phasing any
+            // member, so an attachment selected with its host phases indirectly.
+            let mut seen = HashSet::new();
+            return filters
+                .iter()
+                .flat_map(|filter| {
+                    match filter {
+                        // CR 201.5 + CR 400.7: source identity is independent of the
+                        // announced target list, including a later same-ID incarnation.
+                        TargetFilter::SelfRef => {
+                            if ability.self_ref_is_current(state)
+                                && state
+                                    .battlefield_phased_in_ids()
+                                    .contains(&ability.source_id)
+                            {
+                                vec![ability.source_id]
+                            } else {
+                                Vec::new()
+                            }
+                        }
+                        // An explicitly empty announced set stays empty. Do not use
+                        // ParentTarget's event/source fallback for this compound leg.
+                        TargetFilter::ParentTarget => ability
+                            .live_object_targets(state)
+                            .iter()
+                            .filter_map(|target| match target {
+                                TargetRef::Object(id) => Some(*id),
+                                TargetRef::Player(_) => None,
+                            })
+                            .collect(),
+                        // CR 608.2k: the trigger's named combat partner is an
+                        // untargeted event referent, not an announced target or a
+                        // population filter. CR 702.26b: only phased-in battlefield
+                        // objects can join this phase-out batch.
+                        TargetFilter::TriggeringSource => {
+                            state
+                                .current_trigger_event
+                                .as_ref()
+                                .and_then(|event| {
+                                    phase_out_event_referent(state, ability.source_id, event)
+                                })
+                                .filter(|id| {
+                                    // CR 400.7: missing capture is not authority to bind a
+                                    // current incarnation here, after response priority.
+                                    ability
+                                        .target_incarnations
+                                        .iter()
+                                        .find(|pin| pin.object_id == *id)
+                                        .is_some_and(|pin| pin.is_current(state))
+                                })
+                                .filter(|id| {
+                                    state.objects.get(id).is_some_and(|object| {
+                                        object.zone == crate::types::zones::Zone::Battlefield
+                                            && object.is_phased_in()
+                                    })
+                                })
+                                .into_iter()
+                                .collect()
+                        }
+                        TargetFilter::None
+                        | TargetFilter::Any
+                        | TargetFilter::Player
+                        | TargetFilter::Controller
+                        | TargetFilter::SourceController
+                        | TargetFilter::ControllerAndControlledPermanents { .. }
+                        | TargetFilter::Opponent
+                        | TargetFilter::GrantingObject { .. }
+                        | TargetFilter::SourceOrPaired
+                        | TargetFilter::Typed(_)
+                        | TargetFilter::Not { .. }
+                        | TargetFilter::Or { .. }
+                        | TargetFilter::And { .. }
+                        | TargetFilter::StackAbility { .. }
+                        | TargetFilter::StackSpell
+                        | TargetFilter::CastingSpell
+                        | TargetFilter::SpecificObject { .. }
+                        | TargetFilter::SpecificPlayer { .. }
+                        | TargetFilter::PlayerWhoChoseLabel { .. }
+                        | TargetFilter::PlayerMatching { .. }
+                        | TargetFilter::Neighbor { .. }
+                        | TargetFilter::ScopedPlayer
+                        | TargetFilter::AttachedTo
+                        | TargetFilter::LastCreated
+                        | TargetFilter::LastRevealed
+                        | TargetFilter::LastZoneChanged
+                        | TargetFilter::CostPaidObject
+                        | TargetFilter::AmassedArmy
+                        | TargetFilter::ChosenCard
+                        | TargetFilter::TrackedSet { .. }
+                        | TargetFilter::TrackedSetFiltered { .. }
+                        | TargetFilter::ExiledBySource
+                        | TargetFilter::ExiledCardByIndex { .. }
+                        | TargetFilter::TriggeringSpellController
+                        | TargetFilter::TriggeringSpellOwner
+                        | TargetFilter::TriggeringPlayer
+                        | TargetFilter::AttackedPlayerOrPlaneswalker
+                        | TargetFilter::EventTarget
+                        | TargetFilter::TriggeringSourceController
+                        | TargetFilter::EventTargetController
+                        | TargetFilter::ParentTargetSlot { .. }
+                        | TargetFilter::DeclaredPlayer { .. }
+                        | TargetFilter::ParentTargetController
+                        | TargetFilter::ParentTargetOwner
+                        | TargetFilter::AffectedObjectOwner
+                        | TargetFilter::SourceChosenPlayer
+                        | TargetFilter::OriginalController
+                        | TargetFilter::OriginalSource
+                        | TargetFilter::PostReplacementSourceController
+                        | TargetFilter::PostReplacementDamageSource
+                        | TargetFilter::PostReplacementDamageTarget
+                        | TargetFilter::PostReplacementDamageTargetOwner
+                        | TargetFilter::DefendingPlayer
+                        | TargetFilter::HasChosenName
+                        | TargetFilter::ChosenDamageSource { .. }
+                        | TargetFilter::Named { .. }
+                        | TargetFilter::Owner
+                        | TargetFilter::AllPlayers => {
+                            collect_object_targets(state, ability, filter)
                         }
                     }
-                    // An explicitly empty announced set stays empty. Do not use
-                    // ParentTarget's event/source fallback for this compound leg.
-                    TargetFilter::ParentTarget => ability
-                        .live_object_targets(state)
-                        .iter()
-                        .filter_map(|target| match target {
-                            TargetRef::Object(id) => Some(*id),
-                            TargetRef::Player(_) => None,
-                        })
-                        .collect(),
-                    // CR 608.2k: the trigger's named combat partner is an
-                    // untargeted event referent, not an announced target or a
-                    // population filter. CR 702.26b: only phased-in battlefield
-                    // objects can join this phase-out batch.
-                    TargetFilter::TriggeringSource => {
-                        // CR 509.1 + CR 608.2k: in a blocking event, "that
-                        // creature" is the source's combat partner. The existing
-                        // event-only ParentTarget reader owns that orientation;
-                        // this is not an announced-target lookup.
-                        let context_filter = if matches!(
-                            state.current_trigger_event.as_ref(),
-                            Some(
-                                GameEvent::BlockersDeclared { .. }
-                                    | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
-                            )
-                        ) {
-                            &TargetFilter::ParentTarget
-                        } else {
-                            filter
-                        };
-                        crate::game::targeting::resolve_event_context_target(
-                            state,
-                            context_filter,
-                            ability.source_id,
-                        )
-                        .into_iter()
-                        .filter_map(|target| match target {
-                            TargetRef::Object(id) => Some(id),
-                            TargetRef::Player(_) => None,
-                        })
-                        .filter(|id| {
-                            state.objects.get(id).is_some_and(|object| {
-                                object.zone == crate::types::zones::Zone::Battlefield
-                                    && object.is_phased_in()
-                            })
-                        })
-                        .collect()
-                    }
-                    TargetFilter::None
-                    | TargetFilter::Any
-                    | TargetFilter::Player
-                    | TargetFilter::Controller
-                    | TargetFilter::SourceController
-                    | TargetFilter::ControllerAndControlledPermanents { .. }
-                    | TargetFilter::Opponent
-                    | TargetFilter::GrantingObject { .. }
-                    | TargetFilter::SourceOrPaired
-                    | TargetFilter::Typed(_)
-                    | TargetFilter::Not { .. }
-                    | TargetFilter::Or { .. }
-                    | TargetFilter::And { .. }
-                    | TargetFilter::StackAbility { .. }
-                    | TargetFilter::StackSpell
-                    | TargetFilter::CastingSpell
-                    | TargetFilter::SpecificObject { .. }
-                    | TargetFilter::SpecificPlayer { .. }
-                    | TargetFilter::PlayerWhoChoseLabel { .. }
-                    | TargetFilter::PlayerMatching { .. }
-                    | TargetFilter::Neighbor { .. }
-                    | TargetFilter::ScopedPlayer
-                    | TargetFilter::AttachedTo
-                    | TargetFilter::LastCreated
-                    | TargetFilter::LastRevealed
-                    | TargetFilter::LastZoneChanged
-                    | TargetFilter::CostPaidObject
-                    | TargetFilter::AmassedArmy
-                    | TargetFilter::ChosenCard
-                    | TargetFilter::TrackedSet { .. }
-                    | TargetFilter::TrackedSetFiltered { .. }
-                    | TargetFilter::ExiledBySource
-                    | TargetFilter::ExiledCardByIndex { .. }
-                    | TargetFilter::TriggeringSpellController
-                    | TargetFilter::TriggeringSpellOwner
-                    | TargetFilter::TriggeringPlayer
-                    | TargetFilter::AttackedPlayerOrPlaneswalker
-                    | TargetFilter::EventTarget
-                    | TargetFilter::TriggeringSourceController
-                    | TargetFilter::EventTargetController
-                    | TargetFilter::ParentTargetSlot { .. }
-                    | TargetFilter::DeclaredPlayer { .. }
-                    | TargetFilter::ParentTargetController
-                    | TargetFilter::ParentTargetOwner
-                    | TargetFilter::AffectedObjectOwner
-                    | TargetFilter::SourceChosenPlayer
-                    | TargetFilter::OriginalController
-                    | TargetFilter::OriginalSource
-                    | TargetFilter::PostReplacementSourceController
-                    | TargetFilter::PostReplacementDamageSource
-                    | TargetFilter::PostReplacementDamageTarget
-                    | TargetFilter::PostReplacementDamageTargetOwner
-                    | TargetFilter::DefendingPlayer
-                    | TargetFilter::HasChosenName
-                    | TargetFilter::ChosenDamageSource { .. }
-                    | TargetFilter::Named { .. }
-                    | TargetFilter::Owner
-                    | TargetFilter::AllPlayers => collect_object_targets(state, ability, filter),
-                }
-            })
-            .filter(|id| seen.insert(*id))
-            .collect();
+                })
+                .filter(|id| seen.insert(*id))
+                .collect();
+        }
+        _ => {}
     }
     let from_targets: Vec<ObjectId> = ability
         .targets
@@ -397,6 +458,37 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
         id
+    }
+
+    #[test]
+    fn ordinary_phase_out_union_phases_only_the_announced_object() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let chosen = add_creature(&mut state, PlayerId(0), "Chosen");
+        let bystander = add_creature(&mut state, PlayerId(0), "Bystander");
+        let effect = Effect::PhaseOut {
+            target: TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::SelfRef,
+                    TargetFilter::Typed(TypedFilter::creature()),
+                ],
+            },
+        };
+        assert!(crate::types::ability::effect_has_stack_target_declaration(
+            &effect
+        ));
+        let ability =
+            ResolvedAbility::new(effect, vec![TargetRef::Object(chosen)], source, PlayerId(0));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(state.objects[&chosen].is_phased_out());
+        assert!(state.objects[&source].is_phased_in());
+        assert!(state.objects[&bystander].is_phased_in());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved { kind: EffectKind::PhaseOut, source_id, .. }
+                if *source_id == source
+        )));
     }
 
     #[test]

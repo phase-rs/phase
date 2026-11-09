@@ -9850,6 +9850,10 @@ pub(crate) fn seed_event_context_parent_targets(
     let Some(event) = trigger_event else {
         return;
     };
+    if timing == EventContextSeedTiming::StackPush {
+        // CR 400.7 + CR 608.2k: capture non-targeted operands before responses.
+        super::effects::phase_out::seed_event_context_pins(state, ability, event);
+    }
     if !effect_uses_parent_target(&ability.effect) || parent_target_seeding_blocked(ability) {
         return;
     }
