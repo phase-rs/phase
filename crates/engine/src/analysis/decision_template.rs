@@ -10,6 +10,7 @@ use crate::types::mana::{ManaColor, ManaType};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 // NOTE: `matches_target_filter`/`FilterContext`/`TargetFilter` are NOT imported — their
 // only consumer, `TargetSchedule::IndexedClass`, is deferred to Phase 4/B3 (RULED
 // Deferral 2). `ResourceAxis` is likewise not imported — its only consumer,
@@ -147,6 +148,48 @@ impl DecisionTemplate {
                 }
             }
         }
+    }
+
+    /// CR 732.2a: the iteration indices at which [`resolve`] may answer differently than at the
+    /// index before, on one unchanged board, or `None` where no finite list holds them. A pin
+    /// reads the index only through a [`TargetSchedule`]: a constant never changes, a piecewise
+    /// schedule changes at its declared starts (before its first start it has no entry, which is
+    /// a change too), and a round robin of two or more changes at every index.
+    ///
+    /// WILDCARD-FREE over [`PinnedDecision`], [`TargetPin`] and [`TargetSchedule`], so a decision
+    /// kind, a pin kind or a schedule that reads the index some other way fails to build here.
+    pub(crate) fn resolution_change_points(&self) -> Option<BTreeSet<IterationIndex>> {
+        let mut points = BTreeSet::new();
+        for decision in &self.decisions {
+            match decision {
+                PinnedDecision::Targets { targets, .. } => {
+                    for target in targets {
+                        match target {
+                            // `resolve_target` hands neither of these the iteration index.
+                            TargetPin::ByIdentity(_) | TargetPin::Player(_) => {}
+                            TargetPin::Scheduled(schedule) => match schedule {
+                                TargetSchedule::Constant(_) => {}
+                                TargetSchedule::RoundRobin(schedule) => {
+                                    if schedule.len() > 1 {
+                                        return None;
+                                    }
+                                }
+                                TargetSchedule::Piecewise(schedule) => {
+                                    points.extend(schedule.iter().map(|(start, _)| *start));
+                                }
+                            },
+                        }
+                    }
+                }
+                PinnedDecision::Order { .. }
+                | PinnedDecision::Mode { .. }
+                | PinnedDecision::MayChoice { .. }
+                | PinnedDecision::UnlessBreak { .. }
+                | PinnedDecision::ManaColor { .. }
+                | PinnedDecision::ConvokeTaps { .. } => {}
+            }
+        }
+        Some(points)
     }
 }
 
@@ -1874,6 +1917,127 @@ mod tests {
 
     fn seat_rank(player: PlayerId) -> Ranking {
         Ranking::one(AnnouncementSubject::Seat(player))
+    }
+
+    /// CR 732.2a: on one board a template's resolution changes with the iteration index only
+    /// where [`DecisionTemplate::resolution_change_points`] says it may. Each row resolves its
+    /// template at twelve successive indices through [`resolve`] itself: between two listed
+    /// points every index answers as the one before it, a piecewise schedule answers differently
+    /// across each of its starts, and a round robin of two, which has no finite list, answers
+    /// differently at successive indices.
+    #[test]
+    fn a_resolution_changes_only_at_its_change_points() {
+        let mut state = GameState::new_two_player(7);
+        bf_object(&mut state, 10, 100, 0);
+        bf_object(&mut state, 11, 101, 0);
+        let ten = || obj_rank(this_obj(10, None));
+        let eleven = || obj_rank(this_obj(11, None));
+        let targets = |source: u64, pin: TargetPin| PinnedDecision::Targets {
+            slot: DecisionSlot::first(this_obj(source, None), ChoicePoint::AnnouncedTarget),
+            targets: vec![pin],
+        };
+        let template = |decisions: Vec<PinnedDecision>| DecisionTemplate {
+            owner: PlayerId(0),
+            decisions,
+            replay: ReplayMode::Static,
+            key: tri_key(),
+        };
+        let scheduled = |schedule: TargetSchedule| TargetPin::Scheduled(schedule);
+        // (name, template, its change points)
+        let rows: Vec<(&str, DecisionTemplate, Option<Vec<IterationIndex>>)> = vec![
+            (
+                "no scheduled pin",
+                template(vec![
+                    targets(10, TargetPin::ByIdentity(this_obj(10, None))),
+                    targets(11, TargetPin::Player(PlayerId(1))),
+                    PinnedDecision::Order {
+                        slot: DecisionSlot::first(this_obj(11, None), ChoicePoint::TriggerOrder),
+                        pos: 0,
+                    },
+                ]),
+                Some(vec![]),
+            ),
+            (
+                "a constant schedule",
+                template(vec![targets(
+                    10,
+                    scheduled(TargetSchedule::Constant(ten())),
+                )]),
+                Some(vec![]),
+            ),
+            (
+                "a round robin of one",
+                template(vec![targets(
+                    10,
+                    scheduled(TargetSchedule::RoundRobin(vec![ten()])),
+                )]),
+                Some(vec![]),
+            ),
+            (
+                "a piecewise schedule",
+                template(vec![targets(
+                    10,
+                    scheduled(TargetSchedule::Piecewise(vec![(2, ten()), (5, eleven())])),
+                )]),
+                Some(vec![2, 5]),
+            ),
+            (
+                "two piecewise schedules",
+                template(vec![
+                    targets(
+                        10,
+                        scheduled(TargetSchedule::Piecewise(vec![(0, ten()), (3, eleven())])),
+                    ),
+                    targets(
+                        11,
+                        scheduled(TargetSchedule::Piecewise(vec![(0, eleven()), (7, ten())])),
+                    ),
+                ]),
+                Some(vec![0, 3, 7]),
+            ),
+            (
+                "a round robin of two",
+                template(vec![targets(
+                    10,
+                    scheduled(TargetSchedule::RoundRobin(vec![ten(), eleven()])),
+                )]),
+                None,
+            ),
+        ];
+        for (name, template, expected) in rows {
+            let points = template.resolution_change_points();
+            assert_eq!(
+                points
+                    .as_ref()
+                    .map(|points| points.iter().copied().collect::<Vec<_>>()),
+                expected,
+                "{name}: the change points"
+            );
+            let resolved: Vec<_> = (0..12)
+                .map(|index| resolve(&template, index, &state))
+                .collect();
+            assert!(
+                resolved.iter().any(Result::is_ok),
+                "REACH-GUARD {name}: some index resolves to a live target"
+            );
+            match points {
+                Some(points) => {
+                    for index in 1..12usize {
+                        let listed = points.contains(&(index as IterationIndex));
+                        assert_eq!(
+                            resolved[index] != resolved[index - 1],
+                            listed,
+                            "{name}: index {index} answers differently than the one before it \
+                             exactly where a change point is listed"
+                        );
+                    }
+                }
+                None => assert_ne!(
+                    resolved[0], resolved[1],
+                    "{name}: successive indices answer differently"
+                ),
+            }
+        }
     }
 
     /// T6: `DecisionPointKind` serializes externally tagged (`{"ConvokeTaps":{...}}`) — the

@@ -153,7 +153,8 @@ vi.mock("../../stores/multiplayerDraftStore", async (importOriginal) => {
   };
 });
 
-vi.mock("../../stores/draftPodStore", () => ({
+vi.mock("../../stores/draftPodStore", async (importOriginal) => ({
+  isHostedPodRecoveryFailureCurrent: (await importOriginal<typeof import("../../stores/draftPodStore")>()).isHostedPodRecoveryFailureCurrent,
   useDraftPodStore: (selector: (state: { config: { podSize: number }; reset: () => void; resumeHostedPod: () => void; enterKind: () => void }) => unknown) => selector({
     config: { podSize: 8 }, ...podStore,
   }),

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "PayableResource::ManaGeneric carries a composition mode: an old peer ignores `composition`, resolves the prompt as ConcretizeX, and pays the base cost once instead of per unit — a silent underpayment with no parse error (entry 24 precedent)."
+}

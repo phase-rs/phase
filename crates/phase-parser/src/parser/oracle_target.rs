@@ -10,10 +10,10 @@ use crate::types::ability::{
     AggregateFunction, AttachmentKind, AttachmentReferent, CardTypeSetSource, ChoiceType,
     CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator, ControllerRef,
     CostCategory, CountScope, CrewRelation, DamageKindFilter, FilterProp, NameStickerSet,
-    ObjectProperty, ObjectScope, ParitySource, PlayerFilter, PlayerRelation, PropertyAggregate,
-    PtStat, PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality,
-    SharedQualityRelation, TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter,
-    TypedFilter,
+    ObjectProperty, ObjectScope, Parity, ParitySource, PlayerFilter, PlayerRelation,
+    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, SeatDirection,
+    SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode, ThisWayCause,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -26,7 +26,9 @@ use super::oracle_effect::{
     is_bare_object_pronoun, parse_multi_target_count_expr, parse_search_name_reference_suffix,
     resolve_it_pronoun,
 };
-use super::oracle_ir::context::{bind_controller_phrase, ChosenColorQualifierScope, ParseContext};
+use super::oracle_ir::context::{
+    bind_controller_phrase, ChosenColorQualifierScope, ParseContext, SpellAnaphorBinding,
+};
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use super::oracle_nom::filter as nom_filter;
@@ -140,6 +142,32 @@ pub(crate) fn resolve_pronoun_target(ctx: &mut ParseContext, pronoun: &str) -> T
             resolve_it_pronoun(ctx)
         }
         _ => TargetFilter::ParentTarget,
+    }
+}
+
+/// CR 608.2c + CR 608.2k: Refine a bare "that spell" binding for a caller that
+/// threaded the parse context.
+///
+/// The arm itself defaults to `TriggeringSource` because most callers parse
+/// without a context. When `effective_spell_anaphor_binding()` is `ParentTarget`
+/// (a NON-trigger instruction) the same anaphor names the spell mentioned
+/// earlier in the instruction sequence — the announced target of the resolving spell/ability ("Counter
+/// target spell. … counter that spell": Denied!, Mages' Contest, the "… instead"
+/// counter bodies; "… counter the spell": Split Decision's vote outcome). Only
+/// the consumers that both thread `ctx` and can carry a bare anaphor apply this
+/// refinement — today the counter and change-targets parsers — so a
+/// context-dropping parser (and the copy / gain-control consumers) keeps the
+/// historical event-source reading instead of silently re-binding.
+pub(crate) fn bind_spell_anaphor_to_context(
+    ctx: &ParseContext,
+    filter: TargetFilter,
+) -> TargetFilter {
+    if !matches!(filter, TargetFilter::TriggeringSource) {
+        return filter;
+    }
+    match ctx.effective_spell_anaphor_binding() {
+        SpellAnaphorBinding::ParentTarget => TargetFilter::ParentTarget,
+        SpellAnaphorBinding::EventSource => TargetFilter::TriggeringSource,
     }
 }
 
@@ -1072,13 +1100,17 @@ pub fn parse_target_with_syntax<'a>(
             return parse_target_with_syntax(original_rest, ctx);
         }
     }
-    // CR 608.2k: Bare "that spell" refers to the triggering spell object
-    // (Krark, the Thumbless; Spellchain Scatter). "that card" is NOT included —
-    // it stays on the ParentTarget arm below and is rewritten to TrackedSet when
-    // a prior sibling publishes an affected set (Sin, Spira's Punishment). Predicate
-    // continuations ("that spell is countered this way") keep ParentTarget because
-    // text remains after the noun; comma continuations ("copy that spell, and …")
-    // still name the triggering spell.
+    // CR 608.2k: Bare "that spell" defaults to the triggering spell object
+    // (Krark, the Thumbless; Spellchain Scatter). A caller that threads the parse
+    // context refines this for a non-trigger instruction via
+    // `bind_spell_anaphor_to_context` (the earlier announced target, CR 608.2c).
+    // "that card" is NOT included — it stays on the ParentTarget arm below and is
+    // rewritten to TrackedSet when a prior sibling publishes an affected set (Sin,
+    // Spira's Punishment). Predicate continuations ("that spell is countered this
+    // way") keep ParentTarget because text remains after the noun. The counter and
+    // change-targets consumers refine the binding through
+    // `bind_spell_anaphor_to_context`; the copy and gain-control consumers keep
+    // this event-source default (recorded residual, follow-up).
     if let Ok((rest_subject, _)) = tag::<_, _, OracleError<'_>>("that ").parse(lower.as_str()) {
         let original_rest = &text[lower.len() - rest_subject.len()..];
         if let Ok((after, _)) = parse_word_bounded(rest_subject, "spell") {
@@ -7583,6 +7615,58 @@ pub(crate) fn parse_mana_value_suffix(
             parity
         };
         return Some((prop, text.len() - after.len()));
+    }
+
+    // CR 202.3 + CR 601.3a: the FIXED odd/even mana-value filter — "with an
+    // even mana value" (Desecrate Reality, Gyruda), "with even mana values"
+    // (Void Winnower), "with an odd mana value" (Soundwave). CR 202.3 defines
+    // the mana value whose parity is read; CR 601.3a is the rule written
+    // around this exact wording — its own example is "A player controls Void
+    // Winnower, which reads, in part, 'Your opponents can't cast spells with
+    // even mana values.'" — so the Comprehensive Rules treat the parity as a
+    // QUALITY OF THE SPELL, which is what makes it a filter conjunct here
+    // rather than a property of the prohibition.
+    //
+    // This sits in the slot the branch-order comment below calls "parity",
+    // beside the `LastNamedChoice` arm above: both produce
+    // `FilterProp::ManaValueParity` and differ only in which `ParitySource`
+    // supplies the quality. `ParitySource::Fixed` already had a complete
+    // runtime (`parity_from_source` in `filter.rs`, plus coverage and trigger
+    // binding arms) and no parser constructed it, so every printed fixed-parity
+    // clause silently dropped its conjunct. The plural "values" is accepted
+    // because the printed wording pluralizes with the plural subject noun
+    // ("spells with even mana values") while meaning the same per-object
+    // predicate.
+    //
+    // Ordering is load-bearing in one direction only: this must stay AFTER the
+    // relative head, which claims "with the same/lesser/greater mana value
+    // ...". It cannot shadow that head (no relative form begins "odd"/"even")
+    // nor the numeric head below ("mana value" never begins with a parity
+    // word), so it is grammatically disjoint from both — but keeping it in the
+    // parity slot is what the comment below documents.
+    if let Ok((after, parity)) = (
+        parse_suffix_subject_head,
+        opt(alt((
+            tag::<_, _, OracleError<'_>>("an "),
+            tag("a "),
+            tag("the "),
+        ))),
+        alt((
+            value(Parity::Even, tag::<_, _, OracleError<'_>>("even")),
+            value(Parity::Odd, tag("odd")),
+        )),
+        tag::<_, _, OracleError<'_>>(" mana value"),
+        opt(tag::<_, _, OracleError<'_>>("s")),
+    )
+        .parse(trimmed)
+        .map(|(after, (_, _, parity, _, _))| (after, parity))
+    {
+        return Some((
+            FilterProp::ManaValueParity {
+                parity: ParitySource::Fixed(parity),
+            },
+            text.len() - after.len(),
+        ));
     }
 
     // Branch order in this function is: superlative -> relative ("the same /
@@ -16062,10 +16146,45 @@ mod tests {
 
     #[test]
     fn parse_target_standalone_that_spell_is_triggering_source() {
+        // CR 608.2k: the arm's own default. Consumers that thread a non-trigger
+        // context refine it through `bind_spell_anaphor_to_context`.
         let (filter, rest, _) =
             parse_target_with_syntax("that spell", &mut ParseContext::default());
         assert_eq!(filter, TargetFilter::TriggeringSource);
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn bind_spell_anaphor_to_context_refines_only_non_trigger_contexts() {
+        let default_ctx = ParseContext::default();
+        assert_eq!(
+            bind_spell_anaphor_to_context(&default_ctx, TargetFilter::TriggeringSource),
+            TargetFilter::ParentTarget,
+            "CR 608.2c: a non-trigger instruction names its earlier announced target"
+        );
+        let trigger_ctx = ParseContext {
+            in_trigger: true,
+            ..ParseContext::default()
+        };
+        assert_eq!(
+            bind_spell_anaphor_to_context(&trigger_ctx, TargetFilter::TriggeringSource),
+            TargetFilter::TriggeringSource,
+            "CR 608.2k: a triggered ability names the event's spell object"
+        );
+        let delayed_ctx = ParseContext {
+            spell_anaphor_binding: SpellAnaphorBinding::EventSource,
+            ..ParseContext::default()
+        };
+        assert_eq!(
+            bind_spell_anaphor_to_context(&delayed_ctx, TargetFilter::TriggeringSource),
+            TargetFilter::TriggeringSource,
+            "CR 603.7 + CR 608.2k: a default-context delayed body has no parent target"
+        );
+        assert_eq!(
+            bind_spell_anaphor_to_context(&default_ctx, TargetFilter::StackSpell),
+            TargetFilter::StackSpell,
+            "only the bare anaphor binding is refined"
+        );
     }
 
     #[test]
@@ -23798,6 +23917,73 @@ mod tests {
                 }
             ),
             "expected Cmc LE CountersOn(Source, Time), got {prop:?}"
+        );
+    }
+
+    /// CR 202.3 + CR 601.3a: the FIXED odd/even head. Every surface form the
+    /// corpus prints must bind the printed parity and consume exactly its own
+    /// clause — the singular-with-article form (Desecrate Reality, Gyruda,
+    /// Soundwave), the bare plural (Void Winnower), and both parities. A head
+    /// that hardcoded one parity, or that over-consumed a trailing clause,
+    /// would pass a single-case test and fail here.
+    #[test]
+    fn mana_value_suffix_fixed_parity_binds_printed_parity() {
+        for (input, expected) in [
+            ("with an even mana value", Parity::Even),
+            ("with an odd mana value", Parity::Odd),
+            ("with even mana values", Parity::Even),
+            ("with odd mana values", Parity::Odd),
+            ("that have an even mana value", Parity::Even),
+            ("that each have an odd mana value", Parity::Odd),
+        ] {
+            let mut ctx = ParseContext::default();
+            let (prop, consumed) = parse_mana_value_suffix(input, &mut ctx)
+                .unwrap_or_else(|| panic!("fixed-parity suffix {input:?} must parse"));
+            assert_eq!(consumed, input.len(), "{input:?} must consume its clause");
+            assert_eq!(
+                prop,
+                FilterProp::ManaValueParity {
+                    parity: ParitySource::Fixed(expected),
+                },
+                "{input:?} must bind {expected:?}"
+            );
+        }
+    }
+
+    /// CR 202.3: the fixed-parity head must stop at the property noun so a
+    /// trailing clause survives for the caller — Gyruda's "with an even mana
+    /// value from among the milled cards" keeps its source-set phrase. This is
+    /// the same consumption contract the elliptical-possessive head below
+    /// documents; an over-consuming head would swallow "from among …" and the
+    /// tracked-set reference would be lost.
+    #[test]
+    fn mana_value_suffix_fixed_parity_leaves_trailing_clause() {
+        let mut ctx = ParseContext::default();
+        let input = "with an even mana value from among the milled cards";
+        let (prop, consumed) =
+            parse_mana_value_suffix(input, &mut ctx).expect("fixed-parity suffix parses");
+        assert_eq!(
+            prop,
+            FilterProp::ManaValueParity {
+                parity: ParitySource::Fixed(Parity::Even),
+            }
+        );
+        assert_eq!(&input[consumed..], " from among the milled cards");
+    }
+
+    /// CR 202.3: guard — the fixed-parity head must not shadow the RELATIVE
+    /// head above it. "with the same mana value as" and "with lesser mana value
+    /// than" are owned by `parse_relative_mana_value_suffix` (~46 cards); the
+    /// parity head sits after it and must leave those shapes alone.
+    #[test]
+    fn mana_value_suffix_fixed_parity_does_not_shadow_relative_head() {
+        let mut ctx = ParseContext::default();
+        let (prop, _) =
+            parse_mana_value_suffix("with lesser mana value than that creature", &mut ctx)
+                .expect("relative suffix still parses");
+        assert!(
+            !matches!(prop, FilterProp::ManaValueParity { .. }),
+            "relative head must keep its shape, got {prop:?}"
         );
     }
 
