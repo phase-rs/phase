@@ -393,7 +393,9 @@ pub struct ShortcutDecisionSchema {
     pub measured_repetition_bound: Option<u32>,
     /// The highest count an accept may legally SPECIFY against this offer: the measured
     /// threshold above, or `MAX_SHORTCUT_CYCLES` where none was measured, capped at
-    /// `MAX_SHORTCUT_CYCLES` either way. A legality ceiling, not a delivery promise — the
+    /// `MAX_SHORTCUT_CYCLES` either way, and at the repetitions whose player-resource edits the
+    /// engine can represent where the producer measured them (`analysis::headroom`). A
+    /// legality ceiling, not a delivery promise — the
     /// consumption seam re-derives its own bound on the board the drive runs against
     /// (`game::engine::shortcut_consumption_bound`) and may stop the drive short of this.
     /// Derived once, in

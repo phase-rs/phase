@@ -15,6 +15,7 @@ use crate::analysis::decision_template::{
     ChoicePoint, DecisionSlot, DecisionTemplate, MayChoiceOption, PinnedDecision,
     ShortcutDecisionSchema, TargetPin,
 };
+use crate::analysis::headroom::PeriodExcursions;
 use crate::analysis::loop_check::{classify_win_kind, LoopCertificate, WinKind};
 use crate::analysis::resource::{
     driving_resources_non_decreasing_carried, frame_without, CertifiedInstructedDeparture,
@@ -214,6 +215,11 @@ pub(crate) struct Confirmation {
     /// measured it on the replayed frames (CR 704.5a), or a spend period's as the counting replay
     /// performed it; `None` on the unbounded road.
     pub(crate) bounded: Option<BoundedOfferParts>,
+    /// The repetitions the confirmed frame can represent (`analysis::headroom`); `None` when the
+    /// period moves no player resource toward the end of its stored range. An engine limit, so the
+    /// unbounded road's offer states no more than this; a bounded offer already did, and a counted
+    /// one performed only what fit.
+    pub(crate) representable: Option<u32>,
 }
 
 /// The certificate, schema and declaration a bounded offer publishes.
@@ -1245,6 +1251,8 @@ struct ReplayedPeriod {
     /// The frame the second cycle reached, or where it was refused.
     replay: GameState,
     second: Result<Vec<String>, OfferRefusal>,
+    /// The player-resource excursions of each replayed cycle, the second's as far as it ran.
+    excursions: [PeriodExcursions; 2],
     /// Every frame above is read inside the probe.
     _probe: SimulationProbeGuard,
 }
@@ -1289,6 +1297,16 @@ fn period_floors(
 }
 
 impl ReplayedPeriod {
+    /// The repetitions of this period `frame` can represent, the fewer either replayed cycle
+    /// allows; `None` when neither moves a player resource toward the end of its stored range.
+    /// An engine limit, not a rules one — see `analysis::headroom`.
+    fn representable_repetitions(&self, frame: &GameState) -> Option<u32> {
+        self.excursions
+            .iter()
+            .filter_map(|excursions| excursions.representable_repetitions(frame))
+            .min()
+    }
+
     /// Each replayed frame's floor; the closing frame's needs a third cycle.
     fn floors(&self) -> [usize; 3] {
         let mut next = self.replay.clone();
@@ -1340,6 +1358,7 @@ fn replay_period(
     let end = FrameEnd::of(&s_n, holder, span.reach);
     let mut replay = s_n.clone();
     let mut choices = Vec::new();
+    let (mut first_events, mut second_events) = (Vec::new(), Vec::new());
     #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_variables))]
     let performed = replay_cycle_ordered(
         &mut replay,
@@ -1348,7 +1367,7 @@ fn replay_period(
         &mut choices,
         None,
         settles.as_deref_mut(),
-        &mut Vec::new(),
+        &mut first_events,
         None,
     )?;
     let s_n1 = replay.clone();
@@ -1359,7 +1378,7 @@ fn replay_period(
         &mut Vec::new(),
         None,
         settles,
-        &mut Vec::new(),
+        &mut second_events,
         None,
     );
     Ok(ReplayedPeriod {
@@ -1374,6 +1393,8 @@ fn replay_period(
         s_n1,
         replay,
         second,
+        excursions: [first_events, second_events]
+            .map(|events| PeriodExcursions::of_events(&events)),
         _probe: probe,
     })
 }
@@ -1381,6 +1402,8 @@ fn replay_period(
 /// CR 732.2a: confirms the span `span` of the current trace as a period `frame`'s priority
 /// holder may propose to repeat.
 pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation, OfferRefusal> {
+    let replayed = replay_period(frame, span, None)?;
+    let representable = replayed.representable_repetitions(frame);
     let ReplayedPeriod {
         holder,
         items,
@@ -1393,8 +1416,9 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
         s_n1,
         mut replay,
         second,
+        excursions: _,
         _probe,
-    } = replay_period(frame, span, None)?;
+    } = replayed;
     // A period whose second cycle is refused has one pair of frames, read as any pair is.
     let (prior, current) = match second {
         Ok(_) => (&s_n1, &replay),
@@ -1449,8 +1473,9 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
                 == ObjectGrowthVerdict::ResourceRecurrence(Some(RecurrenceCover::TurnCycle)))
             .then(|| CleanupPair::measure(&frames, holder))
             .flatten();
-            let parts = replay_bounded_offer(frame, holder, &frames, &choices, cleanup)
-                .map_err(|_| OfferRefusal::LossAxis)?;
+            let parts =
+                replay_bounded_offer(frame, holder, &frames, &choices, cleanup, representable)
+                    .map_err(|_| OfferRefusal::LossAxis)?;
             let delta = ResourceVector::period(prior, current);
             (delta, None, Some(parts), growth, CountedBy::Threshold)
         }
@@ -1509,6 +1534,7 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
                 #[cfg(any(test, feature = "test-support"))]
                 performed,
                 bounded: Some(parts),
+                representable,
             });
         }
     };
@@ -1527,6 +1553,7 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
         #[cfg(any(test, feature = "test-support"))]
         performed,
         bounded,
+        representable,
     })
 }
 

@@ -2857,9 +2857,11 @@ fn interactive_loop_bridge_paths(
             // MEASURES no CR 704 repetition threshold — `UntilLethal` is terminated by the
             // real SBA, not by a caller-supplied count — so it passes the absence and the
             // constructor derives the ceiling from the engine's own budget.
+            // The ring holds no event stream, so no representable bound is measured here.
             let schema = build_shortcut_schema(
                 Vec::new(),
                 shortcut_iteration_count(certificate.win_kind),
+                None,
                 None,
             );
             state.waiting_for = WaitingFor::LoopShortcut {
@@ -3263,6 +3265,7 @@ fn offer_draw_without_end(
         schema: build_shortcut_schema(
             Vec::new(),
             crate::analysis::decision_template::IterationCount::WithoutEnd,
+            None,
             None,
         ),
         declaration: None,
@@ -3876,6 +3879,9 @@ enum FrameSource<'a, 'v> {
     /// it recorded, so there is no unspecified window to gate and no announced slot to charge.
     Replay {
         answers: &'a [crate::analysis::decision_template::PinnedDecision],
+        /// The repetitions the replayed cycles' player-resource edits leave representable
+        /// (`analysis::headroom`), read off the event stream only a replay has.
+        representable: Option<u32>,
     },
 }
 
@@ -3930,6 +3936,10 @@ fn bounded_offer_tail(
     // exact recurrence (which says nothing about choices) and basis B consults no board
     // predicate at all. And deliberately NOT a second `loop_states_cover_modulo_growth_pinned`
     // call: that predicate refuses on BOARD facts without ever examining a choice.
+    let representable = match &source {
+        FrameSource::Ring { .. } => None,
+        FrameSource::Replay { representable, .. } => *representable,
+    };
     let (touch, recorded) = match source {
         FrameSource::Ring { touch, verdicts } => {
             let slots: Vec<DecisionSlot> = points.iter().map(|p| p.slot.clone()).collect();
@@ -3944,7 +3954,7 @@ fn bounded_offer_tail(
             }
             (Some(touch), None)
         }
-        FrameSource::Replay { answers } => (None, Some(answers)),
+        FrameSource::Replay { answers, .. } => (None, Some(answers)),
     };
 
     // (7) THE BOUND, derived from the ANNOUNCEMENT authority — never from `points`.
@@ -4134,6 +4144,7 @@ fn bounded_offer_tail(
         points,
         IterationCount::Fixed(measured_bound),
         Some(measured_bound),
+        representable,
     );
     let own_survived = own.survived_count(proposer, schema.deliverable_capacity);
     // CR 704.5a / CR 704.5b / CR 704.5c + CR 732.2a: no offer when the proposer survives no
@@ -5482,6 +5493,13 @@ pub(crate) fn bounded_cycle_charged_targets_for_window(
 /// no CR number — the budget is ours, not the game's, as the declare handler's budget arm
 /// states.
 ///
+/// `representable_repetitions` is the second engine ceiling, applied here beside the budget: the
+/// repetitions whose player-resource edits the stored integer widths can hold
+/// (`analysis::headroom`), where the producer measured one. Like the budget it is ours and not
+/// the game's (CR 119.3 sets no maximum), so it narrows the capacity and never the measured
+/// threshold. Without it an offer states a count whose take is refused with
+/// `EngineError::LifeChangeUnrepresentable` at a repetition the offer promised.
+///
 /// `iteration_count` is the SUGGESTION the frontend seeds its picker with; the capacity is the
 /// LEGAL CEILING the declared-count check enforces. A `Fixed` suggestion is NARROWED to the
 /// capacity here and never raised to it: a suggestion above its own capacity would be refused
@@ -5492,12 +5510,15 @@ fn build_shortcut_schema(
     points: Vec<crate::analysis::decision_template::DecisionPoint>,
     iteration_count: crate::analysis::decision_template::IterationCount,
     measured_repetition_bound: Option<u32>,
+    representable_repetitions: Option<u32>,
 ) -> crate::analysis::decision_template::ShortcutDecisionSchema {
     use crate::analysis::decision_template::{
         DecisionPointKind, IterationCount, ShortcutDecisionSchema,
     };
-    let deliverable_capacity = measured_repetition_bound
-        .map_or(MAX_SHORTCUT_CYCLES, |bound| bound.min(MAX_SHORTCUT_CYCLES));
+    let deliverable_capacity = [measured_repetition_bound, representable_repetitions]
+        .into_iter()
+        .flatten()
+        .fold(MAX_SHORTCUT_CYCLES, u32::min);
     // Wildcard-free so a third `IterationCount` variant build-breaks here instead of
     // inheriting whichever decision this match happens to make.
     let iteration_count = match iteration_count {
@@ -8296,7 +8317,8 @@ fn try_offer_object_growth_shortcut(
         #[cfg(feature = "test-support")]
         crate::game::perf_counters::record_play_trace(|counters| counters.confirm_asks += 1);
         let confirmation = super::period_confirm::confirm(state, span).ok()?;
-        Some((span, confirmation))
+        // No repetition the board can represent is no shortcut to offer.
+        (confirmation.representable != Some(0)).then_some((span, confirmation))
     })?;
     // CR 732.2a: a period is offered at its stated count — the threshold authority's for a loss
     // period (CR 704.5a), the counting replay's for a spend.
@@ -8355,6 +8377,8 @@ fn try_offer_object_growth_shortcut(
         pinned_decisions_to_points(confirmation.period.choices(), state, caster)?,
         iteration_count,
         None,
+        // The repetitions the board can represent: the offer states no count its take refuses.
+        confirmation.representable,
     );
     super::play_trace::note_offered(state, span);
     Some((certificate, schema, confirmation.period, None))
@@ -8369,6 +8393,7 @@ pub(crate) fn replay_bounded_offer(
     frames: &[GameState],
     choices: &[crate::analysis::decision_template::PinnedDecision],
     cleanup: Option<crate::analysis::resource::CleanupPair>,
+    representable: Option<u32>,
 ) -> Result<super::period_confirm::BoundedOfferParts, BoundedOfferRefusal> {
     let frames: Vec<&GameState> = frames.iter().collect();
     let (&current, window) = frames
@@ -8394,7 +8419,10 @@ pub(crate) fn replay_bounded_offer(
             frames,
             periodic,
             points,
-            source: FrameSource::Replay { answers: choices },
+            source: FrameSource::Replay {
+                answers: choices,
+                representable,
+            },
         },
         false,
         caster,
@@ -8511,10 +8539,13 @@ pub(crate) fn counted_offer(
             },
         )),
     };
+    // The counting replay stopped at the first repetition that did not fit, so `count` is
+    // already representable.
     let schema = build_shortcut_schema(
         points,
         crate::analysis::decision_template::IterationCount::Fixed(suggested),
         Some(count),
+        None,
     );
     (certificate, schema, None)
 }
@@ -22186,7 +22217,7 @@ mod shortcut_schema_tests {
             "BOARD CLASS: the seed must sit strictly below the budget, else narrowing and \
              setting-to-capacity publish the same integer and this arm measures nothing"
         );
-        let unmeasured = build_shortcut_schema(Vec::new(), IterationCount::Fixed(seed), None);
+        let unmeasured = build_shortcut_schema(Vec::new(), IterationCount::Fixed(seed), None, None);
         assert!(
             !unmeasured.is_bounded(),
             "REACH-GUARD: this arm's subject is a producer that measured nothing"
@@ -22215,13 +22246,19 @@ mod shortcut_schema_tests {
             Vec::new(),
             IterationCount::Fixed(measured + 4),
             Some(measured),
+            None,
         );
         assert_eq!(over.deliverable_capacity, measured);
         assert_eq!(over.iteration_count, IterationCount::Fixed(measured));
 
         // Hostile sibling: `UntilLethal` names no count, so there is nothing to narrow — the
         // member a `match` collapsing both variants would break.
-        let until = build_shortcut_schema(Vec::new(), IterationCount::UntilLethal, Some(measured));
+        let until = build_shortcut_schema(
+            Vec::new(),
+            IterationCount::UntilLethal,
+            Some(measured),
+            None,
+        );
         assert_eq!(until.iteration_count, IterationCount::UntilLethal);
         assert_eq!(until.deliverable_capacity, measured);
     }
@@ -22295,6 +22332,7 @@ mod bounded_declaration_tests {
             ],
             IterationCount::Fixed(4),
             Some(4),
+            None,
         )
     }
 
@@ -22483,6 +22521,7 @@ mod bounded_declaration_tests {
                 ],
                 IterationCount::Fixed(4),
                 Some(4),
+                None,
             );
             let mut state = recording_state();
             // The OTHER point is answered, so the refusal cannot be attributed to it.
@@ -22544,7 +22583,7 @@ mod bounded_declaration_tests {
     /// fully-answered NON-empty schema — which D1-P-may's positive arm and D3's control refuse.
     #[test]
     fn d4_an_empty_schema_publishes_no_declaration() {
-        let empty = build_shortcut_schema(Vec::new(), IterationCount::Fixed(4), Some(4));
+        let empty = build_shortcut_schema(Vec::new(), IterationCount::Fixed(4), Some(4), None);
         assert!(
             empty.points.is_empty(),
             "reach-guard: this fixture is the empty-schema case"
@@ -23113,7 +23152,7 @@ mod stage2_injector_tests {
             .collect();
         park_on_shortcut_offer(
             &mut state,
-            build_shortcut_schema(points, IterationCount::Fixed(3), None),
+            build_shortcut_schema(points, IterationCount::Fixed(3), None, None),
             crate::analysis::loop_check::OfferRoad::Ring,
         );
         (state, template)
