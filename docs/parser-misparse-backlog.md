@@ -11,6 +11,8 @@ Consolidated from 50 per-batch clustering passes over the whole card database. S
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
+Cards listed in `crates/phase-ast/data/confirmed-misparses.toml` are held unsupported in coverage until their fix lands; fixing one means deleting its row there and regenerating card data (and the committed test fixture only when its copy of that face carries the `confirmed_misparse` marker).
+
 ## Ranked root causes
 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
