@@ -15,7 +15,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 The owner/phasing repairs in PR #10635 retain distinct binding authorities:
 
-- A source-owner shuffle moves the source and shuffles its owner's library without announcing a target. Alabaster Dragon's death trigger follows its recorded graveyard successor; Etrata's source shuffle remains independent of its earlier exile target.
+- A source-owner shuffle retains the source binding and its owner's shuffle obligation without announcing a target. Alabaster Dragon's death trigger follows its recorded graveyard successor; a stolen token copy still shuffles its owner's library after it ceases to exist. Etrata's source shuffle remains independent of its earlier exile target.
 - An owner-population shuffle uses the selected objects' owners, but does not rewrite an explicit origin possessor. A stolen Elixir of Immortality still moves its activator's graveyard.
 - Compound phasing distinguishes an announced optional target from an untargeted combat partner. Dream Fighter phases out both combat participants without a target declaration.
 - A target filter containing only properties is still constrained. Forge of Heroes retains both commander designation and entry-this-turn restrictions.
