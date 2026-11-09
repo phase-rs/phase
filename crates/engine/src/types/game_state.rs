@@ -52148,6 +52148,97 @@ mod tests {
             ));
         }
 
+        // Only the retained damage-selected snapshot carries the Aura's pin.
+        // Keep the identity=None full-payload preservation control above separate.
+        let stamped_history = |live, named, aura_live, aura_named| {
+            let (mut state, x, mut selected) = with_history(damage(live, Some(named)), named);
+            let aura = create_object(
+                &mut state,
+                CardId(62),
+                PlayerId(1),
+                "Control Magic".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&aura).unwrap().incarnation = aura_live;
+            selected.attachments[0].object_id = aura;
+            selected.attachments[0].identity = Some(ObjectIncarnationRef::of(aura, aura_named));
+            for snapshot in state.lki_by_incarnation.get_mut(&x).unwrap().values_mut() {
+                snapshot.attachments.clear();
+            }
+            state
+                .lki_by_incarnation
+                .get_mut(&x)
+                .unwrap()
+                .insert(named, selected.clone());
+            state.lki_cache.get_mut(&x).unwrap().attachments.clear();
+            assert!(state.lki_cache[&x].attachments.is_empty());
+            assert_eq!(state.lki_by_incarnation[&x][&named], selected);
+            assert_eq!(
+                selected.attachments[0].identity,
+                Some(ObjectIncarnationRef::of(aura, aura_named))
+            );
+            (state, x, aura, selected)
+        };
+        let (early_attachment, _, early_aura, _) = stamped_history(4, 2, 8, 6);
+        let (late_attachment, _, late_aura, _) = stamped_history(92, 90, 98, 96);
+        assert_eq!(early_aura, late_aura, "the same fixture Aura is referenced");
+        assert_ne!(
+            early_attachment, late_attachment,
+            "reach: source and nested Aura pins differ at equivalent departed epochs"
+        );
+        assert!(
+            normalized_equal(&early_attachment, &late_attachment),
+            "retained snapshot attachment pins must compare by relative incarnation rank"
+        );
+
+        let (live_attachment, _, aura, _) = stamped_history(4, 2, 7, 7);
+        let (stale_attachment, _, stale_aura, _) = stamped_history(4, 2, 9, 7);
+        assert_eq!(aura, stale_aura);
+        let live_selected = &live_attachment.lki_by_incarnation[&x][&2];
+        let stale_selected = &stale_attachment.lki_by_incarnation[&x][&2];
+        assert_eq!(
+            live_selected, stale_selected,
+            "reach: full selected payloads, including raw Aura pins and controllers, match"
+        );
+        assert_eq!(
+            live_selected.attachments[0].identity,
+            Some(ObjectIncarnationRef::of(
+                aura,
+                live_attachment.objects[&aura].incarnation
+            ))
+        );
+        assert_ne!(
+            stale_selected.attachments[0].identity,
+            Some(ObjectIncarnationRef::of(
+                aura,
+                stale_attachment.objects[&aura].incarnation
+            ))
+        );
+        assert!(
+            !normalized_equal(&live_attachment, &stale_attachment),
+            "the same raw retained attachment pin is live in one frame and stale in the other"
+        );
+        for (state, source, aura, mut expected) in [
+            stamped_history(4, 2, 8, 6),
+            stamped_history(92, 90, 98, 96),
+            stamped_history(4, 2, 7, 7),
+            stamped_history(4, 2, 9, 7),
+        ] {
+            let normalized = state.normalize_for_loop();
+            let history = &normalized.lki_by_incarnation[&source];
+            assert_eq!(history.len(), 1, "only the selected snapshot is retained");
+            let mut actual = history.values().next().unwrap().clone();
+            assert_eq!(actual.attachments[0].object_id, aura);
+            assert!(actual.attachments[0].identity.is_some());
+            actual.attachments[0].identity = None;
+            expected.attachments[0].identity = None;
+            assert_eq!(actual, expected, "all non-identity snapshot fields survive");
+            assert!(loop_states_equal(
+                &normalized,
+                &normalized.normalize_for_loop()
+            ));
+        }
+
         // None and missing exact history do not fabricate an authority. Keep the
         // existing bare-id fallback; the full-snapshot case above is the positive.
         for named in [None, Some(2)] {

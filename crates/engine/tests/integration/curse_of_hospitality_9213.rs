@@ -472,7 +472,7 @@ fn curse_trigger_pending(curse_source: ObjectId) -> impl Fn(&GameRunner) -> bool
 /// controller of the object that dealt the damage — P2, not P1.
 #[test]
 fn a_blinked_damage_dealer_names_the_controller_of_the_object_that_dealt_it() {
-    let (mut runner, raider, _control, top_card, responses) = stolen_attacker_board(
+    let (mut runner, raider, control, top_card, responses) = stolen_attacker_board(
         "Flicker of Fate",
         "Exile target creature or enchantment, then return it to the battlefield under its owner's control.",
         ManaCost::Cost {
@@ -549,6 +549,22 @@ fn a_blinked_damage_dealer_names_the_controller_of_the_object_that_dealt_it() {
                 // exile-exit snapshot or the returned permanent, answers.
                 assert_eq!(state.lki_cache[&raider].controller, P1);
                 assert_eq!(state.lki_by_incarnation[&raider][&stamp].controller, P2);
+                let attachment = state.lki_by_incarnation[&raider][&stamp]
+                    .attachments
+                    .iter()
+                    .find(|attachment| attachment.object_id == control)
+                    .expect("the first departure snapshots the attached Control Magic");
+                assert_eq!(
+                    attachment
+                        .identity
+                        .expect("the departed Control Magic attachment has an exact pin")
+                        .object_id,
+                    control
+                );
+                assert!(
+                    state.lki_cache[&raider].attachments.is_empty(),
+                    "the later bare-id snapshot has no attachment to supply the nested pin"
+                );
                 let active_set = state
                     .chain_tracked_set_id
                     .expect("the second Flicker's set");
