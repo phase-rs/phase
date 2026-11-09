@@ -764,6 +764,15 @@ fn loop_relational_kinnan_mana_receipt_does_not_rerank_a_pending_curse_damage_so
         P1,
         |_| panic!("Kinnan and Curse require no trigger ordering"),
         |runner| {
+            eprintln!(
+                "pr10613 fixture priority={:?} blink zones={:?}/{:?} receipt={:?} captured={} stack={:?}",
+                runner.state().waiting_for,
+                runner.state().objects[&responses[0]].zone,
+                runner.state().objects[&responses[1]].zone,
+                mana_receipt,
+                pending_after_blinks.is_some(),
+                runner.state().stack.iter().map(|entry| entry.source_id).collect::<Vec<_>>()
+            );
             let Some(entry) = runner.state().stack.iter().find(|e| e.source_id == curse) else {
                 return false;
             };

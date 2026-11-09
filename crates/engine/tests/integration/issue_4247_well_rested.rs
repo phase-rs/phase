@@ -400,6 +400,13 @@ fn loop_relational_well_rested_real_untaps_distinguish_current_spent_from_retire
         runner.activate(plains, 0).resolve();
         assert!(runner.state().objects[&plains].tapped);
     }
+    eprintln!(
+        "pr10613 Aura before Flicker: epoch={} types={:?} keywords={:?} attachment={:?}",
+        aura_epoch,
+        runner.state().objects[&well_rested].card_types,
+        runner.state().objects[&well_rested].keywords,
+        runner.state().objects[&well_rested].attached_to
+    );
     let outcome = runner.cast(flicker).target_object(well_rested).resolve();
     // CR 303.4f: the returning Aura's controller chooses its legal enchant host.
     match outcome.final_waiting_for() {
@@ -414,7 +421,14 @@ fn loop_relational_well_rested_real_untaps_distinguish_current_spent_from_retire
             assert!(legal_targets.contains(&TargetRef::Object(host)));
             assert!(legal_targets.contains(&TargetRef::Object(other_host)));
         }
-        waiting => panic!("Flicker must reach its mandatory Aura reattachment choice: {waiting:?}"),
+        waiting => panic!(
+            "Flicker must reach its mandatory Aura reattachment choice: {waiting:?}; Aura zone={:?} epoch={} attachment={:?} keywords={:?}; spell zone={:?}",
+            runner.state().objects[&well_rested].zone,
+            runner.state().objects[&well_rested].incarnation,
+            runner.state().objects[&well_rested].attached_to,
+            runner.state().objects[&well_rested].keywords,
+            runner.state().objects[&flicker].zone
+        ),
     }
     runner
         .act(GameAction::ChooseTarget {
