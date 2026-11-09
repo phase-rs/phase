@@ -22,6 +22,7 @@ const SOUL_WARDEN: &str = "Whenever another creature enters, you gain 1 life.";
 const THRAGTUSK: &str = "When this creature enters, you gain 5 life.\nWhen this creature leaves the battlefield, create a 3/3 green Beast creature token.";
 const BEACON_OF_UNREST: &str = "Put target artifact or creature card from a graveyard onto the battlefield under your control. Shuffle Beacon of Unrest into its owner's library.";
 const MOX_DIAMOND: &str = "If this artifact would enter, you may discard a land card instead. If you do, put this artifact onto the battlefield. If you don't, put it into its owner's graveyard.\n{T}: Add one mana of any color.";
+const OPEN_THE_VAULTS: &str = "Return all artifact and enchantment cards from all graveyards to the battlefield under their owners' control. (Auras with nothing to enchant remain in graveyards.)";
 
 fn move_count(events: &[GameEvent], object: ObjectId, from: Zone, to: Zone) -> usize {
     events
@@ -422,30 +423,62 @@ fn beacon_of_unrest_departed_mox_discard_payer_completes_family_before_priority(
     }
 }
 
-/// CR 118.12 + CR 614.12a + CR 608.2c: a living payer's real accepted cost
-/// must enter the artifact, then finish Beacon's shuffle instruction and its
-/// resolution before priority, using the same original delivery boundary.
+/// CR 118.12 + CR 614.12a + CR 608.2c: the living entry controller pays
+/// the real accepted cost, independently of the resolving spell's controller.
+/// The original family and the spell's final part finish before priority.
 #[test]
-fn beacon_of_unrest_paid_mox_discard_completes_family_and_shuffle_before_priority() {
-    let (scenario, [beacon, mox, forest, island]) = beacon_mox_scenario();
+fn open_the_vaults_paid_mox_discard_completes_family_before_priority() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let vaults = scenario
+        .add_spell_to_hand_from_oracle(P0, "Open the Vaults", false, OPEN_THE_VAULTS)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 4,
+            shards: vec![ManaCostShard::White, ManaCostShard::White],
+        })
+        .id();
+    let mox = scenario
+        .add_spell_to_graveyard(P1, "Mox Diamond", false)
+        .as_artifact()
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text(MOX_DIAMOND)
+        .id();
+    let forest = scenario.add_land_to_hand(P1, "Forest").id();
+    let island = scenario.add_land_to_hand(P1, "Island").id();
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::White,
+            ManaType::White,
+        ]
+        .into_iter()
+        .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+        .collect(),
+    );
     let mut runner = scenario.build();
-    let outcome = runner.cast(beacon).target_objects(&[mox]).resolve();
+    let outcome = runner.cast(vaults).resolve();
     assert_eq!(outcome.mana_pool_total(P0), 0);
     assert!(matches!(
         outcome.final_waiting_for(),
         WaitingFor::ReplacementChoice {
-            player: P0,
+            player: P1,
             kind: ReplacementChoiceKind::OptionalBranch,
             ..
         }
     ));
+    assert_eq!(runner.state().objects[&vaults].zone, Zone::Stack);
+    assert_eq!(runner.state().objects[&mox].zone, Zone::Graveyard);
     runner
         .act(GameAction::ChooseReplacement { index: 0 })
-        .expect("the living intended controller accepts the actual Mox cost");
+        .expect("P1 accepts the real Mox cost during P0's resolving spell");
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::DiscardChoice {
-            player: P0,
+            player: P1,
             count: 1,
             ..
         }
@@ -454,21 +487,21 @@ fn beacon_of_unrest_paid_mox_discard_completes_family_and_shuffle_before_priorit
         .act(GameAction::SelectCards {
             cards: vec![forest],
         })
-        .expect("selecting one of the two real lands pays the accepted entry cost");
+        .expect("P1 selects one of their two real lands to pay the entry cost");
 
     // Inspect the answer immediately; no extra action or private drain.
     let state = runner.state();
     assert!(state.players.iter().all(|player| !player.is_eliminated));
     assert_eq!(state.objects[&mox].zone, Zone::Battlefield);
     assert_eq!(state.objects[&mox].owner, P1);
-    assert_eq!(state.objects[&mox].controller, P0);
+    assert_eq!(state.objects[&mox].controller, P1);
     assert!(state.battlefield.contains(&mox));
     assert_eq!(state.objects[&forest].zone, Zone::Graveyard);
-    assert!(state.players[P0.0 as usize].graveyard.contains(&forest));
+    assert!(state.players[P1.0 as usize].graveyard.contains(&forest));
     assert_eq!(state.objects[&island].zone, Zone::Hand);
-    assert!(state.players[P0.0 as usize].hand.contains(&island));
-    assert_eq!(state.objects[&beacon].zone, Zone::Library);
-    assert!(state.players[P0.0 as usize].library.contains(&beacon));
+    assert!(state.players[P1.0 as usize].hand.contains(&island));
+    assert_eq!(state.objects[&vaults].zone, Zone::Graveyard);
+    assert!(state.players[P0.0 as usize].graveyard.contains(&vaults));
     assert!(state.pending_replacement.is_none());
     assert!(state.resolution_stack.is_empty());
     assert!(state.resolving_stack_entry.is_none());
@@ -488,9 +521,9 @@ fn beacon_of_unrest_paid_mox_discard_completes_family_and_shuffle_before_priorit
         0
     );
     assert_eq!(
-        move_count(&result.events, beacon, Zone::Stack, Zone::Library),
+        move_count(&result.events, vaults, Zone::Stack, Zone::Graveyard),
         1,
-        "Beacon's actual shuffle-tail move runs exactly once"
+        "Open the Vaults completes its actual final part exactly once"
     );
     assert_eq!(
         result
@@ -498,7 +531,19 @@ fn beacon_of_unrest_paid_mox_discard_completes_family_and_shuffle_before_priorit
             .iter()
             .filter(|event| matches!(
                 event,
-                GameEvent::StackResolved { object_id } if *object_id == beacon
+                GameEvent::Discarded { player_id: P1, object_id, .. } if *object_id == forest
+            ))
+            .count(),
+        1,
+        "the land is actually discarded by P1, not by the family controller"
+    );
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::StackResolved { object_id } if *object_id == vaults
             ))
             .count(),
         1,
