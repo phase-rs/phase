@@ -12,8 +12,8 @@ use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     CounterCostRootSubtree, DeferredLifeCostResume, GameState, PendingCostMoveResume,
-    PendingCounterPostAction, PendingReplacement, StagedMemberOutcome, TokenEntryEventEmission,
-    UnrepresentablePolicy, WaitingFor,
+    PendingCounterPostAction, PendingReplacement, ReplacementChoiceKind, StagedMemberOutcome,
+    TokenEntryEventEmission, UnrepresentablePolicy, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
@@ -237,7 +237,7 @@ pub(crate) struct InterruptedReplacement {
     subjects: [Option<ObjectIncarnationRef>; 2],
     actor: Option<PlayerId>,
     cost_payer: Option<PlayerId>,
-    waiting_for_replacement: bool,
+    replacement_choice: Option<ReplacementChoiceKind>,
 }
 
 pub(crate) fn capture_replacement_before_departure(
@@ -270,7 +270,11 @@ pub(crate) fn capture_replacement_before_departure(
         subjects,
         actor: state.waiting_for.acting_player(),
         cost_payer: super::replacement::pending_replacement_cost_payer(state, pending),
-        waiting_for_replacement: matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        replacement_choice: if let WaitingFor::ReplacementChoice { kind, .. } = &state.waiting_for {
+            Some(*kind)
+        } else {
+            None
+        },
     })
 }
 
@@ -378,7 +382,7 @@ fn settle_replacement_after_departure_inner(
         state.waiting_for = waiting;
         return Ok(replacement_departure_settlement(state));
     }
-    if !interrupted.waiting_for_replacement
+    if interrupted.replacement_choice.is_none()
         || state
             .pending_replacement
             .as_ref()
