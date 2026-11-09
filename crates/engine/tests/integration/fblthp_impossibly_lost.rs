@@ -39,6 +39,7 @@ use engine::types::zones::Zone;
 
 const P2: PlayerId = PlayerId(2);
 const ORACLE: &str = "When one or more of your opponents are dealt combat damage during your turn, draw two cards. If your library has no cards in it, you win the game. Fblthp's owner shuffles him into their library.";
+const SLIP_ORACLE: &str = "Put a +1/+1 counter on target creature. It phases out.";
 
 fn hand_len(runner: &GameRunner, player: PlayerId) -> usize {
     runner
@@ -110,6 +111,30 @@ fn drive_combat_damage(
         .events;
     events.extend(runner.combat_damage().events().iter().cloned());
     events
+}
+
+/// Pass priority through combat until Fblthp's trigger is on the stack. The
+/// caller can then respond before the trigger resolves.
+fn pass_until_fblthp_trigger(
+    runner: &mut GameRunner,
+    fblthp: ObjectId,
+    events: &mut Vec<GameEvent>,
+) {
+    for _ in 0..20 {
+        if runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == fblthp)
+        {
+            return;
+        }
+        let result = runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority through combat");
+        events.extend(result.events);
+    }
+    panic!("Fblthp's trigger never reached the stack");
 }
 
 /// CR 603.2c + CR 120.4b + CR 510.2: combat damage to two opponents is one trigger
@@ -304,6 +329,196 @@ fn owner_shuffle_follows_fblthps_owner_after_it_leaves() {
         shuffled,
         vec![P0],
         "only Fblthp's owner's library may be shuffled"
+    );
+}
+
+/// CR 702.26b + CR 701.24c: a phased-out Fblthp is treated as though it does
+/// not exist, so the self-move leaves it on the battlefield; the eligible owner
+/// still shuffles their library. Slip Out the Back is a production phasing
+/// instant cast in response to the trigger.
+#[test]
+fn phased_out_fblthp_stays_on_battlefield_and_owner_shuffles() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for name in ["P0 A", "P0 B", "P0 C"] {
+        scenario.add_card_to_library_top(P0, name);
+    }
+    for name in ["P1 A", "P1 B", "P1 C", "P1 D", "P1 E"] {
+        scenario.add_card_to_library_top(P1, name);
+    }
+    let fblthp = scenario
+        .add_creature_from_oracle(P1, "Fblthp, Impossibly Lost", 1, 1, ORACLE)
+        .id();
+    let attacker = scenario.add_creature(P1, "Attacker", 1, 1).id();
+    let slip = scenario
+        .add_spell_to_hand_from_oracle(P1, "Slip Out the Back", true, SLIP_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&fblthp)
+        .expect("Fblthp exists")
+        .owner = P0;
+    runner.state_mut().active_player = P1;
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P0))])
+        .expect("P1 attacks P0");
+    let hand_with_slip = hand_len(&runner, P1);
+
+    let mut events = Vec::new();
+    pass_until_fblthp_trigger(&mut runner, fblthp, &mut events);
+    let outcome = runner.cast(slip).target_object(fblthp).resolve();
+    events.extend(outcome.events().iter().cloned());
+    for _ in 0..20 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        let result = runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority to resolve the trigger");
+        events.extend(result.events);
+    }
+
+    let f = &runner.state().objects[&fblthp];
+    assert_eq!(
+        f.zone,
+        Zone::Battlefield,
+        "a phased-out Fblthp cannot be moved by its own shuffle instruction"
+    );
+    assert!(f.is_phased_out(), "the response really phased Fblthp out");
+    assert_eq!(
+        hand_len(&runner, P1),
+        hand_with_slip + 1,
+        "Slip left hand and the trigger drew two"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::CardDrawn { player_id, .. } if *player_id == P1
+            ))
+            .count(),
+        2,
+        "the trigger emitted exactly two draw events: {events:?}"
+    );
+    assert_eq!(
+        runner.state().players[0].library.len(),
+        3,
+        "the owner's library is shuffled in place"
+    );
+    assert_eq!(
+        runner.state().players[1].library.len(),
+        3,
+        "the controller drew two from five"
+    );
+    let shuffled: Vec<PlayerId> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shuffled,
+        vec![P0],
+        "only the owner's library may be shuffled"
+    );
+}
+
+/// CR 800.4a + CR 609.3: when the owner has left the game in response, the
+/// owner has no library to shuffle; the controller still draws.
+#[test]
+fn departed_owner_skips_the_shuffle_while_the_controller_draws() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for name in ["P1 A", "P1 B", "P1 C", "P1 D", "P1 E"] {
+        scenario.add_card_to_library_top(P1, name);
+    }
+    let fblthp = scenario
+        .add_creature_from_oracle(P1, "Fblthp, Impossibly Lost", 1, 1, ORACLE)
+        .id();
+    let attacker = scenario.add_creature(P1, "Attacker", 1, 1).id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&fblthp)
+        .expect("Fblthp exists")
+        .owner = P0;
+    runner.state_mut().active_player = P1;
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P2))])
+        .expect("P1 attacks P2");
+    let hand_before = hand_len(&runner, P1);
+
+    let mut events = Vec::new();
+    pass_until_fblthp_trigger(&mut runner, fblthp, &mut events);
+    let conceded = runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("P0 concedes in response");
+    events.extend(conceded.events);
+    for _ in 0..20 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        let result = runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority to resolve the trigger");
+        events.extend(result.events);
+    }
+
+    assert!(
+        runner
+            .state()
+            .players
+            .iter()
+            .find(|player| player.id == P0)
+            .expect("P0 exists")
+            .is_eliminated,
+        "reach guard: the owner has left the game"
+    );
+    assert_eq!(
+        hand_len(&runner, P1),
+        hand_before + 2,
+        "the controller still draws two"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::CardDrawn { player_id, .. } if *player_id == P1
+            ))
+            .count(),
+        2,
+        "the trigger emitted exactly two draw events: {events:?}"
+    );
+    assert_eq!(
+        runner.state().players[1].library.len(),
+        3,
+        "the draw resolved from five cards"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            }
+        )),
+        "a departed owner has no library to shuffle: {events:?}"
     );
 }
 
