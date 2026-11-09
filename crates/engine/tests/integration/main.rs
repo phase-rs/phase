@@ -295,6 +295,7 @@ mod loop_shortcut;
 mod loop_shortcut_activation;
 mod loop_shortcut_cast_route;
 mod loop_shortcut_drain_boards;
+mod loop_shortcut_life_matches_performing;
 mod loop_shortcut_mana_engine;
 mod loop_shortcut_offer_writer_census;
 mod loop_shortcut_ranking;
