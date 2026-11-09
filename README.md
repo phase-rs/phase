@@ -470,10 +470,17 @@ This reports the selected-inventory outcome, not a new request-level
 acknowledgement: an automatic timer pick of the identical instance is
 indistinguishable on the existing wire.
 
+A command already sent for the outgoing match cannot complete once that same
+socket announces a replacement match: its addressed reply is fenced by the new
+match key, so the slot is released with a recoverable failure before listeners
+observe the new match and the next command can be claimed. A command still being
+claimed is instead released unsent by its own post-notification check.
+
 The codec socket reads the canonical type-first envelope header by prefix, so an
 ordinary frame is handed to the adapter without a throwaway parse; only a
-noncanonical field order falls back to parsing. `Full`/`Delta` still decode
-through the shared runtime, and Rust remains the only authority over bodies.
+noncanonical field order or an escaped tag (for example `Fu\u006cl`) falls back
+to the JSON discriminator. `Full`/`Delta` still decode through the shared
+runtime, and Rust remains the only authority over bodies.
 
 ### Design Principles
 
