@@ -8720,6 +8720,13 @@ pub(crate) fn project_object_for_loop(object: &mut crate::game::game_object::Gam
     object.defense = None;
 }
 
+#[cfg(test)]
+thread_local! {
+    // Deterministic per-thread work observation; absent from production builds.
+    static DAMAGE_RECIPIENT_JOURNAL_VISITS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// Keep only the recipient answer retained damage carriers can still read:
 /// unknown (no row), live, or all-stale. Full damage history remains strict
 /// state; this bounded reduction belongs only to the resource projection.
@@ -8759,7 +8766,11 @@ fn project_damage_recipient_relations_for_loop(state: &mut GameState) {
         };
         let mut stamped = journal
             .iter()
-            .filter(|record| record.matches_damage_event(&event))
+            .filter(|record| {
+                #[cfg(test)]
+                DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(visits.get() + 1));
+                record.matches_damage_event(&event)
+            })
             .filter_map(|record| record.target_incarnation)
             .peekable();
         if stamped.peek().is_none() {
@@ -9683,6 +9694,139 @@ mod tests {
                 "{label}: published recipient read"
             );
         }
+    }
+
+    #[test]
+    fn loop_relational_recipient_many_keys_visit_journal_once() {
+        // Abstract CR 603.2c many-survivor carrier shape, not a printed-card
+        // support claim: each recipient has a distinct retained damage event.
+        const MANY: usize = 64;
+        let mut state = relational_recipient_frame(Some(7), false, false);
+        let template = state.stack.pop_front().unwrap();
+        let row_template = state.damage_dealt_this_turn.pop_front().unwrap();
+        let append =
+            |state: &mut GameState, id: u64, source_stamp: Option<u64>, pins: &[Option<u64>]| {
+                let recipient = battlefield_creature(state, id, 1);
+                state.objects.get_mut(&recipient).unwrap().incarnation = 7;
+                let mut entry = template.clone();
+                entry.id = ObjectId(10_000 + id);
+                let StackEntryKind::TriggeredAbility {
+                    trigger_event:
+                        Some(GameEvent::DamageDealt {
+                            source_incarnation,
+                            target,
+                            amount,
+                            ..
+                        }),
+                    ..
+                } = &mut entry.kind
+                else {
+                    panic!("fixture retains a damage event");
+                };
+                *source_incarnation = source_stamp;
+                *target = TargetRef::Object(recipient);
+                *amount = 2;
+                state.stack.push_back(entry);
+                for pin in pins {
+                    let mut row = row_template.clone();
+                    row.source_incarnation = source_stamp;
+                    row.target = TargetRef::Object(recipient);
+                    row.target_incarnation = *pin;
+                    row.amount = 2;
+                    state.damage_dealt_this_turn.push_back(row);
+                }
+            };
+        for offset in 0..MANY {
+            append(&mut state, 1_000 + offset as u64, Some(3), &[Some(7)]);
+        }
+        append(&mut state, 2_000, Some(3), &[Some(3), None, Some(5)]);
+        append(&mut state, 2_001, Some(3), &[None]);
+        append(&mut state, 2_002, Some(3), &[]);
+        append(&mut state, 2_003, Some(3), &[Some(3), Some(7), None]);
+        append(&mut state, 2_004, None, &[Some(7)]);
+        // Neither a different stamped source nor an absent source stamp may
+        // turn an otherwise unknown Some(3) event into a live journal match.
+        for (target, source_incarnation) in [(2_002, Some(4)), (2_001, None)] {
+            state.damage_dealt_this_turn.push_back(DamageRecord {
+                source_id: ObjectId(20),
+                source_incarnation,
+                target: TargetRef::Object(ObjectId(target)),
+                target_incarnation: Some(7),
+                amount: 2,
+                ..Default::default()
+            });
+        }
+        let mut duplicate = state.stack[0].clone();
+        duplicate.id = ObjectId(90_000);
+        state.stack.push_back(duplicate);
+        state.damage_dealt_this_turn = state.damage_dealt_this_turn.iter().rev().cloned().collect();
+        let journal_rows = state.damage_dealt_this_turn.len();
+        DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(0));
+        let projected = project_out_resources(&state);
+        let visits = DAMAGE_RECIPIENT_JOURNAL_VISITS.with(std::cell::Cell::get);
+        assert_eq!(
+            projected.damage_dealt_this_turn.len(),
+            MANY + 3,
+            "one witness for every live/mixed/optional-source key and all-stale key; none for unknown"
+        );
+        for entry in &projected.stack {
+            let StackEntryKind::TriggeredAbility {
+                trigger_event: Some(event @ GameEvent::DamageDealt { target, .. }),
+                ..
+            } = &entry.kind
+            else {
+                panic!("fixture retains only damage carriers");
+            };
+            let TargetRef::Object(target) = target else {
+                panic!("fixture has object recipients");
+            };
+            let expected = match target.0 {
+                2_000 => Some(0),
+                2_001 | 2_002 => None,
+                _ => Some(projected.objects[target].incarnation),
+            };
+            let mut rows = projected
+                .damage_dealt_this_turn
+                .iter()
+                .filter(|row| row.matches_damage_event(event));
+            assert_eq!(
+                rows.next().and_then(|row| row.target_incarnation),
+                expected,
+                "recipient {target:?}"
+            );
+            assert!(
+                rows.next().is_none(),
+                "duplicate carrier must not duplicate its witness"
+            );
+        }
+        for (target, accepted) in [
+            (2_000, false),
+            (2_001, true),
+            (2_002, true),
+            (2_003, true),
+            (2_004, true),
+        ] {
+            let mut selected = state.clone();
+            selected.current_trigger_event =
+                selected.stack.iter().find_map(|entry| match &entry.kind {
+                    StackEntryKind::TriggeredAbility {
+                        trigger_event:
+                            Some(
+                                event @ GameEvent::DamageDealt {
+                                    target: TargetRef::Object(id),
+                                    ..
+                                },
+                            ),
+                        ..
+                    } if *id == ObjectId(target) => Some(event.clone()),
+                    _ => None,
+                });
+            relational_recipient_reads(&selected, if accepted { &[ObjectId(target)] } else { &[] });
+        }
+        assert!(
+            visits <= journal_rows,
+            "{visits} journal-row visits for {journal_rows} input rows; requested keys must not multiply the scan"
+        );
     }
 
     #[test]
