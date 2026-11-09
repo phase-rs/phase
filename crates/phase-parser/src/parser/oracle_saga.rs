@@ -1381,10 +1381,11 @@ mod tests {
     /// A later clause that isn't a duration-free grant to the Saga keeps exactly
     /// what the effect-chain parser produced. The Kang Dynasty III's "can't be
     /// blocked this turn" stays end-of-turn. World War Hulk III's "it gains
-    /// trample" is the second conjunct of a leading "Until end of turn,", which the
-    /// parser leaves duration-less and the GenericEffect resolver's end-of-turn
-    /// fallback expires (effects/effect.rs), so promoting it would make the
-    /// trample outlast the turn.
+    /// trample" is the second conjunct of a leading "Until end of turn," — since
+    /// #7962 the sentence's window is stamped onto that conjunct explicitly on BOTH
+    /// carriers (`oracle_effect::assembly`), instead of the resolver's end-of-turn
+    /// fallback supplying it; promoting it would make the trample outlast the turn
+    /// either way, so this row pins the value the chapter actually carries.
     #[test]
     fn chapter_leaves_a_later_grant_to_another_object_as_parsed() {
         for (body, expected) in [
@@ -1394,7 +1395,7 @@ mod tests {
             ),
             (
                 "Choose target creature you control. Until end of turn, double its power and toughness and it gains trample.",
-                None,
+                Some(Duration::UntilEndOfTurn),
             ),
         ] {
             let line = format!("III \u{2014} {body}");
@@ -1528,11 +1529,10 @@ mod tests {
     /// clause. World War Hulk III's "… and it gains trample" continues a clause
     /// stating "Until end of turn" and is left as parsed (the end-of-turn
     /// fallback expires it); with no stated duration in the instruction it
-    /// continues, the same grant lasts until the end of the game. The parser
-    /// gives no such continuation a governing-duration-free shape today (a
-    /// dependent token grant carries `Permanent` from the effect-chain parser),
-    /// so the second case is built from Hulk's own chain with the leading
-    /// duration removed.
+    /// continues, the same grant lasts until the end of the game. A parsed
+    /// continuation under a stated window now carries that window on BOTH carriers
+    /// (#7962), so the second case is built from Hulk's own chain with the sentence
+    /// window removed from the governing clause AND from the grant.
     #[test]
     fn a_continuation_grant_to_other_objects_follows_its_governing_duration() {
         let lines = vec![
@@ -1561,19 +1561,29 @@ mod tests {
             "reach: a continuation"
         );
         assert!(
-            matches!(&*grant.effect, Effect::GenericEffect { duration: None, static_abilities, .. }
+            matches!(&*grant.effect, Effect::GenericEffect { duration: Some(Duration::UntilEndOfTurn), static_abilities, .. }
                 if static_abilities.iter().all(|def| def.affected.is_some()
                     && !matches!(def.affected, Some(TargetFilter::SelfRef)))),
-            "reach: a duration-free grant to another object, got {:?}",
+            "reach: a sentence-governed grant to another object, got {:?}",
             grant.effect
         );
 
         let mut ungoverned = parsed.clone();
-        ungoverned
+        let governing = ungoverned
             .sub_ability
             .as_deref_mut()
-            .expect("the doubling clause")
-            .duration = None;
+            .expect("the doubling clause");
+        governing.duration = None;
+        // #7962: the sentence's window also reaches the GRANT's own carrier AND its
+        // embedded effect field, so the "nothing states a duration" case this row
+        // builds must clear both — otherwise the chapter promotion correctly reads a
+        // state this row did not intend to build.
+        if let Some(grant) = governing.sub_ability.as_deref_mut() {
+            grant.duration = None;
+            if let Effect::GenericEffect { duration, .. } = grant.effect.as_mut() {
+                *duration = None;
+            }
+        }
         promote_grant_duration_for_chapter(&mut ungoverned);
         let grant = ungoverned
             .sub_ability

@@ -148,7 +148,7 @@ fn trigger_rewards_your_lifegain(trigger: &TriggerDefinition) -> bool {
         && !filter_is_opponent_scoped(trigger.valid_target.as_ref())
 }
 
-fn filter_is_opponent_scoped(filter: Option<&TargetFilter>) -> bool {
+pub(crate) fn filter_is_opponent_scoped(filter: Option<&TargetFilter>) -> bool {
     let Some(filter) = filter else {
         return false;
     };
