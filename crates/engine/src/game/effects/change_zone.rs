@@ -6497,6 +6497,10 @@ mod tests {
     /// bool, `enters_attacking` always present, the other entry fields only when
     /// non-default).
     fn legacy_change_zone_carrier(carrier: &mut serde_json::Value, legacy: &serde_json::Value) {
+        carrier
+            .as_object_mut()
+            .expect("legacy carrier is an object")
+            .remove("performed_by");
         let ids = carrier["remaining"]
             .as_array()
             .expect("premise: the carrier lists its members")
@@ -6539,6 +6543,34 @@ mod tests {
             }
         }
         wire
+    }
+
+    /// Typed save-layout fixture, not a printed support claim. The nearest
+    /// printed mass return is Brilliant Restoration: "Return all artifact and
+    /// enchantment cards from your graveyard to the battlefield." This fixture
+    /// adds the existing synthetic replacement pause to expose saved members.
+    #[test]
+    fn legacy_v11_parked_change_zone_restores_its_actor_and_resumes() {
+        let (paused, shock, relic, orni) = paused_mass_return(|_| {}, true);
+        for (label, mut wire) in both_wires(&paused) {
+            let state = wire_state_mut(&mut wire);
+            state["resolution_state_version"] = serde_json::Value::from(11_u64);
+            change_zone_carrier_mut(state, "resolution_frames")
+                .as_object_mut()
+                .expect("the legacy carrier is an object")
+                .remove("performed_by");
+            let mut restored = restore_persisted(wire)
+                .unwrap_or_else(|error| panic!("{label}: v11 actor restore: {error}"));
+            let pending = parked_change_zone_iteration(&restored)
+                .expect("the restored save still owns its interrupted members");
+            assert_eq!(pending.performed_by, PlayerId(0));
+            apply_as_current(&mut restored, GameAction::ChooseReplacement { index: 1 })
+                .expect("the restored game accepts the actual replacement answer");
+            for card in [shock, relic, orni] {
+                assert_eq!(restored.objects[&card].zone, Zone::Battlefield);
+            }
+            assert!(parked_change_zone_iteration(&restored).is_none());
+        }
     }
 
     /// CR 603.6a + CR 614.12 (persisted-version boundary): a v1–v6 save paused

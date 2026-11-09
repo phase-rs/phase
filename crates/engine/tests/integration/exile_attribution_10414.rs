@@ -68,7 +68,9 @@ use engine::types::ability::{
     TargetFilter,
 };
 use engine::types::actions::GameAction;
-use engine::types::game_state::{ReplacementChoiceKind, WaitingFor};
+use engine::types::game_state::{
+    PersistedGameState, PersistedRestoreFinalization, ReplacementChoiceKind, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -957,6 +959,48 @@ fn mudhole_typed_continuation_completes_after_replacement_pauses() {
     }
     assert_eq!(zone(&runner, relic), Zone::Graveyard);
     assert_eq!(zone(&runner, mudhole), Zone::Graveyard);
+}
+
+#[test]
+fn paused_subject_exile_restore_preserves_actor_before_public_resume() {
+    let (mut runner, lands, _, mudhole) = mudhole_replacement_fixture(true);
+    runner.cast(mudhole).target_player(P1).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P1, .. }
+    ));
+    let snapshots = [
+        PersistedGameState::Raw(Box::new(runner.state().clone())),
+        PersistedGameState::capture(runner.state().clone()),
+    ];
+    for snapshot in snapshots {
+        let bytes = serde_json::to_value(snapshot).expect("the public saved-game writer succeeds");
+        let state = serde_json::from_value::<PersistedGameState>(bytes)
+            .expect("the public saved-game reader accepts the current snapshot")
+            .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+            .expect("the saved frame is valid for restoration")
+            .finalize_immediately()
+            .expect("the saved game restores");
+        let mut restored = GameRunner::from_state(state);
+        for _ in lands {
+            assert!(matches!(
+                restored.state().waiting_for,
+                WaitingFor::ReplacementChoice { player: P1, .. }
+            ));
+            restored
+                .act(GameAction::ChooseReplacement { index: 1 })
+                .expect("the restored game accepts the actual replacement answer");
+        }
+        drive_to_priority(&mut restored);
+        assert_resolution_finished(&restored);
+        for land in lands {
+            assert_eq!(zone(&restored, land), Zone::Exile);
+            assert_eq!(exiled_by(&restored, land), Some(P1));
+        }
+        assert_eq!(restored.life(P2), 23);
+        assert_pridemate_counters(&restored, 1);
+        assert_eq!(zone(&restored, mudhole), Zone::Graveyard);
+    }
 }
 
 /// CR 800.4a + CR 800.4g: losing the instruction's subject removes that
