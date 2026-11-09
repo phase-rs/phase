@@ -10624,6 +10624,34 @@ mod tests {
                 row.target = TargetRef::Object(ObjectId(21));
             }
         }
+        // A two-group renaming reverses raw-id order. Group order is not
+        // position either; compare the same recipient partition, not ids.
+        let mut permuted = split.clone();
+        for id in [23, 25] {
+            let mut fresh = shared.objects[&ObjectId(21)].clone();
+            fresh.id = ObjectId(id);
+            permuted.objects.insert(fresh.id, fresh);
+            permuted.battlefield.push_back(ObjectId(id));
+        }
+        permuted.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::DamageDealt {
+                source_id, target, ..
+            } = event
+            {
+                *target = TargetRef::Object(if *source_id == ObjectId(20) {
+                    ObjectId(25)
+                } else {
+                    ObjectId(23)
+                });
+            }
+        });
+        for row in permuted.damage_dealt_this_turn.iter_mut() {
+            row.target = TargetRef::Object(if row.source_id == ObjectId(20) {
+                ObjectId(25)
+            } else {
+                ObjectId(23)
+            });
+        }
 
         fn recipients(state: &GameState) -> BTreeSet<ObjectId> {
             let mut receivers = BTreeSet::new();
@@ -10648,6 +10676,7 @@ mod tests {
         let shared_projection = project_out_resources(&shared);
         let renamed_projection = project_out_resources(&renamed);
         let split_projection = project_out_resources(&split);
+        let permuted_projection = project_out_resources(&permuted);
         for (raw, projected, expected) in [
             (&shared, &shared_projection, BTreeSet::from([ObjectId(21)])),
             (
@@ -10659,6 +10688,11 @@ mod tests {
                 &split,
                 &split_projection,
                 BTreeSet::from([ObjectId(21), ObjectId(22)]),
+            ),
+            (
+                &permuted,
+                &permuted_projection,
+                BTreeSet::from([ObjectId(23), ObjectId(25)]),
             ),
         ] {
             assert_eq!(recipients(raw), expected, "raw event-target consumer");
@@ -10679,6 +10713,12 @@ mod tests {
         assert!(
             positive.is_empty(),
             "consistently renaming the shared recipient must cover: {positive:?}"
+        );
+        let permuted_positive =
+            fodder_growth_cover_refusals(&split, &permuted, &class, PlayerId(0)).0;
+        assert!(
+            permuted_positive.is_empty(),
+            "consistently renaming multiple groups must ignore raw-id order: {permuted_positive:?}"
         );
         let negative = fodder_growth_cover_refusals(&shared, &split, &class, PlayerId(0)).0;
         assert!(
