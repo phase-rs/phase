@@ -536,6 +536,17 @@ fn a_blinked_damage_dealer_names_the_controller_of_the_object_that_dealt_it() {
                 let active_set = state
                     .chain_tracked_set_id
                     .expect("the second Flicker's set");
+                let latest_nonempty_set = state
+                    .tracked_object_sets
+                    .iter()
+                    .filter(|(_, objects)| !objects.is_empty())
+                    .max_by_key(|(id, _)| id.0)
+                    .map(|(&id, _)| id);
+                assert_eq!(
+                    latest_nonempty_set,
+                    Some(active_set),
+                    "normalization's fallback selects the second Flicker's active set"
+                );
                 assert_ne!(
                     state.tracked_set_member_origins[&active_set][&raider].departure_incarnation,
                     stamp,

@@ -35737,15 +35737,28 @@ impl GameState {
                     referenced_lki.insert(ObjectIncarnationRef::of(*object_id, incarnation));
                 }
             }
-            // CR 400.7 + CR 608.2h: a tap event names the incarnation that was
-            // tapped; "that permanent's controller" reads its snapshot.
+            // CR 400.7 + CR 608.2h: tap and damage events name specific
+            // incarnations; pending triggers still read their full departure
+            // snapshots, not the latest history for a new object with the same id.
             if let GameEvent::PermanentTapped {
-                object_id,
+                object_id: source_id,
                 incarnation: Some(incarnation),
+                ..
+            }
+            | GameEvent::DamageDealt {
+                source_id,
+                source_incarnation: Some(incarnation),
                 ..
             } = event
             {
-                referenced_lki.insert(ObjectIncarnationRef::of(*object_id, *incarnation));
+                referenced_lki.insert(ObjectIncarnationRef::of(*source_id, *incarnation));
+            }
+            if let GameEvent::CombatDamageDealtToPlayer {
+                source_incarnations,
+                ..
+            } = event
+            {
+                referenced_lki.extend(source_incarnations.iter().copied());
             }
         };
 
@@ -37331,6 +37344,7 @@ impl GameState {
             pending_trigger: _,
             pending_trigger_firing: _,
             pending_trigger_event_batch: _,
+            current_trigger_event: _,
             current_trigger_events: _,
             stack_trigger_event_batches: _,
             stack_trigger_firings: _,
@@ -37627,7 +37641,6 @@ impl GameState {
             deferred_step_trigger_resume: _,
             pending_team_draw_step: _,
             pending_untap_declines: _,
-            current_trigger_event: _,
             current_trigger_match_count: _,
             announced_source_x: _,
             turn_up_paid_cost_source: _,
