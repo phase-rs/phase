@@ -3569,17 +3569,16 @@ fn evaluate_deck_coverage(db: &CardDatabase, request: &DeckCompatibilityRequest)
     for (canonical, name) in &unique_names {
         if let Some(face) = db.get_face_by_name(name) {
             resolved_unique += 1;
-            let gaps = crate::game::coverage::card_face_gaps(face);
-            if gaps.is_empty() {
+            let coverage = crate::game::coverage::card_face_coverage(face);
+            if coverage.is_supported() {
                 supported_count += 1;
             } else {
                 let copies = copy_counts.get(canonical).copied().unwrap_or(1);
-                let parse_details = crate::game::coverage::build_parse_details_for_face(face);
                 unsupported_cards.push(UnsupportedCard {
                     name: face.name.clone(),
-                    gaps,
+                    gaps: coverage.gap_handlers(),
                     oracle_text: face.oracle_text.clone(),
-                    parse_details,
+                    parse_details: coverage.parse_details,
                     copies,
                 });
             }
@@ -10449,6 +10448,44 @@ mod tests {
             coverage.supported_unique + coverage.unsupported_cards.len(),
             coverage.total_unique,
             "every counted card must land in exactly one bucket"
+        );
+    }
+
+    /// CR 100.2a: Deck coverage must surface cards that coverage-report marks unsupported,
+    /// including those whose only gaps are parse warnings (e.g. SwallowedClause) or
+    /// unhandled resolver features (issue #9972).
+    #[test]
+    fn deck_coverage_marks_card_with_parse_warning_or_resolver_feature_unsupported() {
+        use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+
+        let mut cards = Map::new();
+        insert_planechase_card(&mut cards, "Plains", &["Basic"], &["Land"]);
+
+        let mut dragon = planechase_card_json("Transcendent Dragon", &[], &["Creature"]);
+        dragon["parse_warnings"] = serde_json::to_value(vec![OracleDiagnostic::swallowed_clause(
+            "Replacement_Instead",
+            "exile it instead",
+            None,
+        )])
+        .unwrap();
+        cards.insert("transcendent dragon".to_string(), dragon);
+
+        let db = CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap();
+
+        let request = DeckCompatibilityRequest {
+            main_deck: vec!["Plains".to_string(), "Transcendent Dragon".to_string()],
+            ..Default::default()
+        };
+
+        let coverage = evaluate_deck_coverage(&db, &request);
+        assert_eq!(coverage.total_unique, 2);
+        assert_eq!(coverage.supported_unique, 1);
+        assert_eq!(coverage.unsupported_cards.len(), 1);
+        let unsupported = &coverage.unsupported_cards[0];
+        assert_eq!(unsupported.name, "Transcendent Dragon");
+        assert_eq!(
+            unsupported.gaps,
+            vec!["Swallow:Replacement_Instead".to_string()]
         );
     }
 
