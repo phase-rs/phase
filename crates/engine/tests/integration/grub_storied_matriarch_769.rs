@@ -35,7 +35,7 @@ use engine::types::counter::CounterType;
 use engine::types::game_state::{ReplacementChoiceKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::ManaColor;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -57,6 +57,7 @@ const KEEPERS_ORACLE: &str = "This creature can't have counters put on it.";
 const GANG_ORACLE: &str = "At the beginning of your first main phase, you may blight 2. If you don't, you lose 3 life. (To blight 2, put two -1/-1 counters on a creature you control.)";
 const SCROUNGER_ORACLE: &str = "At the beginning of your first main phase, you may blight 1. If you do, create a Treasure token. (To blight 1, put a -1/-1 counter on a creature you control. A Treasure token is an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")";
 const TORCHMASTER_ORACLE: &str = "At the beginning of combat on your turn, you may blight 1. When you do, target creature gains haste until end of turn. (To blight 1, put a -1/-1 counter on a creature you control.)";
+const SHOW_AND_TELL_ORACLE: &str = "Each player may put an artifact, creature, enchantment, or land card from their hand onto the battlefield.";
 
 /// A board at `phase`, with stocked libraries so a real draw step can't end the
 /// game (CR 704.5b).
@@ -1182,6 +1183,64 @@ fn aegis_sculptor_with_an_empty_graveyard_offers_no_exile() {
     assert_eq!(plus_counters(&stocked, aegis), 0);
     for id in cards {
         assert_eq!(stocked.state().objects[&id].zone, Zone::Graveyard);
+    }
+}
+
+/// Show and Tell: "Each player may put an artifact, creature, enchantment, or
+/// land card from their hand onto the battlefield."
+///
+/// CR 101.4 + CR 608.2d: each player makes their own choice, from their own
+/// hand, and can't choose an impossible option. With Grizzly Bears in one hand
+/// and the other hand empty, only the holder is asked, and the empty seat is
+/// not. Each board is the other with the seats swapped.
+#[test]
+fn show_and_tell_asks_only_the_seat_with_an_eligible_card() {
+    for holder in [P1, P0] {
+        let (mut runner, (show_and_tell, bears)) = board(Phase::PreCombatMain, |scenario, db| {
+            let show_and_tell = scenario
+                .add_spell_to_hand_from_oracle(P0, "Show and Tell", false, SHOW_AND_TELL_ORACLE)
+                .with_mana_cost(ManaCost::generic(0))
+                .id();
+            let bears = scenario.add_real_card(holder, "Grizzly Bears", Zone::Hand, db);
+            (show_and_tell, bears)
+        });
+
+        runner.cast(show_and_tell).commit();
+        for seat in [P0, P1] {
+            let expected = usize::from(seat == holder);
+            assert_eq!(
+                runner.state().players[seat.0 as usize].hand.len(),
+                expected,
+                "holder {holder:?}: after the cast, {seat:?}'s hand"
+            );
+        }
+        assert_eq!(runner.state().stack.len(), 1, "reach: Show and Tell");
+        both_pass(&mut runner);
+
+        let WaitingFor::OptionalEffectChoice { player, .. } = runner.state().waiting_for.clone()
+        else {
+            panic!(
+                "holder {holder:?}: the holder must be asked; got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(player, holder, "the empty seat is not asked");
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("accepting the put must succeed");
+        if let WaitingFor::EffectZoneChoice { player, cards, .. } =
+            runner.state().waiting_for.clone()
+        {
+            assert_eq!((player, cards), (holder, vec![bears]));
+            runner
+                .act(GameAction::SelectCards { cards: vec![bears] })
+                .expect("putting Grizzly Bears must succeed");
+        }
+
+        assert_settled(&runner);
+        let entered = &runner.state().objects[&bears];
+        assert_eq!(entered.zone, Zone::Battlefield, "holder {holder:?}");
+        assert_eq!(entered.controller, holder);
     }
 }
 
