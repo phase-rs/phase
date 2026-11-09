@@ -392,16 +392,16 @@ pub fn structurally_valid_prompt_answer(state: &GameState, action: &GameAction) 
 ///
 /// PRE-TAKE GUARDS ARE THE WHOLE CLAIM. An admitted answer can still fail when applied: a
 /// `Shorten` at place 0 elides the rest of the poll and takes it at once, the last responder's
-/// answer takes it too, and that take can be rejected after the guards (a life change outside the
-/// engine's range, `LifeChangeUnrepresentable`) or fall back to manual play without an error (a
+/// answer takes it too, and that take can be rejected after the guards (an energy gain the engine
+/// cannot represent, `EngineError::PlayerResourceChangeUnrepresentable`) or fall back to manual play without an error (a
 /// departed proposer, whose guard restores priority). That is the same class as an
-/// admitted named choice whose life gain is unrepresentable — the authority's contract is that an
+/// admitted named choice whose energy gain is unrepresentable — the authority's contract is that an
 /// admitted answer is one the PROMPT admits, not one the engine can execute, which is why phase-ai's
 /// chooser simulates the single answer it submits and re-decides on a rejection
 /// (`ai_driver_replaces_a_submitted_creature_type_the_engine_rejects`). On this shape the rejection
 /// is pinned by
-/// `public_recorded_period_replay_rejects_later_life_counter_overflow_atomically`, whose hostile
-/// overflowing gain makes a public `Accept` return that error and restore its entry state.
+/// `public_recorded_period_replay_rejects_later_energy_overflow_atomically`, whose hostile
+/// overflowing energy gain makes a public `Accept` return that error and restore its entry state.
 ///
 /// MIRRORS THE REDUCER'S ADMITTED SET BY CALLING ITS AUTHORITY, not by restating it.
 /// `handle_respond_to_shortcut` refuses three `Shorten` shapes: a place its counted take refuses,
