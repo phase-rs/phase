@@ -18,7 +18,8 @@
 //! Monoxa, Pixie Guide, Tayam, Rhythm of the Wild, Stolen Identity, Fathom Mage and
 //! Storm the Festival carry only the lines under test, and Rite of the Moth its
 //! first line, without its flashback.
-//! Ever After, Myojin of Life's Web, Oblation and Llanowar Elves are verbatim.
+//! Ever After, Myojin of Life's Web, Oblation, Llanowar Elves and Roaming Throne
+//! are verbatim.
 //! Dice-dependent rows choose their RNG seed by search and assert against the
 //! emitted `DieRolled` results, never a hard-coded total.
 
@@ -7395,6 +7396,350 @@ fn a_chosen_co_entrant_does_not_see_the_roll() {
         );
         assert_co_entry_settled(&board, &events, p1_before, 0, &what);
     }
+}
+
+// ---------------------------------------------------------------------------
+// A co-entrant's trigger doubler (Roaming Throne) and an as-enters roll
+// ---------------------------------------------------------------------------
+
+/// Verbatim Oracle text (card-data), Roaming Throne.
+const ROAMING_THRONE: &str = "Ward {2}\nAs this creature enters, choose a creature type.\nThis creature is the chosen type in addition to its other types.\nIf a triggered ability of another creature you control of the chosen type triggers, it triggers an additional time.";
+
+/// A resident Brazen Dwarf with its printed types (Dwarf Shaman), so a Roaming
+/// Throne that chose Dwarf doubles its trigger.
+fn add_typed_dwarf(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_from_oracle(P0, "Brazen Dwarf", 1, 3, BRAZEN_DWARF)
+        .with_subtypes(vec!["Dwarf", "Shaman"])
+        .id()
+}
+
+/// A Roaming Throne card (printed artifact creature — Golem, 4/4) in P0's hand
+/// costing `cost`.
+fn throne_card(scenario: &mut GameScenario, cost: ManaCost) -> ObjectId {
+    scenario
+        .add_creature_to_hand_from_oracle(P0, "Roaming Throne", 4, 4, ROAMING_THRONE)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Golem"])
+        .with_mana_cost(cost)
+        .id()
+}
+
+/// A Roaming Throne card in P0's graveyard.
+fn graveyard_throne(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_to_graveyard(P0, "Roaming Throne", 4, 4)
+        .from_oracle_text(ROAMING_THRONE)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Golem"])
+        .id()
+}
+
+/// The creature types a Roaming Throne row can name.
+fn seed_creature_types(runner: &mut GameRunner) {
+    runner.state_mut().all_creature_types = vec![
+        "Dwarf".into(),
+        "Goblin".into(),
+        "Golem".into(),
+        "Shaman".into(),
+    ];
+}
+
+/// Answer the entry prompts that come before Hammer Jammer's roll, in delivery
+/// order: an entry's replacement ordering (the entrant's own replacement first,
+/// then Grumgully's) and Roaming Throne's creature type (Dwarf). Returns how many
+/// ordering prompts were answered.
+fn answer_pre_roll_entry_prompts(runner: &mut GameRunner, events: &mut Vec<GameEvent>) -> usize {
+    let mut ordering_prompts = 0;
+    for _ in 0..8 {
+        let state = runner.state();
+        let action = match &state.waiting_for {
+            WaitingFor::NamedChoice {
+                choice_type: ChoiceType::CreatureType { .. },
+                ..
+            } => GameAction::ChooseOption {
+                choice: "Dwarf".to_string(),
+            },
+            WaitingFor::ReplacementChoice { candidates, .. } if !is_counter_prompt(state) => {
+                ordering_prompts += 1;
+                GameAction::ChooseReplacement {
+                    index: candidates
+                        .iter()
+                        .position(|candidate| candidate.source_name != "Grumgully, the Generous")
+                        .unwrap_or_else(|| panic!("an entrant's own replacement: {candidates:?}")),
+                }
+            }
+            _ => return ordering_prompts,
+        };
+        act(runner, action, events);
+    }
+    panic!("the entry prompts never ended");
+}
+
+fn chose_dwarf(state: &GameState, throne: ObjectId) -> bool {
+    state.objects[&throne]
+        .card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype == "Dwarf")
+}
+
+/// Where Hammer Jammer's as-enters roll is made relative to the owner's pauses,
+/// on a Roaming Throne co-entry row.
+#[derive(Clone, Copy, Debug)]
+enum ThroneCoEntry {
+    /// No replacement beyond the two entrants' own.
+    Inline,
+    /// Grumgully, the Generous: each entry asks its replacement order, so the
+    /// owner is parked when the roll is made.
+    Ordered,
+}
+
+impl ThroneCoEntry {
+    fn extras(self) -> fn(&mut GameScenario) {
+        match self {
+            ThroneCoEntry::Inline => no_extras,
+            ThroneCoEntry::Ordered => add_grumgully,
+        }
+    }
+
+    /// The entry ordering prompts before the roll: Roaming Throne's, then Hammer
+    /// Jammer's, which parks the owner when the roll is made.
+    fn ordering_prompts(self) -> usize {
+        match self {
+            ThroneCoEntry::Inline => 0,
+            ThroneCoEntry::Ordered => 2,
+        }
+    }
+
+    /// Hammer Jammer's +1/+1 counters for its roll `n`.
+    fn counters(self, n: u32) -> u32 {
+        match self {
+            ThroneCoEntry::Inline => n,
+            ThroneCoEntry::Ordered => n + 1,
+        }
+    }
+}
+
+/// A Roaming Throne co-entry row's board: `spell` puts Roaming Throne, then
+/// Hammer Jammer, onto the battlefield, with a resident Brazen Dwarf and a free
+/// Box of Free-Range Goblins in hand.
+struct ThroneCoEntryBoard {
+    runner: GameRunner,
+    spell: ObjectId,
+    throne: ObjectId,
+    jammer: ObjectId,
+    resident: ObjectId,
+    box_of_goblins: ObjectId,
+}
+
+/// Storm the Festival over Roaming Throne, then Hammer Jammer.
+fn throne_festival_board(case: ThroneCoEntry) -> ThroneCoEntryBoard {
+    let mut scenario = board(7);
+    let resident = add_typed_dwarf(&mut scenario);
+    let throne = throne_card(&mut scenario, ManaCost::generic(4));
+    let jammer = jammer_card(&mut scenario);
+    let NewcomerFestival {
+        mut runner,
+        festival,
+        box_of_goblins,
+        ..
+    } = newcomer_festival(scenario, case.extras(), false, &[throne, jammer]);
+    seed_creature_types(&mut runner);
+    ThroneCoEntryBoard {
+        runner,
+        spell: festival,
+        throne,
+        jammer,
+        resident,
+        box_of_goblins,
+    }
+}
+
+/// Rise of the Dark Realms over Roaming Throne, then Hammer Jammer, in P0's
+/// graveyard.
+fn throne_rise_board(case: ThroneCoEntry) -> ThroneCoEntryBoard {
+    let mut scenario = board(7);
+    case.extras()(&mut scenario);
+    let throne = graveyard_throne(&mut scenario);
+    let jammer = graveyard_creature(&mut scenario, "Hammer Jammer", HAMMER_JAMMER);
+    let resident = add_typed_dwarf(&mut scenario);
+    let spell = free_spell(
+        &mut scenario,
+        "Rise of the Dark Realms",
+        false,
+        RISE_OF_THE_DARK_REALMS,
+    );
+    let box_of_goblins = free_spell(
+        &mut scenario,
+        "Box of Free-Range Goblins",
+        false,
+        BOX_OF_FREE_RANGE_GOBLINS,
+    );
+    let mut runner = scenario.build();
+    seed_creature_types(&mut runner);
+    ThroneCoEntryBoard {
+        runner,
+        spell,
+        throne,
+        jammer,
+        resident,
+        box_of_goblins,
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ThroneOwner {
+    Festival,
+    Rise,
+}
+
+fn run_throne_co_entry(owner: ThroneOwner, case: ThroneCoEntry) {
+    let what = format!("{owner:?} {case:?}");
+    reset_triggers_seen();
+    let mut board = match owner {
+        ThroneOwner::Festival => throne_festival_board(case),
+        ThroneOwner::Rise => throne_rise_board(case),
+    };
+    let p1_before = life(board.runner.state(), P1);
+    let mut events = Vec::new();
+    match owner {
+        ThroneOwner::Festival => festival_keeps(
+            &mut board.runner,
+            board.spell,
+            vec![board.throne, board.jammer],
+            &mut events,
+        ),
+        ThroneOwner::Rise => {
+            cast_and_pass(&mut board.runner, board.spell, None, None, &mut events);
+        }
+    }
+    assert_eq!(
+        answer_pre_roll_entry_prompts(&mut board.runner, &mut events),
+        case.ordering_prompts(),
+        "{what}: reach: the entry ordering prompts"
+    );
+    settle(&mut board.runner, &mut events, DEFAULT_ANSWERS);
+    let state = board.runner.state();
+    assert_eq!(zone(state, board.throne), Zone::Battlefield, "{what}");
+    assert!(
+        chose_dwarf(state, board.throne),
+        "{what}: reach: Roaming Throne chose Dwarf"
+    );
+    let throne_entry =
+        battlefield_entry_index(&events, board.throne).expect("Roaming Throne entered");
+    assert!(
+        throne_entry < first_roll_index(&events),
+        "{what}: reach: Roaming Throne is delivered before the roll"
+    );
+    assert_eq!(
+        triggers_seen_from(board.resident),
+        1,
+        "{what}: Roaming Throne enters with the roll's event, so it does not double the \
+         resident Dwarf's trigger"
+    );
+    assert_eq!(
+        p1_before - life(state, P1),
+        1,
+        "{what}: the resident Dwarf deals 1 damage once"
+    );
+    assert_eq!(triggers_seen_from(board.jammer), 0, "{what}");
+    let rolls = die_results(&events);
+    assert_eq!(rolls.len(), 1, "{what}");
+    assert_eq!(
+        plus_counters(state, board.jammer),
+        case.counters(rolls[0]),
+        "{what}: {rolls:?}"
+    );
+    assert_finished(state, &[board.resident], &what);
+
+    // Reach: once Roaming Throne is on the battlefield, it doubles the Dwarf's
+    // trigger on a later roll (CR 603.2d).
+    let p1_before_box = life(state, P1);
+    let _ = take_triggers_seen_from(board.resident);
+    cast_box_and_settle(&mut board.runner, board.box_of_goblins, None);
+    let state = board.runner.state();
+    assert_eq!(
+        triggers_seen_from(board.resident),
+        2,
+        "{what}: reach: Roaming Throne doubles the Dwarf's trigger on a later roll"
+    );
+    assert_eq!(p1_before_box - life(state, P1), 2, "{what}");
+    assert_finished(state, &[board.resident, board.jammer], &what);
+}
+
+/// R23b (Codex review of m5). Storm the Festival puts Roaming Throne, then Hammer
+/// Jammer, onto the battlefield, Throne choosing Dwarf, with Brazen Dwarf
+/// resident + CR 603.6a + CR 603.6d + CR 614.12a + CR 611.3b + CR 603.2d: the two
+/// enter in one event, and Hammer Jammer's roll is made before that event, so
+/// Throne is not on the battlefield when it is rolled and its doubling static
+/// does not apply. The resident Dwarf triggers once; a later roll is doubled. No
+/// replacement beyond the two entrants' own.
+#[test]
+fn a_co_entrant_doubler_does_not_double_a_later_members_roll() {
+    run_throne_co_entry(ThroneOwner::Festival, ThroneCoEntry::Inline);
+}
+
+/// R23b-ordered. R23b behind Grumgully, the Generous's ordering prompts
+/// (CR 616.1): Storm the Festival's batch is parked when Hammer Jammer's roll is
+/// made.
+#[test]
+fn a_parked_co_entrant_doubler_does_not_double_a_later_members_roll() {
+    run_throne_co_entry(ThroneOwner::Festival, ThroneCoEntry::Ordered);
+}
+
+/// R23c (Codex review of m5, the mass owner). R23b on Rise of the Dark Realms over
+/// Roaming Throne, then Hammer Jammer, in P0's graveyard.
+#[test]
+fn a_mass_return_co_entrant_doubler_does_not_double_the_roll() {
+    run_throne_co_entry(ThroneOwner::Rise, ThroneCoEntry::Inline);
+}
+
+/// R23c-ordered. R23c behind Grumgully, the Generous's ordering prompts
+/// (CR 616.1): the mass owner is parked on its `ChangeZone` frame when the roll
+/// is made.
+#[test]
+fn a_parked_mass_return_co_entrant_doubler_does_not_double_the_roll() {
+    run_throne_co_entry(ThroneOwner::Rise, ThroneCoEntry::Ordered);
+}
+
+/// R23d (positive control). Roaming Throne is cast first and chooses Dwarf, then
+/// Hammer Jammer is cast with Brazen Dwarf resident + CR 603.2d + CR 611.3b: Throne
+/// is on the battlefield when the roll is made, so the Dwarf's trigger triggers
+/// an additional time.
+#[test]
+fn a_resident_doubler_doubles_an_as_enters_roll() {
+    reset_triggers_seen();
+    let mut scenario = board(7);
+    let resident = add_typed_dwarf(&mut scenario);
+    let throne = throne_card(&mut scenario, ManaCost::generic(0));
+    let jammer = free_jammer(&mut scenario);
+    let mut runner = scenario.build();
+    seed_creature_types(&mut runner);
+    let mut events = Vec::new();
+    cast_and_pass(&mut runner, throne, None, None, &mut events);
+    assert_eq!(answer_pre_roll_entry_prompts(&mut runner, &mut events), 0);
+    settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+    assert!(
+        chose_dwarf(runner.state(), throne),
+        "reach: Roaming Throne chose Dwarf"
+    );
+    let p1_before = life(runner.state(), P1);
+    let _ = take_triggers_seen_from(resident);
+    let mut events = Vec::new();
+    cast_and_pass(&mut runner, jammer, None, None, &mut events);
+    settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+    let state = runner.state();
+    assert_eq!(die_results(&events).len(), 1);
+    assert_eq!(
+        triggers_seen_from(resident),
+        2,
+        "a resident Roaming Throne doubles the Dwarf's trigger"
+    );
+    assert_eq!(p1_before - life(state, P1), 2);
+    assert_eq!(triggers_seen_from(jammer), 0);
+    assert_eq!(plus_counters(state, jammer), die_results(&events)[0]);
+    assert_finished(state, &[resident], "R23d");
 }
 
 /// R24's board: Llanowar Elves, Hardened Scales and Branching Evolution on P0's
