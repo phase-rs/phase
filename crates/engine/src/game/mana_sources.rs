@@ -2514,53 +2514,90 @@ pub(crate) fn has_activatable_player_choice_mana_ability_for_payment(
     exclude: Option<ObjectId>,
     payment_context: Option<&PaymentContext<'_>>,
 ) -> bool {
-    state.battlefield.iter().any(|&object_id| {
-        if Some(object_id) == exclude {
-            return false;
-        }
-        let Some(obj) = state.objects.get(&object_id) else {
-            return false;
-        };
-        if obj.zone != Zone::Battlefield || obj.controller != controller {
-            return false;
-        }
-        obj.abilities.iter().enumerate().any(|(idx, ability)| {
-            if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
-                return false;
-            }
-            // Choice-free tap-cost and unambiguous self-sacrifice abilities
-            // (Sol Ring, Gold, Treasure) are already covered by
-            // `is_active_tap_mana_ability` on the auto-tap path; a tap cost that
-            // chooses an object (CR 605.3a) belongs here with the ambiguous
-            // non-tap costs (KCI's "Sacrifice an artifact", discard, pay-life).
-            if (has_tap_component(&ability.cost)
-                && !mana_abilities::cost_requires_object_choice(
-                    state, controller, object_id, ability,
-                ))
-                || has_unambiguous_self_sacrifice_component(&ability.cost)
-            {
-                return false;
-            }
-            if !mana_abilities::can_activate_mana_ability_now(
-                state, controller, object_id, idx, ability,
-            ) {
-                return false;
-            }
-            if !activation_condition_satisfied(state, controller, object_id, idx, ability) {
-                return false;
-            }
-            match &*ability.effect {
-                Effect::Mana { restrictions, .. } => mana_ability_allowed_for_payment(
-                    ability,
-                    restrictions,
-                    state,
-                    object_id,
-                    payment_context,
-                ),
-                _ => false,
-            }
+    activatable_player_choice_mana_abilities_for_payment(
+        state,
+        controller,
+        exclude,
+        payment_context,
+    )
+    .next()
+    .is_some()
+}
+
+/// CR 117.1d + CR 601.2g: Each `(source, ability index)` that
+/// [`has_activatable_player_choice_mana_ability_for_payment`] reports: a
+/// currently activatable mana ability whose activation the automatic payer
+/// leaves to the player, in battlefield order.
+pub(crate) fn activatable_player_choice_mana_abilities_for_payment<'a>(
+    state: &'a GameState,
+    controller: PlayerId,
+    exclude: Option<ObjectId>,
+    payment_context: Option<&'a PaymentContext<'a>>,
+) -> impl Iterator<Item = (ObjectId, usize)> + 'a {
+    state.battlefield.iter().flat_map(move |&object_id| {
+        let obj = state.objects.get(&object_id).filter(|obj| {
+            Some(object_id) != exclude
+                && obj.zone == Zone::Battlefield
+                && obj.controller == controller
+        });
+        obj.into_iter().flat_map(move |obj| {
+            obj.abilities
+                .iter()
+                .enumerate()
+                .filter(move |(idx, ability)| {
+                    player_choice_mana_ability_usable_for_payment(
+                        state,
+                        controller,
+                        object_id,
+                        *idx,
+                        ability,
+                        payment_context,
+                    )
+                })
+                .map(move |(idx, _)| (object_id, idx))
         })
     })
+}
+
+/// CR 117.1d + CR 601.2g: one ability of [`activatable_player_choice_mana_abilities_for_payment`].
+fn player_choice_mana_ability_usable_for_payment(
+    state: &GameState,
+    controller: PlayerId,
+    object_id: ObjectId,
+    idx: usize,
+    ability: &AbilityDefinition,
+    payment_context: Option<&PaymentContext<'_>>,
+) -> bool {
+    if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
+        return false;
+    }
+    // Choice-free tap-cost and unambiguous self-sacrifice abilities
+    // (Sol Ring, Gold, Treasure) are already covered by
+    // `is_active_tap_mana_ability` on the auto-tap path; a tap cost that
+    // chooses an object (CR 605.3a) belongs here with the ambiguous
+    // non-tap costs (KCI's "Sacrifice an artifact", discard, pay-life).
+    if (has_tap_component(&ability.cost)
+        && !mana_abilities::cost_requires_object_choice(state, controller, object_id, ability))
+        || has_unambiguous_self_sacrifice_component(&ability.cost)
+    {
+        return false;
+    }
+    if !mana_abilities::can_activate_mana_ability_now(state, controller, object_id, idx, ability) {
+        return false;
+    }
+    if !activation_condition_satisfied(state, controller, object_id, idx, ability) {
+        return false;
+    }
+    match &*ability.effect {
+        Effect::Mana { restrictions, .. } => mana_ability_allowed_for_payment(
+            ability,
+            restrictions,
+            state,
+            object_id,
+            payment_context,
+        ),
+        _ => false,
+    }
 }
 
 /// CR 117.1d + CR 601.2g: One activation's producible mana shape for the

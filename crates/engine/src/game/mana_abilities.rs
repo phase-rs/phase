@@ -1749,6 +1749,64 @@ pub fn handle_discard_for_mana_ability(
     continue_mana_ability_activation(state, updated, events)
 }
 
+/// CR 117.1 + CR 118.3 + CR 605.3b: Answer a mana ability's cost-choice prompt
+/// (`WaitingFor::PayCost` resumed by `CostResume::ManaAbility`) with `chosen`.
+/// The single dispatch for the player's answer and for a witness board that
+/// activates a mana ability on the player's behalf.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_mana_ability_cost_selection(
+    state: &mut GameState,
+    kind: &PayCostKind,
+    min_count: usize,
+    count: usize,
+    choices: &[ObjectId],
+    pending: &PendingManaAbility,
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    match kind {
+        // CR 605.1a: the aggregate form never resumes a mana ability;
+        // fixed-count and X-sentinel forms both do.
+        PayCostKind::TapCreatures { mode } => handle_tap_creatures_for_mana_ability(
+            state, min_count, count, *mode, choices, pending, chosen, events,
+        ),
+        PayCostKind::Discard => {
+            handle_discard_for_mana_ability(state, count, choices, pending, chosen, events)
+        }
+        PayCostKind::ExileFromManaZone { .. } => {
+            handle_exile_for_mana_ability(state, count, choices, pending, chosen, events)
+        }
+        PayCostKind::Sacrifice => {
+            handle_sacrifice_for_mana_ability(state, count, choices, pending, chosen, events)
+        }
+        // ReturnToHand, Reveal, ExileFromZone, RemoveCounter, and Behold
+        // do not have mana-ability cost handlers wired today. If a
+        // future mana ability uses one of these CR-valid cost shapes,
+        // add the corresponding mana-ability handler instead of
+        // routing it through the spell pipeline.
+        PayCostKind::ReturnToHand
+        | PayCostKind::Reveal { shared_quality: _ }
+        | PayCostKind::ExileFromZone { .. }
+        | PayCostKind::ExileMaterials { .. }
+        | PayCostKind::ExilePermanent { .. }
+        | PayCostKind::ExileAggregate { .. }
+        | PayCostKind::RemoveCounter { .. }
+        // CR 701.3d: an unattach-from cost is only ever surfaced via
+        // `CostResume::Spell` (targeted activation), never as a mana
+        // ability — unreachable here.
+        | PayCostKind::UnattachFrom { .. }
+        | PayCostKind::Behold { .. } => {
+            debug_assert!(
+                !matches!(kind, PayCostKind::UnattachFrom { .. }),
+                "UnattachFrom cost cannot resume a mana ability",
+            );
+            Err(EngineError::InvalidAction(
+                "Cost kind cannot resume a mana ability".into(),
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 

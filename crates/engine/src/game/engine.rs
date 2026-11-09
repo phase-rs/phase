@@ -14223,73 +14223,16 @@ fn apply_non_priority_pass_action(
             }
             CostResume::ManaAbility {
                 mana_ability: pending_mana_ability,
-            } => match kind {
-                // CR 605.1a: the aggregate form never resumes a mana ability;
-                // fixed-count and X-sentinel forms both do.
-                PayCostKind::TapCreatures { mode } => {
-                    engine_casting::handle_tap_creatures_for_mana_ability(
-                        state,
-                        *min_count,
-                        *count,
-                        *mode,
-                        choices,
-                        pending_mana_ability,
-                        &chosen,
-                        &mut events,
-                    )?
-                }
-                PayCostKind::Discard => engine_casting::handle_discard_for_mana_ability(
-                    state,
-                    *count,
-                    choices,
-                    pending_mana_ability,
-                    &chosen,
-                    &mut events,
-                )?,
-                PayCostKind::ExileFromManaZone { .. } => {
-                    super::mana_abilities::handle_exile_for_mana_ability(
-                        state,
-                        *count,
-                        choices,
-                        pending_mana_ability,
-                        &chosen,
-                        &mut events,
-                    )?
-                }
-                PayCostKind::Sacrifice => super::mana_abilities::handle_sacrifice_for_mana_ability(
-                    state,
-                    *count,
-                    choices,
-                    pending_mana_ability,
-                    &chosen,
-                    &mut events,
-                )?,
-                // ReturnToHand, Reveal, ExileFromZone, RemoveCounter, and Behold
-                // do not have mana-ability cost handlers wired today. If a
-                // future mana ability uses one of these CR-valid cost shapes,
-                // add the corresponding mana-ability handler instead of
-                // routing it through the spell pipeline.
-                PayCostKind::ReturnToHand
-                | PayCostKind::Reveal { shared_quality: _ }
-                | PayCostKind::ExileFromZone { .. }
-                | PayCostKind::ExileMaterials { .. }
-                | PayCostKind::ExilePermanent { .. }
-                | PayCostKind::ExileAggregate { .. }
-                | PayCostKind::RemoveCounter { .. }
-                // CR 701.3d: an unattach-from cost is only ever surfaced via
-                // `CostResume::Spell` (targeted activation), never as a mana
-                // ability — unreachable here.
-                | PayCostKind::UnattachFrom { .. }
-                | PayCostKind::Behold { .. } => {
-                    debug_assert!(
-                        !matches!(kind, PayCostKind::UnattachFrom { .. }),
-                        "UnattachFrom cost cannot resume a mana ability",
-                    );
-                    return Err(EngineError::InvalidAction(
-                        "Cost kind cannot resume a mana ability".into(),
-                    ));
-                }
-            },
+            } => super::mana_abilities::handle_mana_ability_cost_selection(
+                state,
+                kind,
+                *min_count,
+                *count,
+                choices,
+                pending_mana_ability,
+                &chosen,
+                &mut events,
+            )?,
             CostResume::Resolution => match kind {
                 PayCostKind::Sacrifice => {
                     casting_costs::handle_resolution_optional_sacrifice_for_cost(

@@ -23748,23 +23748,13 @@ fn settle_exact_mana_ability_prompts(
             choice,
             context: ManaChoiceContext::ManaAbility(_),
         } if *waiting_player == player => match choice {
-            ManaChoicePrompt::SingleColor { options } => options
-                .iter()
-                .copied()
-                .map(|color| GameAction::ChooseManaColor {
-                    choice: ManaChoice::SingleColor(color),
-                    count: 1,
-                })
-                .collect(),
-            ManaChoicePrompt::Combination { options } => options
-                .iter()
-                .cloned()
-                .map(|colors| GameAction::ChooseManaColor {
-                    choice: ManaChoice::Combination(colors),
-                    count: 1,
-                })
-                .collect(),
             ManaChoicePrompt::AnyCombination { .. } => Vec::new(),
+            ManaChoicePrompt::SingleColor { .. } | ManaChoicePrompt::Combination { .. } => {
+                mana_choice_answers(choice)
+                    .into_iter()
+                    .map(|choice| GameAction::ChooseManaColor { choice, count: 1 })
+                    .collect()
+            }
         },
         _ => Vec::new(),
     };
@@ -28133,8 +28123,12 @@ pub(crate) fn can_pay_ability_cost_now(
 /// on the intact board ([`casting_costs::extract_mana_leg`]), by the manual mana
 /// route the spell-side castability gate also uses
 /// ([`player_choice_mana_payment_route`]), and the rest of the cost by
-/// `payable`. Like that gate, the route counts each mana ability's capacity
-/// independently of the rest of the cost's resources (issue #1235).
+/// `payable`. Those two estimates count each resource independently, so they
+/// only gate the exact check: CR 118.10 forbids one payment from serving both a
+/// mana ability's cost and the activation's (one creature can't be sacrificed
+/// both to Ashnod's Altar and for "Sacrifice a creature"), which
+/// [`mana_ability_window_mana_witness`] judges on boards where the player has
+/// really activated those mana abilities.
 fn payable_with_mana_ability_window_mana(
     state: &GameState,
     player: PlayerId,
@@ -28154,6 +28148,276 @@ fn payable_with_mana_ability_window_mana(
     activation_manual_mana_payment_route(state, player, source_id, ability_index, cost, &mana)
         == ManualPaymentRoute::Feasible
         && rest.as_ref().is_none_or(|rest| payable(state, rest))
+        && mana_ability_window_mana_witness(state, player, source_id, cost, ability_index, &payable)
+}
+
+/// The most boards [`mana_ability_window_mana_witness`] builds for one
+/// verdict. Past it the search fails closed: the activation is refused rather
+/// than offered without a witness.
+const MANA_ABILITY_WINDOW_WITNESS_BUDGET: usize = 32;
+
+/// CR 601.2g + CR 605.3a + CR 605.3b + CR 118.10: whether `player` can activate,
+/// during the activation's CR 601.2g opportunity, mana abilities the automatic
+/// payer never activates (a sacrifice, discard or other object-choosing cost:
+/// Ashnod's Altar) so that `payable` then accepts the whole `cost` — its mana
+/// from the pool those abilities filled, its other components from what their
+/// costs left behind. Each candidate is activated on a clone through the real
+/// mana-ability authority, every object choice its cost asks for tried in turn,
+/// and each activation resolves at once (CR 605.3b). The activation's own
+/// source is never chosen to pay a mana ability's cost, so the witness never
+/// rests on the source leaving before its own cost is paid. A search over
+/// activations in candidate order (a source may be activated again) explores
+/// each multiset of activations once; an activation that adds no mana, or
+/// stops for a prompt other than its cost's object choice (a mana color), is
+/// not part of any witness. At most [`MANA_ABILITY_WINDOW_WITNESS_BUDGET`]
+/// boards are built.
+fn mana_ability_window_mana_witness(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    ability_index: Option<usize>,
+    payable: &impl Fn(&GameState, &AbilityCost) -> bool,
+) -> bool {
+    let activation_context = activation_payment_context(state, source_id, ability_index);
+    let payment_ctx = activation_context.as_payment_context();
+    let candidates: Vec<(ObjectId, usize)> =
+        super::mana_sources::activatable_player_choice_mana_abilities_for_payment(
+            state,
+            player,
+            requires_untapped(cost).then_some(source_id),
+            Some(&payment_ctx),
+        )
+        .collect();
+    let mut search = ManaWindowWitnessSearch {
+        player,
+        source_id,
+        cost,
+        payable,
+        candidates: &candidates,
+        budget: MANA_ABILITY_WINDOW_WITNESS_BUDGET,
+    };
+    search.from(state, 0)
+}
+
+struct ManaWindowWitnessSearch<'a, F> {
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &'a AbilityCost,
+    payable: &'a F,
+    candidates: &'a [(ObjectId, usize)],
+    budget: usize,
+}
+
+impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
+    /// Whether some activations of `candidates[first..]` on `board` reach a
+    /// board on which the cost is payable.
+    fn from(&mut self, board: &GameState, first: usize) -> bool {
+        for (candidate, &(mana_source, index)) in self.candidates.iter().enumerate().skip(first) {
+            let Some(def) = board
+                .objects
+                .get(&mana_source)
+                .and_then(|obj| obj.abilities.get(index))
+                .cloned()
+            else {
+                continue;
+            };
+            if !super::mana_abilities::can_activate_mana_ability_now(
+                board,
+                self.player,
+                mana_source,
+                index,
+                &def,
+            ) {
+                continue;
+            }
+            let Some(mut next) = self.clone_board(board) else {
+                return false;
+            };
+            let waiting = super::mana_abilities::activate_mana_ability(
+                &mut next,
+                mana_source,
+                self.player,
+                index,
+                &def,
+                &mut Vec::new(),
+                ManaAbilityResume::Priority,
+                None,
+            );
+            if self.through_cost_choices(board, next, waiting, candidate) {
+                return true;
+            }
+            if self.budget == 0 {
+                return false;
+            }
+        }
+        false
+    }
+
+    /// CR 118.3 + CR 605.3b: Follow one activation on `next` to its
+    /// resolution, trying each object choice its cost asks for (never the
+    /// activation's own source), then judge and extend each resolved board.
+    fn through_cost_choices(
+        &mut self,
+        board: &GameState,
+        mut next: GameState,
+        waiting: Result<WaitingFor, EngineError>,
+        candidate: usize,
+    ) -> bool {
+        match waiting {
+            Ok(WaitingFor::Priority { .. }) => {
+                let pool = |state: &GameState| {
+                    state
+                        .players
+                        .get(self.player.0 as usize)
+                        .map_or(0, |p| p.mana_pool.total())
+                };
+                if pool(&next) <= pool(board) {
+                    return false;
+                }
+                next.waiting_for = board.waiting_for.clone();
+                (self.payable)(&next, self.cost) || self.from(&next, candidate)
+            }
+            Ok(WaitingFor::PayCost {
+                kind,
+                choices,
+                count,
+                min_count,
+                resume: CostResume::ManaAbility { mana_ability },
+                ..
+            }) => {
+                let choices: Vec<ObjectId> = choices
+                    .into_iter()
+                    .filter(|id| *id != self.source_id)
+                    .collect();
+                // CR 118.3: pay exactly the printed count where the cost
+                // allows it; an X-sentinel form pays its largest.
+                let count = count.min(choices.len());
+                if count < min_count {
+                    return false;
+                }
+                for picked in index_combinations(choices.len(), count, Repetition::Distinct) {
+                    let chosen: Vec<ObjectId> = picked.iter().map(|&i| choices[i]).collect();
+                    let Some(mut answered) = self.clone_board(&next) else {
+                        return false;
+                    };
+                    let resumed = super::mana_abilities::handle_mana_ability_cost_selection(
+                        &mut answered,
+                        &kind,
+                        min_count,
+                        count,
+                        &choices,
+                        &mana_ability,
+                        &chosen,
+                        &mut Vec::new(),
+                    );
+                    if self.through_cost_choices(board, answered, resumed, candidate) {
+                        return true;
+                    }
+                    if self.budget == 0 {
+                        return false;
+                    }
+                }
+                false
+            }
+            // CR 106.1 + CR 605.3b: each color (or combination) the ability
+            // can add is a separate way to activate it.
+            Ok(WaitingFor::ChooseManaColor {
+                choice: prompt,
+                context: ManaChoiceContext::ManaAbility(mana_ability),
+                ..
+            }) => {
+                for chosen in mana_choice_answers(&prompt) {
+                    let Some(mut answered) = self.clone_board(&next) else {
+                        return false;
+                    };
+                    let resumed = super::mana_abilities::handle_choose_mana_color(
+                        &mut answered,
+                        &mana_ability,
+                        &prompt,
+                        chosen,
+                        &mut Vec::new(),
+                    );
+                    if self.through_cost_choices(board, answered, resumed, candidate) {
+                        return true;
+                    }
+                    if self.budget == 0 {
+                        return false;
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn clone_board(&mut self, board: &GameState) -> Option<GameState> {
+        self.budget = self.budget.checked_sub(1)?;
+        crate::game::perf_counters::record_state_clone_for_legality();
+        Some(board.clone())
+    }
+}
+
+/// CR 106.1 + CR 605.3b: every answer `prompt` accepts — each color or
+/// combination offered, or for one color per unit, each multiset of colors.
+fn mana_choice_answers(prompt: &ManaChoicePrompt) -> Vec<ManaChoice> {
+    match prompt {
+        ManaChoicePrompt::SingleColor { options } => options
+            .iter()
+            .copied()
+            .map(ManaChoice::SingleColor)
+            .collect(),
+        ManaChoicePrompt::Combination { options } => options
+            .iter()
+            .cloned()
+            .map(ManaChoice::Combination)
+            .collect(),
+        ManaChoicePrompt::AnyCombination { count, options } => {
+            index_combinations(options.len(), *count, Repetition::Allowed)
+                .map(|picked| ManaChoice::Combination(picked.iter().map(|&i| options[i]).collect()))
+                .collect()
+        }
+    }
+}
+
+/// Whether [`index_combinations`] may pick one index more than once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Repetition {
+    Distinct,
+    Allowed,
+}
+
+/// Each `k`-element selection of `0..n`, as ascending index lists (each
+/// multiset once under [`Repetition::Allowed`]), in lexicographic order and
+/// produced lazily.
+fn index_combinations(
+    n: usize,
+    k: usize,
+    repetition: Repetition,
+) -> impl Iterator<Item = Vec<usize>> {
+    let step = match repetition {
+        Repetition::Distinct => 1,
+        Repetition::Allowed => 0,
+    };
+    let ceiling = move |position: usize| match repetition {
+        Repetition::Distinct => n + position - k,
+        Repetition::Allowed => n - 1,
+    };
+    let first = match repetition {
+        Repetition::Distinct => (k <= n).then(|| (0..k).collect::<Vec<_>>()),
+        Repetition::Allowed => (n > 0 || k == 0).then(|| vec![0; k]),
+    };
+    std::iter::successors(first, move |previous| {
+        let position = (0..previous.len())
+            .rev()
+            .find(|&i| previous[i] < ceiling(i))?;
+        let mut next = previous.clone();
+        next[position] += 1;
+        for i in position + 1..next.len() {
+            next[i] = next[i - 1] + step;
+        }
+        Some(next)
+    })
 }
 
 /// CR 107.4f + CR 119.4 + CR 601.2h: whether an automatic payment of `cost`'s

@@ -4358,3 +4358,126 @@ fn manual_formidable_speaker_restore_keeps_the_controller_when_it_is_not_the_own
         );
     }
 }
+
+const ASHNODS_ALTAR: &str = "Sacrifice a creature: Add {C}{C}.";
+const CARNAGE_ALTAR: &str = "{3}, Sacrifice a creature: Draw a card.";
+
+struct CarnageBoard {
+    runner: GameRunner,
+    carnage: ObjectId,
+    ashnods: ObjectId,
+    creatures: Vec<ObjectId>,
+}
+
+/// Carnage Altar ("{3}, Sacrifice a creature: Draw a card.") with two Ashnod's
+/// Altars ("Sacrifice a creature: Add {C}{C}.") as P0's only mana sources and
+/// `creatures` vanilla creatures to sacrifice. The {3} takes two Ashnod
+/// activations, so the activation needs three distinct creatures.
+fn carnage_board(creatures: usize) -> CarnageBoard {
+    let mut scenario = scenario_at_main();
+    let carnage = scenario
+        .add_artifact_from_oracle(P0, "Carnage Altar", CARNAGE_ALTAR)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let ashnods = scenario
+        .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    scenario
+        .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
+        .with_mana_cost(ManaCost::generic(3));
+    let creatures = (0..creatures)
+        .map(|_| scenario.add_vanilla(P0, 2, 2))
+        .collect();
+    scenario.add_card_to_library_top(P0, "Drawn card");
+    CarnageBoard {
+        runner: scenario.build(),
+        carnage,
+        ashnods,
+        creatures,
+    }
+}
+
+fn offered_modes(runner: &GameRunner, source: ObjectId) -> Vec<CastPaymentMode> {
+    let (_, _, grouped) = legal_actions_full(runner.state());
+    grouped
+        .get(&source)
+        .into_iter()
+        .flatten()
+        .filter_map(|action| match action {
+            GameAction::ActivateAbility { payment_mode, .. } => Some(*payment_mode),
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 118.10 + CR 601.2g + CR 605.3a (#10190): one sacrifice can't pay both a
+/// mana ability's cost and the activation's. With two creatures, sacrificing
+/// both to Ashnod's Altars makes the {3} but leaves nothing for Carnage Altar's
+/// "Sacrifice a creature", so the activation is offered in no mode; a third
+/// creature makes it offered for a manual payment.
+#[test]
+fn a_manual_activation_cannot_sacrifice_its_mana_fodder_again() {
+    let board = carnage_board(2);
+    assert!(
+        offered_modes(&board.runner, board.carnage).is_empty(),
+        "both creatures fund the {{3}}, so none is left for the sacrifice"
+    );
+
+    let board = carnage_board(3);
+    assert_eq!(
+        offered_modes(&board.runner, board.carnage),
+        vec![CastPaymentMode::Manual],
+        "a third creature pays the sacrifice"
+    );
+}
+
+/// CR 601.2g + CR 605.3b + CR 118.10: the offered manual activation completes:
+/// two creatures are sacrificed to one Ashnod's Altar in the window (activated
+/// twice), the third pays Carnage Altar's own sacrifice, and the draw resolves
+/// with one {C} left floating.
+#[test]
+fn a_manual_activation_funded_by_sacrificed_creatures_completes() {
+    let CarnageBoard {
+        mut runner,
+        carnage,
+        ashnods,
+        creatures,
+    } = carnage_board(3);
+    let hand_before = hand_size(&runner, P0);
+
+    let waiting_for = activate_index(&mut runner, carnage, 0, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    for &fodder in &creatures[..2] {
+        let waiting_for = activate_mana_ability(&mut runner, ashnods);
+        assert!(
+            is_cost_prompt(&waiting_for, |kind| *kind == PayCostKind::Sacrifice),
+            "{waiting_for:?}"
+        );
+        let waiting_for = select_cards(&mut runner, &[fodder]);
+        assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    }
+    assert_eq!(pool_total(&runner), 4);
+
+    let waiting_for = pass(&mut runner);
+    assert!(
+        is_cost_prompt(&waiting_for, |kind| *kind == PayCostKind::Sacrifice),
+        "Carnage Altar's own sacrifice follows the window: {waiting_for:?}"
+    );
+    let waiting_for = select_cards(&mut runner, &[creatures[2]]);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(
+        creatures
+            .iter()
+            .all(|&creature| in_zone(&runner, creature, Zone::Graveyard)),
+        "two creatures paid for mana and the third for the activation"
+    );
+    assert_eq!(pool_total(&runner), 1, "the {{3}} left one {{C}} floating");
+    assert_eq!(runner.state().stack.len(), 1, "the draw is on the stack");
+
+    pass(&mut runner);
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(hand_size(&runner, P0), hand_before + 1, "the draw resolved");
+}

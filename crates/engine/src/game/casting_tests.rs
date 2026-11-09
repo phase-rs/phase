@@ -63157,3 +63157,42 @@ fn void_winnower_runtime_does_not_block_its_own_controller() {
         "\"Your opponents can't cast\" never restricts the controller (CR 109.5)"
     );
 }
+
+#[test]
+fn index_combinations_enumerates_each_selection_once() {
+    let distinct: Vec<Vec<usize>> = index_combinations(4, 2, Repetition::Distinct).collect();
+    assert_eq!(
+        distinct,
+        vec![
+            vec![0, 1],
+            vec![0, 2],
+            vec![0, 3],
+            vec![1, 2],
+            vec![1, 3],
+            vec![2, 3]
+        ]
+    );
+    let multisets: Vec<Vec<usize>> = index_combinations(3, 2, Repetition::Allowed).collect();
+    assert_eq!(
+        multisets,
+        vec![
+            vec![0, 0],
+            vec![0, 1],
+            vec![0, 2],
+            vec![1, 1],
+            vec![1, 2],
+            vec![2, 2]
+        ]
+    );
+    assert_eq!(
+        index_combinations(2, 3, Repetition::Distinct).count(),
+        0,
+        "more picks than distinct indices"
+    );
+    assert_eq!(index_combinations(0, 1, Repetition::Allowed).count(), 0);
+    assert_eq!(
+        index_combinations(0, 0, Repetition::Distinct).collect::<Vec<_>>(),
+        vec![Vec::<usize>::new()],
+        "the empty selection"
+    );
+}
