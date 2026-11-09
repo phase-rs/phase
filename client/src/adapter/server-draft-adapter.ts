@@ -923,7 +923,7 @@ export class ServerDraftAdapter implements EngineAdapter {
   }
 
   private abandonSocket(socket: PhaseSocket): void {
-    // An incomplete socket's close must not reject an established draft action.
+    // Invalidate the candidate before notifications can reenter on a successor.
     if (this.ws === socket.ws) {
       this.ws = null;
       if (this.pingInterval) {
@@ -931,7 +931,12 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.pingInterval = null;
       }
     }
-    this.releaseSocket(socket.ws);
+    try {
+      this.settleSocketClose(socket.ws);
+    } finally {
+      // Source-scoped settlement must not strand the lease if a listener throws.
+      this.releaseSocket(socket.ws);
+    }
   }
 
   /**

@@ -4704,6 +4704,109 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
     },
   } as const;
 
+  it.each(["supersession", "setup send failure"] as const)(
+    "settles serverHello-claimed work when candidate abandonment follows %s",
+    async (abandonment) => {
+      const { adapter, ws, provider, codec } = await startRuntimeDraft();
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      try {
+        await enterCodecMatch(ws, events);
+        const candidateSession = await codec.provider();
+        const replacementSession = await codec.provider();
+        if (!candidateSession || !replacementSession) throw new Error("Missing candidate codec leases");
+        const candidateLeaseClose = vi.spyOn(candidateSession, "close");
+        const replacementLeaseClose = vi.spyOn(replacementSession, "close");
+        provider.mockResolvedValueOnce(candidateSession).mockResolvedValueOnce(replacementSession);
+        const initSettled = vi.fn();
+        const candidateInit = adapter.reconnectDraft();
+        void candidateInit.then(initSettled, initSettled);
+        await drainArt();
+        const candidate = MockWebSocket.last!;
+        expect(candidate).not.toBe(ws);
+        const actionSettled = vi.fn();
+        const manaSettled = vi.fn();
+        const interactionSettled = vi.fn();
+        let replacementInit: Promise<void> | null = null;
+        const off = adapter.onEvent((event) => {
+          if (event.type !== "serverHello") return;
+          off();
+          // The candidate is already public, but attachment setup has not completed.
+          void adapter.submitAction({ type: "PassPriority" }, 0).then(actionSettled, actionSettled);
+          void adapter.previewManaPayment({ type: "PassPriority" }, 0).then(manaSettled, manaSettled);
+          void PREVIEW_KINDS.interaction.start(adapter, "abandoned-hello-preview")
+            .then(interactionSettled, interactionSettled);
+          if (abandonment === "supersession") {
+            replacementInit = adapter.reconnectDraft();
+            void replacementInit.catch(() => undefined);
+          } else {
+            candidate.send.mockImplementationOnce(() => { throw new Error("candidate setup failed"); });
+          }
+        });
+        candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+        await drainArt();
+        expect(initSettled).toHaveBeenCalledOnce();
+        expect(initSettled).toHaveBeenCalledWith(expect.objectContaining({ code: "WS_CLOSED" }));
+        for (const settled of [actionSettled, manaSettled, interactionSettled]) {
+          expect.soft(settled).toHaveBeenCalledOnce();
+          expect.soft(settled).toHaveBeenCalledWith(expect.objectContaining({ code: "WS_CLOSED" }));
+        }
+        expect(candidate.close).toHaveBeenCalledOnce();
+        expect(candidateLeaseClose).toHaveBeenCalledOnce();
+
+        if (abandonment === "setup send failure") {
+          replacementInit = adapter.reconnectDraft();
+          void replacementInit.catch(() => undefined);
+        }
+        if (!replacementInit) throw new Error("No replacement reconnect was started");
+        await drainArt();
+        const replacement = MockWebSocket.last!;
+        expect(replacement).not.toBe(candidate);
+        replacement.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+        await drainArt();
+        replacement.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+        receive(replacement, "DraftStateUpdate", { view: createMockDraftView() });
+        await replacementInit;
+        events.length = 0;
+        await enterCodecMatch(replacement, events);
+        const successor = adapter.submitAction({ type: "PassPriority" }, 0);
+        const successorSettled = vi.fn();
+        void successor.then(successorSettled, successorSettled);
+        const successorPreview = PREVIEW_KINDS.interaction.start(adapter, "abandoned-hello-preview");
+        const successorPreviewSettled = vi.fn();
+        void successorPreview.then(successorPreviewSettled, successorPreviewSettled);
+        expect(submissionTypes(replacement)).toEqual(["Action"]);
+
+        receive(candidate, "ActionFailed", {
+          message: "late abandoned failure",
+        });
+        receive(candidate, "InteractionPreviewFailed", {
+          request_id: "abandoned-hello-preview", message: "late abandoned preview",
+        });
+        await drainArt();
+        expect(successorSettled).not.toHaveBeenCalled();
+        expect(successorPreviewSettled).not.toHaveBeenCalled();
+        expect(replacement.close).not.toHaveBeenCalled();
+        expect(replacementLeaseClose).not.toHaveBeenCalled();
+
+        replacement.dispatchSynthetic("message", draftFrame("Delta", {
+          type: "StateUpdate", command_id: lastSubmissionCommandId(replacement),
+          data: { state: matchState("after-abandoned-hello"), events: [], full_key: FULL_KEY },
+        }));
+        receive(replacement, "InteractionPreview", { preview: { requestId: "abandoned-hello-preview" } });
+        await expect(successor).resolves.toMatchObject({ events: [] });
+        await expect(successorPreview).resolves.toMatchObject({ requestId: "abandoned-hello-preview" });
+        adapter.dispose();
+        expect(candidate.close).toHaveBeenCalledOnce();
+        expect(candidateLeaseClose).toHaveBeenCalledOnce();
+        expect(replacementLeaseClose).toHaveBeenCalledOnce();
+      } finally {
+        adapter.dispose();
+        codec.runtime.dispose();
+      }
+    },
+  );
+
   it.each(["mana-payment", "interaction"] as const)(
     "retains a retired attachment through its last %s preview, then frees its runtime baseline",
     async (lastKind) => {
