@@ -215,8 +215,8 @@ pub(crate) struct Confirmation {
     /// measured it on the replayed frames (CR 704.5a), or a spend period's as the counting replay
     /// performed it; `None` on the unbounded road.
     pub(crate) bounded: Option<BoundedOfferParts>,
-    /// The repetitions the confirmed frame can represent (`analysis::headroom`); `None` when the
-    /// period moves no player resource toward the end of its stored range. An engine limit, so the
+    /// The repetitions, up to the shortcut budget, the confirmed frame can represent
+    /// (`analysis::headroom`); `None` when the whole budget fits. An engine limit, so the
     /// unbounded road's offer states no more than this; a bounded offer already did, and a counted
     /// one performed only what fit.
     pub(crate) representable: Option<u32>,
@@ -1297,14 +1297,15 @@ fn period_floors(
 }
 
 impl ReplayedPeriod {
-    /// The repetitions of this period `frame` can represent, the fewer either replayed cycle
-    /// allows; `None` when neither moves a player resource toward the end of its stored range.
-    /// An engine limit, not a rules one — see `analysis::headroom`.
+    /// The repetitions of this period, up to the shortcut budget, that `frame` can represent,
+    /// stepped from both replayed cycles; `None` when the whole budget fits. An engine limit, not
+    /// a rules one — see `analysis::headroom`.
     fn representable_repetitions(&self, frame: &GameState) -> Option<u32> {
-        self.excursions
-            .iter()
-            .filter_map(|excursions| excursions.representable_repetitions(frame))
-            .min()
+        PeriodExcursions::representable_repetitions(
+            &self.excursions,
+            frame,
+            crate::game::engine::MAX_SHORTCUT_CYCLES,
+        )
     }
 
     /// Each replayed frame's floor; the closing frame's needs a third cycle.

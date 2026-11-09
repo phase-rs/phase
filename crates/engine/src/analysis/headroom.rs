@@ -26,6 +26,8 @@ enum PlayerScalar {
     LifeLostThisTurn,
     /// CR 107.14 + CR 122.1: energy counters, a `u32`.
     Energy,
+    /// The per-turn tally of energy paid or lost that every energy decrement adds to, a `u32`.
+    EnergyPaidOrLostThisTurn,
     /// CR 122.1: a player counter of this kind, a `u32`.
     Counter(PlayerCounterKind),
 }
@@ -37,6 +39,9 @@ impl PlayerScalar {
             PlayerScalar::LifeGainedThisTurn => i64::from(player.life_gained_this_turn),
             PlayerScalar::LifeLostThisTurn => i64::from(player.life_lost_this_turn),
             PlayerScalar::Energy => i64::from(player.energy),
+            PlayerScalar::EnergyPaidOrLostThisTurn => {
+                i64::from(player.energy_paid_or_lost_this_turn)
+            }
             PlayerScalar::Counter(kind) => i64::from(player.player_counter(&kind)),
         }
     }
@@ -50,6 +55,7 @@ impl PlayerScalar {
             PlayerScalar::LifeGainedThisTurn
             | PlayerScalar::LifeLostThisTurn
             | PlayerScalar::Energy
+            | PlayerScalar::EnergyPaidOrLostThisTurn
             | PlayerScalar::Counter(_) => (None, i64::from(u32::MAX)),
         }
     }
@@ -73,24 +79,27 @@ impl Excursion {
         self.lowest = self.lowest.min(self.net);
     }
 
-    /// The repetitions from `value` before a step leaves `range`; `None` when none ever does.
-    ///
-    /// Repetition `k` (from 1) starts at `value + (k - 1) * net` and spans `highest` above and
-    /// `lowest` below that start, so the start moves only one way and only one end of the range
-    /// can bind once the first repetition fits.
-    fn repetitions(self, value: i64, (floor, ceiling): (Option<i64>, i64)) -> Option<u32> {
-        let fits_above = |start: i64| start + self.highest <= ceiling;
-        let fits_below = |start: i64| floor.is_none_or(|floor| start + self.lowest >= floor);
-        if !fits_above(value) || !fits_below(value) {
-            return Some(0);
+    /// Whether a repetition starting at `start` stays inside `range` all the way through.
+    fn fits(self, start: i64, (floor, ceiling): (Option<i64>, i64)) -> bool {
+        start.saturating_add(self.highest) <= ceiling
+            && floor.is_none_or(|floor| start.saturating_add(self.lowest) >= floor)
+    }
+
+    /// The `k`th repetition (from 1) of a period whose first two are `first` and `second`: the
+    /// change between them recurs, so a constant period repeats `second` and a period whose
+    /// effect grows by a fixed amount (a gain per creature while each repetition makes a
+    /// creature) keeps growing by it.
+    fn nth(first: Self, second: Self, k: i64) -> Self {
+        if k == 1 {
+            return first;
         }
-        let after_first = match self.net {
-            0 => return None,
-            net if net > 0 => (ceiling - value - self.highest) / net,
-            // A falling scalar with no floor never leaves its range.
-            net => (value + self.lowest - floor?) / -net,
-        };
-        Some(u32::try_from(after_first.saturating_add(1)).unwrap_or(u32::MAX))
+        let grown = |a: i64, b: i64| b.saturating_add((b - a).saturating_mul(k - 2));
+        let net = grown(first.net, second.net);
+        Self {
+            net,
+            highest: grown(first.highest, second.highest).max(net).max(0),
+            lowest: grown(first.lowest, second.lowest).min(net).min(0),
+        }
     }
 }
 
@@ -123,7 +132,11 @@ impl PeriodExcursions {
                     excursions.step(*player_id, tally, amount.abs());
                 }
                 GameEvent::EnergyChanged { player, delta } => {
-                    excursions.step(*player, PlayerScalar::Energy, i64::from(*delta));
+                    let delta = i64::from(*delta);
+                    excursions.step(*player, PlayerScalar::Energy, delta);
+                    if delta < 0 {
+                        excursions.step(*player, PlayerScalar::EnergyPaidOrLostThisTurn, -delta);
+                    }
                 }
                 GameEvent::PlayerCounterChanged {
                     player,
@@ -151,18 +164,46 @@ impl PeriodExcursions {
         }
     }
 
-    /// The repetitions of this period that `state` can represent, the fewest any scalar allows;
-    /// `None` when no scalar it moves ever leaves its stored range.
+    /// The repetitions, up to `budget`, of a period whose first two replayed repetitions are
+    /// `cycles` that `state` can represent: the fewest any scalar allows, or `None` when every
+    /// scalar fits the whole budget.
     ///
-    /// Read on the board the repetitions start from. The per-turn tallies reset at a turn's
-    /// start, so a period that crosses a turn is counted as if they did not; that can only
-    /// understate the count.
-    pub(crate) fn representable_repetitions(&self, state: &GameState) -> Option<u32> {
-        self.by_scalar
-            .iter()
-            .filter_map(|(&(player, scalar), excursion)| {
-                let value = scalar.read(state.players.iter().find(|p| p.id == player)?);
-                excursion.repetitions(value, scalar.range())
+    /// Each scalar is stepped repetition by repetition from its value on `state`, the board the
+    /// repetitions start from, under [`Excursion::nth`]. A period whose effect grows faster than
+    /// by a fixed amount per repetition is outside what two repetitions show; its take still
+    /// refuses the repetition that does not fit. The per-turn tallies reset at a turn's start,
+    /// so a period that crosses a turn is counted as if they did not, which can only understate.
+    pub(crate) fn representable_repetitions(
+        cycles: &[Self; 2],
+        state: &GameState,
+        budget: u32,
+    ) -> Option<u32> {
+        let [first, second] = cycles;
+        let scalars: std::collections::BTreeSet<_> = first
+            .by_scalar
+            .keys()
+            .chain(second.by_scalar.keys())
+            .copied()
+            .collect();
+        scalars
+            .into_iter()
+            .filter_map(|(player, scalar)| {
+                let mut start = scalar.read(state.players.iter().find(|p| p.id == player)?);
+                let [a, b] = [first, second].map(|cycle| {
+                    cycle
+                        .by_scalar
+                        .get(&(player, scalar))
+                        .copied()
+                        .unwrap_or_default()
+                });
+                (1..=budget).find_map(|k| {
+                    let repetition = Excursion::nth(a, b, i64::from(k));
+                    if !repetition.fits(start, scalar.range()) {
+                        return Some(k - 1);
+                    }
+                    start = start.saturating_add(repetition.net);
+                    None
+                })
             })
             .min()
     }
@@ -173,6 +214,7 @@ mod tests {
     use super::*;
 
     const P0: PlayerId = PlayerId(0);
+    const BUDGET: u32 = 1_000;
 
     fn life(amount: i32) -> GameEvent {
         GameEvent::LifeChanged {
@@ -182,107 +224,108 @@ mod tests {
         }
     }
 
+    fn energy(delta: i32) -> GameEvent {
+        GameEvent::EnergyChanged { player: P0, delta }
+    }
+
     fn state_at(life: i32) -> GameState {
         let mut state = GameState::new_two_player(7);
         state.players[0].life = life;
         state
     }
 
+    /// Two equal repetitions of `events`.
+    fn constant(events: &[GameEvent], state: &GameState) -> Option<u32> {
+        let cycle = PeriodExcursions::of_events(events);
+        PeriodExcursions::representable_repetitions(&[cycle.clone(), cycle], state, BUDGET)
+    }
+
     #[test]
     fn a_net_gain_counts_the_repetitions_up_to_the_life_limit() {
-        let excursions = PeriodExcursions::of_events(&[life(2)]);
-        assert_eq!(
-            excursions.representable_repetitions(&state_at(i32::MAX - 1498)),
-            Some(749)
-        );
-        assert_eq!(
-            excursions.representable_repetitions(&state_at(i32::MAX - 2)),
-            Some(1)
-        );
-        assert_eq!(
-            excursions.representable_repetitions(&state_at(i32::MAX - 1)),
-            Some(0)
-        );
+        assert_eq!(constant(&[life(2)], &state_at(i32::MAX - 1498)), Some(749));
+        assert_eq!(constant(&[life(2)], &state_at(i32::MAX - 2)), Some(1));
+        assert_eq!(constant(&[life(2)], &state_at(i32::MAX - 1)), Some(0));
+        assert_eq!(constant(&[life(2)], &state_at(20)), None, "the budget fits");
     }
 
     /// A repetition that gains 3 and then loses 1 peaks above where it ends, and the overflow
     /// check runs at the peak.
     #[test]
     fn the_peak_inside_a_repetition_binds_and_not_its_net() {
-        let excursions = PeriodExcursions::of_events(&[life(3), life(-1)]);
         // Starts MAX-6, MAX-4, MAX-2 peak at MAX-3, MAX-1, MAX+1: two fit.
         assert_eq!(
-            excursions.representable_repetitions(&state_at(i32::MAX - 6)),
+            constant(&[life(3), life(-1)], &state_at(i32::MAX - 6)),
             Some(2)
         );
     }
 
+    /// A gain that grows by one each repetition (2, 3, 4, ...) is stepped as it grows: from
+    /// MAX-20 the totals 2, 5, 9, 14, 20 fit and the sixth (27) does not. Either repetition alone,
+    /// extended as if constant, would state more.
+    #[test]
+    fn a_growing_gain_is_stepped_as_it_grows() {
+        let cycles = [
+            PeriodExcursions::of_events(&[life(2)]),
+            PeriodExcursions::of_events(&[life(3)]),
+        ];
+        let state = state_at(i32::MAX - 20);
+        assert_eq!(
+            PeriodExcursions::representable_repetitions(&cycles, &state, BUDGET),
+            Some(5)
+        );
+        assert_eq!(constant(&[life(3)], &state), Some(6));
+    }
+
     #[test]
     fn a_net_loss_counts_the_repetitions_down_to_the_life_floor() {
-        let excursions = PeriodExcursions::of_events(&[life(-5)]);
-        assert_eq!(
-            excursions.representable_repetitions(&state_at(i32::MIN + 12)),
-            Some(2)
-        );
+        assert_eq!(constant(&[life(-5)], &state_at(i32::MIN + 12)), Some(2));
     }
 
     /// A gain and an equal loss leave life where it was, but each repetition still adds to both
     /// per-turn tallies.
     #[test]
     fn a_life_neutral_repetition_is_bounded_by_the_per_turn_tallies() {
-        let excursions = PeriodExcursions::of_events(&[life(4), life(-4)]);
+        let events = [life(4), life(-4)];
         let mut state = state_at(20);
-        assert_eq!(
-            excursions.representable_repetitions(&state),
-            Some(u32::MAX / 4)
-        );
+        assert_eq!(constant(&events, &state), None);
         state.players[0].life_gained_this_turn = u32::MAX - 8;
-        assert_eq!(excursions.representable_repetitions(&state), Some(2));
+        assert_eq!(constant(&events, &state), Some(2));
+        state.players[0].life_gained_this_turn = 0;
+        state.players[0].life_lost_this_turn = u32::MAX - 4;
+        assert_eq!(constant(&events, &state), Some(1));
     }
 
     #[test]
     fn energy_and_player_counters_are_bounded_at_their_stored_width() {
-        let excursions = PeriodExcursions::of_events(&[
-            GameEvent::EnergyChanged {
-                player: P0,
-                delta: 3,
-            },
+        let events = [
+            energy(3),
             GameEvent::PlayerCounterChanged {
                 player: P0,
                 counter_kind: PlayerCounterKind::Experience,
                 delta: 1,
             },
-        ]);
+        ];
         let mut state = state_at(20);
         state.players[0].energy = u32::MAX - 7;
-        assert_eq!(excursions.representable_repetitions(&state), Some(2));
+        assert_eq!(constant(&events, &state), Some(2));
         state.players[0].energy = 0;
         state.players[0]
             .player_counters
             .insert(PlayerCounterKind::Experience, u32::MAX - 4);
-        assert_eq!(excursions.representable_repetitions(&state), Some(4));
+        assert_eq!(constant(&events, &state), Some(4));
     }
 
-    /// Spending what a repetition then restores never leaves the stored range, and a period that
-    /// moves no player resource states no limit at all.
+    /// Spending energy a repetition then restores leaves the energy total where it was, but
+    /// each spend adds to the paid-or-lost tally; a period that moves no player resource states
+    /// no limit at all.
     #[test]
-    fn a_period_that_returns_its_resources_has_no_limit() {
-        let restored = PeriodExcursions::of_events(&[
-            GameEvent::EnergyChanged {
-                player: P0,
-                delta: -2,
-            },
-            GameEvent::EnergyChanged {
-                player: P0,
-                delta: 2,
-            },
-        ]);
+    fn a_restored_energy_spend_is_bounded_only_by_its_tally() {
+        let events = [energy(-2), energy(2)];
         let mut state = state_at(20);
         state.players[0].energy = 2;
-        assert_eq!(restored.representable_repetitions(&state), None);
-        assert_eq!(
-            PeriodExcursions::default().representable_repetitions(&state),
-            None
-        );
+        assert_eq!(constant(&events, &state), None);
+        state.players[0].energy_paid_or_lost_this_turn = u32::MAX - 5;
+        assert_eq!(constant(&events, &state), Some(2));
+        assert_eq!(constant(&[], &state), None);
     }
 }

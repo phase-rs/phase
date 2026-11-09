@@ -2170,6 +2170,34 @@ fn an_altar_zulaport_period_is_offered_a_bounded_shortcut_and_taken() {
     }
 }
 
+/// The Altar–Zulaport drain with P0 a few life short of `i32::MAX`: each repetition gains P0 1
+/// life, so P0's representable life gains bind before P1's CR 704.5a threshold. The loss-axis
+/// offer states those repetitions rather than P1's life, and its take lands P0 on the limit
+/// (#10543). An engine limit, not a rule: CR 119.3 sets no maximum.
+#[test]
+fn an_altar_zulaport_offer_near_the_life_limit_states_the_representable_repetitions() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) =
+        altar_board_at("Zulaport Cutthroat", &[i32::MAX - 12, 20], db);
+    drain_to_offer(&mut runner, altar, gravecrawler, &[P1]);
+    let offered = runner.state().clone();
+    let representable = (i32::MAX - offered.players[0].life) as u32;
+    assert!(
+        representable < offered.players[1].life as u32,
+        "reach guard: P0's gains bind before P1's life ({representable} vs {})",
+        offered.players[1].life
+    );
+    bounded_recorded_offer(&offered, representable);
+
+    let all = taken(&offered, representable);
+    assert_eq!(
+        lives(&all),
+        [i32::MAX, offered.players[1].life - representable as i32]
+    );
+    assert_eq!(all.waiting_for, WaitingFor::Priority { player: P0 });
+    assert_declaration_refused(&offered, representable + 1);
+}
+
 fn in_a_best_of_three(runner: &mut GameRunner) {
     runner.state_mut().set_match_config(MatchConfig {
         match_type: MatchType::Bo3,
