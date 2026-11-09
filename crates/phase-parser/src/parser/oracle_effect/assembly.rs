@@ -4822,7 +4822,49 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // `refuse_unenforced_aggregate_resolution_selection`.
     super::lower::refuse_unenforced_aggregate_resolution_selection(&mut result);
 
+    // CR 608.2c + CR 400.3: "This creature's owner shuffles it into their
+    // library. If that player does, they reveal …" — the reveal's "that player"
+    // is the owner the preceding Shuffle resolves. The clause parser emits
+    // `ParentTarget` for the anaphor; bind it to `Owner` so a nonowner activator
+    // does not reveal from the activator's library.
+    bind_owner_shuffle_reveal_player(&mut result);
+
     result
+}
+
+/// CR 608.2c + CR 400.3: bind a third-person reveal that follows a source-owner
+/// shuffle to the source owner, not the resolving ability's activator.
+fn bind_owner_shuffle_reveal_player(def: &mut AbilityDefinition) {
+    if matches!(
+        &*def.effect,
+        Effect::Shuffle {
+            target: TargetFilter::Owner
+        }
+    ) {
+        if let Some(sub) = def.sub_ability.as_deref_mut() {
+            rewrite_parent_target_reveal_player_to_owner(sub);
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        bind_owner_shuffle_reveal_player(sub);
+    }
+    if let Some(otherwise) = def.else_ability.as_deref_mut() {
+        bind_owner_shuffle_reveal_player(otherwise);
+    }
+}
+
+fn rewrite_parent_target_reveal_player_to_owner(def: &mut AbilityDefinition) {
+    if let Effect::RevealUntil { player, .. } = &mut *def.effect {
+        if matches!(player, TargetFilter::ParentTarget) {
+            *player = TargetFilter::Owner;
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        rewrite_parent_target_reveal_player_to_owner(sub);
+    }
+    if let Some(otherwise) = def.else_ability.as_deref_mut() {
+        rewrite_parent_target_reveal_player_to_owner(otherwise);
+    }
 }
 
 /// CR 608.2c: validate the structural "repeat this process" directives of an

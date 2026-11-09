@@ -17973,6 +17973,17 @@ pub(crate) fn controller_for_relative_filter(
     }
 }
 
+/// CR 400.3 + CR 608.2c: the owner of this ability's exact source incarnation.
+/// Reads the live object first, then its LKI snapshot. Used by the source-owner
+/// shuffle and the third-person reveal/owner anaphors that follow it.
+pub(crate) fn source_owner(state: &GameState, ability: &ResolvedAbility) -> Option<PlayerId> {
+    state
+        .objects
+        .get(&ability.source_id)
+        .map(|object| object.owner)
+        .or_else(|| state.lki_cache.get(&ability.source_id).map(|lki| lki.owner))
+}
+
 /// CR 121.1 + CR 615.5 + CR 609.7: Resolve the acting player for an effect
 /// whose target slot may be a context-ref. Mirrors `life::resolve_life_loss_target`
 /// for the Draw/Scry/Surveil class — those handlers historically short-circuited

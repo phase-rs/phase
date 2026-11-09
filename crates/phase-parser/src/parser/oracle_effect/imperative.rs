@@ -11248,6 +11248,20 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         _ => TargetFilter::Controller,
     };
     let tracks_owner_population = matches!(&effect, Effect::ChangeZoneAll { .. });
+    // CR 701.24a + CR 608.2c: a source self-move to its owner's library is the
+    // move component of a parser-emitted "shuffle ~ into its owner's library".
+    // Mark it TerminalShuffle so the generic delivery tail does not auto-shuffle
+    // and the explicit chained Shuffle owns the one randomization (the same
+    // authority the typed graveyard population and ChangeZoneAll use).
+    let source_self_move = matches!(
+        &effect,
+        Effect::ChangeZone {
+            destination: Zone::Library,
+            target: TargetFilter::SelfRef,
+            owner_library: true,
+            ..
+        }
+    );
     // A selected graveyard population explicitly owned by the caster or the
     // declared player has one library subject (Dwell on the Past). ParentTarget/
     // SelfRef moves do not establish that guarantee: their receiving owner may
