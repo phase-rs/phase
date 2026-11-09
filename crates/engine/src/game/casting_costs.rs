@@ -20417,11 +20417,6 @@ mod tests {
                 "Whenever this creature deals combat damage to a player, draw that many cards.\n{1}, Discard a card: This creature gets +1/+1 until end of turn.")
                 .with_subtypes(vec!["Nephilim"]).with_mana_cost(crate::types::mana::parse_mtgjson_mana_cost("{U}{B}{R}{G}")).id();
             let mut runner = scenario.build();
-            // CR 305.6: represent Island through its intrinsic subtype route,
-            // without a redundant explicit ability, as the fallback requires.
-            let object = runner.state_mut().objects.get_mut(&island).unwrap();
-            object.abilities = Arc::new(Vec::new());
-            object.base_abilities = Arc::new(Vec::new());
             for (aura, land) in auras.iter().copied().zip([island, nykthos]) {
                 crate::game::effects::attach::attach_to(runner.state_mut(), aura, land);
             }
@@ -20439,15 +20434,29 @@ mod tests {
                     .clone();
                 runner.act(action).unwrap();
             }
+            // CR 305.6: exercise the shared auto-payer's legacy subtype-only
+            // input directly. A public action's layer pass materializes the
+            // Island ability, so stage this representation after setup actions.
+            let object = runner.state_mut().objects.get_mut(&island).unwrap();
+            object.abilities = Arc::new(Vec::new());
+            object.base_abilities = Arc::new(Vec::new());
             let rows = mana_sources::activatable_land_mana_options(runner.state(), island, P0);
             assert!(rows.iter().any(|row| row.ability_index.is_none()
                 && row
                     .taps_for_mana_overrides
                     .iter()
                     .any(|(_, value)| *value == ProductionOverride::SingleColor(ManaType::Green))));
+            let mut payment_events = Vec::new();
+            auto_tap_mana_sources(
+                runner.state_mut(),
+                P0,
+                &crate::types::mana::parse_mtgjson_mana_cost("{U}{B}{R}{G}"),
+                &mut payment_events,
+                None,
+            );
             let paid = runner.cast(spell).commit();
             let produced = |source, color| {
-                paid.events().iter().filter(|event| matches!(event,
+                payment_events.iter().filter(|event| matches!(event,
                 GameEvent::ManaAdded { source_id, mana_type, .. } if *source_id == source && *mana_type == color)).count()
             };
             // CR 605.4a + CR 106.3: settle the completed Island/Aura
@@ -20462,8 +20471,8 @@ mod tests {
                 produced(wastes[1], ManaType::Colorless),
                 usize::from(initial_c == 1)
             );
-            let green_event = paid.events().iter().position(|event| matches!(event, GameEvent::ManaAdded { source_id, mana_type: ManaType::Green, .. } if *source_id == auras[0])).unwrap();
-            let later_base = paid.events().iter().position(|event| matches!(event, GameEvent::ManaAdded { source_id, .. } if *source_id == nykthos)).unwrap();
+            let green_event = payment_events.iter().position(|event| matches!(event, GameEvent::ManaAdded { source_id, mana_type: ManaType::Green, .. } if *source_id == auras[0])).unwrap();
+            let later_base = payment_events.iter().position(|event| matches!(event, GameEvent::ManaAdded { source_id, .. } if *source_id == nykthos)).unwrap();
             assert!(green_event < later_base);
             assert_eq!(paid.state().objects[&spell].mana_spent_to_cast_amount, 4);
             assert_eq!(paid.state().players[0].mana_pool.total(), 1);
