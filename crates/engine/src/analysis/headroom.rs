@@ -79,21 +79,31 @@ impl Excursion {
         self.lowest = self.lowest.min(self.net);
     }
 
-    /// Whether a repetition starting at `start` stays inside `range` all the way through.
-    fn fits(self, start: i64, (floor, ceiling): (Option<i64>, i64)) -> bool {
-        start.saturating_add(self.highest) <= ceiling
-            && floor.is_none_or(|floor| start.saturating_add(self.lowest) >= floor)
+    /// Whether a repetition starting at `start` stays on the near side of `limit`.
+    fn fits(self, start: i64, limit: Limit, (floor, ceiling): (Option<i64>, i64)) -> bool {
+        match limit {
+            Limit::Ceiling => start.saturating_add(self.highest) <= ceiling,
+            Limit::Floor => floor.is_none_or(|floor| start.saturating_add(self.lowest) >= floor),
+        }
     }
 
-    /// The `k`th repetition (from 1) of a period whose first two are `first` and `second`: the
-    /// change between them recurs, so a constant period repeats `second` and a period whose
-    /// effect grows by a fixed amount (a gain per creature while each repetition makes a
-    /// creature) keeps growing by it.
-    fn nth(first: Self, second: Self, k: i64) -> Self {
+    /// The `k`th repetition (from 1) of a period whose first two are `first` and `second`, as
+    /// seen from `limit`. A change between them that moves toward `limit` recurs, so a period
+    /// whose effect grows by a fixed amount (a gain per creature while each repetition makes a
+    /// creature) keeps growing by it; a change that moves away from `limit` is taken not to
+    /// recur, because it may be a one-off of the first repetition (a "first time each turn"
+    /// trigger). Either way the count can only be understated.
+    fn nth(first: Self, second: Self, k: i64, limit: Limit) -> Self {
         if k == 1 {
             return first;
         }
-        let grown = |a: i64, b: i64| b.saturating_add((b - a).saturating_mul(k - 2));
+        let grown = |a: i64, b: i64| {
+            let change = match limit {
+                Limit::Ceiling => (b - a).max(0),
+                Limit::Floor => (b - a).min(0),
+            };
+            b.saturating_add(change.saturating_mul(k - 2))
+        };
         let net = grown(first.net, second.net);
         Self {
             net,
@@ -101,6 +111,13 @@ impl Excursion {
             lowest: grown(first.lowest, second.lowest).min(net).min(0),
         }
     }
+}
+
+/// Which end of a scalar's stored range a trajectory is stepped toward.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Limit {
+    Ceiling,
+    Floor,
 }
 
 /// The player-resource excursions of one performed repetition, read off the events it emitted.
@@ -169,9 +186,9 @@ impl PeriodExcursions {
     /// scalar fits the whole budget.
     ///
     /// Each scalar is stepped repetition by repetition from its value on `state`, the board the
-    /// repetitions start from, under [`Excursion::nth`]. A period whose effect grows faster than
-    /// by a fixed amount per repetition is outside what two repetitions show; its take still
-    /// refuses the repetition that does not fit. The per-turn tallies reset at a turn's start,
+    /// repetitions start from, under [`Excursion::nth`], once toward each end of its range. A
+    /// period whose effect grows faster than by a fixed amount per repetition is outside what
+    /// two repetitions show; its take still refuses the repetition that does not fit. The per-turn tallies reset at a turn's start,
     /// so a period that crosses a turn is counted as if they did not, which can only understate.
     pub(crate) fn representable_repetitions(
         cycles: &[Self; 2],
@@ -188,7 +205,7 @@ impl PeriodExcursions {
         scalars
             .into_iter()
             .filter_map(|(player, scalar)| {
-                let mut start = scalar.read(state.players.iter().find(|p| p.id == player)?);
+                let value = scalar.read(state.players.iter().find(|p| p.id == player)?);
                 let [a, b] = [first, second].map(|cycle| {
                     cycle
                         .by_scalar
@@ -196,14 +213,20 @@ impl PeriodExcursions {
                         .copied()
                         .unwrap_or_default()
                 });
-                (1..=budget).find_map(|k| {
-                    let repetition = Excursion::nth(a, b, i64::from(k));
-                    if !repetition.fits(start, scalar.range()) {
-                        return Some(k - 1);
-                    }
-                    start = start.saturating_add(repetition.net);
-                    None
-                })
+                [Limit::Ceiling, Limit::Floor]
+                    .into_iter()
+                    .filter_map(|limit| {
+                        let mut start = value;
+                        (1..=budget).find_map(|k| {
+                            let repetition = Excursion::nth(a, b, i64::from(k), limit);
+                            if !repetition.fits(start, limit, scalar.range()) {
+                                return Some(k - 1);
+                            }
+                            start = start.saturating_add(repetition.net);
+                            None
+                        })
+                    })
+                    .min()
             })
             .min()
     }
@@ -274,6 +297,21 @@ mod tests {
             Some(5)
         );
         assert_eq!(constant(&[life(3)], &state), Some(6));
+    }
+
+    /// A gain of 3, then 2 and 2 ever after (a one-off on the first repetition): the shrink
+    /// between the replayed cycles is not carried forward. From MAX-10 the totals 3, 5, 7, 9 fit
+    /// and the fifth (11) does not.
+    #[test]
+    fn a_shrinking_gain_is_not_carried_forward() {
+        let cycles = [
+            PeriodExcursions::of_events(&[life(3)]),
+            PeriodExcursions::of_events(&[life(2)]),
+        ];
+        assert_eq!(
+            PeriodExcursions::representable_repetitions(&cycles, &state_at(i32::MAX - 10), BUDGET),
+            Some(4)
+        );
     }
 
     #[test]
