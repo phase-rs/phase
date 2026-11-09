@@ -4501,7 +4501,9 @@ mod tests {
             assert!(spent.iter().all(|unit| unit.restrictions.is_empty()));
             assert_eq!(pool.total(), 2 + expected_life);
             assert_eq!(
-                pool.count_where(|unit| unit.pip_id == ManaPipId(4) || unit.pip_id == ManaPipId(5)),
+                pool.units()
+                    .filter(|unit| unit.pip_id == ManaPipId(4) || unit.pip_id == ManaPipId(5))
+                    .count(),
                 2
             );
             if text == "{W/U}{U}{U/B}" {
