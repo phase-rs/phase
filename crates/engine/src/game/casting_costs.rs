@@ -20390,34 +20390,35 @@ mod tests {
     #[test]
     fn completed_intrinsic_aura_prefix_survives_later_nested_settlement() {
         use crate::types::game_state::ProductionOverride;
-        for initial_c in [1, 2] {
+        for initial_c in [0, 1] {
             let mut scenario = GameScenario::new();
             scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
             let island = scenario
                 .add_land_from_oracle(P0, "Island", "({T}: Add {U}.)")
                 .with_subtypes(vec!["Island"])
                 .id();
-            let nykthos = scenario.add_land_from_oracle(P0, "Nykthos, Shrine to Nyx",
-                "{T}: Add {C}.\n{2}, {T}: Choose a color. Add an amount of mana of that color equal to your devotion to that color. (Your devotion to a color is the number of mana symbols of that color in the mana costs of permanents you control.)")
-                .as_legendary().id();
+            let prairie = scenario
+                .add_land_from_oracle(P0, "Sungrass Prairie", "{1}, {T}: Add {G}{W}.")
+                .id();
             let auras: Vec<_> = (0..2).map(|_| scenario.add_enchantment_from_oracle(P0, "Fertile Ground",
                 "Enchant land\nWhenever enchanted land is tapped for mana, its controller adds an additional one mana of any color.")
                 .with_subtypes(vec!["Aura"]).with_mana_cost(crate::types::mana::parse_mtgjson_mana_cost("{1}{G}")).id()).collect();
-            scenario.add_enchantment_from_oracle(P0, "Leyline of the Void",
-                "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.")
-                .with_mana_cost(crate::types::mana::parse_mtgjson_mana_cost("{2}{B}{B}"));
-            let wastes: Vec<_> = (0..2)
+            let wastes: Vec<_> = (0..1)
                 .map(|_| {
                     scenario
                         .add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.")
                         .id()
                 })
                 .collect();
-            let spell = scenario.add_creature_to_hand_from_oracle(P0, "Glint-Eye Nephilim", 2, 2,
-                "Whenever this creature deals combat damage to a player, draw that many cards.\n{1}, Discard a card: This creature gets +1/+1 until end of turn.")
-                .with_subtypes(vec!["Nephilim"]).with_mana_cost(crate::types::mana::parse_mtgjson_mana_cost("{U}{B}{R}{G}")).id();
+            let spell = scenario
+                .add_creature_to_hand_from_oracle(P0, "Fusion Elemental", 8, 8, "")
+                .with_subtypes(vec!["Elemental"])
+                .with_mana_cost(crate::types::mana::parse_mtgjson_mana_cost(
+                    "{W}{U}{B}{R}{G}",
+                ))
+                .id();
             let mut runner = scenario.build();
-            for (aura, land) in auras.iter().copied().zip([island, nykthos]) {
+            for (aura, land) in auras.iter().copied().zip([island, prairie]) {
                 crate::game::effects::attach::attach_to(runner.state_mut(), aura, land);
             }
             crate::game::layers::evaluate_layers(runner.state_mut());
@@ -20445,16 +20446,15 @@ mod tests {
                 && row
                     .taps_for_mana_overrides
                     .iter()
-                    .any(|(_, value)| *value == ProductionOverride::SingleColor(ManaType::Green))));
+                    .any(|(_, value)| *value == ProductionOverride::SingleColor(ManaType::Black))));
             let mut payment_events = Vec::new();
             auto_tap_mana_sources(
                 runner.state_mut(),
                 P0,
-                &crate::types::mana::parse_mtgjson_mana_cost("{U}{B}{R}{G}"),
+                &crate::types::mana::parse_mtgjson_mana_cost("{W}{U}{B}{R}{G}"),
                 &mut payment_events,
                 None,
             );
-            let paid = runner.cast(spell).commit();
             let produced = |source, color| {
                 payment_events.iter().filter(|event| matches!(event,
                 GameEvent::ManaAdded { source_id, mana_type, .. } if *source_id == source && *mana_type == color)).count()
@@ -20462,20 +20462,22 @@ mod tests {
             // CR 605.4a + CR 106.3: settle the completed Island/Aura
             // prefix before the next producer enters either an empty actual
             // cost slice or a nonempty external funding tap slice.
-            assert_eq!(produced(auras[0], ManaType::Green), 1);
+            assert_eq!(produced(auras[0], ManaType::Black), 1);
             assert_eq!(produced(auras[1], ManaType::Red), 1);
-            assert_eq!(produced(nykthos, ManaType::Black), 2);
+            assert_eq!(produced(prairie, ManaType::Green), 1);
+            assert_eq!(produced(prairie, ManaType::White), 1);
             assert_eq!(produced(auras[0], ManaType::White), 0);
             assert_eq!(produced(auras[1], ManaType::White), 0);
             assert_eq!(
-                produced(wastes[1], ManaType::Colorless),
-                usize::from(initial_c == 1)
+                produced(wastes[0], ManaType::Colorless),
+                usize::from(initial_c == 0)
             );
-            let green_event = payment_events.iter().position(|event| matches!(event, GameEvent::ManaAdded { source_id, mana_type: ManaType::Green, .. } if *source_id == auras[0])).unwrap();
-            let later_base = payment_events.iter().position(|event| matches!(event, GameEvent::ManaAdded { source_id, .. } if *source_id == nykthos)).unwrap();
-            assert!(green_event < later_base);
-            assert_eq!(paid.state().objects[&spell].mana_spent_to_cast_amount, 4);
-            assert_eq!(paid.state().players[0].mana_pool.total(), 1);
+            let black_event = payment_events.iter().position(|event| matches!(event, GameEvent::ManaAdded { source_id, mana_type: ManaType::Black, .. } if *source_id == auras[0])).unwrap();
+            let later_base = payment_events.iter().position(|event| matches!(event, GameEvent::ManaAdded { source_id, .. } if *source_id == prairie)).unwrap();
+            assert!(black_event < later_base);
+            let paid = runner.cast(spell).commit();
+            assert_eq!(paid.state().objects[&spell].mana_spent_to_cast_amount, 5);
+            assert_eq!(paid.state().players[0].mana_pool.total(), 0);
             assert!(paid.state().pending_taps_for_mana_overrides.is_empty());
             paid.resolve().assert_zone(&[spell], Zone::Battlefield);
             assert!(runner.state().stack.is_empty());

@@ -213,14 +213,13 @@ fn snow_hybrid_payment_preserves_a_quality_eligible_alternative() {
     .is_err());
     assert_eq!(pool, original);
 
-    // An eligible pin keeps the legacy color choice, even when an unpinned
-    // payment would reserve the Snow unit for the other shard.
+    // CR 107.4e + CR 118.3a: a pin prefers that unit, not its assignment to
+    // a particular shard. Snow W pays S while ordinary U pays W/U.
     let mut pinned = ManaPool::from_units(vec![
         hybrid_reserve_unit(ManaType::White, 1, true, false),
         snow_regression_unit(ManaType::Blue, 2),
     ]);
-    let original = pinned.clone();
-    assert!(pay_cost_with_demand_and_choices(
+    let (spent, life) = pay_cost_with_demand_and_choices(
         &mut pinned,
         &cost,
         None,
@@ -230,8 +229,11 @@ fn snow_hybrid_payment_preserves_a_quality_eligible_alternative() {
         LifePaymentColors::EMPTY,
         &[ManaPipId(1)],
     )
-    .is_err());
-    assert_eq!(pinned, original);
+    .expect("the pinned Snow unit remains spendable on the Snow shard");
+    assert!(life.is_empty());
+    assert_eq!(spent.len(), 2);
+    assert!(spent.iter().any(|unit| unit.pip_id == ManaPipId(1)));
+    assert_eq!(pinned.total(), 0);
 
     // The remaining U/P can use life. It must not force Snow W into W/U;
     // mana-only residual planning's conservative future demand is not a
@@ -507,11 +509,13 @@ fn toluz_keeps_a_payable_hybrid_suffix_with_ineligible_mana() {
     // The Lute's spell-only mana cannot pay for this creature. Eligible U=2
     // must not make the first hybrid strand the later strict U and U/B.
     const TOLUZ: &str = "When Toluz enters, it connives. (Draw a card, then discard a card. If you discarded a nonland card, put a +1/+1 counter on this creature.)\nWhenever you discard one or more cards, exile them from your graveyard.\nWhen Toluz dies, put the cards exiled with it into their owner's hand.";
-    for (extra, krrik) in [
-        (Some(ManaType::White), false),
-        (Some(ManaType::Blue), false),
-        (None, false),
-        (Some(ManaType::White), true),
+    for (extra, krrik, pinned) in [
+        (Some(ManaType::White), false, false),
+        (Some(ManaType::Blue), false, false),
+        (None, false, false),
+        (Some(ManaType::White), true, false),
+        (None, false, true),
+        (Some(ManaType::Blue), false, true),
     ] {
         let mut s = board();
         if krrik {
@@ -602,33 +606,60 @@ fn toluz_keeps_a_payable_hybrid_suffix_with_ineligible_mana() {
             2
         );
 
-        let payment = r.cast(toluz).commit();
+        if pinned {
+            let pip_id = before
+                .iter()
+                .find(|unit| unit.source_id == island_a)
+                .unwrap()
+                .pip_id;
+            r.act(GameAction::CastSpell {
+                object_id: toluz,
+                card_id: r.state().objects[&toluz].card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Manual,
+            })
+            .unwrap();
+            assert!(matches!(
+                r.state().waiting_for,
+                WaitingFor::ManaPayment { player: P0, .. }
+            ));
+            r.act(GameAction::SpendPoolMana { pip_id }).unwrap();
+            assert!(r
+                .state()
+                .pending_cast
+                .as_ref()
+                .unwrap()
+                .pinned_pool_units
+                .contains(&pip_id));
+            r.act(GameAction::PassPriority).unwrap();
+            assert!(!r.state().players[0]
+                .mana_pool
+                .units()
+                .any(|unit| unit.pip_id == pip_id));
+        } else {
+            r.cast(toluz).commit();
+        }
         // Deliberately stop at the fully paid casting boundary; Toluz's
         // enters/connive resolution is not the behavior under test.
-        assert_eq!(payment.state().objects[&toluz].zone, Zone::Stack);
+        assert_eq!(r.state().objects[&toluz].zone, Zone::Stack);
         // K'rrik's printed black-spell trigger is also on the stack.
-        assert_eq!(payment.state().stack.len(), 1 + usize::from(krrik));
+        assert_eq!(r.state().stack.len(), 1 + usize::from(krrik));
         if krrik {
-            assert_eq!(payment.state().players[0].life, 1);
+            assert_eq!(r.state().players[0].life, 1);
         }
-        assert_eq!(payment.state().objects[&toluz].mana_spent_to_cast_amount, 3);
+        assert_eq!(r.state().objects[&toluz].mana_spent_to_cast_amount, 3);
         assert_eq!(
-            payment.state().objects[&toluz]
-                .mana_spent_source_snapshots
-                .len(),
+            r.state().objects[&toluz].mana_spent_source_snapshots.len(),
             3
         );
-        let remaining: Vec<_> = payment.state().players[0].mana_pool.units().collect();
+        let remaining: Vec<_> = r.state().players[0].mana_pool.units().collect();
         assert_eq!(remaining.len(), 2 * usize::from(extra.is_some()));
         assert!(remaining
             .iter()
             .all(|unit| Some(unit.source_id) == restricted_land
                 && Some(unit.color) == extra
                 && !unit.restrictions.is_empty()));
-        assert!(matches!(
-            payment.state().waiting_for,
-            WaitingFor::Priority { .. }
-        ));
+        assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
     }
 }
 

@@ -1319,12 +1319,9 @@ impl PaymentContinuation<'_> {
         max_life_payments: Option<usize>,
     ) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
         let mut failure = PaymentError::InsufficientMana;
-        // An eligible preferred pin retains the player's selected color.
-        let alternative = pool
-            .first_pinned_where(pins, |unit| is_eligible_color_unit(unit, colors.0, spell))
-            .is_none()
-            .then_some(colors.1);
-        for color in std::iter::once(colors.0).chain(alternative) {
+        // CR 107.4e + CR 118.3a: pins prioritize eligible units, not a
+        // particular hybrid shard. Keep the other half as a payable fallback.
+        for color in [colors.0, colors.1] {
             let mut remaining = pool.clone();
             let Some(unit) =
                 spend_eligible(&mut remaining, color, spell, pins, self.quality_demand)
@@ -4479,7 +4476,7 @@ mod tests {
             let mut pool = ManaPool::from_units(units);
             let original = pool.clone();
             let choices = choice.map(|choice| vec![choice]);
-            let pins: &[ManaPipId] = if text.starts_with("{W/U/P}") {
+            let pins: &[ManaPipId] = if text == "{W/U}{U}{U/B}" || text.starts_with("{W/U/P}") {
                 &[ManaPipId(3)]
             } else {
                 &[]
