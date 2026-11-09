@@ -41,18 +41,15 @@ fn shuffled_players(outcome: &CastOutcome) -> Vec<PlayerId> {
         .collect()
 }
 
-/// Every library shuffle in this resolution must belong to one player. The zone
-/// move publishes one shuffle per card it puts into a library (CR 701.24a), so
-/// the event count is not the assertion — the participant is.
+/// CR 701.24a + CR 603.2c: one printed shuffle instruction randomizes once,
+/// after the chosen set is delivered. Member delivery must not publish extra
+/// shuffles (and therefore extra shuffle-trigger opportunities).
 fn assert_only_player_shuffled(outcome: &CastOutcome, player: PlayerId, why: &str) {
     let shuffled = shuffled_players(outcome);
-    assert!(
-        !shuffled.is_empty(),
-        "the resolution must shuffle at least once: {why}"
-    );
-    assert!(
-        shuffled.iter().all(|&p| p == player),
-        "only the targeted player shuffles: {why}, got {shuffled:?}"
+    assert_eq!(
+        shuffled.as_slice(),
+        &[player],
+        "exactly one shuffle belongs to the instruction's player: {why}"
     );
 }
 
