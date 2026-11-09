@@ -597,6 +597,133 @@ mod tests {
         assert!(events.iter().any(|event| matches!(
             event,
             GameEvent::EffectResolved { kind: EffectKind::PhaseOut, source_id, .. }
+    // Existing AST consumer contract, not a verified printed slot-union producer.
+    // Nearest printed examples are U.S.S. Defiant, Mirror Migrant ("it and up
+    // to one target creature you control phase out") and Dream Fighter ("this
+    // creature and that creature phase out"). They produce ParentTarget and
+    // TriggeringSource respectively, not ParentTargetSlot. This supplemental
+    // resolver test checks the existing slot reference without inventing Oracle.
+    #[test]
+    fn compound_phase_out_parent_slot_affects_only_its_live_declared_object() {
+        for (selected_index, stale_index, inherited_count, expected_index) in [
+            (1, None, 3, Some(1)),
+            (1, Some(0), 3, Some(1)),
+            (1, Some(1), 3, None),
+            (3, None, 3, None),
+            (1, None, 0, None),
+        ] {
+            let mut state = GameState::new_two_player(42);
+            let source = add_creature(&mut state, P0, "Source");
+            let inherited = [
+                add_creature(&mut state, P0, "Earlier slot"),
+                add_creature(&mut state, P0, "Selected slot"),
+                add_creature(&mut state, P0, "Later slot"),
+            ];
+            let bystander = add_creature(&mut state, P0, "Bystander");
+            let mut ability = ResolvedAbility::new(
+                Effect::PhaseOut {
+                    target: TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::SelfRef,
+                            TargetFilter::ParentTargetSlot {
+                                index: selected_index,
+                            },
+                        ],
+                    },
+                },
+                inherited
+                    .iter()
+                    .take(inherited_count)
+                    .copied()
+                    .map(TargetRef::Object)
+                    .collect(),
+                source,
+                P0,
+            );
+            ability.set_target_incarnations_recursive(
+                inherited
+                    .iter()
+                    .map(|id| ObjectIncarnationRef::from_object(&state.objects[id]))
+                    .collect(),
+            );
+            if let Some(index) = stale_index {
+                let id = inherited[index];
+                crate::game::zones::move_to_zone(&mut state, id, Zone::Exile, &mut Vec::new());
+                crate::game::zones::move_to_zone(
+                    &mut state,
+                    id,
+                    Zone::Battlefield,
+                    &mut Vec::new(),
+                );
+            }
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+            assert!(
+                state.objects[&source].is_phased_out(),
+                "the independent source leg must still resolve"
+            );
+            for (index, id) in inherited.iter().enumerate() {
+                assert_eq!(
+                    state.objects[id].is_phased_out(),
+                    expected_index == Some(index),
+                    "selected slot {selected_index}, stale slot {stale_index:?}, inherited count {inherited_count}, observed slot {index}"
+                );
+                assert_eq!(state.objects[id].zone, Zone::Battlefield);
+            }
+            assert!(state.objects[&bystander].is_phased_in());
+            assert!(matches!(
+                events.last(),
+                Some(GameEvent::EffectResolved {
+                    kind: EffectKind::PhaseOut,
+                    source_id,
+                    ..
+                }) if *source_id == source
+            ));
+        }
+    }
+
+    // Supplemental AST consumer boundary: these context leaves have no verified
+    // printed phasing-union producer. Defiant and Dream Fighter above justify
+    // only the supported reference legs, not arbitrary is_context_ref unions.
+    #[test]
+    fn unsupported_phase_out_context_unions_keep_announced_only_behavior() {
+        for context_leaf in [
+            TargetFilter::None,
+            TargetFilter::LastCreated,
+            TargetFilter::CostPaidObject,
+            TargetFilter::EventTarget,
+        ] {
+            let mut state = GameState::new_two_player(42);
+            let source = add_creature(&mut state, P0, "Source");
+            let chosen = add_creature(&mut state, P0, "Announced");
+            let created = add_creature(&mut state, P0, "Created");
+            state.last_created_token_ids = vec![created];
+            let ability = ResolvedAbility::new(
+                Effect::PhaseOut {
+                    target: TargetFilter::Or {
+                        filters: vec![TargetFilter::SelfRef, context_leaf],
+                    },
+                },
+                vec![TargetRef::Object(chosen)],
+                source,
+                P0,
+            );
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+            assert!(state.objects[&chosen].is_phased_out());
+            assert!(state.objects[&source].is_phased_in());
+            assert!(state.objects[&created].is_phased_in());
+            assert!(matches!(
+                events.last(),
+                Some(GameEvent::EffectResolved {
+                    kind: EffectKind::PhaseOut,
+                    source_id,
+                    ..
+                }) if *source_id == source
+            ));
+        }
+    }
+
                 if *source_id == source
         )));
     }
