@@ -19642,7 +19642,10 @@ mod tests {
         );
         assert_eq!(
             ability.multi_target,
-            Some(MultiTargetSpec { min: 0, max: None })
+            Some(MultiTargetSpec {
+                min: QuantityExpr::Fixed { value: 0 },
+                max: None,
+            })
         );
         let movement = ability.sub_ability.as_deref().expect("When you do shuffle");
         assert_eq!(movement.condition, Some(AbilityCondition::WhenYouDo));
