@@ -700,7 +700,7 @@ fn parse_reveal_until_all_to_zone_that_player(input: &str) -> OracleResult<'_, C
     let (input, _) = eof(input)?;
     Ok((
         input,
-        ContinuationAst::RevealUntilAllToZone {
+        ContinuationAst::RevealedRemainder {
             destination,
             rest_order: DigRestOrder::Preserve,
         },
@@ -6002,7 +6002,7 @@ pub(super) fn apply_clause_continuation(
                             destination: Some(dest),
                             ..
                         } if *dest != Zone::Library
-                    )
+                    ) || matches!(&*defs[index].effect, Effect::RevealUntil { .. })
                 });
             if !public_reveal {
                 defs.push(AbilityDefinition::new(
@@ -6018,6 +6018,26 @@ pub(super) fn apply_clause_continuation(
             // prompt this instruction does not own; rather than delivering in
             // arbitrary engine order, keep this shape honest as an unsupported gap.
             if destination == Zone::Graveyard {
+                if let Some(index) = env.resolve(
+                    defs,
+                    super::assembly::AntecedentSelector::LastWithRole(
+                        super::assembly::AntecedentRole::DigOrRevealUntil,
+                    ),
+                    None,
+                    super::assembly::OnMiss::Ignore,
+                ) {
+                    if let Effect::RevealUntil {
+                        matched_disposition,
+                        kept_destination,
+                        rest_destination,
+                        ..
+                    } = &mut *defs[index].effect
+                    {
+                        *matched_disposition = RevealUntilDisposition::RevealOnly;
+                        *kept_destination = Zone::Library;
+                        *rest_destination = Zone::Library;
+                    }
+                }
                 defs.push(AbilityDefinition::new(
                     kind,
                     Effect::unimplemented(
@@ -7057,10 +7077,14 @@ pub(super) fn apply_clause_continuation(
                 if has_intervening_instruction {
                     if let Effect::RevealUntil {
                         matched_disposition,
+                        kept_destination,
+                        rest_destination,
                         ..
                     } = &mut *defs[target_idx].effect
                     {
                         *matched_disposition = RevealUntilDisposition::RevealOnly;
+                        *kept_destination = Zone::Library;
+                        *rest_destination = Zone::Library;
                         let mut placement = AbilityDefinition::new(
                             kind,
                             Effect::ChangeZoneAll {

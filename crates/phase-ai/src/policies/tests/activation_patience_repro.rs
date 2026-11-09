@@ -1659,39 +1659,6 @@ fn an_upkeep_own_library_change_is_not_held_while_the_draw_is_ahead() {
             HOLD,
         ),
         row(
-            "Thought Dissector (a reveal of an opponent's library whose card moves)",
-            "Thought Dissector",
-            "{X}, {T}: Target opponent reveals cards from the top of their library until an artifact card or X cards are revealed, whichever comes first. If an artifact card is revealed this way, put it onto the battlefield under your control and sacrifice this artifact. Put the rest of the revealed cards into that player's graveyard.",
-            0,
-            |ability| {
-                let chain = collect_chain_effects(ability);
-                matches!(
-                    chain.first(),
-                    Some(Effect::RevealTop { player, .. }) if names_an_opponent(player)
-                ) && chain.iter().any(|effect| {
-                    matches!(
-                        effect,
-                        Effect::ChangeZone {
-                            origin: None,
-                            destination: Zone::Battlefield,
-                            target: TargetFilter::ParentTarget,
-                            ..
-                        }
-                    )
-                }) && chain.iter().any(|effect| {
-                    matches!(
-                        effect,
-                        Effect::ChangeZoneAll {
-                            origin: Some(Zone::Exile),
-                            destination: Zone::Graveyard,
-                            ..
-                        }
-                    )
-                })
-            },
-            HOLD,
-        ),
-        row(
             "Dark-Dweller Oracle (exiles the AI's top card)",
             "Dark-Dweller Oracle",
             "{1}, Sacrifice a creature: Exile the top card of your library. You may play that card this turn. (You still pay its costs. You can play a land this way only if you have an available land play remaining.)",

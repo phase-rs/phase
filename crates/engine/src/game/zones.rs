@@ -2749,6 +2749,26 @@ pub(crate) fn reorder_within_library(
     }
     state.advance_library_knowledge_epoch(player);
 
+    // CR 701.20d: An effect that reveals multiple cards may state that the cards
+    // are to be reordered; any revealed cards that are reordered stop being
+    // revealed and become new objects.
+    for &object_id in ordered {
+        let is_revealed = state.revealed_cards.contains(&object_id)
+            || state.public_revealed_cards.contains(&object_id)
+            || state.holds_stack_bound_reveal(object_id);
+        if is_revealed {
+            if let Some(obj) = state.objects.get(&object_id) {
+                let occurrence = ObjectIncarnationRef::from_object(obj);
+                state.clear_revealed_information_on_zone_exit(occurrence, Zone::Library);
+            }
+            state.revealed_cards.remove(&object_id);
+            state.public_revealed_cards.remove(&object_id);
+            if let Some(obj) = state.objects.get_mut(&object_id) {
+                obj.bump_incarnation();
+            }
+        }
+    }
+
     // CR 401.5 + CR 611.3a: A library reorder can change its top card without
     // creating a ZoneChanged event, so invalidate the dependent static directly
     // (self-gated).
