@@ -1,6 +1,10 @@
 //! Public activated ability payment for a concrete sacrifice count after X mana.
-//! These abilities are synthetic typed fixtures, not printed-card coverage.
+//! Lazotep Quarry exercises its printed activation through token resolution.
+//! Fiend Artisan and a Cauldron-granted Whisper activation exercise tap observers
+//! that leave while the remaining sacrifice costs are paid.
+//! The remaining historical fixtures are synthetic lower-layer cost tests.
 
+use std::ops::ControlFlow;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use engine::ai_support::legal_actions_full;
@@ -13,14 +17,21 @@ use engine::types::ability::{
     SacrificeRequirement, TapCreaturesRequirement, TargetFilter, TargetRef, TypeFilter,
     TypedFilter, REMOVE_COUNTER_COST_X,
 };
+use engine::types::ability_visit::{
+    visit_ability_def, visit_replacement, visit_static, visit_trigger,
+};
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
 use engine::types::counter::{CounterMatch, CounterType};
+use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    ActivationResidual, CastPaymentMode, CostResume, PersistedGameState, WaitingFor,
+    ActivationResidual, CastPaymentMode, CostResume, ExileLink, ExileLinkKind,
+    PendingCostMoveResume, PersistedGameState, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::{EtbTapState, Zone};
 
@@ -84,6 +95,7 @@ fn optional_graveyard_exile_redirect() -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -480,72 +492,1127 @@ fn x_mana_targeted_count_keeps_target_and_records_crime_once() {
     assert_eq!(runner.state().players[0].crimes_committed_this_turn, 1);
 }
 
-#[test]
-fn x_mana_count_plus_tap_refuses_before_any_sacrifice() {
+// Verbatim MTGJSON Oracle text; the land and creature characteristics below
+// also retain their printed types, mana costs, colors, and power/toughness.
+const LAZOTEP_QUARRY: &str = "{T}: Add {C}.\n{T}, Sacrifice a creature: Add one mana of any color.\n{X}{2}, {T}, Sacrifice a Desert: Exile target creature card with mana value X from your graveyard. Create a token that's a copy of it, except it's a 4/4 black Zombie. Activate only as a sorcery.";
+
+const FIEND_ARTISAN: &str = "This creature gets +1/+1 for each creature card in your graveyard.\n{X}{B/G}, {T}, Sacrifice another creature: Search your library for a creature card with mana value X or less, put it onto the battlefield, then shuffle. Activate only as a sorcery.";
+const CAPTAIN_AMERICA: &str = "Vigilance\nWhenever a creature you control becomes tapped during your turn, if it's the first time that creature has become tapped this turn, untap it.";
+const FALLOWSAGE: &str = "Whenever this creature becomes tapped, you may draw a card.";
+const WHISPER: &str = "{T}, Sacrifice two creatures: Return target creature card from your graveyard to the battlefield.";
+const AGATHAS_SOUL_CAULDRON: &str = "You may spend mana as though it were mana of any color to activate abilities of creatures you control.\nCreatures you control with +1/+1 counters on them have all activated abilities of all creature cards exiled with Agatha's Soul Cauldron.\n{T}: Exile target card from a graveyard. When a creature card is exiled this way, put a +1/+1 counter on target creature you control.";
+const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
+const LEYLINE_OF_THE_VOID: &str = "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.";
+
+fn assert_supported_abilities(runner: &GameRunner, source: ObjectId) {
+    let object = &runner.state().objects[&source];
+    let mut supported = |effect: &Effect| {
+        assert!(
+            !matches!(effect, Effect::Unimplemented { .. }),
+            "{}: {effect:?}",
+            object.name
+        );
+        ControlFlow::Continue(())
+    };
+    for ability in object.abilities.iter() {
+        assert!(!ability
+            .cost
+            .as_ref()
+            .is_some_and(AbilityCost::contains_unimplemented));
+        let _ = visit_ability_def(ability, &mut supported);
+    }
+    for trigger in object.trigger_definitions.iter_all() {
+        let _ = visit_trigger(trigger.definition(), &mut supported);
+    }
+    for definition in object.static_definitions.iter_all() {
+        let _ = visit_static(definition, &mut supported);
+    }
+    for definition in object.replacement_definitions.iter_all() {
+        let _ = visit_replacement(definition, &mut supported);
+    }
+}
+
+fn sacrifice_activation_index(runner: &GameRunner, source: ObjectId) -> usize {
+    assert_supported_abilities(runner, source);
+    let indices: Vec<_> = runner.state().objects[&source]
+        .abilities
+        .iter()
+        .enumerate()
+        .filter_map(|(index, ability)| {
+            let mut sacrifice = false;
+            if let Some(cost) = &ability.cost {
+                cost.for_each_cost_node(&mut |node| {
+                    sacrifice |= matches!(node, AbilityCost::Sacrifice(_));
+                });
+            }
+            (ability.kind == AbilityKind::Activated && sacrifice).then_some(index)
+        })
+        .collect();
+    assert_eq!(
+        indices.len(),
+        1,
+        "one printed sacrifice activation must be reachable"
+    );
+    indices[0]
+}
+
+fn tap_events(events: &[GameEvent], source: ObjectId) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(event,
+                GameEvent::PermanentTapped { object_id, .. } if *object_id == source
+            )
+        })
+        .count()
+}
+
+fn assert_finished(runner: &GameRunner) {
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+fn assert_one_observer_above_activation(runner: &GameRunner, source: ObjectId, observer: ObjectId) {
+    assert_eq!(
+        runner.state().stack.len(),
+        2,
+        "one captured trigger above the activation"
+    );
+    let activation = runner.state().stack.front().unwrap();
+    assert!(matches!(
+        activation.kind,
+        StackEntryKind::ActivatedAbility { .. }
+    ));
+    assert_eq!((activation.source_id, activation.controller), (source, P0));
+    let trigger = runner.state().stack.back().unwrap();
+    assert!(matches!(
+        trigger.kind,
+        StackEntryKind::TriggeredAbility { .. }
+    ));
+    assert_eq!((trigger.source_id, trigger.controller), (observer, P0));
+}
+
+fn restore_payment(runner: &mut GameRunner) {
+    let encoded =
+        serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap();
+    *runner = GameRunner::from_state(
+        serde_json::from_value::<PersistedGameState>(encoded)
+            .unwrap()
+            .into_game_state()
+            .unwrap(),
+    );
+}
+
+struct FiendCards {
+    source: ObjectId,
+    captain: ObjectId,
+    fodder: [ObjectId; 2],
+    opposing: ObjectId,
+    library_bears: [ObjectId; 2],
+    replacements: Option<[ObjectId; 2]>,
+}
+
+fn fiend_fixture(captain_controller: PlayerId, replacements: bool) -> (GameRunner, FiendCards) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let source = scenario
-        .add_enchantment_from_oracle(P0, "Mixed cost source", "")
-        .with_ability_definition(draw_x(AbilityCost::Composite {
-            costs: vec![
-                x_mana(),
-                AbilityCost::Tap,
-                AbilityCost::Sacrifice(SacrificeCost::count(
-                    TypedFilter::permanent()
-                        .controller(ControllerRef::You)
-                        .into(),
-                    1,
-                )),
-            ],
-        }))
+        .add_creature_from_oracle(P0, "Fiend Artisan", 1, 1, FIEND_ARTISAN)
+        .with_subtypes(vec!["Nightmare"])
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::BlackGreen; 2],
+        })
+        .with_color(vec![ManaColor::Black, ManaColor::Green])
         .id();
-    let other = scenario.add_enchantment_from_oracle(P0, "Other", "").id();
+    let captain = scenario
+        .add_creature_from_oracle(
+            captain_controller,
+            "Captain America, Living Legend",
+            3,
+            4,
+            CAPTAIN_AMERICA,
+        )
+        .as_legendary()
+        .with_subtypes(vec!["Human", "Soldier", "Hero"])
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::White, ManaCostShard::Blue],
+        })
+        .with_color(vec![ManaColor::White, ManaColor::Blue])
+        .id();
+    let [first, second, opposing] = [P0, P0, P1].map(|player| {
+        scenario
+            .add_creature(player, "Grizzly Bears", 2, 2)
+            .with_subtypes(vec!["Bear"])
+            .with_color(vec![ManaColor::Green])
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id()
+    });
+    let library_bears = [0, 1].map(|_| {
+        scenario
+            .add_spell_to_library_top(P0, "Grizzly Bears", false)
+            .as_creature()
+            .with_subtypes(vec!["Bear"])
+            .with_color(vec![ManaColor::Green])
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id()
+    });
+    let replacements = replacements.then(|| {
+        let rest = scenario
+            .add_enchantment_from_oracle(P0, "Rest in Peace", REST_IN_PEACE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::White],
+            })
+            .with_color(vec![ManaColor::White])
+            .id();
+        let leyline = scenario
+            .add_enchantment_from_oracle(P1, "Leyline of the Void", LEYLINE_OF_THE_VOID)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Black; 2],
+            })
+            .with_color(vec![ManaColor::Black])
+            .id();
+        [rest, leyline]
+    });
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Green, ObjectId(9000), false, vec![]); 6],
+    );
+    let mut runner = scenario.build();
+    // The library builder supplies types/cost; set the printed creature P/T too.
+    for id in library_bears {
+        let object = runner.state_mut().objects.get_mut(&id).unwrap();
+        object.power = Some(2);
+        object.toughness = Some(2);
+        object.base_power = Some(2);
+        object.base_toughness = Some(2);
+    }
+    assert_supported_abilities(&runner, source);
+    assert_supported_abilities(&runner, captain);
+    assert_eq!(
+        runner.state().objects[&captain].trigger_definitions.len(),
+        1
+    );
+    if let Some(ids) = replacements {
+        for id in ids {
+            assert_supported_abilities(&runner, id);
+            assert_eq!(runner.state().objects[&id].replacement_definitions.len(), 1);
+        }
+    }
+    (
+        runner,
+        FiendCards {
+            source,
+            captain,
+            fodder: [first, second],
+            opposing,
+            library_bears,
+            replacements,
+        },
+    )
+}
+
+fn fiend_announce(runner: &mut GameRunner, cards: &FiendCards) {
+    let ability_index = sacrifice_activation_index(runner, cards.source);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: cards.source,
+            ability_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ChooseXValue { player: P0, .. }
+    ));
+}
+
+fn fiend_choose_x(runner: &mut GameRunner, cards: &FiendCards) {
+    choose_x_and_finish_mana(runner, 2);
+    let WaitingFor::PayCost {
+        player,
+        choices,
+        min_count,
+        count,
+        resume: CostResume::Spell { spell },
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "Fiend must offer its printed sacrifice cost: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!((*player, *min_count, *count), (P0, 1, 1));
+    assert_eq!(spell.object_id, cards.source);
+    assert_eq!(spell.ability.chosen_x, Some(2));
+    assert!(!choices.contains(&cards.source));
+    assert!(!choices.contains(&cards.opposing));
+    assert_eq!(
+        choices.contains(&cards.captain),
+        runner.state().objects[&cards.captain].controller == P0
+    );
+    assert!(choices.contains(&cards.fodder[0]) || choices.contains(&cards.fodder[1]));
+    // CR 603.3: no tap observer can resolve while the cost choice is pending.
+    assert!(runner.state().stack.is_empty());
+    assert!(!runner.state().objects[&cards.source].tapped);
+}
+
+fn fiend_finish(
+    runner: &mut GameRunner,
+    cards: &FiendCards,
+    searched: ObjectId,
+    observes: bool,
+    tap_count: u32,
+) {
+    assert!(runner.state().objects[&cards.source].tapped);
+    if observes {
+        assert_one_observer_above_activation(runner, cards.source, cards.captain);
+        runner.resolve_top();
+        // CR 113.7a + CR 603.4: the captured first-tap trigger survives its source's departure.
+        assert!(
+            !runner.state().objects[&cards.source].tapped,
+            "Captain must untap Fiend even after being sacrificed"
+        );
+    } else {
+        assert_eq!(runner.state().stack.len(), 1);
+    }
+    let entry = runner.state().stack.back().unwrap();
+    assert!(matches!(
+        entry.kind,
+        StackEntryKind::ActivatedAbility { .. }
+    ));
+    assert_eq!(entry.source_id, cards.source);
+    assert_eq!(entry.ability().unwrap().chosen_x, Some(2));
+    runner.resolve_top();
+    let WaitingFor::SearchChoice {
+        player,
+        cards: choices,
+        count,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "Fiend's activation must resolve to a real search: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!((*player, *count), (P0, 1));
+    assert!(choices.contains(&searched));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![searched],
+        })
+        .unwrap();
+    assert_eq!(runner.state().objects[&searched].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&cards.source].tapped, !observes);
+    assert_eq!(
+        runner.state().object_tap_count_this_turn.get(&cards.source),
+        Some(&tap_count)
+    );
+    assert_finished(runner);
+}
+
+#[test]
+fn fiend_tap_observer_survives_selected_sacrifice_and_respects_controller() {
+    for (controller, sacrifice_observer) in [(P0, true), (P0, false), (P1, false)] {
+        let (mut runner, cards) = fiend_fixture(controller, false);
+        fiend_announce(&mut runner, &cards);
+        fiend_choose_x(&mut runner, &cards);
+        let selected = if sacrifice_observer {
+            cards.captain
+        } else {
+            cards.fodder[0]
+        };
+        let result = runner
+            .act(GameAction::SelectCards {
+                cards: vec![selected],
+            })
+            .unwrap();
+        assert_eq!(tap_events(&result.events, cards.source), 1);
+        let tap = result.events.iter().position(|event| matches!(event, GameEvent::PermanentTapped { object_id, .. } if *object_id == cards.source)).unwrap();
+        let departure = result.events.iter().position(|event| matches!(event, GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), .. } if *object_id == selected)).unwrap();
+        // CR 601.2h + CR 603.10: tap first while the selected observer still exists.
+        assert!(tap < departure);
+        assert_eq!(runner.state().objects[&selected].zone, Zone::Graveyard);
+        fiend_finish(
+            &mut runner,
+            &cards,
+            cards.library_bears[0],
+            controller == P0,
+            1,
+        );
+    }
+}
+
+#[test]
+fn fiend_second_real_payment_does_not_repeat_first_tap_trigger() {
+    let (mut runner, cards) = fiend_fixture(P0, false);
+    let mut events = Vec::new();
+    for (index, selected) in cards.fodder.into_iter().enumerate() {
+        fiend_announce(&mut runner, &cards);
+        fiend_choose_x(&mut runner, &cards);
+        events.extend(
+            runner
+                .act(GameAction::SelectCards {
+                    cards: vec![selected],
+                })
+                .unwrap()
+                .events,
+        );
+        assert_eq!(runner.state().objects[&selected].zone, Zone::Graveyard);
+        // CR 603.4: the first completed untap is the reach guard for the second-tap negative.
+        fiend_finish(
+            &mut runner,
+            &cards,
+            cards.library_bears[index],
+            index == 0,
+            (index + 1) as u32,
+        );
+    }
+    assert_eq!(tap_events(&events, cards.source), 2);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+}
+
+#[test]
+fn fiend_tap_prefix_survives_replacement_choice_and_restore_once() {
+    for replacement_index in [0, 1] {
+        let (mut runner, cards) = fiend_fixture(P0, true);
+        fiend_announce(&mut runner, &cards);
+        fiend_choose_x(&mut runner, &cards);
+        let mut events = runner
+            .act(GameAction::SelectCards {
+                cards: vec![cards.captain],
+            })
+            .unwrap()
+            .events;
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("competing graveyard replacements must pause");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(candidates.len(), 2);
+        let replacements = cards.replacements.unwrap();
+        for id in replacements {
+            assert!(candidates.iter().any(|candidate| candidate.source_id == id));
+        }
+        let choice = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == replacements[replacement_index])
+            .unwrap();
+        assert!(runner.state().objects[&cards.source].tapped);
+        assert!(runner.state().stack.is_empty());
+        let Some(PendingCostMoveResume::SacrificeForCost {
+            deferred_cost_events,
+            ..
+        }) = &runner.state().pending_cost_move_resume
+        else {
+            panic!("the existing sacrifice root must own the pause");
+        };
+        assert_eq!(
+            tap_events(deferred_cost_events, cards.source),
+            0,
+            "tap prefix must not join the deferred departure fragment"
+        );
+        let before = serde_json::to_value(runner.state()).unwrap();
+        assert!(runner.act(GameAction::CancelCast).is_err());
+        assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
+        restore_payment(&mut runner);
+        events.extend(
+            runner
+                .act(GameAction::ChooseReplacement { index: choice })
+                .unwrap()
+                .events,
+        );
+        assert_eq!(runner.state().objects[&cards.captain].zone, Zone::Exile);
+        assert_eq!(tap_events(&events, cards.source), 1);
+        fiend_finish(&mut runner, &cards, cards.library_bears[0], true, 1);
+    }
+}
+
+#[test]
+fn fiend_unpaid_cancel_and_invalid_selections_do_not_create_tap_observers() {
+    let (mut valid, cards) = fiend_fixture(P0, false);
+    fiend_announce(&mut valid, &cards);
+    let mut cancelled = GameRunner::from_state(valid.state().clone());
+    let result = cancelled.act(GameAction::CancelCast).unwrap();
+    assert_eq!(tap_events(&result.events, cards.source), 0);
+    assert!(!cancelled.state().objects[&cards.source].tapped);
+    assert_eq!(
+        cancelled.state().objects[&cards.captain].zone,
+        Zone::Battlefield
+    );
+    assert!(!cancelled
+        .state()
+        .object_tap_count_this_turn
+        .contains_key(&cards.source));
+    assert!(cancelled.state().pending_cast.is_none());
+    assert_finished(&cancelled);
+    fiend_choose_x(&mut valid, &cards);
+    for case in [
+        "empty",
+        "duplicate",
+        "opponent",
+        "departed",
+        "tapped source",
+    ] {
+        let mut invalid = GameRunner::from_state(valid.state().clone());
+        let selected = match case {
+            "empty" => vec![],
+            "duplicate" => vec![cards.captain, cards.captain],
+            "opponent" => vec![cards.opposing],
+            "departed" => {
+                engine::game::zones::move_to_zone(
+                    invalid.state_mut(),
+                    cards.captain,
+                    Zone::Graveyard,
+                    &mut vec![],
+                );
+                vec![cards.captain]
+            }
+            "tapped source" => {
+                invalid
+                    .state_mut()
+                    .objects
+                    .get_mut(&cards.source)
+                    .unwrap()
+                    .tapped = true;
+                vec![cards.captain]
+            }
+            _ => unreachable!(),
+        };
+        let before = serde_json::to_value(invalid.state()).unwrap();
+        // CR 118.3 + CR 733.1: invalid payments leave the public action snapshot unchanged.
+        assert!(
+            invalid
+                .act(GameAction::SelectCards { cards: selected })
+                .is_err(),
+            "{case}"
+        );
+        assert_eq!(
+            serde_json::to_value(invalid.state()).unwrap(),
+            before,
+            "{case}"
+        );
+        assert!(!invalid
+            .state()
+            .object_tap_count_this_turn
+            .contains_key(&cards.source));
+        assert!(invalid.state().stack.is_empty());
+    }
+    valid
+        .act(GameAction::SelectCards {
+            cards: vec![cards.captain],
+        })
+        .unwrap();
+    fiend_finish(&mut valid, &cards, cards.library_bears[0], true, 1);
+}
+
+#[test]
+fn fallowsage_granted_whisper_cost_preserves_its_tap_trigger_after_sacrifice() {
+    for (sacrifice_source, accept) in [(true, true), (true, false), (false, true), (false, false)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let cauldron = scenario
+            .add_artifact_from_oracle(P0, "Agatha's Soul Cauldron", AGATHAS_SOUL_CAULDRON)
+            .as_legendary()
+            .with_mana_cost(ManaCost::generic(2))
+            .id();
+        let whisper = scenario
+            .add_creature_to_exile(P0, "Whisper, Blood Liturgist", 2, 2)
+            .from_oracle_text(WHISPER)
+            .as_legendary()
+            .with_subtypes(vec!["Human", "Cleric"])
+            .with_mana_cost(ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::Black],
+            })
+            .with_color(vec![ManaColor::Black])
+            .id();
+        let source = scenario
+            .add_creature_from_oracle(P0, "Fallowsage", 2, 2, FALLOWSAGE)
+            .with_plus_counters(1)
+            .with_subtypes(vec!["Merfolk", "Wizard"])
+            .with_mana_cost(ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::Blue],
+            })
+            .with_color(vec![ManaColor::Blue])
+            .id();
+        let fodder = [0, 1].map(|_| {
+            scenario
+                .add_creature(P0, "Grizzly Bears", 2, 2)
+                .with_subtypes(vec!["Bear"])
+                .with_color(vec![ManaColor::Green])
+                .with_mana_cost(ManaCost::Cost {
+                    generic: 1,
+                    shards: vec![ManaCostShard::Green],
+                })
+                .id()
+        });
+        let targets = [0, 1].map(|_| {
+            scenario
+                .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+                .with_subtypes(vec!["Bear"])
+                .with_color(vec![ManaColor::Green])
+                .with_mana_cost(ManaCost::Cost {
+                    generic: 1,
+                    shards: vec![ManaCostShard::Green],
+                })
+                .id()
+        });
+        let library_bears = [0, 1].map(|_| {
+            scenario
+                .add_spell_to_library_top(P0, "Grizzly Bears", false)
+                .as_creature()
+                .with_subtypes(vec!["Bear"])
+                .with_color(vec![ManaColor::Green])
+                .with_mana_cost(ManaCost::Cost {
+                    generic: 1,
+                    shards: vec![ManaCostShard::Green],
+                })
+                .id()
+        });
+        let mut runner = scenario.build();
+        for id in library_bears {
+            let object = runner.state_mut().objects.get_mut(&id).unwrap();
+            object.power = Some(2);
+            object.toughness = Some(2);
+            object.base_power = Some(2);
+            object.base_toughness = Some(2);
+        }
+        // CR 613.1f: established linked exile grants the actual printed activation.
+        runner.state_mut().exile_links.push(ExileLink {
+            exiled_id: whisper,
+            source_id: cauldron,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+        runner.state_mut().layers_dirty.mark_full();
+        engine::game::layers::evaluate_layers(runner.state_mut());
+        assert_supported_abilities(&runner, cauldron);
+        assert_supported_abilities(&runner, whisper);
+        let ability_index = sacrifice_activation_index(&runner, source);
+        assert_eq!(runner.state().objects[&source].trigger_definitions.len(), 1);
+        assert!(runner.state().objects[&source]
+            .granted_abilities_from
+            .is_some_and(|first| ability_index >= first));
+        let granting_object =
+            runner.state().objects[&source].abilities[ability_index].granting_object;
+        let hand_before = runner.state().players[0].hand.len();
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        let WaitingFor::TargetSelection {
+            player,
+            target_slots,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "Whisper must offer its two real graveyard targets: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(target_slots.len(), 1);
+        assert_eq!(target_slots[0].legal_targets.len(), 2);
+        for target in targets {
+            assert!(target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(target)));
+        }
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(targets[1])),
+            })
+            .unwrap();
+        let WaitingFor::PayCost {
+            player,
+            choices,
+            min_count,
+            count,
+            resume: CostResume::Spell { spell },
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("granted Whisper must offer the real Count2 cost");
+        };
+        assert_eq!((*player, *min_count, *count), (P0, 2, 2));
+        assert_eq!(choices.len(), 3);
+        for id in [source, fodder[0], fodder[1]] {
+            assert!(choices.contains(&id));
+        }
+        assert_eq!(spell.ability.targets, vec![TargetRef::Object(targets[1])]);
+        // Whisper does not name its granter; preserve whatever binding the grant supplied.
+        assert_eq!(spell.ability.context.granting_object, granting_object);
+        assert!(!runner.state().objects[&source].tapped);
+        assert!(runner.state().stack.is_empty());
+        let selected = if sacrifice_source {
+            vec![source, fodder[0]]
+        } else {
+            fodder.to_vec()
+        };
+        let events = runner
+            .act(GameAction::SelectCards {
+                cards: selected.clone(),
+            })
+            .unwrap()
+            .events;
+        assert_eq!(tap_events(&events, source), 1);
+        assert_one_observer_above_activation(&runner, source, source);
+        let ability = runner.state().stack.front().unwrap().ability().unwrap();
+        assert_eq!(ability.context.granting_object, granting_object);
+        assert_eq!(ability.targets, vec![TargetRef::Object(targets[1])]);
+        assert_eq!(ability.cost_paid_objects.len(), 2);
+        for (record, selected) in ability.cost_paid_objects.iter().zip(selected) {
+            let paid = record.snapshot().unwrap();
+            assert_eq!(paid.object_id, selected);
+            assert_eq!(paid.lki.tapped, selected == source);
+            assert_eq!(runner.state().objects[&selected].zone, Zone::Graveyard);
+        }
+        assert_eq!(
+            runner.state().objects[&source].zone,
+            if sacrifice_source {
+                Zone::Graveyard
+            } else {
+                Zone::Battlefield
+            }
+        );
+        runner.resolve_top();
+        let WaitingFor::OptionalEffectChoice {
+            player, source_id, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "the captured Fallowsage trigger must offer its draw: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!((*player, *source_id), (P0, source));
+        assert_eq!(runner.state().players[0].hand.len(), hand_before);
+        // CR 603.2 + CR 113.7a: accepting the departed source's trigger still draws one.
+        runner
+            .act(GameAction::DecideOptionalEffect { accept })
+            .unwrap();
+        assert_eq!(
+            runner.state().players[0].hand.len(),
+            hand_before + usize::from(accept)
+        );
+        assert_eq!(runner.state().stack.len(), 1);
+        runner.resolve_top();
+        assert_eq!(runner.state().objects[&targets[1]].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&targets[0]].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&whisper].zone, Zone::Exile);
+        assert_eq!(
+            runner.state().object_tap_count_this_turn.get(&source),
+            Some(&1)
+        );
+        assert_finished(&runner);
+    }
+}
+
+struct QuarryCards {
+    source: ObjectId,
+    other_desert: ObjectId,
+    opposing_desert: ObjectId,
+    bears: [ObjectId; 2],
+    opposing_bears: ObjectId,
+    giant: ObjectId,
+    ability_index: usize,
+}
+
+fn quarry_fixture(source_owner: PlayerId) -> (GameRunner, QuarryCards) {
+    let mut scenario = GameScenario::new();
+    // CR 307.5: "Only as a sorcery" requires our main phase and an empty stack.
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_land_from_oracle(source_owner, "Lazotep Quarry", LAZOTEP_QUARRY)
+        .with_subtypes(vec!["Desert"])
+        .controlled_by(P0)
+        .id();
+    let other_desert = scenario
+        .add_land_from_oracle(P0, "Lazotep Quarry", LAZOTEP_QUARRY)
+        .with_subtypes(vec!["Desert"])
+        .id();
+    let opposing_desert = scenario
+        .add_land_from_oracle(P1, "Lazotep Quarry", LAZOTEP_QUARRY)
+        .with_subtypes(vec!["Desert"])
+        .id();
+    let [first, second, opposing_bears] = [P0, P0, P1].map(|owner| {
+        scenario
+            .add_creature_to_graveyard(owner, "Grizzly Bears", 2, 2)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Green],
+            })
+            .with_subtypes(vec!["Bear"])
+            .id()
+    });
+    let giant = scenario
+        .add_creature_to_graveyard(P0, "Hill Giant", 3, 3)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Red],
+        })
+        .with_subtypes(vec!["Giant"])
+        .id();
     scenario.with_mana_pool(
         P0,
         vec![ManaUnit::new(ManaType::Green, ObjectId(9000), false, vec![]); 4],
     );
     let mut runner = scenario.build();
+    // CR 205.3: production loads the creature-type vocabulary from card data;
+    // scenarios do not derive it from the cards added to the fixture.
+    runner.state_mut().all_creature_types = vec!["Bear".into(), "Giant".into(), "Zombie".into()];
+    let x_abilities: Vec<_> = runner.state().objects[&source]
+        .abilities
+        .iter()
+        .enumerate()
+        .filter(|(_, ability)| {
+            let mut has_x = false;
+            if let Some(cost) = &ability.cost {
+                cost.for_each_cost_node(&mut |node| {
+                    has_x |= matches!(node, AbilityCost::Mana { cost } if cost.has_x());
+                });
+            }
+            has_x
+        })
+        .collect();
+    assert_eq!(
+        x_abilities.len(),
+        1,
+        "must find Quarry's printed X activation"
+    );
+    let (ability_index, ability) = x_abilities[0];
+    assert_eq!(ability.kind, AbilityKind::Activated);
+    assert!(!ability.cost.as_ref().unwrap().contains_unimplemented());
+    let _ = visit_ability_def(ability, &mut |effect: &Effect| {
+        assert!(
+            !matches!(effect, Effect::Unimplemented { .. }),
+            "{ability:?}"
+        );
+        ControlFlow::Continue(())
+    });
+    (
+        runner,
+        QuarryCards {
+            source,
+            other_desert,
+            opposing_desert,
+            bears: [first, second],
+            opposing_bears,
+            giant,
+            ability_index,
+        },
+    )
+}
+
+fn quarry_announce_x(runner: &mut GameRunner, cards: &QuarryCards) {
     runner
         .act(GameAction::ActivateAbility {
-            source_id: source,
-            ability_index: 0,
+            source_id: cards.source,
+            ability_index: cards.ability_index,
             payment_mode: CastPaymentMode::Auto,
         })
         .unwrap();
     assert!(matches!(
-        runner
-            .state()
-            .pending_cast
-            .as_ref()
-            .unwrap()
-            .activation_residual,
+        runner.state().waiting_for,
+        WaitingFor::ChooseXValue { player: P0, .. }
+    ));
+    // CR 107.3a + CR 107.3i: X is announced once and governs cost and target.
+    choose_x_and_finish_mana(runner, 2);
+    let WaitingFor::TargetSelection {
+        player,
+        pending_cast,
+        target_slots,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected Quarry target choice: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(pending_cast.ability.chosen_x, Some(2));
+    assert!(matches!(
+        pending_cast.activation_residual,
         ActivationResidual::XMana
     ));
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        runner.act(GameAction::ChooseX { value: 1 })
-    }));
-    match result {
-        Err(payload) => {
-            let message = payload
-                .downcast_ref::<String>()
-                .map(String::as_str)
-                .or_else(|| payload.downcast_ref::<&str>().copied());
-            assert_eq!(message, Some("non-self sacrifice/exile cost unhandled"));
-        }
-        Ok(Err(EngineError::ActionNotAllowed(message))) => {
-            assert_eq!(message, "non-self sacrifice/exile cost unhandled");
-        }
-        Ok(other) => panic!("mixed Tap suffix unexpectedly proceeded: {other:?}"),
+    assert_eq!(target_slots.len(), 1);
+    let legal = &target_slots[0].legal_targets;
+    // CR 601.2c + CR 202.3: the chosen target must be a MV2 creature in our graveyard.
+    for bear in cards.bears {
+        assert!(legal.contains(&TargetRef::Object(bear)));
     }
+    assert_eq!(legal.len(), 2);
+    assert!(!legal.contains(&TargetRef::Object(cards.opposing_bears)));
+    assert!(!legal.contains(&TargetRef::Object(cards.giant)));
+}
+
+fn quarry_choose_target(runner: &mut GameRunner, cards: &QuarryCards) {
+    let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for else {
+        panic!("expected target selection");
+    };
+    let target = target_slots[0]
+        .legal_targets
+        .iter()
+        .find(|target| **target == TargetRef::Object(cards.bears[1]))
+        .expect("second Bears must be offered")
+        .clone();
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(target),
+        })
+        .unwrap();
+    let WaitingFor::PayCost {
+        player,
+        choices,
+        min_count,
+        count,
+        resume: CostResume::Spell { spell },
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected Quarry sacrifice: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!((*player, *min_count, *count), (P0, 1, 1));
+    assert_eq!(choices.len(), 2);
+    assert!(choices.contains(&cards.source));
+    assert!(choices.contains(&cards.other_desert));
+    assert!(!choices.contains(&cards.opposing_desert));
+    assert_eq!(spell.ability.chosen_x, Some(2));
+    assert_eq!(
+        spell.ability.targets,
+        vec![TargetRef::Object(cards.bears[1])]
+    );
+}
+
+fn quarry_pay_and_resolve(runner: &mut GameRunner, cards: &QuarryCards, sacrifice: ObjectId) {
+    let sacrifice_owner = runner.state().objects[&sacrifice].owner;
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![sacrifice],
+        })
+        .unwrap();
+    // CR 601.2h + CR 602.2b: {X}{2} with X=2 spends all four floating mana once.
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_eq!(runner.state().stack.len(), 1);
+    let entry = runner.state().stack.back().unwrap();
+    assert_eq!((entry.source_id, entry.controller), (cards.source, P0));
+    let ability = entry.ability().unwrap();
+    assert_eq!(ability.chosen_x, Some(2));
+    assert_eq!(ability.targets, vec![TargetRef::Object(cards.bears[1])]);
+    assert_eq!(ability.cost_paid_objects.len(), 1);
+    let paid = ability.cost_paid_objects[0].snapshot().unwrap();
+    assert_eq!(paid.object_id, sacrifice);
+    assert_eq!((paid.lki.controller, paid.lki.owner), (P0, sacrifice_owner));
+    // CR 107.5: self-sacrifice records a tapped source; another Desert does not tap.
+    assert_eq!(paid.lki.tapped, sacrifice == cards.source);
+    let sacrificed = &runner.state().objects[&sacrifice];
+    assert_eq!(sacrificed.zone, Zone::Graveyard);
+    // CR 701.21a: controller pays, but the sacrificed card goes to its owner's graveyard.
+    assert_eq!(sacrificed.owner, sacrifice_owner);
+    assert!(runner.state().players[sacrifice_owner.0 as usize]
+        .graveyard
+        .contains(&sacrifice));
+    let retained = if sacrifice == cards.source {
+        cards.other_desert
+    } else {
+        cards.source
+    };
+    assert_eq!(runner.state().objects[&retained].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&retained].tapped,
+        retained == cards.source
+    );
+    assert_eq!(
+        runner.state().objects[&cards.opposing_desert].zone,
+        Zone::Battlefield
+    );
+    assert!(!runner.state().objects[&cards.opposing_desert].tapped);
+    runner.resolve_top();
     assert!(runner.state().stack.is_empty());
-    assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
-    assert_eq!(runner.state().objects[&other].zone, Zone::Battlefield);
-    assert!(!runner.state().objects[&source].tapped);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    // CR 400.7j: copy the creature exiled by the effect, not the cost-paid Desert.
+    assert_eq!(runner.state().objects[&cards.bears[1]].zone, Zone::Exile);
+    for untouched in [cards.bears[0], cards.opposing_bears, cards.giant] {
+        assert_eq!(runner.state().objects[&untouched].zone, Zone::Graveyard);
+    }
+    let tokens: Vec<_> = runner
+        .state()
+        .battlefield
+        .iter()
+        .map(|id| &runner.state().objects[id])
+        .filter(|object| object.is_token)
+        .collect();
+    assert_eq!(tokens.len(), 1);
+    let token = tokens[0];
+    // CR 707.2 + CR 707.9b: retain name/cost, replacing P/T, color, and creature subtype.
+    assert_eq!(token.name, "Grizzly Bears");
+    assert_eq!(token.controller, P0);
+    assert_eq!((token.power, token.toughness), (Some(4), Some(4)));
+    assert_eq!(token.color, vec![ManaColor::Black]);
+    assert_eq!(token.card_types.core_types, vec![CoreType::Creature]);
+    assert_eq!(token.card_types.subtypes, vec!["Zombie".to_string()]);
+    assert_eq!(
+        token.mana_cost,
+        ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Green]
+        }
+    );
+}
+
+#[test]
+fn lazotep_quarry_x_tap_self_sacrifice_copies_selected_bears() {
+    for owner in [P0, P1] {
+        let (mut runner, cards) = quarry_fixture(owner);
+        quarry_announce_x(&mut runner, &cards);
+        quarry_choose_target(&mut runner, &cards);
+        quarry_pay_and_resolve(&mut runner, &cards, cards.source);
+    }
+}
+
+#[test]
+fn lazotep_quarry_x_tap_other_desert_copies_selected_bears() {
+    let (mut runner, cards) = quarry_fixture(P0);
+    quarry_announce_x(&mut runner, &cards);
+    quarry_choose_target(&mut runner, &cards);
+    quarry_pay_and_resolve(&mut runner, &cards, cards.other_desert);
+}
+
+#[test]
+fn lazotep_quarry_tapped_source_refuses_without_payment() {
+    let (mut valid, cards) = quarry_fixture(P0);
+    let mut invalid = GameRunner::from_state(valid.state().clone());
+    invalid
+        .state_mut()
+        .objects
+        .get_mut(&cards.source)
+        .unwrap()
+        .tapped = true;
+    let before = serde_json::to_value(invalid.state()).unwrap();
+    // CR 107.5 + CR 118.3: an already tapped source cannot pay {T}.
+    assert!(invalid
+        .act(GameAction::ActivateAbility {
+            source_id: cards.source,
+            ability_index: cards.ability_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .is_err());
+    assert_eq!(serde_json::to_value(invalid.state()).unwrap(), before);
+    quarry_announce_x(&mut valid, &cards);
+    quarry_choose_target(&mut valid, &cards);
+    quarry_pay_and_resolve(&mut valid, &cards, cards.source);
+}
+
+#[test]
+fn lazotep_quarry_invalid_or_stale_sacrifices_refuse_without_partial_payment() {
+    let (mut valid, cards) = quarry_fixture(P0);
+    quarry_announce_x(&mut valid, &cards);
+    quarry_choose_target(&mut valid, &cards);
+    for case in ["empty", "opponent", "departed", "control changed", "tapped"] {
+        let mut invalid = GameRunner::from_state(valid.state().clone());
+        let chosen = match case {
+            "empty" => vec![],
+            "opponent" => vec![cards.opposing_desert],
+            "departed" => {
+                engine::game::zones::move_to_zone(
+                    invalid.state_mut(),
+                    cards.source,
+                    Zone::Graveyard,
+                    &mut vec![],
+                );
+                vec![cards.source]
+            }
+            "control changed" => {
+                let source = invalid.state_mut().objects.get_mut(&cards.source).unwrap();
+                source.controller = P1;
+                source.base_controller = Some(P1);
+                vec![cards.source]
+            }
+            "tapped" => {
+                invalid
+                    .state_mut()
+                    .objects
+                    .get_mut(&cards.source)
+                    .unwrap()
+                    .tapped = true;
+                vec![cards.source]
+            }
+            _ => unreachable!(),
+        };
+        let before = serde_json::to_value(invalid.state()).unwrap();
+        // CR 118.3 + CR 601.2h + CR 701.21a: reject incomplete or no-longer-payable selections.
+        assert!(
+            invalid
+                .act(GameAction::SelectCards { cards: chosen })
+                .is_err(),
+            "{case}"
+        );
+        assert_eq!(
+            serde_json::to_value(invalid.state()).unwrap(),
+            before,
+            "{case}"
+        );
+        assert!(invalid.state().stack.is_empty());
+        assert!(matches!(
+            invalid.state().waiting_for,
+            WaitingFor::PayCost { .. }
+        ));
+    }
+    quarry_pay_and_resolve(&mut valid, &cards, cards.source);
+}
+
+#[test]
+fn lazotep_quarry_targets_only_announced_x_in_controllers_graveyard() {
+    let (mut valid, cards) = quarry_fixture(P1);
+    quarry_announce_x(&mut valid, &cards);
+    for target in [cards.opposing_bears, cards.giant] {
+        let mut invalid = GameRunner::from_state(valid.state().clone());
+        let before = serde_json::to_value(invalid.state()).unwrap();
+        assert!(invalid
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target))
+            })
+            .is_err());
+        assert_eq!(serde_json::to_value(invalid.state()).unwrap(), before);
+    }
+    quarry_choose_target(&mut valid, &cards);
+    quarry_pay_and_resolve(&mut valid, &cards, cards.source);
 }
 
 #[test]
 fn x_mana_replacement_pause_restores_payer_and_announced_x() {
-    for accept_first in [false, true] {
+    // No printed card was identified with X mana, two separately encoded Count
+    // legs, and draw-X. Whisper's printed {T}/Count2 is the gameplay witness above.
+    // This existing typed fixture protects the serialized residual representation:
+    // CR 601.2h + CR 602.2b require the complete cost, with no replay of paid legs.
+    for (with_tap, accept_first) in [(false, false), (false, true), (true, false), (true, true)] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let one = AbilityCost::Sacrifice(SacrificeCost::count(
@@ -554,12 +1621,14 @@ fn x_mana_replacement_pause_restores_payer_and_announced_x() {
                 .into(),
             1,
         ));
+        let mut costs = vec![x_mana(), one.clone(), one.clone()];
+        if with_tap {
+            costs.insert(1, AbilityCost::Tap);
+        }
         let source = scenario
             .add_enchantment_from_oracle(P1, "Replaced source", "")
             .controlled_by(P0)
-            .with_ability_definition(draw_x(AbilityCost::Composite {
-                costs: vec![x_mana(), one.clone(), one],
-            }))
+            .with_ability_definition(draw_x(AbilityCost::Composite { costs }))
             .id();
         let other = scenario.add_enchantment_from_oracle(P0, "Other", "").id();
         scenario
@@ -580,15 +1649,30 @@ fn x_mana_replacement_pause_restores_payer_and_announced_x() {
             })
             .unwrap();
         choose_x_and_finish_mana(&mut runner, 4);
-        let WaitingFor::PayCost { choices, .. } = &runner.state().waiting_for else {
+        let WaitingFor::PayCost {
+            player,
+            choices,
+            min_count,
+            count,
+            resume: CostResume::Spell { spell },
+            ..
+        } = &runner.state().waiting_for
+        else {
             panic!("first Count1 prompt: {:?}", runner.state().waiting_for);
         };
+        assert_eq!((*player, *min_count, *count), (P0, 1, 1));
+        assert_eq!(choices.len(), 2);
         assert!(choices.contains(&source));
-        runner
+        assert!(choices.contains(&other));
+        let locked_cost = serde_json::to_value(&spell.activation_cost_snapshot).unwrap();
+        assert!(!locked_cost.is_null());
+        let mut events = runner
             .act(GameAction::SelectCards {
                 cards: vec![source],
             })
-            .unwrap();
+            .unwrap()
+            .events;
+        assert_eq!(tap_events(&events, source), usize::from(with_tap));
         let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
             panic!("source sacrifice must pause for optional replacement");
         };
@@ -608,9 +1692,12 @@ fn x_mana_replacement_pause_restores_payer_and_announced_x() {
             .into_game_state()
             .unwrap();
         runner = GameRunner::from_state(restored);
-        runner
-            .act(GameAction::ChooseReplacement { index: choice })
-            .unwrap();
+        events.extend(
+            runner
+                .act(GameAction::ChooseReplacement { index: choice })
+                .unwrap()
+                .events,
+        );
         assert_eq!(
             runner.state().objects[&source].zone,
             if accept_first {
@@ -640,9 +1727,25 @@ fn x_mana_replacement_pause_restores_payer_and_announced_x() {
             ActivationResidual::XMana
         ));
         assert_eq!(spell.ability.chosen_x, Some(4));
-        runner
-            .act(GameAction::SelectCards { cards: vec![other] })
-            .unwrap();
+        assert_eq!(spell.object_id, source);
+        assert_eq!(spell.activation_cost.as_ref(), Some(&one));
+        assert_eq!(
+            serde_json::to_value(&spell.activation_cost_snapshot).unwrap(),
+            locked_cost
+        );
+        let paid_source = spell.ability.cost_paid_objects[0].snapshot().unwrap();
+        assert_eq!(paid_source.object_id, source);
+        assert_eq!(paid_source.lki.tapped, with_tap);
+        // The engine's existing committed-payment policy rejects cancellation.
+        let before = serde_json::to_value(runner.state()).unwrap();
+        assert!(runner.act(GameAction::CancelCast).is_err());
+        assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
+        events.extend(
+            runner
+                .act(GameAction::SelectCards { cards: vec![other] })
+                .unwrap()
+                .events,
+        );
         let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
             panic!("second sacrifice must pause for optional replacement");
         };
@@ -650,9 +1753,12 @@ fn x_mana_replacement_pause_restores_payer_and_announced_x() {
             .iter()
             .position(|candidate| candidate.description == "Decline")
             .unwrap();
-        runner
-            .act(GameAction::ChooseReplacement { index: decline })
-            .unwrap();
+        events.extend(
+            runner
+                .act(GameAction::ChooseReplacement { index: decline })
+                .unwrap()
+                .events,
+        );
         assert_eq!(runner.state().objects[&other].zone, Zone::Graveyard);
         let entry = runner.state().stack.back().unwrap();
         assert_eq!((entry.source_id, entry.controller), (source, P0));
@@ -664,8 +1770,10 @@ fn x_mana_replacement_pause_restores_payer_and_announced_x() {
             .map(|record| record.snapshot().unwrap().object_id)
             .collect();
         assert_eq!(paid, vec![source, other]);
+        assert_eq!(tap_events(&events, source), usize::from(with_tap));
         runner.resolve_top();
         assert_eq!(runner.state().players[0].hand.len(), hand_before + 4);
+        assert_finished(&runner);
     }
 }
 
@@ -1542,7 +2650,7 @@ fn x_mana_target_and_crime_survive_optional_replacement_restore() {
 }
 
 #[test]
-fn x_mana_mixed_requirement_life_tap_and_exile_shapes_refuse_atomically() {
+fn x_mana_mixed_requirement_life_and_exile_shapes_refuse_atomically() {
     let creature: TargetFilter = TypedFilter::creature()
         .controller(ControllerRef::You)
         .into();
@@ -1574,8 +2682,6 @@ fn x_mana_mixed_requirement_life_tap_and_exile_shapes_refuse_atomically() {
             )),
             1,
         ),
-        ("tap after Count0", AbilityCost::Tap, 0),
-        ("tap after Count1", AbilityCost::Tap, 1),
         (
             "hand exile",
             AbilityCost::Exile {

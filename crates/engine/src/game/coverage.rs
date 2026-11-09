@@ -26,8 +26,8 @@ use crate::types::ability::{
     ContinuousModification, ControllerRef, CountScope, CounterKindChooser, CounterKindDomain,
     CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
     EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
-    ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition, ManaProduction,
-    MassLibraryShuffleMode, NameStickerSet, NumberQuality, ObjectProperty, ObjectScope,
+    ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition, LibraryShuffleMode,
+    ManaProduction, NameStickerSet, NumberQuality, ObjectProperty, ObjectScope,
     ObjectSelectionCardinality, ObjectSelectionEligibility, Parity, ParsedCondition,
     PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValue,
     PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
@@ -56,6 +56,7 @@ use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::ControlFlow;
+use std::sync::LazyLock;
 use strum::IntoEnumIterator;
 
 const TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL: &str =
@@ -1962,6 +1963,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             }
         }
         QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
+        QuantityRef::DeployedBossCount => "deployed bosses".into(),
         QuantityRef::ExiledCardPower { index } => format!("power of exiled card {index}"),
         QuantityRef::ZoneCardCount {
             zone,
@@ -2067,6 +2069,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             )
         }
         QuantityRef::CrimesCommittedThisTurn => "crimes committed this turn".into(),
+        QuantityRef::EnergyPaidOrLostThisTurn => "energy paid or lost this turn".into(),
         QuantityRef::BendTypesThisTurn => "distinct bend types this turn".into(),
         QuantityRef::LifeGainedThisTurn { player } => {
             format!("life gained this turn ({})", fmt_player_scope(player))
@@ -2780,6 +2783,8 @@ fn fmt_core_type(ct: &CoreType) -> &'static str {
         CoreType::Phenomenon => "phenomenon",
         CoreType::Scheme => "scheme",
         CoreType::Conspiracy => "conspiracy",
+        CoreType::Boss => "boss",
+        CoreType::Event => "event",
     }
 }
 
@@ -2805,6 +2810,7 @@ fn fmt_characteristic_population(source: &CardTypeSetSource) -> String {
                             "designated for an owner-library shuffle"
                         }
                         ThisWayCause::Discarded => "discarded",
+                        ThisWayCause::Tapped => "tapped",
                         ThisWayCause::Exiled => "exiled",
                         ThisWayCause::Milled => "milled",
                         ThisWayCause::Destroyed => "destroyed",
@@ -3407,6 +3413,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             destination,
             target,
             owner_library,
+            library_shuffle,
             enter_transformed,
             enters_under,
             enter_tapped,
@@ -3431,6 +3438,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             // only when active, so a plain ChangeZone's signature is unchanged.
             if *owner_library {
                 d.push(("owner_library".into(), "true".into()));
+            }
+            if matches!(library_shuffle, LibraryShuffleMode::TerminalShuffle) {
+                d.push(("library_shuffle".into(), format!("{library_shuffle:?}")));
             }
             if *enter_transformed {
                 d.push(("enter_transformed".into(), "true".into()));
@@ -3508,7 +3518,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             if let Some(lp) = library_position {
                 d.push(("library_position".into(), format!("{lp:?}")));
             }
-            if matches!(library_shuffle, MassLibraryShuffleMode::TerminalShuffle) {
+            if matches!(library_shuffle, LibraryShuffleMode::TerminalShuffle) {
                 d.push(("library_shuffle".into(), format!("{library_shuffle:?}")));
             }
             if *random_order {
@@ -4518,6 +4528,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::PairWith { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
+        Effect::HordePlayCard { count } => {
+            d.push(("count".into(), format!("{count}")));
+        }
         // Effects with no interesting parameters
         Effect::Unimplemented { .. }
         | Effect::Explore
@@ -5273,6 +5286,9 @@ fn fmt_attack_target_filter(filter: &crate::types::triggers::AttackTargetFilter)
         // CR 725.1: the monarch is a player designation, and no player is the
         // monarch until an effect creates one.
         ATF::Monarch => "the monarch",
+        // CR 508.6: the source's own attack history, so the label names the
+        // history rather than a player class the card does not print.
+        ATF::PlayerAttackedBySourceThisTurn => "a player it has already attacked this turn",
     }
 }
 
@@ -6914,6 +6930,17 @@ fn token_pt_provenance_has_no_materialization_gap(
     ) && !token_rules_text_unparsed_gap(preset, materialized)
 }
 
+/// The token-catalog coverage summary, computed once per process.
+///
+/// Its only inputs are the compiled-in token catalog ([`known_token_presets`])
+/// and the pure Oracle parser, so the summary is a process-wide constant that
+/// does not depend on the `CardDatabase` being analyzed. Deriving it re-parses
+/// every catalog preset's rules text (~1.5k lines), which dominated each
+/// [`analyze_coverage`] call: ~20s per call in an unoptimized build against
+/// microseconds for a one-card database, so a test that analyzes N one-card
+/// databases paid the catalog parse N times.
+static TOKEN_COVERAGE: LazyLock<TokenCoverageSummary> = LazyLock::new(analyze_token_coverage);
+
 fn analyze_token_coverage() -> TokenCoverageSummary {
     let mut summary = TokenCoverageSummary::default();
     let mut gap_accumulators: BTreeMap<String, (usize, usize, Vec<String>)> = BTreeMap::new();
@@ -7127,6 +7154,8 @@ fn token_category_label(category: &crate::game::token_presets::TokenCategory) ->
         TokenCategory::Land => "land".to_string(),
         TokenCategory::Planeswalker => "planeswalker".to_string(),
         TokenCategory::Artifact => "artifact".to_string(),
+        TokenCategory::Boss => "boss".to_string(),
+        TokenCategory::Event => "event".to_string(),
     }
 }
 
@@ -7237,6 +7266,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         // this, a card can parse cleanly yet silently do nothing on resolution.
         check_resolver_features(face, &mut missing);
         check_shared_source_graveyard_slot(face, &mut missing);
+        check_confirmed_misparse(face, &mut missing);
 
         // Flag cards where the parser consumed Oracle text without producing
         // a corresponding parse item. Uses the parse tree computed above.
@@ -7606,7 +7636,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         supported_cards,
         coverage_pct,
         keyword_count,
-        token_coverage: analyze_token_coverage(),
+        token_coverage: TOKEN_COVERAGE.clone(),
         coverage_by_format,
         coverage_by_set,
         cards,
@@ -7724,8 +7754,16 @@ pub fn card_face_gaps(face: &CardFace) -> Vec<String> {
         &mut missing,
     );
     check_shared_source_graveyard_slot(face, &mut missing);
+    check_confirmed_misparse(face, &mut missing);
     check_entry_projection(face, &mut missing);
     missing
+}
+
+/// Project export support metadata into the existing coverage-gap authority.
+fn check_confirmed_misparse(face: &CardFace, missing: &mut Vec<String>) {
+    if let Some(class) = face.metadata.confirmed_misparse {
+        missing.push(class.handler().to_string());
+    }
 }
 
 /// The coverage label for an ability whose per-player fan-out ("each player
@@ -10089,9 +10127,10 @@ fn counter_exile_rider_drops_its_tail(def: &AbilityDefinition) -> bool {
 /// quality it could not type (`types/keywords.rs`), and
 /// `game::keywords::source_matches_card_type` can only ever match `s` against a
 /// core type word or a parseable subtype. Any other string — "each mana value
-/// other than the chosen number" (Haktos the Unscarred), "each color", "that
-/// player" — makes the grant INERT: the card parses, exports a real
-/// `AddKeyword` modification, and grants nothing at runtime.
+/// other than the chosen number" (Haktos the Unscarred), "each color" — makes
+/// the grant INERT: the card parses, exports a real `AddKeyword` modification,
+/// and grants nothing at runtime. ("that player" no longer lands here: it is
+/// typed as `FromPlayer(TargetPlayer)` and fixed to the declared target.)
 ///
 /// The predicate below mirrors `source_matches_card_type`'s two acceptance paths
 /// exactly, so the two cannot drift.
@@ -11156,6 +11195,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ("DistinctSubtypes", batch_filter_support(source))
         }
         QuantityRef::CardsExiledBySource => ("CardsExiledBySource", Handled),
+        QuantityRef::DeployedBossCount => ("DeployedBossCount", Handled),
         QuantityRef::ExiledCardPower { .. } => ("ExiledCardPower", Handled),
         QuantityRef::ZoneCardCount { .. } => ("ZoneCardCount", Handled),
         QuantityRef::BasicLandTypeCount { .. } => ("BasicLandTypeCount", Handled),
@@ -11178,6 +11218,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::EnteredThisTurn { .. } => ("EnteredThisTurn", Handled),
         QuantityRef::SacrificedThisTurn { .. } => ("SacrificedThisTurn", Handled),
         QuantityRef::CrimesCommittedThisTurn => ("CrimesCommittedThisTurn", Handled),
+        QuantityRef::EnergyPaidOrLostThisTurn => ("EnergyPaidOrLostThisTurn", Handled),
         QuantityRef::BendTypesThisTurn => ("BendTypesThisTurn", Handled),
         QuantityRef::LifeGainedThisTurn { .. } => ("LifeGainedThisTurn", Handled),
         QuantityRef::CardsDrawnThisTurn { .. } => ("CardsDrawnThisTurn", Handled),
@@ -15294,6 +15335,7 @@ mod tests {
         let inner = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin,
                 destination: Zone::Battlefield,
                 target: TargetFilter::TrackedSet {
@@ -16473,6 +16515,7 @@ mod tests {
 
         // A graveyard self-return: the shape where the collision bites.
         let graveyard_self_return = || Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Hand,
             target: TargetFilter::SelfRef,
@@ -16638,13 +16681,14 @@ mod tests {
             AttackTargetFilter::OwnerOrPlaneswalker,
             AttackTargetFilter::PlayerOrPermanents,
             AttackTargetFilter::Monarch,
+            AttackTargetFilter::PlayerAttackedBySourceThisTurn,
         ]
         .iter()
         .map(fmt_attack_target_filter)
         .collect();
         assert_eq!(
             labels.len(),
-            8,
+            9,
             "every AttackTargetFilter variant must map to a distinct label: {labels:?}"
         );
     }
@@ -17145,6 +17189,7 @@ mod tests {
         // parse-diff signature; a plain ChangeZone has no such row.
         let signature_keys = |attacking: bool| -> Vec<String> {
             effect_details(&Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::None,
@@ -17196,13 +17241,13 @@ mod tests {
             })
         };
 
-        let per_object = details(MassLibraryShuffleMode::PerObject);
+        let per_object = details(LibraryShuffleMode::PerObject);
         assert!(
             !per_object.iter().any(|(key, _)| key == "library_shuffle"),
             "the default mode must not churn legacy coverage signatures"
         );
 
-        let terminal = details(MassLibraryShuffleMode::TerminalShuffle);
+        let terminal = details(LibraryShuffleMode::TerminalShuffle);
         assert!(
             terminal
                 .iter()
@@ -23504,6 +23549,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin,
                 destination,
                 target,

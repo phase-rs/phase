@@ -25,8 +25,34 @@ use crate::config::{AiConfig, OpponentModel};
 use crate::eval::{
     evaluate_for_planner, evaluate_state, strategic_intent, threat_level, StrategicIntent,
 };
+use crate::policies::activation_patience::{root_held_line, HeldLine};
 use crate::policies::context::{PolicyContext, PriorsEnv, SearchDepth};
-use crate::policies::PolicyRegistry;
+use crate::policies::registry::PolicyScore;
+use crate::policies::{PolicyId, PolicyRegistry};
+
+/// The policy whose root verdict the search root applies unweighted. Its hold on an activation
+/// also says whether PassPriority may inherit the line (`activation_patience::root_held_line`,
+/// `search::lend_deferral_witness`).
+pub(crate) const DEFERRAL_POLICY: PolicyId = PolicyId::ActivationPatience;
+
+/// A root candidate's tactical score, split around [`DEFERRAL_POLICY`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RootTacticalScore {
+    /// Every other term: the hint, the other policies and the class adjustment.
+    pub weighted: f64,
+    /// [`DEFERRAL_POLICY`]'s hold, when its delta is non-zero.
+    pub deferral: Option<Deferral>,
+}
+
+/// ActivationPatience's hold on a root candidate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Deferral {
+    /// The verdict's delta, added at the root at full strength beside the weighted tactical term.
+    pub penalty: f64,
+    /// Whether PassPriority may inherit the held line: the root's answer, so every hold at a
+    /// root carries the same one.
+    pub line: HeldLine,
+}
 
 #[derive(Debug, Clone)]
 pub struct RankedCandidate {
@@ -37,6 +63,11 @@ pub struct RankedCandidate {
     /// ordinary one-action root simulation. It is an alternative continuation
     /// witness, not a tactical policy score.
     pub(crate) continuation_witness: Option<f64>,
+    /// ActivationPatience's hold on this activation (its only non-neutral verdict). The root
+    /// adds the penalty at full strength beside `score * tactical_weight`, because the beam
+    /// cannot see past the window the hold is about. Its `line` says whether PassPriority may
+    /// inherit the continuation (`search::lend_deferral_witness`).
+    pub(crate) deferral: Option<Deferral>,
 }
 
 impl RankedCandidate {
@@ -46,6 +77,7 @@ impl RankedCandidate {
             score,
             payment_successor: None,
             continuation_witness: None,
+            deferral: None,
         }
     }
 
@@ -59,12 +91,29 @@ impl RankedCandidate {
             score,
             payment_successor: Some(state),
             continuation_witness: None,
+            deferral: None,
         }
     }
 
     pub(crate) fn with_continuation_witness(mut self, value: f64) -> Self {
         self.continuation_witness = value.is_finite().then_some(value);
         self
+    }
+
+    pub(crate) fn with_deferral(mut self, deferral: Option<Deferral>) -> Self {
+        self.deferral = deferral;
+        self
+    }
+
+    /// The tactical score with the deferral added unweighted.
+    pub(crate) fn tactical_total(&self) -> f64 {
+        self.deferral.map_or(self.score, |d| self.score + d.penalty)
+    }
+
+    /// The root's tactical term: `score * tactical_weight`, plus the deferral at full strength.
+    pub(crate) fn root_tactical(&self, tactical_weight: f64) -> f64 {
+        let weighted = self.score * tactical_weight;
+        self.deferral.map_or(weighted, |d| weighted + d.penalty)
     }
 
     /// Preserve any proven continuation through the existing tactical-score
@@ -74,14 +123,16 @@ impl RankedCandidate {
     pub(crate) fn beam_priority(&self) -> f64 {
         self.continuation_witness
             .filter(|witness| witness.is_finite())
-            .map_or(self.score, |witness| self.score.max(witness))
+            .map_or(self.tactical_total(), |witness| {
+                self.tactical_total().max(witness)
+            })
     }
 
     pub(crate) fn root_score(&self, tactical_weight: f64) -> f64 {
         self.continuation_witness
             .filter(|witness| witness.is_finite())
-            .map_or(self.score * tactical_weight, |witness| {
-                (self.score * tactical_weight).max(witness)
+            .map_or(self.root_tactical(tactical_weight), |witness| {
+                self.root_tactical(tactical_weight).max(witness)
             })
     }
 }
@@ -1276,18 +1327,25 @@ impl<'a> PlannerServices<'a> {
             // Mulligan as the complete legal set; neither can fail apply_as_current.
             // Skipping the clone+simulate eliminates ~2 state clones per mulligan step.
             engine::types::actions::GameAction::MulliganDecision { .. } => true,
-            // CR 608.2d + CR 614.12a + CR 701.23a: a named-choice answer from the prompt's
-            // enumerated domain, or a library search selection, is admitted by
-            // its submission guard without mutating the game; the engine decides that
-            // through the same authority `SimulationFilter` consults before its
-            // probe. Under `PromptAnswerValidation::AtSubmission` no state copy is
+            // CR 608.2d + CR 614.12a + CR 701.23a + CR 732.2b: a named-choice answer from the
+            // prompt's enumerated domain, a library search selection, or a loop-shortcut
+            // responder's answer is admitted by its submission guard without mutating the game;
+            // the engine decides that through the same authority `SimulationFilter` consults
+            // before its probe. Under `PromptAnswerValidation::AtSubmission` no state copy is
             // made here: the root search simulates the answers in its beam until one fails, and
             // the caller the one answer it submits. A shape
             // the authority declines (a scoped search, a card name, a free-entry
             // number, an answer given while a cast or activation is in progress),
             // and every answer under `EachCandidate`, is simulated below.
+            //
+            // The shortcut arm must be listed HERE and not only in the authority: the arm is
+            // gated on `admits_without_simulation`, so an unlisted shape still takes `_ =>
+            // simulation_accepts` below while the chooser's own submission check (which reads
+            // `admits_without_simulation` directly) then simulates the same answer a second
+            // time — two takes where the unadmitted shape paid one.
             engine::types::actions::GameAction::ChooseOption { .. }
             | engine::types::actions::GameAction::SelectCards { .. }
+            | engine::types::actions::GameAction::RespondToShortcut { .. }
                 if prompt_answers.admits_without_simulation(state, &candidate.action) =>
             {
                 true
@@ -1769,6 +1827,47 @@ impl<'a> PlannerServices<'a> {
         scoring_player: PlayerId,
         search_depth: SearchDepth,
     ) -> f64 {
+        self.tactical_score_parts(state, ctx, candidate, scoring_player, search_depth, None)
+            .0
+    }
+
+    /// The root's [`Self::tactical_score`], with [`DEFERRAL_POLICY`]'s verdict split out as the
+    /// unweighted `deferral` (`RankedCandidate::deferral`).
+    pub(crate) fn root_tactical_score(
+        &self,
+        state: &GameState,
+        ctx: &AiDecisionContext,
+        candidate: &CandidateAction,
+        scoring_player: PlayerId,
+    ) -> RootTacticalScore {
+        let (weighted, held) = self.tactical_score_parts(
+            state,
+            ctx,
+            candidate,
+            scoring_player,
+            SearchDepth::Root,
+            Some(DEFERRAL_POLICY),
+        );
+        RootTacticalScore {
+            weighted,
+            deferral: (held != 0.0).then(|| Deferral {
+                penalty: held,
+                line: root_held_line(state, scoring_player, &ctx.candidates),
+            }),
+        }
+    }
+
+    /// [`Self::tactical_score`]'s terms, with policy `held`'s verdict returned apart as the
+    /// second element (0.0 when `held` is `None`).
+    fn tactical_score_parts(
+        &self,
+        state: &GameState,
+        ctx: &AiDecisionContext,
+        candidate: &CandidateAction,
+        scoring_player: PlayerId,
+        search_depth: SearchDepth,
+        held: Option<PolicyId>,
+    ) -> (f64, f64) {
         let cast_facts = cast_facts_for_action(state, &candidate.action, scoring_player);
         let mut score = should_play_now_with_facts(
             state,
@@ -1787,7 +1886,14 @@ impl<'a> PlannerServices<'a> {
             cast_facts,
             search_depth,
         };
-        score += self.policies.score(&policy_ctx);
+        let policy_score = match held {
+            Some(held) => self.policies.score_holding_out(&policy_ctx, held),
+            None => PolicyScore {
+                rest: self.policies.score(&policy_ctx),
+                held: 0.0,
+            },
+        };
+        score += policy_score.rest;
 
         match candidate.metadata.tactical_class {
             TacticalClass::Pass => {
@@ -1806,7 +1912,7 @@ impl<'a> PlannerServices<'a> {
             _ => {}
         }
 
-        score
+        (score, policy_score.held)
     }
 
     pub fn policy_priors(
@@ -1984,9 +2090,10 @@ impl<'a> PlannerServices<'a> {
 }
 
 /// How the planner legality gate (`PlannerServices::candidate_is_valid`)
-/// validates a prompt answer, a named-choice answer or a library search
-/// selection, that `engine::ai_support::structurally_valid_prompt_answer`
-/// admits. Every other candidate is validated the same way under both.
+/// validates a prompt answer, a named-choice answer, a library search selection
+/// or a loop-shortcut answer, that
+/// `engine::ai_support::structurally_valid_prompt_answer` admits. Every other
+/// candidate is validated the same way under both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PromptAnswerValidation {
     /// Simulate each answer on a state copy, as the gate's catch-all does. The
@@ -3335,11 +3442,11 @@ pub(crate) mod tests {
 
     // ------------------------------------------------------------------
     // Prompt-answer legality gate: `candidate_is_valid` admits a named-choice
-    // answer or a library search selection through
-    // `engine::ai_support::structurally_valid_prompt_answer` instead of a state
-    // copy + simulation, and only at the `NamedChoice` / `SearchChoice`
-    // windows. Every base board is reached through the real cast/play pipeline
-    // from the card's verbatim Oracle text.
+    // answer, a library search selection, or a loop-shortcut responder's answer
+    // through `engine::ai_support::structurally_valid_prompt_answer` instead of a
+    // state copy + simulation, and only at the `NamedChoice` / `SearchChoice` /
+    // `RespondToShortcut` windows. Every base board is reached through the real
+    // cast/play pipeline from the card's verbatim Oracle text.
     // ------------------------------------------------------------------
 
     const DISTANT_MELODY_ORACLE: &str =
@@ -3912,6 +4019,63 @@ pub(crate) mod tests {
             clones >= 1,
             "an answer the authority declines must be simulated"
         );
+    }
+
+    /// #10464: a loop-shortcut responder's answer passes the legality gate without a state copy.
+    ///
+    /// The gate arm is gated on `admits_without_simulation`, so a shape missing from it falls to
+    /// `_ => simulation_accepts` — and for the last responder that simulation is the whole take.
+    /// The chooser's own submission check reads the authority directly, so it then simulates the
+    /// same answer AGAIN: two takes where the unlisted shape paid one. Fails on revert of the
+    /// `RespondToShortcut` arm (one legality clone), which is why the arm is listed at the gate and
+    /// not only in the authority.
+    #[test]
+    fn shortcut_answers_pass_the_legality_gate_without_a_state_copy() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = engine::types::game_state::WaitingFor::RespondToShortcut {
+            player: P0,
+            remaining_players: vec![P1],
+            proposal: engine::analysis::loop_check::ShortcutProposal {
+                proposer: P1,
+                predicted_winner: None,
+                count: engine::analysis::decision_template::IterationCount::Fixed(2),
+                unbounded: Vec::new(),
+                rising: Vec::new(),
+                win_kind: None,
+                win_kind_at: None,
+                template: None,
+                per_cycle: None,
+                shortened_by: None,
+                published_declaration: None,
+                leading_aims: Vec::new(),
+                road: engine::analysis::loop_check::OfferRoad::Ring,
+                counted_take: Default::default(),
+                period: Default::default(),
+            },
+        };
+        let accept = GameAction::RespondToShortcut {
+            response: engine::analysis::loop_check::ShortcutResponse::Accept,
+        };
+
+        let (verdict, clones) = gate_verdict(&state, &accept);
+        assert!(verdict, "the prompt offers this answer");
+        assert_eq!(
+            clones, 0,
+            "the gate must admit a shortcut answer structurally, not simulate the take"
+        );
+
+        // Paired reach guard: the same gate still simulates an answer outside the proposal's
+        // places, so the counter above is live rather than dead.
+        let (verdict, clones) = gate_verdict(
+            &state,
+            &GameAction::RespondToShortcut {
+                response: engine::analysis::loop_check::ShortcutResponse::Shorten {
+                    at_iteration: 2,
+                },
+            },
+        );
+        assert!(!verdict, "place 2 is at the proposed count, not a place");
+        assert!(clones >= 1, "an answer the authority declines is simulated");
     }
 
     /// T2. Every selection at Demonic Tutor's library search passes the
@@ -6849,6 +7013,74 @@ pub(crate) mod tests {
             },
             score,
         )
+    }
+
+    /// The root's tactical term carries `deferral` unweighted, in the floor (`root_score`) and
+    /// the beam order (`beam_priority`) alike; with no deferral both are today's values, bit
+    /// for bit. A continuation witness still takes the max over the deferred term.
+    #[test]
+    fn root_tactical_applies_deferral_at_full_strength() {
+        let tw = 0.35;
+        let score = 2.0;
+        let penalty = -1.5;
+        let deferral = Deferral {
+            penalty,
+            line: HeldLine::Reproducible,
+        };
+
+        let plain = ranked_candidate(GameAction::PassPriority, score);
+        assert_eq!(plain.root_score(tw), score * tw);
+        assert_eq!(plain.beam_priority(), score);
+        assert_eq!(plain.root_tactical(tw), score * tw);
+
+        let held = ranked_candidate(GameAction::PassPriority, score).with_deferral(Some(deferral));
+        assert_eq!(held.root_tactical(tw), score * tw + penalty);
+        assert_eq!(held.root_score(tw), score * tw + penalty);
+        assert_eq!(held.tactical_total(), score + penalty);
+        assert_eq!(held.beam_priority(), score + penalty);
+
+        for witness in [-5.0, 0.0, 5.0] {
+            let witnessed = ranked_candidate(GameAction::PassPriority, score)
+                .with_deferral(Some(deferral))
+                .with_continuation_witness(witness);
+            assert_eq!(
+                witnessed.root_score(tw),
+                (score * tw + penalty).max(witness),
+                "witness {witness}"
+            );
+            assert_eq!(
+                witnessed.beam_priority(),
+                (score + penalty).max(witness),
+                "witness {witness}"
+            );
+        }
+    }
+
+    /// The strategy-adjusted planner value of a finished game stays in the terminal band
+    /// `eval::terminal_outcome` reads: a won `GameOver` is a win, a lost one a loss.
+    #[test]
+    fn planner_value_of_a_won_leaf_is_a_terminal_win() {
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let services = hard_services(&config, &policies);
+
+        let mut won = make_state();
+        won.waiting_for = WaitingFor::GameOver {
+            winner: Some(PlayerId(0)),
+        };
+        assert_eq!(
+            crate::eval::terminal_outcome(services.evaluate_state(&won)),
+            Some(crate::eval::TerminalOutcome::Won)
+        );
+
+        let mut lost = make_state();
+        lost.waiting_for = WaitingFor::GameOver {
+            winner: Some(PlayerId(1)),
+        };
+        assert_eq!(
+            crate::eval::terminal_outcome(services.evaluate_state(&lost)),
+            Some(crate::eval::TerminalOutcome::Lost)
+        );
     }
 
     // V1: a beta cutoff records the cutting move as the ply's primary killer.

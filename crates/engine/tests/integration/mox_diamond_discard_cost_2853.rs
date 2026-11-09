@@ -65,6 +65,7 @@ fn entry_from_hand(card: ObjectId) -> ResolvedAbility {
             destination: Zone::Battlefield,
             target: TargetFilter::SpecificObject { id: card },
             owner_library: false,
+            library_shuffle: Default::default(),
             enter_transformed: false,
             enters_under: None,
             enter_tapped: engine::types::zones::EtbTapState::Unspecified,

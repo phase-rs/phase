@@ -2072,6 +2072,7 @@ impl GameRunner {
             WaitingFor::RippleRevealChoice { .. } => "RippleRevealChoice",
             WaitingFor::RippleBottomOrder { .. } => "RippleBottomOrder",
             WaitingFor::RevealUntilBottomOrder { .. } => "RevealUntilBottomOrder",
+            WaitingFor::DigBottomOrder { .. } => "DigBottomOrder",
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
@@ -2090,6 +2091,7 @@ impl GameRunner {
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
+            WaitingFor::HeroEventChoice { .. } => "HeroEventChoice",
             WaitingFor::EffectZoneChoice { .. } => "EffectZoneChoice",
             WaitingFor::DrawnThisTurnTopdeckChoice { .. } => "DrawnThisTurnTopdeckChoice",
             WaitingFor::ManifestDreadChoice { .. } => "ManifestDreadChoice",
@@ -2182,6 +2184,7 @@ impl GameRunner {
             WaitingFor::TributeChoice { .. } => "TributeChoice",
             WaitingFor::UnlessPayment { .. } => "UnlessPayment",
             WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
+            WaitingFor::SecretAgendaChoice { .. } => "SecretAgendaChoice",
             WaitingFor::CompanionReveal { .. } => "CompanionReveal",
             WaitingFor::ChooseRingBearer { .. } => "ChooseRingBearer",
             WaitingFor::ChooseRoomDoor { .. } => "ChooseRoomDoor",
@@ -3228,6 +3231,7 @@ fn waiting_for_variant_name(waiting: &WaitingFor) -> &'static str {
         WaitingFor::NamedChoice { .. } => "NamedChoice",
         WaitingFor::TributeChoice { .. } => "TributeChoice",
         WaitingFor::DiscardChoice { .. } => "DiscardChoice",
+        WaitingFor::HeroEventChoice { .. } => "HeroEventChoice",
         WaitingFor::EffectZoneChoice { .. } => "EffectZoneChoice",
         WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
         WaitingFor::CopyRetarget { .. } => "CopyRetarget",
@@ -3722,7 +3726,8 @@ fn drive_resolution(
                 act_collect(runner, GameAction::SelectCards { cards: keep }, &mut events)?;
             }
             WaitingFor::RippleBottomOrder { cards, .. }
-            | WaitingFor::RevealUntilBottomOrder { cards, .. } => {
+            | WaitingFor::RevealUntilBottomOrder { cards, .. }
+            | WaitingFor::DigBottomOrder { cards, .. } => {
                 let cards = cards.clone();
                 act_collect(runner, GameAction::SelectCards { cards }, &mut events)?;
             }
@@ -5699,6 +5704,7 @@ mod tests {
 
     fn move_zone_effect(origin: Option<Zone>, destination: Zone, target: TargetFilter) -> Effect {
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin,
             destination,
             target,

@@ -2128,6 +2128,37 @@ fn owed_final_part(state: &GameState) -> Option<OwedSpellFinalPart> {
     })
 }
 
+/// CR 400.7 + CR 608.2m + CR 608.2n: where the instant or sorcery a resolution
+/// carrier names stands, relative to that resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolvingSpellPresence {
+    /// Still the resolving object on the stack: popped from `state.stack` as it
+    /// began resolving, still in `Zone::Stack` (CR 608.2n's final part moves it).
+    OnTheStack,
+    /// It left the stack once it started to resolve (CR 608.2m) — its own
+    /// instruction moved it ("Exile Invoke Calamity"), or its owner left the
+    /// game — and its card is not a spell on the stack again.
+    LeftTheStack,
+    /// It left the stack and its card was cast again during this resolution
+    /// (CR 608.2g + CR 601.2a): a live stack entry under the same storage id.
+    /// That spell is a new object (CR 400.7), not this resolution.
+    CastAgain,
+}
+
+/// The single authority for [`ResolvingSpellPresence`]. A live stack entry
+/// with the carrier's id is a new cast of its card (buyback, a recursion loop,
+/// a cast during this resolution) whatever zone it is in; otherwise stack
+/// residency decides.
+fn resolving_spell_presence(state: &GameState, entry: &StackEntry) -> ResolvingSpellPresence {
+    if state.stack.iter().any(|live| live.id == entry.id) {
+        ResolvingSpellPresence::CastAgain
+    } else if spell_still_on_stack(state, entry.id) {
+        ResolvingSpellPresence::OnTheStack
+    } else {
+        ResolvingSpellPresence::LeftTheStack
+    }
+}
+
 /// CR 608.2c + CR 608.2n: whether the resolving carrier is an instant or
 /// sorcery spell whose instructions paused and whose final part — leaving the
 /// stack — therefore still has to run.
@@ -2150,14 +2181,13 @@ pub(super) fn resolving_spell_owes_final_part(state: &GameState) -> bool {
 ///
 /// The marker decides whether the final part is owed. A card that is again a
 /// live stack entry is a new cast of it (buyback, a recursion loop), not the
-/// paused resolution.
+/// paused resolution ([`ResolvingSpellPresence::CastAgain`]).
 pub(super) fn spell_awaiting_final_part(state: &GameState) -> Option<&StackEntry> {
     owed_final_part(state)
         .and(state.resolving_stack_entry.as_ref())
         .filter(|entry| {
             matches!(entry.kind, StackEntryKind::Spell { .. })
-                && spell_still_on_stack(state, entry.id)
-                && !state.stack.iter().any(|live| live.id == entry.id)
+                && resolving_spell_presence(state, entry) == ResolvingSpellPresence::OnTheStack
         })
 }
 
@@ -2174,8 +2204,7 @@ pub(super) fn resolving_instant_or_sorcery_on_stack(state: &GameState) -> Option
     state.resolving_stack_entry.as_ref().filter(|entry| {
         matches!(entry.kind, StackEntryKind::Spell { .. })
             && !is_permanent_spell(state, entry.id)
-            && spell_still_on_stack(state, entry.id)
-            && !state.stack.iter().any(|live| live.id == entry.id)
+            && resolving_spell_presence(state, entry) == ResolvingSpellPresence::OnTheStack
     })
 }
 
@@ -2185,7 +2214,9 @@ pub(super) fn resolving_instant_or_sorcery_on_stack(state: &GameState) -> Option
 /// stack, exactly as the inline completion runs them — now that every
 /// instruction has been followed. Called only by
 /// `engine::run_spell_final_part_if_due`, which retires the carrier on
-/// `Completed` or `NotOwed`.
+/// `Completed` or `NotOwed`. A spell whose card left the stack during its
+/// resolution, including one whose card was cast again, is finished by
+/// `finish_deferred_resolution_of_departed_spell`.
 ///
 /// This is also where the resolution is reported (`GameEvent::StackResolved`):
 /// at the pause the spell was still on the stack, still resolving. As on the
@@ -2258,10 +2289,13 @@ pub(super) fn finish_deferred_spell_resolution(
 
 /// CR 608.2m + CR 608.2n: the final part of a deferred resolution whose spell
 /// is no longer on the stack — its own instructions moved it ("Exile Invoke
-/// Calamity"), or its owner left the game while its controller finished it.
-/// It keeps resolving fully (CR 608.2m), so it owes the stack-exit bookkeeping
-/// of how it was cast, as on the inline path; only the move is skipped, because
-/// it is already where it was put (issue #323). Reported resolved exactly once
+/// Calamity"), or its owner left the game while its controller finished it,
+/// or its card was cast again during this resolution (CR 608.2g), in which
+/// case the new spell (CR 400.7) is left alone and only the report is owed.
+/// Otherwise it keeps resolving fully (CR 608.2m), so it owes the stack-exit
+/// bookkeeping of how it was cast, as on the inline path; only the move is
+/// skipped, because it is already where it was put (issue #323). Reported
+/// resolved exactly once
 /// (CR 608.2m) — whether its own instruction moved it, its owner left, its
 /// controller left while another player still had its instruction to answer,
 /// or the departure itself settled its departed controller's owner arrangement
@@ -2273,16 +2307,16 @@ fn finish_deferred_resolution_of_departed_spell(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> DeferredFinalPart {
-    let Some((spell_id, casting_variant)) = owed_final_part(state)
+    let Some((spell_id, casting_variant, presence)) = owed_final_part(state)
         .and(state.resolving_stack_entry.as_ref())
-        .filter(|entry| {
-            !spell_still_on_stack(state, entry.id)
-                && !state.stack.iter().any(|live| live.id == entry.id)
-        })
         .and_then(|entry| match &entry.kind {
             StackEntryKind::Spell {
                 casting_variant, ..
-            } => Some((entry.id, *casting_variant)),
+            } => Some((
+                entry.id,
+                *casting_variant,
+                resolving_spell_presence(state, entry),
+            )),
             StackEntryKind::ActivatedAbility { .. }
             | StackEntryKind::TriggeredAbility { .. }
             | StackEntryKind::KeywordAction { .. }
@@ -2291,7 +2325,22 @@ fn finish_deferred_resolution_of_departed_spell(
     else {
         return DeferredFinalPart::NotOwed;
     };
-    finish_spell_stack_exit(state, spell_id, casting_variant, events);
+    match presence {
+        // `spell_awaiting_final_part` owns a spell still on the stack; it never
+        // reaches this finalizer (same answer as the former residency filter).
+        ResolvingSpellPresence::OnTheStack => return DeferredFinalPart::NotOwed,
+        // CR 608.2m: it keeps resolving fully, so it owes the stack-exit
+        // bookkeeping of how it was cast; only the move is skipped (issue #323).
+        ResolvingSpellPresence::LeftTheStack => {
+            finish_spell_stack_exit(state, spell_id, casting_variant, events);
+        }
+        // CR 400.7 + CR 601.2a + CR 608.2g: its card was cast again during this
+        // resolution. That spell is a new object with its own characteristics and
+        // records under the same storage id, so the departed spell has nothing
+        // left to settle — no face to restore, no Adventure permission (CR 715.3d:
+        // the card no longer remains exiled), no Omen shuffle.
+        ResolvingSpellPresence::CastAgain => {}
+    }
     events.push(GameEvent::StackResolved {
         object_id: spell_id,
     });
@@ -4795,6 +4844,7 @@ fn self_counter_run_key<'a>(
 fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
     let ResolvedAbility {
         effect,
+        coin_branches,
         targets,
         declares_chosen_group,
         reads_chosen_group,
@@ -4882,6 +4932,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
     );
 
     self_counter
+        && coin_branches.is_none()
         && targets.is_empty()
         && declares_chosen_group.is_none()
         && reads_chosen_group.is_none()
@@ -5051,6 +5102,7 @@ fn fixed_controller_gain_life_run_key<'a>(
 fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
     let ResolvedAbility {
         effect,
+        coin_branches,
         targets,
         declares_chosen_group,
         reads_chosen_group,
@@ -5137,6 +5189,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
     );
 
     fixed_controller_gain_life
+        && coin_branches.is_none()
         && targets.is_empty()
         && declares_chosen_group.is_none()
         && reads_chosen_group.is_none()
@@ -5286,6 +5339,7 @@ fn fixed_opponent_effect_run_key<'a>(
 fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
     let ResolvedAbility {
         effect,
+        coin_branches,
         targets,
         declares_chosen_group,
         reads_chosen_group,
@@ -5376,6 +5430,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
     );
 
     fixed_opponent_effect
+        && coin_branches.is_none()
         && targets.is_empty()
         && declares_chosen_group.is_none()
         && reads_chosen_group.is_none()
@@ -5459,7 +5514,9 @@ fn optional_ability_is_inert_under_auto_choice(
         origin,
     };
     match state.may_trigger_auto_choice_for_live_prompt(&key) {
-        Some(AutoMayChoice::Decline) => ability.sub_ability.is_none(),
+        Some(AutoMayChoice::Decline) => {
+            ability.sub_ability.is_none() && ability.coin_branches.is_none()
+        }
         Some(AutoMayChoice::Accept) => {
             ability_has_no_legal_resolution_targets(state, ability, trigger_event)
         }
@@ -5472,7 +5529,7 @@ fn ability_has_no_legal_resolution_targets(
     ability: &ResolvedAbility,
     trigger_event: Option<&GameEvent>,
 ) -> bool {
-    if ability.sub_ability.is_some() {
+    if ability.sub_ability.is_some() || ability.coin_branches.is_some() {
         return false;
     }
 
@@ -5611,12 +5668,9 @@ fn normalize_ability_source(ability: &ResolvedAbility) -> ResolvedAbility {
     out.trigger_source = None;
     out.trigger_definition_ref = None;
     out.may_trigger_origin = None;
-    out.sub_ability = out
-        .sub_ability
-        .map(|sub| Box::new(normalize_ability_source(&sub)));
-    out.else_ability = out
-        .else_ability
-        .map(|alt| Box::new(normalize_ability_source(&alt)));
+    for (_, child) in out.child_links_mut() {
+        *child = normalize_ability_source(child);
+    }
     out
 }
 
@@ -5631,6 +5685,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
 ) -> bool {
     let ResolvedAbility {
         effect: a_effect,
+        coin_branches: a_coin_branches,
         targets: a_targets,
         declares_chosen_group: a_declares_chosen_group,
         reads_chosen_group: a_reads_chosen_group,
@@ -5724,6 +5779,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
     } = a;
     let ResolvedAbility {
         effect: b_effect,
+        coin_branches: b_coin_branches,
         targets: b_targets,
         declares_chosen_group: b_declares_chosen_group,
         reads_chosen_group: b_reads_chosen_group,
@@ -5817,6 +5873,21 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
     } = b;
 
     a_effect == b_effect
+        && match (a_coin_branches.as_deref(), b_coin_branches.as_deref()) {
+            (None, None) => true,
+            (Some(a), Some(b)) => {
+                (match (&a.won, &b.won) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => inert_trigger_abilities_eq_ignoring_provenance(a, b),
+                    (None, Some(_)) | (Some(_), None) => false,
+                }) && match (&a.lost, &b.lost) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => inert_trigger_abilities_eq_ignoring_provenance(a, b),
+                    (None, Some(_)) | (Some(_), None) => false,
+                }
+            }
+            (None, Some(_)) | (Some(_), None) => false,
+        }
         && a_targets == b_targets
         && a_declares_chosen_group == b_declares_chosen_group
         && a_reads_chosen_group == b_reads_chosen_group
@@ -6283,6 +6354,7 @@ pub(crate) fn create_warp_delayed_trigger(
     let exile_def = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: crate::types::ability::TargetFilter::SelfRef,
@@ -10152,6 +10224,7 @@ mod tests {
 
         let resolved = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -10202,6 +10275,7 @@ mod tests {
 
         let resolved = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -11378,6 +11452,7 @@ mod tests {
                     prevention_tally: Vec::new(),
                     lives_before: vec![20, 20],
                     sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
+                    phase_c_remnant: None,
                 }));
             assert!(
                 !priority_checkpoint_is_settled(&state),
@@ -17877,6 +17952,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,
                     target: TargetFilter::SelfRef,
