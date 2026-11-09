@@ -63,7 +63,11 @@ fn etrata_shuffles_the_source_not_its_earlier_exile_target() {
                 .legal_targets
                 .contains(&TargetRef::Object(victim)));
         }
-        other => panic!("Etrata's combat trigger must announce its exile target: {other:?}"),
+        other => panic!(
+            "Etrata's combat trigger must announce its exile target: {other:?}; phase={:?}; source={:?}",
+            runner.state().phase,
+            runner.state().objects[&etrata].trigger_definitions,
+        ),
     }
     let mut events = runner
         .act(GameAction::ChooseTarget {
