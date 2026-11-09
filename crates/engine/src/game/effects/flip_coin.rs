@@ -1100,6 +1100,7 @@ mod tests {
             let mut def = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::SelfRef,
@@ -1131,6 +1132,7 @@ mod tests {
             let mut def = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Battlefield,
                     target: TargetFilter::ParentTarget,

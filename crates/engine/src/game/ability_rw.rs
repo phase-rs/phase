@@ -5479,6 +5479,7 @@ fn rw_effect(
             conditional_enter_with_counters,
             face_down_profile: _,
             enters_modified_if: _,
+            library_shuffle: _,
         } => {
             let (mut p, sc) = mem(target, *origin, *destination);
             // §4.3.6 / §10.4 ENGINE COUPLING (CR 110.2 + CR 110.2a; the entering
@@ -8740,6 +8741,7 @@ mod tests {
 
     fn change_zone(origin: Option<Zone>, dest: Zone, target: TargetFilter) -> Effect {
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin,
             destination: dest,
             target,
@@ -10449,6 +10451,7 @@ mod tests {
     }
     fn change_zone_under(target: TargetFilter, enters_under: Option<ControllerRef>) -> Effect {
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
             target,

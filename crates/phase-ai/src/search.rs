@@ -593,8 +593,8 @@ fn choose_action_with_session_inner(
 
     // The scored path, as one step this decision may take twice. Under
     // `PromptAnswerValidation::AtSubmission` the legality gate admits, without
-    // simulating them, the named-choice answers and library search selections
-    // `structurally_valid_prompt_answer` admits. The root search simulates the
+    // simulating them, the named-choice answers, library search selections and
+    // loop-shortcut answers `structurally_valid_prompt_answer` admits. The root search simulates the
     // ones in its beam on its first rung, in beam order, and at the first that
     // fails the scorer scores the decision again under `EachCandidate`, the
     // gate that simulates every answer, before returning, so nothing here
@@ -18573,6 +18573,7 @@ mod tests {
         ];
         let change_zone = Box::new(ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Graveyard,
                 target: TargetFilter::Any,

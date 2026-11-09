@@ -16582,6 +16582,7 @@ mod tests {
         // `ParentTarget` snapshot, the snapshot being the exiled victim.
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
@@ -16801,6 +16802,7 @@ mod tests {
     fn change_zone_head(destination: Zone, targets: Vec<TargetRef>) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination,
                 target: TargetFilter::Typed(TypedFilter::creature()),
@@ -17145,6 +17147,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
@@ -18884,6 +18887,7 @@ mod tests {
         .sub_ability(put_counters);
         let put_land = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -19003,6 +19007,7 @@ mod tests {
             .sub_ability(put_counter);
             let change_zone = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::Any,
@@ -19414,6 +19419,7 @@ mod tests {
             );
             let mut sub = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(origin),
                     destination: Zone::Battlefield,
                     target: filter,
@@ -19472,6 +19478,7 @@ mod tests {
             .push(CoreType::Artifact);
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(
@@ -20299,6 +20306,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Card).properties(vec![
@@ -21526,6 +21534,7 @@ mod tests {
         )
         .sub_ability(ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(TypedFilter::creature().controller(
@@ -21702,6 +21711,7 @@ mod tests {
         )
         .sub_ability(ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(TypedFilter::creature().controller(
@@ -23698,6 +23708,7 @@ mod tests {
         )
         .sub_ability(ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -23865,6 +23876,7 @@ mod tests {
         ]));
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: filter.clone(),
