@@ -549,6 +549,13 @@ fn a_blinked_damage_dealer_names_the_controller_of_the_object_that_dealt_it() {
     let pending =
         pending_after_blink.expect("capture Priority after Flicker, before Curse resolves");
     let stamp = original_stamp.expect("combat emitted a stamped damage event");
+    eprintln!(
+        "[DEBUG-pr10613] stamp={stamp} current={:?} current_events={:?} tracked_origins={:?} active_set={:?}",
+        pending.current_trigger_event,
+        pending.current_trigger_events,
+        pending.tracked_set_member_origins,
+        pending.chain_tracked_set_id
+    );
     let mut same_controller = pending.clone();
     same_controller
         .lki_by_incarnation
