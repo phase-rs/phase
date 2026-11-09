@@ -6595,7 +6595,7 @@ fn drive_one_shortcut_cycle(
                 if ring_back_after.is_some() && ring_back_after != ring_back_before {
                     frames_this_cycle += 1;
                 }
-                let norm = work.normalize_for_loop();
+                let norm = work.normalize_for_loop_sample();
                 if settle_recurs(boundary, &norm)
                     || published_period_elapsed(frames_this_cycle, frames_per_period)
                 {
@@ -11347,7 +11347,7 @@ fn run_auto_pass_loop(
                             AUTO_PASS_WINDOW_SAMPLES
                                 .with(|samples| samples.set(samples.get() + 1));
                             let fingerprint = state.loop_fingerprint();
-                            let normalized = state.normalize_for_loop();
+                            let normalized = state.normalize_for_loop_sample();
                             // CR 732.5: the out verdict is read only for a repeat; it needs each
                             // beat's live state.
                             if loop_window.iter().enumerate().any(|(at, (fp, prior))| {

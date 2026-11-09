@@ -35420,7 +35420,23 @@ impl GameState {
     /// Clone with the volatile, monotonically-advancing fields the `PartialEq`
     /// impl compares zeroed/canonicalized, so two states reached at different
     /// times can compare equal on everything a mandatory action could change.
+    ///
+    /// Full strict form: transient pruning AND identity ranking.
     pub(crate) fn normalize_for_loop(&self) -> GameState {
+        self.normalize_for_loop_with_rank(LoopIdentityRank::Ranked)
+    }
+
+    /// CR 104.4b + CR 732.2a: the sample-side comparand. Same transient normal
+    /// form as [`Self::normalize_for_loop`], with allocator-derived identity
+    /// ranks deferred. Ring samples and per-beat candidates therefore compare
+    /// transient content first; the row-unbounded journal rank runs only when
+    /// [`loop_states_equal`] confirms a candidate pair. Every other field,
+    /// including the full damage journal, is exactly the strict form.
+    pub(crate) fn normalize_for_loop_sample(&self) -> GameState {
+        self.normalize_for_loop_with_rank(LoopIdentityRank::Deferred)
+    }
+
+    fn normalize_for_loop_with_rank(&self, rank: LoopIdentityRank) -> GameState {
         let mut clone = self.clone();
         // apply() resets these at the start of every player action, so a position compares as
         // the next action starts from it.
@@ -35762,7 +35778,9 @@ impl GameState {
                     (!history.is_empty()).then_some((object_id, history))
                 })
                 .collect();
-        clone.canonicalize_loop_identities();
+        if rank == LoopIdentityRank::Ranked {
+            clone.canonicalize_loop_identities();
+        }
         clone
     }
 
@@ -38193,7 +38211,7 @@ impl GameState {
             crate::analysis::resource::bump_loop_detect_cost(|cost| {
                 cost.sampler_normalized_clones += 1;
             });
-            self.normalize_for_loop()
+            self.normalize_for_loop_sample()
         };
         let live = {
             let _timed = crate::analysis::resource::CostTimer::start(|cost| {
@@ -38874,19 +38892,45 @@ impl GameState {
 /// samples. Kept small because the live `GameState` carries it through every clone.
 const LOOP_DETECT_RING_CAP: usize = 16;
 
-/// CR 104.4b confirmation between two states that have BOTH already been
-/// `normalize_for_loop`d. Reuses `PartialEq` for the non-object fields, supplements its
+/// CR 104.4b confirmation between two states that have both been transient-pruned for the
+/// loop (the strict `normalize_for_loop` form, or the sample form that defers identity
+/// ranks). Reuses `PartialEq` for the non-object fields, supplements its
 /// `objects.len()`-only object check with per-object content equality, and supplements its
 /// deliberate omission of `pending_damage_replacements` with [`pending_shields_loop_eq`]
 /// (CR 104.4b + CR 615.3: a state is not the same loop point when its LIVE floating shields
 /// differ; a spent shield is not part of the position).
+///
+/// `normalize_for_loop_sample` defers the allocator-derived identity rank because it walks
+/// the row-unbounded damage journal. This authority supplies that rank for a candidate pair
+/// and then applies the SAME conjuncts, so the deferred sample never weakens strict
+/// equality: ranking is a deterministic function run on both sides alike.
 pub(crate) fn loop_states_equal(a: &GameState, b: &GameState) -> bool {
-    a.is_loop_comparable()
-        && b.is_loop_comparable()
-        && a == b
-        && a.stack_trigger_firings == b.stack_trigger_firings
-        && objects_content_eq(&a.objects, &b.objects)
-        && pending_shields_loop_eq(a, b)
+    if !a.is_loop_comparable() || !b.is_loop_comparable() {
+        return false;
+    }
+    // The full journal is compared in both views, so a growing history is excluded here
+    // before either candidate clone or any identity work.
+    if a.damage_dealt_this_turn.len() != b.damage_dealt_this_turn.len() {
+        return false;
+    }
+    let conjuncts = |a: &GameState, b: &GameState| {
+        a == b
+            && a.stack_trigger_firings == b.stack_trigger_firings
+            && objects_content_eq(&a.objects, &b.objects)
+            && pending_shields_loop_eq(a, b)
+    };
+    // Exact equality is strictly stronger than canonical equality, so the already-ranked
+    // common case pays no copies.
+    if conjuncts(a, b) {
+        return true;
+    }
+    // Otherwise rank the candidate clones here: `canonicalize_loop_identities` is
+    // idempotent, so an already-ranked side is unchanged and a deferred side catches up.
+    let mut ranked_a = a.clone();
+    ranked_a.canonicalize_loop_identities();
+    let mut ranked_b = b.clone();
+    ranked_b.canonicalize_loop_identities();
+    conjuncts(&ranked_a, &ranked_b)
 }
 
 /// CR 615.3 + CR 614.3: the LIVE floating shields in `state`, in registry order — the
@@ -39629,6 +39673,19 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     excluding this single-object identity field cannot hide growth.
         resolution_source_relatch: _,
     } = s;
+}
+
+/// CR 104.4b + CR 732.2a: how a loop comparand treats allocator-derived identities
+/// (incarnations, spell announcements, grants). Ranking walks the row-unbounded damage
+/// journal, so a per-beat sample defers it and [`loop_states_equal`] ranks only the
+/// candidate pair it is confirming. Numeric distinctiveness, not recorded history, so a
+/// unit variant cannot be confused with a state field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoopIdentityRank {
+    /// Full canonical ranks; the strict [`GameState::normalize_for_loop`] contract.
+    Ranked,
+    /// Transient-pruned only: identity ranks are deferred to strict confirmation.
+    Deferred,
 }
 
 impl Default for GameState {

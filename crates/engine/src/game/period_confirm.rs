@@ -1596,7 +1596,9 @@ pub(crate) fn mandatory_period_holds(frame: &GameState, span: NamedSpan) -> Opti
     let boundary = crate::game::engine::take_boundary(&s_n);
     let counted_take = if settles
         .iter()
-        .any(|settled| crate::game::engine::settle_recurs(&boundary, &settled.normalize_for_loop()))
+        .any(|settled| {
+            crate::game::engine::settle_recurs(&boundary, &settled.normalize_for_loop_sample())
+        })
     {
         crate::analysis::loop_check::CountedTake::Performs
     } else {

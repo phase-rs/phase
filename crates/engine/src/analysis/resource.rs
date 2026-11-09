@@ -5505,20 +5505,12 @@ pub(crate) fn fodder_growth_cover_refusals(
         }
     }
     // CR 400.7 + CR 608.2k: preserve exact dealer/recipient identity aliases.
-    // Never anonymously rename a recipient
-    // that is also a retained damage dealer: the source/target alias matters.
-    // The existing visitor includes player damage and all parked carriers.
-    let mut legacy_recipients = HashSet::new();
+    // Never anonymously rename a recipient that is also a retained damage
+    // dealer: the source/target alias matters. The existing visitor includes
+    // player damage and all parked carriers. Legacy/no-stamp recipients are
+    // NOT refused here: the projection now retains them as a bounded `Legacy`
+    // read class, so the recipient partition below carries their sharing.
     for frame in [&mut pa.0, &mut pb.0] {
-        // Factory projection keeps one witness per retained key with ANY known
-        // recipient stamp (live or stale). Missing keys therefore identify the
-        // runtime's legacy fallback without rescanning the raw damage journal.
-        let known_recipients: HashSet<_> = frame
-            .damage_dealt_this_turn
-            .iter()
-            .map(DamageRecord::event_key)
-            .collect();
-        let mut unknown_recipients = Vec::new();
         frame.for_each_trigger_event_carrier_mut(&mut |event| {
             if let GameEvent::DamageDealt { source_id, .. } = event {
                 recipient_cohort.remove(&*source_id);
@@ -5528,27 +5520,10 @@ pub(crate) fn fodder_growth_cover_refusals(
                     recipient_cohort.remove(source);
                 }
             }
-            let Some(key) = DamageEventKey::from_event(event) else {
-                return;
-            };
-            let TargetRef::Object(target) = &key.target else {
-                return;
-            };
-            if recipient_cohort.contains(target) && !known_recipients.contains(&key) {
-                unknown_recipients.push(*target);
-            }
         });
-        // An absent object has no live fallback recipient in this frame.
-        legacy_recipients.extend(
-            unknown_recipients
-                .into_iter()
-                .filter(|target| frame.objects.contains_key(target)),
-        );
     }
-    // Finish dealer exclusions on BOTH frames before deciding eligibility.
-    // The stack is about to disappear, so retain this refusal at its owning
-    // cover seam rather than inventing a recipient epoch in the projection.
-    let has_legacy_recipient = !legacy_recipients.is_disjoint(&recipient_cohort);
+    // The stack is about to disappear; the recipient relation that matters is
+    // already retained in the projected journal.
     pa.0.stack.clear();
     pb.0.stack.clear();
 
@@ -5600,7 +5575,7 @@ pub(crate) fn fodder_growth_cover_refusals(
         && cf.stack.is_empty()
         && last_known_records_grow_unread(&pa, &pb)
         && HistoryMember::LastKnownRecords.equalize(&mut pb.0, &pa);
-    if has_legacy_recipient || !eq_except_growable(&pa, &pb, &growing, Some(&recipient_cohort)) {
+    if !eq_except_growable(&pa, &pb, &growing, Some(&recipient_cohort)) {
         refusals.push(FodderCoverRefusal::NonObjectRemainder);
     }
 
@@ -6991,8 +6966,18 @@ fn eq_except_growable(
     b.0.retain_carrier_referenced_lki();
     a.0.retain_trigger_referenced_departed_stack_records();
     b.0.retain_trigger_referenced_departed_stack_records();
-    canonicalize_projected_recipient_relations(&mut a, GameState::canonicalize_loop_identities);
-    canonicalize_projected_recipient_relations(&mut b, GameState::canonicalize_loop_identities);
+    let stale_a = projected_stale_rows(&a.0);
+    canonicalize_projected_recipient_relations(
+        &mut a,
+        &stale_a,
+        GameState::canonicalize_loop_identities,
+    );
+    let stale_b = projected_stale_rows(&b.0);
+    canonicalize_projected_recipient_relations(
+        &mut b,
+        &stale_b,
+        GameState::canonicalize_loop_identities,
+    );
     // AFTER the battlefield/stack clears, which makes those two arms no-ops by construction —
     // the fodder half of `grown` lives there and needs nothing further. `zones::remove_from_zone`
     // is the shipped single authority for the operation and is exhaustive over `Zone`, so no
@@ -7047,10 +7032,14 @@ fn eq_except_growable(
         && crate::types::game_state::pending_shields_loop_eq(&a, &b)
 }
 
-/// CR 400.7 + CR 608.2k: whether a stamped recipient is still the original
-/// permanent. Missing stamps are represented separately, not as either class.
+/// CR 400.7 + CR 608.2k: whether a damage fact's recipient is still the
+/// original object (live), a superseded stamp (stale), or the runtime's legacy
+/// named-object fallback, which applies when no matching row stamped a
+/// recipient at all. `Legacy` ranks below `Stale` so the established
+/// `Stale < Live` comparison order is preserved.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum RecipientReadClass {
+    Legacy,
     Stale,
     Live,
 }
@@ -7085,9 +7074,6 @@ fn take_fodder_recipient_groups(
     }
     let mut keyed = smallvec::SmallVec::<[(ObjectId, FodderRecipientFact); 4]>::new();
     frame.0.damage_dealt_this_turn.retain(|record| {
-        let Some(epoch) = record.target_incarnation else {
-            return true;
-        };
         let TargetRef::Object(target) = &record.target else {
             return true;
         };
@@ -7114,10 +7100,12 @@ fn take_fodder_recipient_groups(
                 source_incarnation,
                 amount,
                 is_combat,
-                recipient_class: if epoch == 0 {
-                    RecipientReadClass::Stale
-                } else {
-                    RecipientReadClass::Live
+                // CR 608.2k: an unstamped fact still names this live recipient
+                // at runtime, so its sharing relation is part of the quotient.
+                recipient_class: match record.target_incarnation {
+                    None => RecipientReadClass::Legacy,
+                    Some(0) => RecipientReadClass::Stale,
+                    Some(_) => RecipientReadClass::Live,
                 },
                 tapped: object.tapped,
             },
@@ -8892,21 +8880,27 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
-/// Keep only the recipient answer retained damage carriers can still read:
-/// unknown (no row), live, or all-stale. Full damage history remains strict
+/// CR 400.7 + CR 608.2k + CR 732.2a: reduce full damage history to the one
+/// recipient answer each retained damage carrier can still read — legacy (no
+/// matching stamp), all-stale, or live. Full damage history remains strict
 /// state; this bounded reduction belongs only to the resource projection.
 /// Collect C requested keys, then inspect H journal rows once: expected O(C+H)
 /// hash work and O(C) storage, before the existing final witness sort.
-fn project_damage_recipient_relations_for_loop(state: &mut GameState) {
+///
+/// The returned indices are the emitted witnesses classified stale. They are
+/// positions, not a value sentinel: a raw live epoch of `0` is ordinary data,
+/// so only a row this function classified stale may be hidden from a rank pass.
+fn project_damage_recipient_relations_for_loop(
+    state: &mut GameState,
+) -> smallvec::SmallVec<[usize; 4]> {
     struct RequestedRecipient {
         live_incarnation: u64,
-        class: Option<RecipientReadClass>,
+        class: RecipientReadClass,
     }
 
     let journal = std::mem::take(&mut state.damage_dealt_this_turn);
-    if journal.is_empty() {
-        return;
-    }
+    // Missing rows still authorize the runtime's legacy named-object fallback,
+    // so the requested keys are collected even when the journal is empty.
     // The whole-state carrier visitor needs &mut self, but never writes the
     // object store. Alias only its persistent root: no GameState/object clone
     // or per-object COW, and no second requested-key collection.
@@ -8924,12 +8918,12 @@ fn project_damage_recipient_relations_for_loop(state: &mut GameState) {
         };
         requested.entry(key).or_insert_with(|| RequestedRecipient {
             live_incarnation: object.incarnation,
-            class: None,
+            class: RecipientReadClass::Legacy,
         });
     });
     drop(objects);
     if requested.is_empty() {
-        return;
+        return smallvec::SmallVec::new();
     }
     for record in &journal {
         #[cfg(test)]
@@ -8944,48 +8938,51 @@ fn project_damage_recipient_relations_for_loop(state: &mut GameState) {
             continue;
         };
         if epoch == relation.live_incarnation {
-            relation.class = Some(RecipientReadClass::Live);
-        } else if relation.class.is_none() {
-            relation.class = Some(RecipientReadClass::Stale);
+            relation.class = RecipientReadClass::Live;
+        } else if relation.class == RecipientReadClass::Legacy {
+            relation.class = RecipientReadClass::Stale;
         }
     }
+    let mut stale = smallvec::SmallVec::new();
     for (key, relation) in requested {
         let target_incarnation = match relation.class {
-            None => continue,
-            Some(RecipientReadClass::Stale) => 0,
-            Some(RecipientReadClass::Live) => relation.live_incarnation,
+            RecipientReadClass::Legacy => None,
+            RecipientReadClass::Stale => {
+                stale.push(state.damage_dealt_this_turn.len());
+                Some(0)
+            }
+            RecipientReadClass::Live => Some(relation.live_incarnation),
         };
         state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: key.source_id,
             source_incarnation: key.source_incarnation,
             target: key.target,
-            target_incarnation: Some(target_incarnation),
+            target_incarnation,
             amount: key.amount,
             is_combat: key.is_combat,
             ..Default::default()
         });
     }
+    stale
 }
 
 /// Identity callbacks rename fields without adding/removing journal rows.
-/// Temporarily hide stale witnesses from the rank pool, then restore their
-/// projection-only class even when a growth cover removed the live recipient.
-/// Every input witness is stamped, so None during the callback is unambiguous.
+/// `stale` names exactly the witness positions carrying the projection's
+/// non-live class; they are hidden across the callback so they cannot occupy a
+/// rank, then restored. Legacy rows are already `None` and are left alone, and a
+/// raw live epoch of `0` is never mistaken for the stale class.
 fn canonicalize_projected_recipient_relations(
     frame: &mut ResourceProjectedFrame,
+    stale: &[usize],
     canonicalize: impl FnOnce(&mut GameState),
 ) {
-    for record in frame.0.damage_dealt_this_turn.iter_mut() {
-        debug_assert!(record.target_incarnation.is_some());
-        if record.target_incarnation == Some(0) {
-            record.target_incarnation = None;
-        }
+    for &index in stale {
+        debug_assert_eq!(frame.0.damage_dealt_this_turn[index].target_incarnation, Some(0));
+        frame.0.damage_dealt_this_turn[index].target_incarnation = None;
     }
     canonicalize(&mut frame.0);
-    for record in frame.0.damage_dealt_this_turn.iter_mut() {
-        if record.target_incarnation.is_none() {
-            record.target_incarnation = Some(0);
-        }
+    for &index in stale {
+        frame.0.damage_dealt_this_turn[index].target_incarnation = Some(0);
     }
     // Map traversal cannot choose the journal's compared order.
     fn tuple(record: &DamageRecord) -> (ObjectId, Option<u64>, ObjectId, u32, bool) {
@@ -9006,21 +9003,50 @@ fn canonicalize_projected_recipient_relations(
         .sort_by(|left, right| tuple(left).cmp(&tuple(right)));
 }
 
-/// Clone a state through `normalize_for_loop`, then apply what the relaxed comparison needs.
+/// The later post-erasure callers cannot carry the selector's positions (growth covers
+/// rewrite the journal), and by then every live epoch has ranked to a positive value, so
+/// the projection-only stale `Some(0)` is unambiguous. Legacy rows stay `None`.
+fn projected_stale_rows(frame: &GameState) -> smallvec::SmallVec<[usize; 4]> {
+    frame
+        .damage_dealt_this_turn
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| record.target_incarnation == Some(0))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Clone a state through the loop sample form (`normalize_for_loop_sample`), reduce
+/// damage history to the bounded recipient classes, rank only those witnesses, then
+/// apply what the relaxed comparison needs.
 /// Three zeroing sources: [`project_out_player_consumables`] for the per-player axes (its own
 /// no-`..` destructure is that set's boundary), [`project_object_for_loop`] for the per-object
 /// ones, and the per-turn tally/journal block below. The stack's volatile
-/// per-entry id is renamed to its POSITION with its firing sidecar. Finally
-/// reduce damage history to retained recipient read classes and compact identity
-/// ranks AFTER every erasure, including mana receipts. This narrow pass also
-/// accepts already-normalized ring inputs without a second full normalizer.
+/// per-entry id is renamed to its POSITION with its firing sidecar. The journal rank runs
+/// here on the bounded witnesses (a raw live epoch must be ranked before the
+/// projection-only stale class is meaningful) and NOT on the full history; one narrow
+/// re-rank then follows every erasure, including mana receipts. This pass also accepts
+/// already-normalized ring inputs without a second full normalizer.
 /// The result is only a comparand, never a live game state.
 fn project_out_resources(state: &GameState) -> ResourceProjectedFrame {
     bump_loop_detect_cost(|cost| cost.projected_clones += 1);
     // Read from the unprojected state: the cost gates judge recorded facts
     // against the live statics, before any object is projected below.
     let observable_journal = crate::game::casting::cost_observable_activation_journal(state);
-    let mut s = state.normalize_for_loop();
+    // CR 104.4b + CR 732.2a: unranked transient form, so the row-unbounded
+    // journal is reduced BEFORE any identity pass can walk it.
+    let mut s = state.normalize_for_loop_sample();
+    let stale_witnesses = project_damage_recipient_relations_for_loop(&mut s);
+    // Rank the bounded witnesses before the axes/objects they may name are
+    // projected away. `canonicalize_loop_identities` is the strict rank pass;
+    // with the journal already reduced it sees only retained relations.
+    let mut projected = ResourceProjectedFrame(s);
+    canonicalize_projected_recipient_relations(
+        &mut projected,
+        &stale_witnesses,
+        GameState::canonicalize_loop_identities,
+    );
+    let mut s = projected.0;
 
     for player in &mut s.players {
         // Single authority for the projected player-consumable set, shared with the
@@ -9193,10 +9219,11 @@ fn project_out_resources(state: &GameState) -> ResourceProjectedFrame {
             s.stack_trigger_firings.insert(canonical_id, firing);
         }
     }
-    project_damage_recipient_relations_for_loop(&mut s);
     let mut projected = ResourceProjectedFrame(s);
+    let stale = projected_stale_rows(&projected.0);
     canonicalize_projected_recipient_relations(
         &mut projected,
+        &stale,
         GameState::canonicalize_lki_incarnations_for_loop,
     );
     projected
@@ -9962,8 +9989,8 @@ mod tests {
             crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get);
         assert_eq!(
             projected.damage_dealt_this_turn.len(),
-            MANY + 3,
-            "one witness for every live/mixed/optional-source key and all-stale key; none for unknown"
+            MANY + 5,
+            "one bounded witness per retained key: live/mixed/stale, plus the legacy answer for an unstamped or absent row set"
         );
         for entry in &projected.stack {
             let StackEntryKind::TriggeredAbility {
