@@ -2302,7 +2302,7 @@ mod tests {
     };
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ObjectId,
-        ObjectIncarnationRef, TriggerFiring,
+        TriggerFiring,
     };
     use crate::types::mana::ManaCost;
     use crate::types::match_config::MatchType;

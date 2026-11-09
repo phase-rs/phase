@@ -192,7 +192,102 @@ pub(super) fn collect_object_targets(
                             TargetRef::Player(_) => None,
                         })
                         .collect(),
-                    other => collect_object_targets(state, ability, other),
+                    // CR 608.2k: the trigger's named combat partner is an
+                    // untargeted event referent, not an announced target or a
+                    // population filter. CR 702.26b: only phased-in battlefield
+                    // objects can join this phase-out batch.
+                    TargetFilter::TriggeringSource => {
+                        // CR 509.1 + CR 608.2k: in a blocking event, "that
+                        // creature" is the source's combat partner. The existing
+                        // event-only ParentTarget reader owns that orientation;
+                        // this is not an announced-target lookup.
+                        let context_filter = if matches!(
+                            state.current_trigger_event.as_ref(),
+                            Some(
+                                GameEvent::BlockersDeclared { .. }
+                                    | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
+                            )
+                        ) {
+                            &TargetFilter::ParentTarget
+                        } else {
+                            filter
+                        };
+                        crate::game::targeting::resolve_event_context_target(
+                            state,
+                            context_filter,
+                            ability.source_id,
+                        )
+                        .into_iter()
+                        .filter_map(|target| match target {
+                            TargetRef::Object(id) => Some(id),
+                            TargetRef::Player(_) => None,
+                        })
+                        .filter(|id| {
+                            state.objects.get(id).is_some_and(|object| {
+                                object.zone == crate::types::zones::Zone::Battlefield
+                                    && object.is_phased_in()
+                            })
+                        })
+                        .collect()
+                    }
+                    TargetFilter::None
+                    | TargetFilter::Any
+                    | TargetFilter::Player
+                    | TargetFilter::Controller
+                    | TargetFilter::SourceController
+                    | TargetFilter::ControllerAndControlledPermanents { .. }
+                    | TargetFilter::Opponent
+                    | TargetFilter::GrantingObject { .. }
+                    | TargetFilter::SourceOrPaired
+                    | TargetFilter::Typed(_)
+                    | TargetFilter::Not { .. }
+                    | TargetFilter::Or { .. }
+                    | TargetFilter::And { .. }
+                    | TargetFilter::StackAbility { .. }
+                    | TargetFilter::StackSpell
+                    | TargetFilter::CastingSpell
+                    | TargetFilter::SpecificObject { .. }
+                    | TargetFilter::SpecificPlayer { .. }
+                    | TargetFilter::PlayerWhoChoseLabel { .. }
+                    | TargetFilter::PlayerMatching { .. }
+                    | TargetFilter::Neighbor { .. }
+                    | TargetFilter::ScopedPlayer
+                    | TargetFilter::AttachedTo
+                    | TargetFilter::LastCreated
+                    | TargetFilter::LastRevealed
+                    | TargetFilter::LastZoneChanged
+                    | TargetFilter::CostPaidObject
+                    | TargetFilter::AmassedArmy
+                    | TargetFilter::ChosenCard
+                    | TargetFilter::TrackedSet { .. }
+                    | TargetFilter::TrackedSetFiltered { .. }
+                    | TargetFilter::ExiledBySource
+                    | TargetFilter::ExiledCardByIndex { .. }
+                    | TargetFilter::TriggeringSpellController
+                    | TargetFilter::TriggeringSpellOwner
+                    | TargetFilter::TriggeringPlayer
+                    | TargetFilter::AttackedPlayerOrPlaneswalker
+                    | TargetFilter::EventTarget
+                    | TargetFilter::TriggeringSourceController
+                    | TargetFilter::EventTargetController
+                    | TargetFilter::ParentTargetSlot { .. }
+                    | TargetFilter::DeclaredPlayer { .. }
+                    | TargetFilter::ParentTargetController
+                    | TargetFilter::ParentTargetOwner
+                    | TargetFilter::AffectedObjectOwner
+                    | TargetFilter::SourceChosenPlayer
+                    | TargetFilter::OriginalController
+                    | TargetFilter::OriginalSource
+                    | TargetFilter::PostReplacementSourceController
+                    | TargetFilter::PostReplacementDamageSource
+                    | TargetFilter::PostReplacementDamageTarget
+                    | TargetFilter::PostReplacementDamageTargetOwner
+                    | TargetFilter::DefendingPlayer
+                    | TargetFilter::HasChosenName
+                    | TargetFilter::ChosenDamageSource { .. }
+                    | TargetFilter::Named { .. }
+                    | TargetFilter::Owner
+                    | TargetFilter::AllPlayers => collect_object_targets(state, ability, filter),
                 }
             })
             .filter(|id| seen.insert(*id))
