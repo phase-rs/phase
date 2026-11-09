@@ -1,36 +1,41 @@
-use crate::game::effects::counters;
-use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::game::replacement::CounterPlacementProhibitions;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
-use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
 /// CR 701.68a + CR 701.68b: the creatures `player` can blight for `count`: those
-/// they control on the battlefield that can actually take the -1/-1 counters.
-/// Placement prohibitions (CR 614.17) are read through the real replacement
-/// pipeline, so a creature the counters can't be put on is never offered.
+/// they control that exist (CR 702.26b: a phased-out creature is treated as
+/// though it doesn't exist, CR 702.26d: though it stays on the battlefield)
+/// and that the counters can be put on (CR 614.17). The "can't" effects are
+/// found once per scan and matched read-only through the replacement
+/// pipeline's own shape predicate and applicability authority; no state is
+/// cloned and the replacement index is neither rebuilt nor consulted. The real
+/// placement still runs the pipeline, so CR 616.1 ordering among Doubling
+/// Season, Vorinclex and Vizier of Remedies is chosen when the counters are put.
 fn blightable_creatures(
     state: &GameState,
     player: PlayerId,
     count: u32,
 ) -> impl Iterator<Item = ObjectId> + '_ {
+    let prohibitions = CounterPlacementProhibitions::active(state);
     state.battlefield.iter().copied().filter(move |id| {
         state.objects.get(id).is_some_and(|obj| {
             obj.controller == player
                 && !obj.is_emblem
+                && obj.is_phased_in_permanent()
                 && obj.card_types.core_types.contains(&CoreType::Creature)
-                && counters::preview_counter_addition(
+                && !prohibitions.forbid_object_counters(
                     state,
                     player,
-                    ObjectIncarnationRef::from_object(obj),
+                    *id,
                     CounterType::Minus1Minus1,
                     count,
                 )
-                .is_some_and(|preview| !preview.is_prohibited())
         })
     })
 }
@@ -144,6 +149,7 @@ fn resolve_nothing_blighted(
 mod tests {
     use super::*;
     use crate::game::engine::apply;
+    use crate::game::game_object::{PhaseOutCause, PhaseStatus};
     use crate::game::zones;
     use crate::types::ability::TargetFilter;
     use crate::types::actions::GameAction;
@@ -245,6 +251,71 @@ mod tests {
         assert!(
             !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
             "no eligible creatures must not prompt a choice"
+        );
+        assert_eq!(state.last_effect_count, Some(0));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: EffectKind::BlightEffect,
+                ..
+            }
+        )));
+    }
+
+    /// CR 702.26b + CR 702.26d: a phased-out creature stays on the battlefield
+    /// but is treated as though it doesn't exist, so it is neither offered for
+    /// blight nor a reason blight is possible, whichever way it phased out
+    /// (CR 702.26g: directly, or indirectly with its host).
+    #[test]
+    fn blight_skips_phased_out_creatures() {
+        let board = |first: PhaseStatus, second: PhaseStatus| {
+            let mut state = GameState::new_two_player(7);
+            let first_id = make_creature(&mut state, 1, PlayerId(0));
+            let second_id = make_creature(&mut state, 2, PlayerId(0));
+            state.objects.get_mut(&first_id).unwrap().phase_status = first;
+            state.objects.get_mut(&second_id).unwrap().phase_status = second;
+            (state, first_id, second_id)
+        };
+        let directly = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+        let indirectly = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Indirectly,
+        };
+
+        let (mut state, phased_in, phased_out) = board(PhaseStatus::PhasedIn, directly);
+        assert!(
+            state.battlefield.contains(&phased_out),
+            "CR 702.26d: phasing out doesn't move the creature"
+        );
+        let ability = blight_ability(phased_in, PlayerId(0), 1);
+        assert!(
+            !optional_blight_is_infeasible(&state, &ability),
+            "the phased-in creature can be blighted"
+        );
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { cards, .. } => {
+                assert_eq!(
+                    cards,
+                    &[phased_in],
+                    "the phased-out creature is not offered"
+                );
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
+
+        let (mut state, first, _) = board(directly, indirectly);
+        let ability = blight_ability(first, PlayerId(0), 1);
+        assert!(
+            optional_blight_is_infeasible(&state, &ability),
+            "CR 701.68b: with every creature phased out there is no blight to choose"
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "no creature exists to choose, so no choice opens"
         );
         assert_eq!(state.last_effect_count, Some(0));
         assert!(events.iter().any(|e| matches!(

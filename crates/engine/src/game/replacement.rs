@@ -11859,22 +11859,115 @@ fn is_counter_placement_event(event: &ProposedEvent) -> bool {
 /// (`find_applicable_replacements`), which has already enforced the handler
 /// matcher, source/player scope, condition, and optional-decline gates. Virtual
 /// rules-source candidates carry no definition and are never preventive here.
+/// The definition shape is `is_mandatory_prevention`'s.
 fn mandatory_prevention_applies(
     state: &GameState,
     candidates: &[ReplacementId],
     events: &[ReplacementEvent],
 ) -> bool {
     candidates.iter().any(|rid| {
-        replacement_definition_for_id(state, *rid).is_some_and(|def| {
-            events.contains(&def.event)
-                && def.quantity_modification == Some(QuantityModification::Prevent)
-                && !replacement_mode_is_optional(&def.mode)
-        })
+        replacement_definition_for_id(state, *rid)
+            .is_some_and(|def| is_mandatory_prevention(def, events))
     })
 }
 
+/// CR 614.6 + CR 614.17: the definition shape that obligatorily kills an event
+/// of one of `events`: a MANDATORY `QuantityModification::Prevent`. Shared by
+/// the pipeline's first-step check and the read-only counter matcher below.
+fn is_mandatory_prevention(def: &ReplacementDefinition, events: &[ReplacementEvent]) -> bool {
+    events.contains(&def.event)
+        && def.quantity_modification == Some(QuantityModification::Prevent)
+        && !replacement_mode_is_optional(&def.mode)
+}
+
+/// The replacement events that govern a counter-placement event.
+const COUNTER_PLACEMENT_REPLACEMENT_EVENTS: &[ReplacementEvent] = &[ReplacementEvent::AddCounter];
+
 fn counter_placement_prevention_applies(state: &GameState, candidates: &[ReplacementId]) -> bool {
-    mandatory_prevention_applies(state, candidates, &[ReplacementEvent::AddCounter])
+    mandatory_prevention_applies(state, candidates, COUNTER_PLACEMENT_REPLACEMENT_EVENTS)
+}
+
+/// CR 614.17 + CR 122.1: the mandatory "counters can't be put on …" effects
+/// active now (Solemnity, Melira's Keepers, Blossombind, Tatterkite),
+/// discovered once so a caller asking about many objects (blight eligibility,
+/// CR 701.68b) pays the active-definition scan once, not per object.
+/// Read-only: no applier runs, no state is cloned, and the replacement index is
+/// neither rebuilt nor consulted. `pipeline_loop` asks the same question on its
+/// first step (where CR 614.17c keeps other replacements from modifying the
+/// event), through the same shape predicate (`is_mandatory_prevention`) and the
+/// same per-candidate applicability authority
+/// (`object_replacement_candidate_applies`). A phased-out source is never found
+/// (CR 702.26b, via `active_replacements`).
+pub(crate) struct CounterPlacementProhibitions(Vec<ReplacementId>);
+
+impl CounterPlacementProhibitions {
+    pub(crate) fn active(state: &GameState) -> Self {
+        Self(
+            super::functioning_abilities::active_replacements(state)
+                .filter(|(_, _, def)| {
+                    is_mandatory_prevention(def, COUNTER_PLACEMENT_REPLACEMENT_EVENTS)
+                })
+                .map(|(index, obj, _)| ReplacementId {
+                    source: obj.id,
+                    index,
+                })
+                .collect(),
+        )
+    }
+
+    /// CR 614.17: can't `count` counters of `counter_type` be put on
+    /// `object_id` by `actor`? A zero-count placement is no counter-placement
+    /// event, so nothing forbids it.
+    pub(crate) fn forbid_object_counters(
+        &self,
+        state: &GameState,
+        actor: PlayerId,
+        object_id: ObjectId,
+        counter_type: CounterType,
+        count: u32,
+    ) -> bool {
+        let event = || ProposedEvent::AddCounter {
+            placement: CounterPlacement::Object {
+                actor,
+                object_id,
+                counter_type: counter_type.clone(),
+            },
+            count,
+            applied: HashSet::new(),
+        };
+        let forbidden = !self.0.is_empty() && {
+            let event = event();
+            is_counter_placement_event(&event)
+                && self.0.iter().any(|rid| {
+                    object_replacement_candidate_applies(
+                        state,
+                        &event,
+                        replacement_registry(),
+                        *rid,
+                    )
+                })
+        };
+
+        // Drift audit, as `indexed_object_replacement_candidates` audits the
+        // index against the legacy scan: the verdict must equal the pipeline's
+        // own first-step check on the same event, including on the empty fast
+        // path above.
+        #[cfg(all(debug_assertions, not(test)))]
+        {
+            let event = event();
+            let pipeline_forbids = is_counter_placement_event(&event)
+                && counter_placement_prevention_applies(
+                    state,
+                    &find_applicable_replacements(state, &event, replacement_registry()),
+                );
+            debug_assert_eq!(
+                forbidden, pipeline_forbids,
+                "counter-placement prohibition matcher diverged from the pipeline for {event:?}",
+            );
+        }
+
+        forbidden
+    }
 }
 
 /// CR 121.1 + CR 614.6 + CR 614.11: pure preflight — does a proposed draw survive
@@ -26727,6 +26820,423 @@ mod tests {
             find_applicable_replacements(&state, &event, &registry).is_empty(),
             "player-scoped counter replacements must not match object counter placement"
         );
+    }
+
+    /// Solemnity's object line: "Counters can't be put on artifacts, creatures,
+    /// enchantments, or lands." (the parser's shape for it).
+    fn solemnity_object_counter_line() -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::AnyOf(vec![
+                    TypeFilter::Artifact,
+                    TypeFilter::Creature,
+                    TypeFilter::Enchantment,
+                    TypeFilter::Land,
+                ]))
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }]),
+            ))
+            .quantity_modification(QuantityModification::Prevent)
+    }
+
+    /// Doubling Season's counter line: "If an effect would put one or more
+    /// counters on a permanent you control, it puts twice that many of those
+    /// counters on that permanent instead."
+    fn doubling_season_counter_line() -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You),
+            ))
+            .quantity_modification(QuantityModification::DOUBLE)
+    }
+
+    /// Puts a P0 object in `zone` carrying `replacements`.
+    fn put_counter_board_object(
+        state: &mut GameState,
+        id: ObjectId,
+        core_type: CoreType,
+        zone: Zone,
+        replacements: Vec<ReplacementDefinition>,
+    ) {
+        let mut obj = GameObject::new(
+            id,
+            CardId(id.0),
+            PlayerId(0),
+            format!("Object {}", id.0),
+            zone,
+        );
+        obj.card_types.core_types = vec![core_type];
+        obj.replacement_definitions = replacements.into();
+        state.objects.insert(id, obj);
+        match zone {
+            Zone::Battlefield => state.battlefield.push_back(id),
+            Zone::Graveyard => state.players[0].graveyard.push_back(id),
+            other => panic!("unsupported test zone {other:?}"),
+        }
+    }
+
+    /// CR 701.68b + CR 614.17: blight eligibility answers the "can't" question
+    /// without entering the replacement pipeline, so it neither clones state nor
+    /// rebuilds and consults the replacement index per candidate creature.
+    #[test]
+    fn blight_eligibility_never_enters_the_replacement_pipeline() {
+        use crate::game::effects::{blight, counters};
+
+        let solemnity = ObjectId(90);
+        let doubling_season = ObjectId(91);
+        let bear = ObjectId(92);
+        let elf = ObjectId(93);
+        let board = |with_solemnity: bool| {
+            let mut state = GameState::new_two_player(42);
+            if with_solemnity {
+                put_counter_board_object(
+                    &mut state,
+                    solemnity,
+                    CoreType::Enchantment,
+                    Zone::Battlefield,
+                    vec![solemnity_object_counter_line()],
+                );
+            }
+            put_counter_board_object(
+                &mut state,
+                doubling_season,
+                CoreType::Enchantment,
+                Zone::Battlefield,
+                vec![doubling_season_counter_line()],
+            );
+            for creature in [bear, elf] {
+                put_counter_board_object(
+                    &mut state,
+                    creature,
+                    CoreType::Creature,
+                    Zone::Battlefield,
+                    vec![],
+                );
+            }
+            state
+        };
+        let ability = ResolvedAbility::new(
+            Effect::BlightEffect {
+                count: 1,
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            bear,
+            PlayerId(0),
+        );
+
+        let state = board(true);
+        // Positive control: the instrument fires when the pipeline runs.
+        reset_indexed_replacement_consults();
+        let preview = counters::preview_counter_addition(
+            &state,
+            PlayerId(0),
+            ObjectIncarnationRef::from_object(&state.objects[&bear]),
+            CounterType::Minus1Minus1,
+            1,
+        );
+        assert!(preview.is_some_and(counters::CounterAdditionPreview::is_prohibited));
+        assert!(
+            indexed_replacement_consults() > 0,
+            "positive control: the full pipeline consults the replacement index"
+        );
+
+        reset_indexed_replacement_consults();
+        assert!(
+            blight::optional_blight_is_infeasible(&state, &ability),
+            "CR 701.68b + CR 614.17: Solemnity leaves no creature to blight"
+        );
+        let mut resolved = state.clone();
+        blight::resolve(&mut resolved, &ability, &mut Vec::new()).unwrap();
+        assert!(
+            !matches!(resolved.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "the resolver agrees with the gate: nothing to choose"
+        );
+        assert_eq!(
+            indexed_replacement_consults(),
+            0,
+            "blight eligibility must not run the replacement pipeline"
+        );
+
+        let state = board(false);
+        reset_indexed_replacement_consults();
+        assert!(!blight::optional_blight_is_infeasible(&state, &ability));
+        let mut resolved = state.clone();
+        blight::resolve(&mut resolved, &ability, &mut Vec::new()).unwrap();
+        let WaitingFor::EffectZoneChoice { mut cards, .. } = resolved.waiting_for.clone() else {
+            panic!("expected EffectZoneChoice, got {:?}", resolved.waiting_for);
+        };
+        cards.sort();
+        assert_eq!(
+            cards,
+            vec![bear, elf],
+            "both creatures can take the counter"
+        );
+        assert_eq!(
+            indexed_replacement_consults(),
+            0,
+            "admitting candidates must not run the replacement pipeline either"
+        );
+    }
+
+    /// CR 614.17: the read-only matcher returns the "can these counters be put on
+    /// this object" verdict for each prohibition shape, and the full-pipeline
+    /// preview agrees with it case by case. Each expected value is derived from
+    /// the card text and the rules, not from either reading.
+    #[test]
+    fn counter_placement_prohibitions_return_the_cr_614_17_verdict() {
+        use crate::game::effects::counters::{preview_counter_addition, CounterAdditionPreview};
+        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+        use crate::types::counter::CounterMatch;
+
+        let solemnity = ObjectId(90);
+        let second_source = ObjectId(91);
+        let target = ObjectId(92);
+        let other = ObjectId(93);
+
+        // Solemnity's player line: "Players can't get counters."
+        let mut solemnity_player_line = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Prevent);
+        solemnity_player_line.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+        // Melira's Keepers: "This creature can't have counters put on it."
+        let keepers_line = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .valid_card(TargetFilter::SelfRef)
+            .quantity_modification(QuantityModification::Prevent);
+        // Vizier of Remedies: "If one or more -1/-1 counters would be put on a
+        // creature you control, that many -1/-1 counters minus one are put on
+        // it instead."
+        let vizier_line = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+            ))
+            .quantity_modification(QuantityModification::Minus { value: 1 })
+            .counter_match(CounterMatch::OfType(CounterType::Minus1Minus1));
+        // Synthetic: no printed card has an optional counter `Prevent`; this
+        // pins the matcher to the shared predicate's mode gate.
+        let mut optional_prevention = solemnity_object_counter_line();
+        optional_prevention.mode = ReplacementMode::Optional { decline: None };
+
+        struct Case {
+            label: &'static str,
+            state: GameState,
+            object: ObjectId,
+            count: u32,
+            forbidden: bool,
+        }
+        // `target` and `other` are P0 creatures; `target` may carry its own line.
+        let board = |sources: Vec<(ObjectId, CoreType, Zone, Vec<ReplacementDefinition>)>,
+                     target_lines: Vec<ReplacementDefinition>| {
+            let mut state = GameState::new_two_player(42);
+            for (id, core_type, zone, lines) in sources {
+                put_counter_board_object(&mut state, id, core_type, zone, lines);
+            }
+            put_counter_board_object(
+                &mut state,
+                target,
+                CoreType::Creature,
+                Zone::Battlefield,
+                target_lines,
+            );
+            put_counter_board_object(
+                &mut state,
+                other,
+                CoreType::Creature,
+                Zone::Battlefield,
+                vec![],
+            );
+            state
+        };
+        let enchantment = |id: ObjectId, zone: Zone, lines: Vec<ReplacementDefinition>| {
+            (id, CoreType::Enchantment, zone, lines)
+        };
+        let solemnity_on_battlefield = || {
+            enchantment(
+                solemnity,
+                Zone::Battlefield,
+                vec![solemnity_object_counter_line()],
+            )
+        };
+        let mut phased_out = board(vec![solemnity_on_battlefield()], vec![]);
+        phased_out.objects.get_mut(&solemnity).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+
+        let cases = vec![
+            Case {
+                label: "(a) no prohibition",
+                state: board(vec![], vec![]),
+                object: target,
+                count: 1,
+                forbidden: false,
+            },
+            Case {
+                label: "(b) Solemnity's object line forbids a creature",
+                state: board(vec![solemnity_on_battlefield()], vec![]),
+                object: target,
+                count: 1,
+                forbidden: true,
+            },
+            Case {
+                label: "(c) Solemnity's player line alone concerns players, not objects",
+                state: board(
+                    vec![enchantment(
+                        solemnity,
+                        Zone::Battlefield,
+                        vec![solemnity_player_line],
+                    )],
+                    vec![],
+                ),
+                object: target,
+                count: 1,
+                forbidden: false,
+            },
+            Case {
+                label: "(d) Melira's Keepers forbids itself",
+                state: board(vec![], vec![keepers_line.clone()]),
+                object: target,
+                count: 1,
+                forbidden: true,
+            },
+            Case {
+                label: "(d) Melira's Keepers allows another creature",
+                state: board(vec![], vec![keepers_line.clone()]),
+                object: other,
+                count: 1,
+                forbidden: false,
+            },
+            Case {
+                label: "(e) Solemnity + Keepers forbid Keepers",
+                state: board(vec![solemnity_on_battlefield()], vec![keepers_line.clone()]),
+                object: target,
+                count: 1,
+                forbidden: true,
+            },
+            Case {
+                label: "(e) Solemnity + Keepers forbid another creature",
+                state: board(vec![solemnity_on_battlefield()], vec![keepers_line]),
+                object: other,
+                count: 1,
+                forbidden: true,
+            },
+            Case {
+                label: "(f) CR 614.17c: Doubling Season can't modify a forbidden placement",
+                state: board(
+                    vec![
+                        solemnity_on_battlefield(),
+                        enchantment(
+                            second_source,
+                            Zone::Battlefield,
+                            vec![doubling_season_counter_line()],
+                        ),
+                    ],
+                    vec![],
+                ),
+                object: target,
+                count: 1,
+                forbidden: true,
+            },
+            Case {
+                label: "(g) Vizier of Remedies replaces, it doesn't forbid",
+                state: board(
+                    vec![(
+                        second_source,
+                        CoreType::Creature,
+                        Zone::Battlefield,
+                        vec![vizier_line],
+                    )],
+                    vec![],
+                ),
+                object: target,
+                count: 1,
+                forbidden: false,
+            },
+            Case {
+                label: "(h) Doubling Season replaces, it doesn't forbid",
+                state: board(
+                    vec![enchantment(
+                        second_source,
+                        Zone::Battlefield,
+                        vec![doubling_season_counter_line()],
+                    )],
+                    vec![],
+                ),
+                object: target,
+                count: 1,
+                forbidden: false,
+            },
+            Case {
+                label: "(i) CR 616.1: an optional prevention is a choice, not a \"can't\"",
+                state: board(
+                    vec![enchantment(
+                        solemnity,
+                        Zone::Battlefield,
+                        vec![optional_prevention],
+                    )],
+                    vec![],
+                ),
+                object: target,
+                count: 1,
+                forbidden: false,
+            },
+            Case {
+                label: "(j) CR 702.26b: a phased-out Solemnity forbids nothing",
+                state: phased_out,
+                object: target,
+                count: 1,
+                forbidden: false,
+            },
+            Case {
+                label: "(k) Solemnity in a graveyard doesn't function",
+                state: board(
+                    vec![enchantment(
+                        solemnity,
+                        Zone::Graveyard,
+                        vec![solemnity_object_counter_line()],
+                    )],
+                    vec![],
+                ),
+                object: target,
+                count: 1,
+                forbidden: false,
+            },
+            Case {
+                label: "(l) placing zero counters is no counter-placement event",
+                state: board(vec![solemnity_on_battlefield()], vec![]),
+                object: target,
+                count: 0,
+                forbidden: false,
+            },
+        ];
+
+        for case in cases {
+            let state = &case.state;
+            assert_eq!(
+                CounterPlacementProhibitions::active(state).forbid_object_counters(
+                    state,
+                    PlayerId(0),
+                    case.object,
+                    CounterType::Minus1Minus1,
+                    case.count,
+                ),
+                case.forbidden,
+                "matcher: {}",
+                case.label
+            );
+            assert_eq!(
+                preview_counter_addition(
+                    state,
+                    PlayerId(0),
+                    ObjectIncarnationRef::from_object(&state.objects[&case.object]),
+                    CounterType::Minus1Minus1,
+                    case.count,
+                )
+                .is_some_and(CounterAdditionPreview::is_prohibited),
+                case.forbidden,
+                "full-pipeline preview: {}",
+                case.label
+            );
+        }
     }
 
     #[test]

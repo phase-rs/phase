@@ -17047,12 +17047,11 @@ pub(crate) enum OptionalFeasibility {
 /// **THE FEASIBILITY PROBE IS THE LAST CONJUNCT, AND THAT ORDERING IS A GUARANTEE, NOT AN
 /// IMPLEMENTATION ACCIDENT.** `engine::entry_publishes_pin_slots` calls this once per announced
 /// entry, per candidate window, per beat, where production pays it once per resolution. LAST
-/// ordering restricts the clone-bearing arms to `optional ∧ ¬optional_for ∧ ¬repeat ∧
-/// (Effect::CastFromZone ∨ Effect::BlightEffect)` entries — a strict subset of the population
-/// production already pays for. It is deliberately NOT charged against `PROBE_BUDGET`: that
-/// counter bounds CR 732.2a certification ASKS at the verdict door, and putting wall-clock cost
-/// on the same counter would re-base every metered row's pinned spend and make neither number
-/// readable.
+/// ordering restricts the clone-bearing arm to `optional ∧ ¬optional_for ∧ ¬repeat ∧
+/// Effect::CastFromZone` entries — a strict subset of the population production already pays
+/// for. It is deliberately NOT charged against `PROBE_BUDGET`: that counter bounds CR 732.2a
+/// certification ASKS at the verdict door, and putting wall-clock cost on the same counter
+/// would re-base every metered row's pinned spend and make neither number readable.
 pub(crate) struct UpfrontOptionalGate {
     /// CR 608.2d: [`optional_prompt_player`] names who ANNOUNCES it — not always the controller.
     /// `None`: the instruction is addressed to no one, so it is declined unprompted.

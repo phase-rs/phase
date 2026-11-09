@@ -17,6 +17,9 @@
 //! can't choose to blight, so every optional blight is gated on that.
 //! CR 508.4: the token is attacking without having been declared as an attacker.
 //! CR 707.9a: the copy gains the "except" end-step sacrifice trigger.
+//! CR 702.26b + CR 702.26d: a phased-out creature is treated as though it doesn't
+//! exist, so it is neither offered for blight nor a reason blight is possible; a
+//! phased-out "can't" source forbids nothing.
 
 use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
@@ -39,6 +42,8 @@ const MATRIARCH: &str = "Grub, Storied Matriarch";
 const AUNTIE: &str = "Grub, Notorious Auntie";
 const GOBLIN: &str = "Goblin Piker";
 const SOLEMNITY: &str = "Solemnity";
+const SLIP: &str = "Slip Out the Back";
+const CONCEALMENT: &str = "Clever Concealment";
 
 const AUNTIE_ORACLE: &str = "Menace\nWhenever Grub attacks, you may blight 1. If you do, create a tapped and attacking token that's a copy of the blighted creature, except it has \"At the beginning of the end step, sacrifice this token.\"\nAt the beginning of your first main phase, you may pay {B}. If you do, transform Grub.";
 const NEXUS_ORACLE: &str = "At the beginning of combat on your turn, draw a card. Then you may exile an artifact or creature card from your hand. If you do, create a token that's a copy of the exiled card, except it's a 3/3 Golem artifact creature in addition to its other types.";
@@ -522,6 +527,177 @@ fn auntie_with_no_creature_left_cannot_blight() {
 
     assert_settled(&runner);
     assert!(tokens(&runner).is_empty());
+}
+
+/// Slip Out the Back reads "Put a +1/+1 counter on target
+/// creature. It phases out." Cast in response to Grub's trigger, it leaves the
+/// Bear on the battlefield with its counter (CR 702.26d) but treated as though it
+/// doesn't exist (CR 702.26b), so CR 701.68a's "a creature you control" can't be
+/// the Bear, and the copy comes from a legal choice.
+#[test]
+fn blight_does_not_offer_a_phased_out_creature() {
+    let (mut runner, grub, (bear, elf, slip)) = grub_board(Phase::BeginCombat, |scenario, db| {
+        scenario.add_basic_land(P0, ManaColor::Blue);
+        (
+            scenario.add_creature(P0, "Bear", 2, 2).id(),
+            scenario.add_creature(P0, "Elf", 3, 3).id(),
+            scenario.add_real_card(P0, SLIP, Zone::Hand, db),
+        )
+    });
+    flip(&mut runner, grub);
+
+    attack_with(&mut runner, &[grub]);
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach-guard: Grub's trigger is on the stack"
+    );
+    runner.cast(slip).target_object(bear).commit();
+    both_pass(&mut runner);
+    let phased = &runner.state().objects[&bear];
+    assert!(phased.is_phased_out(), "reach-guard: the Bear phased out");
+    assert_eq!(phased.zone, Zone::Battlefield, "CR 702.26d: it didn't move");
+    assert_eq!(
+        phased.counters.get(&CounterType::Plus1Plus1).copied(),
+        Some(1),
+        "CR 702.26d: its counter stays on it"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach-guard: Grub's trigger is still on the stack"
+    );
+
+    both_pass(&mut runner);
+    decide(&mut runner, true);
+    let WaitingFor::EffectZoneChoice { mut cards, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "CR 701.68a: blighting asks for a creature; got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    cards.sort();
+    let mut expected = vec![grub, elf];
+    expected.sort();
+    assert_eq!(cards, expected, "the phased-out Bear is not offered");
+    let prompt = runner.state().waiting_for.clone();
+    assert!(
+        runner
+            .act(GameAction::SelectCards { cards: vec![bear] })
+            .is_err(),
+        "the phased-out Bear can't be chosen"
+    );
+    assert_eq!(
+        runner.state().waiting_for,
+        prompt,
+        "a refused choice leaves the prompt open"
+    );
+    runner
+        .act(GameAction::SelectCards { cards: vec![elf] })
+        .expect("blighting the Elf must succeed");
+
+    assert_settled(&runner);
+    assert_eq!(minus_counters(&runner, elf), 1);
+    assert_eq!(minus_counters(&runner, bear), 0);
+    let created = tokens(&runner);
+    assert_eq!(created.len(), 1, "CR 701.68c: blighting makes one token");
+    assert_eq!(runner.state().objects[&created[0]].name, "Elf");
+    assert!(
+        is_attacking(&runner, created[0]),
+        "CR 508.4: the token enters attacking"
+    );
+}
+
+/// CR 701.68b + CR 608.2d + CR 702.26b: Slip Out the Back phases out Grub, her
+/// controller's only creature, while her attack trigger waits. The trigger still
+/// resolves (CR 113.7a), but no creature exists to blight, so the "you may" is
+/// not offered and its rider stays closed.
+#[test]
+fn auntie_whose_only_creature_phased_out_cannot_blight() {
+    let (mut runner, grub, slip) = grub_board(Phase::BeginCombat, |scenario, db| {
+        scenario.add_basic_land(P0, ManaColor::Blue);
+        scenario.add_real_card(P0, SLIP, Zone::Hand, db)
+    });
+    flip(&mut runner, grub);
+
+    attack_with(&mut runner, &[grub]);
+    runner.cast(slip).target_object(grub).commit();
+    both_pass(&mut runner);
+    assert!(
+        runner.state().objects[&grub].is_phased_out(),
+        "reach-guard: Grub phased out"
+    );
+    assert!(
+        !is_attacking(&runner, grub),
+        "CR 506.4: a permanent that phases out is removed from combat"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach-guard: CR 113.7a, Grub's trigger is still on the stack"
+    );
+
+    both_pass(&mut runner);
+
+    assert_settled(&runner);
+    assert!(tokens(&runner).is_empty(), "no blight, no token");
+    assert_eq!(minus_counters(&runner, grub), 0);
+}
+
+/// CR 702.26b: Clever Concealment reads "Any number of target nonland
+/// permanents you control phase out." With Solemnity ("Counters can't be put on
+/// artifacts, creatures, enchantments, or lands.") phased out, Solemnity is
+/// treated as though it doesn't exist and forbids nothing, so Grub can blight.
+/// The paired negative is `auntie_cannot_blight_under_solemnity`.
+#[test]
+fn a_phased_out_solemnity_does_not_stop_the_blight() {
+    let (mut runner, grub, (solemnity, bear, concealment)) =
+        grub_board(Phase::BeginCombat, |scenario, db| {
+            for color in [
+                ManaColor::White,
+                ManaColor::White,
+                ManaColor::Blue,
+                ManaColor::Blue,
+            ] {
+                scenario.add_basic_land(P0, color);
+            }
+            (
+                scenario.add_real_card(P0, SOLEMNITY, Zone::Battlefield, db),
+                scenario.add_creature(P0, "Bear", 2, 2).id(),
+                scenario.add_real_card(P0, CONCEALMENT, Zone::Hand, db),
+            )
+        });
+    flip(&mut runner, grub);
+
+    attack_with(&mut runner, &[grub]);
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach-guard: Grub's trigger is on the stack"
+    );
+    runner
+        .cast(concealment)
+        .target_objects(&[solemnity])
+        .commit();
+    both_pass(&mut runner);
+    assert!(
+        runner.state().objects[&solemnity].is_phased_out(),
+        "reach-guard: Solemnity phased out"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach-guard: Grub's trigger is still on the stack"
+    );
+
+    both_pass(&mut runner);
+    blight(&mut runner, &[grub, bear], bear);
+
+    assert_settled(&runner);
+    assert_eq!(minus_counters(&runner, bear), 1);
+    let created = tokens(&runner);
+    assert_eq!(created.len(), 1, "CR 701.68c: blighting makes one token");
+    assert_eq!(runner.state().objects[&created[0]].name, "Bear");
 }
 
 /// CR 701.68b + CR 614.17: Solemnity reads "Counters can't be put on artifacts,
