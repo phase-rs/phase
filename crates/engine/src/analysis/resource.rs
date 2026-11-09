@@ -10516,6 +10516,151 @@ mod tests {
         );
     }
 
+    #[test]
+    fn loop_relational_fodder_recipient_groups_survive_consistent_renaming() {
+        use crate::game::targeting::resolve_event_referent_permanents;
+        use crate::types::ability::{
+            Effect, EffectScope, ResolvedAbility, TapStateChange, TargetFilter,
+        };
+
+        // Controlled comparison states with actual event-target tap consumers;
+        // normalized/projected comparands are read, never resumed as gameplay.
+        let mut shared = relational_recipient_frame(Some(7), false, false);
+        let other_dealer = battlefield_creature(&mut shared, 24, 0);
+        shared.objects.get_mut(&other_dealer).unwrap().incarnation = 7;
+        let snapshot = shared.objects[&other_dealer].snapshot_public_characteristics();
+        shared
+            .lki_by_incarnation
+            .entry(other_dealer)
+            .or_default()
+            .insert(3, snapshot);
+        let mut second_entry = shared.stack[0].clone();
+        second_entry.id = ObjectId(101);
+        second_entry.source_id = other_dealer;
+        shared.stack.push_back(second_entry);
+        for entry in shared.stack.iter_mut() {
+            let dealer = entry.source_id;
+            let StackEntryKind::TriggeredAbility {
+                source_id,
+                ability,
+                trigger_event,
+                ..
+            } = &mut entry.kind
+            else {
+                panic!("fixture keeps two pending damage triggers");
+            };
+            *source_id = dealer;
+            **ability = ResolvedAbility::new(
+                Effect::SetTapState {
+                    target: TargetFilter::EventTarget,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+                vec![],
+                dealer,
+                PlayerId(0),
+            );
+            let Some(GameEvent::DamageDealt { source_id, .. }) = trigger_event else {
+                panic!("fixture retains a damage event");
+            };
+            *source_id = dealer;
+        }
+        let mut second_row = shared.damage_dealt_this_turn[0].clone();
+        second_row.source_id = other_dealer;
+        shared.damage_dealt_this_turn.push_back(second_row);
+
+        let mut renamed = shared.clone();
+        let mut fresh = shared.objects[&ObjectId(21)].clone();
+        fresh.id = ObjectId(22);
+        renamed.objects.insert(fresh.id, fresh);
+        renamed.battlefield.push_back(ObjectId(22));
+        renamed.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::DamageDealt { target, .. } = event {
+                *target = TargetRef::Object(ObjectId(22));
+            }
+        });
+        for row in renamed.damage_dealt_this_turn.iter_mut() {
+            row.target = TargetRef::Object(ObjectId(22));
+        }
+        let mut split = renamed.clone();
+        split.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::DamageDealt {
+                source_id, target, ..
+            } = event
+            {
+                if *source_id == ObjectId(20) {
+                    *target = TargetRef::Object(ObjectId(21));
+                }
+            }
+        });
+        for row in split.damage_dealt_this_turn.iter_mut() {
+            if row.source_id == ObjectId(20) {
+                row.target = TargetRef::Object(ObjectId(21));
+            }
+        }
+
+        fn recipients(state: &GameState) -> BTreeSet<ObjectId> {
+            let mut receivers = BTreeSet::new();
+            let mut context = state.clone();
+            for entry in &state.stack {
+                let StackEntryKind::TriggeredAbility {
+                    trigger_event: Some(event),
+                    ..
+                } = &entry.kind
+                else {
+                    panic!("fixture keeps its pending event");
+                };
+                context.current_trigger_event = Some(event.clone());
+                receivers.extend(resolve_event_referent_permanents(
+                    &context,
+                    &TargetFilter::EventTarget,
+                    entry.source_id,
+                ));
+            }
+            receivers
+        }
+        let shared_projection = project_out_resources(&shared);
+        let renamed_projection = project_out_resources(&renamed);
+        let split_projection = project_out_resources(&split);
+        for (raw, projected, expected) in [
+            (&shared, &shared_projection, BTreeSet::from([ObjectId(21)])),
+            (
+                &renamed,
+                &renamed_projection,
+                BTreeSet::from([ObjectId(22)]),
+            ),
+            (
+                &split,
+                &split_projection,
+                BTreeSet::from([ObjectId(21), ObjectId(22)]),
+            ),
+        ] {
+            assert_eq!(recipients(raw), expected, "raw event-target consumer");
+            assert_eq!(
+                recipients(projected),
+                expected,
+                "projected event-target consumer"
+            );
+            assert_eq!(
+                projected.damage_dealt_this_turn.len(),
+                2,
+                "the hostile pair changes sharing, not fact count"
+            );
+        }
+        let mut class = shared.objects[&ObjectId(21)].clone();
+        project_object_for_loop(&mut class);
+        let positive = fodder_growth_cover_refusals(&shared, &renamed, &class, PlayerId(0)).0;
+        assert!(
+            positive.is_empty(),
+            "consistently renaming the shared recipient must cover: {positive:?}"
+        );
+        let negative = fodder_growth_cover_refusals(&shared, &split, &class, PlayerId(0)).0;
+        assert!(
+            negative.contains(&FodderCoverRefusal::NonObjectRemainder),
+            "the same two damage keys split across two recipients must refuse: {negative:?}"
+        );
+    }
+
     fn relational_resource_grants(wr: u64, ss: u64, spent: &[u64]) -> GameState {
         use crate::types::ability::{
             TriggerDefinitionOccurrenceRef, TriggerGrantInstanceRef, TriggerGrantProducerKey,
