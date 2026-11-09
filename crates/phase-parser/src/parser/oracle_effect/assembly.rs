@@ -4691,29 +4691,12 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     fold_token_it_has_grants_into_token_statics(&mut result);
     fold_copy_spell_gains_haste_and_quoted_grant(&mut result);
     nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut result);
-    // CR 303.4f + CR 301.5b + CR 603.7d: Wire `forward_result: true` on a
-    // parent zone-change to Battlefield when the chained sub-ability is an
-    // `Attach` gated by `ZoneChangedThisWay`. Without this, the runtime
-    // resolves the sub-ability with `source_id` = the original ability source
-    // (the trigger source / Saga / activated permanent), so the Attach tries
-    // to equip *that* object to the chosen creature — wrong for Armored
-    // Skyhunter (Skyhunter cannot equip itself), wrong for Vault 101: Birthday
-    // Party (a Saga is not Equipment), wrong for Quest for the Holy Relic and
-    // Stonehewer Giant (the searcher is not the moved Equipment).
-    //
-    // CR 608.2c: The same flag also wires sub-chains whose own clauses
-    // anchor on the just-moved card via the bare-"it" anaphor
-    // (`TargetFilter::SelfRef`) — Emperor of Bones' "[…] put a creature
-    // card exiled with this creature onto the battlefield […]. It gains
-    // haste. Sacrifice it at the beginning of the next end step." The
-    // trailing GenericEffect/Pump and CreateDelayedTrigger subs target
-    // `SelfRef` so the runtime's `source_id` rewrite resolves them to the
-    // moved card instead of Emperor itself.
-    //
-    // The `forward_result` flag makes the runtime forward the just-moved
-    // card's id as the sub-ability's `source_id` (see `effects/mod.rs`
-    // forward_result branch), so `Attach::resolve` operates on the correct
-    // attaching object.
+    // CR 303.4f + CR 301.5b + CR 400.7j: forward the returned-object
+    // referent needed by an attachment or later result-bound instruction.
+    // Emperor of Bones' grant and delayed sacrifice keep that referent
+    // separate from the creating ability's source (CR 603.7d + CR 603.7e).
+    // A primary SelfRef names the original source; it does not by itself
+    // request result forwarding or replace that source with the moved card.
     rewire_result_anchored_subchain(&mut result);
     fold_enters_this_way_counter_rider(&mut result);
     // CR 608.2c + CR 701.9a + CR 701.21a: a discard/sacrifice-this-way gated
