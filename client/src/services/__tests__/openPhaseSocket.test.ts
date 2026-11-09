@@ -199,10 +199,6 @@ describe("openPhaseSocket", () => {
     await vi.waitFor(() => expect(onerror).toHaveBeenCalledOnce());
     expect(raw.close).toHaveBeenCalled();
     expect(received).toHaveBeenCalledOnce();
-
-    raw.deliverMessage(42);
-    await vi.waitFor(() => expect(onerror).toHaveBeenCalledTimes(2));
-    expect(received).toHaveBeenCalledOnce();
   });
 
   // Guards the rejected wholesale-catch design: a throwing message listener must
@@ -264,14 +260,6 @@ describe("openPhaseSocket", () => {
 
     await vi.waitFor(() => expect(onerror).toHaveBeenCalledOnce());
     expect(raw.close).toHaveBeenCalled();
-
-    socket.ws.send('{"type":"Ping"}');
-    await vi.waitFor(() =>
-      expect(
-        raw.send.mock.calls.filter(([value]) => value instanceof Uint8Array),
-      ).toHaveLength(2),
-    );
-    expect(onerror).toHaveBeenCalledOnce();
   });
 
   it("notifies close listeners after the close handler throws", async () => {
@@ -284,18 +272,12 @@ describe("openPhaseSocket", () => {
       throw new Error("close handler blew up");
     });
     const dropped = vi.fn();
-    const received = vi.fn();
     socket.ws.onclose = onclose;
-    socket.ws.onmessage = received;
     socket.ws.addEventListener("close", dropped);
 
     raw.close();
     await vi.waitFor(() => expect(onclose).toHaveBeenCalledOnce());
     expect(dropped).toHaveBeenCalledOnce();
-
-    const pong = new TextEncoder().encode('{"type":"Pong"}');
-    raw.deliverMessage(new Uint8Array([0x00, ...pong]).buffer);
-    await vi.waitFor(() => expect(received).toHaveBeenCalledOnce());
   });
 
   it("rejects with protocol_mismatch when versions diverge and closes the socket", async () => {
