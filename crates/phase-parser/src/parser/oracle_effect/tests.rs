@@ -61071,9 +61071,8 @@ fn change_zone_to_battlefield_anaphor_subchain_sets_forward_result() {
     let parent = find_change_zone_to_battlefield(&def)
         .expect("expected a ChangeZone|Dig to Battlefield parent in the parsed chain");
 
-    // CR 608.2c: the bare-"it" anaphor sub-chain must trigger the
-    // rewire, so the runtime rebinds the sub's source_id to the
-    // moved card.
+    // CR 608.2c: the parent must supply the returned card's forwarded context.
+    // This asserts referent availability, not a change to the printed source.
     assert!(
         parent.forward_result,
         "ChangeZone-to-Battlefield with bare-\"it\" sub-chain must mark forward_result"
