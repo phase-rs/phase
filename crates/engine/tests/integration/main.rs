@@ -199,6 +199,7 @@ mod kaalia_zenith_seeker_reveal_types_8068;
 mod karazikar_attack_scope_7189;
 mod kashi_tribe_damage_tap_freeze;
 mod kibo_uktabi_prince_defending_player_sacrifice;
+mod kili_the_resourceful;
 mod kilo_live_offer_from_real_dump;
 mod later_instruction_unless_bindings;
 mod lathiel_end_step_counters_repro;

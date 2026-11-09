@@ -705,7 +705,9 @@ pub(crate) fn parse_collect_evidence_alt_cost(text: &str) -> Option<StaticDefini
     // matches "rather than pay " without a leading space.
     let tp = TextPair::new(&tp.original[consumed..], i_lower).trim_start();
 
-    let cost = AbilityCost::CollectEvidence { amount };
+    let cost = AbilityCost::CollectEvidence {
+        amount: crate::types::ability::CollectEvidenceAmount::Fixed(amount),
+    };
 
     // "rather than pay [the/its] mana cost for [filter] spells you cast".
     let tp = nom_tag_tp(&tp, "rather than pay ")?;
@@ -820,12 +822,16 @@ fn parse_alternative_keyword_cost_body(text: &str) -> Option<StaticDefinition> {
         KeywordKind::Cycling
     } else if nom_primitives::scan_contains(kw_lower, "crew cost") {
         KeywordKind::Crew
+    } else if nom_primitives::scan_contains(kw_lower, "equip cost") {
+        KeywordKind::Equip
     } else {
         return None;
     };
 
-    // Frequency: detect "the first card you [keyword] each turn" pattern.
-    let frequency = if nom_primitives::scan_contains(kw_lower, "first card you cycle each turn") {
+    // Frequency: detect first-per-turn keyword ability patterns.
+    let frequency = if nom_primitives::scan_contains(kw_lower, "first card you cycle each turn")
+        || nom_primitives::scan_contains(kw_lower, "first equip ability you activate each turn")
+    {
         Some(CastFrequency::OncePerTurn)
     } else {
         None

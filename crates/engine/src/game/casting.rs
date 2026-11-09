@@ -27606,6 +27606,85 @@ pub(super) fn find_one_of_cost(cost: &AbilityCost) -> Option<&Vec<AbilityCost>> 
     }
 }
 
+/// CR 602.2b + CR 118.9: An active keyword-cost static adds an alternative
+/// activation-cost branch before the shared cost lock. Its condition is already
+/// applied by `battlefield_active_statics`; the source filter and first-use
+/// frequency are evaluated against the activated ability and its controller.
+fn activation_cost_with_alternative_keyword_costs(
+    state: &GameState,
+    ability: &AbilityDefinition,
+    player: PlayerId,
+    source_id: ObjectId,
+    base_cost: AbilityCost,
+) -> AbilityCost {
+    use crate::types::ability::AbilityTag;
+    use crate::types::keywords::KeywordKind;
+    use crate::types::statics::CastFrequency;
+
+    let Some((ability_tag, keyword)) = ability.ability_tag.and_then(|tag| match tag {
+        AbilityTag::Equip => Some((tag, KeywordKind::Equip)),
+        AbilityTag::Cycling => Some((tag, KeywordKind::Cycling)),
+        _ => None,
+    }) else {
+        return base_cost;
+    };
+
+    let mut alternatives = Vec::new();
+    for (static_source, definition) in
+        super::functioning_abilities::battlefield_active_statics(state)
+    {
+        if static_source.controller != player {
+            continue;
+        }
+        let StaticMode::AlternativeKeywordCost {
+            keyword: granted_keyword,
+            cost,
+            frequency,
+        } = &definition.mode
+        else {
+            continue;
+        };
+        if *granted_keyword != keyword {
+            continue;
+        }
+        if definition.affected.as_ref().is_some_and(|filter| {
+            let context =
+                super::filter::FilterContext::from_source_with_controller(static_source.id, player);
+            !super::filter::matches_target_filter(state, source_id, filter, &context)
+        }) {
+            continue;
+        }
+        let frequency_available = match frequency.unwrap_or(CastFrequency::Unlimited) {
+            CastFrequency::Unlimited => true,
+            CastFrequency::OncePerTurn => !state
+                .abilities_activated_this_turn_by_player
+                .get(&player)
+                .is_some_and(|records| {
+                    records
+                        .iter()
+                        .any(|record| record.ability_tag == Some(ability_tag))
+                }),
+            CastFrequency::OncePerTurnPerPermanentType => false,
+        };
+        if frequency_available {
+            alternatives.push(cost.clone());
+        }
+    }
+
+    if alternatives.is_empty() {
+        return base_cost;
+    }
+    match base_cost {
+        AbilityCost::OneOf { mut costs } => {
+            costs.extend(alternatives);
+            AbilityCost::OneOf { costs }
+        }
+        base_cost => AbilityCost::OneOf {
+            costs: std::iter::once(base_cost).chain(alternatives).collect(),
+        },
+    }
+}
+
 /// CR 601.2h + CR 602.2b: Filter disjunctive activation-cost branches through the
 /// same affordability authority used by `can_activate_ability_now` and
 /// `handle_activate_ability`, each judged inside its `enclosing` total cost and
@@ -29585,6 +29664,15 @@ pub(crate) fn activation_verdict(
     else {
         return ActivationVerdict::Illegal;
     };
+    if let Some(base_cost) = ability_def.cost.take() {
+        ability_def.cost = Some(activation_cost_with_alternative_keyword_costs(
+            state,
+            &ability_def,
+            player,
+            source_id,
+            base_cost,
+        ));
+    }
     if !matches!(
         activation_structural_eligibility(state, player, source_id, &ability_def),
         ActivationStructuralEligibility::Eligible
@@ -31188,6 +31276,13 @@ fn activate_with_cost_carrier(
             Some(snapshot)
         }
         None => ability_def.cost.clone().map(|base_cost| {
+            let base_cost = activation_cost_with_alternative_keyword_costs(
+                state,
+                &ability_def,
+                player,
+                source_id,
+                base_cost,
+            );
             let modifiers = collect_activation_cost_modifiers(
                 state,
                 &ability_def,

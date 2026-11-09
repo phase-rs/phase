@@ -9835,6 +9835,49 @@ fn gavi_alternative_cycling_cost_tracks_once_per_turn_frequency() {
     );
 }
 
+#[test]
+fn kili_alternative_equip_cost_is_conditional_and_once_per_turn() {
+    let r = parse(
+        "Storied (If you control three or more artifacts, legendaries, and/or Sagas, you have an enduring story for the rest of the game.)\nAs long as you have an enduring story, you may pay {0} rather than pay the equip cost of the first equip ability you activate each turn.\nWhenever another Dwarf or Equipment you control enters, draw a card. This ability triggers only once each turn.",
+        "Kíli the Resourceful",
+        &[],
+        &["Creature", "Dwarf"],
+        &[],
+    );
+    let alt = r.statics.iter().find_map(|s| match &s.mode {
+        StaticMode::AlternativeKeywordCost {
+            keyword: crate::types::keywords::KeywordKind::Equip,
+            cost,
+            frequency,
+        } => Some((s, cost, frequency)),
+        _ => None,
+    });
+    let (static_def, cost, frequency) = alt.unwrap_or_else(|| {
+        panic!(
+            "expected equip AlternativeKeywordCost, statics: {:?}, warnings: {:?}",
+            r.statics, r.parse_warnings
+        )
+    });
+    assert!(matches!(cost, AbilityCost::Mana { cost } if cost == &ManaCost::generic(0)));
+    assert_eq!(
+        frequency,
+        &Some(crate::types::statics::CastFrequency::OncePerTurn)
+    );
+    assert!(
+        matches!(
+            static_def.condition.as_ref(),
+            Some(crate::types::ability::StaticCondition::HasEnduringStory)
+        ),
+        "enduring-story condition must gate the alternative cost: {:?}",
+        static_def.condition
+    );
+    assert!(
+        r.parse_warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        r.parse_warnings
+    );
+}
+
 // CR 118.9 + CR 701.20a + CR 601.3: Land Grant — "If you have no land cards in
 // hand, you may reveal your hand rather than pay this spell's mana cost."
 // routes to a conditional alternative-cost casting option whose cost is an

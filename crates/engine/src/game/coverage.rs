@@ -10136,7 +10136,15 @@ fn is_static_definition_supported(
     static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
     token_static_traversal: TokenStaticTraversal,
 ) -> bool {
-    (static_registry.contains_key(&stat.mode) || is_data_carrying_static(&stat.mode))
+    let mode_supported = match &stat.mode {
+        StaticMode::AlternativeKeywordCost { keyword, .. } => matches!(
+            keyword,
+            crate::types::keywords::KeywordKind::Cycling
+                | crate::types::keywords::KeywordKind::Equip
+        ),
+        _ => static_registry.contains_key(&stat.mode) || is_data_carrying_static(&stat.mode),
+    };
+    mode_supported
         && !stat
             .condition
             .as_ref()
@@ -25323,25 +25331,24 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     }
 
     #[test]
-    fn alternative_keyword_cost_static_remains_runtime_coverage_gap() {
+    fn alternative_keyword_cost_coverage_tracks_runtime_ability_classes() {
         let mut face = make_face();
-        face.oracle_text = Some("You may pay {0} rather than pay cycling costs.".to_string());
+        face.oracle_text = Some("You may pay {0} rather than pay equip costs.".to_string());
         face.static_abilities.push(
             StaticDefinition::new(StaticMode::AlternativeKeywordCost {
-                keyword: KeywordKind::Cycling,
+                keyword: KeywordKind::Equip,
                 cost: AbilityCost::Mana {
                     cost: ManaCost::generic(0),
                 },
                 frequency: None,
             })
-            .description("You may pay {0} rather than pay cycling costs.".to_string()),
+            .description("You may pay {0} rather than pay equip costs.".to_string()),
         );
 
         let gaps = card_face_gaps(&face);
         assert!(
-            gaps.iter()
-                .any(|gap| gap == "Static:AlternativeKeywordCost(Cycling)"),
-            "runtime-deferred AlternativeKeywordCost must remain a coverage gap: {gaps:?}"
+            gaps.is_empty(),
+            "Equip alternative cost should be supported: {gaps:?}"
         );
 
         let parse_details = build_parse_details_for_face(&face);
@@ -25350,8 +25357,27 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             .find(|item| item.category == ParseCategory::Static)
             .expect("static parse item");
         assert!(
-            !static_item.supported,
-            "runtime-deferred AlternativeKeywordCost must not be marked supported"
+            static_item.supported,
+            "runtime-supported Equip AlternativeKeywordCost should be supported"
+        );
+
+        let mut crew_face = make_face();
+        crew_face.oracle_text = Some("You may pay {0} rather than pay crew costs.".to_string());
+        crew_face.static_abilities.push(StaticDefinition::new(
+            StaticMode::AlternativeKeywordCost {
+                keyword: KeywordKind::Crew,
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::generic(0),
+                },
+                frequency: None,
+            },
+        ));
+        let crew_gaps = card_face_gaps(&crew_face);
+        assert!(
+            crew_gaps
+                .iter()
+                .any(|gap| gap == "Static:AlternativeKeywordCost(Crew)"),
+            "Crew still routes through a separate special-action cost seam: {crew_gaps:?}"
         );
     }
 
