@@ -5481,7 +5481,8 @@ pub(crate) fn fodder_growth_cover_refusals(
     let cf = flush_clone(current);
     let mut pa = project_out_resources(&pf);
     let mut pb = project_out_resources(&cf);
-    // Reuse the board cover's class authority before discarding stack carriers.
+    // CR 110.1 + CR 732.2a: compare battlefield permanents through the same
+    // content authority before certifying predictable shortcut results.
     // The recipient quotient is narrower than `growing`: each present object
     // must belong to the battlefield class on BOTH feeds.
     let mut growing = HashSet::new();
@@ -5503,7 +5504,8 @@ pub(crate) fn fodder_growth_cover_refusals(
             }
         }
     }
-    // Dealer identities remain exact. Never anonymously rename a recipient
+    // CR 400.7 + CR 608.2k: preserve exact dealer/recipient identity aliases.
+    // Never anonymously rename a recipient
     // that is also a retained damage dealer: the source/target alias matters.
     // The existing visitor includes player damage and all parked carriers.
     for frame in [&mut pa.0, &mut pb.0] {
@@ -7016,13 +7018,21 @@ fn eq_except_growable(
         && crate::types::game_state::pending_shields_loop_eq(&a, &b)
 }
 
+/// CR 400.7 + CR 608.2k: whether a stamped recipient is still the original
+/// permanent. Missing stamps are represented separately, not as either class.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RecipientReadClass {
+    Stale,
+    Live,
+}
+
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct FodderRecipientFact {
     source_id: ObjectId,
     source_incarnation: Option<u64>,
     amount: u32,
     is_combat: bool,
-    is_live: bool,
+    recipient_class: RecipientReadClass,
     tapped: bool,
 }
 
@@ -7031,9 +7041,10 @@ struct FodderRecipientGroup {
     facts: smallvec::SmallVec<[FodderRecipientFact; 4]>,
 }
 
-/// Keep which stamped damage keys share a recipient before forgetting that
-/// interchangeable recipient's id. No fake id, source renaming or class
-/// reselection. All ineligible rows remain full records in the remainder.
+/// CR 400.7 + CR 608.2k + CR 732.2a: preserve original recipient sharing when
+/// certifying predictable shortcut results. Group before forgetting an
+/// interchangeable id; no fake id, source renaming or class reselection.
+/// All ineligible rows remain full records in the remainder.
 fn take_fodder_recipient_groups(
     frame: &mut ResourceProjectedFrame,
     original: &ResourceProjectedFrame,
@@ -7074,7 +7085,11 @@ fn take_fodder_recipient_groups(
                 source_incarnation,
                 amount,
                 is_combat,
-                is_live: epoch != 0,
+                recipient_class: if epoch == 0 {
+                    RecipientReadClass::Stale
+                } else {
+                    RecipientReadClass::Live
+                },
                 tapped: object.tapped,
             },
         ));
@@ -8854,14 +8869,9 @@ thread_local! {
 /// Collect C requested keys, then inspect H journal rows once: expected O(C+H)
 /// hash work and O(C) storage, before the existing final witness sort.
 fn project_damage_recipient_relations_for_loop(state: &mut GameState) {
-    enum ReadClass {
-        Unknown,
-        Stale,
-        Live,
-    }
     struct RequestedRecipient {
         live_incarnation: u64,
-        class: ReadClass,
+        class: Option<RecipientReadClass>,
     }
 
     let journal = std::mem::take(&mut state.damage_dealt_this_turn);
@@ -8885,7 +8895,7 @@ fn project_damage_recipient_relations_for_loop(state: &mut GameState) {
         };
         requested.entry(key).or_insert_with(|| RequestedRecipient {
             live_incarnation: object.incarnation,
-            class: ReadClass::Unknown,
+            class: None,
         });
     });
     drop(objects);
@@ -8902,16 +8912,16 @@ fn project_damage_recipient_relations_for_loop(state: &mut GameState) {
             continue;
         };
         if epoch == relation.live_incarnation {
-            relation.class = ReadClass::Live;
-        } else if matches!(relation.class, ReadClass::Unknown) {
-            relation.class = ReadClass::Stale;
+            relation.class = Some(RecipientReadClass::Live);
+        } else if relation.class.is_none() {
+            relation.class = Some(RecipientReadClass::Stale);
         }
     }
     for (key, relation) in requested {
         let target_incarnation = match relation.class {
-            ReadClass::Unknown => continue,
-            ReadClass::Stale => 0,
-            ReadClass::Live => relation.live_incarnation,
+            None => continue,
+            Some(RecipientReadClass::Stale) => 0,
+            Some(RecipientReadClass::Live) => relation.live_incarnation,
         };
         state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: key.source_id,
