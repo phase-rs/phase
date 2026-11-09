@@ -883,7 +883,8 @@ fn entry_controller_has_left(
 /// CR 800.4b + CR 616.1: finish only the active logical owner's exact parked
 /// entry when its latched chooser and intended entry controller have left.
 /// Both legacy iterations and staged populations retain the `Remained` result
-/// for their ordinary resume driver; a replacement-cost payer is not ours.
+/// for their ordinary resume driver. Its hypothetical transformed-entry
+/// projection ends here; a replacement-cost payer is not ours to retire.
 pub(crate) fn terminalize_paused_entry_for_departed_controller(
     state: &mut GameState,
     departed: PlayerId,
@@ -944,6 +945,15 @@ pub(crate) fn terminalize_paused_entry_for_departed_controller(
         .pending_replacement
         .take()
         .expect("the terminalized delivery owns its parked replacement");
+    if matches!(
+        state
+            .liminal_entries
+            .get(&member.object_id)
+            .map(|entry| &entry.kind),
+        Some(LiminalEntryKind::TransformedEntry)
+    ) {
+        state.liminal_entries.remove(&member.object_id);
+    }
     true
 }
 
