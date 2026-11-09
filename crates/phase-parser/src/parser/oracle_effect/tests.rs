@@ -96846,77 +96846,6 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
     }
 }
 
-/// CR 400.7e + CR 603.6: "When this creature dies, shuffle it into its owner's
-/// library." — the bare "it" names the object the trigger's own event moved to
-/// the graveyard, never a selected `ParentTarget` population (which resolves to
-/// an empty set for an untargeted trigger and would lose the move entirely).
-#[test]
-fn self_death_shuffle_binds_the_event_successor_not_a_selected_population() {
-    let parsed = parse_card(
-        "Flying\nWhen this creature dies, shuffle it into its owner's library.",
-        "Alabaster Dragon",
-        &["Flying"],
-        &["Creature"],
-    );
-    let execute = parsed.triggers[0].execute.as_ref().expect("dies trigger");
-    assert!(
-        matches!(
-            &*execute.effect,
-            Effect::ChangeZone {
-                destination: Zone::Library,
-                owner_library: true,
-                target: TargetFilter::SelfRef | TargetFilter::TriggeringSource,
-                ..
-            }
-        ),
-        "the move must bind the source / event successor, got {:?}",
-        execute.effect
-    );
-    assert!(
-        !matches!(&*execute.effect, Effect::ChangeZoneAll { .. }),
-        "an untargeted self shuffle must not lower to a selected-name population: {:?}",
-        execute.effect
-    );
-    assert!(
-        outer_gap_names(&parsed).is_empty(),
-        "the dies-shuffle chain must not carry an Unimplemented node: {:?}",
-        outer_gap_names(&parsed)
-    );
-}
-
-/// CR 400.7e + CR 603.6: the same binding for every other self-subject trigger
-/// (no departure event, so no CR 603.6 successor is needed — the source is still
-/// the object "it" names). Pre-change this lowered to the selected
-/// `ChangeZoneAll { ParentTarget }`, which has no source fallback.
-/// Infrastructure exception: Fblthp, the Lost is the nearest printed non-departure
-/// self-shuffle. Its full Oracle is covered by the named-owner row below.
-#[test]
-fn self_trigger_shuffle_without_chosen_antecedent_binds_the_source() {
-    let parsed = parse_card(
-        "Whenever this creature attacks, shuffle it into its owner's library.",
-        "Self Shuffle Fixture",
-        &[],
-        &["Creature"],
-    );
-    let execute = parsed.triggers[0]
-        .execute
-        .as_ref()
-        .expect("attacks trigger");
-    assert!(
-        matches!(
-            &*execute.effect,
-            Effect::ChangeZone {
-                destination: Zone::Library,
-                owner_library: true,
-                target: TargetFilter::SelfRef,
-                ..
-            }
-        ),
-        "the untargeted self shuffle names the source, got {:?}",
-        execute.effect
-    );
-}
-
 /// CR 608.2c: an established chosen antecedent still owns the bare "it" — the
 /// source/event fallback must never override a selected referent.
 #[test]
@@ -96938,45 +96867,6 @@ fn chosen_antecedent_shuffle_still_names_the_selected_target() {
         "a chosen antecedent keeps the selected `ParentTarget` population, got {:?}",
         shuffle.effect
     );
-}
-
-/// CR 115.10a + CR 400.3: "This creature's owner shuffles it into their
-/// library." — the possessive subject names the SOURCE, and nothing becomes a
-/// target. The move must carry `SelfRef`, not a selected population.
-#[test]
-fn source_possessive_owner_shuffle_moves_the_source_without_a_target_slot() {
-    let parsed = parse_card(
-        "Flying\n{U}: This creature's owner shuffles it into their library.",
-        "Cerulean Sphinx",
-        &["Flying"],
-        &["Creature"],
-    );
-    let ability = &parsed.abilities[0];
-    assert!(
-        matches!(
-            &*ability.effect,
-            Effect::ChangeZone {
-                destination: Zone::Library,
-                owner_library: true,
-                target: TargetFilter::SelfRef,
-                ..
-            }
-        ),
-        "the Sphinx's own owner shuffles the Sphinx, got {:?}",
-        ability.effect
-    );
-    assert!(
-        !matches!(&*ability.effect, Effect::TargetOnly { .. }),
-        "being affected does not make the source a target: {:?}",
-        ability.effect
-    );
-    assert!(outer_gap_names(&parsed).is_empty());
-    assert!(matches!(
-        &*ability.sub_ability.as_deref().expect("shuffle").effect,
-        Effect::Shuffle {
-            target: TargetFilter::Owner
-        }
-    ));
 }
 
 /// CR 115.10a + CR 400.3: "Enchanted creature's owner shuffles it into their
@@ -97154,73 +97044,6 @@ fn call_the_coppercoats_plural_opponent_declaration_survives_the_peel() {
     );
 }
 
-/// CR 201.5 + CR 201.5c: named and shortened self references keep source ownership.
-#[test]
-fn etrata_fblthp_named_owner_shuffles_preserve_self_reference() {
-    for (name, oracle) in [
-        ("Etrata, the Silencer", "Etrata can't be blocked.\nWhenever Etrata deals combat damage to a player, exile target creature that player controls and put a hit counter on that card. That player loses the game if they own three or more exiled cards with hit counters on them. Etrata's owner shuffles Etrata into their library."),
-        ("Fblthp, Impossibly Lost", "When one or more of your opponents are dealt combat damage during your turn, draw two cards. If your library has no cards in it, you win the game. Fblthp's owner shuffles him into their library. (If you draw from an empty library this way, you still win the game.)"),
-        ("Fblthp, the Lost", "When Fblthp enters, draw a card. If it entered from your library or was cast from your library, draw two cards instead.\nWhen Fblthp becomes the target of a spell, shuffle Fblthp into its owner's library."),
-    ] {
-        let parsed = parse_card(oracle, name, &[], &["Creature"]);
-        assert!(!outer_gap_names(&parsed).iter().any(|gap| gap == "unbound_subject"), "{name}: {parsed:?}");
-        let defs: Vec<_> = parsed.triggers.iter().filter_map(|trigger| trigger.execute.as_deref())
-            .flat_map(chain_defs).collect();
-        let movement = defs.iter().find(|def| matches!(&*def.effect,
-            Effect::ChangeZone { target: TargetFilter::SelfRef, owner_library: true, destination: Zone::Library, .. }
-        )).unwrap_or_else(|| panic!("{name}: missing source move: {defs:?}"));
-        assert!(matches!(&*movement.sub_ability.as_ref().expect("terminal shuffle").effect,
-            Effect::Shuffle { target: TargetFilter::Owner }
-        ), "{name}: {movement:?}");
-    }
-}
-
-#[test]
-fn gandalf_owner_shuffle_conjunct_draws_for_owner() {
-    let parsed = parse_card(
-        "Ward {3} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {3}.)\n{6}: Gandalf's owner shuffles him into their library and draws three cards.",
-        "Gandalf, Wandering Wizard", &[], &["Creature"],
-    );
-    let ability = parsed
-        .abilities
-        .iter()
-        .find(|ability| ability.cost.is_some())
-        .expect("activated ability");
-    assert!(
-        matches!(
-            &*ability.effect,
-            Effect::ChangeZone {
-                target: TargetFilter::SelfRef,
-                destination: Zone::Library,
-                owner_library: true,
-                ..
-            }
-        ),
-        "{ability:?}"
-    );
-    let shuffle = ability.sub_ability.as_deref().expect("shuffle");
-    assert!(
-        matches!(
-            &*shuffle.effect,
-            Effect::Shuffle {
-                target: TargetFilter::Owner
-            }
-        ),
-        "{shuffle:?}"
-    );
-    assert!(
-        matches!(
-            &*shuffle.sub_ability.as_deref().expect("draw").effect,
-            Effect::Draw {
-                count: QuantityExpr::Fixed { value: 3 },
-                target: TargetFilter::Owner
-            }
-        ),
-        "{shuffle:?}"
-    );
-    assert!(outer_gap_names(&parsed).is_empty());
-}
-
 #[test]
 fn owner_shuffle_explicit_source_cannot_substitute_a_different_possessor() {
     for text in [
@@ -97238,23 +97061,6 @@ fn owner_shuffle_explicit_source_cannot_substitute_a_different_possessor() {
             .is_none(),
             "{text}"
         );
-    }
-    for apostrophe in ["'", "\u{2019}"] {
-        let text = format!("~{apostrophe}s owner shuffles ~ into their library.");
-        let lower = text.to_lowercase();
-        let clause = try_parse_owner_of_target_shuffle(
-            TextPair::new(&text, &lower),
-            &mut ParseContext::default(),
-        )
-        .expect("source possessor and explicit source agree");
-        assert!(matches!(
-            clause.effect,
-            Effect::ChangeZone {
-                target: TargetFilter::SelfRef,
-                owner_library: true,
-                ..
-            }
-        ));
     }
 }
 

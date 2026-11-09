@@ -16212,9 +16212,13 @@ fn try_parse_owner_of_target_shuffle(
     let (_, (_, object, _, _, conjunct)) = all_consuming((
         alt((tag::<_, _, OracleError<'_>>("shuffle "), tag("shuffles "))),
         alt((
-            map(nom_primitives::parse_object_recipient_pronoun, |_| {
-                ShuffleObject::Pronoun
-            }),
+            map(
+                nom_primitives::parse_object_recipient_pronoun,
+                |pronoun| match pronoun {
+                    "him" | "her" => ShuffleObject::SelfReference(TargetFilter::SelfRef),
+                    _ => ShuffleObject::Pronoun,
+                },
+            ),
             map(
                 nom_target::parse_self_reference,
                 ShuffleObject::SelfReference,

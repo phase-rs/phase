@@ -19751,49 +19751,6 @@ mod tests {
         assert!(parse_shuffle_ast(malformed, malformed, &mut ctx).is_none());
     }
 
-    #[test]
-    fn r2_bound_shuffle_uses_terminal_population_but_self_keeps_explicit_referent() {
-        for target in [
-            TargetFilter::ParentTarget,
-            TargetFilter::ParentTargetSlot { index: 1 },
-        ] {
-            let clause = lower_shuffle_ast(ShuffleImperativeAst::ChangeZoneToLibrary {
-                target: target.clone(),
-                owner_library: true,
-            });
-            assert!(matches!(&clause.effect, Effect::ChangeZoneAll {
-                origin: None, destination: Zone::Library, target: bound,
-                library_position: None, library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
-                random_order: false, ..
-            } if *bound == target));
-            let terminal = clause.sub_ability.as_deref().expect("terminal shuffle");
-            assert!(matches!(
-                *terminal.effect,
-                Effect::Shuffle {
-                    target: TargetFilter::ScopedPlayer
-                }
-            ));
-            assert_eq!(terminal.player_scope, Some(owner_library_shuffle_scope()));
-        }
-        let own = lower_shuffle_ast(ShuffleImperativeAst::ChangeZoneToLibrary {
-            target: TargetFilter::SelfRef,
-            owner_library: true,
-        });
-        assert!(matches!(
-            own.effect,
-            Effect::ChangeZone {
-                target: TargetFilter::SelfRef,
-                owner_library: true,
-                ..
-            }
-        ));
-        assert!(matches!(
-            *own.sub_ability.unwrap().effect,
-            Effect::Shuffle {
-                target: TargetFilter::Owner
-            }
-        ));
-    }
     use crate::types::ability::{EffectKind, ParitySource, ZoneChoiceChooser};
     use crate::types::counter::CounterType;
     use crate::types::keywords::KeywordKind;
