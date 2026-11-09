@@ -829,8 +829,14 @@ export class StateCodecSocket implements PhaseSocketTransport {
     try {
       this.releaseSession();
     } finally {
-      // Healthy frames drained first, or a rejected/stalled drain was ended.
-      this.deliver({ kind: "close", event });
+      try {
+        // Raw death alone permits the ordered drain. Once this owner actually
+        // terminates, retire any wrapped inflater and its pending payloads too.
+        if (this.options.inner !== this.options.raw) this.options.inner.close();
+      } finally {
+        // Healthy frames drained first, or a rejected/stalled drain was ended.
+        this.deliver({ kind: "close", event });
+      }
     }
   }
 
