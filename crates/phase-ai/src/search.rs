@@ -19089,6 +19089,7 @@ mod tests {
                     source_id: source,
                     ability_index: Some(0),
                     rules_execution_node: None,
+                    activated_mana_occurrence: None,
                     ability_snapshot: Some(ability),
                     announced_source_incarnation: None,
                     color_override: None,

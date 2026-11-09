@@ -11380,6 +11380,45 @@ pub struct PendingManaAbility {
     /// causal node after resumption.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules_execution_node: Option<RulesExecutionNodeRef>,
+    /// CR 605.3b: WHICH activation of `source_id` this parked record is — the
+    /// occurrence [`Self::rules_execution_node`] must belong to.
+    ///
+    /// The node reference alone cannot answer that on restore. Settlement
+    /// ordinals are unique, but a save states only the reference, so a reference
+    /// that names a RETAINED node of this same object and incarnation is
+    /// indistinguishable from this activation's own node — and an object can
+    /// activate a mana ability twice in one incarnation (Prismite: "{2}: Add one
+    /// mana of any color."). CR 605.3b says such an ability "resolves
+    /// immediately after it is activated", so the first activation's node is
+    /// finished; re-entering it for the second would write the second
+    /// activation's settlement into the first.
+    ///
+    /// This field is the second record of the one announcement: the ordinal the
+    /// activation's node was minted under, written beside the node (both come
+    /// from the single value `GameState::begin_activated_mana_journal_node`
+    /// returns) and re-written beside it at every resume that re-binds the node.
+    /// The two must therefore AGREE —
+    /// [`Self::recorded_producer_node`] refuses a save where they do not, so a
+    /// node of the same source and epoch that belongs to an earlier occurrence
+    /// is a contradiction rather than evidence.
+    ///
+    /// `None` only for a payload written before this field existed (its journal
+    /// is turn-scoped, so the node it names may already have been discarded, and
+    /// the announcement epoch remains the exact evidence such a save carries).
+    /// This field, like the node, is never defaulted to a value: a save that
+    /// states no occurrence claims none.
+    ///
+    /// Protocol: serde-ADDITIVE (`Option`, `#[serde(default)]`, skipped when
+    /// unset), so an older peer parses a payload that carries it and a newer peer
+    /// parses one that does not. No gameplay fact and no rendered feature is
+    /// derived from it — it strengthens restore validation only, so a peer that
+    /// drops it falls back to the pre-change validation rather than losing a
+    /// capability. That is the `crates/lobby-broker/src/protocol.rs` rule for
+    /// optional/defaulted additions ("does not require a bump — unless the client
+    /// stops deriving a fallback for it"), so no protocol record was added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activated_mana_occurrence:
+        Option<crate::types::resolved_commands::ManaActivationOccurrence>,
     /// CR 605.3b + CR 400.7: Mana ability choices can be answered after the
     /// source paid a cost that moved it out of existence (Treasure tokens, etc.).
     /// Preserve the activated ability definition from activation time so the
@@ -11627,9 +11666,21 @@ impl PendingManaAbility {
     ///   different object. That is a state contradicting itself, and it is
     ///   refused rather than read as absence: reading it as absence would price
     ///   the activation's mana from a node that settles something else.
+    /// * **a retained activated-mana node of this source that is a DIFFERENT
+    ///   OCCURRENCE** — an earlier activation of the same object in the same
+    ///   incarnation (Prismite can be activated twice; both activations share a
+    ///   source and an epoch). CR 605.3b makes a mana ability resolve
+    ///   "immediately after it is activated", so that earlier node has already
+    ///   settled and this activation must not write into it. The save's
+    ///   `activated_mana_occurrence` is the occurrence witness beside the node
+    ///   reference, and the two disagreeing is again a contradiction
+    ///   ([`ParkedActivationNodeConflict::ForeignOccurrence`]), not absence.
     ///
     /// Both readings the caller makes — the epoch and the node to reuse — come
-    /// from this one answer, so they cannot disagree.
+    /// from this one answer, so they cannot disagree. And the same method is the
+    /// one restore runs over every parked activation
+    /// ([`Self::reject_foreign_parked_activation_nodes`]): an answer the
+    /// validator refuses can never reach a settlement.
     pub(crate) fn recorded_producer_node(
         &self,
         journal: &ResolvedRulesJournal,
@@ -11649,6 +11700,18 @@ impl PendingManaAbility {
                 source,
                 activation_source: self.source_id,
             });
+        }
+        // CR 605.3b: the node names this object and epoch, but is it THIS
+        // activation's node? Only the occurrence beside it can say.
+        if let Some(occurrence) = self.activated_mana_occurrence {
+            let RulesExecutionNodeRef::ActivatedMana(ordinal) = node else {
+                // Unreachable: `activated_mana_source` answered above, so the
+                // node is an activated-mana node.
+                return Err(ParkedActivationNodeConflict::NotAnActivatedManaNode { node });
+            };
+            if occurrence.ordinal() != ordinal {
+                return Err(ParkedActivationNodeConflict::ForeignOccurrence { node, occurrence });
+            }
         }
         Ok(ParkedActivationNodeEvidence::Owned(source))
     }
@@ -11687,13 +11750,27 @@ pub enum ParkedActivationNodeConflict {
         source: ObjectIncarnationRef,
         activation_source: ObjectId,
     },
+    /// CR 605.3b: the journal retains an activated-mana node naming this
+    /// activation's own object and incarnation, but it belongs to a DIFFERENT
+    /// occurrence — an earlier activation of that same object (Prismite's "add
+    /// one mana of any color" can be activated twice in one incarnation). A mana
+    /// ability resolves immediately after it is activated, so the earlier node
+    /// has settled and this activation's settlement must not be written into it.
+    /// `occurrence` is the occurrence the save states for this activation; the
+    /// node's own ordinal is the one it actually names.
+    ForeignOccurrence {
+        node: RulesExecutionNodeRef,
+        occurrence: crate::types::resolved_commands::ManaActivationOccurrence,
+    },
 }
 
 impl ParkedActivationNodeConflict {
     /// The recorded node this conflict is about.
     pub fn node(&self) -> RulesExecutionNodeRef {
         match self {
-            Self::NotAnActivatedManaNode { node } | Self::ForeignSource { node, .. } => *node,
+            Self::NotAnActivatedManaNode { node }
+            | Self::ForeignSource { node, .. }
+            | Self::ForeignOccurrence { node, .. } => *node,
         }
     }
 }
@@ -11714,6 +11791,11 @@ impl std::fmt::Display for ParkedActivationNodeConflict {
                 f,
                 "its execution node {node:?} names {:?} epoch {}, not this activation's object {:?}",
                 source.object_id, source.incarnation, activation_source
+            ),
+            Self::ForeignOccurrence { node, occurrence } => write!(
+                f,
+                "its execution node {node:?} belongs to a different activation of the same object \
+                 than the {occurrence} it states — CR 605.3b already settled that one"
             ),
         }
     }
@@ -16923,6 +17005,30 @@ impl GameState {
     /// The pending walk reuses [`Self::pending_cast_owners`] rather than
     /// restating the custody list, so a carrier added to it is covered for free.
     ///
+    /// CR 115.1 + CR 601.2c + CR 109.2: a SPELL's facts are the same question, so
+    /// they get the same answer. A completed cast's list rides
+    /// [`SpellCastRecord::targets`] in
+    /// [`Self::spells_cast_this_turn_by_player`] /
+    /// [`Self::spells_cast_this_game_by_player`] — the records a "the first spell
+    /// you cast during each of your turns that targets a creature costs {W}{B}
+    /// less" gate counts (Head of the Class). Checking only that the LIST exists
+    /// ([`Self::reject_unknown_cast_history_provenance`]) leaves a list whose
+    /// object target states no zone: the fact then fails every zone-scoped
+    /// qualifier (`filter::declared_target_fact_matches` leaves the zone axis
+    /// unanswerable), the record reads as "did not qualify", and the gate's
+    /// zero-count comparison hands the NEXT spell the same once-per-turn
+    /// reduction a second time. An omitted zone is not evidence of a
+    /// non-qualifying target; it is absent evidence, and it is refused like every
+    /// other absent zone in this walk.
+    ///
+    /// The same list reaches the history one action later through the cast
+    /// FINALIZATION carriers — `PendingCast::committed_target_facts`,
+    /// `PrepaidSpellFinalization` → `FinalizePrePaymentChecks`,
+    /// `PendingCostMoveCompletion::{FinalizeCast, FinalizeDelvedCast}` and
+    /// `PendingSacrificeCostCompletion::FinalizeSpell`. They are checked for the
+    /// same reason the pending activation record is: an unchecked carrier becomes
+    /// an unchecked history row as soon as it finalizes.
+    ///
     /// The resolved-rules command operand
     /// (`ResolvedLedgerEdit::AbilityActivated { record }`) is deliberately NOT
     /// refused. It is not a history reader: it is the replay authority that
@@ -16962,6 +17068,81 @@ impl GameState {
                 None => Ok(()),
             }
         }
+        /// CR 601.2c: check the fact list a cast's OWN finalization latch carries.
+        /// `None` is the pre-latch shape, which
+        /// [`Self::reject_unknown_pending_target_facts`] already refuses; a list
+        /// that exists but states no zone is this guard's question.
+        fn check_latched(
+            facts: &Option<Vec<ActivationTargetFact>>,
+        ) -> Result<(), PersistedRestoreError> {
+            match facts.as_deref() {
+                Some(facts) => check_facts(facts),
+                None => Ok(()),
+            }
+        }
+        /// CR 115.1 + CR 601.2c: the same question for a COMPLETED cast. Its record
+        /// names its own spell, so the refusal can say which one.
+        fn check_completed_cast(record: &SpellCastRecord) -> Result<(), PersistedRestoreError> {
+            let Some(facts) = record.targets.as_deref() else {
+                // An ABSENT list is `reject_unknown_cast_history_provenance`'s
+                // refusal, not this one.
+                return Ok(());
+            };
+            match facts
+                .iter()
+                .find_map(ActivationTargetFact::object_target_without_announced_zone)
+            {
+                Some(target) => Err(PersistedRestoreError::UnknownAnnouncedTargetZone {
+                    owner: record.spell_object_id,
+                    target,
+                }),
+                None => Ok(()),
+            }
+        }
+        fn check_pre_payment_checks(
+            checks: &Option<Box<FinalizePrePaymentChecks>>,
+        ) -> Result<(), PersistedRestoreError> {
+            match checks.as_deref() {
+                Some(checks) => check_latched(&checks.committed_target_facts),
+                None => Ok(()),
+            }
+        }
+        fn check_prepaid(
+            prepared: &Option<Box<PrepaidSpellFinalization>>,
+        ) -> Result<(), PersistedRestoreError> {
+            match prepared.as_deref() {
+                Some(prepared) => check_pre_payment_checks(&prepared.pre_payment_checks),
+                None => Ok(()),
+            }
+        }
+        fn check_completion(
+            completion: &PendingCostMoveCompletion,
+        ) -> Result<(), PersistedRestoreError> {
+            match completion {
+                PendingCostMoveCompletion::FinalizeCast {
+                    committed_target_facts,
+                    ..
+                } => check_latched(committed_target_facts),
+                PendingCostMoveCompletion::FinalizeDelvedCast {
+                    pre_payment_checks, ..
+                } => check_pre_payment_checks(pre_payment_checks),
+                PendingCostMoveCompletion::FinishPending
+                | PendingCostMoveCompletion::CompleteSelectedReturnToHand { .. }
+                | PendingCostMoveCompletion::PublishExileTrackedSet => Ok(()),
+            }
+        }
+        fn check_sacrifice_completion(
+            completion: &PendingSacrificeCostCompletion,
+        ) -> Result<(), PersistedRestoreError> {
+            match completion {
+                PendingSacrificeCostCompletion::FinalizeSpell {
+                    pre_payment_checks, ..
+                } => check_latched(&pre_payment_checks.committed_target_facts),
+                PendingSacrificeCostCompletion::SelectedNonSelf
+                | PendingSacrificeCostCompletion::SelfRef
+                | PendingSacrificeCostCompletion::ResolutionOptionalPayment { .. } => Ok(()),
+            }
+        }
 
         for record in self
             .abilities_activated_this_turn_by_player
@@ -16969,6 +17150,19 @@ impl GameState {
             .flat_map(|rows| rows.iter())
         {
             check(record)?;
+        }
+        // CR 115.1 + CR 601.2c: completed SPELL history, the records a
+        // "the first spell you cast … that targets a creature" gate counts. A
+        // record whose list is absent is
+        // `reject_unknown_cast_history_provenance`'s question; a list that exists
+        // and states no zone for an object target is this guard's.
+        for record in self
+            .spells_cast_this_turn_by_player
+            .values()
+            .chain(self.spells_cast_this_game_by_player.values())
+            .flat_map(|rows| rows.iter())
+        {
+            check_completed_cast(record)?;
         }
         for owner in self.pending_cast_owners() {
             let Some(pending) = self.pending_cast_at(owner) else {
@@ -16980,6 +17174,19 @@ impl GameState {
             if let Some(facts) = pending.committed_target_facts.as_deref() {
                 check_facts(facts)?;
             }
+            // CR 601.2h: the same cast's finalization carriers, which write the
+            // history row this walk just read one action later.
+            check_prepaid(&pending.prepaid_finalization)?;
+        }
+        // CR 601.2h + CR 601.2i: the cost-move completion payloads are not
+        // pending-cast owners, so the custody walk above cannot reach them — the
+        // same reason `reject_unknown_pending_target_facts` checks them separately.
+        match self.pending_cost_move_resume.as_ref() {
+            Some(PendingCostMoveResume::Cast { completion, .. }) => check_completion(completion)?,
+            Some(PendingCostMoveResume::SacrificeForCost { completion, .. }) => {
+                check_sacrifice_completion(completion)?
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -17334,8 +17541,18 @@ impl GameState {
     /// as evidence — or, when the object differed, silently as no evidence, which
     /// is the same fail-open stated twice.
     ///
+    /// The same question has a third wrong answer, and only an occurrence can name
+    /// it: an `ActivatedMana` node of this very object and incarnation that belongs
+    /// to an EARLIER activation of it. Prismite's "{2}: Add one mana of any color."
+    /// makes that shape ordinary — two activations, one source, one epoch — and
+    /// CR 605.3b already settled the first, so admitting the pair would let the
+    /// second activation's settlement be written into the first's finished node.
+    /// `PendingManaAbility::activated_mana_occurrence` is the witness that
+    /// separates them, and it is the SAME witness the resume reads: this walk and
+    /// [`PendingManaAbility::recorded_producer_node`] are one validation, not two.
+    ///
     /// [`PendingManaAbility::recorded_producer_node`] is the authority on the
-    /// three shapes, and this walk applies it to every parked activation the save
+    /// shapes, and this walk applies it to every parked activation the save
     /// holds. Absence stays admissible (that is the legacy shape); only a
     /// retained-but-foreign reference is refused.
     fn reject_foreign_parked_activation_nodes(&self) -> Result<(), PersistedRestoreError> {
@@ -18044,8 +18261,10 @@ pub enum PersistedRestoreError {
 
     /// CR 605.3b + CR 113.7 + CR 400.7: a parked mana activation records an
     /// execution node the journal RETAINS but which cannot be that activation's
-    /// own — a triggered-mana node (CR 605.4a: it settles a different ability) or
-    /// an activated-mana node naming a different object.
+    /// own — a triggered-mana node (CR 605.4a: it settles a different ability), an
+    /// activated-mana node naming a different object, or an activated-mana node of
+    /// the same object and incarnation belonging to a DIFFERENT occurrence (an
+    /// earlier activation of that object, already settled per CR 605.3b).
     ///
     /// The distinction this refuses on is the one the resume boundary needs: a
     /// save that records NO node it can still read (the field predates the save,
@@ -48583,6 +48802,7 @@ mod tests {
                         source_id: ObjectId(1),
                         ability_index: None,
                         rules_execution_node: None,
+                        activated_mana_occurrence: None,
                         ability_snapshot: None,
                         announced_source_incarnation: None,
                         color_override: None,
@@ -48698,6 +48918,7 @@ mod tests {
                     source_id: ObjectId(1),
                     ability_index: None,
                     rules_execution_node: None,
+                    activated_mana_occurrence: None,
                     ability_snapshot: None,
                     announced_source_incarnation: None,
                     color_override: None,
@@ -51876,6 +52097,7 @@ mod tests {
                 source_id: ObjectId(1),
                 ability_index: Some(0),
                 rules_execution_node: None,
+                activated_mana_occurrence: None,
                 ability_snapshot: None,
                 announced_source_incarnation: None,
                 color_override: None,
@@ -55205,6 +55427,7 @@ mod tests {
                     source_id: ObjectId(1),
                     ability_index: None,
                     rules_execution_node: None,
+                    activated_mana_occurrence: None,
                     ability_snapshot: None,
                     announced_source_incarnation: None,
                     color_override: None,
@@ -55467,6 +55690,7 @@ mod tests {
             source_id: ObjectId(1),
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: None,
@@ -60566,6 +60790,7 @@ mod restored_exact_attack_authority_tests {
             source_id: attacker,
             ability_index: None,
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: None,

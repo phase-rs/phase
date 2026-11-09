@@ -52,6 +52,60 @@ pub enum RulesExecutionNodeRef {
     PlayerLeave(ResolvedCommandOrdinal),
 }
 
+/// CR 605.3b: ONE activation of one mana ability — the occurrence a parked
+/// activation's settlement must belong to.
+///
+/// Settlement ordinals are minted from a single counter
+/// ([`SettlementNodeOrdinal`]), so an ordinal names exactly one node and a node
+/// belongs to exactly one settlement. That is what an activation's occurrence IS:
+/// the ordinal its own `ActivatedMana` node was minted under
+/// (`GameState::begin_activated_mana_journal_node`). Two activations of the SAME
+/// object in the SAME incarnation therefore carry DIFFERENT occurrences, while
+/// sharing a source and an epoch — which is exactly the pair a save could
+/// otherwise confuse, and why a producer's `(object, incarnation)` is not enough
+/// to identify which activation a recorded node settles.
+///
+/// The parked activation records this value beside its
+/// [`RulesExecutionNodeRef`] so the two are two records of one announcement: a
+/// save that points its node at an earlier activation's node while stating this
+/// occurrence contradicts itself, and restore refuses it
+/// ([`ParkedActivationNodeConflict::ForeignOccurrence`]) instead of writing this
+/// activation's settlement into the earlier one. A mana ability "resolves
+/// immediately after it is activated" (CR 605.3b), so a completed activation's
+/// node is done; nothing of this activation belongs in it.
+///
+/// [`ParkedActivationNodeConflict::ForeignOccurrence`]:
+/// crate::types::game_state::ParkedActivationNodeConflict::ForeignOccurrence
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ManaActivationOccurrence(pub SettlementNodeOrdinal);
+
+impl ManaActivationOccurrence {
+    /// The occurrence a freshly opened settlement node belongs to, or `None` when
+    /// `node` is not an activated-mana node (a triggered mana ability settles a
+    /// different occurrence under its own kind — CR 605.4a).
+    pub fn of_node(node: RulesExecutionNodeRef) -> Option<Self> {
+        match node {
+            RulesExecutionNodeRef::ActivatedMana(ordinal) => Some(Self(ordinal)),
+            RulesExecutionNodeRef::Proposal(_)
+            | RulesExecutionNodeRef::TriggeredMana(_)
+            | RulesExecutionNodeRef::Payment(_)
+            | RulesExecutionNodeRef::PlayerLeave(_) => None,
+        }
+    }
+
+    /// The settlement ordinal this occurrence is.
+    pub fn ordinal(self) -> SettlementNodeOrdinal {
+        self.0
+    }
+}
+
+impl std::fmt::Display for ManaActivationOccurrence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "mana activation occurrence {}", self.0 .0)
+    }
+}
+
 /// Exact recipient of one mana payment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaPaymentRecipient {

@@ -53705,9 +53705,10 @@ fn clear_stack_to_priority(state: &mut GameState) {
 /// Install a first-qualified-spell keyword-grant static (`oracle_line`) on a
 /// battlefield permanent named `name`, owned by P0.
 ///
-/// Parameterized by the card so the same fixture serves every member of the class:
-/// Maelstrom Nexus (no post-timing qualifier), Rain of Riches (payment-source
-/// qualifier) and TARDIS Bay (mana-value qualifier).
+/// Parameterized by the card so the same fixture serves every member of the class
+/// whose ability really does function from the battlefield: Maelstrom Nexus and
+/// Rain of Riches (both enchantments). A PLANE card's static does not — see
+/// [`install_printed_plane_first_spell_cascade_grant`].
 fn install_first_spell_cascade_grant(
     state: &mut GameState,
     name: &str,
@@ -53735,6 +53736,68 @@ fn install_first_spell_cascade_grant(
         .unwrap()
         .static_definitions
         .push(grant);
+}
+
+/// CR 311.2 + CR 113.6b: install `name`'s first-spell keyword grant as the
+/// PRINTED PLANE it is — a `Plane` card, face up in the command zone, placed
+/// through the same Planechase setup the Planechase suite uses.
+///
+/// CR 311.2: "Plane cards remain in the command zone throughout the game … They're
+/// not permanents." A plane's static therefore has to function from the COMMAND
+/// zone (CR 113.6b), which is why `synthesize_planechase` is the production
+/// stamping step that puts `Zone::Command` on it. Mounting the same text on a
+/// battlefield object — as this fixture used to — tests a card that does not
+/// exist: it exercises a permanent whose ability works from the battlefield, not
+/// TARDIS Bay. The object is built with the real card type, the real static, and
+/// the real zone, so nothing about the fixture stands in for the card.
+fn install_printed_plane_first_spell_cascade_grant(
+    state: &mut GameState,
+    name: &str,
+    oracle_line: &str,
+) -> ObjectId {
+    let grant = parse_static_line(oracle_line)
+        .unwrap_or_else(|| panic!("{name}'s static should parse: {oracle_line}"));
+    assert!(
+        grant.condition.is_some(),
+        "{name}'s first-spell grant must carry the SpellsCastThisTurn gate"
+    );
+    // `synthesize_planechase` is the production stamping step: it is what makes a
+    // parsed plane's static function from the command zone.
+    let face = crate::game::planechase_tests::synthesized_planar_face(
+        CoreType::Plane,
+        Vec::new(),
+        vec![grant],
+    );
+    state.format_config = crate::types::format::FormatConfig::planechase();
+    let (active, deck) =
+        crate::game::planechase_tests::setup_planechase(state, PlayerId(0), (name, &face), &[]);
+    assert!(
+        deck.is_empty(),
+        "{name} is the active plane, not a deck entry"
+    );
+    assert_eq!(
+        state.objects[&active].zone,
+        Zone::Command,
+        "CR 311.2: a plane stays in the command zone"
+    );
+    assert!(
+        !state.objects[&active].card_types.core_types.is_empty()
+            && state.objects[&active]
+                .card_types
+                .core_types
+                .contains(&CoreType::Plane),
+        "{name} must be the printed Plane card type, not a stand-in"
+    );
+    // The parser+pipeline sanity check the battlefield helper makes: the ability
+    // must be stamped to function from the command zone it actually sits in.
+    assert!(
+        state.objects[&active]
+            .static_definitions
+            .iter_all()
+            .all(|definition| definition.active_zones.contains(&Zone::Command)),
+        "CR 113.6b: {name}'s static must function from the command zone"
+    );
+    active
 }
 
 /// A battlefield artifact with the `Treasure` subtype — the source Phase 1's
@@ -54148,11 +54211,18 @@ fn rain_of_riches_grants_cascade_only_to_a_treasure_funded_first_spell() {
 #[test]
 fn tardis_bay_grants_cascade_only_to_a_first_spell_with_mana_value_two_or_greater() {
     let mut state = setup_game_at_main_phase();
-    install_first_spell_cascade_grant(
+    // CR 311.2: TARDIS Bay is a PLANE — face up in the command zone, not a
+    // battlefield permanent. The fixture is the printed card through the existing
+    // Planechase setup, so the static is exercised from the zone it functions in.
+    let plane = install_printed_plane_first_spell_cascade_grant(
         &mut state,
         "TARDIS Bay",
-        CardId(7_500),
         "The first spell you cast during each of your turns with mana value 2 or greater has cascade.",
+    );
+    assert_eq!(
+        state.objects[&plane].zone,
+        Zone::Command,
+        "CR 311.2: the plane stays in the command zone for the whole test"
     );
 
     let leg_a = create_wayfarers_bauble(&mut state, CardId(7_501), PlayerId(0));

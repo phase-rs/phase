@@ -463,11 +463,19 @@ pub(crate) fn retain_pooled_mana_producer_snapshots(state: &mut GameState) {
     use crate::types::game_state::PooledManaProducerSnapshot;
 
     let carried: Vec<PooledManaProducerSnapshot> = state.pooled_mana_producer_snapshots.clone();
-    let carried_lki = |source_id: ObjectId, incarnation: u64| {
+    // CR 118.3a + CR 400.7: the carried fact is read for ONE unit, by the same key
+    // the ledger is written with and the restore boundary validates with — the
+    // pip. A `(source, incarnation)` lookup would hand the first-recorded unit's
+    // fact to every other unit of the same tenure, which is the same "the entry
+    // belongs to some unit, not this one" mismatch
+    // [`pooled_mana_producer_snapshot`] exists to prevent.
+    let carried_lki = |unit: &crate::types::mana::ManaUnit| {
         carried
             .iter()
             .find(|snapshot| {
-                snapshot.source_id == source_id && snapshot.source_incarnation == incarnation
+                snapshot.pip_id == unit.pip_id
+                    && snapshot.source_id == unit.source_id
+                    && Some(snapshot.source_incarnation) == unit.source_incarnation
             })
             .map(|snapshot| snapshot.lki.clone())
     };
@@ -497,7 +505,7 @@ pub(crate) fn retain_pooled_mana_producer_snapshots(state: &mut GameState) {
             // still reads that cache. A departure that records no last-known
             // information (a hidden zone) leaves the fact unprovable, so nothing
             // is recorded rather than inventing one.
-            let lki = carried_lki(unit.source_id, incarnation).or_else(|| {
+            let lki = carried_lki(&unit).or_else(|| {
                 crate::game::filter::exit_lki_for_incarnation(state, unit.source_id, incarnation)
                     .cloned()
             });
@@ -529,19 +537,36 @@ pub(crate) fn retain_pooled_mana_producer_snapshots(state: &mut GameState) {
     state.pooled_mana_producer_snapshots = retained;
 }
 
-/// CR 106.3 + CR 400.7: the producer fact retained for `source_id`'s
-/// `incarnation` while a pool still holds the unit it produced — the read side
-/// of [`retain_pooled_mana_producer_snapshots`].
-pub(crate) fn pooled_mana_producer_snapshot(
-    state: &GameState,
-    source_id: ObjectId,
-    incarnation: u64,
-) -> Option<&crate::types::game_state::LKISnapshot> {
+/// CR 106.3 + CR 400.7: the producer fact retained for ONE floating unit while a
+/// pool still holds it — the read side of
+/// [`retain_pooled_mana_producer_snapshots`].
+///
+/// The key is the unit's PIP, and it is the same key the restore boundary
+/// validates with ([`GameState::pip_recorded_producer_epochs`] filters the ledger
+/// by `unit.pip_id`). Keying this read by `(source, incarnation)` instead was a
+/// second, weaker identity for the same record: one storage id can carry several
+/// floating units of ONE producing tenure at once — a Treasure that made two
+/// units is a single `(source, incarnation)` pair — so a read that took the first
+/// entry naming that pair would answer for whichever unit was recorded first,
+/// including a row keyed to a pip that is not the unit being spent. The validator
+/// would ignore such a row (it is keyed to another unit) and the payment would
+/// still spend the fact it holds, which is exactly the mismatch this read closes:
+/// a row the validator ignores must not be usable at payment.
+///
+/// `None` when the ledger holds no entry for THIS unit: its producing source's
+/// characteristics are then unprovable from the ledger, and the caller must fall
+/// through to its other evidence rather than borrow another unit's fact.
+pub(crate) fn pooled_mana_producer_snapshot<'a>(
+    state: &'a GameState,
+    unit: &crate::types::mana::ManaUnit,
+) -> Option<&'a crate::types::game_state::LKISnapshot> {
     state
         .pooled_mana_producer_snapshots
         .iter()
         .find(|snapshot| {
-            snapshot.source_id == source_id && snapshot.source_incarnation == incarnation
+            snapshot.pip_id == unit.pip_id
+                && snapshot.source_id == unit.source_id
+                && Some(snapshot.source_incarnation) == unit.source_incarnation
         })
         .map(|snapshot| &snapshot.lki)
 }

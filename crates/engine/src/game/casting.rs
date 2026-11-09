@@ -24836,12 +24836,7 @@ fn mana_spent_source_snapshot(
                 super::filter::exit_lki_for_incarnation(state, pinned.object_id, pinned.incarnation)
                     .cloned()
                     .or_else(|| {
-                        super::mana_payment::pooled_mana_producer_snapshot(
-                            state,
-                            pinned.object_id,
-                            pinned.incarnation,
-                        )
-                        .cloned()
+                        super::mana_payment::pooled_mana_producer_snapshot(state, unit).cloned()
                     })?
             }
         },

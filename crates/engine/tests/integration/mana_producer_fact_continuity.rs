@@ -469,6 +469,148 @@ fn retained_pip_keeps_its_producer_across_the_phase_boundary() {
 }
 
 // ---------------------------------------------------------------------------
+// 1b — ONE pip key at restore, at carry-forward, and at spend
+// ---------------------------------------------------------------------------
+
+/// The `1b` board: Rain of Riches, Upwelling, one sacrificed Treasure whose red
+/// mana is still floating in POSTCOMBAT main, and the `{1}` spell it will pay for.
+/// Returns the runner, that spell, the Treasure, the epoch that produced the unit,
+/// and the pip.
+///
+/// The Treasure's sacrifice is what forces the question: CR 400.7 makes the
+/// graveyard card a new object, the step/phase boundary clears the exit LKI, so the
+/// ONLY surviving record of who made this mana is the pool's per-unit ledger row —
+/// which is keyed by the unit's pip, the same key the restore boundary validates
+/// with (`GameState::pip_recorded_producer_epochs`).
+fn retained_treasure_pip_board() -> (GameRunner, ObjectId, ObjectId, u64, u64) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    scenario.add_enchantment_from_oracle(P0, "Rain of Riches", RAIN_OF_RICHES);
+    scenario.add_enchantment_from_oracle(P0, "Upwelling", UPWELLING);
+    // A {1} spell, so the ONE retained Treasure unit is the whole payment: the unit
+    // whose fact is under test is the only unit spent.
+    let mut builder = scenario.add_spell_to_hand_from_oracle(
+        P0,
+        "Environmental Sciences",
+        false,
+        ENVIRONMENTAL_SCIENCES,
+    );
+    builder.with_mana_cost(ManaCost::generic(1));
+    let sciences = builder.id();
+    let mut runner = scenario.build();
+    let treasure = treasure_token(runner.state_mut(), 9101);
+    let incarnation = runner.state().objects[&treasure].incarnation;
+    activate_mana_ability(&mut runner, treasure, ManaType::Red);
+    pass_until(
+        &mut runner,
+        |r| r.state().phase == Phase::PostCombatMain,
+        "crossing combat into postcombat main",
+    );
+    let units = pool_units(&runner);
+    assert_eq!(units.len(), 1, "Upwelling retained the one unit");
+    let unit = &units[0];
+    assert_eq!(unit.source_id, treasure);
+    assert_eq!(
+        unit.source_incarnation,
+        Some(incarnation),
+        "reach: the unit is pinned to the epoch that produced it"
+    );
+    assert!(
+        runner.state().lki_by_incarnation.is_empty(),
+        "reach: the generic exit LKI was cleared at the boundary, so the ledger is the only record"
+    );
+    assert_eq!(
+        runner.state().pooled_mana_producer_snapshots.len(),
+        1,
+        "reach: exactly one ledger row, keyed to this unit's pip"
+    );
+    assert_eq!(
+        runner.state().pooled_mana_producer_snapshots[0].pip_id,
+        unit.pip_id,
+        "reach: the row is keyed to the pip of the unit it describes"
+    );
+    (runner, sciences, treasure, incarnation, unit.pip_id.0)
+}
+
+/// Cast the `{1}` spell after restore and report whether the granted cascade
+/// arrived, plus how many spent units recorded a producer fact.
+fn cast_after_restore_and_read_cascade(state: GameState, sciences: ObjectId) -> (bool, usize) {
+    let mut runner = GameRunner::from_state(state);
+    runner.cast(sciences).commit();
+    let state = runner.state();
+    let granted = state.objects[&sciences]
+        .cast_spell_keywords
+        .iter()
+        .any(|keyword| matches!(keyword, Keyword::Cascade));
+    let recorded = state.spells_cast_this_turn_by_player[&P0]
+        .back()
+        .map(|record| record.mana_source_snapshots().len())
+        .unwrap_or(0);
+    (granted, recorded)
+}
+
+/// CR 106.3 + CR 118.3a: a ledger row keyed to a DIFFERENT pip than the unit being
+/// spent must never supply that unit's source facts — the restore boundary ignores
+/// a row it does not key to the unit, so the payment must ignore it too.
+///
+/// The row here is the save's own, re-stamped with the unstamped sentinel `pip_id:
+/// 0` (the key a save written before the field carries). Admission still succeeds —
+/// a row matching no unit is legacy silence, not a contradiction — so the ONLY thing
+/// standing between that row and the payment is the runtime reader's key.
+///
+/// Two legs, one save apart:
+///   * **stale key** — the row asserts it belongs to no unit. The spent pip has no
+///     ledger fact left, so the Treasure provenance is unprovable and the cascade is
+///     NOT granted. Before the fix the reader matched on `(source, incarnation)` and
+///     spent the row anyway: a row the validator ignores, used at payment.
+///   * **valid key** (the control) — the identical save with the row keyed to the
+///     unit's own pip grants cascade and records the Treasure, so the leg above is
+///     not passing because the board stopped working.
+#[test]
+fn a_ledger_row_keyed_to_another_pip_is_not_spendable() {
+    // The control: the save this build wrote, unmodified.
+    let (runner, sciences, _treasure, _incarnation, _pip) = retained_treasure_pip_board();
+    let control_json = persisted_json(runner.state());
+    let (control_cascade, control_recorded) = cast_after_restore_and_read_cascade(
+        decode_and_admit(control_json).expect("the control save restores"),
+        sciences,
+    );
+    assert!(
+        control_cascade,
+        "control: the retained Treasure pip still grants cascade when its own row is intact"
+    );
+    assert_eq!(
+        control_recorded, 1,
+        "control: the payment recorded the Treasure producer fact for its one unit"
+    );
+
+    // The witness: the same save with the one ledger row re-keyed to pip 0.
+    let (runner, sciences, _treasure, _incarnation, _pip) = retained_treasure_pip_board();
+    let mut json = persisted_json(runner.state());
+    assert_eq!(
+        rekey_pool_producer_facts(&mut json, 0),
+        1,
+        "reach-guard: the save carries exactly the one ledger row under test"
+    );
+    let (stale_cascade, stale_recorded) = cast_after_restore_and_read_cascade(
+        decode_and_admit(json)
+            .expect("a row keyed to no unit is legacy silence, not a contradiction"),
+        sciences,
+    );
+    assert_eq!(
+        stale_recorded, 0,
+        "CR 106.3 + CR 118.3a: a row keyed to pip 0 belongs to no unit, so it must not answer \
+         for the pip that was spent"
+    );
+    assert!(
+        !stale_cascade,
+        "CR 106.3: the stale row must not supply the spent pip's Treasure fact. Granting cascade \
+         here means the payment read a ledger row keyed to another unit"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 2 — a legacy pin-less pool is refused; a pinned pool is admitted and pays
 // ---------------------------------------------------------------------------
 
@@ -536,6 +678,29 @@ fn strip_resolved_rules_journal(json: &mut serde_json::Value) -> bool {
 /// The persisted JSON a save of `state` produces.
 fn persisted_json(state: &GameState) -> serde_json::Value {
     serde_json::to_value(PersistedGameState::capture(state.clone())).expect("the save serializes")
+}
+
+/// Re-key the pool's per-unit producer ledger: every row is re-stamped with
+/// `pip`, the identity the row asserts it belongs to. `0` is the unstamped
+/// sentinel a legacy row carries, and it matches no real unit.
+///
+/// Returns the rows it touched, so a witness can insist the ledger it mutilated
+/// was the one it meant to.
+fn rekey_pool_producer_facts(json: &mut serde_json::Value, pip: u64) -> usize {
+    let Some(rows) = json
+        .get_mut("state")
+        .and_then(|state| state.get_mut("pooled_mana_producer_snapshots"))
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return 0;
+    };
+    for row in rows.iter_mut() {
+        let Some(object) = row.as_object_mut() else {
+            continue;
+        };
+        object.insert("pip_id".to_string(), serde_json::json!(pip));
+    }
+    rows.len()
 }
 
 fn admitted(json: serde_json::Value) -> Result<GameState, PersistedRestoreError> {

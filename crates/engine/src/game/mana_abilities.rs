@@ -25,7 +25,7 @@ use crate::types::mana::{ManaColor, ManaCost, ManaPool, ManaType, PaymentContext
 #[cfg(test)]
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::resolved_commands::RulesExecutionNodeRef;
+use crate::types::resolved_commands::{ManaActivationOccurrence, RulesExecutionNodeRef};
 use crate::types::statics::StaticModeKind;
 use crate::types::zones::Zone;
 use std::collections::HashSet;
@@ -507,12 +507,17 @@ pub(super) fn resolve_mana_ability_excluding(
         .objects
         .get(&source_id)
         .map(|source| source.incarnation);
-    let rules_execution_node = Some(state.begin_activated_mana_journal_node(source_id));
+    let rules_execution_node = state.begin_activated_mana_journal_node(source_id);
+    // CR 605.3b: the occurrence this activation IS, recorded beside the node it
+    // was announced under — the pair restore compares, so this activation can never
+    // be confused with another activation of the same object.
+    let activated_mana_occurrence = ManaActivationOccurrence::of_node(rules_execution_node);
     let pending = PendingManaAbility {
         player,
         source_id,
         ability_index,
-        rules_execution_node,
+        rules_execution_node: Some(rules_execution_node),
+        activated_mana_occurrence,
         ability_snapshot: Some(ability_def.clone()),
         announced_source_incarnation,
         color_override,
@@ -1035,14 +1040,18 @@ pub fn activate_mana_ability(
     // before the inline sub-chain resolves; the source-subject condition gate
     // must read this epoch's exit last-known information instead.
     let announced_source_incarnation = Some(source.incarnation);
-    let rules_execution_node = Some(state.begin_activated_mana_journal_node(source_id));
+    let rules_execution_node = state.begin_activated_mana_journal_node(source_id);
+    // CR 605.3b: the occurrence witness beside the node — see
+    // `resolve_parked_activation_producer`.
+    let activated_mana_occurrence = ManaActivationOccurrence::of_node(rules_execution_node);
     advance_mana_ability_activation(
         state,
         PendingManaAbility {
             player,
             source_id,
             ability_index: Some(ability_index),
-            rules_execution_node,
+            rules_execution_node: Some(rules_execution_node),
+            activated_mana_occurrence,
             ability_snapshot: Some(ability_def.clone()),
             announced_source_incarnation,
             color_override,
@@ -1411,7 +1420,9 @@ pub(crate) fn mana_choice_prompt(
 /// * both present must agree — two epochs for one activation is a save
 ///   contradicting itself, and neither side is preferred;
 /// * a retained node that cannot be this activation's — a triggered-mana node,
-///   or an activated-mana node naming a different object — is a save
+///   an activated-mana node naming a different object, or an activated-mana node
+///   of this same object and epoch that belongs to a DIFFERENT occurrence (an
+///   earlier activation of it, already settled per CR 605.3b) — is a save
 ///   contradicting itself about which settlement this activation is, and is
 ///   refused rather than read as absence
 ///   ([`PendingManaAbility::recorded_producer_node`]);
@@ -1422,6 +1433,11 @@ pub(crate) fn mana_choice_prompt(
 ///   by the activation entry (a direct prompt/production call on a live state, not
 ///   a resume of a saved one), so it resolves from the live object and BOTH writers
 ///   then use that one value.
+///
+/// Whichever answer it reaches, the caller binds `producer.node` AND the
+/// occurrence that node was minted under
+/// (`ManaActivationOccurrence::of_node`) back onto the pending, so the pair a
+/// later restore compares is the pair this resume actually used.
 struct ParkedActivationProducer {
     /// The producing epoch every fact written for this activation is stamped with.
     source: ObjectIncarnationRef,
@@ -4462,6 +4478,13 @@ fn continue_mana_ability_cost_payment(
     // parks: every later resume reads the node it already carries and reuses it.
     pending.announced_source_incarnation = Some(producer.source.incarnation);
     pending.rules_execution_node = Some(producer.node);
+    // CR 605.3b: and the OCCURRENCE besides them. The node reference alone cannot
+    // say which activation it belongs to once it is written into a save (the
+    // object's other activations keep nodes of their own at the same source and
+    // epoch), so the ordinal the node was minted under travels with it. Re-binding
+    // it here — from the node this resume resolved, the only node this activation
+    // may settle under — is what keeps the pair agreeing through every park.
+    pending.activated_mana_occurrence = ManaActivationOccurrence::of_node(producer.node);
     state.with_rules_execution_node(producer.node, |state| {
         continue_mana_ability_cost_payment_in_node(state, pending, cursor, events, cost_event_start)
     })
@@ -12509,6 +12532,7 @@ mod tests {
             source_id: source,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: None,
@@ -12615,6 +12639,7 @@ mod tests {
             announced_source_incarnation: None,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -12826,6 +12851,7 @@ mod tests {
                 source_id: source,
                 ability_index: Some(0),
                 rules_execution_node: None,
+                activated_mana_occurrence: None,
                 ability_snapshot: None,
                 announced_source_incarnation: None,
                 color_override: None,
@@ -13061,6 +13087,7 @@ mod tests {
             source_id: ruins,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: None,
@@ -13169,6 +13196,7 @@ mod tests {
             source_id: ruins,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: None,
@@ -14309,6 +14337,7 @@ mod tests {
             source_id: ruins,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: None,
@@ -15238,6 +15267,7 @@ mod tests {
             announced_source_incarnation: None,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -15685,6 +15715,7 @@ mod tests {
             source_id: brushland,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: None,
@@ -16252,6 +16283,7 @@ mod tests {
             source_id: source,
             ability_index: None,
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: None,
@@ -16327,6 +16359,7 @@ mod tests {
             source_id: altar,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Black)),
@@ -16460,6 +16493,7 @@ mod tests {
             source_id: chain,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
@@ -16528,6 +16562,7 @@ mod tests {
             source_id: chain,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Red)),
@@ -16688,6 +16723,7 @@ mod tests {
             source_id: chain,
             ability_index: Some(0),
             rules_execution_node: None,
+            activated_mana_occurrence: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),

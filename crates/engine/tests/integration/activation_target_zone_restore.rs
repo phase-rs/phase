@@ -229,6 +229,61 @@ fn strip_target_fact_zones(value: &mut serde_json::Value) -> usize {
     walk(value)
 }
 
+/// Remove the announcement zone from every committed target fact of the COMPLETED
+/// SPELL history — `spells_cast_this_turn_by_player` / `spells_cast_this_game_by_player`
+/// — reproducing a save written before `SpellCastRecord`'s facts carried one.
+///
+/// Deliberately narrower than [`strip_target_fact_zones`]: it leaves the pending
+/// carriers and the resolved-rules journal's replay operand byte-identical, so a
+/// refusal can only be about the completed history row.
+fn strip_completed_cast_history_zones(json: &mut serde_json::Value) -> usize {
+    fn strip_records(records: &mut serde_json::Value) -> usize {
+        let Some(records) = records.as_array_mut() else {
+            return 0;
+        };
+        strip_facts_of(records)
+    }
+    fn strip_facts_of(records: &mut [serde_json::Value]) -> usize {
+        let mut stripped = 0;
+        for record in records.iter_mut() {
+            let Some(facts) = record
+                .get_mut("targets")
+                .and_then(serde_json::Value::as_array_mut)
+            else {
+                continue;
+            };
+            for fact in facts.iter_mut() {
+                if let Some(data) = fact
+                    .get_mut("data")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    if data.contains_key("lki") && data.remove("zone").is_some() {
+                        stripped += 1;
+                    }
+                }
+            }
+        }
+        stripped
+    }
+    let mut stripped = 0;
+    for history in [
+        "spells_cast_this_turn_by_player",
+        "spells_cast_this_game_by_player",
+    ] {
+        let Some(by_player) = json
+            .get_mut("state")
+            .and_then(|state| state.get_mut(history))
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            continue;
+        };
+        for records in by_player.values_mut() {
+            stripped += strip_records(records);
+        }
+    }
+    stripped
+}
+
 fn persisted_json(state: &engine::types::game_state::GameState) -> serde_json::Value {
     serde_json::to_value(PersistedGameState::capture(state.clone())).expect("the save serializes")
 }
@@ -459,5 +514,204 @@ fn a_pending_activation_without_a_target_zone_is_refused_at_restore() {
              announcement zone must be refused — `take_activation_record` publishes \
              that record to the turn journal as soon as payment finishes"
         ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CR 115.1 + CR 601.2c + CR 109.2: the same question for a COMPLETED SPELL
+// ---------------------------------------------------------------------------
+
+/// Head of the Class, complete printed Oracle text, both abilities — the card whose
+/// first sentence is the once-per-turn gate this witness measures: "The first spell
+/// you cast during each of your turns that targets a creature costs {W}{B} less to
+/// cast."
+const HEAD_OF_THE_CLASS: &str = "The first spell you cast during each of your turns that targets a creature costs {W}{B} less to cast. This effect reduces only the amount of colored mana you pay.\nRepartee — Whenever you cast an instant or sorcery spell that targets a creature, this creature perpetually gets +1/+1.";
+
+/// Doom Blade — a printed `{1}{B}` instant that targets a creature, so the gate is
+/// measurable as a pool delta: full `{1}{B}` spends 2, the once-per-turn reduction
+/// makes it spend 1.
+const DOOM_BLADE: &str = "Destroy target nonblack creature.";
+
+fn doom_blade_cost() -> engine::types::mana::ManaCost {
+    engine::types::mana::ManaCost::Cost {
+        shards: vec![engine::types::mana::ManaCostShard::Black],
+        generic: 1,
+    }
+}
+
+/// The gate board: Head of the Class, two creature victims (the first is destroyed
+/// by the earlier targeting cast, so the later one still has a legal target), two
+/// Doom Blades in hand, and an empty pool.
+struct GateBoard {
+    runner: GameRunner,
+    blade_a: ObjectId,
+    blade_b: ObjectId,
+    victim_a: ObjectId,
+    victim_b: ObjectId,
+}
+
+fn gate_board() -> GateBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Head of the Class", 2, 2, HEAD_OF_THE_CLASS);
+    let victim_a = scenario.add_vanilla(P0, 1, 1);
+    let victim_b = scenario.add_vanilla(P0, 1, 1);
+    let blade_a = scenario
+        .add_spell_to_hand_from_oracle(P0, "Doom Blade", false, DOOM_BLADE)
+        .with_mana_cost(doom_blade_cost())
+        .id();
+    let blade_b = scenario
+        .add_spell_to_hand_from_oracle(P0, "Doom Blade", false, DOOM_BLADE)
+        .with_mana_cost(doom_blade_cost())
+        .id();
+    GateBoard {
+        runner: scenario.build(),
+        blade_a,
+        blade_b,
+        victim_a,
+        victim_b,
+    }
+}
+
+/// Fill the pool the way the sibling gate suite does: two black and four colorless.
+fn fill_gate_pool(runner: &mut GameRunner) {
+    let state = runner.state_mut();
+    for mana in [
+        engine::types::mana::ManaType::Black,
+        engine::types::mana::ManaType::Black,
+        engine::types::mana::ManaType::Colorless,
+        engine::types::mana::ManaType::Colorless,
+        engine::types::mana::ManaType::Colorless,
+        engine::types::mana::ManaType::Colorless,
+    ] {
+        state.players[P0.0 as usize]
+            .mana_pool
+            .add(engine::types::mana::ManaUnit::new(
+                mana,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+    }
+}
+
+/// Cast `spell` at `victim` and report the mana actually spent, which is how
+/// Head of the Class's reduction is observable.
+fn cast_and_measure(runner: &mut GameRunner, spell: ObjectId, victim: ObjectId) -> usize {
+    let before = runner.state().players[P0.0 as usize].mana_pool.total();
+    runner.cast(spell).target_objects(&[victim]).resolve();
+    before - runner.state().players[P0.0 as usize].mana_pool.total()
+}
+
+/// CR 115.1 + CR 601.2c + CR 109.2: a COMPLETED cast's recorded target facts are
+/// read by the same "targets a creature" gate an activation's are, so a save whose
+/// completed record states a target but no announcement ZONE must be refused — not
+/// admitted as an unreadable fact.
+///
+/// The consequence is what makes it a blocker rather than a tidiness complaint. The
+/// stage this replaces asked only whether the LIST existed
+/// (`reject_unknown_cast_history_provenance`). A list with an object target whose
+/// zone is `Unknown` reaches `filter::declared_target_fact_matches`, where a bare
+/// "targets a creature" carries `InZone { Battlefield }` (CR 109.2) and an
+/// unanswerable zone axis answers `false`. The record then reads as "did not
+/// qualify", the gate's zero-count comparison is satisfied a second time, and the
+/// turn's NEXT creature-targeting spell is handed the same once-per-turn reduction
+/// again.
+///
+/// So the witness measures it: if this save is admitted, the second Doom Blade pays
+/// 1 instead of 2 — the failure message reports the number instead of merely
+/// complaining that admission succeeded.
+#[test]
+fn a_completed_spell_without_a_target_zone_is_refused_at_restore() {
+    let mut board = gate_board();
+    fill_gate_pool(&mut board.runner);
+    let first = cast_and_measure(&mut board.runner, board.blade_a, board.victim_a);
+    assert_eq!(
+        first, 1,
+        "reach-guard: the turn's first creature-targeting spell receives the once-per-turn \
+         reduction and pays the reduced {{1}}"
+    );
+    // The completed cast is now in the turn history, with its committed target fact.
+    {
+        let state = board.runner.state();
+        let record = state.spells_cast_this_turn_by_player[&P0]
+            .back()
+            .expect("the completed cast is recorded");
+        let targets = record
+            .targets
+            .as_deref()
+            .expect("reach: the record states its declared targets");
+        let ActivationTargetFact::Object { id, zone, .. } = &targets[0] else {
+            panic!("the committed target is an object fact: {targets:?}");
+        };
+        assert_eq!(*id, board.victim_a);
+        assert_eq!(
+            *zone,
+            AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
+            "reach: the completed record carries the battlefield announcement"
+        );
+    }
+
+    // The control: the save this build wrote is admitted, and the restored ordinal
+    // counts the earlier cast, so the second targeting spell pays FULL price.
+    let control = admitted(persisted_json(board.runner.state()))
+        .expect("a current-format completed-cast history must stay admitted");
+    let mut control_board = GateBoard {
+        runner: GameRunner::from_state(control),
+        blade_a: board.blade_a,
+        blade_b: board.blade_b,
+        victim_a: board.victim_a,
+        victim_b: board.victim_b,
+    };
+    fill_gate_pool(&mut control_board.runner);
+    let second = cast_and_measure(
+        &mut control_board.runner,
+        control_board.blade_b,
+        control_board.victim_b,
+    );
+    assert_eq!(
+        second, 2,
+        "CR 115.9: the restored history still counts the earlier creature-targeting cast, so the \
+         turn's reduction is NOT granted twice — the second one pays full {{1}}{{B}}"
+    );
+
+    // The witness: the same save, with the COMPLETED history row's committed target
+    // facts stripped of their zone (nothing else in the payload is touched).
+    let mut legacy = persisted_json(board.runner.state());
+    assert_eq!(
+        strip_completed_cast_history_zones(&mut legacy),
+        2,
+        "reach-guard: one completed cast, recorded once in the turn history and once in the game \
+         history — both committed target facts lose their zone"
+    );
+    match admitted(legacy) {
+        Err(PersistedRestoreError::UnknownAnnouncedTargetZone { owner, target }) => {
+            assert_eq!(
+                owner,
+                Some(board.blade_a),
+                "the refusal names the spell whose record cannot be read"
+            );
+            assert_eq!(target, board.victim_a);
+        }
+        Err(other) => panic!("expected an unknown-target-zone refusal, got {other:?}"),
+        Ok(state) => {
+            // Only reachable with the guard missing: measure the consequence so the
+            // failure names it rather than only reporting the admission.
+            let mut probe = GateBoard {
+                runner: GameRunner::from_state(state),
+                blade_a: board.blade_a,
+                blade_b: board.blade_b,
+                victim_a: board.victim_a,
+                victim_b: board.victim_b,
+            };
+            fill_gate_pool(&mut probe.runner);
+            let spent = cast_and_measure(&mut probe.runner, probe.blade_b, probe.victim_b);
+            panic!(
+                "CR 115.1 + CR 601.2c + CR 109.2: a COMPLETED cast whose target list exists but \
+                 states no announcement zone must be refused. Admitted, the unreadable fact fails \
+                 the creature qualifier, the gate counts zero, and the turn's reduction is granted \
+                 a second time: the next targeting spell paid {spent}, expected 2"
+            );
+        }
     }
 }

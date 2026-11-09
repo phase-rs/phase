@@ -6,6 +6,7 @@ use engine::types::ability::{
     TypedFilter,
 };
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
 use engine::types::game_state::{
     CastPaymentMode, GameState, ManaChoice, ManaChoiceContext, ManaChoicePrompt,
     ParkedActivationNodeConflict, PayCostKind, PendingCostMoveResume, PendingManaAbility,
@@ -1093,16 +1094,6 @@ fn petal_prompt_with_no_producer_evidence_is_refused() {
 const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
 /// Leyline of the Void, verbatim (Scryfall, exact name).
 const LEYLINE_OF_THE_VOID: &str = "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.";
-/// Synthetic companion on the REAL Lotus Petal (its activated line is verbatim):
-/// a `TapsForMana` triggered mana ability. Kinnan, Bonder Prodigy's shape —
-/// "Whenever you tap a nonland permanent for mana, add one mana of any type that
-/// permanent produced" — this ability belongs to the permanent it is printed on
-/// while firing from another permanent being tapped, so its `TriggeredMana`
-/// settlement node names the PRINTED object and that object's own epoch. The
-/// witness below therefore parks an activation of the trigger's own permanent
-/// while the journal retains the triggered node for the same object and epoch.
-const TAPPED_FOR_MANA_TRIGGER: &str =
-    "Whenever you tap an artifact for mana, add an additional {C}.";
 
 /// Every retained `ActivatedMana` settlement node naming this exact object
 /// epoch — the nodes one activation may legitimately own at most one of.
@@ -1122,6 +1113,21 @@ fn activated_mana_nodes(
         })
         .map(|node| node.identity)
         .collect()
+}
+
+/// The mana pips this one settlement node recorded as produced — the record a
+/// second settlement must not add to.
+fn node_produced_pips(
+    state: &GameState,
+    node: RulesExecutionNodeRef,
+) -> Vec<engine::types::mana::ManaPipId> {
+    state
+        .resolved_rules_journal
+        .nodes()
+        .iter()
+        .find(|candidate| candidate.identity == node)
+        .map(|candidate| candidate.produced_pips.clone())
+        .unwrap_or_default()
 }
 
 /// Every retained `TriggeredMana` settlement node naming this exact object
@@ -1333,15 +1339,38 @@ fn replacement_pause_round_trip_keeps_one_settlement_node_for_the_activation() {
 /// a TRIGGERED-mana node for the same source and epoch settles a different
 /// ability. The reference contradicts the activation, so restore refuses it
 /// instead of reading an epoch out of it.
+///
+/// The board is the two PRINTED cards that make this shape real rather than
+/// synthetic:
+///
+/// * **Kinnan, Bonder Prodigy** — "Whenever you tap a nonland permanent for mana,
+///   add one mana of any type that permanent produced." A triggered MANA ability
+///   (CR 605.1b: it triggers from the activation of an activated mana ability), so
+///   it settles under a `TriggeredMana` node that names KINNAN — the object whose
+///   ability triggered (CR 113.7) — and his epoch.
+/// * **Enduring Vitality** — "Creatures you control have \"{T}: Add one mana of
+///   any color.\"" The grant is what gives KINNAN an activated mana ability, so
+///   the parked activation is announced by the same object and incarnation the
+///   triggered node already names. That same-source, same-incarnation pair is the
+///   whole point: only the node's KIND tells them apart.
+const KINNAN_BONDER_PRODIGY: &str = "Whenever you tap a nonland permanent for mana, add one mana of any type that permanent produced.\n{5}{G}{U}: Look at the top five cards of your library. You may put a non-Human creature card from among them onto the battlefield. Put the rest on the bottom of your library in a random order.";
+const ENDURING_VITALITY: &str = "Vigilance\nCreatures you control have \"{T}: Add one mana of any color.\"\nWhen Enduring Vitality dies, if it was a creature, return it to the battlefield under its owner's control. It's an enchantment. (It's not a creature.)";
+
 #[test]
 fn parked_activation_naming_a_triggered_mana_node_is_refused_at_restore() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    // The trigger lives on the SECOND Petal (Kinnan's shape: a permanent you
-    // control taps for mana, and THIS object's triggered mana ability settles
-    // under its own node). The first Petal's tap fires it, so the node it opens
-    // names the second Petal's object and epoch — the exact tuple the second
-    // Petal's own activation later announces with.
+    // Kinnan: the printed trigger's home, and (through Enduring Vitality's grant)
+    // the source of the activation that parks. Both settle against ONE object and
+    // ONE incarnation — the pair a save cannot distinguish on its own.
+    let kinnan = scenario
+        .add_creature_from_oracle(P0, "Kinnan, Bonder Prodigy", 2, 2, KINNAN_BONDER_PRODIGY)
+        .id();
+    // Enduring Vitality is an Enchantment Creature; the grant is its second line.
+    let vitality = scenario
+        .add_creature_from_oracle(P0, "Enduring Vitality", 3, 3, ENDURING_VITALITY)
+        .id();
+    // A nonland permanent to tap for mana, which is what fires Kinnan's trigger.
     let tapped = scenario
         .add_artifact_from_oracle(
             P0,
@@ -1349,49 +1378,49 @@ fn parked_activation_naming_a_triggered_mana_node_is_refused_at_restore() {
             "{T}, Sacrifice this artifact: Add one mana of any color.",
         )
         .id();
-    let triggered_petal = scenario
-        .add_artifact_from_oracle(
-            P0,
-            "Lotus Petal",
-            &format!(
-                "{}\n{}",
-                "{T}, Sacrifice this artifact: Add one mana of any color.", TAPPED_FOR_MANA_TRIGGER
-            ),
-        )
-        .id();
     let mut runner = scenario.build();
-    let announced = runner.state().objects[&triggered_petal].incarnation;
+    // Enduring Vitality is an Enchantment Creature; the scenario constructors add
+    // one core type each, so state the printed pair rather than a stand-in.
+    {
+        let obj = runner.state_mut().objects.get_mut(&vitality).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.base_card_types = obj.card_types.clone();
+    }
+    let announced = runner.state().objects[&kinnan].incarnation;
 
-    // CR 605.3a: a mana ability is activated at priority. The first Petal's
-    // production taps it for mana, which fires the second Petal's trigger.
+    // CR 605.3a: a mana ability is activated at priority. Tapping the Petal for
+    // mana is what Kinnan's trigger fires on, and the trigger belongs to KINNAN.
     runner
         .act(GameAction::ActivateAbility {
             source_id: tapped,
             ability_index: 0,
             payment_mode: CastPaymentMode::Auto,
         })
-        .expect("the first Petal activates");
+        .expect("the Petal activates");
     let mut runner = choose_blue(runner);
-    let source = ObjectIncarnationRef::of(triggered_petal, announced);
+    let source = ObjectIncarnationRef::of(kinnan, announced);
     let triggered = triggered_mana_nodes(runner.state(), source);
     assert_eq!(
         triggered.len(),
         1,
-        "reach-guard: the tapped-for-mana trigger settled under ONE TriggeredMana node \
-         naming this exact object and epoch, got {triggered:?}"
+        "reach-guard: Kinnan's tapped-for-mana trigger settled under ONE TriggeredMana node \
+         naming Kinnan's own object and epoch, got {triggered:?}"
     );
 
-    // The second Petal parks at its own colour prompt with its own activated node.
-    let park = |runner: &mut GameRunner| {
-        runner
-            .act(GameAction::ActivateAbility {
-                source_id: triggered_petal,
-                ability_index: 0,
-                payment_mode: CastPaymentMode::Auto,
-            })
-            .expect("the second Petal activates and parks at its colour choice");
-    };
-    park(&mut runner);
+    // Kinnan's GRANTED activation (Enduring Vitality's "{T}: Add one mana of any
+    // color.") parks at its colour prompt with its own activated node.
+    let granted = runner.state().objects[&kinnan]
+        .abilities
+        .iter()
+        .position(|ability| matches!(*ability.effect, Effect::Mana { .. }))
+        .expect("reach-guard: Enduring Vitality granted Kinnan an activated mana ability");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: kinnan,
+            ability_index: granted,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Kinnan's granted mana ability activates and parks at its colour choice");
     assert!(
         matches!(
             runner.state().waiting_for,
@@ -1406,6 +1435,11 @@ fn parked_activation_naming_a_triggered_mana_node_is_refused_at_restore() {
     assert_ne!(
         activated, triggered[0],
         "the triggered node is a different settlement"
+    );
+    assert!(
+        activated_mana_nodes(runner.state(), source).contains(&activated),
+        "reach-guard: the parked activation's node is an ACTIVATED node of this very object \
+         and epoch — the same source and incarnation the triggered node names"
     );
 
     let mut json = persisted_json(runner.state());
@@ -1426,7 +1460,7 @@ fn parked_activation_naming_a_triggered_mana_node_is_refused_at_restore() {
             source_id,
             reason: ParkedActivationNodeConflict::NotAnActivatedManaNode { node },
         } => {
-            assert_eq!(*source_id, triggered_petal);
+            assert_eq!(*source_id, kinnan);
             assert_eq!(*node, triggered[0]);
         }
         other => panic!(
@@ -1516,6 +1550,198 @@ fn parked_activation_naming_another_object_s_activated_node_is_refused_at_restor
              not converted to absence, got {other:?}"
         ),
     }
+}
+
+/// CR 605.3b: Prismite — "{2}: Add one mana of any color." A creature that can be
+/// activated TWICE in one incarnation, which is the shape no source/epoch test can
+/// tell apart: activation 1 and activation 2 name the same object and the same
+/// epoch, and each opens its own `ActivatedMana` node.
+///
+/// A save parked at activation 2's colour prompt states that occurrence beside the
+/// node it belongs to. Pointing the node at activation 1's node — retained, of the
+/// same source, of the same epoch — used to be accepted (the validator asked only
+/// whether the node was an activated-mana node of that source), the second
+/// activation re-entered the first's FINISHED node, and its settlement was written
+/// into it. CR 605.3b resolves a mana ability immediately after it is activated, so
+/// that node is done: the pair contradicting itself is refused.
+///
+/// The control is the same save untouched: it restores, produces one pip under
+/// activation 2's own node, and leaves activation 1's node with exactly its own
+/// pip.
+const PRISMITE: &str = "{2}: Add one mana of any color.";
+
+/// Prismite's first activation completed; the second is parked at its colour
+/// prompt. Returns the runner, the source's identity, and activation 1's node.
+fn prismite_second_activation_parked() -> (GameRunner, ObjectIncarnationRef, RulesExecutionNodeRef)
+{
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let prismite = scenario
+        .add_artifact_from_oracle(P0, "Prismite", PRISMITE)
+        .id();
+    // Four colorless: {2} for each activation.
+    scenario.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| {
+                engine::types::mana::ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![])
+            })
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    let announced = runner.state().objects[&prismite].incarnation;
+    let source = ObjectIncarnationRef::of(prismite, announced);
+
+    let activate = |runner: &mut GameRunner| {
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: prismite,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("Prismite activates and parks at its colour choice");
+    };
+
+    // Activation 1 completes and settles under its own node.
+    activate(&mut runner);
+    let mut runner = choose_blue(runner);
+    let first = activated_mana_nodes(runner.state(), source);
+    assert_eq!(
+        first.len(),
+        1,
+        "reach-guard: activation 1 settled under exactly one activated-mana node, got {first:?}"
+    );
+    assert_eq!(
+        node_produced_pips(runner.state(), first[0]).len(),
+        1,
+        "reach-guard: activation 1's node recorded the pip it produced"
+    );
+
+    // Activation 2 parks. It opens a SECOND node of the same source and epoch.
+    activate(&mut runner);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseManaColor { .. }
+        ),
+        "activation 2 parks at its colour prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    let parked = parked_colour_pending(runner.state());
+    let second = parked
+        .rules_execution_node
+        .expect("activation 2 carries its own node");
+    assert_eq!(
+        parked
+            .activated_mana_occurrence
+            .map(|occurrence| occurrence.ordinal()),
+        match second {
+            RulesExecutionNodeRef::ActivatedMana(ordinal) => Some(ordinal),
+            _ => None,
+        },
+        "reach-guard: the parked activation states the occurrence its own node was minted under"
+    );
+    let all = activated_mana_nodes(runner.state(), source);
+    assert_eq!(
+        all.len(),
+        2,
+        "reach-guard: TWO activations of one object and epoch, so two activated-mana nodes — \
+         {all:?}"
+    );
+    assert_ne!(second, first[0], "the two activations are different nodes");
+    (runner, source, first[0])
+}
+
+#[test]
+fn parked_activation_pointing_at_an_earlier_activation_s_node_is_refused() {
+    let (runner, source, first_node) = prismite_second_activation_parked();
+    let own = parked_colour_pending(runner.state())
+        .rules_execution_node
+        .expect("activation 2 carries its own node");
+    let RulesExecutionNodeRef::ActivatedMana(own_ordinal) = own else {
+        panic!("reach-guard: the parked activation's node is an activated-mana node");
+    };
+    assert_eq!(
+        node_produced_pips(runner.state(), first_node).len(),
+        1,
+        "reach-guard: activation 1's node already settled its own pip"
+    );
+    assert!(
+        node_produced_pips(runner.state(), own).is_empty(),
+        "reach-guard: activation 2's node has settled nothing yet — it is parked before production"
+    );
+
+    let mut json = persisted_json(runner.state());
+    let pending = saved_pending_mut(&mut json);
+    assert_eq!(
+        pending.get("announced_source_incarnation"),
+        Some(&serde_json::json!(source.incarnation)),
+        "reach-guard: the save carries the epoch both activations share"
+    );
+    assert!(
+        pending.contains_key("activated_mana_occurrence"),
+        "reach-guard: the save states the occurrence beside the node"
+    );
+    pending.insert(
+        "rules_execution_node".to_string(),
+        serde_json::to_value(first_node).expect("the node identity serializes"),
+    );
+
+    let refusal = admission_refusal(json);
+    match &refusal {
+        PersistedRestoreError::ContradictoryParkedActivationNode {
+            source_id,
+            reason: ParkedActivationNodeConflict::ForeignOccurrence { node, occurrence },
+        } => {
+            assert_eq!(*source_id, source.object_id);
+            assert_eq!(*node, first_node, "the save points at activation 1's node");
+            assert_eq!(
+                occurrence.ordinal(),
+                own_ordinal,
+                "and states activation 2's own occurrence — so the two disagree"
+            );
+        }
+        other => panic!(
+            "CR 605.3b: an activated node of the same source and epoch that belongs to an EARLIER \
+             activation must be refused as a different occurrence, got {other:?}"
+        ),
+    }
+}
+
+/// The intact control for the refusal above: the save this build wrote restores,
+/// produces ONE pip under activation 2's own node, and leaves activation 1's node
+/// with the one pip it already had.
+#[test]
+fn intact_second_activation_prompt_restores_and_settles_under_its_own_node() {
+    let (runner, source, first_node) = prismite_second_activation_parked();
+    let own = parked_colour_pending(runner.state())
+        .rules_execution_node
+        .expect("activation 2 carries its own node");
+    let json = persisted_json(runner.state());
+
+    let mut runner = GameRunner::from_state(admitted(json).expect("the intact save restores"));
+    assert_eq!(
+        node_produced_pips(runner.state(), first_node).len(),
+        1,
+        "the restored save still holds activation 1's node with its own pip"
+    );
+    runner = choose_blue(runner);
+    assert_eq!(
+        node_produced_pips(runner.state(), own).len(),
+        1,
+        "activation 2's settlement landed in activation 2's node"
+    );
+    assert_eq!(
+        node_produced_pips(runner.state(), first_node).len(),
+        1,
+        "CR 605.3b: and NOT in activation 1's finished node, which the earlier activation \
+         already settled"
+    );
+    assert_eq!(
+        activated_mana_nodes(runner.state(), source).len(),
+        2,
+        "two activations, two nodes: the resume opened none"
+    );
 }
 
 /// CR 605.3b + CR 602.2a: the control for both refusals. A save that records NO
