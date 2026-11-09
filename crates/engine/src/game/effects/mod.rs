@@ -1460,10 +1460,12 @@ pub(crate) fn settle_empty_forwarded_zone_result(state: &mut GameState, producer
 
 /// Resumes ready continuations and restores the caller's trigger context.
 ///
-/// Only writes by the die-instruction publisher survive context restoration:
+/// Only writes by the die-instruction publisher survive successful scope restoration:
 /// survivor values, completed aggregates and explicit clears. Nested drains
 /// propagate their latest publication, or retain the enclosing publication when
-/// they do not write. Numeric Attraction events and context replay are not writes.
+/// they do not write. A failed body or tail discards the scope's publication and
+/// restores the caller's entry die scalar and enclosing publication. Numeric
+/// Attraction events and context replay are not writes.
 pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 601.2h + CR 605.3b + CR 608.2c: a parked counter-cost root whose
     // replacement subtree has retired resumes before any further resolution
@@ -1632,6 +1634,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         // CR 608.2: replay the resolving ability's snapshotted trigger
         // context so TargetFilter::TriggeringPlayer (and its siblings)
         // resolve against the original trigger, not whatever is live now.
+        let entry_die_result = state.die_result_this_resolution;
         let trigger_snapshot = trigger_context
             .as_ref()
             .map(|ctx| super::triggers::push_resolving_trigger_context(state, ctx));
@@ -1647,6 +1650,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         }
         let enclosing_die_publication = state.die_result_publication.take();
         let mut chain_progress = None;
+        let mut execution_failed = false;
         if !player_scope_queue_end {
             if bound_result_is_empty(&chain)
                 && ability_chain_depends_on_missing_forward_result(&chain)
@@ -1657,12 +1661,16 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                         chain.context.forwarded_result_context.clone();
                     // CR 603.10 + CR 608.2c: the choice-driven instruction just completed; its entries are observed before the resumed chain runs.
                     settle_entries_before_instruction(state, events, &remaining, None);
-                    chain_progress = resolve_ability_chain_step(state, &remaining, events, 1).ok();
+                    chain_progress = resolve_ability_chain_step(state, &remaining, events, 1)
+                        .inspect_err(|_| execution_failed = true)
+                        .ok();
                 }
             } else {
                 // CR 603.10 + CR 608.2c: the choice-driven instruction just completed; its entries are observed before the resumed chain runs.
                 settle_entries_before_instruction(state, events, &chain, None);
-                chain_progress = resolve_ability_chain_step(state, &chain, events, 1).ok();
+                chain_progress = resolve_ability_chain_step(state, &chain, events, 1)
+                    .inspect_err(|_| execution_failed = true)
+                    .ok();
             }
         }
         if let Some(source_id) = state
@@ -1705,6 +1713,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                     events,
                     1,
                 )
+                .inspect_err(|_| execution_failed = true)
                 .ok();
             }
         }
@@ -1715,13 +1724,14 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         // the ability's own instruction determines how multiple dice are used.
         // Actual writer authority, not event kind or scalar inequality, determines
         // ownership. An Attraction can emit a numeric die without publishing.
-        let published_die = state.die_result_publication.take();
+        let published_die = state
+            .die_result_publication
+            .take()
+            .filter(|_| !execution_failed);
         if let Some(snapshot) = trigger_snapshot {
             super::triggers::restore_trigger_event_context(state, snapshot);
         }
-        if let Some(value) = published_die {
-            state.die_result_this_resolution = value;
-        }
+        state.die_result_this_resolution = published_die.unwrap_or(entry_die_result);
         state.die_result_publication = published_die.or(enclosing_die_publication);
         if let Some(kind) = parent_kind {
             events.push(GameEvent::EffectResolved {
