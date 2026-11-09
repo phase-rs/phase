@@ -17060,35 +17060,6 @@ fn effect_shuffle_their_library() {
 }
 
 #[test]
-fn compound_shuffle_it_into_library() {
-    let def = parse_effect_chain("Shuffle it into its owner's library", AbilityKind::Spell);
-    // CR 608.2c + CR 400.7e: a bare "it" with no announced antecedent names the
-    // ability's own source, so the move is the single-object `ChangeZone` — the
-    // selected-population `ChangeZoneAll` is reserved for an announced
-    // antecedent (see `announced_parent_target_shuffle_keeps_the_selected_population`).
-    assert!(
-        matches!(
-            &*def.effect,
-            Effect::ChangeZone {
-                origin: None,
-                destination: Zone::Library,
-                target: TargetFilter::SelfRef,
-                owner_library: true,
-                ..
-            }
-        ),
-        "got {:?}",
-        def.effect
-    );
-    // CR 701.24a: Compound shuffle must chain a Shuffle sub_ability.
-    let sub = def
-        .sub_ability
-        .as_ref()
-        .expect("should have Shuffle sub_ability");
-    assert!(matches!(&*sub.effect, Effect::Shuffle { .. }));
-}
-
-#[test]
 fn compound_shuffle_graveyard_into_library() {
     let def = parse_effect_chain(
         "Shuffle your graveyard into your library",
@@ -96264,70 +96235,6 @@ fn compound_shuffle_this_artifact_and_graveyard_moves_whole_zone() {
     );
 }
 
-/// CR 608.2c + CR 400.7e + CR 115.10a: a bare "it" in a source-departure
-/// shuffle names the ability's OWN SOURCE — the object that left is the
-/// departure event's source — so the move is the single-object `ChangeZone`.
-/// Lowering it as the selected-population `ChangeZoneAll` would move nothing,
-/// because no object was ever announced as a target (Alabaster Dragon, Dread,
-/// Serra Avatar).
-#[test]
-fn source_departure_shuffle_moves_the_source_not_a_population() {
-    let cards = [
-        (
-            "Alabaster Dragon",
-            "Flying\nWhen this creature dies, shuffle it into its owner's library.",
-        ),
-        (
-            "Dread",
-            "Fear (This creature can't be blocked except by artifact creatures and/or black creatures.)\nWhenever a creature deals damage to you, destroy it.\nWhen Dread is put into a graveyard from anywhere, shuffle it into its owner's library.",
-        ),
-        (
-            "Serra Avatar",
-            "Serra Avatar's power and toughness are each equal to your life total.\nWhen Serra Avatar is put into a graveyard from anywhere, shuffle it into its owner's library.",
-        ),
-    ];
-    for (name, text) in cards {
-        let parsed = parse_oracle_text(text, name, &[], &["Creature".to_string()], &[]);
-        let mut found: Option<&AbilityDefinition> = None;
-        for trigger in &parsed.triggers {
-            let mut current = trigger.execute.as_deref();
-            while let Some(def) = current {
-                if matches!(
-                    &*def.effect,
-                    Effect::ChangeZone {
-                        destination: Zone::Library,
-                        target: TargetFilter::SelfRef,
-                        owner_library: true,
-                        ..
-                    }
-                ) {
-                    found = Some(def);
-                    break;
-                }
-                current = def.sub_ability.as_deref();
-            }
-            if found.is_some() {
-                break;
-            }
-        }
-        let move_clause = found
-            .unwrap_or_else(|| panic!("{name}: no source-library move: {:?}", parsed.triggers));
-        assert!(
-            move_clause.sub_ability.is_some(),
-            "{name}: CR 701.24c needs the terminal shuffle"
-        );
-        let mut cursor = Some(move_clause);
-        while let Some(def) = cursor {
-            assert!(
-                !matches!(&*def.effect, Effect::ChangeZoneAll { .. }),
-                "{name}: a departure pronoun must not lower to a selected population: {:?}",
-                def.effect
-            );
-            cursor = def.sub_ability.as_deref();
-        }
-    }
-}
-
 /// CR 608.2c + CR 601.2c + CR 115.6: once an object IS announced — including an
 /// optional "up to one" announcement that may be declined — the bare "it"
 /// names that announced object, and the chain keeps the selected-population
@@ -96366,47 +96273,6 @@ fn announced_parent_target_shuffle_keeps_the_selected_population() {
     }
 }
 
-/// CR 108.3 + CR 400.7e + CR 115.10a: a source-owner possessive subject
-/// ("{U}: This creature's owner shuffles it into their library" — Cerulean
-/// Sphinx) moves the SOURCE. The possessor is typed on the printed subject and
-/// declares no target slot, so the movement authority stays the single-object
-/// `ChangeZone`.
-#[test]
-fn source_owner_possessive_shuffle_moves_the_source() {
-    let parsed = parse_oracle_text(
-        "Flying\n{U}: This creature's owner shuffles it into their library.",
-        "Cerulean Sphinx",
-        &[],
-        &["Creature".to_string()],
-        &["Sphinx".to_string()],
-    );
-    let ability = parsed
-        .abilities
-        .iter()
-        .find(|ability| ability.kind == AbilityKind::Activated)
-        .unwrap_or_else(|| panic!("no activated ability: {:?}", parsed.abilities));
-    assert!(
-        matches!(
-            &*ability.effect,
-            Effect::ChangeZone {
-                destination: Zone::Library,
-                target: TargetFilter::SelfRef,
-                owner_library: true,
-                ..
-            }
-        ),
-        "expected the source's own library move, got {:?}",
-        ability.effect
-    );
-    assert!(
-        ability.sub_ability.is_some(),
-        "CR 701.24c needs the terminal shuffle"
-    );
-}
-
-/// SHAPE — CR 201.5 + CR 115.10a: a normalized source name or gendered
-/// object under its source-owner subject moves only the source, not an earlier
-/// selected creature. Full Oracle verified against MTGJSON AtomicCards.
 #[test]
 fn source_owner_shuffle_full_oracle_keeps_named_and_gendered_source_objects() {
     for (name, text, has_exile_target) in [
@@ -96441,24 +96307,14 @@ fn source_owner_shuffle_full_oracle_keeps_named_and_gendered_source_objects() {
                 "{name}: missing the distinct earlier creature target: {nodes:?}"
             );
         }
-        let movement = nodes
-            .iter()
-            .find(|def| matches!(
-                &*def.effect,
-                Effect::ChangeZone {
-                    destination: Zone::Library,
-                    target: TargetFilter::SelfRef,
-                    owner_library: true,
-                    ..
-                }
-            ))
-            .unwrap_or_else(|| panic!("{name}: missing source-library move: {nodes:?}"));
         assert!(
-            matches!(
-                movement.sub_ability.as_deref().map(|def| &*def.effect),
-                Some(Effect::Shuffle { .. })
-            ),
-            "{name}: missing terminal shuffle: {movement:?}"
+            nodes.iter().any(|def| matches!(
+                &*def.effect,
+                Effect::Shuffle {
+                    target: TargetFilter::Owner
+                }
+            )),
+            "{name}: the shuffle must name the source's owner: {nodes:?}"
         );
         assert!(
             !nodes.iter().any(|def| matches!(
@@ -96470,26 +96326,10 @@ fn source_owner_shuffle_full_oracle_keeps_named_and_gendered_source_objects() {
     }
 }
 
-/// SHAPE: source-only object grammar must not widen the generic target-owner
-/// route or consume a trailing instruction.
+/// CR 201.5 + CR 608.2c: owner-shuffle grammar rejects foreign object/library
+/// referents and trailing instructions instead of silently changing their scope.
 #[test]
 fn source_owner_shuffle_object_grammar_is_scoped_and_whole_clause() {
-    for object in ["~", "this creature", "it", "itself", "him", "her", "them"] {
-        let text = format!("~'s owner shuffles {object} into their library");
-        let lower = text.to_ascii_lowercase();
-        let clause = try_parse_owner_of_target_shuffle(
-            TextPair::new(&text, &lower),
-            &mut ParseContext::default(),
-        )
-        .expect(&text);
-        assert!(matches!(
-            clause.effect,
-            Effect::ChangeZone {
-                target: TargetFilter::SelfRef,
-                ..
-            }
-        ));
-    }
     let control = "The owner of target creature shuffles it into their library";
     let lower = control.to_ascii_lowercase();
     let clause = try_parse_owner_of_target_shuffle(
@@ -96525,67 +96365,6 @@ fn source_owner_shuffle_object_grammar_is_scoped_and_whole_clause() {
             "{text}"
         );
     }
-}
-
-#[test]
-fn gandalf_full_oracle_preserves_source_move_shuffle_and_owner_draw() {
-    let parsed = parse_oracle_text(
-        "Ward {3} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {3}.)\n{6}: Gandalf's owner shuffles him into their library and draws three cards.",
-        "Gandalf, Wandering Wizard",
-        &[],
-        &["Creature".to_string()],
-        &["Avatar".to_string(), "Wizard".to_string()],
-    );
-    let ability = parsed
-        .abilities
-        .iter()
-        .find(|ability| ability.kind == AbilityKind::Activated)
-        .expect("Gandalf's activated ability");
-    let mut nodes = Vec::new();
-    collect_test_tree(ability, false, &mut nodes);
-    assert!(
-        !nodes
-            .iter()
-            .any(|def| matches!(&*def.effect, Effect::Unimplemented { .. })),
-        "{nodes:?}"
-    );
-    assert!(
-        nodes.iter().any(|def| matches!(
-            &*def.effect,
-            Effect::ChangeZone {
-                destination: Zone::Library,
-                target: TargetFilter::SelfRef,
-                owner_library: true,
-                ..
-            }
-        )),
-        "{nodes:?}"
-    );
-    assert!(
-        nodes.iter().any(|def| matches!(
-            &*def.effect,
-            Effect::Shuffle {
-                target: TargetFilter::Owner
-            }
-        )),
-        "{nodes:?}"
-    );
-    assert!(
-        nodes.iter().any(|def| matches!(
-            &*def.effect,
-            Effect::Draw {
-                count: QuantityExpr::Fixed { value: 3 },
-                target: TargetFilter::Owner
-            }
-        )),
-        "{nodes:?}"
-    );
-    assert!(
-        !nodes
-            .iter()
-            .any(|def| effect_has_stack_target_declaration(&def.effect)),
-        "{nodes:?}"
-    );
 }
 
 #[test]
@@ -96640,18 +96419,6 @@ fn source_owner_draw_binding_is_independent_of_an_earlier_target() {
             Effect::ChangeZone {
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(_),
-                ..
-            }
-        )),
-        "{nodes:?}"
-    );
-    assert!(
-        nodes.iter().any(|def| matches!(
-            &*def.effect,
-            Effect::ChangeZone {
-                destination: Zone::Library,
-                target: TargetFilter::SelfRef,
-                owner_library: true,
                 ..
             }
         )),

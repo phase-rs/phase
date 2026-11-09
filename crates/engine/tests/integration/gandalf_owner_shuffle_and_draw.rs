@@ -167,7 +167,7 @@ fn unavailable_stolen_gandalf_still_shuffles_once_before_its_owner_draws() {
     // Its controller responds to their own ability, so Ward is not involved.
     let outcome = runner
         .cast(unsummon)
-        .targeting(gandalf)
+        .target_object(gandalf)
         .accept_optional()
         .resolve();
     assert_eq!(outcome.state().objects[&gandalf].zone, Zone::Hand);
