@@ -15,6 +15,7 @@ const CLOUDSHIFT: &str = "Exile target creature you control, then return that ca
 // Full Oracle text verified against the local MTGJSON AtomicCards export.
 const MIRROR_MATCH: &str = "Cast this spell only during the declare blockers step.\nFor each creature attacking you or a planeswalker you control, create a token that's a copy of that creature and that's blocking that creature. Exile those tokens at end of combat.";
 const DRELNOCH: &str = "Whenever this creature becomes blocked, you may draw two cards.";
+const ETERNAL_OF_HARSH_TRUTHS: &str = "Afflict 2 (Whenever this creature becomes blocked, defending player loses 2 life.)\nWhenever this creature attacks and isn't blocked, draw a card.";
 
 fn priority_to_combat_prompt(runner: &mut GameRunner, blockers: bool) {
     for _ in 0..32 {
@@ -336,6 +337,122 @@ fn mirror_match_fires_bare_becomes_blocked_only_for_the_first_copy() {
             WaitingFor::Priority { .. }
         ));
         assert!(outcome.state().objects[&bystander].is_phased_in());
+    }
+}
+
+// CR 702.130a + CR 509.3c: Afflict consumes the first blocked transition,
+// whether declared or caused by an entering blocker, never each later copy.
+#[test]
+fn mirror_match_fires_printed_afflict_only_on_the_first_blocked_transition() {
+    for declared_blocker in [false, true] {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let attacker = scenario
+            .add_creature(P0, "Eternal of Harsh Truths", 1, 3)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 2,
+            })
+            .with_subtypes(vec!["Zombie", "Cleric"])
+            .from_oracle_text_with_keywords(&["Afflict"], ETERNAL_OF_HARSH_TRUTHS)
+            .id();
+        let blocker = scenario.add_creature(P1, "Declared blocker", 2, 2).id();
+        let bystander = scenario.add_creature(P1, "Bystander", 2, 2).id();
+        let mirrors: Vec<_> = (0..2)
+            .map(|_| {
+                scenario
+                    .add_spell_to_hand_from_oracle(P1, "Mirror Match", true, MIRROR_MATCH)
+                    .with_mana_cost(ManaCost::Cost {
+                        shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                        generic: 4,
+                    })
+                    .id()
+            })
+            .collect();
+        let islands: Vec<_> = (0..12)
+            .map(|_| scenario.add_basic_land(P1, ManaColor::Blue))
+            .collect();
+        scenario.with_library_top(P0, &["Unblocked attack reward", "Must stay"]);
+        let mut runner = scenario.build();
+        priority_to_combat_prompt(&mut runner, false);
+        runner
+            .act(GameAction::DeclareAttackers {
+                attacks: vec![(attacker, AttackTarget::Player(P1))],
+                bands: vec![],
+            })
+            .unwrap();
+        priority_to_combat_prompt(&mut runner, true);
+        runner
+            .act(GameAction::DeclareBlockers {
+                assignments: if declared_blocker {
+                    vec![(blocker, attacker)]
+                } else {
+                    vec![]
+                },
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.life(P1), if declared_blocker { 18 } else { 20 });
+        assert_eq!(runner.life(P0), 20);
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+
+        for (index, mirror) in mirrors.into_iter().enumerate() {
+            if matches!(runner.state().waiting_for, WaitingFor::Priority { player, .. } if player != P1)
+            {
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { player: P1, .. }
+            ));
+            for &island in &islands[index * 6..(index + 1) * 6] {
+                runner
+                    .act(GameAction::ActivateAbility {
+                        source_id: island,
+                        ability_index: 0,
+                        payment_mode: CastPaymentMode::Auto,
+                    })
+                    .unwrap();
+            }
+            let outcome = runner.cast(mirror).resolve();
+            assert_eq!(outcome.state().objects[&mirror].zone, Zone::Graveyard);
+            let assignments =
+                &outcome.state().combat.as_ref().unwrap().blocker_assignments[&attacker];
+            assert_eq!(
+                assignments.len(),
+                index + 1 + usize::from(declared_blocker),
+                "each paid Mirror Match must add a real entering blocker"
+            );
+            let copy = *assignments.last().unwrap();
+            assert!(outcome.state().objects[&copy].is_token);
+            assert_eq!(
+                outcome.state().objects[&copy].name,
+                "Eternal of Harsh Truths"
+            );
+            outcome.assert_life_delta(
+                P1,
+                if index == 0 && !declared_blocker {
+                    -2
+                } else {
+                    0
+                },
+            );
+            outcome.assert_life_delta(P0, 0);
+            assert!(outcome.state().objects[&bystander].is_phased_in());
+            assert_eq!(outcome.state().objects[&bystander].zone, Zone::Battlefield);
+            assert!(outcome.state().stack.is_empty());
+            assert!(outcome.state().resolution_stack.is_empty());
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::Priority { .. }
+            ));
+        }
+        assert_eq!(runner.life(P1), 18, "Afflict must happen exactly once");
     }
 }
 
