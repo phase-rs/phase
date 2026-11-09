@@ -3093,44 +3093,10 @@ fn collect_matching_triggers_inner(
         }
         TriggerSource::Context(source_context) => source_context.clone(),
     };
-    let trace_activation = std::env::var_os("PHASE_PR10635_TRIGGER_TRACE").is_some()
-        && matches!(
-            event,
-            GameEvent::ZoneChanged { .. }
-                | GameEvent::DamageDealt { .. }
-                | GameEvent::CombatDamageDealtToPlayer { .. }
-        )
-        && !source_context.trigger_entries.is_empty();
-    if trace_activation {
-        eprintln!(
-            "[DEBUG-pr10635] collector source={:?} visit={} zone={zone_filter:?} identity={:?} entries={}",
-            source_context.identity.reference.object_id,
-            match visit {
-                TriggerSourceVisit::EventSubject => "subject",
-                TriggerSourceVisit::Observer => "observer",
-                TriggerSourceVisit::ControlChangeWatcher => "control",
-            },
-            source_context.identity,
-            source_context.trigger_entries.len(),
-        );
-        let event_kind = match event {
-            GameEvent::ZoneChanged { .. } => "ZoneChanged",
-            GameEvent::DamageDealt { .. } => "DamageDealt",
-            GameEvent::CombatDamageDealtToPlayer { .. } => "CombatDamageDealtToPlayer",
-            _ => unreachable!("trace events are filtered above"),
-        };
-        eprintln!("[DEBUG-pr10635] collector event_kind={event_kind}");
-    }
     if !collection.admits_source_visit(visit, source_context.identity.reference) {
-        if trace_activation {
-            eprintln!("[DEBUG-pr10635] denied source visit");
-        }
         return Vec::new();
     }
     if collection.omits_member_event_subject(source_context.identity.reference, event) {
-        if trace_activation {
-            eprintln!("[DEBUG-pr10635] omitted member subject");
-        }
         return Vec::new();
     }
     let use_latched_trigger_entries = match source {
@@ -3147,9 +3113,6 @@ fn collect_matching_triggers_inner(
         Some(&source_context),
         active_suppress_triggers,
     ) {
-        if trace_activation {
-            eprintln!("[DEBUG-pr10635] suppressed source");
-        }
         return Vec::new();
     }
 
@@ -3276,12 +3239,6 @@ fn collect_matching_triggers_inner(
             TriggerSource::Context(_) => unreachable!("context sources use latched entries"),
         }
     };
-    if trace_activation {
-        eprintln!(
-            "[DEBUG-pr10635] source={obj_id:?} latched={use_latched_trigger_entries} functioning_entries={}",
-            printed_triggers.len(),
-        );
-    }
     let all_triggers = printed_triggers.into_iter().chain(
         granted_keyword_triggers
             .iter()
@@ -3290,13 +3247,6 @@ fn collect_matching_triggers_inner(
     );
     for (trig_idx, definition_ref, trig_def, granted_keyword_kind) in all_triggers {
         let source_context = source_context_for_definition(&source_context, trig_def);
-        if trace_activation {
-            eprintln!(
-                "[DEBUG-pr10635] definition source={obj_id:?} index={trig_idx} mode={:?} zones={:?}",
-                trig_def.mode,
-                trig_def.trigger_zones,
-            );
-        }
         // CR 603.10d: a look-back control-change trigger exists, and has its
         // controller, as of immediately before the change, so it is collected
         // only from the watcher latched then (`ControlChangeWatcher`), never
@@ -3333,9 +3283,6 @@ fn collect_matching_triggers_inner(
                     zones_match = record.from_zone == Some(source_context.identity.expected_zone)
                         && trig_def.trigger_zones.contains(to);
                 }
-            }
-            if trace_activation {
-                eprintln!("[DEBUG-pr10635] zone_guard source={obj_id:?} index={trig_idx} result={zones_match}");
             }
             if !zones_match {
                 continue;
@@ -3423,9 +3370,6 @@ fn collect_matching_triggers_inner(
             } else {
                 matcher(event, trig_def, &source_context, state)
             };
-            if trace_activation {
-                eprintln!("[DEBUG-pr10635] matcher source={obj_id:?} index={trig_idx} result={admitted}");
-            }
             if !admitted {
                 continue;
             }
@@ -3557,9 +3501,6 @@ fn collect_matching_triggers_inner(
                 FiringConditions::printed(trig_def, definition_ref.as_ref()),
                 &ability,
             );
-            if trace_activation {
-                eprintln!("[DEBUG-pr10635] firing_groups source={obj_id:?} index={trig_idx} count={}", firing_groups.len());
-            }
             for FiringGroup {
                 events: trigger_events,
                 ..
@@ -5449,23 +5390,6 @@ fn collect_pending_triggers_with_collection(
         //
         super::trigger_index::ensure_ready(state);
         let candidates = crate::game::trigger_index::candidates_for_event(state, event);
-        if std::env::var_os("PHASE_PR10635_TRIGGER_TRACE").is_some()
-            && matches!(
-                event,
-                GameEvent::ZoneChanged { .. }
-                    | GameEvent::DamageDealt { .. }
-                    | GameEvent::CombatDamageDealtToPlayer { .. }
-            )
-        {
-            let sources: Vec<_> = state
-                .battlefield
-                .iter()
-                .filter_map(|id| state.objects.get(id))
-                .filter(|object| !object.trigger_definitions.is_empty())
-                .map(|object| (object.id, object.zone, object.trigger_definitions.len()))
-                .collect();
-            eprintln!("[DEBUG-pr10635] scan candidates={candidates:?} battlefield_sources={sources:?}");
-        }
 
         // CR 603.2 differential test (debug-only): run a SHADOW scan over the
         // full battlefield with cloned dedup sets and verify every matched
@@ -11189,23 +11113,6 @@ fn dispatch_pending_trigger_context_core(
     );
 
     let prepared = prepare_trigger_targets(state, &trigger);
-    if std::env::var_os("PHASE_PR10635_TRIGGER_TRACE").is_some()
-        && matches!(
-            trigger.trigger_event,
-            Some(GameEvent::ZoneChanged { .. })
-                | Some(GameEvent::DamageDealt { .. })
-                | Some(GameEvent::CombatDamageDealtToPlayer { .. })
-        )
-    {
-        let preparation = match &prepared {
-            PreparedTriggerTargets::NoTargets { .. } => "no-targets",
-            PreparedTriggerTargets::AutoAssigned { .. } => "auto-assigned",
-            PreparedTriggerTargets::NeedsPlayerChoice { .. } => "needs-choice",
-            PreparedTriggerTargets::NoLegalRequiredTarget => "no-legal-target",
-            PreparedTriggerTargets::NeedsFallbackPush => "unresolved",
-        };
-        eprintln!("[DEBUG-pr10635] dispatch source={:?} preparation={preparation}", trigger.source_id);
-    }
 
     if immediate {
         // CR 605.4a: the stackless backend. The classifier already proved an

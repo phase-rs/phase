@@ -29725,6 +29725,9 @@ impl TargetFilter {
                 // the source's live-or-LKI incarnation, never chosen while
                 // announcing the ability.
                 | TargetFilter::SourceController
+                // CR 108.3 + CR 115.10a: the source's owner is fixed by
+                // ownership, not selected when announcing this ability.
+                | TargetFilter::Owner
                 | TargetFilter::OriginalController
                 // CR 608.2c: the reanimator-Aura's pre-rebind source identity is
                 // resolved (concretized to SpecificObject) during resolution, never

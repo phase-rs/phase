@@ -272,6 +272,7 @@ mod activation_cost_work_census;
 mod committed_dump_walk;
 mod conformer_shuriken;
 mod conquerors_galleon_end_of_combat_transform;
+mod dream_fighter_context_phasing;
 mod dromokas_command_spell_prevention;
 mod elixir_of_immortality_stolen_activation;
 mod enchant_tapped_creature;

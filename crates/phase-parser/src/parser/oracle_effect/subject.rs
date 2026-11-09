@@ -1875,6 +1875,11 @@ fn parse_source_and_target_subjects(
     let subject_lower = subject.to_lowercase();
     let subject_pair = TextPair::new(subject, &subject_lower);
     let (primary_tp, secondary_tp) = subject_pair.split_around(" and ")?;
+    let (declared_text, _) = super::strip_optional_target_prefix(secondary_tp.original.trim());
+    let declared_lower = declared_text.to_lowercase();
+    parse_declared_target_prefix
+        .parse(declared_lower.as_str())
+        .ok()?;
     let primary_application = parse_subject_application_for(
         primary_tp.original.trim(),
         ctx,
@@ -1897,8 +1902,9 @@ fn parse_source_and_target_subjects(
     Some((primary_application, secondary_application))
 }
 
-/// CR 702.26a + CR 702.26h: resolve both subjects in one phasing batch; only
-/// the second conjunct is targeted (CR 115.1), even if the source has shroud.
+/// CR 702.26h: resolve source-plus-object phasing in one batch so attachments
+/// phase indirectly with their host. CR 115.10a: an event-context subject is
+/// not a target; only a declared second subject uses an announced target slot.
 pub(super) fn try_parse_source_and_target_phase_out(
     text: &str,
     ctx: &mut ParseContext,
@@ -1913,8 +1919,31 @@ pub(super) fn try_parse_source_and_target_phase_out(
     .parse(lower.as_str())
     .ok()?;
     let mut tentative = ctx.clone();
-    let (source, selected) =
-        parse_source_and_target_subjects(text[..predicate_start].trim(), &mut tentative)?;
+    let subject = text[..predicate_start].trim();
+    let Some((source, selected)) = parse_source_and_target_subjects(subject, &mut tentative) else {
+        // The declared-target grammar deliberately declines contextual anaphors.
+        // Reuse the subject authority without routing the event through ParentTarget.
+        let subject_lower = subject.to_lowercase();
+        let (source, partner) = TextPair::new(subject, &subject_lower).split_around(" and ")?;
+        let mut contextual = ctx.clone();
+        let source = parse_subject_application(source.original.trim(), &mut contextual)?;
+        let partner = parse_subject_application(partner.original.trim(), &mut contextual)?;
+        if source.affected != TargetFilter::SelfRef
+            || source.target.is_some()
+            || source.multi_target.is_some()
+            || partner.target != Some(TargetFilter::TriggeringSource)
+            || partner.multi_target.is_some()
+        {
+            return None;
+        }
+        let clause = super::parsed_clause(Effect::PhaseOut {
+            target: TargetFilter::Or {
+                filters: vec![TargetFilter::SelfRef, TargetFilter::TriggeringSource],
+            },
+        });
+        *ctx = contextual;
+        return Some(clause);
+    };
     if source.affected != TargetFilter::SelfRef
         || super::target_filter_can_target_player(&selected.affected)
     {
@@ -9459,6 +9488,47 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn compound_phase_out_preserves_event_context_instead_of_declaring_it() {
+        for secondary in [
+            "target creature",
+            "up to one target creature",
+            "up to one other target creature",
+            "another target creature",
+        ] {
+            let text = format!("~ and {secondary} phase out.");
+            assert!(
+                try_parse_source_and_target_phase_out(&text, &mut ParseContext::default())
+                    .is_some(),
+                "{text}"
+            );
+        }
+
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..ParseContext::default()
+        };
+        let application =
+            parse_subject_application("that creature", &mut ctx).expect("event-context creature");
+        assert_eq!(application.target, Some(TargetFilter::TriggeringSource));
+        assert!(
+            parse_source_and_target_subjects("~ and that creature", &mut ctx).is_none(),
+            "an event-context binding is not an announced target"
+        );
+        let clause = super::super::parse_effect_clause("~ and that creature phase out.", &mut ctx);
+        assert_eq!(
+            clause.effect,
+            Effect::PhaseOut {
+                target: TargetFilter::Or {
+                    filters: vec![TargetFilter::SelfRef, TargetFilter::TriggeringSource],
+                },
+            },
+            "declining the declared-target route must retain both contextual subjects"
+        );
+        assert!(clause.multi_target.is_none());
+        assert!(clause.sub_ability.is_none());
     }
     use crate::types::ability::AttackerBlockStatus;
     use crate::types::ability::ThisWayCause;

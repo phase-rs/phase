@@ -192,6 +192,23 @@ pub(super) fn collect_object_targets(
                             TargetRef::Player(_) => None,
                         })
                         .collect(),
+                    // CR 608.2k: the trigger's named combat partner is an
+                    // untargeted event referent, not an announced target or a
+                    // population filter. CR 702.26b: only phased-in battlefield
+                    // objects can join this phase-out batch.
+                    TargetFilter::TriggeringSource => {
+                        crate::game::targeting::resolved_object_ids_for_filter(
+                            state, ability, filter,
+                        )
+                        .into_iter()
+                        .filter(|id| {
+                            state.objects.get(id).is_some_and(|object| {
+                                object.zone == crate::types::zones::Zone::Battlefield
+                                    && object.is_phased_in()
+                            })
+                        })
+                        .collect()
+                    }
                     TargetFilter::None
                     | TargetFilter::Any
                     | TargetFilter::Player
@@ -228,7 +245,6 @@ pub(super) fn collect_object_targets(
                     | TargetFilter::TriggeringSpellController
                     | TargetFilter::TriggeringSpellOwner
                     | TargetFilter::TriggeringPlayer
-                    | TargetFilter::TriggeringSource
                     | TargetFilter::AttackedPlayerOrPlaneswalker
                     | TargetFilter::EventTarget
                     | TargetFilter::TriggeringSourceController

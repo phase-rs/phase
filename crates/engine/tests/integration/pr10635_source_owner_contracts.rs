@@ -64,10 +64,9 @@ fn alabaster_dragon_death_follows_the_source_into_its_owners_shuffled_library() 
                 (Some(Zone::Battlefield), Zone::Graveyard),
                 (Some(Zone::Graveyard), Zone::Library),
             ],
-            "controller={controller:?}; waiting={:?}; stack={}; events={:?}",
+            "controller={controller:?}; waiting={:?}; stack={}",
             outcome.final_waiting_for(),
-            outcome.state().stack.len(),
-            outcome.events()
+            outcome.state().stack.len()
         );
         outcome.assert_zone(&[dragon], Zone::Library);
         outcome.assert_zone(&[other_dragon], Zone::Battlefield);
