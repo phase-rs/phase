@@ -11066,7 +11066,10 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         } if filter.properties.iter().any(|property| matches!(
             property,
             FilterProp::Owned {
-                controller: ControllerRef::You | ControllerRef::TargetPlayer
+                controller:
+                    ControllerRef::You
+                    | ControllerRef::TargetPlayer
+                    | ControllerRef::ScopedPlayer
             }
         ))
     );
