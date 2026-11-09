@@ -69,13 +69,19 @@ pub enum RulesExecutionNodeRef {
 /// [`RulesExecutionNodeRef`] so the two are two records of one announcement: a
 /// save that points its node at an earlier activation's node while stating this
 /// occurrence contradicts itself, and restore refuses it
-/// ([`ParkedActivationNodeConflict::ForeignOccurrence`]) instead of writing this
+/// ([`ParkedActivationConflict::ForeignOccurrence`]) instead of writing this
 /// activation's settlement into the earlier one. A mana ability "resolves
 /// immediately after it is activated" (CR 605.3b), so a completed activation's
 /// node is done; nothing of this activation belongs in it.
 ///
-/// [`ParkedActivationNodeConflict::ForeignOccurrence`]:
-/// crate::types::game_state::ParkedActivationNodeConflict::ForeignOccurrence
+/// Because an ordinal names exactly one node, this record also NAMES that node when
+/// the reference is missing: a save that keeps the occurrence and loses
+/// `rules_execution_node` still resolves to the settlement it was announced under
+/// (`PendingManaAbility::recorded_activation_node`) rather than being read as
+/// absence and opening a second one for the same activation.
+///
+/// [`ParkedActivationConflict::ForeignOccurrence`]:
+/// crate::types::game_state::ParkedActivationConflict::ForeignOccurrence
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ManaActivationOccurrence(pub SettlementNodeOrdinal);
@@ -2575,6 +2581,27 @@ impl ResolvedRulesJournal {
             RulesExecutionNodeKind::ActivatedMana { source } => Some(*source),
             _ => None,
         }
+    }
+
+    /// CR 605.3b: whether this journal retains `node` AND that node has already
+    /// produced mana — the only witness that says an activation's settlement
+    /// happened.
+    ///
+    /// A mana ability "resolves immediately after it is activated", so the node an
+    /// activation was announced under is finished the moment it records the pips it
+    /// produced: nothing of a later, still-parked activation belongs in it. The
+    /// commands a node owns are NOT that witness and must not be read as one — an
+    /// activation pays its own cost (CR 602.2b routes it through CR 601.2h) under
+    /// this very node while it is still parked at a colour prompt, so an
+    /// append-only command history is non-empty on a node that has settled nothing.
+    ///
+    /// An unknown node answers `false`: the journal no longer holds it, so it
+    /// proves nothing either way.
+    pub fn node_produced_mana(&self, node: RulesExecutionNodeRef) -> bool {
+        let Ok(position) = self.node_index(node) else {
+            return false;
+        };
+        !self.nodes[position].produced_pips.is_empty()
     }
 
     /// CR 106.3 + CR 118.3a: stamp `epoch` onto EVERY copy this journal holds of

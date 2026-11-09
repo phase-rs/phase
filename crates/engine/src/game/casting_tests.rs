@@ -54254,6 +54254,27 @@ fn tardis_bay_grants_cascade_only_to_a_first_spell_with_mana_value_two_or_greate
         keywords.iter().any(|k| matches!(k, Keyword::Cascade)),
         "the first mana-value-2-or-greater spell of the turn must receive Cascade; got {keywords:?}"
     );
+    // CR 702.85a: cascade "functions only while the spell with cascade is on the
+    // stack" and is a TRIGGERED ability, so the grant is only real if the trigger
+    // it grants actually exists — assert it on the stack BEFORE clearing it, or the
+    // leg would pass on a keyword snapshot that never became an ability.
+    let cascade_triggers = runner
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| {
+            entry.source_id == leg_b
+                && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+                && entry
+                    .ability()
+                    .is_some_and(|ability| matches!(ability.effect, Effect::Cascade))
+        })
+        .count();
+    assert_eq!(
+        cascade_triggers, 1,
+        "the granted cascade must be on the stack as exactly one Cascade trigger from the \
+         qualifying spell"
+    );
     clear_stack_to_priority(runner.state_mut());
 
     // Leg C: a second mana value 2 spell — only the gate can refuse it.

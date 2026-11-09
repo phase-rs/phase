@@ -107,6 +107,10 @@ const UPWELLING: &str = "Players don't lose unspent mana as steps and phases end
 const RAIN_OF_RICHES: &str = "When this enchantment enters, create two Treasure tokens.\nThe first spell you cast each turn that mana from a Treasure was spent to cast has cascade.";
 const MINIMUS_TYPE_CHANGE: &str = "Enchanted permanent is a Treasure artifact with \"{T}, Sacrifice this artifact: Add one mana of any color,\" and it loses all other abilities.";
 const ENVIRONMENTAL_SCIENCES: &str = "Search your library for a basic land card, reveal it, put it into your hand, then shuffle. You gain 2 life.";
+/// Printed **Wayfarer's Bauble** — `{1}`, Artifact. The `{2}` in its text is its
+/// activated ability's cost; the CARD costs `{1}`, which is what makes it the honest
+/// one-mana payment rather than a card retuned to fit the board.
+const WAYFARERS_BAUBLE: &str = "{2}, {T}, Sacrifice this artifact: Search your library for a basic land card, put that card onto the battlefield tapped, then shuffle.";
 const BURNING_TREE_EMISSARY: &str = "When this creature enters, add {R}{G}.";
 const CLOUDSHIFT: &str =
     "Exile target creature you control, then return that card to the battlefield under your control.";
@@ -473,9 +477,16 @@ fn retained_pip_keeps_its_producer_across_the_phase_boundary() {
 // ---------------------------------------------------------------------------
 
 /// The `1b` board: Rain of Riches, Upwelling, one sacrificed Treasure whose red
-/// mana is still floating in POSTCOMBAT main, and the `{1}` spell it will pay for.
-/// Returns the runner, that spell, the Treasure, the epoch that produced the unit,
-/// and the pip.
+/// mana is still floating in POSTCOMBAT main, and the printed `{1}` spell it will
+/// pay for. Returns the runner, that spell, the Treasure, the epoch that produced
+/// the unit, and the pip.
+///
+/// The spell is **Wayfarer's Bauble** — printed `{1}`, an Artifact — rather than a
+/// card whose printed cost is overridden to `{1}` by the fixture: the payment under
+/// test must be a real one-mana cast, not one arranged to fit the board. (Printed
+/// Oracle text: "{2}, {T}, Sacrifice this artifact: Search your library for a basic
+/// land card, put that card onto the battlefield tapped, then shuffle." — the `{2}`
+/// is its ACTIVATED ability's cost, not the card's mana cost.)
 ///
 /// The Treasure's sacrifice is what forces the question: CR 400.7 makes the
 /// graveyard card a new object, the step/phase boundary clears the exit LKI, so the
@@ -488,16 +499,12 @@ fn retained_treasure_pip_board() -> (GameRunner, ObjectId, ObjectId, u64, u64) {
     scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
     scenario.add_enchantment_from_oracle(P0, "Rain of Riches", RAIN_OF_RICHES);
     scenario.add_enchantment_from_oracle(P0, "Upwelling", UPWELLING);
-    // A {1} spell, so the ONE retained Treasure unit is the whole payment: the unit
-    // whose fact is under test is the only unit spent.
-    let mut builder = scenario.add_spell_to_hand_from_oracle(
-        P0,
-        "Environmental Sciences",
-        false,
-        ENVIRONMENTAL_SCIENCES,
-    );
+    // A one-mana spell, so the ONE retained Treasure unit is the whole payment: the
+    // unit whose fact is under test is the only unit spent.
+    let mut builder =
+        scenario.add_artifact_to_hand_from_oracle(P0, "Wayfarer's Bauble", WAYFARERS_BAUBLE);
     builder.with_mana_cost(ManaCost::generic(1));
-    let sciences = builder.id();
+    let bauble = builder.id();
     let mut runner = scenario.build();
     let treasure = treasure_token(runner.state_mut(), 9101);
     let incarnation = runner.state().objects[&treasure].incarnation;
@@ -530,16 +537,16 @@ fn retained_treasure_pip_board() -> (GameRunner, ObjectId, ObjectId, u64, u64) {
         unit.pip_id,
         "reach: the row is keyed to the pip of the unit it describes"
     );
-    (runner, sciences, treasure, incarnation, unit.pip_id.0)
+    (runner, bauble, treasure, incarnation, unit.pip_id.0)
 }
 
 /// Cast the `{1}` spell after restore and report whether the granted cascade
 /// arrived, plus how many spent units recorded a producer fact.
-fn cast_after_restore_and_read_cascade(state: GameState, sciences: ObjectId) -> (bool, usize) {
+fn cast_after_restore_and_read_cascade(state: GameState, spell: ObjectId) -> (bool, usize) {
     let mut runner = GameRunner::from_state(state);
-    runner.cast(sciences).commit();
+    runner.cast(spell).commit();
     let state = runner.state();
-    let granted = state.objects[&sciences]
+    let granted = state.objects[&spell]
         .cast_spell_keywords
         .iter()
         .any(|keyword| matches!(keyword, Keyword::Cascade));
@@ -550,31 +557,75 @@ fn cast_after_restore_and_read_cascade(state: GameState, sciences: ObjectId) -> 
     (granted, recorded)
 }
 
+/// Cross one more step/phase boundary in the restored state — the boundary the
+/// pool's per-unit producer ledger is REBUILT at — and report the ledger rows that
+/// survive it, plus the pooled pips the boundary kept.
+///
+/// This is the other half of the pip key: the payment reads the ledger
+/// (`mana_payment::pooled_mana_producer_snapshot`), and the boundary carries it
+/// forward (`mana_payment::retain_pooled_mana_producer_snapshots`, whose carry arm
+/// matches a carried row to a unit by that unit's pip). A row keyed to a pip no
+/// pool holds must be dropped by both.
+fn cross_boundary_and_read_ledger(mut runner: GameRunner) -> (Vec<u64>, Vec<u64>) {
+    pass_until(
+        &mut runner,
+        |r| r.state().phase == Phase::End,
+        "crossing postcombat main into the end step",
+    );
+    let state = runner.state();
+    (
+        state
+            .pooled_mana_producer_snapshots
+            .iter()
+            .map(|snapshot| snapshot.pip_id.0)
+            .collect(),
+        state
+            .players
+            .iter()
+            .flat_map(|player| player.mana_pool.units())
+            .map(|unit| unit.pip_id.0)
+            .collect(),
+    )
+}
+
 /// CR 106.3 + CR 118.3a: a ledger row keyed to a DIFFERENT pip than the unit being
-/// spent must never supply that unit's source facts — the restore boundary ignores
-/// a row it does not key to the unit, so the payment must ignore it too.
+/// spent must never supply that unit's source facts — and the same key decides
+/// whether the row survives a boundary at all. The restore boundary ignores a row it
+/// does not key to the unit, so the payment AND the carry-forward must ignore it too.
 ///
 /// The row here is the save's own, re-stamped with the unstamped sentinel `pip_id:
 /// 0` (the key a save written before the field carries). Admission still succeeds —
 /// a row matching no unit is legacy silence, not a contradiction — so the ONLY thing
-/// standing between that row and the payment is the runtime reader's key.
+/// standing between that row and the unit it really describes is the runtime key, at
+/// both readers.
 ///
-/// Two legs, one save apart:
-///   * **stale key** — the row asserts it belongs to no unit. The spent pip has no
-///     ledger fact left, so the Treasure provenance is unprovable and the cascade is
-///     NOT granted. Before the fix the reader matched on `(source, incarnation)` and
-///     spent the row anyway: a row the validator ignores, used at payment.
-///   * **valid key** (the control) — the identical save with the row keyed to the
-///     unit's own pip grants cascade and records the Treasure, so the leg above is
-///     not passing because the board stopped working.
+/// Four legs, one save apart, because the pip key has two readers and each needs its
+/// own witness:
+///   * **stale key, spend** — the row asserts it belongs to no unit. The spent pip
+///     has no ledger fact left, so the Treasure provenance is unprovable and cascade
+///     is NOT granted. Before the fix the payment reader matched on `(source,
+///     incarnation)` and spent the row anyway: a row the validator ignores, used at
+///     payment.
+///   * **valid key, spend** (the control) — the identical save with the row keyed to
+///     the unit's own pip grants cascade and records the Treasure, so the leg above
+///     is not passing because the board stopped working.
+///   * **stale key, carry** — the same re-keyed save restored and driven across the
+///     step/phase boundary the ledger is REBUILT at. The unit survives the boundary
+///     (Upwelling), so a reader that carried the row forward by `(source,
+///     incarnation)` would re-key this row onto the surviving unit and resurrect a
+///     spent fact. It must be dropped instead: the ledger keeps no row for a pip no
+///     pool holds.
+///   * **valid key, carry** (the control) — the intact save crosses the same
+///     boundary and keeps exactly the one row, still keyed to the unit's pip, so the
+///     leg above is not passing because the boundary empties the ledger.
 #[test]
 fn a_ledger_row_keyed_to_another_pip_is_not_spendable() {
     // The control: the save this build wrote, unmodified.
-    let (runner, sciences, _treasure, _incarnation, _pip) = retained_treasure_pip_board();
+    let (runner, bauble, _treasure, _incarnation, pip) = retained_treasure_pip_board();
     let control_json = persisted_json(runner.state());
     let (control_cascade, control_recorded) = cast_after_restore_and_read_cascade(
-        decode_and_admit(control_json).expect("the control save restores"),
-        sciences,
+        decode_and_admit(control_json.clone()).expect("the control save restores"),
+        bauble,
     );
     assert!(
         control_cascade,
@@ -586,7 +637,7 @@ fn a_ledger_row_keyed_to_another_pip_is_not_spendable() {
     );
 
     // The witness: the same save with the one ledger row re-keyed to pip 0.
-    let (runner, sciences, _treasure, _incarnation, _pip) = retained_treasure_pip_board();
+    let (runner, bauble, _treasure, _incarnation, _pip) = retained_treasure_pip_board();
     let mut json = persisted_json(runner.state());
     assert_eq!(
         rekey_pool_producer_facts(&mut json, 0),
@@ -594,9 +645,9 @@ fn a_ledger_row_keyed_to_another_pip_is_not_spendable() {
         "reach-guard: the save carries exactly the one ledger row under test"
     );
     let (stale_cascade, stale_recorded) = cast_after_restore_and_read_cascade(
-        decode_and_admit(json)
+        decode_and_admit(json.clone())
             .expect("a row keyed to no unit is legacy silence, not a contradiction"),
-        sciences,
+        bauble,
     );
     assert_eq!(
         stale_recorded, 0,
@@ -607,6 +658,231 @@ fn a_ledger_row_keyed_to_another_pip_is_not_spendable() {
         !stale_cascade,
         "CR 106.3: the stale row must not supply the spent pip's Treasure fact. Granting cascade \
          here means the payment read a ledger row keyed to another unit"
+    );
+
+    // The carry reader, on the same two saves: cross one more boundary and read what
+    // the ledger holds afterwards.
+    let (rows, pooled) = cross_boundary_and_read_ledger(GameRunner::from_state(
+        decode_and_admit(control_json).expect("the control save restores"),
+    ));
+    assert_eq!(
+        pooled,
+        vec![pip],
+        "control: the unit survived the boundary carrying its own pip, so the ledger below is \
+         read against a pool that still holds it"
+    );
+    assert_eq!(
+        rows,
+        vec![pip],
+        "control: the boundary carried the one row forward, still keyed to the unit's pip"
+    );
+
+    let (rows, pooled) = cross_boundary_and_read_ledger(GameRunner::from_state(
+        decode_and_admit(json).expect("the re-keyed save restores"),
+    ));
+    assert_eq!(
+        pooled,
+        vec![pip],
+        "the unit still survives this boundary too — the ledger below is not empty because the \
+         mana vanished"
+    );
+    assert!(
+        rows.is_empty(),
+        "CR 106.3 + CR 118.3a: a row keyed to a pip no pool holds must be DROPPED by the boundary, \
+         not carried onto the surviving unit of the same tenure — carrying it by (source, \
+         incarnation) would resurrect a spent fact. Ledger rows after the boundary: {rows:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 1c — the ledger's row belongs to ONE pip, not to its producing tenure
+// ---------------------------------------------------------------------------
+
+/// CR 106.3 + CR 400.7 + CR 104.4b: **Prismite** — "{2}: Add one mana of any
+/// color." A creature that can be activated twice in one incarnation, so both pips
+/// it makes share ONE producing tenure (`(source, incarnation)`) while being two
+/// different units.
+const PRISMITE: &str = "{2}: Add one mana of any color.";
+
+/// CR 106.3 + CR 118.3a + CR 104.4b: spending one of two pips that share a tenure
+/// must drop that pip's ledger row at the next boundary, even though the OTHER pip
+/// of the same tenure is still floating.
+///
+/// The board is real: **Prismite** is activated twice (`{R}` then `{U}`), then
+/// **Cloudshift** returns it as a new object (CR 400.7), so the pips name an epoch
+/// its storage id no longer holds and the boundary records a producer fact for each.
+/// **Wayfarer's Bauble** (`{1}`) then spends exactly one of them, and the next
+/// boundary prunes the ledger.
+///
+/// Pruning by `(source, incarnation)` — the pin `ManaPool::shapes()` aggregates —
+/// keeps every row of a tenure whose producer still appears SOMEWHERE in a pool, so
+/// the spent pip's row survived as long as its sibling floated. `GameState::eq`
+/// compares the ledger whole, so that leftover row made two positions describing the
+/// same game compare as different (the CR 104.4b loop detection reads that
+/// comparison). The row belongs to its PIP: it lives exactly as long as the pool
+/// holds that unit.
+#[test]
+fn spending_one_of_two_pips_from_one_tenure_drops_only_the_spent_row() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    // CR 106.4: Upwelling is what keeps both pips floating across the boundary that
+    // writes the ledger in the first place.
+    scenario.add_enchantment_from_oracle(P0, "Upwelling", UPWELLING);
+    let prismite = scenario
+        .add_creature_from_oracle(P0, "Prismite", 1, 1, PRISMITE)
+        .id();
+    let cloudshift = {
+        let mut builder =
+            scenario.add_spell_to_hand_from_oracle(P0, "Cloudshift", true, CLOUDSHIFT);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        });
+        builder.id()
+    };
+    let bauble = {
+        let mut builder =
+            scenario.add_artifact_to_hand_from_oracle(P0, "Wayfarer's Bauble", WAYFARERS_BAUBLE);
+        builder.with_mana_cost(ManaCost::generic(1));
+        builder.id()
+    };
+    // `{2}` twice for the activations, `{W}` for Cloudshift — setup mana, spent
+    // before any assertion, and never a unit under test.
+    scenario.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .chain(std::iter::once(ManaUnit::new(
+                ManaType::White,
+                ObjectId(0),
+                false,
+                vec![],
+            )))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    let producing_incarnation = runner.state().objects[&prismite].incarnation;
+
+    // Two activations of ONE object in ONE incarnation: one tenure, two units.
+    activate_mana_ability(&mut runner, prismite, ManaType::Red);
+    activate_mana_ability(&mut runner, prismite, ManaType::Blue);
+    // CR 400.7: the returned Prismite is a NEW object, so the pips it made name an
+    // epoch its storage id no longer holds — the shape a retained producer fact is
+    // for at all.
+    runner.cast(cloudshift).target_object(prismite).commit();
+    pass_until(
+        &mut runner,
+        |r| {
+            r.state()
+                .objects
+                .get(&prismite)
+                .is_some_and(|object| object.zone == Zone::Battlefield)
+                && r.state().objects[&prismite].incarnation != producing_incarnation
+        },
+        "Cloudshift returning the card",
+    );
+    assert_ne!(
+        runner.state().objects[&prismite].incarnation,
+        producing_incarnation,
+        "reach-guard: Cloudshift returned the card as a new object"
+    );
+
+    let tenure: Vec<ManaUnit> = pool_units(&runner)
+        .into_iter()
+        .filter(|unit| unit.source_id == prismite)
+        .collect();
+    assert_eq!(
+        tenure.len(),
+        2,
+        "reach-guard: two pips from Prismite, got {tenure:?}"
+    );
+    for unit in &tenure {
+        assert_eq!(
+            unit.source_incarnation,
+            Some(producing_incarnation),
+            "reach-guard: both pips carry ONE tenure — same source, same epoch"
+        );
+    }
+    let (red, blue) = (
+        tenure
+            .iter()
+            .find(|unit| unit.color == ManaType::Red)
+            .expect("the red pip")
+            .pip_id,
+        tenure
+            .iter()
+            .find(|unit| unit.color == ManaType::Blue)
+            .expect("the blue pip")
+            .pip_id,
+    );
+    assert_ne!(red, blue, "reach-guard: two different pips");
+
+    // The boundary that WRITES the retained facts: both pips are still floating and
+    // their producing epoch is gone, so the pool owes a row for each.
+    pass_until(
+        &mut runner,
+        |r| r.state().phase == Phase::PostCombatMain,
+        "crossing combat into postcombat main",
+    );
+    let rows_after_write: Vec<u64> = runner
+        .state()
+        .pooled_mana_producer_snapshots
+        .iter()
+        .map(|snapshot| snapshot.pip_id.0)
+        .collect();
+    assert_eq!(
+        rows_after_write.len(),
+        2,
+        "reach-guard: the boundary retained a fact for each of the two pips, got \
+         {rows_after_write:?}"
+    );
+
+    // Spend ONE of the two. A `{1}` artifact pays with exactly one unit.
+    runner.cast(bauble).commit();
+    let surviving: Vec<ManaUnit> = pool_units(&runner)
+        .into_iter()
+        .filter(|unit| unit.source_id == prismite)
+        .collect();
+    assert_eq!(
+        surviving.len(),
+        1,
+        "reach-guard: the cast spent exactly one of the two pips, got {surviving:?}"
+    );
+    let surviving_pip = surviving[0].pip_id;
+    assert!(
+        surviving_pip == red || surviving_pip == blue,
+        "reach-guard: the survivor is one of the two pips under test"
+    );
+
+    // The next boundary prunes. ONE pip of the tenure is still pooled, so a
+    // tenure-keyed rule keeps BOTH rows; a pip-keyed rule keeps exactly the
+    // survivor's.
+    pass_until(
+        &mut runner,
+        |r| r.state().phase == Phase::End,
+        "crossing postcombat main into the end step",
+    );
+    let rows_after_spend: Vec<u64> = runner
+        .state()
+        .pooled_mana_producer_snapshots
+        .iter()
+        .map(|snapshot| snapshot.pip_id.0)
+        .collect();
+    assert_eq!(
+        pool_units(&runner)
+            .iter()
+            .map(|unit| unit.pip_id.0)
+            .collect::<Vec<_>>(),
+        vec![surviving_pip.0],
+        "reach-guard: Upwelling kept the surviving pip across the boundary"
+    );
+    assert_eq!(
+        rows_after_spend,
+        vec![surviving_pip.0],
+        "CR 106.3 + CR 118.3a: the ledger row belongs to its PIP, so the boundary must drop the \
+         spent pip's row even though another pip of the same (source, incarnation) tenure is \
+         still floating — rows {rows_after_spend:?}, survivor {surviving_pip:?}"
     );
 }
 

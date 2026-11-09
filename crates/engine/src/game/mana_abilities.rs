@@ -1398,41 +1398,45 @@ pub(crate) fn mana_choice_prompt(
 /// Two records can carry that epoch, and which of them a save holds depends on
 /// when the save was written — the activation's execution node
 /// (`PendingManaAbility::rules_execution_node`, whose mana node names the source
-/// as an [`ObjectIncarnationRef`]) and the announcement epoch
-/// (`PendingManaAbility::announced_source_incarnation`). They are two statements
-/// about ONE activation, so resolving them independently is exactly how the two
-/// writers could disagree: a node-only save produced from the moved object while
-/// the journal recorded the original one, and an announcement-only save stamped
-/// the pip with the announcement while the re-opened node named the moved object.
-/// Either way the save the activation then wrote was one its own next load refuses
-/// with `PersistedRestoreError::ContradictoryFloatingManaProvenance`.
+/// as an [`ObjectIncarnationRef`], or the occurrence ordinal
+/// (`PendingManaAbility::activated_mana_occurrence`) that node was minted under)
+/// and the announcement epoch (`PendingManaAbility::announced_source_incarnation`).
+/// They are statements about ONE activation, so resolving them independently is
+/// exactly how the two writers could disagree: a node-only save produced from the
+/// moved object while the journal recorded the original one, and an
+/// announcement-only save stamped the pip with the announcement while the re-opened
+/// node named the moved object. Either way the save the activation then wrote was
+/// one its own next load refuses with
+/// `PersistedRestoreError::ContradictoryFloatingManaProvenance`.
 ///
-/// This function is the single authority. It answers the epoch AND the node that
-/// must be used with it, ONCE, so both writers consume one value: the pip's
-/// recorded producer (what [`produce_mana_from_ability`] stamps on the unit) and
-/// the journal's production record (the node the activation runs under).
+/// This function is the single authority on the resume side. It answers the epoch
+/// AND the node that must be used with it, ONCE, so both writers consume one value:
+/// the pip's recorded producer (what [`produce_mana_from_ability`] stamps on the
+/// unit) and the journal's production record (the node the activation runs under).
+/// The validation itself is not its own: it is
+/// [`PendingManaAbility::activation_producer_evidence`], the same rule the restore
+/// chokepoint applies, so a boundary cannot admit what the other refuses.
 ///
 /// Resolution:
-/// * the node the journal still retains resolves to an ACTIVATED mana node of
-///   this activation's own → that epoch is exact, and the node itself is reused;
-/// * a node the journal no longer retains (or none at all) proves nothing;
-/// * the announcement epoch is exact by construction (captured before any cost);
-/// * both present must agree — two epochs for one activation is a save
-///   contradicting itself, and neither side is preferred;
-/// * a retained node that cannot be this activation's — a triggered-mana node,
-///   an activated-mana node naming a different object, or an activated-mana node
-///   of this same object and epoch that belongs to a DIFFERENT occurrence (an
-///   earlier activation of it, already settled per CR 605.3b) — is a save
-///   contradicting itself about which settlement this activation is, and is
-///   refused rather than read as absence
-///   ([`PendingManaAbility::recorded_producer_node`]);
-/// * neither present: an activation this engine built names its producer twice,
-///   so a save carrying neither field predates both and proves nothing — refusing
-///   is the only answer that does not price the mana from the live occupant of the
-///   storage id. A pending carrying no announcement snapshot at all was not built
-///   by the activation entry (a direct prompt/production call on a live state, not
-///   a resume of a saved one), so it resolves from the live object and BOTH writers
-///   then use that one value.
+/// * the producer evidence rule
+///   ([`PendingManaAbility::activation_producer_evidence`], the ONE rule restore
+///   applies to every parked activation a save holds) answers this activation's
+///   own activated-mana node → that epoch is exact and the node itself is reused.
+///   The node may be named by either record the save carries: the reference, or
+///   the occurrence ordinal that reference was minted under;
+/// * nothing retained proves nothing, and the announcement epoch is exact by
+///   construction (captured before any cost);
+/// * a contradiction — a retained node of a different kind or object, a node of
+///   this object and epoch belonging to a DIFFERENT occurrence (an earlier
+///   activation of it, already settled per CR 605.3b), a node that already
+///   produced mana behind a save that states no occurrence, two records naming two
+///   incarnations, or no producer record at all behind an activation snapshot — is
+///   refused here exactly as restore refuses it, never read as absence;
+/// * neither record present: the rule refuses a snapshot-carrying pending, and the
+///   only shape left is a pending that carries no announcement snapshot at all —
+///   not built by the activation entry (a direct prompt/production call on a live
+///   state, not a resume of a saved one) — so it resolves from the live object and
+///   BOTH writers then use that one value.
 ///
 /// Whichever answer it reaches, the caller binds `producer.node` AND the
 /// occurrence that node was minted under
@@ -1449,59 +1453,37 @@ fn resolve_parked_activation_producer(
     state: &mut GameState,
     pending: &PendingManaAbility,
 ) -> Result<ParkedActivationProducer, EngineError> {
-    // CR 113.7 + CR 605.3b + CR 400.7: ask the journal what the recorded node IS
-    // — not merely which source it happens to name. The node names the object
-    // that generated the ability, and the half of the evidence that predates
-    // `announced_source_incarnation`, so:
-    //
-    //  * a node the journal no longer retains, or no node at all, proves nothing
-    //    about this activation and leaves the announcement epoch as the evidence
-    //    (the legacy shapes);
-    //  * a node the journal RETAINS that is not this activation's own — a
-    //    triggered-mana node (CR 605.4a: it settles a different ability, however
-    //    exactly it shares this activation's object and epoch) or an
-    //    activated-mana node naming a different object — is a save contradicting
-    //    itself. It is refused, NOT read as absence: reading it as absence is
-    //    what let a resume price this activation from somebody else's node.
+    // CR 113.7 + CR 602.2a + CR 605.3b + CR 400.7: the resume boundary applies the
+    // same rule restore runs over every parked activation, so the two can never
+    // disagree about which settlement this activation is. Reading absence where the
+    // rule reports a contradiction is what let a resume price this activation from
+    // somebody else's node — and the reverse, admitting at restore what only resume
+    // refused, let an activation bind production to a node its own next load
+    // rejects.
     let recorded = pending
-        .recorded_producer_node(&state.resolved_rules_journal)
+        .activation_producer_evidence(&state.resolved_rules_journal)
         .map_err(|conflict| {
             EngineError::InvalidAction(format!(
-                "Parked mana activation for {:?} records an execution node it cannot own: \
+                "Parked mana activation for {:?} records producer evidence it cannot own: \
                  {conflict}",
                 pending.source_id
             ))
         })?;
+    // CR 605.3b: the rule answers the epoch AND the node this activation settles
+    // under, and both are consumed here — the epoch by production, the node by the
+    // journal — so the two cannot describe different activations.
     let (recorded_source, usable_node) = match recorded {
-        ParkedActivationNodeEvidence::Owned(source) => (Some(source), pending.rules_execution_node),
+        ParkedActivationNodeEvidence::Owned { source, node } => (Some(source), Some(node)),
         ParkedActivationNodeEvidence::None => (None, None),
     };
-    let announced = pending.announced_source_incarnation;
 
-    let source = match (recorded_source, announced) {
-        (Some(recorded), Some(announced)) if recorded.incarnation != announced => {
-            return Err(EngineError::InvalidAction(format!(
-                "Parked mana activation for {:?} contradicts itself: its execution node names \
-                 incarnation {} and its announcement epoch names {announced}",
-                pending.source_id, recorded.incarnation
-            )));
-        }
+    let source = match (recorded_source, pending.announced_source_incarnation) {
         (Some(recorded), _) => recorded,
         (None, Some(announced)) => ObjectIncarnationRef::of(pending.source_id, announced),
-        // CR 400.7: an activation this engine built names its producer twice, so a
-        // save carrying neither field predates both and proves nothing. Refusing is
-        // the only answer that does not price the mana from the live occupant of the
-        // storage id. A pending with no announcement snapshot at all was not built
-        // by the activation entry — it is a direct prompt/production call on a live
-        // state, not a resume of a saved one — so the live object IS the announcement
-        // there, and both writers use that one resolved value.
-        (None, None) if pending.ability_snapshot.is_some() => {
-            return Err(EngineError::InvalidAction(format!(
-                "Parked mana activation for {:?} names no producer epoch; refusing to price its \
-                 mana from whatever object holds that storage id now (CR 400.7)",
-                pending.source_id
-            )));
-        }
+        // CR 400.7: the rule refuses every snapshot-carrying pending that names no
+        // producer, so what reaches here was not built by the activation entry — it
+        // is a direct prompt/production call on a live state, not a resume of a
+        // saved one — and the live object IS the announcement there.
         (None, None) => mana_payment::live_source_incarnation(state, pending.source_id)
             .map(|incarnation| ObjectIncarnationRef::of(pending.source_id, incarnation))
             .ok_or_else(|| {
