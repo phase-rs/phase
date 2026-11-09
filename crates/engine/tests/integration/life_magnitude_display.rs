@@ -290,6 +290,130 @@ fn marked_shortcut_revalidates_representable_bound_at_boundary_after_intervening
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 }
 
+/// CR 732.2a + CR 119.3: Multiple accepted marked shortcuts in the stash for the same player
+/// each apply their per-cycle gain to the submitted amount at the boundary. The boundary prompt
+/// aggregates the per-cycle gain across all pending items for that player before computing the
+/// live representable bound, preventing the prompt from offering counts whose materialization
+/// would overflow the stored scalar (#10543).
+#[test]
+fn multiple_accepted_marked_life_batches_aggregate_per_cycle_deltas_at_boundary() {
+    let db = shared_card_db().expect("card db");
+    let (mut runner, altar, gravecrawler) = altar_board_with(Some("Soul Warden"), db, |_| {});
+    let score = |a: &GameAction| 2 * names(&[gravecrawler])(a) + chooses_color(ManaType::Black)(a);
+
+    // Drive to the first loop shortcut offer.
+    for _ in 0..6 {
+        cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
+        settle(&mut runner, &score);
+        if is_offer(runner.state()) {
+            break;
+        }
+        let index = ability(runner.state(), altar, true);
+        activate(&mut runner, altar, index);
+        settle(&mut runner, &score);
+        if is_offer(runner.state()) {
+            break;
+        }
+    }
+    assert!(is_offer(runner.state()));
+    runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(10),
+            template: None,
+        })
+        .expect("declare first shortcut");
+    accept_every_responder(&mut runner);
+
+    // First shortcut is accepted. Verify 1 pending materialization item.
+    assert_eq!(
+        runner
+            .state()
+            .pending_unbounded_materialization
+            .get(&P0)
+            .map(|v| v.len()),
+        Some(1)
+    );
+
+    // Priority returns to P0 before the phase boundary. Drive to a second loop shortcut offer.
+    for _ in 0..6 {
+        cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
+        settle(&mut runner, &score);
+        if is_offer(runner.state()) {
+            break;
+        }
+        let index = ability(runner.state(), altar, true);
+        activate(&mut runner, altar, index);
+        settle(&mut runner, &score);
+        if is_offer(runner.state()) {
+            break;
+        }
+    }
+    assert!(is_offer(runner.state()));
+    runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(10),
+            template: None,
+        })
+        .expect("declare second shortcut");
+    accept_every_responder(&mut runner);
+
+    // Second shortcut is accepted. P0 owns one stash holding both accepted items.
+    assert_eq!(
+        runner
+            .state()
+            .pending_unbounded_materialization
+            .get(&P0)
+            .map(|v| v.len()),
+        Some(2)
+    );
+
+    // Set P0 near the limit where exactly 10 life of headroom remains (P0 life = i32::MAX - 10).
+    runner
+        .state_mut()
+        .players
+        .iter_mut()
+        .find(|p| p.id == P0)
+        .expect("P0 exists")
+        .life = i32::MAX - 10;
+
+    // Pass to the phase boundary. The collapse prompt must aggregate the 2 pending items
+    // (1 + 1 = 2 life per repetition) against the 10 life of headroom, capping max at 5
+    // rather than offering 10 (which would apply 10 * 2 = 20 life and overflow).
+    pass_to_boundary(&mut runner);
+    let state = runner.state();
+    let WaitingFor::PayAmountChoice {
+        player, min, max, ..
+    } = state.waiting_for
+    else {
+        panic!(
+            "expected PayAmountChoice at boundary, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(player, P0);
+    assert_eq!(min, 0);
+    assert_eq!(
+        max, 5,
+        "aggregated per-cycle delta (1+1=2) caps 10 headroom at 5 repetitions"
+    );
+
+    // Submitting 6 exceeds the aggregated representable max and is rejected.
+    let over = runner.act(GameAction::SubmitPayAmount { amount: 6 });
+    assert!(
+        over.is_err(),
+        "submitting 6 when only 5 can be represented must be rejected"
+    );
+
+    // Submitting 5 succeeds, applying 5 to both items (+5 + +5 = +10), landing P0 on exactly i32::MAX.
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 5 })
+        .expect("submit live representable amount 5");
+    let state = runner.state();
+    assert_eq!(life(state, P0), i32::MAX);
+    assert!(state.unbounded_resources.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
+
 /// Enduring Tenacity ("Whenever you gain life, target opponent loses that much life.") and
 /// Exquisite Blood ("Whenever an opponent loses life, you gain that much life."): one shortcut
 /// under P0 marks both P0's gain and P3's drain, so only P0's readout is ∞.

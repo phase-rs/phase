@@ -572,6 +572,9 @@ pub(crate) fn apply_final_player_resource_edit(
     match state.resolve_and_apply_player_edit(player, edit) {
         Ok(()) => Ok(()),
         Err(ResolvedPlayerEditReplayInvariantError::ResourceOverflow) => {
+            if let Some(window) = state.ingress_life_window.as_mut() {
+                window.failed_player.get_or_insert(player);
+            }
             Err(LifeChangeUnrepresentable { player })
         }
         Err(ResolvedPlayerEditReplayInvariantError::UnknownPlayer(_)) => {

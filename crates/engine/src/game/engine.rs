@@ -2869,12 +2869,58 @@ fn interactive_loop_bridge_paths(
             // MEASURES no CR 704 repetition threshold — `UntilLethal` is terminated by the
             // real SBA, not by a caller-supplied count — so it passes the absence and the
             // constructor derives the ceiling from the engine's own budget.
-            // The ring holds no event stream, so no representable bound is measured here.
+            let period_frames: Vec<&GameState> = state
+                .loop_detect_ring
+                .iter()
+                .skip(start)
+                .map(|sample| &sample.live)
+                .chain(std::iter::once(&*state))
+                .collect();
+            let cycle = crate::analysis::headroom::PeriodExcursions::of_frames(&period_frames);
+            let representable =
+                crate::analysis::headroom::PeriodExcursions::representable_repetitions(
+                    &[cycle.clone(), cycle],
+                    state,
+                    MAX_SHORTCUT_CYCLES,
+                );
+            let cycles_to_lethal = state
+                .players
+                .iter()
+                .filter(|p| !p.is_eliminated && p.id != winner)
+                .map(|p| {
+                    let loss = -delta.life.get(&p.id).copied().unwrap_or(0);
+                    let poison_gain = delta.poison.get(&p.id).copied().unwrap_or(0);
+                    let life_cycles = if loss > 0 {
+                        if p.life <= 0 {
+                            0
+                        } else {
+                            (i64::from(p.life) + loss - 1) / loss
+                        }
+                    } else {
+                        i64::MAX
+                    };
+                    let poison_cycles = if poison_gain > 0 {
+                        let needed = 10i64.saturating_sub(i64::from(p.poison_counters));
+                        if needed <= 0 {
+                            0
+                        } else {
+                            (needed + poison_gain - 1) / poison_gain
+                        }
+                    } else {
+                        i64::MAX
+                    };
+                    life_cycles.min(poison_cycles)
+                })
+                .max()
+                .unwrap_or(0);
+            if representable.is_some_and(|r| u64::from(r) < cycles_to_lethal as u64) {
+                return;
+            }
             let schema = build_shortcut_schema(
                 Vec::new(),
                 shortcut_iteration_count(certificate.win_kind),
                 None,
-                None,
+                representable,
             );
             state.waiting_for = WaitingFor::LoopShortcut {
                 proposer,
@@ -3948,18 +3994,7 @@ fn bounded_offer_tail(
     // exact recurrence (which says nothing about choices) and basis B consults no board
     // predicate at all. And deliberately NOT a second `loop_states_cover_modulo_growth_pinned`
     // call: that predicate refuses on BOARD facts without ever examining a choice.
-    let representable = match &source {
-        FrameSource::Ring { .. } => {
-            let cycle = crate::analysis::headroom::PeriodExcursions::of_frames(&period_frames);
-            crate::analysis::headroom::PeriodExcursions::representable_repetitions(
-                &[cycle.clone(), cycle],
-                state,
-                MAX_SHORTCUT_CYCLES,
-            )
-        }
-        FrameSource::Replay { representable, .. } => *representable,
-    };
-    let (touch, recorded) = match source {
+    let (touch, recorded, representable) = match source {
         FrameSource::Ring { touch, verdicts } => {
             let slots: Vec<DecisionSlot> = points.iter().map(|p| p.slot.clone()).collect();
             if !crate::analysis::resource::stack_choices_are_all_specified(
@@ -3971,9 +4006,19 @@ fn bounded_offer_tail(
             ) {
                 return Err(BoundedOfferRefusal::UnspecifiedChoiceWindow);
             }
-            (Some(touch), None)
+            let cycle = crate::analysis::headroom::PeriodExcursions::of_frames(&period_frames);
+            let representable =
+                crate::analysis::headroom::PeriodExcursions::representable_repetitions(
+                    &[cycle.clone(), cycle],
+                    state,
+                    MAX_SHORTCUT_CYCLES,
+                );
+            (Some(touch), None, representable)
         }
-        FrameSource::Replay { answers, .. } => (None, Some(answers)),
+        FrameSource::Replay {
+            answers,
+            representable,
+        } => (None, Some(answers), representable),
     };
 
     // (7) THE BOUND, derived from the ANNOUNCEMENT authority — never from `points`.
@@ -5670,7 +5715,39 @@ fn shortcut_consumption_bound(
         );
     }
     let per_cycle = match proposal.per_cycle.as_ref() {
-        None => return ConsumptionDerivation::Unsigned,
+        None => {
+            if proposal.road == crate::analysis::loop_check::OfferRoad::Ring {
+                if let Some((_winner, _delta, prior)) = find_live_loop_winner(state) {
+                    let start = state
+                        .loop_detect_ring
+                        .iter()
+                        .position(|sample| std::sync::Arc::ptr_eq(sample, &prior))
+                        .unwrap_or(0);
+                    let period_frames: Vec<&GameState> = state
+                        .loop_detect_ring
+                        .iter()
+                        .skip(start)
+                        .map(|sample| &sample.live)
+                        .chain(std::iter::once(state))
+                        .collect();
+                    let cycle =
+                        crate::analysis::headroom::PeriodExcursions::of_frames(&period_frames);
+                    if let Some(r) =
+                        crate::analysis::headroom::PeriodExcursions::representable_repetitions(
+                            &[cycle.clone(), cycle],
+                            state,
+                            MAX_SHORTCUT_CYCLES,
+                        )
+                    {
+                        return ConsumptionDerivation::Measured(ConsumptionBound {
+                            ceiling: r,
+                            entries: Vec::new(),
+                        });
+                    }
+                }
+            }
+            return ConsumptionDerivation::Unsigned;
+        }
         Some(crate::analysis::resource::PeriodSignature::EveryRepetition(per_cycle)) => per_cycle,
         // CR 732.2a: one repetition's signature bounds no other; a take of it predicts no
         // departure, so any departure refuses it whole.
@@ -5753,9 +5830,14 @@ fn shortcut_consumption_bound(
                 .collect()
         });
     let ceiling = ceiling.capacity_count();
-    let cycle = crate::analysis::headroom::PeriodExcursions::of_resource_vector(&per_cycle.delta);
+    let cycle_0 = crate::analysis::headroom::PeriodExcursions::of_declared_iteration(
+        per_cycle, template, published, &points, state, lead, 0,
+    );
+    let cycle_1 = crate::analysis::headroom::PeriodExcursions::of_declared_iteration(
+        per_cycle, template, published, &points, state, lead, 1,
+    );
     let representable = crate::analysis::headroom::PeriodExcursions::representable_repetitions(
-        &[cycle.clone(), cycle],
+        &[cycle_0, cycle_1],
         state,
         MAX_SHORTCUT_CYCLES,
     );

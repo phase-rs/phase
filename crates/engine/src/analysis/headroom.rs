@@ -208,6 +208,25 @@ impl PeriodExcursions {
                         lowest = lowest.min(offset);
                     }
                 }
+                if scalar == PlayerScalar::Life {
+                    if let Some(last_p) = frames
+                        .last()
+                        .and_then(|last| last.players.iter().find(|p| p.id == player.id))
+                    {
+                        let delta_gained = i64::from(
+                            last_p
+                                .life_gained_this_turn
+                                .saturating_sub(player.life_gained_this_turn),
+                        );
+                        let delta_lost = i64::from(
+                            last_p
+                                .life_lost_this_turn
+                                .saturating_sub(player.life_lost_this_turn),
+                        );
+                        highest = highest.max(delta_gained);
+                        lowest = lowest.min(-delta_lost);
+                    }
+                }
                 let net = frames
                     .last()
                     .and_then(|last| last.players.iter().find(|p| p.id == player.id))
@@ -227,19 +246,58 @@ impl PeriodExcursions {
         excursions
     }
 
-    /// The player-resource excursions of one period, read off a [`ResourceVector`].
-    pub(crate) fn of_resource_vector(delta: &crate::analysis::resource::ResourceVector) -> Self {
+    /// The player-resource excursions of iteration `iteration` of a declared period,
+    /// constructing seat life charges from `per_cycle.declared_seat_life_charges` so
+    /// declared victim relocations are accounted for in headroom analysis.
+    pub(crate) fn of_declared_iteration(
+        per_cycle: &crate::analysis::resource::PeriodicDelta,
+        declaration: Option<&crate::analysis::decision_template::DecisionTemplate>,
+        observed: Option<&crate::analysis::decision_template::DecisionTemplate>,
+        points: &[crate::analysis::decision_template::DecisionPoint],
+        state: &GameState,
+        lead: crate::analysis::resource::AnnouncedLead<'_>,
+        iteration: crate::analysis::decision_template::IterationIndex,
+    ) -> Self {
         let mut excursions = Self::default();
-        for (&player, &amount) in &delta.life {
-            excursions.step(player, PlayerScalar::Life, amount);
-            let tally = if amount > 0 {
-                PlayerScalar::LifeGainedThisTurn
-            } else {
-                PlayerScalar::LifeLostThisTurn
-            };
-            excursions.step(player, tally, amount.abs());
+        for player in &state.players {
+            let charge = per_cycle
+                .declared_seat_life_charges(
+                    player.id,
+                    declaration,
+                    observed,
+                    points,
+                    state,
+                    crate::analysis::resource::ChargeBound::Ceiling,
+                    lead,
+                )
+                .nth(iteration as usize)
+                .unwrap_or(crate::analysis::resource::DeclaredLifeCharge { net: 0, dip: 0 });
+            if charge.net != 0 || charge.dip != 0 {
+                excursions.by_scalar.insert(
+                    (player.id, PlayerScalar::Life),
+                    Excursion {
+                        net: -charge.net,
+                        highest: 0,
+                        lowest: -charge.dip,
+                    },
+                );
+                excursions.by_scalar.insert(
+                    (player.id, PlayerScalar::LifeLostThisTurn),
+                    Excursion {
+                        net: charge.net,
+                        highest: charge.dip.max(charge.net),
+                        lowest: 0,
+                    },
+                );
+            }
+            if let Some(&gain) = per_cycle.delta.life.get(&player.id) {
+                if gain > 0 {
+                    excursions.step(player.id, PlayerScalar::Life, gain);
+                    excursions.step(player.id, PlayerScalar::LifeGainedThisTurn, gain);
+                }
+            }
         }
-        for (&player, &delta_poison) in &delta.poison {
+        for (&player, &delta_poison) in &per_cycle.delta.poison {
             excursions.step(
                 player,
                 PlayerScalar::Counter(crate::types::player::PlayerCounterKind::Poison),

@@ -1467,22 +1467,40 @@ fn scan_step_end_mana_handlers(
 /// limits it.
 fn materialization_representable_bound(state: &GameState, controller: PlayerId) -> Option<u32> {
     let items = state.pending_unbounded_materialization.get(&controller)?;
-    let mut bound: Option<u64> = None;
+    let mut total_life_delta_by_player: std::collections::BTreeMap<PlayerId, u64> =
+        std::collections::BTreeMap::new();
     for item in items {
-        if let crate::types::game_state::PersistentAxisMaterialization::Life {
-            player,
-            per_cycle_delta,
-        } = item
-        {
-            if *per_cycle_delta > 0 {
-                if let Some(p) = state.players.iter().find(|pl| pl.id == *player) {
-                    let life_fit = (i64::from(i32::MAX) - i64::from(p.life)).max(0) as u64
-                        / u64::from(*per_cycle_delta);
-                    let gained_fit = (u64::from(u32::MAX) - u64::from(p.life_gained_this_turn))
-                        / u64::from(*per_cycle_delta);
-                    let fit = life_fit.min(gained_fit);
-                    bound = Some(bound.map_or(fit, |b| b.min(fit)));
+        match item {
+            crate::types::game_state::PersistentAxisMaterialization::Life {
+                player,
+                per_cycle_delta,
+            } => {
+                if *per_cycle_delta > 0 {
+                    *total_life_delta_by_player.entry(*player).or_default() +=
+                        u64::from(*per_cycle_delta);
                 }
+            }
+            crate::types::game_state::PersistentAxisMaterialization::Tokens(_) => {
+                // CR 111.1: Tokens are represented as engine objects on the battlefield;
+                // they do not write to fixed-width player-resource scalars.
+            }
+            crate::types::game_state::PersistentAxisMaterialization::Counters(_) => {
+                // CR 122.1: Counters are placed on permanents; permanent counter additions
+                // saturate rather than rejecting through the player-resource ingress error channel.
+            }
+        }
+    }
+    let mut bound: Option<u64> = None;
+    for (player, total_delta) in total_life_delta_by_player {
+        if let Some(p) = state.players.iter().find(|pl| pl.id == player) {
+            let life_headroom = (i64::from(i32::MAX) - i64::from(p.life)).max(0) as u64;
+            let gained_headroom = u64::from(u32::MAX) - u64::from(p.life_gained_this_turn);
+            if let (Some(life_fit), Some(gained_fit)) = (
+                life_headroom.checked_div(total_delta),
+                gained_headroom.checked_div(total_delta),
+            ) {
+                let fit = life_fit.min(gained_fit);
+                bound = Some(bound.map_or(fit, |b| b.min(fit)));
             }
         }
     }

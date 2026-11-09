@@ -544,7 +544,7 @@ fn printed_energy_activation_period_reaches_the_recorded_offer_and_replays_each_
 
 /// CR 107.14 + CR 732.2a: Paying energy costs records the per-turn payment in
 /// `energy_paid_or_lost_this_turn`. When this tally nears `u32::MAX`, the counting replay
-/// at `period_confirm.rs:1499–1520` probes successive payments until tally addition fails.
+/// in period confirmation probes successive payments until tally addition fails.
 /// The failure must propagate as a typed refusal (`LifeChangeUnrepresentable`) rather than
 /// panicking on `expect` in costs resolution (#10543).
 #[test]
@@ -595,35 +595,128 @@ fn printed_energy_counting_replay_stops_on_tally_overflow_without_panicking() {
 /// cleanly without panicking (#10543).
 #[test]
 fn printed_energy_initial_confirmation_refuses_when_cycle_unrepresentable_without_panicking() {
-    let (mut state, line) = setup_energy_activation_loop(false, 0);
+    let (mut state, line) = setup_energy_activation_loop(false, 3);
     let index = energy_activation_index(&state, line);
 
-    // Start near limit such that cycle 1 leaves tally at u32::MAX - 2.
-    state.players[P0.0 as usize].energy_paid_or_lost_this_turn = u32::MAX - 5;
+    // Three modules refund the energy cost, so this is an unbounded loop.
+    // Each period pays 3 energy.
+    // Starting at u32::MAX - 7:
+    // - Live cycle 1 succeeds: pays 3, leaving tally at u32::MAX - 4.
+    //   The confirmer's 2-cycle replay replays cycle 1 (tally becomes MAX - 1) and
+    //   cycle 2 (overflows MAX), returning OfferRefusal::LifeChangeUnrepresentable.
+    //   The offer is withheld and priority remains.
+    // - Live cycle 2 succeeds: pays 3, leaving tally at u32::MAX - 1.
+    //   The confirmer replays and overflows again, leaving priority.
+    state.players[P0.0 as usize].energy_paid_or_lost_this_turn = u32::MAX - 7;
     energy_activation_period(&mut state, line, index);
     assert_eq!(
         state.players[P0.0 as usize].energy_paid_or_lost_this_turn,
-        u32::MAX - 2
+        u32::MAX - 4
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+        "after live cycle 1, offer must be withheld because confirmer cycle 2 overflows; got {:?}",
+        state.waiting_for
     );
 
-    // Live cycle 2 cannot even be paid (attempting to pay 3 from u32::MAX - 2 overflows).
-    // The payment check returns LifeChangeUnrepresentable instead of panicking on expect.
-    let err = apply(
-        &mut state,
-        P0,
-        GameAction::ActivateAbility {
-            source_id: line,
-            ability_index: index,
-            payment_mode: CastPaymentMode::Auto,
-        },
+    energy_activation_period(&mut state, line, index);
+    assert_eq!(
+        state.players[P0.0 as usize].energy_paid_or_lost_this_turn,
+        u32::MAX - 1
     );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+        "after live cycle 2, offer must be withheld again, leaving priority; got {:?}",
+        state.waiting_for
+    );
+}
+
+/// CR 107.14 + CR 601.2f/h: a cast continuation with an interactive multi-step cost
+/// followed by AbilityCost::PayEnergy that overflows energy_paid_or_lost_this_turn
+/// returns EngineError::LifeChangeUnrepresentable and rolls back the cast attempt.
+#[test]
+fn cast_continuation_paying_energy_overflow_returns_life_change_unrepresentable_and_rolls_back() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Test Draw Spell", false, "Draw a card.")
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 1,
+        })
+        .id();
+    let fodder = scenario.add_card_to_hand(P0, "Fodder");
+    scenario.with_mana_pool(
+        P0,
+        (0..5)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+
+    // Replace the spell's additional cost with: Discard 1 card, then Pay 1 Energy.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .additional_cost = Some(engine::types::AdditionalCost::Required(
+        engine::types::ability::AbilityCost::Composite {
+            costs: vec![
+                engine::types::ability::AbilityCost::Discard {
+                    count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                    filter: None,
+                    selection: engine::types::ability::CardSelectionMode::Chosen,
+                    self_scope: engine::types::ability::DiscardSelfScope::FromHand,
+                },
+                engine::types::ability::AbilityCost::PayEnergy {
+                    amount: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                },
+            ],
+        },
+    ));
+
+    runner.state_mut().players[P0.0 as usize].energy = 5;
+    runner.state_mut().players[P0.0 as usize].energy_paid_or_lost_this_turn = u32::MAX;
+
+    // Begin cast: no targets needed.
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id: runner.state().objects[&spell].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast begins and pauses for discard");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::PayCost {
+            kind: engine::types::PayCostKind::Discard,
+            ..
+        }
+    ));
+
+    // Answer the discard prompt with fodder. Continuation resumes to PayEnergy, which overflows.
+    let err = runner.act(GameAction::SelectCards {
+        cards: vec![fodder],
+    });
+
     assert!(
         matches!(
             err,
             Err(EngineError::LifeChangeUnrepresentable { player }) if player == P0
         ),
-        "paying {{E}}{{E}}{{E}} from u32::MAX - 2 must return LifeChangeUnrepresentable, got {:?}",
+        "energy payment overflow in cast continuation must return LifeChangeUnrepresentable, got {:?}",
         err
+    );
+
+    // Rollback: fodder and spell remain in hand, energy_paid_or_lost_this_turn untouched.
+    assert_eq!(runner.state().objects[&fodder].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+    assert_eq!(
+        runner.state().players[P0.0 as usize].energy_paid_or_lost_this_turn,
+        u32::MAX
     );
 }
 
@@ -12045,6 +12138,97 @@ fn a_ring_take_of_the_dina_drain_near_the_life_limit_is_bounded_and_lands_on_max
     );
 }
 
+/// CR 732.2a + CR 104.2a + CR 119.3: an optional winning Ring offer evaluates representable
+/// repetitions against cycles to lethal. When representable is less than cycles needed for living
+/// opponents to cross lethal damage, the offer is withheld and played out. When representable
+/// is sufficient, the offer is made, declarations exceeding representability are refused, and
+/// an accepted take completes to GameOver (#10543).
+#[test]
+fn optional_winning_ring_offer_headroom_bounds_and_plays_out_when_insufficient() {
+    // Arm 1: P0 headroom = 2, P1 life = 3 on offer frame. Cycles to lethal is 3 > 2 (headroom).
+    // Loop is played out without offering shortcut.
+    {
+        let (mut runner, kickoff, _bolt, _cleric) =
+            setup_2p_optional_drain(LoopDetectionMode::Interactive);
+        runner.state_mut().players[P0.0 as usize].life = i32::MAX - 4;
+        runner.state_mut().players[P1.0 as usize].life = 5;
+
+        let res = runner.cast(kickoff).try_resolve();
+        assert!(
+            matches!(res, Err(EngineError::LifeChangeUnrepresentable { player }) if player == P0),
+            "loop plays out until life change overflows when shortcut is withheld, got {:?}",
+            res.as_ref().err()
+        );
+        assert!(
+            !matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { .. }),
+            "when representable < cycles_to_lethal, loop must be played out without offering shortcut; got {:?}",
+            runner.state().waiting_for
+        );
+    }
+
+    // Arm 2: P0 headroom = 2, P1 life = 2 on offer frame. Cycles to lethal is 2 <= 2 (headroom).
+    // Offer is made. Fixed(3) is refused. Fixed(2) is accepted and reaches GameOver at i32::MAX.
+    {
+        let (mut runner, kickoff, _bolt, _cleric) =
+            setup_2p_optional_drain(LoopDetectionMode::Interactive);
+        runner.state_mut().players[P0.0 as usize].life = i32::MAX - 4;
+        runner.state_mut().players[P1.0 as usize].life = 4;
+
+        let _ = runner.cast(kickoff).resolve();
+        let (_events, wf) = drive_collect(&mut runner, 500);
+        let WaitingFor::LoopShortcut {
+            proposer,
+            predicted_winner,
+            schema,
+            ..
+        } = wf
+        else {
+            panic!("when representable >= cycles_to_lethal, loop must OFFER a LoopShortcut; got {wf:?}");
+        };
+        assert_eq!(proposer, P0);
+        assert_eq!(predicted_winner, Some(P0));
+        assert_eq!(schema.deliverable_capacity, 2);
+
+        // Fixed(3) is refused
+        let mut refused = runner.state().clone();
+        let res = apply(
+            &mut refused,
+            P0,
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(3),
+                template: None,
+            },
+        );
+        assert!(res.is_ok());
+        assert!(matches!(
+            refused.waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ));
+
+        // Fixed(2) is accepted and reaches GameOver
+        runner
+            .act(GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(2),
+                template: None,
+            })
+            .expect("Fixed(2) declared");
+        runner
+            .act(GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            })
+            .expect("accept Fixed(2)");
+        assert_eq!(runner.state().players[P0.0 as usize].life, i32::MAX);
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::GameOver { winner: Some(p) } if p == P0
+            ),
+            "expected GameOver with P0 winning, got {:?}",
+            runner.state().waiting_for
+        );
+    }
+}
+
 /// ITEM 2 (CR 732.2a) — the ACCEPT side: an opponent's play in the window's trace must not divert
 /// an accepted bounded grant away from the drain materializer.
 ///
@@ -16124,6 +16308,64 @@ fn a_declared_target_made_illegal_mid_drive_stops_short_and_never_retargets() {
         runner.state().battlefield.contains(&hexproof_src),
         "the roll-back is scoped to the DRIVE: the board change that made the pin illegal is \
          not undone by the abort"
+    );
+}
+
+/// CR 732.2a + CR 119.3: when an offer's choices re-aim a drain from the observed victim (P1)
+/// onto another legal victim (P2), consumption headroom must construct excursions from the
+/// declared victim charges rather than the historical vector, so gross edits on the newly declared
+/// victim bound the take. With P2 having life_lost_this_turn = u32::MAX - 1, only 1 repetition is drivable (#10543).
+#[test]
+fn r5_drain_retargeted_to_p2_with_near_max_life_lost_bounds_take() {
+    let (mut runner, slot, _bond, _hexproof_src, _l0) = r5_reach_offer();
+    // P2 has life_lost_this_turn = u32::MAX - 1.
+    runner.state_mut().players[P2.0 as usize].life_lost_this_turn = u32::MAX - 1;
+
+    // Declaring 3 cycles targeting P2. P2 can only represent 2 repetitions before life_lost_this_turn overflows.
+    let template = r5_pin_template(slot.clone(), P2, 3);
+    runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(3),
+            template: Some(template),
+        })
+        .expect("declare Fixed(3)");
+
+    // When opponents accept, consumption check verifies drivability on final accept and refuses Fixed(3).
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::RespondToShortcut { .. }
+    ) {
+        runner
+            .act(GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            })
+            .expect("respond to shortcut");
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "Fixed(3) on P2 must be refused at consumption because P2 headroom is 2, falling back to priority; got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().players[P2.0 as usize].life_lost_this_turn,
+        u32::MAX - 1,
+        "zero cycles commit on the refused count, leaving P2 life loss unchanged"
+    );
+
+    // With a fresh offer and count 2, declaration and accept succeed.
+    let (mut runner1, slot1, _bond, _hexproof_src, _l0) = r5_reach_offer();
+    runner1.state_mut().players[P2.0 as usize].life_lost_this_turn = u32::MAX - 1;
+    let template1 = r5_pin_template(slot1.clone(), P2, 2);
+    runner1
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(2),
+            template: Some(template1),
+        })
+        .expect("declare Fixed(2)");
+    accept_all_opponents(&mut runner1);
+    assert_eq!(
+        runner1.state().players[P2.0 as usize].life_lost_this_turn,
+        u32::MAX
     );
 }
 
