@@ -438,7 +438,7 @@ fn resolution_can_remove_activatable_mana_source(
     let Some(root) = top.ability() else {
         return false;
     };
-    if !chain_has_effect(root, |effect| battlefield_departure_slot(effect).is_some()) {
+    if !chain_has_battlefield_departure(root) {
         return false;
     }
     let sources: Vec<ObjectId> = mana_sources::activatable_mana_actions_for_player(state, player)
@@ -485,38 +485,49 @@ fn resolution_untaps_ready_mana_source(
     // CR 603.3); holding for it would stop Wilderness Reclamation every end step.
     // A spell, or an untap of anything but the ability's own source, keeps the
     // pass.
-    let (source, ability) = match &top.kind {
-        StackEntryKind::ActivatedAbility { source_id, ability } => (*source_id, ability),
+    let ability = match &top.kind {
+        StackEntryKind::ActivatedAbility { ability, .. } => ability,
         StackEntryKind::Spell { .. }
         | StackEntryKind::TriggeredAbility { .. }
         | StackEntryKind::KeywordAction { .. }
         | StackEntryKind::CombatDamage { .. } => return false,
     };
-    chain_has_effect(ability, untaps_its_source)
-        && mana_sources::untap_repeats_mana(state, player, source)
+    untapped_source(state, ability)
+        .is_some_and(|source| mana_sources::untap_repeats_mana(state, player, source))
 }
 
-/// "Untap this artifact." / "Untap this creature.": an untap of the ability's
-/// own source.
-fn untaps_its_source(effect: &Effect) -> bool {
-    matches!(
-        effect,
+/// The object a "Untap this artifact." / "Untap this creature." instruction in
+/// `ability`'s chain untaps, bound as its resolver binds it
+/// (`ResolvedAbility::self_ref_binding`): none once the source has left the
+/// battlefield, even if it came back (CR 400.7).
+fn untapped_source(state: &GameState, ability: &ResolvedAbility) -> Option<ObjectId> {
+    let untaps_its_source = matches!(
+        ability.effect,
         Effect::SetTapState {
             state: TapStateChange::Untap,
             scope: EffectScope::Single,
             target: TargetFilter::SelfRef,
         }
-    )
+    );
+    untaps_its_source
+        .then(|| ability.self_ref_binding(state))
+        .flatten()
+        .or_else(|| {
+            [&ability.sub_ability, &ability.else_ability]
+                .into_iter()
+                .flatten()
+                .find_map(|branch| untapped_source(state, branch))
+        })
 }
 
-/// Whether any instruction in `ability`'s chain is `judged` — the structural
-/// gate before any board is read.
-fn chain_has_effect(ability: &ResolvedAbility, judged: fn(&Effect) -> bool) -> bool {
-    judged(&ability.effect)
+/// Whether any instruction in `ability`'s chain can move battlefield objects to
+/// another zone — the structural gate before any board is read.
+fn chain_has_battlefield_departure(ability: &ResolvedAbility) -> bool {
+    battlefield_departure_slot(&ability.effect).is_some()
         || [&ability.sub_ability, &ability.else_ability]
             .into_iter()
             .flatten()
-            .any(|branch| chain_has_effect(branch, judged))
+            .any(|branch| chain_has_battlefield_departure(branch))
 }
 
 /// The objects one battlefield-departure instruction can move, as far as they

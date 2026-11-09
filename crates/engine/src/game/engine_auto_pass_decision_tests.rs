@@ -2729,9 +2729,9 @@ fn until_end_of_turn_breaks_on_an_own_top_held_for_a_removable_mana_source() {
         );
         let decision = priority_auto_pass_decision(&state, PlayerId(0));
         if expect_break {
-            assert!(is_break(&decision), "untapped Monolith: the window is held");
+            assert!(is_break(&decision), "untapped Forest: the window is held");
         } else {
-            assert!(is_pass(&decision), "tapped Monolith: own top passes");
+            assert!(is_pass(&decision), "tapped Forest: own top passes");
         }
     }
 }

@@ -455,12 +455,13 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
 /// the game, and the untap after it is the resolving instruction's own, so a
 /// stun counter on the source is removed instead (CR 122.1d), and a replacement
 /// that asks a choice keeps the pass. The source's own cost answers too: a cost
-/// that removes the source (Treasure, Lotus Petal, Mirrored Lotus) leaves
-/// nothing to untap, and a cost that can't be paid again stops a second use. A
-/// use that ends the game (Staff of Compleation's "Pay 2 life" at 2 life,
-/// CR 119.4 + CR 704.5a) leaves no second one. One that stops for a choice
-/// inside its cost (Gilded Goose's Food, Bog Witch's discard) can't be read this
-/// way and keeps the pass. Only `object`'s own rows are read, one copy each.
+/// that can't be paid again stops a second use (Staff of Compleation's "Pay 2
+/// life" at 3 life, CR 119.4), and one that asks a choice before it's paid
+/// can't be read this way and keeps the pass. A use that leaves a player-loss
+/// SBA pending also stops it, as the public action's terminal checkpoint would
+/// end the game there (CR 704.5a); no printed source in the class reaches that
+/// stop except through a life cost, which the payment check already refuses.
+/// Only `object`'s own rows are read, one copy each.
 pub(crate) fn untap_repeats_mana(state: &GameState, player: PlayerId, object: ObjectId) -> bool {
     let Some(source) = state.objects.get(&object) else {
         return false;

@@ -10408,9 +10408,9 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
             // the session keeps auto-passing through it. CR 117.1d + CR 605.3a:
             // `Held` ends it too: the player's own object that can move one of
             // their activatable mana sources off the battlefield, or their own
-            // activated ability that would waste an untap on its own source.
-            // That activation is lost once the object resolves. (`UntilStackEmpty` is consent to resolve the stack
-            // itself, so it passes through.) The standing rungs are
+            // activated ability that would waste an untap on its own source. That
+            // mana is lost once the object resolves. (`UntilStackEmpty` is
+            // consent to resolve the stack itself, so it passes through.) The standing rungs are
             // `priority::standing_priority_pass`'s; Full Control already
             // returned above, so `Withheld` cannot reach this arm.
             let top_needs_response = state.stack.last().is_some_and(|top| {

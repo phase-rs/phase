@@ -51,10 +51,10 @@ use engine::types::ability::{Effect, TapStateChange, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::parse_counter_type;
 use engine::types::game_state::{
-    CastPaymentMode, LoopDetectionMode, PriorityPassingMode, StackEntryKind, WaitingFor,
+    CastPaymentMode, LoopDetectionMode, PriorityPassingMode, StackEntry, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaType;
+use engine::types::mana::{ManaCost, ManaType};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -518,6 +518,76 @@ fn a_stunned_source_gets_no_second_tap_from_its_untap() {
     }
 }
 
+/// Ghostly Flicker, verbatim.
+const GHOSTLY_FLICKER: &str = "Exile two target artifacts, creatures, and/or lands you control, \
+     then return those cards to the battlefield under your control.";
+
+/// CR 400.7: once Monolith is flickered it is a new object, and the untap on
+/// the stack no longer refers to it, so the pass stays. Played out, the untap
+/// leaves the returned Monolith tapped. Without the flicker the same window
+/// holds.
+#[test]
+fn a_flickered_source_is_not_the_untaps_object() {
+    let Some(db) = shared_card_db() else { return };
+    for flicker in [false, true] {
+        let mut scenario = main_phase_scenario();
+        let monolith = scenario.add_real_card(P0, "Basalt Monolith", Zone::Battlefield, db);
+        let mountains: Vec<_> = (0..3)
+            .map(|_| scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db))
+            .collect();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Ghostly Flicker", true, GHOSTLY_FLICKER)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        for &mountain in &mountains {
+            tap_for_mana(&mut runner, mountain);
+        }
+        let untap = untap_ability_index(&runner, monolith);
+        activate(&mut runner, monolith, untap, &[]);
+        if flicker {
+            let incarnation = runner.state().objects[&monolith].incarnation;
+            runner
+                .cast(spell)
+                .target_objects(&[monolith, mountains[0]])
+                .commit();
+            for _ in 0..4 {
+                if runner.state().stack.len() == 1 {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            assert_eq!(runner.state().stack.len(), 1, "Ghostly Flicker resolved");
+            assert_ne!(
+                runner.state().objects[&monolith].incarnation,
+                incarnation,
+                "Monolith came back as a new object"
+            );
+        }
+        assert_eq!(top_source_name(&runner).as_deref(), Some("Basalt Monolith"));
+        assert!(mana_action(&runner, monolith).is_some() && !is_tapped(&runner, monolith));
+        assert_eq!(
+            recommends_pass(&runner),
+            flicker,
+            "flickered: {flicker}: whether the untap window passes"
+        );
+
+        tap_for_mana(&mut runner, monolith);
+        for _ in 0..4 {
+            if runner.state().stack.is_empty() {
+                break;
+            }
+            runner.act(GameAction::PassPriority).expect("pass");
+        }
+        assert!(runner.state().stack.is_empty(), "the untap resolved");
+        assert_eq!(
+            is_tapped(&runner, monolith),
+            flicker,
+            "flickered: {flicker}: whether Monolith stays tapped"
+        );
+    }
+}
+
 /// The hold reads the top entry and its source only: with forty more queued
 /// untaps below it and sixty Treasures beside it, it copies the game once, for
 /// Monolith's one {T} mana row.
@@ -539,8 +609,11 @@ fn the_untap_hold_reads_only_the_top_and_its_source() {
     let untap = untap_ability_index(&runner, monolith);
     activate(&mut runner, monolith, untap, &[]);
     let queued = runner.state().stack.back().expect("the untap").clone();
-    for _ in 0..40 {
-        runner.state_mut().stack.push_front(queued.clone());
+    for id in 0..40 {
+        runner.state_mut().stack.push_front(StackEntry {
+            id: ObjectId(90_000 + id),
+            ..queued.clone()
+        });
     }
 
     let state = runner.state();
@@ -555,9 +628,10 @@ const STAFF_OF_COMPLEATION: &str = "{T}, Pay 1 life: Destroy target permanent yo
 
 /// The Staff's "{T}, Pay 2 life: Add one mana of any color." CR 119.4 +
 /// CR 704.5a: paying 2 life at 2 life is legal, and the player then loses the
-/// game, so the untap has no second use to wait for and the pass stays. At 3
-/// life the first use leaves 1, too little to pay again, so the pass stays too.
-/// At 4 it leaves 2, and the window holds.
+/// game; with 0 life the cost can't be paid again either, so the untap has no
+/// second use to wait for and the pass stays. At 3 life the first use leaves 1,
+/// too little to pay again, so the pass stays too. At 4 it leaves 2, and the
+/// window holds.
 #[test]
 fn a_use_that_ends_the_game_leaves_no_second_one() {
     let Some(db) = shared_card_db() else { return };
@@ -633,9 +707,9 @@ fn illusionists_bracers_on_devoted_druid_gives_the_druid_a_second_tap() {
 }
 
 /// The path a game against the AI takes: the AI's verified pass installs a
-/// rechecking session, whose look-ahead authorizes both entries with Monolith
-/// tapped. An activated entry resolves alone, so the original still reaches a
-/// window of its own with Monolith untapped.
+/// rechecking session. An activated entry resolves alone, so the look-ahead
+/// authorizes one entry, and the original still reaches a window of its own
+/// with Monolith untapped.
 #[test]
 fn an_ai_opponents_pass_leaves_the_original_its_window() {
     let Some(db) = shared_card_db() else { return };
