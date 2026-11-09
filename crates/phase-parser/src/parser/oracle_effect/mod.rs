@@ -28227,9 +28227,9 @@ fn prior_clause_granter_referent(clauses: &[ClauseIr]) -> Option<ObjectScope> {
 /// 0/0 Elemental …" — has the typed land two clauses back, with the `Untap it`
 /// (`ParentTarget`) clause in between. The scan walks back, skipping
 /// `ParentTarget`-carrier clauses (they continue the same chosen referent), and
-/// succeeds at the originating typed clause. It stops at the first clause that is
-/// conditional or is neither typed nor a `ParentTarget` carrier, so it never
-/// reaches across an unrelated referent.
+/// succeeds at the originating typed clause or chosen search result. It stops
+/// at a conditional or a clause that neither introduces such a referent nor
+/// carries it via `ParentTarget`, so it never crosses an unrelated referent.
 ///
 /// CR 603.12 + CR 608.2c carve-out: a `WhenYouDo` clause does NOT bail the walk,
 /// even though it carries a `condition` — it is still inspected as a possible
@@ -50024,9 +50024,9 @@ fn parse_effect_chain_ir_body(
                 replace_target_with_parent(&mut clause.effect);
             }
         }
-        // CR 608.2c: Pronoun clause following an unconditional targeted effect.
-        // Transitive across `ParentTarget`-carrier clauses so an intervening
-        // anaphor ("Untap it.") doesn't hide the originating typed target
+        // CR 608.2c: Pronoun clause following an unconditional chosen-object effect.
+        // Transitive across `ParentTarget` carriers so an intervening
+        // anaphor ("Untap it.") doesn't hide the originating chosen referent
         // (Nissa, Who Shakes the World).
         if condition.is_none()
             && !is_distributed_chunk
