@@ -6342,7 +6342,8 @@ pub(super) fn apply_clause_continuation(
                         let mut def = AbilityDefinition::new(
                             kind,
                             Effect::ChangeZone {
-                                library_shuffle: Default::default(), // CR 400.3: a bounded "put up to N <filter> milled
+                                library_shuffle: Default::default(),
+                                // CR 400.3: a bounded "put up to N <filter> milled
                                 // this way onto the battlefield face down" form
                                 // must scan the milled cards' actual zone (the
                                 // Mill destination), mirroring the `All` branch —
