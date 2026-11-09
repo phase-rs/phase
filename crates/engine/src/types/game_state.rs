@@ -36764,7 +36764,7 @@ impl GameState {
                 supertypes: _,
                 keywords: _,
                 colors: _,
-                chosen_attributes: _,
+                chosen_attributes,
                 counters: _,
                 tapped: _,
                 is_suspected: _,
@@ -36773,6 +36773,34 @@ impl GameState {
                 intensity: _,
             } = lki;
             attachment_incarnations(attachments, f);
+            for attribute in chosen_attributes {
+                match attribute {
+                    ChosenAttribute::Card(reference) => {
+                        // Use the same pool for collection and rewrite. Legacy
+                        // absent stamps must never become ranked real pins.
+                        if reference.incarnation != crate::types::identifiers::LEGACY_INCARNATION {
+                            f(reference.object_id, &mut reference.incarnation);
+                        }
+                    }
+                    ChosenAttribute::Color(_)
+                    | ChosenAttribute::CreatureType(_)
+                    | ChosenAttribute::BasicLandType(_)
+                    | ChosenAttribute::CardType(_)
+                    | ChosenAttribute::OddOrEven(_)
+                    | ChosenAttribute::CardName(_)
+                    | ChosenAttribute::Number(_)
+                    | ChosenAttribute::RevealedNumber(_)
+                    | ChosenAttribute::Player(_)
+                    | ChosenAttribute::TwoColors(_)
+                    | ChosenAttribute::TributeOutcome(_)
+                    | ChosenAttribute::Keyword(_)
+                    | ChosenAttribute::Label(_)
+                    | ChosenAttribute::Counter(_)
+                    | ChosenAttribute::Direction(_)
+                    | ChosenAttribute::CopiableSnapshot(_)
+                    | ChosenAttribute::NotedManaSpent(_) => {}
+                }
+            }
         }
         fn attachment_incarnations(
             attachments: &mut [AttachmentSnapshot],

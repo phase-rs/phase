@@ -5508,7 +5508,17 @@ pub(crate) fn fodder_growth_cover_refusals(
     // Never anonymously rename a recipient
     // that is also a retained damage dealer: the source/target alias matters.
     // The existing visitor includes player damage and all parked carriers.
+    let mut legacy_recipients = HashSet::new();
     for frame in [&mut pa.0, &mut pb.0] {
+        // Factory projection keeps one witness per retained key with ANY known
+        // recipient stamp (live or stale). Missing keys therefore identify the
+        // runtime's legacy fallback without rescanning the raw damage journal.
+        let known_recipients: HashSet<_> = frame
+            .damage_dealt_this_turn
+            .iter()
+            .map(DamageRecord::event_key)
+            .collect();
+        let mut unknown_recipients = Vec::new();
         frame.for_each_trigger_event_carrier_mut(&mut |event| {
             if let GameEvent::DamageDealt { source_id, .. } = event {
                 recipient_cohort.remove(&*source_id);
@@ -5518,8 +5528,27 @@ pub(crate) fn fodder_growth_cover_refusals(
                     recipient_cohort.remove(source);
                 }
             }
+            let Some(key) = DamageEventKey::from_event(event) else {
+                return;
+            };
+            let TargetRef::Object(target) = &key.target else {
+                return;
+            };
+            if recipient_cohort.contains(target) && !known_recipients.contains(&key) {
+                unknown_recipients.push(*target);
+            }
         });
+        // An absent object has no live fallback recipient in this frame.
+        legacy_recipients.extend(
+            unknown_recipients
+                .into_iter()
+                .filter(|target| frame.objects.contains_key(target)),
+        );
     }
+    // Finish dealer exclusions on BOTH frames before deciding eligibility.
+    // The stack is about to disappear, so retain this refusal at its owning
+    // cover seam rather than inventing a recipient epoch in the projection.
+    let has_legacy_recipient = !legacy_recipients.is_disjoint(&recipient_cohort);
     pa.0.stack.clear();
     pb.0.stack.clear();
 
@@ -5571,7 +5600,7 @@ pub(crate) fn fodder_growth_cover_refusals(
         && cf.stack.is_empty()
         && last_known_records_grow_unread(&pa, &pb)
         && HistoryMember::LastKnownRecords.equalize(&mut pb.0, &pa);
-    if !eq_except_growable(&pa, &pb, &growing, Some(&recipient_cohort)) {
+    if has_legacy_recipient || !eq_except_growable(&pa, &pb, &growing, Some(&recipient_cohort)) {
         refusals.push(FodderCoverRefusal::NonObjectRemainder);
     }
 
@@ -10844,7 +10873,7 @@ mod tests {
 
         // Legacy compatibility states have the same pending consumers but no
         // recipient stamp authority. Runtime accepts the named live recipient;
-        // the cover must conservatively refuse these eligible retained shapes.
+        // the cover must retain recipient sharing while allowing consistent renaming.
         // Exercise both raw futures before checking cover, so a projected
         // witness-count assertion cannot hide the semantic regression.
         let mut legacy_covers = Vec::new();
@@ -10857,7 +10886,13 @@ mod tests {
             let mut legacy_shared = shared.clone();
             let mut legacy_renamed = renamed.clone();
             let mut legacy_split = split.clone();
-            for frame in [&mut legacy_shared, &mut legacy_renamed, &mut legacy_split] {
+            let mut legacy_permuted = permuted.clone();
+            for frame in [
+                &mut legacy_shared,
+                &mut legacy_renamed,
+                &mut legacy_split,
+                &mut legacy_permuted,
+            ] {
                 if missing_rows {
                     frame.damage_dealt_this_turn.clear();
                 } else {
@@ -10887,6 +10922,7 @@ mod tests {
                 (&legacy_shared, BTreeSet::from([ObjectId(21)])),
                 (&legacy_renamed, BTreeSet::from([ObjectId(22)])),
                 (&legacy_split, BTreeSet::from([ObjectId(21), ObjectId(22)])),
+                (&legacy_permuted, BTreeSet::from([ObjectId(23), ObjectId(25)])),
             ] {
                 assert_eq!(
                     recipients(raw),
@@ -10899,23 +10935,102 @@ mod tests {
                     "{label}: actual raw trigger resolutions tap the named recipients"
                 );
             }
-            for (shape, current) in [("split", &legacy_split), ("renamed", &legacy_renamed)] {
+            // Keep both recipient ids stable on BOTH boards. Only an independent
+            // inert token class grows; its membership cannot account for losing
+            // which stable recipient each pending legacy consumer names.
+            let mut stable_prior = legacy_renamed.clone();
+            let fodder = battlefield_creature(&mut stable_prior, 30, 0);
+            stable_prior.objects.get_mut(&fodder).unwrap().is_token = true;
+            let mut independent_class = stable_prior.objects[&fodder].clone();
+            project_object_for_loop(&mut independent_class);
+            let mut stable_shared = stable_prior.clone();
+            let mut fresh = stable_prior.objects[&fodder].clone();
+            fresh.id = ObjectId(31);
+            stable_shared.objects.insert(fresh.id, fresh);
+            stable_shared.battlefield.push_back(ObjectId(31));
+            let mut stable_split = stable_shared.clone();
+            stable_split.stack = legacy_split.stack.clone();
+            stable_split.damage_dealt_this_turn = legacy_split.damage_dealt_this_turn.clone();
+            for frame in [&stable_prior, &stable_shared, &stable_split] {
+                for id in [ObjectId(21), ObjectId(22)] {
+                    assert!(
+                        frame.battlefield.contains(&id),
+                        "{label}: both stable recipients are present"
+                    );
+                    assert!(
+                        crate::types::game_state::object_content_eq(
+                            &stable_prior.objects[&id],
+                            &frame.objects[&id],
+                        ),
+                        "{label}: stable recipient content is unchanged"
+                    );
+                    let mut recipient = frame.objects[&id].clone();
+                    project_object_for_loop(&mut recipient);
+                    assert!(
+                        !fodder_content_eq(&recipient, &independent_class),
+                        "{label}: recipients are outside the independently growing class"
+                    );
+                }
+            }
+            for (raw, expected) in [
+                (&stable_prior, BTreeSet::from([ObjectId(22)])),
+                (&stable_shared, BTreeSet::from([ObjectId(22)])),
+                (&stable_split, BTreeSet::from([ObjectId(21), ObjectId(22)])),
+            ] {
+                assert_eq!(recipients(raw), expected, "{label}: stable raw consumer");
+                assert_eq!(
+                    tapped_after_pending_triggers(raw),
+                    expected,
+                    "{label}: stable raw futures differ only when recipients split"
+                );
+            }
+            for (shape, current, should_cover) in [
+                ("noncohort split", &stable_split, false),
+                ("noncohort shared", &stable_shared, true),
+            ] {
+                let refusals = fodder_growth_cover_refusals(
+                    &stable_prior,
+                    current,
+                    &independent_class,
+                    PlayerId(0),
+                )
+                .0;
+                assert!(
+                    refusals
+                        .iter()
+                        .all(|refusal| *refusal == FodderCoverRefusal::NonObjectRemainder),
+                    "{label}/{shape}: independent growth must pass other gates: {refusals:?}"
+                );
+                legacy_covers.push((label, shape, should_cover, refusals));
+            }
+            for (shape, prior, current, should_cover) in [
+                ("split", &legacy_shared, &legacy_split, false),
+                ("renamed", &legacy_shared, &legacy_renamed, true),
+                ("two-group renamed", &legacy_split, &legacy_permuted, true),
+            ] {
                 let refusals =
-                    fodder_growth_cover_refusals(&legacy_shared, current, &class, PlayerId(0)).0;
+                    fodder_growth_cover_refusals(prior, current, &class, PlayerId(0)).0;
                 assert!(
                     refusals
                         .iter()
                         .all(|refusal| *refusal == FodderCoverRefusal::NonObjectRemainder),
                     "{label}/{shape}: other cover gates must admit the fixture: {refusals:?}"
                 );
-                legacy_covers.push((label, shape, refusals));
+                legacy_covers.push((label, shape, should_cover, refusals));
             }
         }
-        for (label, shape, refusals) in legacy_covers {
-            assert!(
-                refusals.contains(&FodderCoverRefusal::NonObjectRemainder),
-                "{label}/{shape}: retained legacy recipients must refuse fodder cover: {refusals:?}"
-            );
+        for (label, shape, should_cover, refusals) in legacy_covers {
+            if should_cover {
+                assert!(
+                    refusals.is_empty(),
+                    "{label}/{shape}: consistent legacy recipient groups must cover: {refusals:?}"
+                );
+            } else {
+                assert!(
+                    refusals.contains(&FodderCoverRefusal::NonObjectRemainder),
+                    "{label}/{shape}: split legacy recipient groups must refuse: {refusals:?}"
+                );
+            }
         }
     }
 

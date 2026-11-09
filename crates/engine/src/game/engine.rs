@@ -11193,6 +11193,12 @@ fn priority_pass_will_close_window(state: &GameState) -> bool {
     !participants.is_empty() && state.priority_passes.len().saturating_add(1) >= participants.len()
 }
 
+#[cfg(test)]
+thread_local! {
+    static AUTO_PASS_WINDOW_SAMPLES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// Auto-pass loop: when a player has an auto-pass flag and receives priority,
 /// automatically pass for them until the goal condition is met or interrupted.
 ///
@@ -11337,6 +11343,9 @@ fn run_auto_pass_loop(
                         if mandatory_iters >= FINGERPRINT_AFTER_ITERS
                             && matches!(result.waiting_for, WaitingFor::Priority { .. })
                         {
+                            #[cfg(test)]
+                            AUTO_PASS_WINDOW_SAMPLES
+                                .with(|samples| samples.set(samples.get() + 1));
                             let fingerprint = state.loop_fingerprint();
                             let normalized = state.normalize_for_loop();
                             // CR 732.5: the out verdict is read only for a repeat; it needs each
@@ -31594,5 +31603,116 @@ At the beginning of combat on your turn, you may choose two. Each mode must targ
             remembered.state().waiting_for
         );
         assert_eq!(remembered.state().loop_decision_tally.optional, 1);
+    }
+}
+
+#[cfg(test)]
+mod damage_history_priority_cost_tests {
+    use super::*;
+    use crate::types::ability::{QuantityExpr, TargetFilter};
+    use crate::types::game_state::{DamageRecord, LOOP_DAMAGE_JOURNAL_VISITS};
+
+    #[test]
+    fn loop_relational_auto_pass_window_defers_unread_damage_history() {
+        const RESOLUTIONS: usize = 40;
+        let caster = PlayerId(0);
+        let opponent = PlayerId(1);
+        for prefix in [32, 256, 2_048] {
+            let mut state = GameState::new_two_player(7);
+            state.phase = Phase::PreCombatMain;
+            state.active_player = caster;
+            state.priority_player = caster;
+            state.waiting_for = WaitingFor::Priority { player: caster };
+            // Isolate the distinct automatic mandatory window, not the
+            // user-enabled persisted ring's sampling route.
+            state.loop_detection = LoopDetectionMode::Off;
+            for player in state.players.iter_mut() {
+                player.life = 1_000;
+            }
+            let source = crate::game::zones::create_object(
+                &mut state,
+                CardId(1),
+                caster,
+                "Damage history work source".to_string(),
+                Zone::Battlefield,
+            );
+            let source_incarnation = state.objects[&source].incarnation;
+            for _ in 0..prefix {
+                state.damage_dealt_this_turn.push_back(DamageRecord {
+                    source_id: source,
+                    source_incarnation: Some(source_incarnation),
+                    target: TargetRef::Player(opponent),
+                    amount: 1,
+                    ..Default::default()
+                });
+            }
+            for index in 0..RESOLUTIONS {
+                state.stack.push_back(StackEntry {
+                    id: ObjectId(100 + index as u64),
+                    source_id: source,
+                    controller: caster,
+                    kind: StackEntryKind::TriggeredAbility {
+                        source_id: source,
+                        ability: Box::new(ResolvedAbility::new(
+                            Effect::DealDamage {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                                target: TargetFilter::Any,
+                                damage_source: None,
+                                excess: None,
+                            },
+                            vec![TargetRef::Player(opponent)],
+                            source,
+                            caster,
+                        )),
+                        condition: None,
+                        trigger_event: None,
+                        description: None,
+                        source_name: String::new(),
+                        subject_match_count: None,
+                        die_result: None,
+                        provenance: None,
+                    },
+                });
+            }
+            for player in [caster, opponent] {
+                state.auto_pass.insert(
+                    player,
+                    AutoPassMode::UntilStackEmpty {
+                        initial_stack_len: RESOLUTIONS,
+                        policy: StackResolutionPolicy::Committed,
+                    },
+                );
+            }
+            // Positive work-observer control, outside the measured drive.
+            LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+            let _strict = state.normalize_for_loop();
+            assert!(
+                LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get) >= 2 * prefix,
+                "strict journal collection/rewrite must be observable"
+            );
+            LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+            AUTO_PASS_WINDOW_SAMPLES.with(|samples| samples.set(0));
+            let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
+            assert!(
+                run_auto_pass_loop(&mut state, &mut result).expect("the finite damage stack resolves"),
+                "the automatic route must advance"
+            );
+            assert!(state.stack.is_empty(), "all pending damage consumers finish");
+            assert_eq!(state.players[1].life, 1_000 - RESOLUTIONS as i32);
+            assert_eq!(
+                state.damage_dealt_this_turn.len(),
+                prefix + RESOLUTIONS,
+                "actual damage resolution grows history inside the automatic window"
+            );
+            assert!(
+                AUTO_PASS_WINDOW_SAMPLES.with(std::cell::Cell::get) > 0,
+                "the separate post-threshold window must actually sample"
+            );
+            assert_eq!(
+                LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get),
+                0,
+                "auto-pass sampling must defer unread full-history ranking"
+            );
+        }
     }
 }
