@@ -22,7 +22,7 @@ use crate::types::ability::{
     AbilityUseTally, ActivationRestriction, AttachSelection, AttachmentKind, AttachmentReferent,
     CardSelectionMode, CastCostModifier, CastManaObjectScope, CastManaSpentMetric, ChooseOneOfKind,
     CommanderOwnership, CountBinding, CounterTransferMode, DigRestOrder, DigRestRemainder,
-    DigSource, ExcessRecipient, ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice,
+    DigSource, ExcessRecipient, ForEachCategoryAction, LibraryShuffleMode, ModalChoice,
     PerpetualModification, PileSource, PossessionAxis, RepeatContinuation, RuntimeHandler,
     SeatDirection, TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
 };
@@ -12781,6 +12781,7 @@ fn plural_recall_rebind_marks_the_delayed_payload_as_a_tracked_set_consumer() {
         effect: Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Exile),
                 destination: Zone::Hand,
                 target: TargetFilter::ParentTarget,
@@ -16213,7 +16214,7 @@ fn all_player_hand_shuffle_normalizer_scopes_only_the_complete_marked_wheel() {
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
-            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
             random_order: false,
         }
     }
@@ -17014,6 +17015,7 @@ fn compound_shuffle_it_into_library() {
         &*def.effect,
         Effect::ChangeZone {
             destination: Zone::Library,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
             ..
         }
     ));
@@ -17082,7 +17084,7 @@ fn compound_shuffle_hand_and_graveyard_into_library() {
             enter_with_counters: _,
             face_down_profile: None,
             library_position: None,
-            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
             random_order: false,
         }
     ));
@@ -17103,7 +17105,7 @@ fn compound_shuffle_hand_and_graveyard_into_library() {
             enter_with_counters: _,
             face_down_profile: None,
             library_position: None,
-            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
             random_order: false,
         }
     ));
@@ -17179,7 +17181,7 @@ fn great_aurora_keeps_move_shuffle_draw_inside_each_player_iteration() {
         origin: None,
         destination: Zone::Library,
         target: TargetFilter::Or { filters },
-        library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+        library_shuffle: LibraryShuffleMode::TerminalShuffle,
         ..
     } = def.effect.as_ref()
     else {
@@ -17239,7 +17241,7 @@ fn assert_targeted_graveyard_shuffle_shape<'a>(
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Library,
                 target: TargetFilter::ParentTarget,
-                library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
                 ..
             }
         ),
@@ -17444,6 +17446,7 @@ fn assert_unit_library_move_binds_shuffle_to_player(card_name: &str, root: &Abil
         destination: Zone::Library,
         target: TargetFilter::Typed(tf),
         owner_library: false,
+        library_shuffle: LibraryShuffleMode::TerminalShuffle,
         ..
     } = move_graveyard.effect.as_ref()
     else {
@@ -17485,7 +17488,7 @@ fn assert_unit_library_move_binds_shuffle_to_player(card_name: &str, root: &Abil
 /// nine printed cards whose instruction is "target player shuffles up to/any
 /// number of target cards from their graveyard into their library". Every one
 /// binds its terminal shuffle to the announced player rather than the caster,
-/// and every one keeps its moved-card filter unchanged.
+/// suppresses per-card shuffles, and keeps its moved-card filter unchanged.
 #[test]
 fn real_targeted_up_to_graveyard_shuffle_cards_bind_terminal_shuffle_to_player_target() {
     let cases = [
@@ -17730,7 +17733,7 @@ fn mass_and_owner_graveyard_shuffles_keep_their_bindings() {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Library,
                 target: TargetFilter::Controller,
-                library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
                 ..
             }
         ),
@@ -17764,7 +17767,7 @@ fn mass_and_owner_graveyard_shuffles_keep_their_bindings() {
             Effect::ChangeZoneAll {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Library,
-                library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
                 ..
             }
         ),
@@ -69275,6 +69278,7 @@ fn leave_battlefield_exile_replacement_matches_6538_shape() {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -94787,6 +94791,7 @@ fn previous_clause_requires_bare_battlefield_move() {
     use crate::parser::oracle_ir::effect_chain::ClauseIrBuilder;
 
     let battlefield_move = || Effect::ChangeZone {
+        library_shuffle: Default::default(),
         origin: Some(Zone::Graveyard),
         destination: Zone::Battlefield,
         target: TargetFilter::Any,

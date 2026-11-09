@@ -5390,6 +5390,7 @@ pub(super) fn apply_clause_continuation(
                 Some(Zone::Library)
             };
             let put_effect = Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: put_origin,
                 destination,
                 target: TargetFilter::Any,
@@ -6341,7 +6342,7 @@ pub(super) fn apply_clause_continuation(
                         let mut def = AbilityDefinition::new(
                             kind,
                             Effect::ChangeZone {
-                                // CR 400.3: a bounded "put up to N <filter> milled
+                                library_shuffle: Default::default(), // CR 400.3: a bounded "put up to N <filter> milled
                                 // this way onto the battlefield face down" form
                                 // must scan the milled cards' actual zone (the
                                 // Mill destination), mirroring the `All` branch —
@@ -6524,6 +6525,7 @@ pub(super) fn apply_clause_continuation(
                 let mut chosen_def = AbilityDefinition::new(
                     kind,
                     Effect::ChangeZone {
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination: chosen_destination,
                         target: TargetFilter::Any,
@@ -6542,6 +6544,7 @@ pub(super) fn apply_clause_continuation(
                 let mut rest_def = AbilityDefinition::new(
                     kind,
                     Effect::ChangeZone {
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination: rest_destination,
                         target: TargetFilter::Any,
@@ -12411,6 +12414,7 @@ mod tests {
     #[test]
     fn multi_zone_search_put_restatement_absorbed_after_origin_none_destination() {
         let previous = Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,
             target: TargetFilter::Any,
@@ -12436,6 +12440,7 @@ mod tests {
     #[test]
     fn search_exile_them_followup_is_absorbed_after_library_exile_destination() {
         let previous = Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Exile,
             target: TargetFilter::Any,
@@ -12458,6 +12463,7 @@ mod tests {
     #[test]
     fn search_exile_face_down_followup_uses_compositional_reference_grammar() {
         let previous = Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Exile,
             target: TargetFilter::Any,

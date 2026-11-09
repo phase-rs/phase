@@ -103,6 +103,7 @@ fn finish_encode_records_no_link_when_redirected_away_from_exile() {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination: Zone::Graveyard,
                         target: TargetFilter::SelfRef,

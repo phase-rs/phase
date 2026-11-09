@@ -380,21 +380,19 @@ fn connive_redirect_to_battlefield_counter_prompt_records_the_delivered_discard(
                 .destination_zone(Zone::Graveyard)
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
-                    Effect::ChangeZone {
-                        destination: Zone::Battlefield,
-                        origin: None,
-                        target: TargetFilter::SelfRef,
-                        owner_library: false,
-                        enter_transformed: false,
-                        enters_under: None,
-                        enter_tapped: EtbTapState::Unspecified,
-                        enters_attacking: false,
-                        up_to: false,
-                        enter_with_counters: vec![],
-                        conditional_enter_with_counters: vec![],
-                        face_down_profile: None,
-                        enters_modified_if: None,
-                    },
+                    Effect::ChangeZone { library_shuffle: Default::default(), destination: Zone::Battlefield,
+                    origin: None,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None, },
                 ))
                 .description(
                     "If a card would be put into a graveyard from anywhere, put it onto the battlefield instead."

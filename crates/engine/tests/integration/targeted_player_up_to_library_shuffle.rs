@@ -26,7 +26,8 @@ const WAND_ORACLE: &str = "{T}: Mill a card.\n{2}, {T}, Exile this artifact: Shu
 const LOAMING_ORACLE: &str = "When this creature enters, target player shuffles any number of target cards from their graveyard into their library.";
 const RITE_ORACLE: &str = "Return up to two target permanent cards from your graveyard to your hand. Target player shuffles up to four target cards from their graveyard into their library. Exile Rite of Renewal.";
 const QUANDRIX_ORACLE: &str = "Choose two —\n• Return target creature or planeswalker to its owner's hand.\n• Counter target artifact or enchantment spell.\n• Put two +1/+1 counters on target creature.\n• Target player shuffles up to three target cards from their graveyard into their library.";
-const COSI_ORACLE: &str = "Whenever an opponent shuffles their library, you may put a +1/+1 counter on this creature.";
+const COSI_ORACLE: &str =
+    "Whenever an opponent shuffles their library, you may put a +1/+1 counter on this creature.";
 
 /// Ordered projection of who actually shuffled a library.
 fn shuffled_players(events: &[GameEvent]) -> Vec<PlayerId> {
@@ -530,7 +531,9 @@ fn dwell_on_the_past_shuffles_once_after_a_commander_replacement_pause() {
         WaitingFor::Priority { .. }
     ));
     for card in [commander, second, target_library] {
-        assert!(runner.state().players[P1.0 as usize].library.contains(&card));
+        assert!(runner.state().players[P1.0 as usize]
+            .library
+            .contains(&card));
     }
     assert_eq!(runner.state().objects[&unchosen].zone, Zone::Graveyard);
     assert_eq!(shuffled_players(&events).as_slice(), &[P1]);
