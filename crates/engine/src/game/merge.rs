@@ -53,7 +53,9 @@ use std::sync::Arc;
 use crate::game::game_object::{DisplayIdentity, GameObject, ObjectIncarnationRefExt};
 use crate::game::printed_cards::intrinsic_copiable_values;
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
-use crate::types::ability::{ContinuousModification, CopiableValues, Duration, TargetFilter};
+use crate::types::ability::{
+    ContinuousModification, CopiableValues, Duration, LibraryPosition, TargetFilter,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -471,8 +473,9 @@ pub fn split_merged_permanent_on_leave(
 /// zone-change event is ready to deliver. Every component, including the
 /// survivor, is queued in `move_objects_simultaneously_then`: its inherited
 /// `applied` set prevents a replacement already applied to the merged event
-/// from applying again, while still letting a component-specific replacement
-/// (notably CR 903.9b) consult and pause. The batch owns every pause/restart,
+/// from applying again. Its library placement is retained on every request,
+/// including across a paused batch, while still letting a component-specific
+/// replacement (notably CR 903.9b) consult and pause. The batch owns every pause/restart,
 /// so replacement choices cannot clobber one another or expose partial event
 /// output. The survivor moves through the ordinary mover; absorbed components
 /// retain their `from: None` component-delivery event shape.
@@ -484,6 +487,7 @@ pub(crate) fn move_merged_permanent_on_leave(
     state: &mut GameState,
     merged_id: ObjectId,
     dest: Zone,
+    library_placement: Option<&LibraryPosition>,
     applied: &HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
@@ -520,7 +524,7 @@ pub(crate) fn move_merged_permanent_on_leave(
                     .expect("merged component exists")
                     .split_from_merge_survivor = Some(survivor_successor);
             }
-            ZoneMoveRequest::merged_component(component_id, dest)
+            ZoneMoveRequest::merged_component(component_id, dest, library_placement.cloned())
                 .with_replacement_applied(applied.clone())
         })
         .collect();

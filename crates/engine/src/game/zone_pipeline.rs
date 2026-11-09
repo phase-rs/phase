@@ -463,13 +463,17 @@ impl ZoneMoveRequest {
     /// replacement pipeline. The delivery recognizes its split marker and
     /// preserves `ZoneChanged { from: None }`, so this is not an independent
     /// battlefield exit even though its would-move event is replaceable.
-    pub(crate) fn merged_component(object_id: ObjectId, to: Zone) -> Self {
+    pub(crate) fn merged_component(
+        object_id: ObjectId,
+        to: Zone,
+        placement: Option<LibraryPosition>,
+    ) -> Self {
         Self {
             object_id,
             to,
             cause: ZoneChangeCause::MergedComponentRouting,
             mods: EntryMods::default(),
-            placement: None,
+            placement,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
             face_down_in_exile: ExileConcealment::Public,
@@ -3822,7 +3826,12 @@ pub(crate) fn deliver_replaced_zone_change(
             // component-specific replacements, including CR 903.9b.
             state.merged_card_component_route = None;
             return match crate::game::merge::move_merged_permanent_on_leave(
-                state, object_id, to, &applied, events,
+                state,
+                object_id,
+                to,
+                library_placement.as_ref(),
+                &applied,
+                events,
             ) {
                 BatchMoveResult::Done => apply_zone_delivery_tail(
                     state,
@@ -3994,7 +4003,18 @@ pub(crate) fn deliver_replaced_zone_change(
                     // arm: default placement.
                     LibraryPosition::RandomWithinTop { .. } => None,
                 };
-                zones::move_to_library_at_index(state, object_id, index, events);
+                if split_component_survivor.is_some() {
+                    // CR 730.3 + CR 400.7: retain the component delivery's origin
+                    // and continuity; placement is not another battlefield exit.
+                    crate::game::merge::put_component_into_zone(state, object_id, to, events);
+                    // Component routing already appends at the bottom.
+                    if let Some(index) = index {
+                        let owner = state.objects[&object_id].owner;
+                        zones::reorder_within_library(state, owner, &[object_id], Some(index));
+                    }
+                } else {
+                    zones::move_to_library_at_index(state, object_id, index, events);
+                }
             }
             _ => {
                 if split_component_survivor.is_some() {
