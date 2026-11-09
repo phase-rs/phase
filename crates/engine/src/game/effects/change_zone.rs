@@ -13111,6 +13111,117 @@ mod tests {
     // rewrites.
     // ---------------------------------------------------------------------
 
+    // Latent typed contract, not a printed card: combine Mudhole's subject-form
+    // mass exile with Palace Jailer's monarch duration. The optional redirect
+    // below is synthetic too; declining it exposes the real delivery resume.
+    fn assert_subject_mass_monarch_duration(paused: bool) {
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let cards: Vec<_> = (0..2)
+            .map(|i| {
+                create_object(
+                    &mut state,
+                    CardId(9800 + i),
+                    PlayerId(1),
+                    format!("Typed duration subject {i}"),
+                    Zone::Graveyard,
+                )
+            })
+            .collect();
+        if paused {
+            let source = create_object(
+                &mut state,
+                CardId(9802),
+                PlayerId(0),
+                "Synthetic optional exile redirect".to_string(),
+                Zone::Battlefield,
+            );
+            let mut redirect =
+                performer_test_pick_exile(None, TargetFilter::SelfRef, PlayerId(0)).effect;
+            if let Effect::ChangeZone { destination, .. } = &mut redirect {
+                *destination = Zone::Graveyard;
+            }
+            state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .replacement_definitions
+                .push(
+                    ReplacementDefinition::new(ReplacementEvent::Moved)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .execute(AbilityDefinition::new(AbilityKind::Spell, redirect))
+                        .destination_zone(Zone::Exile),
+                );
+        }
+        let mut ability = performer_test_mass_exile(
+            Some(Zone::Graveyard),
+            card_leg(
+                None,
+                vec![FilterProp::Owned {
+                    controller: ControllerRef::ScopedPlayer,
+                }],
+            ),
+            PlayerId(0),
+        );
+        ability.scoped_player = Some(PlayerId(1));
+        ability.duration = Some(Duration::UntilOpponentBecomesMonarch);
+        resolve_all(&mut state, &ability, &mut Vec::new()).expect("typed mass exile resolves");
+        if paused {
+            for _ in 0..2 {
+                assert!(matches!(
+                    state.waiting_for,
+                    WaitingFor::ReplacementChoice { .. }
+                ));
+                crate::game::engine::apply_as_current(
+                    &mut state,
+                    GameAction::ChooseReplacement { index: 1 },
+                )
+                .expect("decline the synthetic redirect");
+            }
+            assert!(state.active_change_zone_frame().is_none());
+        }
+        for id in &cards {
+            assert_eq!(state.objects[id].zone, Zone::Exile);
+            assert_eq!(state.objects[id].exiled_by, Some(PlayerId(1)));
+        }
+        // CR 610.3: the duration's opponent relation remains relative to P0,
+        // independently of P1 performing every exile, including resumed ones.
+        let mut events = vec![GameEvent::MonarchChanged {
+            player_id: PlayerId(0),
+        }];
+        crate::game::engine::check_exile_returns(&mut state, &mut events);
+        for id in &cards {
+            assert_eq!(
+                state.objects[id].zone,
+                Zone::Exile,
+                "P0 is not their own opponent"
+            );
+        }
+        let mut events = vec![GameEvent::MonarchChanged {
+            player_id: PlayerId(1),
+        }];
+        crate::game::engine::check_exile_returns(&mut state, &mut events);
+        for id in cards {
+            assert_eq!(
+                state.objects[&id].zone,
+                Zone::Graveyard,
+                "P1 is P0's opponent"
+            );
+        }
+        assert!(state.exile_links.is_empty());
+    }
+
+    #[test]
+    fn subject_mass_exile_duration_stays_controller_relative() {
+        assert_subject_mass_monarch_duration(false);
+    }
+
+    #[test]
+    fn paused_subject_mass_exile_duration_stays_controller_relative() {
+        assert_subject_mass_monarch_duration(true);
+    }
+
     fn performer_test_mass_exile(
         origin: Option<Zone>,
         target: TargetFilter,
