@@ -69,7 +69,9 @@ The Step 1 walk and the Step 2 append each run this check again themselves, so a
 
 Card names, search words, proposals and cluster titles all come from issue text, which anyone can write. Never type any of it into a shell command, not even inside quotes: a `"`, `'`, `$( )` or backtick in the text would end the quoting and run as code. Write the text to a file under `triage/qwen/` instead. The commands in this file are fixed, and they read the text from these files as data:
 
-- `triage/qwen/term.txt`: one line, the card name or search words for the lookup at hand. Rewrite it before each lookup.
+- `triage/qwen/query.txt`: one line, the GitHub search query for the Step 1 walk.
+- `triage/qwen/term.txt`: one line, the card name or search words for the lookup at hand, spelled as written. Rewrite it before each new card or search.
+- `triage/qwen/term-lower.txt`: one line, the same card name in lowercase, for the local card-data lookup only.
 - `triage/qwen/proposal.json`: the one proposal you're about to append.
 
 Use your file-writing tool if you have one. Without one, use a heredoc whose delimiter is quoted, as here: the shell copies the lines between the markers without expanding anything in them.
@@ -80,7 +82,7 @@ Card Name
 TRIAGE_TEXT_END
 ```
 
-The one thing this can't hold is a line that is exactly `TRIAGE_TEXT_END`. `term.txt` is a single line, so if the term itself is `TRIAGE_TEXT_END`, use the file-writing tool or skip the lookup and say so in `notes`. A proposal can't contain that line, since every string in valid JSON is quoted.
+The one thing this can't hold is a line that is exactly `TRIAGE_TEXT_END`. The `.txt` files are single lines, so if the text itself is `TRIAGE_TEXT_END`, use the file-writing tool, or skip that lookup and say so in `notes`. A proposal can't contain that line, since every string in valid JSON is quoted.
 
 Card text and parse data come from the published coverage file. It's about 70 MB, so download it once and reuse it:
 
@@ -92,12 +94,16 @@ Card text and parse data come from the published coverage file. It's about 70 MB
 
 This walks the search results newest first, a page of 100 at a time, skipping issues already in `proposals.jsonl`, until it has `N` new ones or runs out of results. Proposals don't change live labels, so earlier runs' issues still match the search; filtering before counting is what lets each run pick up where the last one stopped.
 
+First write the search query to `triage/qwen/query.txt`, as Setup describes for text: `label:status:needs-triage` for the default slice or a bare number, `no:label` for `unlabeled`, `label:classifier:pending` for `pending`, and for a search argument, the argument itself, exactly as given. The walk reads the query from that file, so it reaches GitHub as data, quotes and all. Then set `N` to the batch size (30 unless the argument is a bare number) and run:
+
 ```bash
-N=30                            # batch size: set from the argument
-Q='label:status:needs-triage'   # unlabeled: 'no:label'; pending: 'label:classifier:pending'; a search argument: the argument itself
+N=30
 : > triage/qwen/batch.jsonl
 page=1 TOTAL=unknown INCOMPLETE=0 STOP=
 jq empty triage/qwen/proposals.jsonl || STOP=ledger-error
+if [ -z "$STOP" ]; then
+  Q=$(jq -Rrs 'sub("[\r\n]+$"; "") | gsub("[\r\n]+"; " ")' triage/qwen/query.txt) && [ -n "$Q" ] || STOP=query-error
+fi
 while [ -z "$STOP" ]; do
   if [ "$page" -gt 10 ]; then STOP=cap; break; fi
   if ! gh api -X GET search/issues -f q="repo:phase-rs/phase is:issue is:open $Q" \
@@ -126,13 +132,14 @@ head -n "$N" triage/qwen/batch.jsonl > triage/qwen/batch.tmp && mv triage/qwen/b
 echo "$STOP: $(wc -l < triage/qwen/batch.jsonl) issues in batch, $TOTAL matching"
 ```
 
-The last line says why the walk stopped, and whether GitHub's search was incomplete along the way. Put both in the run report. After `ledger-error`, stop: the batch is empty and the walk never ran. After any other reason, triage whatever is in the batch:
+The last line says why the walk stopped, and whether GitHub's search was incomplete along the way. Put both in the run report. After `ledger-error` or `query-error`, stop: the batch is empty and the walk never ran. After any other reason, triage whatever is in the batch:
 
 - `full`: the batch has `N` issues. More may be waiting: when the last page holds more new issues than the batch has room for, the walk reports `full`, not `exhausted`, and the next run picks up the ones cut off.
 - `exhausted`: the walk reached the last matching issue. Without `search incomplete`, this is the only outcome that lets you report that every matching issue has been triaged.
 - `api-error on page P`: a request failed (`gh` printed the error) or returned something that isn't JSON (`jq` printed where). Report a partial batch with that error; don't claim the backlog is done.
 - `filter-error on page P`: picking the new issues out of page P failed (`jq` printed the error). Each page is filtered into `page-batch.jsonl` first and added to the batch only once the whole page succeeds, so page P added nothing, even rows `jq` wrote before it failed. Report a partial batch with that error; don't claim the backlog is done.
 - `ledger-error`: the proposals-file check failed: `proposals.jsonl` is missing or has a line that isn't valid JSON, and `jq` printed which. The walk can't tell which issues are done, so it fetched nothing. Recover the file as [The proposals file](#the-proposals-file) says, then rerun. Don't claim the backlog is done.
+- `query-error`: `query.txt` is missing or empty, so there was nothing to search for (an empty query would match every open issue). Write the query as described above and rerun.
 - `cap`: more than 1,000 issues match, and GitHub search won't return past the first 1,000, so the walk can't reach the older ones. Report a partial batch. The next run must narrow `Q` rather than raise the page limit: add `created:<=YYYY-MM-DD` with the date printed by `jq -r '.items[-1].created_at[0:10]' triage/qwen/page.json`, so the search starts where this one stopped. Use `<=`, not `<`: the boundary day can hold matches that fell past the cap, and the ones already triaged are skipped anyway.
 
 `, search incomplete` after any of these means GitHub returned `incomplete_results: true` on at least one page: its search timed out and may have left out matches. Report it whatever the reason, say the batch may be missing issues, and rerun later; don't claim the backlog is done, even after `exhausted`.
@@ -191,10 +198,10 @@ jq -c --rawfile n triage/qwen/term.txt '($n | sub("[\r\n]+$"; "")) as $n
 
 The name is case-sensitive. If nothing comes back, try without apostrophes, the front face of a double-faced card, or the obvious typo fix. If you still can't find it, say so in `notes`; a card missing from the data is worth knowing about in itself.
 
-Quote card text from card data, not from the issue or from memory. Reports regularly paraphrase or misremember the card, and an issue filed against the wrong text sends the fixer after the wrong behavior. If you have a locally generated `client/public/card-data.json` (developer setups do; it's gitignored and built by the card-data pipeline), try it first, since it's the repo's authoritative copy. Its keys are lowercase, so write the name to `term.txt` in lowercase for this lookup:
+Quote card text from card data, not from the issue or from memory. Reports regularly paraphrase or misremember the card, and an issue filed against the wrong text sends the fixer after the wrong behavior. If you have a locally generated `client/public/card-data.json` (developer setups do; it's gitignored and built by the card-data pipeline), try it first, since it's the repo's authoritative copy. Its keys are lowercase, so write the name in lowercase to its own file, `triage/qwen/term-lower.txt`, and leave `term.txt` as you wrote it: the coverage lookup is case-sensitive and still needs the original spelling if this one comes up empty. Lowercase every letter, accented ones included (`Éomer` becomes `éomer`):
 
 ```bash
-jq -er --rawfile n triage/qwen/term.txt '.[$n | sub("[\r\n]+$"; "")].oracle_text | strings | select(length > 0)' client/public/card-data.json
+jq -er --rawfile n triage/qwen/term-lower.txt '.[$n | sub("[\r\n]+$"; "")].oracle_text | strings | select(length > 0)' client/public/card-data.json
 ```
 
 Use what this prints only if it exits 0. Any other exit means there's no usable text: 2 if the file isn't there, 4 if the card isn't in it or has empty text. In that case quote `oracle_text` from the coverage lookup above instead, and check that it's a non-empty string too. The two files agree for almost every card; they differ only when one was built before an Oracle text update. Record the file you actually quoted from in `oracle_source`. If neither has text for the card, set `oracle_source` to `null`, don't quote any card text, and say in `notes` which lookups failed.
@@ -223,7 +230,9 @@ For issues without a card, write two or three distinctive words from the defect 
 
 ```bash
 SEARCH=$(jq -Rrs 'sub("[\r\n]+$"; "") | gsub("\""; "") | gsub("[\r\n]+"; " ")' triage/qwen/term.txt)
-``` A duplicate means the same defect, not the same card: two reports about one card's different abilities are separate issues. If the earlier issue is closed as fixed and the new report is newer, it's a possible regression, not a duplicate; say so in `notes`.
+```
+
+A duplicate means the same defect, not the same card: two reports about one card's different abilities are separate issues. If the earlier issue is closed as fixed and the new report is newer, it's a possible regression, not a duplicate; say so in `notes`.
 
 ### Proposal format
 
@@ -300,7 +309,7 @@ Every issue and tracker number in both files must be a positive whole number wri
 Print a short report:
 
 - how many issues you triaged, with counts by status and by classifier verdict
-- how the Step 1 search ended (`full`, `exhausted`, `ledger-error`, `filter-error`, `api-error` or `cap`) and whether it was marked `search incomplete`; for anything but `full` or `exhausted`, and for anything marked incomplete, that the backlog isn't finished and what the next run should do
+- how the Step 1 search ended (`full`, `exhausted`, `ledger-error`, `query-error`, `filter-error`, `api-error` or `cap`) and whether it was marked `search incomplete`; for anything but `full` or `exhausted`, and for anything marked incomplete, that the backlog isn't finished and what the next run should do
 - the issues that need a maintainer's eye: likely duplicates, possible regressions, anything that looks like a crash or a stall, and anything you'd close
 - clusters that are new or that grew this run, and any members listed under `conflicts`
 
