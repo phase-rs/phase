@@ -363,6 +363,8 @@ const KAROO_LOTUS_VALE: &str = "If this land would enter, sacrifice two untapped
 fn karoo_land_decline_routes_to_graveyard() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Blue);
+    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
 
     let land_id = scenario
         .add_land_to_hand(P0, "Lotus Vale")
@@ -392,11 +394,10 @@ fn karoo_land_decline_routes_to_graveyard() {
     );
 }
 
-/// CR 614.12a: accepting a Karoo land's cost when it is unpayable (no untapped
-/// lands to sacrifice) falls through to the decline branch — the land still
-/// goes to the graveyard, never the battlefield.
+/// CR 118.3 + CR 614.12a: an unpayable Karoo land cost auto-applies its decline
+/// branch without a choice — the land still goes to the graveyard.
 #[test]
-fn karoo_land_accept_with_unpayable_cost_routes_to_graveyard() {
+fn karoo_land_unpayable_cost_routes_to_graveyard_without_prompt() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -415,17 +416,11 @@ fn karoo_land_accept_with_unpayable_cost_routes_to_graveyard() {
         })
         .expect("play land should succeed");
 
-    // Accept (index 0) — but no untapped lands exist to sacrifice.
-    let accept = replacement_choice_index(&runner, "Sacrifice");
-    runner
-        .act(GameAction::ChooseReplacement { index: accept })
-        .expect("accepting the Karoo cost should resolve");
-
     let obj = &runner.state().objects[&land_id];
     assert_eq!(
         obj.zone,
         Zone::Graveyard,
-        "an unpayable Karoo cost must fall through to the graveyard redirect"
+        "an unpayable Karoo cost must auto-decline and redirect to the graveyard"
     );
 }
 
