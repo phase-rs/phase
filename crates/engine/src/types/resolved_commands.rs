@@ -2482,18 +2482,24 @@ impl ResolvedRulesJournal {
     /// The journal keeps the same unit in three places — the `produced` record,
     /// any `spent` record, and the insert/spend command entries — and
     /// [`Self::validate_serialized_authority`] compares them on load, CR 400.7's
-    /// epoch included. The restore boundary admits a pin-less pooled unit by
-    /// binding the epoch the save proves, and that unit exists both in the pool and
-    /// here: a POOL-ONLY stamp would leave the copies describing different objects,
-    /// so the first payment recorded against the restored unit would write a save
-    /// this journal rejects at its next load. Stamping every copy is what keeps the
-    /// round trip readable.
+    /// epoch included. The restore boundary admits a pooled unit by binding the
+    /// epoch the save proves — recovering it for a pin-less pool, or completing a
+    /// journal copy that states nothing while the pool's pin and the producer node
+    /// agree on the value — and that unit exists both in the pool and here: a
+    /// POOL-ONLY stamp would leave the copies describing different objects, so the
+    /// first payment recorded against the restored unit would write a save this
+    /// journal rejects at its next load. Stamping every copy is what keeps the round
+    /// trip readable.
     ///
     /// No copy can carry a CONTRADICTORY epoch by the time this runs: the decoder
     /// is the authority on agreement and refuses a save whose copies disagree
-    /// (`ResolvedRulesJournalError::InvalidSerializedAuthority`), so an epoch that
-    /// reaches here is either unrecorded on every copy or already the same
-    /// everywhere.
+    /// (`ResolvedRulesJournalError::InvalidSerializedAuthority`), and admission
+    /// compares every independent per-pip record (the copies, the producer node, the
+    /// pool's ledger) and refuses a disagreement before calling this
+    /// (`PersistedRestoreError::ContradictoryFloatingManaProvenance`). An epoch that
+    /// reaches here is therefore either unrecorded on every copy or already the same
+    /// everywhere, so this writes a value where there was none and re-writes the same
+    /// value where there already was one.
     pub fn bind_unit_epoch(&mut self, pip: ManaPipId, epoch: u64) {
         if pip.0 == 0 {
             return;

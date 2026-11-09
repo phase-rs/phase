@@ -3191,3 +3191,388 @@ fn a_pin_that_arrived_in_the_save_never_rewrites_the_journals_production_record(
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// 12 — admission leaves ONE answer: every copy of an admitted unit agrees
+// ---------------------------------------------------------------------------
+
+/// Re-point the producing-incarnation pin on EVERY copy of every floating unit —
+/// the pooled copies AND each copy the resolved-rules journal keeps — at
+/// `incarnation`, leaving the producer node and the pool's per-pip ledger exactly
+/// as the engine wrote them.
+///
+/// That is the shape where the unit's copies all agree with each other and only
+/// the save's INDEPENDENT producer record is left to disagree: a guard that reads
+/// the copies and stops has nothing to check the pin against.
+fn pin_every_unit_copy(json: &mut serde_json::Value, incarnation: u64) -> usize {
+    /// A serialized `ManaUnit` is the only object in the journal carrying both a
+    /// `source_id` and a `pip_id`; unlike `strip_journal_unit_pins` this helper
+    /// only needs the journal half, because the pooled half is `pin_pool_units`'.
+    fn pin(value: &mut serde_json::Value, incarnation: u64) -> usize {
+        match value {
+            serde_json::Value::Object(object) => {
+                let mut pinned = 0;
+                if object.contains_key("source_id") && object.contains_key("pip_id") {
+                    object.insert(
+                        "source_incarnation".to_string(),
+                        serde_json::json!(incarnation),
+                    );
+                    pinned += 1;
+                }
+                pinned
+                    + object
+                        .values_mut()
+                        .map(|child| pin(child, incarnation))
+                        .sum::<usize>()
+            }
+            serde_json::Value::Array(items) => {
+                items.iter_mut().map(|child| pin(child, incarnation)).sum()
+            }
+            _ => 0,
+        }
+    }
+    let pooled = pin_pool_units(json, incarnation);
+    let journaled = json
+        .get_mut("state")
+        .and_then(|state| state.get_mut("resolved_rules_journal"))
+        .map(|journal| pin(journal, incarnation))
+        .unwrap_or(0);
+    pooled + journaled
+}
+
+/// CR 106.3 + CR 113.7 + CR 118.3a + CR 400.7: an admitted unit leaves admission
+/// with ONE producer, in every copy — so the save the next payment writes is a
+/// save the next load can read.
+///
+/// The board is the Forest → Llanowar Elves shape of
+/// `a_restored_legacy_pool_round_trips_after_payment`, and the tampering is one
+/// field narrower: only the journal's own copies of the unit lose the pin
+/// (`strip_journal_unit_pins`). The pool's pin survives, and so does the producer
+/// NODE production wrote (`RulesExecutionNodeKind::ActivatedMana`, which names the
+/// Forest's exact epoch and is not a pin) — so the epoch is PROVEN by two
+/// independent records that agree, and there is nothing for this save to
+/// contradict.
+///
+/// What it must not do is admit the unit and leave the journal's copies pin-less.
+/// A payment records the spent unit against the produced unit it came from, and
+/// `ResolvedRulesJournal::validate_serialized_authority` compares those copies
+/// whole (CR 400.7's epoch included) — so that admission writes a save the engine
+/// cannot read back, which is the worst outcome available. Admission therefore
+/// COMPLETES the missing copies from the epoch the save proves before admitting,
+/// and the assertion is the round trip: admit, spend, save, load again.
+#[test]
+fn a_pool_pin_with_unpinned_journal_copies_is_completed_so_the_payment_round_trips() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    let forest = scenario.add_basic_land(P0, ManaColor::Green);
+    let elves = {
+        let mut builder =
+            scenario.add_creature_to_hand_from_oracle(P0, "Llanowar Elves", 1, 1, LLANOWAR_ELVES);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        });
+        builder.id()
+    };
+
+    let mut runner = scenario.build();
+    let forest_incarnation = runner.state().objects[&forest].incarnation;
+    activate_mana_ability(&mut runner, forest, ManaType::Green);
+
+    // Reach guards: one pinned unit, pinned in the journal too, and the producer
+    // node names the epoch the Forest's ability was activated at.
+    let pip = {
+        let state = runner.state();
+        let units = pool_units(&runner);
+        assert_eq!(units.len(), 1, "reach: one unit of {{G}}, got {units:?}");
+        assert_eq!(units[0].source_id, forest);
+        assert_eq!(units[0].source_incarnation, Some(forest_incarnation));
+        assert_eq!(
+            state
+                .resolved_rules_journal
+                .produced_unit(units[0].pip_id)
+                .and_then(|unit| unit.source_incarnation),
+            Some(forest_incarnation),
+            "reach: the journal's own copy carries the same pin the pool's does"
+        );
+        assert_eq!(
+            state
+                .resolved_rules_journal
+                .produced_source_epoch(units[0].pip_id)
+                .map(|note| (note.object_id, note.incarnation)),
+            Some((forest, forest_incarnation)),
+            "reach: the producer node names the epoch that generated the ability"
+        );
+        units[0].pip_id
+    };
+
+    // --- The tampered shape: ONLY the journal's copies lose the pin.
+    let mut stripped = persisted_json(runner.state());
+    assert!(
+        strip_journal_unit_pins(&mut stripped) >= 1,
+        "the journal's copies of the unit must lose their pin"
+    );
+    let pooled_pin = |json: &serde_json::Value| -> Option<u64> {
+        json["state"]["players"]
+            .as_array()
+            .expect("the save carries players")
+            .iter()
+            .flat_map(|player| {
+                player["mana_pool"]["mana"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .find(|unit| unit["source_id"] == serde_json::json!(forest.0))
+            .and_then(|unit| unit["source_incarnation"].as_u64())
+    };
+    assert_eq!(
+        pooled_pin(&stripped),
+        Some(forest_incarnation),
+        "reach: the tampering strips only the journal's copies; the pool's pin stays"
+    );
+    let activated_nodes: Vec<(u64, u64)> = stripped["state"]["resolved_rules_journal"]["nodes"]
+        .as_array()
+        .expect("the journal carries its nodes")
+        .iter()
+        .filter_map(|node| {
+            let source = node.get("kind")?.get("ActivatedMana")?.get("source")?;
+            Some((
+                source.get("object_id")?.as_u64()?,
+                source.get("incarnation")?.as_u64()?,
+            ))
+        })
+        .collect();
+    assert!(
+        activated_nodes.contains(&(forest.0, forest_incarnation)),
+        "reach: the producer node still names the Forest's epoch, got {activated_nodes:?}"
+    );
+    assert_eq!(
+        stripped["state"]["resolved_rules_journal"]["produced_mana"][0]["unit"]
+            ["source_incarnation"],
+        serde_json::Value::Null,
+        "reach: the journal's produced copy is the thing that lost its pin"
+    );
+
+    let restored_state = admitted(stripped).unwrap_or_else(|error| {
+        panic!(
+            "CR 106.3 + CR 113.7: the producer node and the pool's pin agree on the epoch, so \
+             this save proves the unit's producer and must be admitted with the journal's \
+             copies completed, got {error:?}"
+        )
+    });
+
+    // --- Admission completed the journal's copies from the proven epoch.
+    {
+        let unit = restored_state.players[P0.0 as usize]
+            .mana_pool
+            .units()
+            .next()
+            .expect("the unit survives");
+        assert_eq!(unit.pip_id, pip, "reach: the same unit, by pip identity");
+        assert_eq!(
+            unit.source_incarnation,
+            Some(forest_incarnation),
+            "the pool's pin was already the proven epoch"
+        );
+    }
+
+    // --- Spend it, save, and load the save the payment wrote.
+    let mut restored = GameRunner::from_state(restored_state);
+    {
+        let commit = restored.cast(elves).commit();
+        assert_eq!(
+            commit.state().objects[&elves].zone,
+            Zone::Stack,
+            "reach: {{G}} from the Forest paid for the Elves"
+        );
+    }
+    assert!(
+        pool_units(&restored).is_empty(),
+        "reach: the payment spent the only floating unit"
+    );
+
+    let reread = decode_and_admit(persisted_json(restored.state())).unwrap_or_else(|error| {
+        panic!(
+            "CR 118.3a + CR 400.7: the save taken AFTER paying with this pool must load again. \
+             The journal compares each spent unit against the produced unit it came from, \
+             epochs included, so leaving the journal's copies incomplete makes the engine's \
+             own save unreadable: {error}"
+        )
+    });
+    assert_eq!(
+        reread
+            .resolved_rules_journal
+            .produced_unit(pip)
+            .and_then(|unit| unit.source_incarnation),
+        Some(forest_incarnation),
+        "CR 118.3a: the produced and spent copies still name one epoch across the round trip"
+    );
+    assert_eq!(
+        reread
+            .resolved_rules_journal
+            .spent_mana()
+            .iter()
+            .find(|record| record.unit.pip_id == pip)
+            .and_then(|record| record.unit.source_incarnation),
+        Some(forest_incarnation),
+        "CR 118.3a: the spent copy names the same epoch the produced copy does"
+    );
+    assert_eq!(
+        reread
+            .resolved_rules_journal
+            .produced_unit(pip)
+            .and_then(|unit| unit.source_incarnation),
+        Some(forest_incarnation),
+        "CR 118.3a: admission completes the journal's missing copy with the epoch the \
+         save proves, so the two copies of one unit agree before any payment reads them"
+    );
+}
+
+/// CR 106.3 + CR 113.7 + CR 400.7: the producer NODE is compared even when every
+/// unit copy carries the same pin, because the copies are one record and the node
+/// is another.
+///
+/// The board is section 2's Minimus Containment shape: an Aura grants the Bears
+/// "{T}, Sacrifice this artifact: Add one mana of any color", so activating it
+/// makes the mana AND moves the source out of the battlefield (CR 400.7 makes the
+/// graveyard card a different object). Production wrote two independent records of
+/// that epoch: the pin on the unit's copies, and the producer node
+/// (`RulesExecutionNodeKind::ActivatedMana`) naming the object whose ability was
+/// activated — the record the payment itself resolves through
+/// (`mana_spent_source_snapshot`).
+///
+/// The tampering re-points the pooled pin AND every journal copy at another epoch
+/// of the same storage id, and touches nothing else: no retained side ledger
+/// exists in this same-phase save, and the node is left naming the epoch the
+/// ability was activated at. Every pin in the save therefore agrees with every
+/// other pin, and only the node disagrees — so a guard that reads its pin set from
+/// the unit copies alone admits it. The payment then resolves the pin against an
+/// incarnation the storage id never had, records NO producing source for the spent
+/// unit, and Rain of Riches' `ManaSpentFromSource` gate never sees the Treasure:
+/// the cascade the mana earned is silently lost (CR 106.3 makes the mana's source
+/// the source of the ability that produced it, CR 113.7 makes that the object that
+/// generated the ability). Admission must refuse
+/// ([`PersistedRestoreError::ContradictoryFloatingManaProvenance`]) instead.
+#[test]
+fn a_pin_every_unit_copy_agrees_on_is_still_checked_against_the_producer_node() {
+    let (mut runner, bears, _aura, sciences) = minimus_board();
+
+    let producing_incarnation = runner.state().objects[&bears].incarnation;
+    activate_mana_ability(&mut runner, bears, ManaType::Green);
+
+    // Reach guards: the producing epoch is pinned on the pooled unit, the journal's
+    // copy records the same epoch, the producer node names it independently, and no
+    // retained side ledger exists for it to be compared against instead.
+    {
+        let state = runner.state();
+        let units = pool_units(&runner);
+        assert_eq!(units.len(), 1, "reach: one floating unit");
+        assert_eq!(units[0].source_id, bears);
+        assert_eq!(units[0].source_incarnation, Some(producing_incarnation));
+        assert_eq!(
+            state
+                .resolved_rules_journal
+                .produced_unit(units[0].pip_id)
+                .and_then(|unit| unit.source_incarnation),
+            Some(producing_incarnation),
+            "reach: the journal's copy of the unit carries the same pin"
+        );
+        assert_eq!(
+            state
+                .resolved_rules_journal
+                .produced_source_epoch(units[0].pip_id)
+                .map(|note| (note.object_id, note.incarnation)),
+            Some((bears, producing_incarnation)),
+            "reach: the producer node names the epoch the ability was activated at"
+        );
+        assert!(
+            state
+                .pooled_mana_producer_snapshots
+                .iter()
+                .all(|snapshot| snapshot.pip_id != units[0].pip_id),
+            "reach: no retained side ledger entry exists for this unit; got {:?}",
+            state.pooled_mana_producer_snapshots
+        );
+    }
+
+    // --- The tampering: every PIN in the save agrees; the node is untouched.
+    let wrong_incarnation = producing_incarnation + 7;
+    let mut tampered = persisted_json(runner.state());
+    assert!(
+        pin_every_unit_copy(&mut tampered, wrong_incarnation) >= 2,
+        "the pooled pin and the journal's copy must both be re-pointed"
+    );
+    assert_eq!(
+        tampered["state"]["resolved_rules_journal"]["produced_mana"][0]["unit"]
+            ["source_incarnation"],
+        serde_json::json!(wrong_incarnation),
+        "reach: the journal's copy now agrees with the pool's pin"
+    );
+    assert_eq!(
+        tampered["state"]["resolved_rules_journal"]["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .find_map(|node| {
+                let source = node.get("kind")?.get("ActivatedMana")?.get("source")?;
+                Some(source.get("incarnation")?.as_u64().unwrap_or_default())
+            }),
+        Some(producing_incarnation),
+        "reach: production's own record is untouched"
+    );
+
+    match admitted(tampered) {
+        Err(PersistedRestoreError::ContradictoryFloatingManaProvenance {
+            player,
+            source_id,
+            pinned,
+            recorded,
+        }) => {
+            assert_eq!(player, P0);
+            assert_eq!(source_id, bears, "the refused unit is the one under test");
+            assert_eq!(pinned, wrong_incarnation, "the pin under test");
+            assert!(
+                recorded.contains(&producing_incarnation),
+                "the independent fact the pin was checked against is the producer node's own \
+                 epoch, got {recorded:?}"
+            );
+            assert!(
+                recorded.iter().any(|epoch| *epoch != pinned),
+                "the refusal is about a record that disagrees with the pin, got {recorded:?}"
+            );
+        }
+        Err(other) => {
+            panic!("expected the pin/producer-node contradiction to be refused, got {other:?}")
+        }
+        Ok(state) => {
+            // The adjudication a pin-only guard permits: the unit is priced from an
+            // epoch its storage id never had, so the payment records no producing
+            // source at all and the Treasure's cascade is lost. Shown, not asserted,
+            // so a reinstated pin-only path fails here with its consequence.
+            let mut restored = GameRunner::from_state(state);
+            let forest = land(restored.state_mut(), 9601, "Forest", "Forest");
+            add_mana_from_source(restored.state_mut(), P0, ManaType::Green, 1, forest);
+            let commit = restored.cast(sciences).commit();
+            let state = commit.state();
+            let named: Vec<&str> = state.spells_cast_this_turn_by_player[&P0]
+                .back()
+                .expect("the admitted cast must be recorded")
+                .mana_source_snapshots()
+                .iter()
+                .map(|snapshot| snapshot.lki.name.as_str())
+                .collect();
+            let cascade = state.objects[&sciences]
+                .cast_spell_keywords
+                .iter()
+                .any(|keyword| matches!(keyword, Keyword::Cascade));
+            panic!(
+                "CR 106.3 + CR 113.7 + CR 400.7: a pin the unit's own copies agree on must still \
+                 answer to the producer node, which is the record production wrote and the \
+                 payment resolves through. This save was admitted and priced the pip's mana as \
+                 {named:?} (cascade granted: {cascade})"
+            );
+        }
+    }
+}
