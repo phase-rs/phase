@@ -65,19 +65,21 @@ use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, QuantityExpr, ReplacementDefinition, ReplacementMode,
-    TargetFilter,
+    AbilityDefinition, AbilityKind, Effect, EffectKind, QuantityExpr, ReplacementDefinition,
+    ReplacementMode, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
-    PersistedGameState, PersistedRestoreFinalization, ReplacementChoiceKind, WaitingFor,
+    BatchCompletion, ChangeZoneMemberEntry, GameState, PendingChangeZoneIteration,
+    PersistedGameState, PersistedRestoreFinalization, ReplacementChoiceKind,
+    StagedBatchMemberState, WaitingFor, ZoneDeliveryExileTracking,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{parse_mtgjson_mana_cost, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
-use engine::types::resolution::LEGACY_CHANGE_ZONE_CONTROLLER_RESTORE_ERROR;
+use engine::types::resolution::{ChangeZoneFrame, LEGACY_CHANGE_ZONE_CONTROLLER_RESTORE_ERROR};
 use engine::types::zones::Zone;
 
 const P2: PlayerId = PlayerId(2);
@@ -1001,6 +1003,86 @@ fn wire_state_mut(wire: &mut serde_json::Value) -> &mut serde_json::Value {
     }
 }
 
+/// Project the actual staged pause back to the legacy writer's carrier. This
+/// changes only a cloned test snapshot; the live game keeps staged delivery.
+fn subject_exile_legacy_frame_fixture(runner: &GameRunner) -> GameState {
+    let mut state = runner.state().clone();
+    let paused = state
+        .pending_zone_change_delivery_from_replacement()
+        .expect("the actual optional replacement captures its member");
+    let owner = state
+        .take_active_batch_delivery()
+        .expect("the staged frame is active")
+        .expect("the mass move owns a staged population");
+    let staged = owner.staged.as_ref().expect("the population is staged");
+    let request = &staged
+        .members
+        .iter()
+        .find(|member| member.identity == paused.member)
+        .expect("the paused identity belongs to this population")
+        .request;
+    let tail = match owner.completion.as_ref() {
+        Some(BatchCompletion::ChangeZonePopulationSettled { tail, .. }) => tail,
+        other => panic!("Mudhole's captured population completion: {other:?}"),
+    };
+    assert_eq!(tail.effect_kind, EffectKind::ChangeZoneAll);
+    let remaining = staged
+        .members
+        .iter()
+        .filter(|member| member.state == StagedBatchMemberState::Unconsulted)
+        .map(|member| ChangeZoneMemberEntry {
+            object_id: member.identity.object_id,
+            enter_with_counters: member.request.enter_with_counters.clone(),
+            enter_tapped: member.request.enter_tapped,
+            enters_attacking: member.request.enters_attacking,
+        })
+        .collect();
+    let pending = PendingChangeZoneIteration {
+        pending_return_result_producer: tail.pending_return_result_producer,
+        logical_zone_change_group: owner.logical_zone_change_group,
+        paused_current: Some(paused),
+        remaining,
+        source_id: tail.source_id,
+        controller: tail.controller,
+        performed_by: request
+            .performed_by
+            .expect("the request captures its actor"),
+        origin: None,
+        destination: request.destination,
+        enter_transformed: request.enter_transformed,
+        enters_under_player: request.controller_override,
+        duration: request.exile_duration.clone(),
+        track_exiled_by_source: matches!(
+            request.exile_tracking,
+            ZoneDeliveryExileTracking::TrackBySource
+        ),
+        face_down_in_exile: request.face_down_in_exile,
+        moved_count: Some(0),
+        face_down_profile: request.face_down_profile.clone(),
+        library_placement: request.library_placement.clone(),
+        enter_attached_to: request.attach_to,
+        effect_kind: tail.effect_kind,
+    };
+    let marker = state
+        .take_active_change_zone_frame()
+        .expect("the captured population exposes its marker")
+        .expect("the matching ChangeZone marker exists");
+    assert!(marker.pending.is_none());
+    assert_eq!(
+        marker
+            .awaiting_batch
+            .expect("the marker owns a batch")
+            .group_id,
+        pending.logical_zone_change_group.logical_group_id
+    );
+    state.push_change_zone_frame(ChangeZoneFrame {
+        pending: Some(pending),
+        devour_eligible_snapshot: None,
+        awaiting_batch: None,
+    });
+    state
+}
+
 /// Reconstruct the old writer, not a modern carrier with a changed version:
 /// v1–v11 stored the actor in controller and had no performed_by; v1–v6
 /// carried bare remaining ids and entry fields; v1 used independent slots.
@@ -1010,10 +1092,11 @@ fn historical_subject_exile_wire(
     trusted: bool,
 ) -> serde_json::Value {
     assert!((1..=11).contains(&version));
+    let legacy = subject_exile_legacy_frame_fixture(runner);
     let persisted = if trusted {
-        PersistedGameState::capture(runner.state().clone())
+        PersistedGameState::capture(legacy)
     } else {
-        PersistedGameState::Raw(Box::new(runner.state().clone()))
+        PersistedGameState::Raw(Box::new(legacy))
     };
     let mut wire =
         serde_json::to_value(persisted).expect("serialize the actual public replacement pause");

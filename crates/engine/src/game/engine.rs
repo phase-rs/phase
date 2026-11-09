@@ -12584,15 +12584,15 @@ fn apply_action(
     // converge before priority, starting after that already-collected buffer.
     if let GameAction::Concede { player_id } = action {
         let mut events = Vec::new();
-        let resumed_from = super::elimination::concede(state, player_id, &mut events)?;
+        let collected_through = super::elimination::concede(state, player_id, &mut events)?;
         let mut result = ActionResult::applied(events, state.waiting_for.clone());
-        if let Some(scan_from) = resumed_from {
+        if let Some(collected_through) = collected_through {
             // Both scans start at END: no self-collected instruction event
             // or departure-prefix observer can be collected a second time.
             let waiting_for = engine_priority::run_post_action_pipeline_for_canonical_tail(
                 state,
                 &mut result.events,
-                scan_from,
+                collected_through,
                 &result.waiting_for,
                 None,
             )?;
