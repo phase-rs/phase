@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::game::cost_payability::AbilityCostPayability;
 use crate::game::functioning_abilities::static_kind_present;
@@ -15475,18 +15475,19 @@ fn option_satisfies(
     if requires_two_or_more_color_source && !opt.source_could_produce_two_or_more_colors {
         return false;
     }
+    let projected = projected_mana_output(opt, output_projection);
     // CR 106.6: even a type-agnostic shard needs an actual unit permitted by
     // the activation's color rider. Only context-free rows can skip that gate.
     if acceptable.is_empty()
         && required_supertype.is_none()
-        && output_projection.is_none()
+        && projected.is_none()
         && payment_context.is_none()
     {
         return true;
     }
     // CR 106.3 + CR 106.6: an ordinary scalar row has one known unit.
     // Preserve its direct eligibility check without projecting a bundle.
-    if opt.atomic_combination.is_none() && output_projection.is_none() {
+    if opt.atomic_combination.is_none() && projected.is_none() {
         return required_supertype.is_none()
             && (acceptable.is_empty() || acceptable.contains(&opt.mana_type))
             && payment_context.is_none_or(|ctx| ctx.permits_actual_mana_type(opt.mana_type));
@@ -15524,9 +15525,7 @@ fn option_units_for_context(
     payment_context: Option<&PaymentContext<'_>>,
     output_projection: Option<&AutoTapOutput>,
 ) -> Vec<AutoTapUnit> {
-    if let Some((_, groups)) =
-        output_projection.and_then(|output| output.iter().find(|(row, _)| row == option))
-    {
+    if let Some(groups) = projected_mana_output(option, output_projection) {
         return groups
             .base
             .iter()
@@ -15619,7 +15618,8 @@ fn find_least_flexible_source(
                 let covered = match source_order {
                     AutoTapSourceOrder::LeastFlexible => 0,
                     AutoTapSourceOrder::FullOutput
-                        if opt.atomic_combination.is_none() && output_projection.is_none() =>
+                        if opt.atomic_combination.is_none()
+                            && projected_mana_output(opt, output_projection).is_none() =>
                     {
                         1
                     }
@@ -16531,22 +16531,46 @@ fn auto_tap_mana_sources_inner(
                     state.active_auto_tap_row_policy = enclosing_row_policy;
                     return;
                 }
-                let produced = resolved.is_ok()
-                    && events[production_start..].iter().any(|event| {
-                        matches!(event, GameEvent::ManaAbilityProduced { source_id, .. }
-                        if *source_id == option.object_id)
-                    });
-                if produced {
+                let produced_units = resolved.as_ref().ok().and_then(|_| {
+                    events[production_start..].iter().find_map(|event| {
+                        if let GameEvent::ManaAbilityProduced {
+                            source_id,
+                            produced,
+                            ..
+                        } = event
+                        {
+                            (*source_id == option.object_id).then_some(produced.len())
+                        } else {
+                            None
+                        }
+                    })
+                });
+                if produced_units.is_some() {
                     completed_sources.insert(option.object_id);
                 }
-                // CR 608.2h + CR 605.3b: a completed variable producer may
-                // read a changed quantity. Replan only after real production,
-                // from the actual pool and newly collected remaining sources.
-                let variable = matches!(&*ability_def.effect, Effect::Mana { produced, .. }
-                    if mana_sources::single_color_production_count(produced)
-                        .is_some_and(|count| !matches!(count, crate::types::ability::QuantityExpr::Fixed { .. })
-                            && !count.contains_x()));
-                if produced && variable {
+                // CR 106.3 + CR 608.2h + CR 605.3b: a counted producer can
+                // change through its quantity or a conditional "instead" output.
+                // Compare its realized base yield with the selected row, whose
+                // Aura markers are separate from that base. Ordinary fixed
+                // sources remain outside this counted-production refresh.
+                let count = if let Effect::Mana { produced, .. } = &*ability_def.effect {
+                    mana_sources::single_color_production_count(produced)
+                } else {
+                    None
+                };
+                let refresh = count.is_some_and(|count| {
+                    !count.contains_x()
+                        && (!matches!(count, QuantityExpr::Fixed { .. })
+                            || produced_units.is_some_and(|actual| {
+                                actual
+                                    != option
+                                        .atomic_combination
+                                        .as_ref()
+                                        .map_or(1, Vec::len)
+                                        .saturating_sub(option.taps_for_mana_overrides.len())
+                            }))
+                });
+                if produced_units.is_some() && refresh {
                     super::triggers::resolve_tap_mana_triggers_inline(
                         state,
                         events,
@@ -16653,7 +16677,20 @@ fn auto_tap_mana_sources_inner(
 type AutoTapNeed = (Vec<ManaType>, bool, bool, bool, Option<ManaSupertype>);
 
 type AutoTapUnit = (ManaType, Option<ManaSupertype>);
-type AutoTapOutput = Vec<(ManaSourceOption, mana_sources::LiveManaOutputGroups)>;
+// Index the existing snapshot by source/ability. Preserve row order inside a
+// bucket for exact color, restriction and selected-trigger identity matching.
+type AutoTapOutput =
+    HashMap<(ObjectId, Option<usize>), Vec<(ManaSourceOption, mana_sources::LiveManaOutputGroups)>>;
+
+fn projected_mana_output<'a>(
+    option: &ManaSourceOption,
+    output: Option<&'a AutoTapOutput>,
+) -> Option<&'a mana_sources::LiveManaOutputGroups> {
+    output?
+        .get(&(option.object_id, option.ability_index))?
+        .iter()
+        .find_map(|(row, groups)| (row == option).then_some(groups))
+}
 
 /// CR 106.3 + CR 107.4h: keep each producer's complete units until the
 /// planner applies its base-only scalar allowance. Ordinary scalar boards
@@ -16663,21 +16700,20 @@ fn auto_tap_output_projection(
     available: &[ManaSourceOption],
     needs_snow: bool,
 ) -> Option<AutoTapOutput> {
-    let rows: AutoTapOutput = available
-        .iter()
-        .filter(|option| {
-            needs_snow
-                || !option.taps_for_mana_overrides.is_empty()
-                || single_color_choice_source(state, option)
-        })
-        .map(|option| {
-            let player = state.objects[&option.object_id].controller;
-            (
+    let mut rows = AutoTapOutput::new();
+    for option in available.iter().filter(|option| {
+        needs_snow
+            || !option.taps_for_mana_overrides.is_empty()
+            || single_color_choice_source(state, option)
+    }) {
+        let player = state.objects[&option.object_id].controller;
+        rows.entry((option.object_id, option.ability_index))
+            .or_default()
+            .push((
                 option.clone(),
                 mana_sources::live_mana_output_groups_for_option(state, player, option),
-            )
-        })
-        .collect();
+            ));
+    }
     (!rows.is_empty()).then_some(rows)
 }
 
@@ -16862,13 +16898,14 @@ fn counted_single_color_bundle(
     option: &ManaSourceOption,
     output_projection: Option<&AutoTapOutput>,
 ) -> bool {
-    let base_width = output_projection
-        .and_then(|output| output.iter().find(|(row, _)| row == option))
-        .map_or_else(
-            || option.atomic_combination.as_ref().map_or(1, Vec::len),
-            |(_, groups)| groups.base.len(),
-        );
-    base_width > 1 && single_color_choice_source(state, option)
+    if !single_color_choice_source(state, option) {
+        return false;
+    }
+    let base_width = projected_mana_output(option, output_projection).map_or_else(
+        || option.atomic_combination.as_ref().map_or(1, Vec::len),
+        |groups| groups.base.len(),
+    );
+    base_width > 1
 }
 
 // CR 106.3: a flexible color choice remains flexible when an Aura adds a
@@ -17422,7 +17459,7 @@ fn plan_all_auto_tap_rows(
     }
 
     let mut scalar_output = output_projection.cloned().unwrap_or_default();
-    for (option, groups) in &mut scalar_output {
+    for (option, groups) in scalar_output.values_mut().flatten() {
         if counted_single_color_bundle(state, option, output_projection) {
             groups.base.truncate(1);
         }
@@ -17585,10 +17622,9 @@ fn planned_mana_sub_costs_fundable(
         let activation_ctx = activation_context.as_payment_context();
         let needs_snow = needs.iter().any(|need| need.4.is_some());
         let needs_projection = needs_snow
-            && remaining.iter().any(|row| {
-                !output_projection
-                    .is_some_and(|output| output.iter().any(|(projected, _)| projected == row))
-            });
+            && remaining
+                .iter()
+                .any(|row| projected_mana_output(row, output_projection).is_none());
         let nested_output = needs_projection
             .then(|| auto_tap_output_projection(state, &remaining, true))
             .flatten();
