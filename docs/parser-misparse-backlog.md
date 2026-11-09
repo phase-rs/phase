@@ -11,6 +11,17 @@ Consolidated from 50 per-batch clustering passes over the whole card database. S
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
+## Regression coverage boundaries
+
+The owner/phasing repairs in PR #10635 retain distinct binding authorities:
+
+- A source-owner shuffle moves the source and shuffles its owner's library without announcing a target. Alabaster Dragon's death trigger follows its recorded graveyard successor; Etrata's source shuffle remains independent of its earlier exile target.
+- An owner-population shuffle uses the selected objects' owners, but does not rewrite an explicit origin possessor. A stolen Elixir of Immortality still moves its activator's graveyard.
+- Compound phasing distinguishes an announced optional target from an untargeted combat partner. Dream Fighter phases out both combat participants without a target declaration.
+- A target filter containing only properties is still constrained. Forge of Heroes retains both commander designation and entry-this-turn restrictions.
+
+The full-Oracle controls establish these clauses, not complete support for every ability on those cards. Etrata's conditional game-loss clause remains a separate parser gap under [#10728](https://github.com/phase-rs/phase/issues/10728); Forge of Heroes' conditional dual-counter tail remains unsupported under [#8112](https://github.com/phase-rs/phase/issues/8112). Fblthp, Impossibly Lost is a gendered source-reference parsing control, not a claim that its trigger condition is supported.
+
 ## Ranked root causes
 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
