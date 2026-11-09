@@ -10614,6 +10614,7 @@ mod tests {
         let mut ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::SelfRef,

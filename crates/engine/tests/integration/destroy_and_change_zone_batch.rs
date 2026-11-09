@@ -34,7 +34,7 @@ use engine::types::ability::{
     ResolvedAbility, TargetFilter, TargetRef,
 };
 use engine::types::ability::{
-    ControllerRef, EffectKind, FaceDownProfile, MassLibraryShuffleMode, QuantityExpr,
+    ControllerRef, EffectKind, FaceDownProfile, LibraryShuffleMode, QuantityExpr,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -626,6 +626,7 @@ fn d3b_redirected_back_member_is_remained_with_one_creature_destroyed() {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination: Zone::Battlefield,
                         target: TargetFilter::Any,
@@ -1333,7 +1334,7 @@ fn c11_random_order_bottom_placement_has_no_prompt_and_exact_region() {
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: Some(engine::types::ability::LibraryPosition::Bottom),
-            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
             random_order: true,
         },
         vec![],
@@ -1395,7 +1396,7 @@ fn c2_structural_mass_entry_applies_counters_and_profile_once() {
             enter_with_counters: vec![(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 })],
             face_down_profile: Some(FaceDownProfile::vanilla_2_2()),
             library_position: None,
-            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
             random_order: false,
         },
         vec![],
@@ -1468,7 +1469,7 @@ fn c13a_mass_hand_exile_counts_only_moved_members() {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
-                library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
                 random_order: false,
             },
             vec![],
@@ -1546,6 +1547,7 @@ fn c13a_mass_hand_exile_counts_only_moved_members() {
     state.exiled_from_hand_this_resolution = 0;
     let ability = ResolvedAbility::new(
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Hand),
             destination: Zone::Exile,
             target: TargetFilter::Any,
@@ -1812,6 +1814,7 @@ fn c12_forwarded_zone_result_binds_staged_arrivals_after_pause() {
     );
     let mut ability = ResolvedAbility::new(
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,
             target: TargetFilter::Any,

@@ -5725,6 +5725,7 @@ mod tests {
 
     fn move_zone_effect(origin: Option<Zone>, destination: Zone, target: TargetFilter) -> Effect {
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin,
             destination,
             target,

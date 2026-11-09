@@ -850,6 +850,7 @@ fn mudhole_replacement_fixture_with_response(
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination: Zone::Graveyard,
                         target: TargetFilter::SelfRef,

@@ -155,6 +155,7 @@ fn activated_shuffle_both_into_owners_libraries() {
     // Build the first ChangeZone (SelfRef) with sub_ability for second (targeted)
     let sub_resolved = ResolvedAbility::new(
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Library,
             target: TargetFilter::Typed(TypedFilter {
@@ -186,6 +187,7 @@ fn activated_shuffle_both_into_owners_libraries() {
 
     let mut primary = ResolvedAbility::new(
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Library,
             target: TargetFilter::SelfRef,

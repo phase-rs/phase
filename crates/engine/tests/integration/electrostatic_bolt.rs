@@ -11,7 +11,7 @@
 use engine::game::scenario::GameScenario;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityCondition, Effect, EffectKind, MassLibraryShuffleMode, PlayerFilter, PlayerRelation,
+    AbilityCondition, Effect, EffectKind, LibraryShuffleMode, PlayerFilter, PlayerRelation,
     PossessionAxis, TargetFilter, ThisWayCause, TypeFilter,
 };
 use engine::types::actions::GameAction;
@@ -270,7 +270,7 @@ fn target_plus_revealed_preserves_revealed_card_type() {
         Effect::ChangeZoneAll {
             target: TargetFilter::ParentTarget,
             destination: Zone::Library,
-            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
             ..
         }
     ));
