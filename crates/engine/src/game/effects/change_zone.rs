@@ -525,9 +525,10 @@ fn move_performer(
     origin_zones: &[Zone],
     filter_controller: PlayerId,
 ) -> PlayerId {
-    let names_whose_objects = filter_names_library_owner(target_filter, origin_zones)
-        || sweep_names_parent_target_controllers_objects(ability, target_filter);
-    if destination != Zone::Exile || names_whose_objects {
+    if destination != Zone::Exile
+        || filter_names_library_owner(target_filter, origin_zones)
+        || sweep_names_parent_target_controllers_objects(ability, target_filter)
+    {
         ability.controller
     } else {
         filter_controller
@@ -621,25 +622,33 @@ fn any_typed_leg<F: Fn(&TypedFilter) -> bool>(filter: &TargetFilter, pred: &F) -
 }
 
 /// A scoped library leg names whose library is used, not who performs the
-/// instruction. An explicit effective Library origin supplies a missing inline
-/// zone, but never changes a leg that explicitly names another zone.
+/// instruction. Its own inline zone constraints intersect the effective
+/// origins; a broader inline union cannot widen an explicit Library origin.
 fn filter_names_library_owner(filter: &TargetFilter, origin_zones: &[Zone]) -> bool {
     any_typed_leg(filter, &|leg| {
-        let mut inline_zones = leg
-            .properties
-            .iter()
-            .filter_map(|property| match property {
-                FilterProp::InZone { zone } => Some(std::slice::from_ref(zone)),
-                FilterProp::InAnyZone { zones } => Some(zones.as_slice()),
-                _ => None,
-            })
-            .peekable();
-        let library_only = if inline_zones.peek().is_some() {
-            inline_zones.all(|zones| zones == [Zone::Library])
+        if !leg_names_player(leg, &ControllerRef::ScopedPlayer) {
+            return false;
+        }
+        let inline_zones = leg.properties.iter().filter_map(|property| match property {
+            FilterProp::InZone { zone } => Some(std::slice::from_ref(zone)),
+            FilterProp::InAnyZone { zones } => Some(zones.as_slice()),
+            _ => None,
+        });
+        let candidates = if origin_zones.is_empty() {
+            inline_zones.clone().next().unwrap_or(&[])
         } else {
-            origin_zones == [Zone::Library]
+            origin_zones
         };
-        leg_names_player(leg, &ControllerRef::ScopedPlayer) && library_only
+        let mut includes_library = false;
+        for zone in candidates {
+            if inline_zones.clone().all(|zones| zones.contains(zone)) {
+                if *zone != Zone::Library {
+                    return false;
+                }
+                includes_library = true;
+            }
+        }
+        includes_library
     })
 }
 
@@ -13655,6 +13664,29 @@ mod tests {
         let without_inline = pick_library_exile_outcome(without_inline);
         assert_eq!(with_inline, (Zone::Exile, Some(PlayerId(0)), false));
         assert_eq!(without_inline, with_inline);
+    }
+
+    #[test]
+    fn effective_library_origin_intersects_broad_leg_zone_constraints() {
+        let broad = card_leg(
+            None,
+            vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::ScopedPlayer,
+                },
+                FilterProp::InAnyZone {
+                    zones: vec![Zone::Hand, Zone::Library],
+                },
+            ],
+        );
+        assert_eq!(
+            mass_library_exile_outcome(broad.clone()),
+            vec![(Zone::Exile, Some(PlayerId(0))); 2]
+        );
+        assert_eq!(
+            pick_library_exile_outcome(broad),
+            (Zone::Exile, Some(PlayerId(0)), false)
+        );
     }
 
     // Synthetic mixed-zone contract: retain the hand subject's meaning when a
