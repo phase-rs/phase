@@ -211,9 +211,9 @@ fn real_charm_untap(
 }
 
 /// Controlled IDENTITY-LAYOUT fixture, NOT independently played allocation
-/// history and never resumed as gameplay. Both producer keys and all ordinary
-/// game data come from the SAME captured real post-payoff frame. Only the
-/// recipient-local generation layout and the spent occurrence are changed.
+/// history. Producer keys and ordinary game data share one real post-payoff
+/// frame; only recipient-local generations and the spent occurrence change.
+/// Raw layouts are resumed below to probe the gate; comparands never are.
 fn controlled_well_rested_layout(
     common: &GameState,
     host: ObjectId,
@@ -497,6 +497,31 @@ fn loop_relational_well_rested_real_untaps_distinguish_current_spent_from_retire
     let live_spent = layout(10, 11, 10);
     let retired_spent = layout(13, 9, 12);
     let same_raw_spent_remint = layout(13, 9, 10);
+    for (raw, payoffs) in [
+        (&live_spent, 0),
+        (&retired_spent, 1),
+        (&same_raw_spent_remint, 1),
+    ] {
+        // Controlled tapping is setup; the paid Charm produces the actual
+        // untap. These are RAW layouts, never normalized/projected comparands.
+        let mut future = GameRunner::from_state(raw.clone());
+        let current_wr = current_aura_grant(future.state(), host, well_rested).1;
+        future.state_mut().objects.get_mut(&host).unwrap().tapped = true;
+        real_charm_untap(&mut future, host, charms[1], forests[1], payoffs);
+        assert_eq!(
+            current_aura_grant(future.state(), host, well_rested).1,
+            current_wr,
+            "untapping does not remint the selected current grant"
+        );
+        assert!(future
+            .state()
+            .triggers_fired_this_turn
+            .contains(&current_wr));
+        assert_eq!(
+            future.state().players[1].library.len(),
+            2 - payoffs as usize
+        );
+    }
     for (a, b) in [
         (&live_spent, layout(110, 111, 110)),
         (&retired_spent, layout(113, 109, 112)),
