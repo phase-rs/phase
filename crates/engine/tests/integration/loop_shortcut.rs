@@ -19312,13 +19312,10 @@ fn sanguine_bond_piecewise_schedule_bounds_later_pins_at_declaration() {
     );
 }
 
-/// CR 732.2b + CR 732.2a: the proposal carries `deliverable_capacity` durably, so the drive
-/// enforces the offer's count ceiling across declaration, response and restore, while the
-/// PUBLISHED range keeps the proposal's own ends — the engine's budget is not published as one,
-/// and the reducer alone refuses a place the board cannot take. A restored legacy proposal whose
-/// field is 0 falls back to its own count.
+/// CR 732.2b: a fixed-count proposal publishes its own shortening range.
+/// A zero deliverable capacity falls back to the proposal's count.
 #[test]
-fn proposal_deliverable_capacity_bounds_the_drive_and_restored_legacy_proposal() {
+fn proposal_shortening_range_and_zero_capacity_fallback() {
     let mut proposal = ShortcutProposal {
         proposer: P0,
         predicted_winner: Some(P0),

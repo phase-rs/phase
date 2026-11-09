@@ -5744,13 +5744,7 @@ struct ConsumptionBound {
     /// published declaration subtracts every aim it may have made, so this list can be empty at a
     /// count whose `Ceiling` cascade still names a crossing, and the drive's departure verdict
     /// then refuses that departure.
-    ///
-    /// `None` states that NO prediction was published: a restored ring proposal carrying no
-    /// per-period signature bounds its count by the offer's capacity but promises nothing about
-    /// departures, so the drive keeps the commit-and-stop an unsigned proposal gets. That is not
-    /// the same statement as `Some(vec![])`, which says a signed reduction measured no crossing
-    /// at this count and so refuses a departure whole.
-    entries: Option<Vec<crate::analysis::resource::PredictedDeparture>>,
+    entries: Vec<crate::analysis::resource::PredictedDeparture>,
 }
 
 /// CR 704.5a + CR 732.2a: what a consumption-time re-derivation can state about one confirmed
@@ -5765,9 +5759,7 @@ enum ConsumptionDerivation {
     /// no CR 704 threshold — CR 800.4 + CR 102.1 put the period's victims outside the population
     /// the reduction walks.
     NoMeasurement,
-    /// Signed, with the threshold the reduction measured — or a restored ring proposal, whose
-    /// ceiling is the offer's own capacity because it published no signature. Which of the two
-    /// it is shows in `ConsumptionBound::entries`: only the signed one carries a prediction.
+    /// Signed, with the threshold the reduction measured.
     Measured(ConsumptionBound),
     /// CR 732.2a: a period the counting replay counted. Its take answers to the reducer and the
     /// replay's cap, never to the threshold reduction; these are the departures the count saw
@@ -5776,14 +5768,13 @@ enum ConsumptionDerivation {
 }
 
 impl ConsumptionDerivation {
-    /// CR 704.5a + CR 800.4a: the departures a drive may commit — `None` where no prediction was
-    /// published (an unsigned proposal, or the capacity-only derivation a restored ring proposal
-    /// re-derives), and `Some(&[])` where the signed reduction measured nothing.
+    /// CR 704.5a + CR 800.4a: the departures a drive may commit — no prediction to diverge from
+    /// for an unsigned proposal, and none at all where the signed reduction measured nothing.
     fn predicted(&self) -> Option<&[crate::analysis::resource::PredictedDeparture]> {
         match self {
             ConsumptionDerivation::Unsigned => None,
             ConsumptionDerivation::NoMeasurement => Some(&[]),
-            ConsumptionDerivation::Measured(bound) => bound.entries.as_deref(),
+            ConsumptionDerivation::Measured(bound) => Some(&bound.entries),
             ConsumptionDerivation::Replayed(entries) => Some(entries),
         }
     }
@@ -5804,20 +5795,7 @@ fn shortcut_consumption_bound(
         );
     }
     let per_cycle = match proposal.per_cycle.as_ref() {
-        None => {
-            if proposal.road == crate::analysis::loop_check::OfferRoad::Ring {
-                let capacity = proposal.effective_deliverable_capacity();
-                // CR 732.2a: the capacity is the whole statement — a restored ring proposal
-                // published no departure prediction, so a seat leaving inside the sequence is
-                // not a divergence (the `None` below), exactly as for an unsigned proposal. The
-                // empty list this used to hand over predicted nobody, which dropped the cycle.
-                return ConsumptionDerivation::Measured(ConsumptionBound {
-                    ceiling: capacity,
-                    entries: None,
-                });
-            }
-            return ConsumptionDerivation::Unsigned;
-        }
+        None => return ConsumptionDerivation::Unsigned,
         Some(crate::analysis::resource::PeriodSignature::EveryRepetition(per_cycle)) => per_cycle,
         // CR 732.2a: one repetition's signature bounds no other; a take of it predicts no
         // departure, so any departure refuses it whole.
@@ -5906,10 +5884,7 @@ fn shortcut_consumption_bound(
         per_cycle, template, published, &points, state, lead, ceiling,
     );
     let ceiling = representable.map_or(ceiling, |r| ceiling.min(r));
-    ConsumptionDerivation::Measured(ConsumptionBound {
-        ceiling,
-        entries: Some(entries),
-    })
+    ConsumptionDerivation::Measured(ConsumptionBound { ceiling, entries })
 }
 
 /// CR 115.2 + CR 732.2a: the per-slot published legal sets a consumption-time re-derivation has to
@@ -5988,7 +5963,8 @@ fn shortcut_count_is_drivable(
     proposal: &crate::analysis::loop_check::ShortcutProposal,
     count: u32,
 ) -> bool {
-    count <= MAX_SHORTCUT_CYCLES
+    count <= proposal.effective_deliverable_capacity()
+        && count <= MAX_SHORTCUT_CYCLES
         && match shortcut_consumption_bound(state, proposal, count) {
             // EXHAUSTIVE, no wildcard: the two absences answer ALIKE here, and the arm says so
             // instead of collapsing them by accident. Neither supports a derived ceiling — an
@@ -7693,38 +7669,33 @@ fn materialize_fixed_shortcut(
                     ConsumptionDerivation::NoMeasurement => break 'cycles,
                     // A counted period carries its period, whose take is never the ring's.
                     ConsumptionDerivation::Replayed(_) => break 'cycles,
-                    ConsumptionDerivation::Measured(bound) => match &bound.entries {
-                        // No prediction to diverge from: the capacity-only derivation a restored
-                        // ring proposal publishes. Commit-and-stop, exactly as `Unsigned` does.
-                        None => {}
-                        Some(entries) => {
-                            match departure_verdict(entries, &committed, &s, i + 1) {
-                                // CR 732.2a: a predicted departure is a beat the accepted count
-                                // CONTAINS. The count is bounded by this same derivation's
-                                // ceiling at the guard, so where the crossing is the last one the
-                                // count contains the `continue` IS the loop's own end and the
-                                // handback below is reached unchanged.
-                                DepartureVerdict::Predicted => {
-                                    committed = *s;
-                                    committed_cycles += 1;
-                                    commit_repetition(
-                                        &mut result.events,
-                                        proposal.proposer,
-                                        committed_cycles,
-                                        &mut events,
-                                    );
-                                    continue 'cycles;
-                                }
-                                // `NoDeparture` is unreachable under this outcome's own gate,
-                                // which fires on a drop in `seats_in_game`; the arm answers it
-                                // rather than folding it into another verdict. `Unpredicted`
-                                // drops the cycle whole.
-                                DepartureVerdict::NoDeparture | DepartureVerdict::Unpredicted => {
-                                    break 'cycles
-                                }
+                    ConsumptionDerivation::Measured(bound) => {
+                        match departure_verdict(&bound.entries, &committed, &s, i + 1) {
+                            // CR 732.2a: a predicted departure is a beat the accepted count
+                            // CONTAINS. The count is bounded by this same derivation's
+                            // ceiling at the guard, so where the crossing is the last one the
+                            // count contains the `continue` IS the loop's own end and the
+                            // handback below is reached unchanged.
+                            DepartureVerdict::Predicted => {
+                                committed = *s;
+                                committed_cycles += 1;
+                                commit_repetition(
+                                    &mut result.events,
+                                    proposal.proposer,
+                                    committed_cycles,
+                                    &mut events,
+                                );
+                                continue 'cycles;
+                            }
+                            // `NoDeparture` is unreachable under this outcome's own gate,
+                            // which fires on a drop in `seats_in_game`; the arm answers it
+                            // rather than folding it into another verdict. `Unpredicted`
+                            // drops the cycle whole.
+                            DepartureVerdict::NoDeparture | DepartureVerdict::Unpredicted => {
+                                break 'cycles
                             }
                         }
-                    },
+                    }
                 }
                 // THE UNSIGNED FALL-THROUGH ALONE: commit and STOP, the disposition every
                 // producer that publishes no signature shipped with.

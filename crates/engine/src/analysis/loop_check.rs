@@ -309,6 +309,11 @@ pub struct ShortcutProposal {
     /// so a responder's preview splits the declaration by the lead the proposer's preview used.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub leading_aims: Vec<(crate::analysis::decision_template::DecisionSlot, PlayerId)>,
+    /// CR 732.2a: the highest count an accept may legally specify against this offer, copied
+    /// off `ShortcutDecisionSchema::deliverable_capacity` at declare so the proposal carries the
+    /// same resource and representability proof across declaration, response, restore, and settlement.
+    #[serde(default = "default_deliverable_capacity")]
+    pub deliverable_capacity: u32,
     /// CR 732.2a: the declaration the offer PUBLISHED — `game::engine::build_bounded_declaration`'s
     /// validated output, copied off the offer at declare — beside `template`, the declaration the
     /// drive replays. The two differ wherever the declarer overrode the published aim, and
@@ -320,11 +325,6 @@ pub struct ShortcutProposal {
     /// absent observation on its refusing side in both bound directions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub published_declaration: Option<DecisionTemplate>,
-    /// CR 732.2a: the highest count an accept may legally specify against this offer, copied
-    /// off `ShortcutDecisionSchema::deliverable_capacity` at declare so the proposal carries the
-    /// same resource and representability proof across declaration, response, restore, and settlement.
-    #[serde(default = "default_deliverable_capacity")]
-    pub deliverable_capacity: u32,
 }
 
 fn default_deliverable_capacity() -> u32 {
