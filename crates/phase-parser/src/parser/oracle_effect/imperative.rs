@@ -11169,6 +11169,27 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         Effect::ChangeZoneAll { .. } => TargetFilter::ScopedPlayer,
         _ => TargetFilter::Controller,
     };
+    // CR 608.2c + CR 701.24c: the terminal instruction owns this shuffle,
+    // including when the source can no longer move. A scalar library zone
+    // change would automatically shuffle during delivery as well. Reuse the
+    // existing exact-source placement path to defer randomization until the
+    // one owner shuffle, just as SelfAndZonesToLibrary does above.
+    if matches!(
+        &effect,
+        Effect::ChangeZone {
+            destination: Zone::Library,
+            target: TargetFilter::SelfRef,
+            owner_library: true,
+            ..
+        }
+    ) {
+        effect = Effect::PutAtLibraryPosition {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Bottom,
+            arranger: None,
+        };
+    }
     let tracks_owner_population = matches!(&effect, Effect::ChangeZoneAll { .. });
     if let Effect::ChangeZoneAll {
         destination: Zone::Library,
