@@ -2048,8 +2048,8 @@ fn dispatch_resident_post_replacement_work(state: &mut GameState, events: &mut V
 /// frames are independent roots. Both delegate to `draw::resume_draw_sequence`,
 /// which retires only its exact completed child and paired paused parent.
 ///
-/// A step that exposes a finished paused dispatch resumes again
-/// (`exposes_finished_paused_dispatch`), so that dispatch retires in the same pass.
+/// A step that exposes a paused parent whose child has finished resumes again
+/// (`exposes_paused_parent`), so that parent continues in the same pass.
 pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         if waits_for_resolution_choice(&state.waiting_for) {
@@ -2233,7 +2233,15 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
     // own arm retires that dispatch and runs the work queued behind it before
     // the game moves on. Every route that finishes a resolution step passes
     // through here.
-    if exposes_finished_paused_dispatch(state, entry_position) {
+    //
+    // CR 706.3b + CR 608.2c: the same holds for a die-roll frame re-parked under
+    // a results-table row whose child stack has now retired. Farideh's Fireball's
+    // row damage, replaced by Delaying Shield, puts counters that Doubling Season
+    // and Pir make the player order (CR 616.1); once that answer finishes the
+    // counters and Shield's dispatch, the roll's remaining instruction is the next
+    // work, and the spell still owes its graveyard move (CR 608.2n). No player has
+    // priority until it ends (CR 117.2e, CR 117.3b), so the frame continues here.
+    if exposes_paused_parent(state, entry_position) {
         resume_resolution_frames(state, events);
     }
 
@@ -2244,30 +2252,31 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
 }
 
 /// Whether a `resume_resolution_frames` step that began at `entry` left a paused
-/// post-replacement dispatch as the top frame's resident, with `waiting_for` back
-/// at `Priority`.
+/// parent on top, with `waiting_for` back at `Priority`: a paused post-replacement
+/// dispatch as the top frame's resident, or a die-roll frame re-parked mid-loop
+/// (`roll_die::active_die_roll_is_resumable`).
 ///
 /// The step must have made progress (`ResolutionPosition::is_strictly_inside`),
-/// so a dispatch the step itself paused, which pushes rather than pops, is never
+/// so a parent the step itself paused, which pushes rather than pops, is never
 /// taken for a finished one, and the re-resume terminates. A pending life
 /// payment's resume owns its resolution depth (CR 118.3b + CR 119.4 + CR 616.1,
-/// `engine::resume_pending_continuation_pass`), so a dispatch at or below that
+/// `engine::resume_pending_continuation_pass`), so a parent at or below that
 /// depth is left to the payment's own boundary.
-fn exposes_finished_paused_dispatch(state: &GameState, entry: ResolutionPosition) -> bool {
+fn exposes_paused_parent(state: &GameState, entry: ResolutionPosition) -> bool {
     matches!(state.waiting_for, WaitingFor::Priority { .. })
         && state.resolution_stack.position().is_strictly_inside(&entry)
         && state
             .pending_deferred_life_cost_resume
             .as_ref()
             .is_none_or(|resume| state.resolution_stack.len() > resume.resume_at_resolution_depth())
-        && matches!(
-            state.resolution_stack.last(),
-            Some(ResolutionFrame::PostReplacement(drains))
-                if matches!(
-                    drains.resident().map(|drain| &drain.status),
-                    Some(crate::types::game_state::DrainStatus::Paused)
-                )
-        )
+        && match state.resolution_stack.last() {
+            Some(ResolutionFrame::PostReplacement(drains)) => matches!(
+                drains.resident().map(|drain| &drain.status),
+                Some(crate::types::game_state::DrainStatus::Paused)
+            ),
+            Some(ResolutionFrame::DieRoll(_)) => roll_die::active_die_roll_is_resumable(state),
+            Some(_) | None => false,
+        }
 }
 
 /// CR 608.2c: Resume a "repeat this process" loop that paused when

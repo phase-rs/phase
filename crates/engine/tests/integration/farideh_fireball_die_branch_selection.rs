@@ -233,6 +233,24 @@ fn counters(runner: &GameRunner, id: ObjectId, kind: &str) -> u32 {
         .unwrap_or(0)
 }
 
+/// The one Farideh's Fireball each scenario casts.
+fn fireball(runner: &GameRunner) -> ObjectId {
+    runner
+        .state()
+        .objects
+        .values()
+        .find(|object| object.name == "Farideh's Fireball")
+        .map(|object| object.id)
+        .expect("the spell exists")
+}
+
+/// CR 608.2n: an instant or sorcery's resolution ends with it in its owner's graveyard.
+#[track_caller]
+fn assert_in_owners_graveyard(runner: &GameRunner, object: ObjectId, owner: PlayerId) {
+    assert_eq!(runner.state().objects[&object].zone, Zone::Graveyard);
+    assert!(player(runner, owner).graveyard.contains(&object));
+}
+
 #[track_caller]
 fn assert_at_rest(runner: &GameRunner) {
     assert!(
@@ -351,7 +369,9 @@ fn nefarious_lich_exiles_the_rows_damage_across_its_prompt_not_the_d20_face() {
 /// Delaying Shield's counters under Doubling Season and Pir, Imaginative Rascal: the action's
 /// counter event meets two replacements whose order matters, so P1 orders them (CR 616.1) and
 /// the action pauses under the roll. Doubling Season first, then Pir: the shield's 2 become
-/// 2 × 2 + 1 = 5.
+/// 2 × 2 + 1 = 5. The answer also finishes the rest of Fireball's resolution: the row was the
+/// roll's last instruction, so the spell goes to its owner's graveyard (CR 608.2n) before
+/// anyone gets priority (CR 117.2e, CR 117.3b).
 #[test]
 fn delaying_shield_counts_the_rows_damage_across_an_order_choice() {
     for (roll, controller_loss) in [(LOW_ROLL, -2), (HIGH_ROLL, 0)] {
@@ -389,18 +409,8 @@ fn delaying_shield_counts_the_rows_damage_across_an_order_choice() {
         assert_eq!(counters(&runner, shield, "delay"), 5, "face {}", roll.1);
         assert_eq!(life(&runner, P1), 20, "the damage was replaced");
         assert_eq!(life(&runner, P0), 20 + controller_loss);
-        assert!(matches!(
-            runner.state().waiting_for,
-            WaitingFor::Priority { .. }
-        ));
-        assert!(runner.state().stack.is_empty());
-        // Everything `assert_at_rest` checks except the resolution stack. Filed follow-up:
-        // once the order is answered, Fireball's die-roll frame stays parked with its one die
-        // already settled (`next_index` 1 of 1), and the spell, owed by that frame's
-        // completion, is still in the stack zone rather than the graveyard (CR 608.2n). That is
-        // the results-table resume after a CR 616.1 order choice, and it is the same with the
-        // amount binding removed. When the follow-up lands, this row ends with
-        // `assert_at_rest(&runner)` and the spell in the graveyard.
+        assert_at_rest(&runner);
+        assert_in_owners_graveyard(&runner, fireball(&runner), P0);
     }
 }
 
