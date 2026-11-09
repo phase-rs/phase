@@ -22,6 +22,7 @@ const DWELL_ORACLE: &str =
     "Target player shuffles up to four target cards from their graveyard into their library.";
 const WAND_ORACLE: &str = "{T}: Mill a card.\n{2}, {T}, Exile this artifact: Shuffle up to five target cards from your graveyard into your library.";
 const LOAMING_ORACLE: &str = "When this creature enters, target player shuffles any number of target cards from their graveyard into their library.";
+const RITE_ORACLE: &str = "Return up to two target permanent cards from your graveyard to your hand. Target player shuffles up to four target cards from their graveyard into their library. Exile Rite of Renewal.";
 
 /// Ordered projection of who actually shuffled a library.
 fn shuffled_players(outcome: &CastOutcome) -> Vec<PlayerId> {
@@ -280,4 +281,63 @@ fn loaming_shaman_etb_shuffles_the_chosen_players_library() {
     assert!(p0_state.library.contains(&p0_library));
 
     assert_only_player_shuffled(&outcome, P1, "the chosen player shuffles their own library");
+}
+
+/// CR 601.2c + CR 608.2c + CR 701.24a: an earlier object target is not
+/// the actor of a later targeted-player shuffle. Returning P0's permanent
+/// and shuffling P1's graveyard card must preserve both target groups.
+#[test]
+fn rite_of_renewal_keeps_the_shuffle_player_after_an_earlier_object_target() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let rite = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rite of Renewal", false, RITE_ORACLE)
+        .id();
+    let return_card = scenario
+        .add_creature_to_graveyard(P0, "First Target Permanent", 1, 1)
+        .id();
+    let untouched_return_card = scenario
+        .add_creature_to_graveyard(P0, "Unchosen Return Card", 1, 1)
+        .id();
+    let shuffle_card = scenario
+        .add_creature_to_graveyard(P1, "Later Target Permanent", 1, 1)
+        .id();
+    let untouched_shuffle_card = scenario
+        .add_creature_to_graveyard(P1, "Unchosen Shuffle Card", 1, 1)
+        .id();
+    let p0_library = scenario.add_card_to_library_top(P0, "Caster Library Card");
+    let p1_library = scenario.add_card_to_library_top(P1, "Target Library Card");
+
+    let mut runner = scenario.build();
+    let outcome = runner
+        .cast(rite)
+        .target_objects(&[return_card, shuffle_card])
+        .target_player(P1)
+        .resolve();
+
+    assert_completed(&outcome);
+    assert_eq!(
+        shuffle_resolutions(&outcome),
+        1,
+        "the shuffle after the earlier return target must resolve"
+    );
+    outcome.assert_zone(&[return_card], Zone::Hand);
+    outcome.assert_zone(&[shuffle_card], Zone::Library);
+    outcome.assert_zone(
+        &[untouched_return_card, untouched_shuffle_card],
+        Zone::Graveyard,
+    );
+    outcome.assert_zone(&[rite], Zone::Exile);
+    let p0_state = &outcome.state().players[P0.0 as usize];
+    let p1_state = &outcome.state().players[P1.0 as usize];
+    assert!(p0_state.hand.contains(&return_card));
+    assert!(!p0_state.library.contains(&return_card));
+    assert!(p0_state.library.contains(&p0_library));
+    assert!(p1_state.library.contains(&shuffle_card));
+    assert!(p1_state.library.contains(&p1_library));
+    assert_only_player_shuffled(
+        &outcome,
+        P1,
+        "the earlier object target must not replace the announced shuffle player",
+    );
 }
