@@ -17430,12 +17430,14 @@ fn collect_wrapped_unit_library_moves(parsed: &ParsedAbilities) -> Vec<&AbilityD
         .collect()
 }
 
-/// CR 115.1 + CR 701.24a + CR 608.2c: "Target player shuffles up to N target
-/// cards from their graveyard into their library." The moved cards are card
-/// targets (`Owned:TargetPlayer`, `InZone:Graveyard`), so the announced player
-/// is the instruction's actor: the terminal `Shuffle` must name that player
-/// (`ParentTarget`), not the imperative caster default.
+/// CR 115.1 + CR 608.2b + CR 701.24a: the independently targeted graveyard
+/// cards and their shuffle actor refer to the same announced player group.
+/// That stable declaration must survive slot compaction without substituting
+/// the caster when the player becomes illegal.
 fn assert_unit_library_move_binds_shuffle_to_player(card_name: &str, root: &AbilityDefinition) {
+    let group = root
+        .declares_chosen_group
+        .unwrap_or_else(|| panic!("{card_name} must declare its player group"));
     let move_graveyard = root
         .sub_ability
         .as_deref()
@@ -17462,7 +17464,7 @@ fn assert_unit_library_move_binds_shuffle_to_player(card_name: &str, root: &Abil
     );
     assert!(
         tf.properties.contains(&FilterProp::Owned {
-            controller: ControllerRef::TargetPlayer
+            controller: ControllerRef::DeclaredPlayer { group }
         }),
         "{card_name} must select the chosen player's cards, got {tf:?}"
     );
@@ -17475,8 +17477,8 @@ fn assert_unit_library_move_binds_shuffle_to_player(card_name: &str, root: &Abil
         matches!(
             shuffle.effect.as_ref(),
             Effect::Shuffle {
-                target: TargetFilter::ParentTarget
-            }
+                target: TargetFilter::DeclaredPlayer { group: actor_group }
+            } if *actor_group == group
         ),
         "{card_name} must shuffle the same chosen player's library, got {:?}",
         shuffle.effect

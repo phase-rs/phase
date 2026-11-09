@@ -925,6 +925,37 @@ pub fn resolve(
             .map(|cause| EffectResolutionResult { cause, count })
     };
 
+    // CR 608.2b: "target player shuffles target cards from their graveyard"
+    // requires the declared player to act, even when the card targets remain legal.
+    // Read the same group as the terminal Shuffle before delivering any cards.
+    // Only this compound is skipped; the ability chain still reaches independent tails.
+    if let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Library,
+        target: TargetFilter::Typed(filter),
+        owner_library: false,
+        library_shuffle: LibraryShuffleMode::TerminalShuffle,
+        ..
+    } = &ability.effect
+    {
+        let actor_unavailable = filter.properties.iter().any(|property| match property {
+            FilterProp::Owned {
+                controller: ControllerRef::DeclaredPlayer { group },
+            } => crate::game::targeting::resolve_live_declared_player(state, ability, *group)
+                .is_none(),
+            _ => false,
+        });
+        if actor_unavailable {
+            state.last_effect_count = Some(0);
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(completed_result(0));
+        }
+    }
+
     // CR 610.3a / CR 610.3b: If the specified event occurred after this ability
     // was put onto the stack (activated) or triggered (triggered) but before its
     // initial one-shot zone change, the object does not move.

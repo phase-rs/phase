@@ -31174,7 +31174,7 @@ fn is_declared_player_filter(filter: &TargetFilter) -> bool {
     }
 }
 
-/// CR 608.2c + CR 108.3: Find a chain-level player anchor in a parsed clause,
+/// CR 608.2c + CR 108.3: Bind a chain-level player anchor in a parsed clause,
 /// descending into its `sub_ability` chain. A clause such as "target creature's
 /// owner shuffles it into their library" lowers to a top `ChangeZone` with the
 /// owner `Shuffle(ParentTargetOwner)` as a sub-ability, so the anchor lives one
@@ -31183,10 +31183,11 @@ fn is_declared_player_filter(filter: &TargetFilter) -> bool {
 /// inherit the named owner as its chooser (This Is How It Ends). A player-only
 /// `TargetOnly` wrapper contributes its own target through two library-move
 /// shapes: the whole-graveyard mass move (CR 115.1a + CR 608.2c) and the
-/// singular/multi-target card move (CR 115.1 + CR 701.24a + CR 608.2c), so the
-/// terminal shuffle of either binds to the announced player.
-fn extract_player_anchor_in_chain(
-    clause: &ParsedEffectClause,
+/// singular/multi-target card move (CR 115.1 + CR 701.24a + CR 608.2c). The
+/// targeted graveyard compound binds its owned cards and terminal actor to the
+/// same declared group, so an illegal player cannot perform either instruction.
+fn bind_player_anchor_in_chain(
+    clause: &mut ParsedEffectClause,
     declared: &mut impl FnMut() -> TargetFilter,
 ) -> Option<TargetFilter> {
     if let Some(anchor) = extract_player_anchor(&clause.effect, declared) {
@@ -31207,10 +31208,10 @@ fn extract_player_anchor_in_chain(
         &clause.effect,
         Effect::TargetOnly { target } if target_filter_can_target_player(target)
     );
-    let mut sub = clause.sub_ability.as_deref();
+    let mut sub = clause.sub_ability.as_deref_mut();
     while let Some(def) = sub {
         if parent_target_is_player {
-            match def.effect.as_ref() {
+            match def.effect.as_mut() {
                 Effect::ChangeZoneAll {
                     destination: Zone::Library,
                     target: TargetFilter::ParentTarget,
@@ -31224,6 +31225,42 @@ fn extract_player_anchor_in_chain(
                 Effect::ChangeZone {
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Library,
+                    target: TargetFilter::Typed(filter),
+                    owner_library: false,
+                    library_shuffle: LibraryShuffleMode::TerminalShuffle,
+                    ..
+                } if filter.properties.iter().any(|property| {
+                    matches!(
+                        property,
+                        FilterProp::Owned {
+                            controller: ControllerRef::TargetPlayer
+                        }
+                    )
+                }) =>
+                {
+                    let anchor = declared();
+                    if let TargetFilter::DeclaredPlayer { group } = &anchor {
+                        // CR 608.2b: ownership still validates against the announced
+                        // player; applying the compound requires that player live.
+                        for property in &mut filter.properties {
+                            if let FilterProp::Owned {
+                                controller: controller @ ControllerRef::TargetPlayer,
+                            } = property
+                            {
+                                *controller = ControllerRef::DeclaredPlayer { group: *group };
+                            }
+                        }
+                        if let Some(terminal) = def.sub_ability.as_deref_mut() {
+                            if let Effect::Shuffle { target } = terminal.effect.as_mut() {
+                                *target = anchor.clone();
+                            }
+                        }
+                    }
+                    return Some(anchor);
+                }
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Library,
                     target: TargetFilter::Typed(_),
                     owner_library: false,
                     ..
@@ -31231,10 +31268,10 @@ fn extract_player_anchor_in_chain(
                 _ => {}
             }
         }
-        if let Some(anchor) = extract_player_anchor(&def.effect, declared) {
+        if let Some(anchor) = extract_player_anchor(def.effect.as_ref(), declared) {
             return Some(anchor);
         }
-        sub = def.sub_ability.as_deref();
+        sub = def.sub_ability.as_deref_mut();
     }
     None
 }
@@ -31472,7 +31509,7 @@ fn repeat_for_each_this_way_suffix(pred_lower: &str) -> Option<QuantityExpr> {
 /// that already carry an explicit owner anaphor (`ParentTargetOwner`).
 fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter, draw_inherits_anchor: bool) {
     // `ParentTarget` reaches this chain-local applier only from
-    // `extract_player_anchor_in_chain`'s player-only `TargetOnly` wrapper
+    // `bind_player_anchor_in_chain`'s player-only `TargetOnly` wrapper
     // branch. It is a player reference there, but remains excluded from the
     // shared predicate because it can otherwise name an object.
     if !matches!(
@@ -32251,7 +32288,7 @@ impl CarriedPlayerSubject {
     }
 
     /// The player an earlier clause's own subject or search named, extracted by
-    /// `extract_player_anchor_in_chain`.
+    /// `bind_player_anchor_in_chain`.
     fn antecedent(filter: TargetFilter) -> Self {
         Self::Reference {
             filter,
@@ -32659,10 +32696,9 @@ fn lower_subject_exile_objects(
 ///
 /// A singular/multi-target library move ("Target player shuffles up to N target
 /// cards from their graveyard into their library") is deliberately out of scope
-/// here: its terminal shuffle is bound by the chain anchor
-/// (`extract_player_anchor_in_chain` + `apply_anchor_subject`), which owns this
-/// class's `Shuffle { target: Controller }` rebind; other shuffle rebinds live at
-/// their own call sites. Widening this helper would create a second authority
+/// here: its owned cards and terminal shuffle are bound by the chain anchor
+/// (`bind_player_anchor_in_chain`); other shuffle rebinds live at their own
+/// call sites. Widening this helper would create a second authority
 /// for the same write.
 fn sync_player_into_nested_shuffle_sub(
     clause: &mut ParsedEffectClause,
@@ -49641,7 +49677,7 @@ fn parse_effect_chain_ir_body(
         // CR 608.2c: disarm a stale non-caster anchor before applying it to this
         // chunk's caster-default effects, so the caster's SearchLibrary{target_player:
         // None} and Shuffle{Controller} are not rewritten to the earlier subject. The
-        // following extract_player_anchor_in_chain re-arms only on a fresh non-caster
+        // following bind_player_anchor_in_chain re-arms only on a fresh non-caster
         // subject (it excludes Controller/Any), so a later subject-less continuation
         // ("...then shuffle") still inherits the caster.
         if chunk_declares_caster_subject
@@ -49668,7 +49704,7 @@ fn parse_effect_chain_ir_body(
         // The clause being parsed is the next one pushed, so a search that declares its
         // own player is registered at that index.
         let next_clause_index = builder.clauses().len();
-        if let Some(extracted) = extract_player_anchor_in_chain(&clause, &mut || {
+        if let Some(extracted) = bind_player_anchor_in_chain(&mut clause, &mut || {
             reference_to_declaration(
                 &mut declarations,
                 &mut chain_declared_groups,
