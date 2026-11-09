@@ -50,8 +50,8 @@ use crate::types::game_state::{
     PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp,
     PendingPlayerScopeTail, RepeatIterationChoice, RepeatIterationMovement, RepeatProcessRequest,
     RepeatUntilIterationWitness, RepeatUntilStopWitness, ResolutionOptionalPaymentOption,
-    ReturnResultOccurrenceId, SeatCreatedTokens, TrackedMemberOrigin, WaitingFor, ZoneChangeRecord,
-    ZoneOpponentChooserPurpose,
+    ReturnResultOccurrenceId, SeatCreatedTokens, TargetSelectionSlot, TrackedMemberOrigin,
+    WaitingFor, ZoneChangeRecord, ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{DiscardFrameId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -4126,6 +4126,25 @@ fn try_materialize_reflexive_trigger_step(
     result
 }
 
+/// CR 115.6 + CR 603.3d: true when every declared slot of `reflexive` is
+/// optional and has no legal target, so the target walk auto-skips them all
+/// and there is no choice to announce. Zero targets is then a legal
+/// announcement, not a missing required choice: the ability takes the same
+/// route as one that declares no target slots.
+fn reflexive_target_walk_offers_no_choice(
+    state: &GameState,
+    reflexive: &ResolvedAbility,
+    target_slots: &[TargetSelectionSlot],
+) -> bool {
+    crate::game::ability_utils::begin_target_selection_for_ability(
+        state,
+        reflexive,
+        target_slots,
+        &reflexive.target_constraints,
+    )
+    .is_ok_and(|progress| progress.current_slot >= target_slots.len())
+}
+
 fn try_materialize_reflexive_trigger_inner(
     state: &mut GameState,
     reflexive: &ResolvedAbility,
@@ -4276,7 +4295,14 @@ fn try_materialize_reflexive_trigger_inner(
         "a reflexive with propagated parent targets must be slot-less; \
          a declared slot would re-prompt and clobber the bound referent"
     );
-    if target_slots.is_empty() {
+    // CR 603.12 + CR 603.3d: a reflexive with no declared slot — or whose every
+    // declared slot is optional with no legal target (CR 115.6), so the walk has
+    // nothing to offer — is not prompted here. A `WhenYouDo` reflexive is queued
+    // for normal trigger dispatch, which assigns the declined set and puts it on
+    // the stack with zero targets; a gated continuation resolves untargeted.
+    if target_slots.is_empty()
+        || reflexive_target_walk_offers_no_choice(state, reflexive, &target_slots)
+    {
         if creates_reflexive_trigger {
             let pending = build_reflexive_pending_trigger(state, reflexive, parent);
             crate::game::triggers::defer_pending_trigger(state, pending);
@@ -35692,6 +35718,177 @@ mod tests {
             safety -= 1;
         }
         assert_eq!(state.players[1].life, life_before - 2);
+    }
+
+    /// Back for More's reflexive fight ("When you do, it fights up to one
+    /// target creature you don't control."), parsed from the card's Oracle text
+    /// without its reminder text (CR 207.2 + CR 207.2a: reminder text is
+    /// italicized text with no game function). Its only declared slot is the
+    /// optional opponent creature.
+    fn back_for_more_reflexive_fight() -> ResolvedAbility {
+        let definition = crate::parser::oracle_effect::parse_effect_chain(
+            "Return target creature card from your graveyard to the battlefield. When you do, it fights up to one target creature you don't control.",
+            AbilityKind::Spell,
+        );
+        let root = build_resolved_from_def(&definition, ObjectId(100), PlayerId(0));
+        let mut node = root.sub_ability.as_deref();
+        while let Some(sub) = node {
+            if sub
+                .condition
+                .as_ref()
+                .is_some_and(AbilityCondition::has_when_you_do_marker)
+            {
+                return sub.clone();
+            }
+            node = sub.sub_ability.as_deref();
+        }
+        panic!("Back for More must parse a WhenYouDo reflexive sub-ability");
+    }
+
+    /// CR 115.6 + CR 603.3d + CR 603.12: a reflexive whose every declared slot
+    /// is optional with no legal target offers no choice, so it is deferred to
+    /// normal trigger dispatch exactly like a targetless reflexive and goes on
+    /// the stack with zero targets, instead of surfacing a prompt that is
+    /// already complete.
+    #[test]
+    fn choice_free_optional_reflexive_is_deferred_like_a_targetless_one() {
+        let reflexive = back_for_more_reflexive_fight();
+
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        // Reach guard: the Fight arm declares exactly one optional slot even
+        // with no legal target, unlike the generic multi-target arm, which caps
+        // its slot count at the legal-target count and declares none.
+        let slots = crate::game::ability_utils::build_target_slots(&state, &reflexive)
+            .expect("an optional opponent slot is always declarable");
+        assert_eq!(slots.len(), 1, "the reflexive fight declares one slot");
+        assert!(
+            slots[0].optional,
+            "\"up to one target\" makes the slot optional"
+        );
+
+        let mut events = Vec::new();
+        assert!(try_materialize_reflexive_trigger(
+            &mut state,
+            &reflexive,
+            None,
+            None,
+            &mut events,
+            0,
+        )
+        .unwrap());
+        assert_eq!(state.deferred_triggers.len(), 1);
+        assert!(state.stack.is_empty());
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "a choice-free walk must not surface a target prompt, got {:?}",
+            state.waiting_for
+        );
+
+        assert!(
+            crate::game::triggers::drain_deferred_trigger_queue(&mut state, &mut events).is_none()
+        );
+        assert_eq!(state.stack.len(), 1);
+        assert!(
+            state.stack[0]
+                .ability()
+                .expect("the reflexive is a triggered ability on the stack")
+                .targets
+                .is_empty(),
+            "the declined optional slot leaves the reflexive with zero targets"
+        );
+
+        // Paired reach guard: with one legal opponent creature the walk offers
+        // a real choice, so the reflexive is prompted, not deferred.
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        reflexive_test_creature(&mut state, PlayerId(1), "Opposing Creature");
+        let mut events = Vec::new();
+        assert!(try_materialize_reflexive_trigger(
+            &mut state,
+            &reflexive,
+            None,
+            None,
+            &mut events,
+            0,
+        )
+        .unwrap());
+        assert!(
+            matches!(
+                &state.waiting_for,
+                WaitingFor::TriggerTargetSelection { selection, .. } if selection.current_slot == 0
+            ),
+            "a legal opponent creature must open the target walk at its first slot, got {:?}",
+            state.waiting_for
+        );
+        assert!(state.deferred_triggers.is_empty());
+    }
+
+    /// CR 115.6 + CR 603.12: a quantity-gated inline continuation whose every
+    /// declared slot is optional with no legal target resolves untargeted, the
+    /// same `Ok(None)` handoff a slot-less continuation gets. Labelled synthetic
+    /// composition: no printed card gates a Fight (or any slot this arm emits
+    /// without legal targets) on a `QuantityCheck`; this pins only the
+    /// materializer's handoff to the chain descent.
+    #[test]
+    fn choice_free_optional_gated_continuation_resolves_untargeted() {
+        let mut reflexive = back_for_more_reflexive_fight();
+        reflexive.condition = Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Fixed { value: 1 },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        });
+
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let mut events = Vec::new();
+        assert!(!try_materialize_reflexive_trigger(
+            &mut state,
+            &reflexive,
+            None,
+            None,
+            &mut events,
+            0,
+        )
+        .unwrap());
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "a choice-free gated continuation must not surface a target prompt, got {:?}",
+            state.waiting_for
+        );
+        assert!(state.pending_trigger.is_none());
+        assert!(state.stack.is_empty());
+
+        // Paired reach guard: a legal opponent creature opens the inline walk.
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        reflexive_test_creature(&mut state, PlayerId(1), "Opposing Creature");
+        let mut events = Vec::new();
+        assert!(try_materialize_reflexive_trigger(
+            &mut state,
+            &reflexive,
+            None,
+            None,
+            &mut events,
+            0,
+        )
+        .unwrap());
+        assert!(
+            matches!(
+                &state.waiting_for,
+                WaitingFor::TriggerTargetSelection { selection, .. } if selection.current_slot == 0
+            ),
+            "a legal opponent creature must open the inline target walk, got {:?}",
+            state.waiting_for
+        );
     }
 
     /// CR 102.2 + CR 108.3: the player-scope fan-out driver routes

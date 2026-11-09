@@ -846,3 +846,146 @@ fn stolen_goodies_accepts_at_most_three_targets() {
         "at most three targets may receive counters: {counters:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Reflexive "fights up to one target" with no creature to fight
+// ---------------------------------------------------------------------------
+
+const BACK_FOR_MORE_ORACLE: &str = "Return target creature card from your graveyard to the battlefield. When you do, it fights up to one target creature you don't control. (Each deals damage equal to its power to the other.)";
+
+const DIREGRAF_HORDE_ORACLE: &str = "When this creature enters, create two 2/2 black Zombie creature tokens with decayed. When you do, exile up to two target cards from graveyards. (A creature with decayed can't block. When it attacks, sacrifice it at end of combat.)";
+
+fn effect_resolutions(events: &[GameEvent], kind: EffectKind) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event, GameEvent::EffectResolved { kind: resolved, .. } if *resolved == kind))
+        .count()
+}
+
+/// CR 115.6 + CR 603.3d + CR 603.12: Novel Nunchaku's reflexive "equipped
+/// creature fights up to one target creature an opponent controls" with no
+/// opponent creature. Zero targets is a legal announcement for an "up to one"
+/// target, so the reflexive goes on the stack with no target and resolves; the
+/// fight does nothing (CR 701.14a). It is neither removed nor left as a target
+/// prompt with nothing to choose.
+#[test]
+fn novel_nunchaku_with_no_opponent_creature_resolves_the_reflexive_fight_untargeted() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let nunchaku = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Novel Nunchaku", NOVEL_NUNCHAKU_ORACLE)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let mine = scenario.add_creature(P0, "Chosen Host", 3, 3).id();
+    let mut runner = scenario.build();
+    grant_priority(&mut runner, P0);
+    let outcome = runner.cast(nunchaku).target_object(mine).resolve();
+
+    // Reach guard: the enters trigger attached the Equipment, so "When you do"
+    // created the reflexive fight.
+    assert_eq!(attached_object(&outcome, nunchaku), Some(mine));
+    assert_eq!(
+        effect_resolutions(outcome.events(), EffectKind::Fight),
+        1,
+        "the reflexive fight must resolve once with zero targets: {:?}",
+        outcome.events()
+    );
+    assert_eq!(
+        outcome.state().objects[&mine].damage_marked,
+        0,
+        "with nothing to fight, the equipped creature takes no damage"
+    );
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 115.6 + CR 603.12 + CR 701.14a: the same choice-free reflexive class in a
+/// spell-resolution reflexive whose fighter is the returned card ("it").
+/// Back for More returns the creature, and with no creature its controller
+/// doesn't control, the reflexive fight resolves with zero targets and does
+/// nothing; the returned creature stays on the battlefield undamaged.
+#[test]
+fn back_for_more_with_no_opponent_creature_resolves_the_reflexive_fight_untargeted() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dead = scenario
+        .add_creature_to_graveyard(P0, "Returning Bear", 2, 2)
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Back for More", false, BACK_FOR_MORE_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    grant_priority(&mut runner, P0);
+    let outcome = runner.cast(spell).target_object(dead).resolve();
+
+    // Reach guard: the return happened, so "When you do" created the reflexive.
+    assert_eq!(outcome.zone_of(dead), Zone::Battlefield);
+    assert_eq!(outcome.state().objects[&dead].damage_marked, 0);
+    assert_eq!(
+        effect_resolutions(outcome.events(), EffectKind::Fight),
+        1,
+        "the reflexive fight must resolve once with zero targets: {:?}",
+        outcome.events()
+    );
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// Preservation sibling (CR 115.6 + CR 603.12): Diregraf Horde's reflexive
+/// "exile up to two target cards from graveyards" with empty graveyards
+/// declares no slot at all (the generic multi-target arm caps its slot count at
+/// the legal-target count), so it already took the targetless route; it still
+/// resolves exiling nothing, without any target prompt.
+#[test]
+fn diregraf_horde_with_empty_graveyards_resolves_the_reflexive_exile_untargeted() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let horde = scenario
+        .add_creature_to_hand_from_oracle(P0, "Diregraf Horde", 3, 4, DIREGRAF_HORDE_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    grant_priority(&mut runner, P0);
+
+    let commit = runner.cast(horde).commit();
+    let mut events = commit.events().to_vec();
+    drop(commit);
+    for _ in 0..80 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                let result = runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass to resolve the stack");
+                events.extend(result.events);
+            }
+            other => panic!("Diregraf Horde must resolve without any prompt, got {other:?}"),
+        }
+    }
+
+    let state = runner.state();
+    assert!(state.stack.is_empty(), "the stack must resolve");
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(state.objects[&horde].zone, Zone::Battlefield);
+    let zombies = state
+        .objects
+        .values()
+        .filter(|object| {
+            object.is_token
+                && object.name == "Zombie"
+                && object.zone == Zone::Battlefield
+                && object.controller == P0
+        })
+        .count();
+    assert_eq!(zombies, 2, "the enters trigger creates two Zombie tokens");
+    assert_eq!(
+        effect_resolutions(&events, EffectKind::ChangeZone),
+        1,
+        "the reflexive exile resolves once, with nothing to exile: {events:?}"
+    );
+}

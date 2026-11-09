@@ -8221,34 +8221,41 @@ fn rebind_compound_slot_referent_in_quantity(expr: &mut QuantityExpr) {
 
 fn parse_relative_mana_value_suffix(text: &str) -> Option<(FilterProp, &str)> {
     type Vbe<'a> = OracleError<'a>;
-    let (rest, comparator) = nom::sequence::preceded(
+    // Each comparator carries the keyword that introduces its stated comparand
+    // ("lesser mana value than …", "the same mana value as …").
+    let (rest, (comparator, comparand_keyword)) = nom::sequence::preceded(
         tag::<_, _, Vbe>("with "),
         alt((
-            value(Comparator::LT, tag::<_, _, Vbe>("lesser mana value")),
-            value(Comparator::GT, tag("greater mana value")),
-            value(Comparator::LE, tag("equal or lesser mana value")),
-            value(Comparator::EQ, tag("the same mana value")),
-            value(Comparator::EQ, tag("same mana value")),
+            value(
+                (Comparator::LT, "than "),
+                tag::<_, _, Vbe>("lesser mana value"),
+            ),
+            value((Comparator::GT, "than "), tag("greater mana value")),
+            value((Comparator::LE, "than "), tag("equal or lesser mana value")),
+            value((Comparator::EQ, "as "), tag("the same mana value")),
+            value((Comparator::EQ, "as "), tag("same mana value")),
         )),
     )
     .parse(text)
     .ok()?;
 
     let rest = rest.trim_start();
-    let (value, after) = if matches!(comparator, Comparator::EQ) {
-        let (after_as, _) = tag::<_, _, Vbe>("as ").parse(rest).ok()?;
-        parse_mana_value_reference_expr(after_as)?
-    } else if let Ok((after_than, _)) = tag::<_, _, Vbe>("than ").parse(rest) {
-        parse_mana_value_reference_expr(after_than)?
-    } else {
-        (
+    // An explicit comparand whose reference does not parse declines the whole
+    // suffix; only an absent keyword takes the implicit comparand.
+    let (value, after) = match tag::<_, _, Vbe>(comparand_keyword).parse(rest) {
+        Ok((after_keyword, _)) => parse_mana_value_reference_expr(after_keyword)?,
+        // CR 202.3 + CR 608.2k: with no stated comparand ("with lesser mana
+        // value", "with the same mana value"), the mana value compared against
+        // is the object the ability's cost or trigger condition already named —
+        // for Boxing Ring, the entering creature "it".
+        Err(_) => (
             QuantityExpr::Ref {
                 qty: QuantityRef::ObjectManaValue {
                     scope: ObjectScope::CostPaidObject,
                 },
             },
             rest,
-        )
+        ),
     };
 
     Some((FilterProp::Cmc { comparator, value }, after))
@@ -24206,6 +24213,72 @@ mod tests {
         let (prop, consumed) =
             parse_mana_value_suffix(input, &mut ctx).expect("same-mana-value suffix parses");
         assert_eq!(consumed, input.len());
+        assert!(
+            matches!(
+                &prop,
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::Target,
+                        },
+                    },
+                }
+            ),
+            "expected Cmc EQ ObjectManaValue(Target), got {prop:?}"
+        );
+    }
+
+    /// CR 202.3 + CR 608.2k: "with the same mana value" with no stated
+    /// comparand takes the same implicit antecedent the lesser/greater arms
+    /// take — the object the ability's cost or trigger condition already named
+    /// (Boxing Ring: "it fights up to one target creature you don't control
+    /// with the same mana value", where the comparand is the entering creature).
+    #[test]
+    fn same_mana_value_without_comparand_binds_implicit_antecedent() {
+        for input in ["with the same mana value", "with same mana value"] {
+            let mut ctx = ParseContext::default();
+            let (prop, consumed) = parse_mana_value_suffix(input, &mut ctx)
+                .unwrap_or_else(|| panic!("implicit same-mana-value suffix parses: {input:?}"));
+            assert_eq!(consumed, input.len(), "should consume all of {input:?}");
+            assert!(
+                matches!(
+                    &prop,
+                    FilterProp::Cmc {
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectManaValue {
+                                scope: ObjectScope::CostPaidObject,
+                            },
+                        },
+                    }
+                ),
+                "expected Cmc EQ ObjectManaValue(CostPaidObject) for {input:?}, got {prop:?}"
+            );
+        }
+    }
+
+    /// CR 202.3: the implicit comparand applies only when the comparand
+    /// keyword is absent. An explicit "as <reference>" whose reference does
+    /// not parse still declines the whole suffix rather than silently falling
+    /// back to the implicit antecedent.
+    #[test]
+    fn same_mana_value_as_unparseable_reference_still_declines() {
+        assert!(
+            parse_mana_value_reference_expr("a card in your hand").is_none(),
+            "fixture precondition: the reference phrase must be unparseable"
+        );
+        assert!(
+            parse_relative_mana_value_suffix("with the same mana value as a card in your hand")
+                .is_none(),
+            "an explicit but unparseable comparand must decline"
+        );
+        // Paired reach guard: the same explicit keyword with a parseable
+        // reference binds that reference.
+        let (prop, after) =
+            parse_relative_mana_value_suffix("with the same mana value as that creature")
+                .expect("explicit same-mana-value comparand parses");
+        assert!(after.is_empty(), "should consume the whole suffix");
         assert!(
             matches!(
                 &prop,
