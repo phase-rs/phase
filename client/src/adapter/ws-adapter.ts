@@ -1907,6 +1907,8 @@ export class WebSocketAdapter implements EngineAdapter {
   readonly supportsTakeback = true;
   readonly supportsTurnRewind = true;
   private ws: PhaseSocketTransport | null = null;
+  /** Idempotent release of the adopted wrapper, including its decoder lease. */
+  private closeSocket: (() => void) | null = null;
   /**
    * The single cached engine pair, rebuilt (and re-stamped) once per inbound
    * state-bearing message. `getState`/`getLegalActions` both read from THIS
@@ -2385,201 +2387,238 @@ export class WebSocketAdapter implements EngineAdapter {
       this.rejectInitialization(new AdapterError("WS_ERROR", String(err), true));
       return;
     }
-    const superseded = this.isSupersededAttachment(preparation);
-    // The opening latch belongs to the newest attachment.
-    if (!superseded) this.socketOpening = false;
-    // A handshake that settled before `dispose()` resumes here after it.
-    if (this.disposed || superseded) {
+    let closed = false;
+    const closeSocket = () => {
+      if (closed) return;
+      closed = true;
       socket.close();
-      return;
-    }
-
-    if (
-      this.nativeSocketOptions()?.expectedServerVersion !== undefined
-      && socket.serverInfo.version !== this.nativeSocketOptions()!.expectedServerVersion
-    ) {
-      socket.close();
-      const error = new NativeEngineVersionMismatchError(
-        this.nativeSocketOptions()!.expectedServerVersion!,
-        socket.serverInfo.version,
-      );
-      this.rejectInitialization(error);
-      if (this.reconnectInFlight) this.failReconnect();
-      return;
-    }
-
-    this.ws = socket.ws;
-    // Adoption retires the previous binding and its recovery gate.
-    this.stateCodec.adopt(bootstrap, socket.ws);
-    this._serverInfo = socket.serverInfo;
-    this.emit({ type: "serverHello", info: socket.serverInfo, compatible: true });
-    this.startPing();
-
-    socket.ws.onmessage = (event) => {
-      if (this.disposed || this.ws !== socket.ws) return;
-      this.lastInboundAt = Date.now();
-      let message: unknown;
-      try {
-        message = JSON.parse(event.data as string);
-      } catch {
-        this.rejectAuthoritativeStateExport(
-          new AdapterError("WS_ERROR", "Server sent an invalid WebSocket frame.", false),
-        );
-        return;
-      }
-      if (
-        typeof message !== "object"
-        || message === null
-        || !("type" in message)
-        || typeof message.type !== "string"
-      ) {
-        this.rejectAuthoritativeStateExport(
-          new AdapterError("WS_ERROR", "Server sent an invalid WebSocket frame.", false),
-        );
-        return;
-      }
-      return this.handleMessage(message as { type: string; data?: unknown });
     };
-
-    socket.ws.onerror = () => {
-      // A retired socket's late error (e.g. a delayed envelope write) must not fail its replacement.
-      if (this.disposed || this.ws !== socket.ws) return;
-      if (this.sessionIdentityRejected) return;
-      // The initialization is the single failure surface of an initial fallback.
-      if (this.initialFallbackActive()) {
-        this.failInitialFallback(initialFallbackFailure());
-        return;
-      }
-      const err = new AdapterError("WS_ERROR", "WebSocket connection failed", true);
-      if (this.initReject || this.pregameReject || this.gameStartedReject) {
-        this.rejectInitialization(err);
-      } else {
-        this.emit({ type: "error", message: err.message });
-      }
-    };
-
-    socket.ws.onclose = () => {
-      if (this.ws !== socket.ws) return;
-      this.ws = null;
-      // The attachment is gone; a retired transport can never keep gating
-      // submissions or report recovered state for its replacement.
-      this.stateCodec.clearRecovery();
-      if (this.pingInterval) {
-        clearInterval(this.pingInterval);
-        this.pingInterval = null;
-      }
-      // Settled above the identity-rejection guard: a close that arrives
-      // while the latch is set must still settle the caller's promise, or
-      // the submission hangs forever holding the dispatch mutex.
-      const droppedSubmission = this.submission.drop();
-      if (droppedSubmission) {
-        droppedSubmission.reject(
-          new AdapterError("WS_CLOSED", "Connection closed during action", true),
-        );
-        this.emit({ type: "actionPendingChanged", pending: false });
-      }
-      // Deliberately scoped to the submission slot. The seven reject helpers
-      // below still skip on the identity-rejected path; none of them holds the
-      // dispatch mutex, so none can freeze the board the way a parked
-      // submission does. Widening the hoist is a separate judgement.
-      if (this.sessionIdentityRejected) return;
-      // Clear the "host waiting for opponent" latch on socket close —
-      // otherwise a host who received GameCreated, disconnected before
-      // GameStarted, and then reconnected through a different path would
-      // fire `opponentJoined` spuriously on the replayed GameStarted.
-      this.hostWaitingForOpponent = false;
-      this.rejectPendingManaPaymentPreviews(
-        new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
-      );
-      this.rejectAuthoritativeStateExport(
-        new AdapterError("WS_CLOSED", "Connection closed during authoritative-state export", true),
-      );
-      this.rejectPendingInteractionPreviews(
-        new AdapterError("WS_CLOSED", "Connection closed during interaction preview", true),
-      );
-      this.rejectPregameMutation(
-        new AdapterError("WS_CLOSED", "Connection closed during seat mutation", true),
-      );
-      this.rejectAbandon(new AdapterError("WS_CLOSED", "Connection closed while abandoning game", true));
-      // Admission of the initial fallback precedes the generic rejection below,
-      // and a retryable loss inside an active episode retries within the
-      // episode's own deadline: only the episode may settle the initialization.
-      if (this.admitInitialFallback(bootstrap, socket.ws)) {
-        this.attemptReconnect(true);
-        return;
-      }
-      if (this.initialFallbackActive()) {
-        this.attemptReconnect();
-        return;
-      }
-      if (this.initReject) {
-        this.initReject(
-          new AdapterError("WS_CLOSED", "Connection closed before game started", true),
-        );
-        this.initResolve = null;
-        this.initReject = null;
-      } else if (this.pregameReject) {
-        this.pregameReject(
-          new AdapterError("WS_CLOSED", "Connection closed before native seat attachment", true),
-        );
-        this.pregameResolve = null;
-        this.pregameReject = null;
-      } else if (this.gameStartedReject) {
-        this.gameStartedReject(
-          new AdapterError("WS_CLOSED", "Connection closed before game started", true),
-        );
-        this.gameStartedResolve = null;
-        this.gameStartedReject = null;
-      } else if (this.snapshot !== null || this.playerToken !== null) {
-        this.attemptReconnect();
-      }
-    };
-
-    // Continuation fence. Installing the close consumer can synchronously
-    // deliver a retained close (or a listener above can dispose or start a newer
-    // attachment), so the attachment may no longer be the live one. Its setup
-    // frame must not be sent, and its failure is not a setup-send failure: the
-    // close consumer has already settled whatever it owned. A superseded or
-    // disposed attachment's socket is detached (its consumers must neither
-    // settle the pending initialization nor touch the successor) and closed
-    // through the normal path, which releases its codec lease. Only a still
-    // current attachment's failed setup send below is terminal.
-    if (
-      this.disposed
-      || this.ws !== socket.ws
-      || this.stateCodecPreparation !== preparation
-      || preparation.signal.aborted
-    ) {
+    const retireSocket = () => {
       socket.ws.onmessage = null;
       socket.ws.onerror = null;
       socket.ws.onclose = null;
       if (this.ws === socket.ws) {
-        // Still the adapter's socket although a successor is already opening:
-        // the successor has not adopted, so this retired socket is ours to clear.
         this.ws = null;
+        this.closeSocket = null;
         this.stateCodec.clearRecovery();
         if (this.pingInterval) {
           clearInterval(this.pingInterval);
           this.pingInterval = null;
         }
       }
-      socket.close();
-      return;
-    }
+      closeSocket();
+    };
+    // Until setup completes, this continuation owns cleanup even if a public
+    // listener throws, disposes the adapter, or starts another attachment.
+    let retained = false;
+    try {
+      const superseded = this.isSupersededAttachment(preparation);
+      // The opening latch belongs to the newest attachment.
+      if (!superseded) this.socketOpening = false;
+      // A handshake that settled before `dispose()` resumes here after it.
+      if (this.disposed || superseded) return;
 
-    if (!this.send(setupFrame)) {
-      if (this.initialFallbackActive()) {
-        this.failInitialFallback(initialFallbackFailure());
+      if (
+        this.nativeSocketOptions()?.expectedServerVersion !== undefined
+        && socket.serverInfo.version !== this.nativeSocketOptions()!.expectedServerVersion
+      ) {
+        const error = new NativeEngineVersionMismatchError(
+          this.nativeSocketOptions()!.expectedServerVersion!,
+          socket.serverInfo.version,
+        );
+        this.rejectInitialization(error);
+        if (this.reconnectInFlight) this.failReconnect();
         return;
       }
-      socket.close();
-      if (this.initReject) {
-        this.initReject(
-          new AdapterError("WS_CLOSED", "Failed to send setup frame", true),
-        );
-        this.initResolve = null;
-        this.initReject = null;
+
+      const previous = this.ws;
+      const closePrevious = this.closeSocket;
+      this.ws = socket.ws;
+      this.closeSocket = closeSocket;
+      // Publish B before closing A: a synchronous predecessor close must not
+      // settle B's work or schedule another reconnect. The server's seat swap
+      // does not close A, so adoption must release its wrapper and baseline.
+      this.stateCodec.adopt(bootstrap, socket.ws);
+      if (previous) {
+        previous.onmessage = null;
+        previous.onerror = null;
+        previous.onclose = null;
+        closePrevious?.();
       }
+      if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
+      this._serverInfo = socket.serverInfo;
+      this.emit({ type: "serverHello", info: socket.serverInfo, compatible: true });
+      if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
+      this.startPing();
+
+      socket.ws.onmessage = (event) => {
+        if (this.disposed || this.ws !== socket.ws) return;
+        this.lastInboundAt = Date.now();
+        let message: unknown;
+        try {
+          message = JSON.parse(event.data as string);
+        } catch {
+          this.rejectAuthoritativeStateExport(
+            new AdapterError("WS_ERROR", "Server sent an invalid WebSocket frame.", false),
+          );
+          return;
+        }
+        if (
+          typeof message !== "object"
+          || message === null
+          || !("type" in message)
+          || typeof message.type !== "string"
+        ) {
+          this.rejectAuthoritativeStateExport(
+            new AdapterError("WS_ERROR", "Server sent an invalid WebSocket frame.", false),
+          );
+          return;
+        }
+        return this.handleMessage(message as { type: string; data?: unknown });
+      };
+
+      socket.ws.onerror = () => {
+        // A retired socket's late error (e.g. a delayed envelope write) must not fail its replacement.
+        if (this.disposed || this.ws !== socket.ws) return;
+        if (this.sessionIdentityRejected) return;
+        // The initialization is the single failure surface of an initial fallback.
+        if (this.initialFallbackActive()) {
+          this.failInitialFallback(initialFallbackFailure());
+          return;
+        }
+        const err = new AdapterError("WS_ERROR", "WebSocket connection failed", true);
+        if (this.initReject || this.pregameReject || this.gameStartedReject) {
+          this.rejectInitialization(err);
+        } else {
+          this.emit({ type: "error", message: err.message });
+        }
+      };
+
+      socket.ws.onclose = () => {
+        // A natural close already released the wrapper's resources; later
+        // disposal must not request another physical close.
+        closed = true;
+        if (this.ws !== socket.ws) return;
+        this.ws = null;
+        this.closeSocket = null;
+        // The attachment is gone; a retired transport can never keep gating
+        // submissions or report recovered state for its replacement.
+        this.stateCodec.clearRecovery();
+        if (this.pingInterval) {
+          clearInterval(this.pingInterval);
+          this.pingInterval = null;
+        }
+        // Settled above the identity-rejection guard: a close that arrives
+        // while the latch is set must still settle the caller's promise, or
+        // the submission hangs forever holding the dispatch mutex.
+        const droppedSubmission = this.submission.drop();
+        if (droppedSubmission) {
+          droppedSubmission.reject(
+            new AdapterError("WS_CLOSED", "Connection closed during action", true),
+          );
+          this.emit({ type: "actionPendingChanged", pending: false });
+        }
+        // Deliberately scoped to the submission slot. The seven reject helpers
+        // below still skip on the identity-rejected path; none of them holds the
+        // dispatch mutex, so none can freeze the board the way a parked
+        // submission does. Widening the hoist is a separate judgement.
+        if (this.sessionIdentityRejected) return;
+        // Clear the "host waiting for opponent" latch on socket close —
+        // otherwise a host who received GameCreated, disconnected before
+        // GameStarted, and then reconnected through a different path would
+        // fire `opponentJoined` spuriously on the replayed GameStarted.
+        this.hostWaitingForOpponent = false;
+        this.rejectPendingManaPaymentPreviews(
+          new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
+        );
+        this.rejectAuthoritativeStateExport(
+          new AdapterError("WS_CLOSED", "Connection closed during authoritative-state export", true),
+        );
+        this.rejectPendingInteractionPreviews(
+          new AdapterError("WS_CLOSED", "Connection closed during interaction preview", true),
+        );
+        this.rejectPregameMutation(
+          new AdapterError("WS_CLOSED", "Connection closed during seat mutation", true),
+        );
+        this.rejectAbandon(new AdapterError("WS_CLOSED", "Connection closed while abandoning game", true));
+        // Admission of the initial fallback precedes the generic rejection below,
+        // and a retryable loss inside an active episode retries within the
+        // episode's own deadline: only the episode may settle the initialization.
+        if (this.admitInitialFallback(bootstrap, socket.ws)) {
+          this.attemptReconnect(true);
+          return;
+        }
+        if (this.initialFallbackActive()) {
+          this.attemptReconnect();
+          return;
+        }
+        if (this.initReject) {
+          this.initReject(
+            new AdapterError("WS_CLOSED", "Connection closed before game started", true),
+          );
+          this.initResolve = null;
+          this.initReject = null;
+        } else if (this.pregameReject) {
+          this.pregameReject(
+            new AdapterError("WS_CLOSED", "Connection closed before native seat attachment", true),
+          );
+          this.pregameResolve = null;
+          this.pregameReject = null;
+        } else if (this.gameStartedReject) {
+          this.gameStartedReject(
+            new AdapterError("WS_CLOSED", "Connection closed before game started", true),
+          );
+          this.gameStartedResolve = null;
+          this.gameStartedReject = null;
+        } else if (this.snapshot !== null || this.playerToken !== null) {
+          this.attemptReconnect();
+        }
+      };
+
+      // Installing a close consumer can deliver a retained close; public
+      // callbacks can dispose or supersede this attachment too. Its cleanup is
+      // source-scoped and must neither settle nor close the successor.
+      if (
+        this.disposed
+        || this.ws !== socket.ws
+        || this.stateCodecPreparation !== preparation
+        || preparation.signal.aborted
+      ) return;
+
+      if (!this.send(setupFrame)) {
+        if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
+        if (this.initialFallbackActive()) {
+          this.failInitialFallback(initialFallbackFailure());
+          return;
+        }
+        closeSocket();
+        // Keep the close consumer: its deferred notification owns reconnect
+        // scheduling and the normal pending-request settlement.
+        retained = true;
+        if (this.initReject) {
+          this.initReject(
+            new AdapterError("WS_CLOSED", "Failed to send setup frame", true),
+          );
+          this.initResolve = null;
+          this.initReject = null;
+        }
+        return;
+      }
+      retained = !this.disposed && this.ws === socket.ws
+        && this.stateCodecPreparation === preparation;
+    } catch (error) {
+      // A throwing listener only fails the attachment it interrupted. Reentry
+      // may already have transferred the pending join to a newer attachment.
+      try {
+        retireSocket();
+      } finally {
+        if (!this.disposed && !this.isSupersededAttachment(preparation)) {
+          this.rejectInitialization(error instanceof Error ? error : new Error(String(error)));
+          if (this.reconnectInFlight) this.failReconnect("failed");
+        }
+      }
+    } finally {
+      if (!retained) retireSocket();
     }
   }
 
@@ -2864,10 +2903,10 @@ export class WebSocketAdapter implements EngineAdapter {
     this.rejectInitialization(
       new AdapterError("WS_CLOSED", "Adapter disposed before initialization completed", true),
     );
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
-    }
+    const closeSocket = this.closeSocket;
+    this.closeSocket = null;
+    closeSocket?.();
+    this.ws = null;
     this.snapshot = null;
     this.withheldState = null;
     this.withheldBootstrapFailed = false;
@@ -3170,7 +3209,9 @@ export class WebSocketAdapter implements EngineAdapter {
       ws.onerror = null;
       ws.onclose = null;
       this.ws = null;
-      ws.close();
+      const closeSocket = this.closeSocket;
+      this.closeSocket = null;
+      closeSocket?.();
     }
     this.stateCodec.clearRecovery();
     switch (episode.source) {
@@ -4417,7 +4458,7 @@ export class WebSocketAdapter implements EngineAdapter {
     this.rejectAuthoritativeStateExport(error);
     this.rejectPregameMutation(error);
     if (!fallback) this.emit({ type: "error", message: error.message });
-    this.ws?.close();
+    this.closeSocket?.();
     return false;
   }
 }

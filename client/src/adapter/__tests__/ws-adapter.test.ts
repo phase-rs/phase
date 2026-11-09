@@ -5373,9 +5373,11 @@ function realRuntimeCodec() {
   const script = { trapNext: false };
   const handle = (json: string): FakeHandle => ({
     json: () => json,
-    free: () => undefined,
+    free: vi.fn(),
     clone_handle: () => handle(json),
   });
+  const decodedHandles: FakeHandle[] = [];
+  const leases: StateCodecSession[] = [];
   const engine = {
     state_codec_decode: vi.fn((frame: Uint8Array) => {
       if (script.trapNext) {
@@ -5383,19 +5385,173 @@ function realRuntimeCodec() {
         throw new WebAssembly.RuntimeError("unreachable");
       }
       const parsed = JSON.parse(new TextDecoder().decode(frame)) as { data: { state: unknown } };
-      return handle(JSON.stringify(parsed.data.state));
+      const decoded = handle(JSON.stringify(parsed.data.state));
+      decodedHandles.push(decoded);
+      return decoded;
     }),
   };
   const runtime = new StateCodecRuntime(engine as unknown as EngineModule);
   const provider = vi.fn(async (): Promise<StateCodecSession | null> => {
     const sessionId = runtime.open();
-    return {
+    const session: StateCodecSession = {
       decode: async (frame) => runtime.decode(sessionId, frame),
-      close: () => runtime.close(sessionId),
+      close: vi.fn(() => runtime.close(sessionId)),
     };
+    leases.push(session);
+    return session;
   });
-  return { engine, runtime, script, provider };
+  const latestBaseline = () => {
+    const baseline = decodedHandles[decodedHandles.length - 1];
+    if (!baseline) throw new Error("No codec baseline was decoded");
+    return baseline;
+  };
+  return { engine, runtime, script, provider, leases, latestBaseline };
 }
+
+describe("WebSocketAdapter — acquired socket ownership", () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+  const session = () => ({
+    gameCode: "GAME01", playerToken: "codec-token", fullKey: REPLY_OWNERSHIP_FULL_KEY,
+    serverUrl: "wss://localhost:9374/ws", timestamp: Date.now(),
+  });
+
+  it("retires a healthy predecessor and its live baseline while the successor still completes commands", async () => {
+    const codec = realRuntimeCodec();
+    const { adapter, raw, events } = await establishCodecAdapter(codec.provider);
+    const baseline = codec.latestBaseline();
+    try {
+      expect(raw.readyState).toBe(MockWebSocket.OPEN);
+      expect(codec.leases[0].close).not.toHaveBeenCalled();
+      expect(baseline.free).not.toHaveBeenCalled();
+      // The server never closes A. Its local close can synchronously reenter
+      // the consumers, which must already have lost authority over B.
+      raw.close.mockImplementation(() => {
+        raw.dispatchSynthetic("close");
+        raw.onerror?.();
+      });
+      expect(adapter.tryReconnect(session())).toBe(true);
+      const successor = await codecHandshake("Reconnect", raw);
+      expect.soft(raw.close).toHaveBeenCalledOnce();
+      expect.soft(codec.leases[0].close).toHaveBeenCalledOnce();
+      expect.soft(baseline.free).toHaveBeenCalledOnce();
+      expect(successor.close).not.toHaveBeenCalled();
+      expect(codec.leases[1].close).not.toHaveBeenCalled();
+
+      deliverCodec(successor, "Full", codecGameStarted(5, 5));
+      await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
+      const command = adapter.submitAction({ type: "PassPriority" }, 0);
+      deliverCodec(successor, "Delta", codecStateUpdate(6, 6, {
+        command_id: lastSubmissionCommandId(successor),
+      }));
+      await expect(command).resolves.toMatchObject({ events: [] });
+      expect((await adapter.getSnapshot()).state.turn_number).toBe(6);
+      expect(events).not.toContainEqual({ type: "reconnectFailed" });
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "error" }));
+
+      const currentBaseline = codec.latestBaseline();
+      adapter.dispose();
+      adapter.dispose();
+      expect(raw.close).toHaveBeenCalledOnce();
+      expect(codec.leases[0].close).toHaveBeenCalledOnce();
+      expect(baseline.free).toHaveBeenCalledOnce();
+      expect(successor.close).toHaveBeenCalledOnce();
+      expect(codec.leases[1].close).toHaveBeenCalledOnce();
+      expect(currentBaseline.free).toHaveBeenCalledOnce();
+    } finally {
+      adapter.dispose();
+      codec.runtime.dispose();
+    }
+  });
+
+  it.each(["throw", "dispose then throw", "supersede then throw"] as const)(
+    "releases a live acquired decoder when serverHello listeners %s without failing a newer attachment",
+    async (ending) => {
+      const codec = realRuntimeCodec();
+      const prepared = await codec.provider();
+      if (!prepared) throw new Error("The runtime did not open a codec lease");
+      // The public decoder lease already retains an actual runtime baseline
+      // when handed to the socket; a close-only mock cannot prove its release.
+      await prepared.decode(new TextEncoder().encode(fullFrame(JSON.stringify(codecGameStarted(1, 1)))));
+      const baseline = codec.latestBaseline();
+      let first = true;
+      MockWebSocket.last = null;
+      const adapter = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+        undefined, undefined, undefined,
+        { stateCodecSessionProvider: () => {
+          if (!first) return codec.provider();
+          first = false;
+          return Promise.resolve(prepared);
+        } },
+      );
+      const failure = new Error("serverHello listener failed");
+      const events: unknown[] = [];
+      let armed = true;
+      adapter.onEvent((event) => {
+        events.push(event);
+        if (event.type !== "serverHello" || !armed) return;
+        armed = false;
+        expect(baseline.free).not.toHaveBeenCalled();
+        if (ending === "dispose then throw") adapter.dispose();
+        if (ending === "supersede then throw") expect(adapter.tryReconnect(session())).toBe(true);
+        throw failure;
+      });
+      let initialization: unknown = "never settled";
+      void adapter.initialize().then(
+        (value) => { initialization = { resolvedWith: value }; },
+        (error: unknown) => { initialization = error; },
+      );
+      const initialized = async () => {
+        await vi.advanceTimersByTimeAsync(0);
+        return initialization;
+      };
+      try {
+        await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+        const abandoned = latestSocket();
+        abandoned.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+        await vi.advanceTimersByTimeAsync(0);
+        expect.soft(abandoned.close).toHaveBeenCalledOnce();
+        expect.soft(prepared.close).toHaveBeenCalledOnce();
+        expect.soft(baseline.free).toHaveBeenCalledOnce();
+        expect(abandoned.send).not.toHaveBeenCalledWith(expect.stringContaining('"type":"JoinGameWithPassword"'));
+        abandoned.dispatchSynthetic("message", CODEC_CONFIRMATION);
+        deliverCodec(abandoned, "Full", codecGameStarted(99, 99));
+        expect(codec.engine.state_codec_decode).toHaveBeenCalledOnce();
+
+        if (ending === "supersede then throw") {
+          expect(await initialized()).toBe("never settled");
+          const successor = await codecHandshake("Reconnect", abandoned);
+          deliverCodec(successor, "Full", codecGameStarted(5, 5));
+          await expect(initialized()).resolves.toEqual({ resolvedWith: undefined });
+          expect((await adapter.getSnapshot()).state.turn_number).toBe(5);
+          expect(successor.close).not.toHaveBeenCalled();
+          expect(codec.leases[1].close).not.toHaveBeenCalled();
+          expect(events).not.toContainEqual({ type: "reconnectFailed" });
+          expect(events).not.toContainEqual(expect.objectContaining({ type: "error" }));
+          const command = adapter.submitAction({ type: "PassPriority" }, 0);
+          deliverCodec(successor, "Delta", codecStateUpdate(6, 6, {
+            command_id: lastSubmissionCommandId(successor),
+          }));
+          await expect(command).resolves.toMatchObject({ events: [] });
+        } else if (ending === "dispose then throw") {
+          await expect(initialized()).resolves.toMatchObject({
+            code: "WS_CLOSED", message: "Adapter disposed before initialization completed",
+          });
+        } else {
+          expect(await initialized()).toBe(failure);
+        }
+        adapter.dispose();
+        expect(abandoned.close).toHaveBeenCalledOnce();
+        expect(prepared.close).toHaveBeenCalledOnce();
+        expect(baseline.free).toHaveBeenCalledOnce();
+      } finally {
+        adapter.dispose();
+        codec.runtime.dispose();
+      }
+    },
+  );
+});
 
 describe("WebSocketAdapter — codec degradation policy", () => {
   const action = { type: "PassPriority" } as GameAction;

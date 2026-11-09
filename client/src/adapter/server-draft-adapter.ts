@@ -133,11 +133,13 @@ interface StateBearingPayload {
   derived?: GameState["derived"];
 }
 
-interface DraftInit {
-  kind: "create" | "reconnect";
+type DraftInit = {
   resolve: () => void;
   reject: (error: Error) => void;
-}
+} & (
+  | { kind: "create" }
+  | { kind: "reconnect"; draftCode: string; playerToken: string }
+);
 
 type AttachmentOwner =
   | { type: "init"; init: DraftInit }
@@ -255,6 +257,12 @@ export class ServerDraftAdapter implements EngineAdapter {
   // Meaningful only while the callback pair owns an action.
   private draftActionStage: "PreparingDeck" | "AwaitingReply" = "AwaitingReply";
   private draftActionSocket: PhaseSocketTransport | null = null;
+  private draftPick: {
+    draftCode: string;
+    playerToken: string | null;
+    instanceId: string;
+    transferable: boolean;
+  } | null = null;
   private pendingInit: DraftInit | null = null;
   private unfinishedAttachment: DraftAttachment | null = null;
   private listeners: ServerDraftAdapterEventListener[] = [];
@@ -617,8 +625,19 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (this.seatIndex === null || this.draftCode === null) {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
+    const draftCode = this.draftCode;
+    const playerToken = this.draftToken;
     return new Promise<DraftPlayerView>((resolve, reject) => {
       if (!this.claimDraftAction("Pick", resolve, reject)) return;
+      const view = this.draftView;
+      this.draftPick = {
+        draftCode,
+        playerToken,
+        instanceId: cardInstanceId,
+        transferable: view?.required_pick_count === 1
+          && view.current_pack?.some((card) => card.instance_id === cardInstanceId) === true
+          && !view.pool.some((card) => card.instance_id === cardInstanceId),
+      };
       const sent = this.send({
         type: "DraftAction",
         data: {
@@ -760,6 +779,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     this.draftResolve = null;
     this.draftReject = null;
     this.draftActionSocket = null;
+    this.draftPick = null;
     if (result instanceof Error) reject(result);
     else resolve(result);
     this.retireIdleSockets();
@@ -1144,7 +1164,9 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.seatIndex = data.seat_index;
         this.draftView = data.view;
         this.updatePhaseFromView(data.view);
-        if (this.draftActionStage === "AwaitingReply") this.settleDraftAction(data.view);
+        if (this.draftActionStage === "AwaitingReply") {
+          this.settleDraftAction(data.view, this.draftPick ? sourceSocket : undefined);
+        }
         break;
       }
 
@@ -1153,7 +1175,24 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.draftView = data.view;
         this.updatePhaseFromView(data.view);
         if (initOwner?.kind === "reconnect" && this.ws === sourceSocket) this.settleInit(initOwner);
-        if (this.draftActionStage === "AwaitingReply") this.settleDraftAction(data.view);
+        // Reconnect installs B's sender before it captures the bootstrap. An A
+        // pick handled afterward is rejected on A; an A pick handled beforehand
+        // is already in B's pool, even if its broadcast is delayed until after
+        // replacement. Only a complete selection from A's authoritative view
+        // newly appearing in B's pool can complete a transferred pick, never an
+        // unchanged snapshot or a pick/phase/count change. Missing source
+        // authority leaves the reply owned by A.
+        // The wire exposes inventory outcomes, not request acknowledgements:
+        // a timer choosing the same instance is indistinguishable from A's pick.
+        const pick = this.draftPick;
+        const ownsAction = this.draftActionSocket === sourceSocket;
+        if (this.draftActionStage === "AwaitingReply"
+          && (!pick || ownsAction
+            || (initOwner?.kind === "reconnect" && pick.transferable
+              && initOwner.draftCode === pick.draftCode && initOwner.playerToken === pick.playerToken
+              && data.view.pool.some((card) => card.instance_id === pick.instanceId)))) {
+          this.settleDraftAction(data.view);
+        }
         this.emit({ type: "draftViewUpdated", view: data.view });
         break;
       }
@@ -1239,7 +1278,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         // only answer an EARLIER action, so it must not abort this submission
         // with another action's reason.
         if (this.draftActionStage === "AwaitingReply") {
-          this.settleDraftAction(new AdapterError("ACTION_REJECTED", data.reason, true));
+          this.settleDraftAction(new AdapterError("ACTION_REJECTED", data.reason, true), sourceSocket);
         }
         this.emit({ type: "draftActionRejected", reason: data.reason });
         break;
@@ -1556,16 +1595,18 @@ export class ServerDraftAdapter implements EngineAdapter {
   // ── Reconnect ──────────────────────────────────────────────────────
 
   async reconnectDraft(): Promise<void> {
-    if (!this.draftCode || !this.draftToken) {
+    const draftCode = this.draftCode;
+    const playerToken = this.draftToken;
+    if (!draftCode || !playerToken) {
       throw new AdapterError("WS_ERROR", "No draft session to reconnect to", false);
     }
 
     return new Promise<void>((resolve, reject) => {
-      this.beginAttachment({ type: "init", init: { kind: "reconnect", resolve, reject } }, {
+      this.beginAttachment({ type: "init", init: { kind: "reconnect", draftCode, playerToken, resolve, reject } }, {
         type: "ReconnectDraft",
         data: {
-          draft_code: this.draftCode,
-          player_token: this.draftToken,
+          draft_code: draftCode,
+          player_token: playerToken,
         },
       });
     });

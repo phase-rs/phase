@@ -139,6 +139,13 @@ export class GzipEnvelopeSocket implements PhaseSocketTransport {
         const data = this.pendingReceives[this.nextReceive];
         this.pendingReceives[this.nextReceive++] = undefined;
         if (this.nextReceive === this.pendingReceives.length) this.clearPendingReceives();
+        else if (this.nextReceive * 2 >= this.pendingReceives.length) {
+          // Keep storage proportional to the live tail, not cumulative traffic.
+          // Moving only after half is consumed makes the total copying linear.
+          this.pendingReceives.copyWithin(0, this.nextReceive);
+          this.pendingReceives.length -= this.nextReceive;
+          this.nextReceive = 0;
+        }
         let json: string;
         try {
           json = await this.decodeIncoming(data);

@@ -4372,6 +4372,288 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
     }
   });
 
+  function cutoverCard(instanceId: string): DraftPlayerView["pool"][number] {
+    return {
+      instance_id: instanceId, name: "Cutover fixture", set_code: "TST",
+      collector_number: "1", rarity: "common", colors: [], cmc: 0, type_line: "Artifact",
+    };
+  }
+
+  it.each(["replacement snapshot first", "old rejection first"] as const)(
+    "does not acknowledge a rejected old pick across cutover: %s",
+    async (order) => {
+      const { adapter, ws, provider, codec, leaseClose } = await startRuntimeDraft();
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      try {
+        await enterCodecMatch(ws, events);
+        const baseline = codec.latestBaseline();
+        const card = cutoverCard("cutover-rejected");
+        const unchanged = createMockDraftView({ current_pack: [card], required_pick_count: 1 });
+        receive(ws, "DraftStateUpdate", { view: unchanged });
+        const pick = adapter.submitPick(card.instance_id);
+        const observed = trackRejection(pick);
+        const resolved = vi.fn();
+        const rejected = vi.fn();
+        void pick.then(resolved, rejected);
+        const replacement = await replaceRuntimeSocket(adapter, provider, codec.provider, ws, false);
+        const reason = "This socket's draft session identity is no longer current";
+        if (order === "replacement snapshot first") {
+          receive(replacement.ws, "DraftStateUpdate", { view: unchanged });
+          await replacement.reconnected;
+          expect(await observed()).toBe("never settled");
+          expect(ws.close).not.toHaveBeenCalled();
+          expect(leaseClose).not.toHaveBeenCalled();
+          expect(baseline.free).not.toHaveBeenCalled();
+        }
+        receive(ws, "DraftActionRejected", { reason });
+        await expect(pick).rejects.toMatchObject({ code: "ACTION_REJECTED", message: reason });
+        if (order === "old rejection first") {
+          receive(replacement.ws, "DraftStateUpdate", { view: unchanged });
+          await replacement.reconnected;
+        }
+        expect(resolved).not.toHaveBeenCalled();
+        expect(rejected).toHaveBeenCalledOnce();
+        expect(ws.close).toHaveBeenCalledOnce();
+        expect(leaseClose).toHaveBeenCalledOnce();
+        expect(baseline.free).toHaveBeenCalledOnce();
+        expect(adapter.currentDraftView).toEqual(unchanged);
+
+        const successor = adapter.submitPick(card.instance_id);
+        const selected = createMockDraftView({ pool: [card] });
+        receive(replacement.ws, "DraftStateUpdate", { view: selected });
+        await expect(successor).resolves.toEqual(selected);
+        adapter.dispose();
+        expect(rejected).toHaveBeenCalledOnce();
+        expect(ws.close).toHaveBeenCalledOnce();
+        expect(leaseClose).toHaveBeenCalledOnce();
+        expect(replacement.leaseClose).toHaveBeenCalledOnce();
+      } finally {
+        adapter.dispose();
+        codec.runtime.dispose();
+      }
+    },
+  );
+
+  it("acknowledges an accepted old pick from the replacement bootstrap before its delayed broadcast", async () => {
+    const { adapter, ws, provider, codec, leaseClose } = await startRuntimeDraft();
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    try {
+      await enterCodecMatch(ws, events);
+      const baseline = codec.latestBaseline();
+      const card = cutoverCard("cutover-accepted");
+      receive(ws, "DraftStateUpdate", {
+        view: createMockDraftView({ current_pack: [card], required_pick_count: 1 }),
+      });
+      const pick = adapter.submitPick(card.instance_id);
+      const settled = vi.fn();
+      void pick.then(settled, settled);
+      const replacement = await replaceRuntimeSocket(adapter, provider, codec.provider, ws, false);
+      expect(ws.close).not.toHaveBeenCalled();
+      // A mutates before B replaces its sender. B's bootstrap therefore already
+      // contains the selection, even if A's success fan-out is still awaiting
+      // the draft-state lock. The pick counter need not advance for this seat.
+      const selected = createMockDraftView({ pool: [card] });
+      receive(replacement.ws, "DraftStateUpdate", { view: selected });
+      await replacement.reconnected;
+      await expect(pick).resolves.toEqual(selected);
+      expect(settled).toHaveBeenCalledOnce();
+      expect(ws.close).toHaveBeenCalledOnce();
+      expect(leaseClose).toHaveBeenCalledOnce();
+      expect(baseline.free).toHaveBeenCalledOnce();
+      receive(replacement.ws, "DraftStateUpdate", { view: selected });
+      await drainArt();
+      expect(settled).toHaveBeenCalledOnce();
+      expect(adapter.currentDraftView).toEqual(selected);
+      const successor = adapter.submitPick("cutover-next");
+      const next = createMockDraftView({ pool: [card, cutoverCard("cutover-next")] });
+      receive(replacement.ws, "DraftStateUpdate", { view: next });
+      await expect(successor).resolves.toEqual(next);
+      adapter.dispose();
+      expect(leaseClose).toHaveBeenCalledOnce();
+      expect(replacement.leaseClose).toHaveBeenCalledOnce();
+    } finally {
+      adapter.dispose();
+      codec.runtime.dispose();
+    }
+  });
+
+  it.each(["already owned", "incomplete commander step", "different selected instance"] as const)(
+    "does not infer cutover pick success from a later pool update: %s",
+    async (request) => {
+      const { adapter, ws, provider, codec } = await startRuntimeDraft();
+      try {
+        const card = cutoverCard("not-a-new-selection");
+        const other = cutoverCard("different-instance-same-name");
+        const before = createMockDraftView({
+          required_pick_count: 1,
+          ...(request === "incomplete commander step" ? { kind: "CommanderDraft", required_pick_count: 2 } : {}),
+          current_pack: request === "already owned" ? [other] : [card, other],
+          pool: request === "already owned" ? [card] : [],
+        });
+        receive(ws, "DraftStateUpdate", { view: before });
+        const pick = adapter.submitPick(card.instance_id);
+        const observed = trackRejection(pick);
+        const replacement = await replaceRuntimeSocket(adapter, provider, codec.provider, ws, false);
+        const updated = createMockDraftView({
+          ...before, pick_number: 10, current_pack: null, required_pick_count: 0,
+          // A timer can select the requested identity without accepting an
+          // incomplete request; a different instance may even have the same name.
+          pool: request === "different selected instance" ? [other] : [card, other],
+        });
+        receive(replacement.ws, "DraftStateUpdate", { view: updated });
+        await replacement.reconnected;
+        expect(await observed()).toBe("never settled");
+        receive(ws, "DraftActionRejected", {
+          reason: request === "incomplete commander step"
+            ? "seat 0 must pick 2 card(s) from the current pack, got 1"
+            : "This socket's draft session identity is no longer current",
+        });
+        await expect(pick).rejects.toMatchObject({ code: "ACTION_REJECTED" });
+      } finally {
+        adapter.dispose();
+        codec.runtime.dispose();
+      }
+    },
+  );
+
+  it.each(["missing source view", "missing source card"] as const)(
+    "keeps original-source reply ownership when replacement inventory lacks complete selection authority: %s",
+    async (authority) => {
+      const { adapter, ws, provider, codec, leaseClose } = await startRuntimeDraft();
+      try {
+        const card = cutoverCard("unproven-source-selection");
+        if (authority === "missing source card") {
+          receive(ws, "DraftStateUpdate", {
+            view: createMockDraftView({
+              current_pack: [cutoverCard("other-source-card")], required_pick_count: 1,
+            }),
+          });
+        }
+        const pick = adapter.submitPick(card.instance_id);
+        const observed = trackRejection(pick);
+        const replacement = await replaceRuntimeSocket(adapter, provider, codec.provider, ws, false);
+        const selected = createMockDraftView({ pool: [card] });
+        receive(replacement.ws, "DraftStateUpdate", { view: selected });
+        await replacement.reconnected;
+        expect(await observed()).toBe("never settled");
+        expect(ws.close).not.toHaveBeenCalled();
+        expect(leaseClose).not.toHaveBeenCalled();
+        // Existing permitted replies on A still settle, even when no original
+        // view could establish that B's inventory was this request's outcome.
+        receive(ws, "DraftStateUpdate", { view: selected });
+        await expect(pick).resolves.toEqual(selected);
+        expect(ws.close).toHaveBeenCalledOnce();
+        expect(leaseClose).toHaveBeenCalledOnce();
+      } finally {
+        adapter.dispose();
+        codec.runtime.dispose();
+      }
+    },
+  );
+
+  it("does not complete an old pick from matching inventory after creating and reconnecting a different draft", async () => {
+    const { adapter, ws, provider, codec, leaseClose } = await startRuntimeDraft();
+    try {
+      const card = cutoverCard("same-instance-id-in-another-draft");
+      receive(ws, "DraftStateUpdate", {
+        view: createMockDraftView({ current_pack: [card], required_pick_count: 1 }),
+      });
+      const pick = adapter.submitPick(card.instance_id);
+      const observed = trackRejection(pick);
+      const newSession = await codec.provider();
+      if (!newSession) throw new Error("The runtime did not open the new draft's codec lease");
+      provider.mockResolvedValueOnce(newSession);
+      const creating = adapter.createDraft({
+        displayName: "Alice", setCodes: ["MKM"], kind: "Premier", public: true,
+        tournamentFormat: "Swiss", podPolicy: "Competitive", podSize: 8,
+      });
+      void creating.catch(() => undefined);
+      await drainArt();
+      const newDraft = MockWebSocket.last!;
+      expect(newDraft).not.toBe(ws);
+      newDraft.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+      await drainArt();
+      expect(newDraft.send).toHaveBeenCalledWith(expect.stringContaining('"type":"CreateDraftWithSettings"'));
+      newDraft.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+      receive(newDraft, "DraftCreated", {
+        draft_code: "NEXT12", player_token: "new-draft-token", seat_index: 0,
+      });
+      await creating;
+      const replacement = await replaceRuntimeSocket(adapter, provider, codec.provider, newDraft, false);
+      receive(replacement.ws, "DraftStateUpdate", { view: createMockDraftView({ pool: [card] }) });
+      await replacement.reconnected;
+      expect(await observed()).toBe("never settled");
+      expect(ws.close).not.toHaveBeenCalled();
+      expect(leaseClose).not.toHaveBeenCalled();
+      receive(ws, "DraftActionRejected", { reason: "original draft pick rejected" });
+      await expect(pick).rejects.toMatchObject({ message: "original draft pick rejected" });
+      expect(ws.close).toHaveBeenCalledOnce();
+      expect(leaseClose).toHaveBeenCalledOnce();
+    } finally {
+      adapter.dispose();
+      codec.runtime.dispose();
+    }
+  });
+
+  it("isolates replacement rejection from the old pick and late old rejection from its successor until the final preview releases A", async () => {
+    const { adapter, ws, provider, codec, leaseClose } = await startRuntimeDraft();
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    try {
+      await enterCodecMatch(ws, events);
+      const baseline = codec.latestBaseline();
+      const preview = adapter.previewManaPayment({ type: "PassPriority" }, 0);
+      const previewObserved = trackRejection(preview);
+      const previewFrame = ws.send.mock.calls
+        .map(([raw]) => JSON.parse(raw as string) as { type: string; data: { request_id: number } })
+        .find((frame) => frame.type === "PreviewManaPayment")!;
+      const card = cutoverCard("source-scoped-pick");
+      const before = createMockDraftView({ current_pack: [card], required_pick_count: 1 });
+      receive(ws, "DraftStateUpdate", { view: before });
+      const pick = adapter.submitPick(card.instance_id);
+      const observed = trackRejection(pick);
+      const settled = vi.fn();
+      void pick.then(settled, settled);
+      const replacement = await replaceRuntimeSocket(adapter, provider, codec.provider, ws, false);
+      receive(replacement.ws, "DraftActionRejected", { reason: "replacement reconnect rejected" });
+      await expect(replacement.reconnected).rejects.toMatchObject({ message: "replacement reconnect rejected" });
+      expect(await observed()).toBe("never settled");
+      receive(replacement.ws, "DraftStateUpdate", { view: before });
+      expect(await observed()).toBe("never settled");
+      receive(ws, "DraftActionRejected", { reason: "old pick rejected" });
+      await expect(pick).rejects.toMatchObject({ message: "old pick rejected" });
+      expect(settled).toHaveBeenCalledOnce();
+      expect(ws.close).not.toHaveBeenCalled();
+      expect(leaseClose).not.toHaveBeenCalled();
+      expect(baseline.free).not.toHaveBeenCalled();
+
+      const successor = adapter.submitPick(card.instance_id);
+      const successorObserved = trackRejection(successor);
+      receive(ws, "DraftActionRejected", { reason: "late old rejection" });
+      expect(await successorObserved()).toBe("never settled");
+      const selected = createMockDraftView({ pool: [card] });
+      receive(replacement.ws, "DraftStateUpdate", { view: selected });
+      await expect(successor).resolves.toEqual(selected);
+      receive(ws, "ManaPaymentPreview", {
+        request_id: previewFrame.data.request_id, source_ids: [7],
+      });
+      await expect(preview).resolves.toEqual([7]);
+      expect(await previewObserved()).toEqual({ resolvedWith: [7] });
+      expect(settled).toHaveBeenCalledOnce();
+      expect(ws.close).toHaveBeenCalledOnce();
+      expect(leaseClose).toHaveBeenCalledOnce();
+      expect(baseline.free).toHaveBeenCalledOnce();
+      adapter.dispose();
+      expect(leaseClose).toHaveBeenCalledOnce();
+      expect(replacement.leaseClose).toHaveBeenCalledOnce();
+    } finally {
+      adapter.dispose();
+      codec.runtime.dispose();
+    }
+  });
+
   it.each(["is answered", "is closed"] as const)(
     "settles a command claimed before reconnectDraft replaced the socket when the retired socket %s",
     async (how) => {

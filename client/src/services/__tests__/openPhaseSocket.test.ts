@@ -157,6 +157,38 @@ describe("openPhaseSocket", () => {
     expect(order).toEqual(["message", "close"]);
   });
 
+  it("preserves FIFO through sustained binary traffic that never empties the pending tail", async () => {
+    const pending = openPhaseSocket("ws://test");
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(helloFrame({ wire_formats: ["GzipEnvelopeV1"] }));
+    const socket = await pending;
+    const total = 1024;
+    const received: number[] = [];
+    let next = 2;
+    let finish!: () => void;
+    const completed = new Promise<void>((resolve) => { finish = resolve; });
+    const frame = (timestamp: number) => {
+      const bytes = new TextEncoder().encode(JSON.stringify({ type: "Pong", data: { timestamp } }));
+      return new Uint8Array([0x00, ...bytes]).buffer;
+    };
+    socket.ws.onmessage = (event) => {
+      const message: { data: { timestamp: number } } = JSON.parse(event.data);
+      received.push(message.data.timestamp);
+      // There is already one successor queued. Admit another before returning,
+      // so promotion always leaves a nonempty tail throughout the stream.
+      if (next < total) raw.deliverMessage(frame(next++));
+      if (received.length === total) finish();
+    };
+    try {
+      raw.deliverMessage(frame(0));
+      raw.deliverMessage(frame(1));
+      await completed;
+      expect(received).toEqual(Array.from({ length: total }, (_, index) => index));
+    } finally {
+      socket.close();
+    }
+  });
+
   it("reports a queued binary send failure before closing", async () => {
     const promise = openPhaseSocket("ws://test");
     const raw = MockWebSocket.instances[0];
