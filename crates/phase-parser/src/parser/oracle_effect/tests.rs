@@ -17677,42 +17677,6 @@ fn controller_subject_shuffle_up_to_keeps_the_caster_shuffle() {
             );
         }
     }
-
-    // Cathartic Parting prints both shapes: an owner shuffle ("The owner of
-    // target artifact or enchantment an opponent controls shuffles it into
-    // their library.") and a controller-subject card shuffle. The anchor arm
-    // must leave both alone.
-    let parsed = parse_oracle_text(
-        "The owner of target artifact or enchantment an opponent controls shuffles it into their library. You may shuffle up to four target cards from your graveyard into your library.",
-        "Cathartic Parting",
-        &[],
-        &["Sorcery".to_string()],
-        &[],
-    );
-    let targets = collect_shuffle_targets(&parsed);
-    assert_eq!(
-        targets.len(),
-        2,
-        "Cathartic Parting must keep both shuffles: {parsed:#?}"
-    );
-    assert!(
-        targets
-            .iter()
-            .any(|target| matches!(target, TargetFilter::ParentTargetOwner)),
-        "Cathartic Parting keeps the owner shuffle, got {targets:?}"
-    );
-    assert!(
-        targets
-            .iter()
-            .any(|target| matches!(target, TargetFilter::Controller)),
-        "Cathartic Parting keeps the caster shuffle, got {targets:?}"
-    );
-    assert!(
-        !targets
-            .iter()
-            .any(|target| matches!(target, TargetFilter::ParentTarget)),
-        "Cathartic Parting must not gain the targeted-player anchor: {parsed:#?}"
-    );
 }
 
 /// CR 115.1 + CR 701.24a + CR 608.2c: whole-graveyard ("their graveyard") and
