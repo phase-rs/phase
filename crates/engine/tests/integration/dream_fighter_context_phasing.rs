@@ -650,7 +650,7 @@ fn mirror_match_noncreature_vehicle_copy_stays_unblocked_and_expires_at_end_of_c
                 GameAction::DecideOptionalEffect { accept: true }
             }
             WaitingFor::DiscardChoice { count, cards, .. } => GameAction::SelectCards {
-                cards: cards.into_iter().take(count as usize).collect(),
+                cards: cards.into_iter().take(count).collect(),
             },
             other => panic!("unexpected Mirror Match prompt: {other:?}"),
         };
