@@ -3906,6 +3906,16 @@ impl ResolutionStack {
         self.frames.push(frame);
     }
 
+    /// CR 104.1: retire every suspended frame because the game this stack belongs to
+    /// has ended; no instruction of a resolution still under way is owed to a
+    /// finished game. Frames are dropped through the stack's own `pop` whatever
+    /// their kind, so a direct-choice owner and every parent beneath it go together.
+    /// The monotonic draw, discard and post-replacement allocators are left as they
+    /// are, as for any other abandoned frame.
+    pub(crate) fn abandon_all_frames(&mut self) {
+        while self.frames.pop().is_some() {}
+    }
+
     /// Install an outer continuation immediately below the active child.
     ///
     /// There is deliberately no fallback insertion position: callers that do
