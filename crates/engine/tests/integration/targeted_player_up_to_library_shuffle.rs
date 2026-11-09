@@ -28,6 +28,7 @@ const RITE_ORACLE: &str = "Return up to two target permanent cards from your gra
 const QUANDRIX_ORACLE: &str = "Choose two —\n• Return target creature or planeswalker to its owner's hand.\n• Counter target artifact or enchantment spell.\n• Put two +1/+1 counters on target creature.\n• Target player shuffles up to three target cards from their graveyard into their library.";
 const COSI_ORACLE: &str =
     "Whenever an opponent shuffles their library, you may put a +1/+1 counter on this creature.";
+const STREAM_ORACLE: &str = "Target player mills four cards. You shuffle up to four cards from your graveyard into your library.\nReplicate {2}{U}{U} (When you cast this spell, copy it for each time you paid its replicate cost. You may choose new targets for the copies.)";
 
 /// Ordered projection of who actually shuffled a library.
 fn shuffled_players(events: &[GameEvent]) -> Vec<PlayerId> {
@@ -537,4 +538,56 @@ fn dwell_on_the_past_shuffles_once_after_a_commander_replacement_pause() {
     }
     assert_eq!(runner.state().objects[&unchosen].zone, Zone::Graveyard);
     assert_eq!(shuffled_players(&events).as_slice(), &[P1]);
+}
+
+/// CR 701.24a + CR 603.2c: a non-targeted graveyard choice carries the same
+/// terminal placement through EffectZoneChoice. The earlier mill target does
+/// not become the actor for the caster's separate shuffle instruction.
+#[test]
+fn stream_of_thought_resolution_choice_shuffles_once_for_the_caster() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let stream = scenario
+        .add_spell_to_hand_from_oracle(P0, "Stream of Thought", false, STREAM_ORACLE)
+        .id();
+    let selected = scenario
+        .add_creature_to_graveyard(P0, "Chosen Graveyard Card", 1, 1)
+        .id();
+    let unchosen = scenario
+        .add_creature_to_graveyard(P0, "Unchosen Graveyard Card", 1, 1)
+        .id();
+    let caster_library = scenario.add_card_to_library_top(P0, "Caster Library Card");
+    let milled = [
+        scenario.add_card_to_library_top(P1, "Milled Card A"),
+        scenario.add_card_to_library_top(P1, "Milled Card B"),
+        scenario.add_card_to_library_top(P1, "Milled Card C"),
+        scenario.add_card_to_library_top(P1, "Milled Card D"),
+    ];
+
+    let mut runner = scenario.build();
+    let outcome = runner
+        .cast(stream)
+        .target_player(P1)
+        .effect_zone(&[selected])
+        .resolve();
+
+    assert_completed(&outcome);
+    outcome.assert_zone(&[selected], Zone::Library);
+    outcome.assert_zone(&[unchosen, stream], Zone::Graveyard);
+    outcome.assert_zone(&milled, Zone::Graveyard);
+    assert!(outcome.state().players[P0.0 as usize]
+        .library
+        .contains(&caster_library));
+    assert!(outcome.state().players[P0.0 as usize]
+        .library
+        .contains(&selected));
+    assert!(!outcome.state().players[P1.0 as usize]
+        .library
+        .contains(&selected));
+    assert_eq!(shuffle_resolutions(&outcome), 1);
+    assert_only_player_shuffled(
+        &outcome,
+        P0,
+        "resolution-time delivery must not auto-shuffle before the caster's terminal shuffle",
+    );
 }
