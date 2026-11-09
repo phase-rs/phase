@@ -2653,9 +2653,33 @@ fn own_bounce_of_your_land(forest_tapped: bool) -> GameState {
 #[test]
 fn recheck_session_pauses_an_own_top_held_for_a_removable_mana_source() {
     // The look-ahead: with an own inert entry above the bounce, the skipped
-    // window over the bounce is authorized only when nothing can be lost.
+    // window over the bounce is authorized only when nothing can be lost. The
+    // bounce is a trigger here (a karoo's "return a land you control"), since a
+    // spell resolves alone and its window is never looked ahead to.
     for (forest_tapped, limit) in [(false, 1), (true, 2)] {
         let mut state = own_bounce_of_your_land(forest_tapped);
+        let spell = state.stack.pop_back().expect("the bounce is on the stack");
+        let StackEntryKind::Spell {
+            ability: Some(ability),
+            ..
+        } = spell.kind
+        else {
+            unreachable!("own_bounce_of_your_land pushes a spell with an ability");
+        };
+        state.stack.push_back(StackEntry {
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: spell.source_id,
+                ability,
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Karoo".to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+            ..spell
+        });
         push_simple_stack_entry(&mut state, 30_502, PlayerId(0));
         install_recheck_session(&mut state, &[PlayerId(1)]);
         assert_eq!(
