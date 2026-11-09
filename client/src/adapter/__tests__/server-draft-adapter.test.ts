@@ -2556,9 +2556,15 @@ describe("draft attachment settlement", () => {
         expect(settled).toHaveBeenCalledExactlyOnceWith(selected);
         expect(adapter.currentDraftView).toEqual(selected);
         expect(adapter.currentDraftView?.pool).toContainEqual(card);
-        expect(presented.at(-1)).toEqual(selected);
-        const firstSelection = presented.findIndex((view) => view.pool.some((entry) => entry.instance_id === card.instance_id));
-        const lastUnselected = presented.findLastIndex((view) => !view.pool.some((entry) => entry.instance_id === card.instance_id));
+        expect(presented[presented.length - 1]).toEqual(selected);
+        let firstSelection = -1;
+        let lastUnselected = -1;
+        for (let index = 0; index < presented.length; index++) {
+          const view = presented[index]!;
+          const hasSelection = view.pool.some((entry) => entry.instance_id === card.instance_id);
+          if (hasSelection && firstSelection === -1) firstSelection = index;
+          if (!hasSelection) lastUnselected = index;
+        }
         expect(firstSelection).toBeGreaterThan(lastUnselected);
         expect(wire.indexOf("DraftAction")).toBeGreaterThan(wire.indexOf("ReconnectDraft"));
         expect(adapter.currentPhase).toBe("drafting");
@@ -2754,7 +2760,7 @@ describe("draft attachment settlement", () => {
       await completeHandshake();
       expect(await initialized()).toEqual({ resolvedWith: undefined });
       expect(pick).toBeTypeOf("function");
-      await expect(pick!()).resolves.toMatchObject({ pool: [card] });
+      await expect(pick!()).resolves.toMatchObject({ resolvedWith: { pool: [card] } });
       expect(adapter.currentDraftView?.pick_number).toBe(3);
       expect(adapter.currentDraftView?.pool).toEqual([card]);
       expect(wire.indexOf("DraftAction")).toBeGreaterThan(wire.indexOf("ReconnectDraft"));

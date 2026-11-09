@@ -437,6 +437,15 @@ waiters instead follow the attachment handoff. Each acquired candidate keeps an
 idempotent cleanup owner through throwing, disposal and superseding callbacks,
 including requests claimed before that candidate is abandoned.
 
+A replacement transport stays private until its own `JoinGameWithPassword`,
+`Reconnect` or `CreateDraftWithSettings`/`JoinDraftWithPassword`/`ReconnectDraft`
+has entered the serialized write order; only then may `serverHello` or pending
+indicator consumers issue requests. Frames already admitted for that candidate
+stay buffered through those callbacks and drain in wire order, so a synchronous
+peer reply cannot overtake an older bootstrap. A game command is also refused
+with the typed unsent error until the *current* socket has accepted its own
+validated `GameStarted`; a predecessor's Full never authorizes the replacement.
+
 Draft adapters explicitly own current and retired transports. Healthy replacement
 closes an idle predecessor immediately; a source with a permitted command,
 preview or sent draft reply remains owned until that work settles or the source

@@ -5574,7 +5574,7 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
     let commandClaimed = false;
     const timeline: string[] = [];
     const views: Promise<{ at: string; turn: number }>[] = [];
-    adapter.onEvent((event) => {
+    const off = adapter.onEvent((event) => {
       if (event.type === "serverHello") {
         commandClaimed = true;
         command = observe(adapter.submitAction({ type: "PassPriority" }, 0));
@@ -5638,6 +5638,7 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       expect(command!.settled).toHaveBeenCalledOnce();
       expect(exported!.settled).toHaveBeenCalledOnce();
     } finally {
+      off();
       adapter.dispose();
     }
   });
@@ -5650,6 +5651,7 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
     let next: PendingObservation[] = [];
     let initialization: PendingObservation | undefined;
     let armed = true;
+    let threw = false;
     adapter.onEvent((event) => {
       if (event.type === "actionPendingChanged" && !event.pending && armed) {
         armed = false;
@@ -5664,6 +5666,8 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
         ];
       } else if (event.type === "opponentDisconnected") {
         initialization = observe(adapter.initialize());
+        if (threw) return;
+        threw = true;
         throw new Error("FIFO drain superseded B");
       }
     });
