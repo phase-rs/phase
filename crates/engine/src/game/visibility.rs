@@ -3136,7 +3136,6 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         // entirely for non-choosers. A pure private set keeps one placeholder per
         // eligible card (the existing count-only disclosure), and a pure public
         // set is not redacted at all.
-        let private_zone_choice = matches!(zone, Zone::Hand | Zone::Library);
         let has_private_card = cards.iter().any(|id| {
             state
                 .objects
@@ -3150,9 +3149,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 .is_some_and(|object| object.zone.is_public())
         });
         let mixed_private_public = has_private_card && has_public_card;
-        if !can_view_private_for_player(player)
-            && (mixed_private_public || (private_zone_choice && has_private_card))
-        {
+        if !can_view_private_for_player(player) && has_private_card {
             filtered.waiting_for = WaitingFor::EffectZoneChoice {
                 player,
                 cards: if mixed_private_public {

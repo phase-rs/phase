@@ -4510,12 +4510,9 @@ fn parse_type_phrase_folding_unbound<'a>(
     }
 
     // Check zone suffix: "card from a graveyard", "card in your graveyard", "from exile", etc.
-    if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix_with_ownership(
-        &lower[pos..],
-        properties
-            .iter()
-            .any(|prop| matches!(prop, FilterProp::Owned { .. })),
-    ) {
+    if let Some((zone_props, zone_ctrl, consumed)) =
+        parse_zone_suffix_with_ownership(&lower[pos..], noun_phrase_ownership(&properties))
+    {
         extend_zone_properties(&mut properties, zone_props);
         pos += consumed;
         // Apply zone-derived controller if we don't already have one
@@ -4633,12 +4630,9 @@ fn parse_type_phrase_folding_unbound<'a>(
     // the chosen type" ("target creature card of the chosen type from your
     // graveyard", From the Rubble). The primary `parse_zone_suffix` arm above
     // runs before this suffix.
-    if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix_with_ownership(
-        &lower[pos..],
-        properties
-            .iter()
-            .any(|prop| matches!(prop, FilterProp::Owned { .. })),
-    ) {
+    if let Some((zone_props, zone_ctrl, consumed)) =
+        parse_zone_suffix_with_ownership(&lower[pos..], noun_phrase_ownership(&properties))
+    {
         extend_zone_properties(&mut properties, zone_props);
         pos += consumed;
         if controller.is_none() {
@@ -4931,9 +4925,7 @@ fn parse_type_phrase_folding_unbound<'a>(
             if is_locative.is_ok() {
                 if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix_with_ownership(
                     &lower[pos..],
-                    properties
-                        .iter()
-                        .any(|prop| matches!(prop, FilterProp::Owned { .. })),
+                    noun_phrase_ownership(&properties),
                 ) {
                     extend_zone_properties(&mut properties, zone_props);
                     pos += consumed;
@@ -7999,7 +7991,7 @@ pub(crate) fn parse_mana_value_suffix(
             .or_else(|| {
                 let (phrase, zone_tail) =
                     nom_primitives::scan_split_at_phrase(raw_phrase, |input| {
-                        parse_zone_suffix_nom(input, false)
+                        parse_zone_suffix_nom(input, NounPhraseOwnership::Unestablished)
                     })?;
                 let offset = raw_phrase.len() - zone_tail.len();
                 parse_value(phrase).map(|value| (value, &after_equal_to[offset..]))
@@ -11389,10 +11381,33 @@ pub(crate) fn scan_zone_phrase_span(
 ///   each-player iteration the candidate set is scoped to the iterated player's
 ///   own graveyard (CR 110.1/108.3: membership is owner-keyed).
 /// - Other possessive / indefinite / definite / bare: → `InZone` alone.
+///
+/// CR 400.1 + CR 400.3: whether the caller's noun phrase already established
+/// ownership of the population. A mixed per-player/shared zone list can carry a
+/// possessor only in the `Established` case; `Unestablished` is the decline
+/// boundary that keeps one flat `Owned` from over-restricting a shared leg.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum NounPhraseOwnership {
+    Established,
+    Unestablished,
+}
+
+/// The single authority for reading ownership off a constructed type phrase.
+fn noun_phrase_ownership(properties: &[FilterProp]) -> NounPhraseOwnership {
+    if properties
+        .iter()
+        .any(|prop| matches!(prop, FilterProp::Owned { .. }))
+    {
+        NounPhraseOwnership::Established
+    } else {
+        NounPhraseOwnership::Unestablished
+    }
+}
+
 pub(crate) fn parse_zone_suffix(
     text: &str,
 ) -> Option<(Vec<FilterProp>, Option<ControllerRef>, usize)> {
-    parse_zone_suffix_with_ownership(text, false)
+    parse_zone_suffix_with_ownership(text, NounPhraseOwnership::Unestablished)
 }
 
 /// CR 400.1 + CR 400.3: `parse_zone_suffix`, with the caller's noun phrase
@@ -11406,14 +11421,13 @@ pub(crate) fn parse_zone_suffix(
 /// express; the grammar declines rather than over-restricting the shared leg.
 fn parse_zone_suffix_with_ownership(
     text: &str,
-    noun_phrase_has_ownership: bool,
+    ownership: NounPhraseOwnership,
 ) -> Option<(Vec<FilterProp>, Option<ControllerRef>, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
     let lower = trimmed.to_lowercase();
 
-    let (rest, (props, ctrl, _qual)) =
-        parse_zone_suffix_nom(&lower, noun_phrase_has_ownership).ok()?;
+    let (rest, (props, ctrl, _qual)) = parse_zone_suffix_nom(&lower, ownership).ok()?;
     let consumed = lower.len() - rest.len();
     Some((props, ctrl, leading_ws + consumed))
 }
@@ -11427,7 +11441,8 @@ pub(crate) fn parse_exile_graveyard_source(text: &str) -> Option<(Vec<FilterProp
     peek(tag::<_, _, OracleError<'_>>("from "))
         .parse(lower.as_str())
         .ok()?;
-    let (rest, (mut props, controller, qualifier)) = parse_zone_suffix_nom(&lower, false).ok()?;
+    let (rest, (mut props, controller, qualifier)) =
+        parse_zone_suffix_nom(&lower, NounPhraseOwnership::Unestablished).ok()?;
     if !props.iter().any(|prop| {
         matches!(
             prop,
@@ -11600,7 +11615,7 @@ fn possessive_zone_list_props(
 
 fn parse_zone_suffix_nom(
     i: &str,
-    noun_phrase_has_ownership: bool,
+    ownership: NounPhraseOwnership,
 ) -> super::oracle_nom::error::OracleResult<'_, (Vec<FilterProp>, Option<ControllerRef>, ZoneQual)>
 {
     let (i, _) = opt(alt((tag("cards "), tag("card ")))).parse(i)?;
@@ -11684,7 +11699,8 @@ fn parse_zone_suffix_nom(
         // already established ownership (`extend_zone_properties` then dedupes
         // the possessive), and otherwise decline rather than over-restrict the
         // shared leg. Plain/no-possessor lists stay union-only.
-        if mixed_scope && qual != ZoneQual::Plain && !noun_phrase_has_ownership {
+        if mixed_scope && qual != ZoneQual::Plain && ownership == NounPhraseOwnership::Unestablished
+        {
             return Err(nom::Err::Error(nom::error::Error::new(
                 i,
                 nom::error::ErrorKind::Fail,

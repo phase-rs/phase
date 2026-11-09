@@ -1159,6 +1159,28 @@ fn next_of_kin_mixed_choice_redacts_private_eligibility() {
     let two_eligible = open_next_of_kin_choice(2, 0);
     let one_eligible = open_next_of_kin_choice(1, 1);
 
+    for runner in [&two_eligible, &one_eligible] {
+        let WaitingFor::EffectZoneChoice { cards, .. } = &runner.state().waiting_for else {
+            panic!("the unfiltered choice must be open");
+        };
+        assert!(
+            cards.iter().any(|id| runner
+                .state()
+                .objects
+                .get(id)
+                .is_some_and(|object| object.zone == Zone::Hand)),
+            "reach guard: the unfiltered choice must contain a hand card; got {cards:?}"
+        );
+        assert!(
+            cards.iter().any(|id| runner
+                .state()
+                .objects
+                .get(id)
+                .is_some_and(|object| object.zone == Zone::Command)),
+            "reach guard: the unfiltered choice must contain the command-zone card; got {cards:?}"
+        );
+    }
+
     let opponent_two = filter_state_for_viewer(two_eligible.state(), P1);
     let opponent_one = filter_state_for_viewer(one_eligible.state(), P1);
     let WaitingFor::EffectZoneChoice {
