@@ -645,7 +645,9 @@ fn stream_of_thought_resolution_choice_shuffles_once_for_the_caster() {
 /// https://api.scryfall.com/cards/isd/66/rulings
 #[test]
 fn memorys_journey_moves_no_cards_and_neither_player_shuffles_after_surge() {
-    let mut scenario = GameScenario::new();
+    // Keep two legal alternatives after P1 gains hexproof; a single remaining
+    // player would be auto-selected instead of exposing a target-choice prompt.
+    let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
     let memory = scenario
         .add_spell_to_hand_from_oracle(P0, "Memory's Journey", true, MEMORY_ORACLE)
@@ -704,7 +706,10 @@ fn memorys_journey_moves_no_cards_and_neither_player_shuffles_after_surge() {
         ..
     } = &original.state().waiting_for
     else {
-        panic!("Thought Scour must offer its target-player choice");
+        panic!(
+            "Thought Scour must offer its target-player choice, got {:?}",
+            original.state().waiting_for
+        );
     };
     let legal = &target_slots[selection.current_slot].legal_targets;
     assert!(legal.contains(&TargetRef::Player(P0)));
@@ -737,7 +742,10 @@ fn memorys_journey_moves_no_cards_and_neither_player_shuffles_after_surge() {
         ..
     } = &original.state().waiting_for
     else {
-        panic!("Cremate must offer its target-card choice");
+        panic!(
+            "Cremate must offer its target-card choice, got {:?}",
+            original.state().waiting_for
+        );
     };
     let legal = &target_slots[selection.current_slot].legal_targets;
     for card in [selected_a, selected_b] {
