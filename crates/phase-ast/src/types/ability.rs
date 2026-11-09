@@ -26389,7 +26389,7 @@ fn phase_out_or_in_filter_is_mass(filter: &TargetFilter) -> bool {
 
 /// CR 115.10a: a PhaseOut union of already-bound references declares no new
 /// target. This does not prove that any reference resolves to a live object.
-fn phase_out_filter_is_context_union(filter: &TargetFilter) -> bool {
+pub fn phase_out_filter_is_context_union(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Or { filters } => filters.iter().all(phase_out_filter_is_context_union),
         other => other.is_context_ref(),

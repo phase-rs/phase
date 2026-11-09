@@ -2951,6 +2951,29 @@ pub fn resolve_effect_player_ref(
         // `effects::resolve_player_for_context_ref`, which resolves `Controller`
         // straight to `ability.controller`.
         TargetFilter::Controller => Some(ability.controller),
+        // CR 108.3 + CR 608.2h: ownership is invariant across zone changes.
+        // Unlike source controller, this reference does not require a live
+        // matching incarnation, and an unknown owner names no player.
+        TargetFilter::Owner => ability
+            .trigger_source
+            .as_ref()
+            .map(|source| source.source_read(state).owner())
+            .or_else(|| {
+                state
+                    .objects
+                    .get(&ability.source_id)
+                    .map(|source| source.owner)
+            })
+            .or_else(|| {
+                ability.source_incarnation.and_then(|incarnation| {
+                    state
+                        .lki_by_incarnation
+                        .get(&ability.source_id)
+                        .and_then(|by_incarnation| by_incarnation.get(&incarnation))
+                        .map(|lki| lki.owner)
+                })
+            })
+            .or_else(|| state.lki_cache.get(&ability.source_id).map(|lki| lki.owner)),
         // CR 608.2h + CR 113.7a: "~'s controller" follows the source's exact
         // incarnation. A triggered ability owns the richer TriggerSourceContext
         // authority; an activated ability carries its source incarnation from
@@ -7892,6 +7915,59 @@ mod tests {
             source,
             PlayerId(0),
         )
+    }
+
+    #[test]
+    fn source_owner_is_invariant_and_unknown_owner_names_no_player() {
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "owned source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().controller = PlayerId(0);
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&source).unwrap(),
+        );
+        let mut ability = make_resolved_with_targets(vec![TargetRef::Player(PlayerId(0))], source);
+        ability.source_incarnation = Some(state.objects[&source].incarnation);
+        let assert_owner = |state: &GameState, ability: &ResolvedAbility, expected| {
+            assert_eq!(
+                resolve_effect_player_ref(state, ability, &TargetFilter::Owner),
+                expected
+            );
+            assert_eq!(
+                crate::game::effects::resolve_player_for_context_ref(
+                    state,
+                    ability,
+                    &TargetFilter::Owner
+                ),
+                expected
+            );
+        };
+        assert_owner(&state, &ability, Some(PlayerId(1)));
+        let moved = state.objects.get_mut(&source).unwrap();
+        moved.zone = Zone::Library;
+        moved.incarnation += 1;
+        assert_owner(&state, &ability, Some(PlayerId(1)));
+        state.objects.remove(&source);
+        ability.trigger_source = Some(context.clone());
+        assert_owner(&state, &ability, Some(PlayerId(1)));
+        ability.trigger_source = None;
+        state
+            .lki_by_incarnation
+            .entry(source)
+            .or_default()
+            .insert(ability.source_incarnation.unwrap(), context.lki.clone());
+        assert_owner(&state, &ability, Some(PlayerId(1)));
+        state.lki_by_incarnation.remove(&source);
+        state.lki_cache.insert(source, context.lki);
+        assert_owner(&state, &ability, Some(PlayerId(1)));
+        state.lki_cache.remove(&source);
+        assert_owner(&state, &ability, None);
     }
 
     /// CR 608.2h + CR 113.7a: A source-controller predicate on a triggered

@@ -16256,7 +16256,7 @@ fn try_parse_owner_of_target_shuffle(
     {
         // CR 201.5: source-name references still name this particular object
         // even when an earlier instruction declared a different target.
-        all_consuming((
+        let (_, (_, _, _, draw_tail)) = all_consuming((
             alt((
                 verify(nom_target::parse_self_reference, |target: &TargetFilter| {
                     matches!(target, TargetFilter::SelfRef)
@@ -16268,15 +16268,35 @@ fn try_parse_owner_of_target_shuffle(
             )),
             tag(" into "),
             alt((tag("their library"), tag("its owner's library"))),
+            opt(preceded(tag(" and "), rest)),
         ))
         .parse(object_text)
         .ok()?;
-        return Some(imperative::lower_shuffle_ast(
-            ShuffleImperativeAst::ChangeZoneToLibrary {
+        let draw = if let Some(tail) = draw_tail {
+            // Reuse the numeric grammar's whole-count/noun guard after the
+            // shared conjugation adapter; an unknown suffix rejects the clause.
+            let predicate = subject::deconjugate_verb(tail);
+            let ast = imperative::parse_numeric_imperative_ast(&predicate, &predicate)?;
+            if !matches!(ast, NumericImperativeAst::Draw { .. }) {
+                return None;
+            }
+            let mut effect = imperative::lower_numeric_imperative_ast(ast);
+            let Effect::Draw { target, .. } = &mut effect else {
+                return None;
+            };
+            *target = TargetFilter::Owner;
+            Some(Box::new(AbilityDefinition::new(AbilityKind::Spell, effect)))
+        } else {
+            None
+        };
+        let mut movement =
+            imperative::lower_shuffle_ast(ShuffleImperativeAst::ChangeZoneToLibrary {
                 target: TargetFilter::SelfRef,
                 owner_library: true,
-            },
-        ));
+            });
+        let shuffle = movement.sub_ability.as_deref_mut()?;
+        append_to_deepest_sub_ability(shuffle, draw);
+        return Some(movement);
     }
     all_consuming((
         tag::<_, _, OracleError<'_>>("it into "),
@@ -16285,6 +16305,18 @@ fn try_parse_owner_of_target_shuffle(
     .parse(object_text)
     .ok()?;
     let target = extract_owner_of_target(tp, ctx)?;
+    // CR 115.10a + CR 303.4b: an attachment's host is an operand, not
+    // an announced target. The resolution-time attachment binder owns it.
+    if target.contains_source_attachment_host()
+        && !nom_primitives::scan_contains(tp.lower, "target ")
+    {
+        return Some(imperative::lower_shuffle_ast(
+            ShuffleImperativeAst::ChangeZoneToLibrary {
+                target,
+                owner_library: true,
+            },
+        ));
+    }
 
     let movement = imperative::lower_shuffle_ast(ShuffleImperativeAst::ChangeZoneToLibrary {
         target: TargetFilter::ParentTarget,
@@ -44562,15 +44594,11 @@ fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text
     let repair_exile = scan_contains_phrase(&lower, "exiles the top card of their library")
         && !scan_contains_phrase(&lower, "exiles the top card of your library");
 
-    if !repair_reveal && !repair_exile {
-        return;
-    }
-
     // CR 108.3 + CR 400.3 + CR 608.2c: after an owner's-library shuffle,
-    // a following "their library" reveal or exile refers to that same owner. The generic
-    // reveal/exile parser binds "their library" to the relative-player anaphor (or, for
-    // a subjectless reveal/exile, to the controller), so repair only the owner-shuffle
-    // chain and leave explicit "your library" instructions untouched.
+    // a following owner-relative instruction retains that owner. Reveal/exile
+    // repair additionally requires printed "their library", so explicit
+    // "your library" instructions remain untouched. Draw repair below is
+    // restricted to the established prospective-owner population anchor.
     let mut owner_anchor = None;
     let mut current = Some(def);
     while let Some(node) = current {
@@ -44582,6 +44610,14 @@ fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text
                             == Some(&imperative::owner_library_shuffle_scope())) =>
             {
                 owner_anchor = Some(target.clone());
+            }
+            // CR 608.2c: the owner's next instruction retains the same
+            // prospective owner population even after the object moved.
+            Effect::Draw { target, .. }
+                if *target == TargetFilter::ParentTargetOwner
+                    && owner_anchor == Some(TargetFilter::ScopedPlayer) =>
+            {
+                *target = TargetFilter::ScopedPlayer;
             }
             Effect::RevealTop { player, .. }
                 if repair_reveal && is_repairable_library_owner(player) =>

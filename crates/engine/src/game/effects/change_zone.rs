@@ -248,13 +248,9 @@ pub(crate) fn change_zone_all_player_scope(
 ) -> Option<PlayerId> {
     match target_filter {
         TargetFilter::Controller => Some(ability.controller),
-        // CR 400.3: "its owner's" resolves to the owner of source_id.
-        TargetFilter::Owner => state
-            .objects
-            .get(&ability.source_id)
-            .map(|obj| obj.owner)
-            .or_else(|| state.lki_cache.get(&ability.source_id).map(|lki| lki.owner))
-            .or(Some(ability.controller)),
+        TargetFilter::Owner => {
+            crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
+        }
         TargetFilter::Player => ability
             .targets
             .iter()

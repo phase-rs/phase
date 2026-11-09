@@ -11481,7 +11481,7 @@ fn is_player_scope_local_continuation(
     child: &Effect,
     scope: &PlayerFilter,
 ) -> bool {
-    // CR 608.2c + CR 701.55a: an owner-relative top-card instruction or
+    // CR 608.2c + CR 701.55a: an owner-relative draw, top-card instruction or
     // villainous choice follows the terminal shuffle inside that owner's
     // published iteration, not as an unbound tail after the owner scope ends.
     if is_owner_library_shuffle_scope(scope)
@@ -11496,6 +11496,9 @@ fn is_player_scope_local_continuation(
                     ..
                 } | Effect::ExileTop {
                     player: TargetFilter::ScopedPlayer,
+                    ..
+                } | Effect::Draw {
+                    target: TargetFilter::ScopedPlayer,
                     ..
                 } | Effect::ChooseOneOf {
                     chooser: PlayerFilter::ParentObjectTargetOwner,
@@ -16358,10 +16361,8 @@ fn phase_out_context_union_requires_parent(effect: &Effect) -> Option<bool> {
     fn requires_parent(filter: &TargetFilter) -> Option<bool> {
         match filter {
             TargetFilter::ParentTarget => Some(true),
-            TargetFilter::SelfRef => Some(false),
+            TargetFilter::SelfRef | TargetFilter::TriggeringSource => Some(false),
             TargetFilter::Or { filters } => filters.iter().try_fold(true, |dependent, filter| {
-                // Inspect every child, even after SelfRef: unsupported later leaves
-                // must invalidate the proof rather than inherit independence.
                 requires_parent(filter).map(|child| dependent && child)
             }),
             _ => None,
@@ -16370,7 +16371,9 @@ fn phase_out_context_union_requires_parent(effect: &Effect) -> Option<bool> {
     match effect {
         Effect::PhaseOut {
             target: target @ TargetFilter::Or { .. },
-        } => requires_parent(target),
+        } if crate::types::ability::phase_out_filter_is_context_union(target) => {
+            requires_parent(target)
+        }
         _ => None,
     }
 }
@@ -17746,8 +17749,9 @@ pub(crate) fn controller_for_relative_filter(
 ///
 /// CR 608.2b: `None` for an unavailable parent announcement, a
 /// [`TargetFilter::DeclaredPlayer`] whose target was illegal (or never
-/// announced), or a filter declaring its own slot when no player was announced
-/// into it. The effect then affects no one; other filters retain their fallback.
+/// announced), a source owner whose identity is unavailable, or a filter
+/// declaring its own slot when no player was announced into it. The effect
+/// then affects no one; other filters retain their fallback.
 pub(crate) fn resolve_player_for_context_ref(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -17766,7 +17770,7 @@ pub(crate) fn resolve_player_for_context_ref(
         TargetFilter::DeclaredPlayer { group } => {
             crate::game::targeting::resolve_live_declared_player(state, ability, *group)
         }
-        TargetFilter::SpecificPlayer { .. } => {
+        TargetFilter::Owner | TargetFilter::SpecificPlayer { .. } => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
         }
         _ if declared_player_slot_is_empty(state, ability, target_filter) => None,
@@ -29128,6 +29132,18 @@ mod tests {
                     filters: vec![SelfRef, ParentTarget],
                 },
                 Some(false),
+            ),
+            (
+                Or {
+                    filters: vec![ParentTarget, TargetFilter::TriggeringSource],
+                },
+                Some(false),
+            ),
+            (
+                Or {
+                    filters: vec![SelfRef, TargetFilter::Typed(TypedFilter::creature())],
+                },
+                None,
             ),
             (
                 Or {

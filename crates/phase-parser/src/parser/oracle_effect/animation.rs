@@ -627,7 +627,8 @@ fn parse_animation_subtype_loose(input: &str) -> OracleResult<'_, AnimationTypeT
     Ok((rest, AnimationTypeToken::Subtype(word.to_string())))
 }
 
-/// CR 205.3m: registered subtype words and plurals name the same subtype.
+/// CR 205.3: registered subtype words identify subtypes.
+/// Plural canonicalization is a parser convention, not a rules equivalence.
 /// Retain this grammar's punctuation boundary even when the registry accepts
 /// a broader word boundary, and consume multiword subtypes as one token.
 fn parse_registered_animation_subtype(input: &str) -> OracleResult<'_, AnimationTypeToken> {

@@ -2443,20 +2443,38 @@ impl PrintedTargetWord {
 /// (`targeting::bind_resolution_attachment_hosts`).
 ///
 /// Applied to the card's own fully composed ability (after every document
-/// relation), and only when the host instruction is the whole ability — one
-/// node, nothing before or after it (a later sentence that only modifies it,
-/// "That creature can't be regenerated.", folds into the same node). Without a
-/// provable host it then does nothing, exactly as the targeted form did when its
-/// only target was illegal (CR 608.2b). Instructions that precede or follow it
-/// read or depend on that host in ways the targeted form settled by fizzling
-/// the whole ability, so such chains keep their stack-time target (the
-/// followers of a host reference are follow-up work). Donor shapes ("becomes a
-/// copy of", "gains all activated abilities of" the host) also keep theirs.
+/// relation). Ordinarily the host instruction must be the whole ability:
+/// arbitrary followers can depend on a binding this conversion cannot prove.
+/// The bounded owner-library move plus terminal owner shuffle is also admitted:
+/// the single-object move binds the host, and its owner is the shuffle subject.
+/// Donor shapes ("becomes a copy of", "gains all activated abilities of" the
+/// host) retain stack timing.
 pub(crate) fn convert_terminal_attachment_host_reference(
     def: &mut AbilityDefinition,
     printed: PrintedTargetWord,
 ) {
-    if def.sub_ability.is_some()
+    // The printed owner-shuffle class has one determined host followed only
+    // by its owner's shuffle. Do not admit arbitrary host-dependent chains.
+    let owner_shuffle = matches!(
+        def.effect.as_ref(),
+        Effect::ChangeZone {
+            destination: Zone::Library,
+            owner_library: true,
+            target,
+            ..
+        } if target.contains_source_attachment_host()
+    ) && def.sub_ability.as_deref().is_some_and(|sub| {
+        matches!(
+            sub.effect.as_ref(),
+            Effect::Shuffle {
+                target: TargetFilter::ParentTargetOwner
+            }
+        ) && sub.sub_ability.is_none()
+            && sub.else_ability.is_none()
+            && sub.modal.is_none()
+            && sub.mode_abilities.is_empty()
+    });
+    if (def.sub_ability.is_some() && !owner_shuffle)
         || def.else_ability.is_some()
         || def.modal.is_some()
         || !def.mode_abilities.is_empty()

@@ -30,6 +30,58 @@ use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::statics::CostModifyMode;
 
+#[test]
+fn oblation_draw_retains_the_terminal_shuffle_owner_population() {
+    let parsed = parse_oracle_text(
+        "The owner of target nonland permanent shuffles it into their library, then draws two cards.",
+        "Oblation", &[], &["Instant".to_string()], &[],
+    );
+    let root = &parsed.abilities[0];
+    assert_eq!(root.target_choice_timing, TargetChoiceTiming::Stack);
+    assert!(matches!(root.effect.as_ref(), Effect::TargetOnly { .. }));
+    let mut node = Some(root);
+    let mut found = false;
+    while let Some(ability) = node {
+        if let Effect::Draw { target, .. } = ability.effect.as_ref() {
+            assert_eq!(*target, TargetFilter::ScopedPlayer);
+            found = true;
+        }
+        node = ability.sub_ability.as_deref();
+    }
+    assert!(found, "the printed draw instruction must remain present");
+}
+
+#[test]
+fn watery_grasp_owner_shuffle_keeps_a_resolution_host_operand() {
+    let parsed = parse_oracle_text(
+        "Enchant creature\nEnchanted creature doesn't untap during its controller's untap step.\nWaterbend {5}: Enchanted creature's owner shuffles it into their library. (While paying a waterbend cost, you can tap your artifacts and creatures to help. Each one pays for {1}.)",
+        "Watery Grasp", &[], &["Enchantment".to_string()], &["Aura".to_string()],
+    );
+    let ability = parsed
+        .abilities
+        .iter()
+        .find(|ability| ability.kind == AbilityKind::Activated)
+        .unwrap();
+    assert_eq!(ability.target_choice_timing, TargetChoiceTiming::Resolution);
+    assert!(matches!(
+        ability.effect.as_ref(),
+        Effect::ChangeZone {
+            target,
+            destination: Zone::Library,
+            owner_library: true,
+            ..
+        } if target.contains_source_attachment_host()
+    ));
+    let shuffle = ability.sub_ability.as_ref().unwrap();
+    assert!(matches!(
+        shuffle.effect.as_ref(),
+        Effect::Shuffle {
+            target: TargetFilter::ParentTargetOwner
+        }
+    ));
+    assert!(shuffle.sub_ability.is_none());
+}
+
 /// SHAPE: real Technomancer Oracle keeps mill before the direct whole-graveyard
 /// choice, whose immediate continuation moves only the selected parents.
 #[test]
@@ -96452,7 +96504,10 @@ fn source_owner_shuffle_object_grammar_is_scoped_and_whole_clause() {
         }
     ));
     for text in [
-        "~'s owner shuffles ~ into their library and draws a card",
+        "~'s owner shuffles ~ into their library and draws a card mysteriously",
+        "~'s owner shuffles ~ into their library and dances",
+        "~'s owner shuffles ~ into their library and draws three cards and dances",
+        "The owner of target creature shuffles it into their library and draws a card",
         "~'s owner shuffles target creature into their library",
         "~'s owner shuffles him into your library",
         "The owner of target creature shuffles him into their library",
@@ -96470,6 +96525,162 @@ fn source_owner_shuffle_object_grammar_is_scoped_and_whole_clause() {
             "{text}"
         );
     }
+}
+
+#[test]
+fn gandalf_full_oracle_preserves_source_move_shuffle_and_owner_draw() {
+    let parsed = parse_oracle_text(
+        "Ward {3} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {3}.)\n{6}: Gandalf's owner shuffles him into their library and draws three cards.",
+        "Gandalf, Wandering Wizard",
+        &[],
+        &["Creature".to_string()],
+        &["Avatar".to_string(), "Wizard".to_string()],
+    );
+    let ability = parsed
+        .abilities
+        .iter()
+        .find(|ability| ability.kind == AbilityKind::Activated)
+        .expect("Gandalf's activated ability");
+    let mut nodes = Vec::new();
+    collect_test_tree(ability, false, &mut nodes);
+    assert!(
+        !nodes
+            .iter()
+            .any(|def| matches!(&*def.effect, Effect::Unimplemented { .. })),
+        "{nodes:?}"
+    );
+    assert!(
+        nodes.iter().any(|def| matches!(
+            &*def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Library,
+                target: TargetFilter::SelfRef,
+                owner_library: true,
+                ..
+            }
+        )),
+        "{nodes:?}"
+    );
+    assert!(
+        nodes.iter().any(|def| matches!(
+            &*def.effect,
+            Effect::Shuffle {
+                target: TargetFilter::Owner
+            }
+        )),
+        "{nodes:?}"
+    );
+    assert!(
+        nodes.iter().any(|def| matches!(
+            &*def.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Owner
+            }
+        )),
+        "{nodes:?}"
+    );
+    assert!(
+        !nodes
+            .iter()
+            .any(|def| effect_has_stack_target_declaration(&def.effect)),
+        "{nodes:?}"
+    );
+}
+
+#[test]
+fn source_owner_shuffle_draw_tail_reuses_numeric_grammar_and_rejects_suffixes() {
+    for (tail, count) in [
+        ("draws a card", 1),
+        ("draws five cards", 5),
+        ("draw two cards", 2),
+    ] {
+        let text = format!("~'s owner shuffles him into their library and {tail}");
+        let lower = text.to_ascii_lowercase();
+        let clause = try_parse_owner_of_target_shuffle(
+            TextPair::new(&text, &lower),
+            &mut ParseContext::default(),
+        )
+        .expect(&text);
+        let mut ability = AbilityDefinition::new(AbilityKind::Spell, clause.effect);
+        ability.sub_ability = clause.sub_ability;
+        let mut nodes = Vec::new();
+        collect_test_tree(&ability, false, &mut nodes);
+        assert!(nodes.iter().any(|def| matches!(&*def.effect,
+            Effect::Draw { count: QuantityExpr::Fixed { value }, target: TargetFilter::Owner } if *value == count
+        )), "{text}: {nodes:?}");
+        assert!(
+            !nodes
+                .iter()
+                .any(|def| effect_has_stack_target_declaration(&def.effect)),
+            "{text}: {nodes:?}"
+        );
+        for suffix in [" mysteriously", " and dances"] {
+            let invalid = format!("{text}{suffix}");
+            let lower = invalid.to_ascii_lowercase();
+            assert!(
+                try_parse_owner_of_target_shuffle(
+                    TextPair::new(&invalid, &lower),
+                    &mut ParseContext::default(),
+                )
+                .is_none(),
+                "{invalid}"
+            );
+        }
+    }
+}
+
+#[test]
+fn source_owner_draw_binding_is_independent_of_an_earlier_target() {
+    let ability = parse_effect_chain(
+        "Exile target creature. ~'s owner shuffles him into their library and draws two cards.",
+        AbilityKind::Spell,
+        &mut ParseContext::default(),
+    );
+    let mut nodes = Vec::new();
+    collect_test_tree(&ability, false, &mut nodes);
+    assert!(
+        nodes.iter().any(|def| matches!(
+            &*def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        )),
+        "{nodes:?}"
+    );
+    assert!(
+        nodes.iter().any(|def| matches!(
+            &*def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Library,
+                target: TargetFilter::SelfRef,
+                owner_library: true,
+                ..
+            }
+        )),
+        "{nodes:?}"
+    );
+    assert!(
+        nodes.iter().any(|def| matches!(
+            &*def.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Owner
+            }
+        )),
+        "{nodes:?}"
+    );
+    assert!(
+        !nodes.iter().any(|def| matches!(
+            &*def.effect,
+            Effect::TargetOnly {
+                target: TargetFilter::SelfRef
+            }
+        )),
+        "{nodes:?}"
+    );
 }
 
 /// SHAPE — CR 903.3 + CR 115.1c: a commander designation and entry history
