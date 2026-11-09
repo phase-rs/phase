@@ -417,6 +417,23 @@ fenced. A codec rejection or resync request after network death settles the
 original network close instead of replacing its cause or downgrading reconnect
 policy. The timer cannot preempt synchronous main-thread WASM.
 
+Terminal attachment close also retires the gzip receive owner, immediately
+dropping queued compressed payload references even if its active inflater stays
+stalled. A late active result is ignored and no queued successor starts inflation.
+Raw death alone still permits healthy admitted frames to drain before that
+terminal boundary. This is attachment cleanup, not a new compressed-queue or
+total-heap size limit.
+
+Draft adapters explicitly own current and retired transports. Healthy replacement
+closes an idle predecessor immediately; a source with a permitted command,
+preview or sent draft reply remains owned until that work settles or the source
+closes, then releases its decoder lease. Interaction-preview IDs are scoped to
+their transport so a reused ID cannot overwrite another source's pending reply.
+Disposal rejects owned work and closes every current or retired transport even
+when the server never closes the old peer. Abandoning an adopted setup candidate
+also settles that source's owned work before releasing it, including synchronous
+`serverHello` reentry and setup-send failure. No new reply timeout is introduced.
+
 ### Design Principles
 
 - **Pure reducers** — `apply(state, action) -> ActionResult` with no mutation
