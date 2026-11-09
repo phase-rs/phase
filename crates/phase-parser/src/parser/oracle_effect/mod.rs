@@ -56340,6 +56340,23 @@ mod exile_graveyard_origin_shape {
                 );
             }
         }
+        // CR 508.5a + CR 108.3: "defending player's graveyard" binds the one
+        // defending player as the graveyard's owner; it needs no declared slot.
+        let (zone, target) = compose(
+            TargetFilter::Typed(TypedFilter::creature()),
+            "target creature card from defending player's graveyard",
+            " from defending player's graveyard",
+            EffectScope::Single,
+            &ctx,
+        );
+        assert_eq!(zone, Some(Zone::Graveyard));
+        assert_eq!(target.extract_zones(), vec![Zone::Graveyard]);
+        let TargetFilter::Typed(tf) = target else {
+            panic!("class retained")
+        };
+        assert!(tf.properties.contains(&FilterProp::Owned {
+            controller: ControllerRef::DefendingPlayer
+        }));
         let base = "target creature card with lesser power from their graveyard";
         let rem = " with lesser power from their graveyard";
         let scoped = ParseContext {
@@ -56466,10 +56483,6 @@ mod exile_graveyard_origin_shape {
             (
                 "target creature card from target player's graveyard",
                 " from target player's graveyard",
-            ),
-            (
-                "target creature card from defending player's graveyard",
-                " from defending player's graveyard",
             ),
             (
                 "target creature card from a random graveyard",

@@ -28,6 +28,7 @@ mod declared_target_damage_source;
 mod declaring_clause_no_one;
 mod decline_branch_not_graveyard_rider;
 mod defending_player_controls_combat_anchor;
+mod defending_player_graveyard_target;
 mod deferred_target_cost_determination;
 mod delayed_declare_attackers_return;
 mod delayed_departure_lookback;

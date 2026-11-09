@@ -30989,6 +30989,57 @@ mod tests {
         }
     }
 
+    /// SHAPE — CR 508.5a + CR 108.3: a target card "from defending player's
+    /// graveyard" is owned by that one defending player, not by any player.
+    /// Covers the attack-trigger class across the exile (Rysorian Badger,
+    /// Graven Abomination) and reanimate (Rakshasa Debaser) verbs.
+    #[test]
+    fn defending_player_graveyard_target_binds_the_defending_owner() {
+        let cases = [
+            (
+                "Rysorian Badger",
+                "Whenever this creature attacks and isn't blocked, you may exile up to two target creature cards from defending player's graveyard. If you do, you gain 1 life for each card exiled this way and this creature assigns no combat damage this turn.",
+            ),
+            (
+                "Graven Abomination",
+                "Whenever this creature attacks, exile target card from defending player's graveyard.",
+            ),
+            (
+                "Rakshasa Debaser",
+                "Whenever this creature attacks, put target creature card from defending player's graveyard onto the battlefield under your control.",
+            ),
+        ];
+        for (name, oracle) in cases {
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                oracle,
+                name,
+                &[],
+                &["Creature".to_string()],
+                &[],
+            );
+            let execute = parsed
+                .triggers
+                .first()
+                .and_then(|trigger| trigger.execute.as_ref())
+                .unwrap_or_else(|| panic!("{name} trigger execute"));
+            let Some(TargetFilter::Typed(target)) = execute.effect.target_filter() else {
+                panic!("{name}: expected a typed graveyard target, got {execute:?}");
+            };
+            assert!(
+                target.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::DefendingPlayer,
+                }),
+                "{name}: target must be owned by the defending player: {target:?}"
+            );
+            assert!(
+                target.properties.contains(&FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }),
+                "{name}: target must be in a graveyard: {target:?}"
+            );
+        }
+    }
+
     #[test]
     fn singular_and_adjacent_exile_grammars_remain_on_existing_paths() {
         let singular = crate::parser::oracle_effect::parse_effect_chain(
