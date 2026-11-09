@@ -54,7 +54,7 @@ I'm not trying to make money off this. There are no ads. I'm just a dude who lik
 ## Features
 
 - **Rules engine** — Turns, priority, stack, combat, state-based actions, layers, triggers, replacement effects
-- **Resumable batch effects** — Simultaneous destruction and supported zone moves retain replacement choices and private library order across save/restore; surviving replacement choices are reassigned after a player leaves. Instruction performers remain distinct from family and duration controllers across pauses.
+- **Resumable batch effects** — Simultaneous destruction and supported zone moves retain replacement choices and private library order across save/restore; surviving replacement choices are reassigned after a player leaves. Instruction performers remain distinct from family and duration controllers across pauses. Legacy mass-exile pauses without an independently bound execution controller are explicitly refused; a retained announcement snapshot cannot reconstruct it.
 - **Concession settlement** — Begun resolutions keep surviving choices; collected event spans converge through final-part and state-based-action processing before one trigger batch and priority.
 - **Paused target clauses** — Declining Trickster's Stratagem's optional connive target preserves the owner's chosen library position without making the resolving spell connive.
 - **Combat identity across restores** — Phasing retains original combat-partner incarnations and exact parent-slot referents; entering blockers notify attacker-side triggers without inventing blocker-declaration triggers. Ambiguous legacy pending saves are refused rather than rebound to a new object.

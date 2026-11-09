@@ -317,9 +317,9 @@ pub(crate) fn settle_replacement_after_departure(
     let Some(interrupted) = interrupted else {
         return Ok(super::engine_resolution_choices::DepartureSettlement::NotSettled);
     };
-    // CR 603.2 + CR 603.3b + CR 603.7: a concession has no post-action
-    // collector. Keep resumed instruction events separate from the departure
-    // prefix, just as the existing player-scope departure settlement does:
+    // CR 603.2 + CR 603.3b + CR 603.7: the concession's canonical tail starts
+    // after its already-owned departure buffer. Keep resumed instruction events
+    // separate and collect them here, as in player-scope departure settlement:
     // a paused instruction may prepend its retained events to this buffer.
     let mut resumed = Vec::new();
     let settlement = settle_replacement_after_departure_inner(state, interrupted, &mut resumed);
