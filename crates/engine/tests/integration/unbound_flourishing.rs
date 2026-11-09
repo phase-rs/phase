@@ -866,7 +866,7 @@ fn unbound_triggers_on_an_x_mana_ability_and_copies_nothing() {
         matches!(
             &runner.state().waiting_for,
             WaitingFor::PayAmountChoice {
-                resource: PayableResource::ManaGeneric { .. },
+                resource: PayableResource::Mana { .. },
                 source_id,
                 pending_mana_ability: Some(_),
                 ..
