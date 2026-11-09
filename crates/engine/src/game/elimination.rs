@@ -295,9 +295,9 @@ fn eliminate_players_inner(
         )
     });
 
-    // CR 800.4a + CR 608.2c: retain the exact family whose current member is
-    // parked. If that member leaves, only this surviving family may resume
-    // after the departure sweep; a new child or unrelated frame is not ours.
+    // CR 800.4a + CR 608.2c: retain the exact parked family and delivery before
+    // teardown. A departed member is removed; a surviving member whose entry
+    // controller leaves instead completes as Remained through the zone boundary.
     let interrupted_change_zone = state
         .active_change_zone_frame()
         .and_then(|frame| frame.pending.as_ref())
@@ -310,24 +310,38 @@ fn eliminate_players_inner(
             })
         })
         .map(|pending| {
+            let paused = pending
+                .paused_current
+                .as_ref()
+                .expect("the interrupted family has a paused delivery");
             (
                 pending.logical_zone_change_group.logical_group_id,
                 pending.controller,
+                paused.member,
+                paused.expected_event.clone(),
             )
         });
-    let canceled_change_zone_is_resumable = |state: &GameState| {
-        interrupted_change_zone.is_some_and(|(group, controller)| {
-            state
-                .active_change_zone_frame()
-                .and_then(|frame| frame.pending.as_ref())
-                .is_some_and(|pending| {
-                    pending.logical_zone_change_group.logical_group_id == group
-                        && pending.controller == controller
-                        && pending.paused_current.is_none()
+    let canceled_change_zone_is_resumable =
+        |state: &GameState| {
+            interrupted_change_zone
+                .as_ref()
+                .is_some_and(|(group, controller, member, proposal)| {
+                    state
+                        .active_change_zone_frame()
+                        .and_then(|frame| frame.pending.as_ref())
+                        .is_some_and(|pending| {
+                            pending.logical_zone_change_group.logical_group_id == *group
+                                && pending.controller == *controller
+                                && pending.paused_current.as_ref().is_none_or(|paused| {
+                                    paused.captures(*member, proposal)
+                                && paused.terminal_completion
+                                    == Some(crate::types::game_state::ZoneMoveCompletion::Remained)
+                                })
+                        })
                 })
-        }) && state.pending_replacement.is_none()
-            && matches!(state.waiting_for, WaitingFor::Priority { .. })
-    };
+                && state.pending_replacement.is_none()
+                && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        };
 
     let interrupted_ordinary_search = state
         .pending_scoped_library_search
@@ -1597,6 +1611,13 @@ fn do_eliminate(
     // CR 800.4a + CR 616.1: Capture the parked replacement chooser before
     // cast-abandonment teardown can replace its prompt with priority.
     let leaving_is_latched_chooser = state.waiting_for.acting_player() == Some(player);
+
+    // CR 800.4b + CR 117.2e: a surviving owner's parked entry cannot enter
+    // under this departed controller. Capture and terminalize its exact
+    // delivery before any teardown can consume the replacement record or
+    // replace its latched prompt. The begun family stays for its ordinary
+    // resume/convergence boundary after every departure has settled.
+    super::zone_pipeline::terminalize_paused_entry_for_departed_controller(state, player);
 
     abandon_source_bound_resolution_prompt(state, player, leaving_set, events);
     retire_pending_zone_change_contexts_owned_by(state, player);
