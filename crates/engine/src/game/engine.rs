@@ -28062,7 +28062,7 @@ mod bounded_offer_conjunct_tests {
             }
         }
         /// The `#[cfg(test)]`-attributed column-0 `mod … {` … column-0 `}` spans, so the
-        /// census cannot count its own harness. Same shape as the CR 603.5 prompt census.
+        /// census cannot count its own harness.
         fn cfg_test_spans(lines: &[&str]) -> Vec<(usize, usize)> {
             let mut spans = Vec::new();
             let mut i = 0;
