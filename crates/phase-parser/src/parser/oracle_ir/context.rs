@@ -306,6 +306,23 @@ pub enum BareCardAggregateBinding {
     AbilityTargets,
 }
 
+/// CR 608.2c + CR 608.2k: what a bare "that spell" anaphor names in the body
+/// being parsed, for a body NOT itself flagged `in_trigger`. Read only through
+/// [`ParseContext::effective_spell_anaphor_binding`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SpellAnaphorBinding {
+    /// CR 608.2c: a resolving spell/ability instruction — the spell its earlier
+    /// text announced (lowers to `TargetFilter::ParentTarget`).
+    #[default]
+    ParentTarget,
+    /// CR 608.2k: the spell the enclosing trigger condition referred to (lowers
+    /// to `TargetFilter::TriggeringSource`). Handed down to bodies parsed with a
+    /// fresh context that still belong to a triggered ability: delayed /
+    /// reflexive bodies (CR 603.7 / CR 603.12), a trigger-owned results table
+    /// (CR 706.3b), an "instead" sub-body of a triggered ability.
+    EventSource,
+}
+
 /// CR 601.2c + CR 608.2c: the target slots announced by the earlier clauses of
 /// an effect chain, for resolving a demonstrative ("that creature") to the
 /// declared slot it names. Only the stable prefix is numbered: once a clause
@@ -336,6 +353,40 @@ pub struct DeclaredSlotEntry {
     pub index: Option<usize>,
     /// The slot's target filter, matched against a demonstrative's noun.
     pub filter: TargetFilter,
+}
+
+/// CR 608.2c: how the immediately preceding instruction produced the chain's
+/// pending tracked set, and the zone it left those cards in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingTrackedSet {
+    pub zone: Zone,
+    pub producer: TrackedSetProducer,
+}
+
+/// CR 608.2c: the instruction kind that published a pending tracked set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackedSetProducer {
+    /// "Choose card(s) in <zone>": the chosen cards are a referent that a later
+    /// bare "it" / "they" can name.
+    Chosen,
+    /// A bare reveal (CR 701.20b) chooses nothing, so its cards are named only
+    /// by "those cards" / "the cards revealed this way", never by a bare
+    /// pronoun.
+    Revealed,
+}
+
+impl ParseContext {
+    /// CR 608.2c: whether the preceding instruction chose cards that a bare
+    /// "it" / "they" can refer back to.
+    pub fn chosen_tracked_set_pending(&self) -> bool {
+        matches!(
+            self.pending_tracked_set,
+            Some(PendingTrackedSet {
+                producer: TrackedSetProducer::Chosen,
+                ..
+            })
+        )
+    }
 }
 
 /// CR 700.2: the body a [`ParseContext`] parses — a whole ability, or one mode
@@ -387,6 +438,20 @@ pub struct ParseContext {
     /// A declared "target creature" subject inside a trigger body fails closed
     /// to `Unimplemented` (Ria Ivor's shield is not yet supported).
     pub in_trigger: bool,
+    /// What a bare "that spell" anaphor in this effect body names when the body
+    /// is not itself an `in_trigger` body (CR 608.2c + CR 608.2k).
+    ///
+    /// Set to [`SpellAnaphorBinding::EventSource`] for a delayed triggered
+    /// ability's body (CR 603.7), a reflexive body (CR 603.12), a trigger-owned
+    /// results table (CR 706.3b) and an "instead" sub-body parsed out of a
+    /// triggered ability: those bodies parse with a fresh context but have no
+    /// announced parent target, so their anaphor names the object the trigger
+    /// condition referred to. Distinct from `in_trigger`, which gates many other
+    /// parser branches. Consumers read this through
+    /// [`Self::effective_spell_anaphor_binding`], which lets `in_trigger`
+    /// dominate; only a context hand-off that also carries `in_trigger` (the
+    /// effect-chain chunk context) copies the raw field.
+    pub spell_anaphor_binding: SpellAnaphorBinding,
     /// Contextual source for the exact bare aggregate surface "those cards".
     /// Set per effect-chain chunk from the nearest typed producer, or from a
     /// proven trigger subject batch when no compatible chain producer wins.
@@ -862,8 +927,9 @@ pub struct ParseContext {
     /// it lowers a `TrackedSet` put-onto-battlefield whose own clause text named
     /// no explicit origin; an impulse/cascade producer leaves this `None`, so
     /// the lowering keeps the exile default. Reset per effect chain in
-    /// `parse_effect_chain_ir`.
-    pub pending_tracked_set_origin: Option<Zone>,
+    /// `parse_effect_chain_ir`. The producer kind decides whether a bare
+    /// pronoun may name the set ([`Self::chosen_tracked_set_pending`]).
+    pub pending_tracked_set: Option<PendingTrackedSet>,
     /// CR 701.42a: The partner card name extracted from a meld instigator's
     /// own/control gate ("if you both own and control [self] and a [type] named
     /// [partner], exile them, then meld them into [result]"). The gate is parsed
@@ -1137,6 +1203,17 @@ impl ParseContext {
         }
     }
 
+    /// CR 608.2c + CR 608.2k: the binding a bare "that spell" anaphor takes here.
+    /// A printed trigger body (`in_trigger`) always names its event's spell;
+    /// otherwise the handed-down `spell_anaphor_binding` decides.
+    pub(crate) fn effective_spell_anaphor_binding(&self) -> SpellAnaphorBinding {
+        if self.in_trigger {
+            SpellAnaphorBinding::EventSource
+        } else {
+            self.spell_anaphor_binding
+        }
+    }
+
     /// Execute `f` with a temporary relative-player scope, restoring the prior
     /// value on return. Replaces thread-local ScopeGuard RAII pattern.
     pub fn with_player_scope<R>(
@@ -1207,6 +1284,45 @@ mod tests {
             context: "parse_target could not classify".into(),
             text: text.into(),
             line_index: 0,
+        }
+    }
+
+    /// CR 608.2c + CR 608.2k: `in_trigger` dominates the handed-down binding; a
+    /// non-trigger body takes the handed-down binding unchanged.
+    #[test]
+    fn effective_spell_anaphor_binding_lets_in_trigger_dominate() {
+        for (in_trigger, binding, expected) in [
+            (
+                false,
+                SpellAnaphorBinding::ParentTarget,
+                SpellAnaphorBinding::ParentTarget,
+            ),
+            (
+                false,
+                SpellAnaphorBinding::EventSource,
+                SpellAnaphorBinding::EventSource,
+            ),
+            (
+                true,
+                SpellAnaphorBinding::ParentTarget,
+                SpellAnaphorBinding::EventSource,
+            ),
+            (
+                true,
+                SpellAnaphorBinding::EventSource,
+                SpellAnaphorBinding::EventSource,
+            ),
+        ] {
+            let ctx = ParseContext {
+                in_trigger,
+                spell_anaphor_binding: binding,
+                ..ParseContext::default()
+            };
+            assert_eq!(
+                ctx.effective_spell_anaphor_binding(),
+                expected,
+                "in_trigger={in_trigger}, binding={binding:?}"
+            );
         }
     }
 

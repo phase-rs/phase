@@ -1055,6 +1055,7 @@ fn siege_entering_untransformed_still_chooses_protector() {
 
     let resolved = ResolvedAbility::new(
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,
             target: TargetFilter::SelfRef,

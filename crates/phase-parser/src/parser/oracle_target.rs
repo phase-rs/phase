@@ -26,7 +26,9 @@ use super::oracle_effect::{
     is_bare_object_pronoun, parse_multi_target_count_expr, parse_search_name_reference_suffix,
     resolve_it_pronoun,
 };
-use super::oracle_ir::context::{bind_controller_phrase, ChosenColorQualifierScope, ParseContext};
+use super::oracle_ir::context::{
+    bind_controller_phrase, ChosenColorQualifierScope, ParseContext, SpellAnaphorBinding,
+};
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use super::oracle_nom::filter as nom_filter;
@@ -140,6 +142,32 @@ pub(crate) fn resolve_pronoun_target(ctx: &mut ParseContext, pronoun: &str) -> T
             resolve_it_pronoun(ctx)
         }
         _ => TargetFilter::ParentTarget,
+    }
+}
+
+/// CR 608.2c + CR 608.2k: Refine a bare "that spell" binding for a caller that
+/// threaded the parse context.
+///
+/// The arm itself defaults to `TriggeringSource` because most callers parse
+/// without a context. When `effective_spell_anaphor_binding()` is `ParentTarget`
+/// (a NON-trigger instruction) the same anaphor names the spell mentioned
+/// earlier in the instruction sequence — the announced target of the resolving spell/ability ("Counter
+/// target spell. … counter that spell": Denied!, Mages' Contest, the "… instead"
+/// counter bodies; "… counter the spell": Split Decision's vote outcome). Only
+/// the consumers that both thread `ctx` and can carry a bare anaphor apply this
+/// refinement — today the counter and change-targets parsers — so a
+/// context-dropping parser (and the copy / gain-control consumers) keeps the
+/// historical event-source reading instead of silently re-binding.
+pub(crate) fn bind_spell_anaphor_to_context(
+    ctx: &ParseContext,
+    filter: TargetFilter,
+) -> TargetFilter {
+    if !matches!(filter, TargetFilter::TriggeringSource) {
+        return filter;
+    }
+    match ctx.effective_spell_anaphor_binding() {
+        SpellAnaphorBinding::ParentTarget => TargetFilter::ParentTarget,
+        SpellAnaphorBinding::EventSource => TargetFilter::TriggeringSource,
     }
 }
 
@@ -1072,13 +1100,17 @@ pub fn parse_target_with_syntax<'a>(
             return parse_target_with_syntax(original_rest, ctx);
         }
     }
-    // CR 608.2k: Bare "that spell" refers to the triggering spell object
-    // (Krark, the Thumbless; Spellchain Scatter). "that card" is NOT included —
-    // it stays on the ParentTarget arm below and is rewritten to TrackedSet when
-    // a prior sibling publishes an affected set (Sin, Spira's Punishment). Predicate
-    // continuations ("that spell is countered this way") keep ParentTarget because
-    // text remains after the noun; comma continuations ("copy that spell, and …")
-    // still name the triggering spell.
+    // CR 608.2k: Bare "that spell" defaults to the triggering spell object
+    // (Krark, the Thumbless; Spellchain Scatter). A caller that threads the parse
+    // context refines this for a non-trigger instruction via
+    // `bind_spell_anaphor_to_context` (the earlier announced target, CR 608.2c).
+    // "that card" is NOT included — it stays on the ParentTarget arm below and is
+    // rewritten to TrackedSet when a prior sibling publishes an affected set (Sin,
+    // Spira's Punishment). Predicate continuations ("that spell is countered this
+    // way") keep ParentTarget because text remains after the noun. The counter and
+    // change-targets consumers refine the binding through
+    // `bind_spell_anaphor_to_context`; the copy and gain-control consumers keep
+    // this event-source default (recorded residual, follow-up).
     if let Ok((rest_subject, _)) = tag::<_, _, OracleError<'_>>("that ").parse(lower.as_str()) {
         let original_rest = &text[lower.len() - rest_subject.len()..];
         if let Ok((after, _)) = parse_word_bounded(rest_subject, "spell") {
@@ -3861,6 +3893,37 @@ fn parse_type_phrase_folding_unbound<'a>(
                     left_card_suffix = *is_card;
                     left_head_noun = true;
                     break;
+                }
+            }
+        }
+        if !consumed_suffix {
+            // CR 205.2a + CR 205.3a: a card-type LIST ends each leg with the same
+            // informational noun immediately before the list separator — "an
+            // Angel card, a Demon card, and/or a Dragon card" (Kaalia, Zenith
+            // Seeker). The table above only matches the noun when a SPACE
+            // follows it, so a comma-separated leg left " card," in the
+            // remainder and the `TYPE_SEPARATORS` fold below never saw its
+            // separator: it published only the leftmost leg (`Angel`) as the
+            // filter, silently narrowing "an Angel, a Demon, and/or a Dragon"
+            // to "an Angel" so every Demon and Dragon became unselectable
+            // (issue #8068).
+            //
+            // Only the NOUN is consumed, never the comma: the separator stays in
+            // the remainder for the fold, and a caller that splits sibling
+            // clauses still sees the clause boundary it expects.
+            static COMMA_LED_NOUNS: &[(&str, bool)] = &[("cards", true), ("card", true)];
+            for (noun, is_card) in COMMA_LED_NOUNS {
+                if let Ok((after_noun, _)) = tag::<_, _, OracleError<'_>>(*noun).parse(rest_trimmed)
+                {
+                    if peek(tag::<_, _, OracleError<'_>>(","))
+                        .parse(after_noun)
+                        .is_ok()
+                    {
+                        pos += ws_len + (rest_trimmed.len() - after_noun.len());
+                        left_card_suffix = *is_card;
+                        left_head_noun = true;
+                        break;
+                    }
                 }
             }
         }
@@ -16114,10 +16177,45 @@ mod tests {
 
     #[test]
     fn parse_target_standalone_that_spell_is_triggering_source() {
+        // CR 608.2k: the arm's own default. Consumers that thread a non-trigger
+        // context refine it through `bind_spell_anaphor_to_context`.
         let (filter, rest, _) =
             parse_target_with_syntax("that spell", &mut ParseContext::default());
         assert_eq!(filter, TargetFilter::TriggeringSource);
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn bind_spell_anaphor_to_context_refines_only_non_trigger_contexts() {
+        let default_ctx = ParseContext::default();
+        assert_eq!(
+            bind_spell_anaphor_to_context(&default_ctx, TargetFilter::TriggeringSource),
+            TargetFilter::ParentTarget,
+            "CR 608.2c: a non-trigger instruction names its earlier announced target"
+        );
+        let trigger_ctx = ParseContext {
+            in_trigger: true,
+            ..ParseContext::default()
+        };
+        assert_eq!(
+            bind_spell_anaphor_to_context(&trigger_ctx, TargetFilter::TriggeringSource),
+            TargetFilter::TriggeringSource,
+            "CR 608.2k: a triggered ability names the event's spell object"
+        );
+        let delayed_ctx = ParseContext {
+            spell_anaphor_binding: SpellAnaphorBinding::EventSource,
+            ..ParseContext::default()
+        };
+        assert_eq!(
+            bind_spell_anaphor_to_context(&delayed_ctx, TargetFilter::TriggeringSource),
+            TargetFilter::TriggeringSource,
+            "CR 603.7 + CR 608.2k: a default-context delayed body has no parent target"
+        );
+        assert_eq!(
+            bind_spell_anaphor_to_context(&default_ctx, TargetFilter::StackSpell),
+            TargetFilter::StackSpell,
+            "only the bare anaphor binding is refined"
+        );
     }
 
     #[test]
@@ -18510,6 +18608,86 @@ mod tests {
         assert!(
             !matches!(non_type, TargetFilter::Or { .. }),
             "a non-type right conjunct must not union, got {non_type:?}"
+        );
+    }
+
+    /// CR 205.2a + CR 205.3a: a card-type LIST ends each leg with the
+    /// informational "card"/"cards" noun immediately before the list
+    /// separator, so the noun must be consumed there too. Issue #8068: the noun
+    /// scanner only recognized a SPACE after the noun, which left the leftmost
+    /// leg's " card," in the remainder; the comma was then invisible to the
+    /// `TYPE_SEPARATORS` fold below and only the first leg survived.
+    ///
+    /// Paired positive: the same union without the comma-noun form (no noun at
+    /// all) already folds, so the assertion below is about the noun and not
+    /// about unions in general.
+    #[test]
+    fn comma_separated_card_noun_legs_fold_into_one_union() {
+        let (nounless, nounless_rest) =
+            parse_type_phrase_folding("angel, a demon, and/or a dragon");
+        assert_eq!(
+            nounless_rest.trim(),
+            "",
+            "reach-guard: a noun-less list already folds"
+        );
+        assert!(
+            matches!(nounless, TargetFilter::Or { .. }),
+            "reach-guard: a noun-less list already folds, got {nounless:?}"
+        );
+
+        let (filter, rest) =
+            parse_type_phrase_folding("angel card, a demon card, and/or a dragon card");
+        assert_eq!(
+            rest.trim(),
+            "",
+            "the comma-led list must be consumed whole, got remainder {rest:?}"
+        );
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected a three-leg union, got {filter:?}");
+        };
+        let legs: Vec<&str> = filters
+            .iter()
+            .filter_map(|leg| match leg {
+                TargetFilter::Typed(tf) => match tf.type_filters.as_slice() {
+                    [TypeFilter::Subtype(subtype)] => Some(subtype.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(legs, vec!["Angel", "Demon", "Dragon"]);
+
+        // The same list with core types and the plural noun.
+        let (core, core_rest) =
+            parse_type_phrase_folding("creature cards, a land card, and/or an artifact card");
+        assert_eq!(core_rest.trim(), "");
+        let TargetFilter::Or { filters } = core else {
+            panic!("expected a three-leg union, got {core:?}");
+        };
+        assert_eq!(filters.len(), 3, "got {filters:?}");
+    }
+
+    /// Paired negative: consuming the comma-noun form must not eat the clause
+    /// separator. A card-type leg followed by a sibling instruction keeps its
+    /// comma in the remainder for the caller's own clause grammar.
+    ///
+    /// SYNTHETIC PROBE: no printed card pairs a "<type> card" leg with a
+    /// "then …" sibling, so the input is a grammar probe for the separator-
+    /// retention contract rather than a printed-card reading. The contract is
+    /// what the real card (Kaalia, Zenith Seeker) depends on: its legs are ALSO
+    /// followed by a comma (the next leg), and the clause splitter must still
+    /// see the boundary after the final leg.
+    #[test]
+    fn comma_led_card_noun_keeps_a_sibling_clause_separator() {
+        let (filter, rest) = parse_type_phrase_folding("creature card, then draw a card");
+        assert!(
+            matches!(filter, TargetFilter::Typed(_)),
+            "a sibling instruction is not a union leg, got {filter:?}"
+        );
+        assert_eq!(
+            rest.trim_start(),
+            ", then draw a card",
+            "the clause separator must stay in the remainder"
         );
     }
 

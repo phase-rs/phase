@@ -1,4 +1,4 @@
-import type { GameFormat, MatchType } from "../adapter/types";
+import type { ChallengeDeck, GameFormat, MatchType } from "../adapter/types";
 import { getSharedAdapter } from "../adapter/wasm-adapter";
 import { expandParsedDeck, type ParsedDeck } from "./deckParser";
 
@@ -71,6 +71,7 @@ interface DeckCompatibilityRequest {
   draft_set_codes: string[];
   selected_format?: GameFormat | null;
   selected_match_type?: MatchType | null;
+  selected_challenge_deck?: ChallengeDeck | null;
   player_count?: number;
   summary_only?: boolean;
 }
@@ -79,6 +80,14 @@ interface EvaluateOptions {
   selectedFormat?: GameFormat | null;
   draftSetCodes?: readonly string[];
   selectedMatchType?: MatchType | null;
+  /**
+   * The Horde challenge deck to validate survivor requirements against, with
+   * or without a format tag. The AI-survivor catalog passes this alone (no
+   * selected format): the engine answers the picked challenge's survivor
+   * verdict (Commander shape for EDH hordes, unrestricted for
+   * constructed-block hordes).
+   */
+  selectedChallengeDeck?: ChallengeDeck | null;
   summaryOnly?: boolean;
   onResult?: (name: string, result: DeckCompatibilityResult) => void;
   onStatus?: (status: "starting-worker" | "loading-card-database" | "checking-deck", name?: string) => void;
@@ -95,6 +104,7 @@ function buildRequest(deck: ParsedDeck, options: EvaluateOptions): DeckCompatibi
     ...expandParsedDeck(deck),
     selected_format: options.selectedFormat ?? null,
     selected_match_type: options.selectedMatchType ?? null,
+    selected_challenge_deck: options.selectedChallengeDeck ?? null,
     player_count: options.playerCount ?? 2,
     summary_only: options.summaryOnly ?? false,
     draft_set_codes: [...(options.draftSetCodes ?? [])],
@@ -112,6 +122,7 @@ function compatibilityCacheKey(request: DeckCompatibilityRequest): string {
     companion: request.companion,
     selected_format: request.selected_format ?? null,
     selected_match_type: request.selected_match_type ?? null,
+    selected_challenge_deck: request.selected_challenge_deck ?? null,
     player_count: request.player_count ?? 2,
     // Every request field the engine READS has to be named in
     // compatibilityCacheKey, because this module's four cache/inflight maps are
