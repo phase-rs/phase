@@ -131,7 +131,7 @@ impl DepartingEntryPayment {
         {
             return Ok(false);
         }
-        handle_replacement_choice(state, 1, events)?;
+        state.waiting_for = handle_replacement_choice(state, 1, events)?;
         // CR 117.3 + CR 800.4a: the ordinary replacement epilogue seeds the
         // active player's priority. A departed active player cannot receive it.
         if let WaitingFor::Priority { player } = state.waiting_for {
