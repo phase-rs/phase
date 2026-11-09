@@ -496,6 +496,7 @@ mod tests {
     use crate::game::scenario::{GameScenario, P0, P1};
     use crate::game::zones::create_object;
     use crate::types::ability::{ControllerRef, TypedFilter};
+    use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{PendingContinuation, PersistedGameState, StackEntryKind};
     use crate::types::identifiers::{CardId, LEGACY_INCARNATION};
@@ -931,7 +932,19 @@ mod tests {
         runner
             .declare_attackers(&[(partner, AttackTarget::Player(P1))])
             .unwrap();
-        runner.advance_to_phase(Phase::DeclareBlockers);
+        for _ in 0..32 {
+            if matches!(
+                runner.state().waiting_for,
+                WaitingFor::DeclareBlockers { .. }
+            ) {
+                break;
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            runner.act(GameAction::PassPriority).unwrap();
+        }
         runner.declare_blockers(&[(fighter, partner)]).unwrap();
         (runner.state().clone(), fighter, partner)
     }
