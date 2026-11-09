@@ -31022,8 +31022,18 @@ mod tests {
                 .first()
                 .and_then(|trigger| trigger.execute.as_ref())
                 .unwrap_or_else(|| panic!("{name} trigger execute"));
-            let Some(TargetFilter::Typed(target)) = execute.effect.target_filter() else {
-                panic!("{name}: expected a typed graveyard target, got {execute:?}");
+            // Reach guard: the owner binding below comes from a complete parse.
+            assert!(
+                !crate::parser::oracle::has_unimplemented(execute),
+                "{name} must parse fully: {execute:?}"
+            );
+            let Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                target: TargetFilter::Typed(target),
+                ..
+            } = execute.effect.as_ref()
+            else {
+                panic!("{name}: expected a graveyard-origin ChangeZone, got {execute:?}");
             };
             assert!(
                 target.properties.contains(&FilterProp::Owned {
