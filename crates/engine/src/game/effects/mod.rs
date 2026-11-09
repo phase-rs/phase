@@ -25593,7 +25593,7 @@ fn resolve_chain_body(
         {
             let mut sub_clone = sub.as_ref().clone();
             if should_propagate_parent_targets(ability, &sub_clone) {
-                sub_clone.replace_target_occurrences(inherited_parent_occurrences(ability, sub));
+                sub_clone.mirror_targets_from(ability);
             }
             apply_parent_chain_context(
                 &mut sub_clone,

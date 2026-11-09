@@ -22,6 +22,20 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    let object_target = ability.targets.iter().find_map(|target| {
+        if let TargetRef::Object(id) = target {
+            Some(*id)
+        } else {
+            None
+        }
+    });
+    // CR 115.6 + CR 608.2b: an independent conniver slot that was declined
+    // or emptied as illegal names no creature, not the resolving source.
+    if object_target.is_none() && super::sub_has_independent_object_target_slot(ability) {
+        return Ok(());
+    }
+    let conniver_id = object_target.unwrap_or(ability.source_id);
+
     // CR 701.50d + CR 107.3i: Dynamic connive counts (e.g. creatures that died
     // this turn) resolve at ability resolution via the shared quantity pipeline.
     let count = match &ability.effect {
@@ -31,18 +45,6 @@ pub fn resolve(
         _ => 1,
     };
 
-    // Determine conniving creature: first object target, or source
-    let conniver_id = ability
-        .targets
-        .iter()
-        .find_map(|t| {
-            if let TargetRef::Object(id) = t {
-                Some(*id)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(ability.source_id);
     // CR 701.50b + CR 400.7: "~ connives" whose source left the battlefield
     // before resolution (and may have returned as a new object). The connive
     // uses the DEPARTED permanent's last known information — the subject is
