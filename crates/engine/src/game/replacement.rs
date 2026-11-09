@@ -27012,8 +27012,12 @@ mod tests {
             ))
             .quantity_modification(QuantityModification::Minus { value: 1 })
             .counter_match(CounterMatch::OfType(CounterType::Minus1Minus1));
-        // Synthetic: no printed card has an optional counter `Prevent`; this
-        // pins the matcher to the shared predicate's mode gate.
+        // Synthetic: no printed card has an optional counter `Prevent`; every
+        // printed counter prohibition is a mandatory "can't", the nearest being
+        // Melira's Keepers ("This creature can't have counters put on it.").
+        // This only pins the matcher to the shared predicate's mode gate, the
+        // gate the pipeline already applies (see
+        // `optional_counter_prevention_prompts_instead_of_auto_preventing`).
         let mut optional_prevention = solemnity_object_counter_line();
         optional_prevention.mode = ReplacementMode::Optional { decline: None };
 

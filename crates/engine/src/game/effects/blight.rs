@@ -264,8 +264,9 @@ mod tests {
 
     /// CR 702.26b + CR 702.26d: a phased-out creature stays on the battlefield
     /// but is treated as though it doesn't exist, so it is neither offered for
-    /// blight nor a reason blight is possible, whichever way it phased out
-    /// (CR 702.26g: directly, or indirectly with its host).
+    /// blight nor a reason blight is possible. Both `PhaseStatus::PhasedOut`
+    /// causes are covered so the predicate can't key on one of them (CR 702.26g
+    /// names the indirect cause; only attached permanents phase out that way).
     #[test]
     fn blight_skips_phased_out_creatures() {
         let board = |first: PhaseStatus, second: PhaseStatus| {
