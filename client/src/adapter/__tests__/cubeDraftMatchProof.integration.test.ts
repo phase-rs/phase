@@ -1,15 +1,36 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import initDraft from "@wasm/draft";
 import initEngine, {
   export_game_state_json, get_legal_actions_js, initialize_game, load_card_database as loadEngineCards,
 } from "@wasm/engine";
 
+const { hostRoom, saveDraftHostSession } = vi.hoisted(() => ({
+  hostRoom: vi.fn(),
+  saveDraftHostSession: vi.fn(async () => {}),
+}));
+
+vi.mock("../../network/connection", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../network/connection")>()),
+  hostRoom,
+}));
+
+vi.mock("../../services/draftPersistence", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../services/draftPersistence")>()),
+  clearDraftHostSession: vi.fn(async () => {}),
+  loadDraftHostSession: vi.fn(async () => ({ type: "absent" })),
+  saveActiveDraftPod: vi.fn(),
+  saveDraftHostSession,
+}));
+
 import fixture from "../../test/fixtures/draftMatchProof.json";
 import { DraftAdapter, type CubeDraftSettings, type DraftPlayerView } from "../draft-adapter";
+import { P2PDraftHost } from "../p2p-draft-host";
 import { formatMetadata } from "../../data/formatRegistry";
+import type { PersistedDraftHostSession } from "../../services/draftPersistence";
+import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
 
 const wasmDir = resolve(__dirname, "../../wasm");
 const cubeList = fixture.spells.map((name) => `15 ${name}`).join("\n");
@@ -137,5 +158,226 @@ describe("custom Cube submission to real Limited game", () => {
     expect(view.min_deck_size).toBe(21);
     await expect(adapter.submitDeck(view.pool.map((card) => card.name), []))
       .rejects.toThrow("deck has 20 cards, minimum is 21");
+  }, 300_000);
+
+  it("checks an exported session with the legacy admission without installing it", async () => {
+    const adapter = new DraftAdapter();
+    const view = await draftTwenty(adapter, 20);
+    await adapter.submitDeck(view.pool.map((card) => card.name), []);
+    const exported = await adapter.exportSession();
+    const session = JSON.parse(exported) as { config: Record<string, unknown> };
+
+    // Reach: the session the engine exported passes the check.
+    expect(await adapter.checkRestorableSession(exported)).toEqual({ type: "Admitted" });
+    expect(await adapter.checkRestorableSession(JSON.stringify({
+      ...session,
+      config: { ...session.config, flow: "FifoAsync" },
+    }))).toEqual({ type: "Incompatible" });
+    expect(await adapter.checkRestorableSession(JSON.stringify({
+      ...session,
+      config: { ...session.config, selection_policy: { burns_per_pick: 1, discard_threshold: 0 } },
+    }))).toEqual({ type: "Incompatible" });
+    expect(await adapter.checkRestorableSession("{")).toEqual({ type: "Unreadable" });
+    expect(await adapter.exportSession()).toBe(exported);
+  }, 300_000);
+
+  it("keeps a recovering host's saved session out of an installed host's draft engine session", async () => {
+    const engine = new DraftAdapter();
+    await engine.initializeCube(cubeList, "Recovered pod", settings(20), 0, 401);
+    const recoveredSession = await engine.exportSession();
+    await engine.initializeCube(cubeList, "Installed pod", settings(20), 0, 402);
+    const installedSession = await engine.exportSession();
+    const ownSession: Record<string, string> = {
+      "installed-owner": installedSession,
+      "recovered-host": recoveredSession,
+    };
+    // Reach: the engine exported two different sessions and holds the second.
+    expect(recoveredSession).not.toBe(installedSession);
+    expect(await engine.exportSession()).toBe(installedSession);
+
+    const savedUnder = (persistenceId: string) => saveDraftHostSession.mock.calls
+      .filter((call) => (call as unknown[])[0] === persistenceId)
+      .map((call) => ((call as unknown[])[1] as PersistedDraftHostSession).draftSessionJson);
+    hostRoom.mockImplementation(async (_signal: AbortSignal | undefined, options: { preferredRoomCode?: string } = {}) => {
+      const roomCode = options.preferredRoomCode ?? "ABCDE";
+      return {
+        roomCode,
+        peerId: `host-${roomCode}`,
+        peer: { destroy: vi.fn() } as never,
+        onGuestConnected: vi.fn(() => vi.fn()),
+        destroy: vi.fn(),
+      };
+    });
+    const poolInput = { type: "Set" as const, data: { pools: [{ code: "TST" }], sequence: ["TST"] } };
+    const started = vi.spyOn(P2PDraftHost.prototype, "initialize");
+    const realImport = DraftAdapter.prototype.importSession;
+    let releaseImport!: () => void;
+    const importReleased = new Promise<void>((resolveRelease) => {
+      releaseImport = resolveRelease;
+    });
+    let reachImport!: () => void;
+    const importReached = new Promise<void>((resolveReach) => {
+      reachImport = resolveReach;
+    });
+    // Holds the recovering host after its real import has installed its session.
+    const imports = vi.spyOn(DraftAdapter.prototype, "importSession").mockImplementation(
+      async function (this: DraftAdapter, json: string, difficulty: number) {
+        const view = await realImport.call(this, json, difficulty);
+        reachImport();
+        await importReleased;
+        return view;
+      },
+    );
+    try {
+      await expect(useMultiplayerDraftStore.getState().hostDraft({
+        poolInput,
+        kind: "Premier",
+        podSize: 2,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Casual",
+        persistenceId: "installed-owner",
+      })).resolves.toEqual({ status: "opened" });
+      const installed = started.mock.contexts[0] as P2PDraftHost;
+      Reflect.set(installed, "draftStarted", true);
+      const saveInstalled = () =>
+        (Reflect.get(installed, "persistSessionStrict") as () => Promise<void>).call(installed);
+      await saveInstalled();
+      // Reach: the installed host's own save path saves its own session.
+      expect(savedUnder("installed-owner")).toContain(installedSession);
+
+      const recovered: PersistedDraftHostSession = {
+        persistenceId: "recovered-host",
+        roomCode: "BBBBB",
+        kind: "Premier",
+        podSize: 2,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Casual",
+        seatTokens: { 0: "host" },
+        seatNames: { 0: "Host" },
+        kickedTokens: [],
+        draftStarted: true,
+        draftCode: "recovered-host",
+        draftSessionJson: recoveredSession,
+        poolInput,
+      };
+      let current = true;
+      const outcome = useMultiplayerDraftStore.getState().resumeHostedDraft({
+        config: {
+          poolInput,
+          kind: recovered.kind,
+          podSize: recovered.podSize,
+          hostDisplayName: recovered.hostDisplayName,
+          tournamentFormat: recovered.tournamentFormat,
+          podPolicy: recovered.podPolicy,
+          persistenceId: recovered.persistenceId,
+          preferredRoomCode: recovered.roomCode,
+          recovery: { session: recovered, raw: recovered },
+        },
+        isCurrent: () => current,
+        routeSignal: new AbortController().signal,
+      });
+      await importReached;
+      // Reach: the recovering host's restore imported its exact saved session.
+      expect(imports.mock.calls.map(([json]) => json)).toEqual([recoveredSession]);
+
+      await saveInstalled();
+      current = false;
+      releaseImport();
+      await outcome;
+
+      expect(savedUnder("installed-owner")).not.toContain(recoveredSession);
+      const { hostPersistenceId } = useMultiplayerDraftStore.getState();
+      expect(hostPersistenceId).not.toBeNull();
+      expect(JSON.parse(await engine.exportSession())).toEqual(JSON.parse(ownSession[hostPersistenceId!]!));
+    } finally {
+      releaseImport();
+      await useMultiplayerDraftStore.getState().leave(true);
+      vi.restoreAllMocks();
+    }
+  }, 300_000);
+
+  it.each([
+    ["in Review", (session: Record<string, unknown>) => ({ ...session, status: "Review" })],
+    [
+      "with a FIFO flow",
+      (session: Record<string, unknown>) => ({ ...session, config: { ...(session.config as Record<string, unknown>), flow: "FifoAsync" } }),
+    ],
+  ] as const)("refuses a recovering host before any import when the draft engine refuses its exported session %s", async (_label, edit) => {
+    const engine = new DraftAdapter();
+    await engine.initializeCube(cubeList, "Installed pod", settings(20), 0, 403);
+    const installedSession = await engine.exportSession();
+    const refusedSession = JSON.stringify(edit(JSON.parse(installedSession) as Record<string, unknown>));
+    // Reach: the edit changed the session the engine exported, and the engine holds the export.
+    expect(refusedSession).not.toBe(installedSession);
+    expect(await engine.exportSession()).toBe(installedSession);
+    hostRoom.mockImplementation(async (_signal: AbortSignal | undefined, options: { preferredRoomCode?: string } = {}) => {
+      const roomCode = options.preferredRoomCode ?? "ABCDE";
+      return {
+        roomCode,
+        peerId: `host-${roomCode}`,
+        peer: { destroy: vi.fn() } as never,
+        onGuestConnected: vi.fn(() => vi.fn()),
+        destroy: vi.fn(),
+      };
+    });
+    const poolInput = { type: "Set" as const, data: { pools: [{ code: "TST" }], sequence: ["TST"] } };
+    const check = vi.spyOn(DraftAdapter.prototype, "checkRestorableSession");
+    const imports = vi.spyOn(DraftAdapter.prototype, "importSession");
+    try {
+      await expect(useMultiplayerDraftStore.getState().hostDraft({
+        poolInput,
+        kind: "Premier",
+        podSize: 2,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Casual",
+        persistenceId: "installed-owner",
+      })).resolves.toEqual({ status: "opened" });
+      const refused: PersistedDraftHostSession = {
+        persistenceId: "refused-host",
+        roomCode: "CCCCC",
+        kind: "Premier",
+        podSize: 2,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Casual",
+        seatTokens: { 0: "host" },
+        seatNames: { 0: "Host" },
+        kickedTokens: [],
+        draftStarted: true,
+        draftCode: "refused-host",
+        draftSessionJson: refusedSession,
+        poolInput,
+      };
+
+      const outcome = await useMultiplayerDraftStore.getState().resumeHostedDraft({
+        config: {
+          poolInput,
+          kind: refused.kind,
+          podSize: refused.podSize,
+          hostDisplayName: refused.hostDisplayName,
+          tournamentFormat: refused.tournamentFormat,
+          podPolicy: refused.podPolicy,
+          persistenceId: refused.persistenceId,
+          preferredRoomCode: refused.roomCode,
+          recovery: { session: refused, raw: refused },
+        },
+        isCurrent: () => true,
+        routeSignal: new AbortController().signal,
+      });
+
+      // Reach: the real draft engine was asked once, with the exact saved session, and refused it.
+      expect(check.mock.calls).toEqual([[refusedSession]]);
+      await expect(check.mock.results[0]?.value).resolves.toEqual({ type: "Incompatible" });
+      expect(outcome).toBe("incompatible");
+      expect(imports).not.toHaveBeenCalled();
+      expect(useMultiplayerDraftStore.getState().hostPersistenceId).toBe("installed-owner");
+      expect(JSON.parse(await engine.exportSession())).toEqual(JSON.parse(installedSession));
+    } finally {
+      await useMultiplayerDraftStore.getState().leave(true);
+      vi.restoreAllMocks();
+    }
   }, 300_000);
 });

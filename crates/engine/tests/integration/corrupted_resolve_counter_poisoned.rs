@@ -134,3 +134,76 @@ fn corrupted_resolve_counters_only_when_controller_poisoned() {
         "unpoisoned controller: target must resolve — the counter's condition fails"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CR 608.2c: a resolving spell's "counter that spell" names the spell's earlier
+// announced target (the `ParentTarget` anaphor), not a trigger event.
+// ---------------------------------------------------------------------------
+
+const STUBBORN_DENIAL_ORACLE: &str = "Counter target noncreature spell unless its controller pays \
+     {1}.\nFerocious — If you control a creature with power 4 or greater, counter that spell instead.";
+
+/// Drives the real cast->resolve pipeline: P0 casts Mox Pearl, P1 answers with
+/// Stubborn Denial while controlling a 4/4 (Ferocious). The "instead" body's
+/// `Counter { target: ParentTarget }` must counter the announced spell.
+#[test]
+fn stubborn_denial_ferocious_counters_the_announced_spell() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Mox Pearl ({0} Artifact, "{T}: Add {W}.") is a printed zero-mana-cost
+    // noncreature PERMANENT spell: a resolved artifact enters the battlefield,
+    // while a countered one goes to the graveyard (CR 608.3a vs CR 701.6a), so the
+    // final zone discriminates "countered" from "resolved".
+    let mut target_spell =
+        scenario.add_artifact_to_hand_from_oracle(P0, "Mox Pearl", "{T}: Add {W}.");
+    target_spell.with_mana_cost(ManaCost::zero());
+    let target = target_spell.id();
+
+    // P1's Ferocious enabler and the answer.
+    scenario.add_creature(P1, "Big Beast", 4, 4);
+    let mut denial =
+        scenario.add_spell_to_hand_from_oracle(P1, "Stubborn Denial", true, STUBBORN_DENIAL_ORACLE);
+    denial.with_mana_cost(ManaCost::zero());
+    let denial_id = denial.id();
+
+    let mut runner = scenario.build();
+
+    let target_card = runner.state().objects[&target].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: target,
+            card_id: target_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("P0 casts the target artifact spell");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes priority");
+
+    let denial_card = runner.state().objects[&denial_id].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: denial_id,
+            card_id: denial_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("P1 casts Stubborn Denial");
+
+    while !runner.state().stack.is_empty() {
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected waiting state while resolving: {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        runner.state().objects.get(&target).map(|o| o.zone),
+        Some(Zone::Graveyard),
+        "Ferocious Stubborn Denial must counter the spell it targeted (a resolved artifact would be on the battlefield)"
+    );
+}

@@ -381,6 +381,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -526,6 +527,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_remainder: engine::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: engine::types::ability::DigRestOrder::Preserve,
                 reveal: false,
@@ -557,6 +559,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_remainder: engine::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: engine::types::ability::DigRestOrder::Preserve,
                 reveal: false,
