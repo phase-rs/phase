@@ -3012,14 +3012,11 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     } else if def.valid_card.as_ref().is_some_and(filter_requires_self)
         && def.destination == Some(Zone::Graveyard)
     {
-        // CR 603.6c + CR 603.10a: an explicit battlefield departure is
-        // observed using the source's battlefield ability, not an off-zone
-        // ability discovered only after the card reaches the graveyard.
-        def.trigger_zones = vec![if def.origin == Some(Zone::Battlefield) {
-            Zone::Battlefield
-        } else {
-            Zone::Graveyard
-        }];
+        // CR 603.6c + CR 603.10a: the moving source's own trigger is also
+        // collected from its record-owned pre-event context. The engine's
+        // event-subject visit admits this destination zone without granting
+        // it to other battlefield observers.
+        def.trigger_zones = vec![Zone::Graveyard];
     } else if !matches!(def.valid_card, Some(TargetFilter::AttachedTo)) {
         // CR 603.6c + CR 603.6e + CR 113.6 + CR 704.5m: A SelfRef return "from your
         // graveyard" in the effect body implies the source is already in that
