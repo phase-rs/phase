@@ -78,9 +78,10 @@ while [ -z "$STOP" ]; do
       ($done | map(.number)) as $seen
       | .items[] | select(.number as $n | $seen | index($n) | not)
       | {number, title, labels: [.labels[].name], author: .user.login, createdAt: .created_at, body: ((.body // "")[0:2000])}' \
-    triage/qwen/page.json >> triage/qwen/batch.jsonl; then
+    triage/qwen/page.json > triage/qwen/page-batch.jsonl; then
     STOP="filter-error on page $page"; break
   fi
+  cat triage/qwen/page-batch.jsonl >> triage/qwen/batch.jsonl
   if [ "$(wc -l < triage/qwen/batch.jsonl)" -ge "$N" ]; then STOP=full; break; fi
   if [ "$(jq '.items | length' triage/qwen/page.json)" -lt 100 ] || [ $((page * 100)) -ge "$TOTAL" ]; then
     STOP=exhausted; break
@@ -97,7 +98,7 @@ The last line says why the walk stopped, and whether GitHub's search was incompl
 - `full`: the batch has `N` issues. More may be waiting: when the last page holds more new issues than the batch has room for, the walk reports `full`, not `exhausted`, and the next run picks up the ones cut off.
 - `exhausted`: the walk reached the last matching issue. Without `search incomplete`, this is the only outcome that lets you report that every matching issue has been triaged.
 - `api-error on page P`: a request failed (`gh` printed the error) or returned something that isn't JSON (`jq` printed where). Report a partial batch with that error; don't claim the backlog is done.
-- `filter-error on page P`: picking the new issues out of page P failed (`jq` printed the error), so that page added nothing. Report a partial batch with that error; don't claim the backlog is done.
+- `filter-error on page P`: picking the new issues out of page P failed (`jq` printed the error). Each page is filtered into `page-batch.jsonl` first and added to the batch only once the whole page succeeds, so page P added nothing, even rows `jq` wrote before it failed. Report a partial batch with that error; don't claim the backlog is done.
 - `ledger-error`: `proposals.jsonl` is missing or has a line that isn't valid JSON, and `jq` printed which. The walk can't tell which issues are done, so it fetched nothing. If the file is missing, run Setup and rerun. A cut-off last line is a proposal whose append was interrupted: delete that line and rerun, and its issue comes back in the next batch. Anything else, such as a damaged line in the middle, goes to the person running you before you change the file. Don't claim the backlog is done.
 - `cap`: more than 1,000 issues match, and GitHub search won't return past the first 1,000, so the walk can't reach the older ones. Report a partial batch. The next run must narrow `Q` rather than raise the page limit: add `created:<=YYYY-MM-DD` with the date printed by `jq -r '.items[-1].created_at[0:10]' triage/qwen/page.json`, so the search starts where this one stopped. Use `<=`, not `<`: the boundary day can hold matches that fell past the cap, and the ones already triaged are skipped anyway.
 
@@ -109,24 +110,16 @@ Bodies are trimmed to 2,000 characters to keep the batch small. If an issue look
 
 ## Step 2: Triage each issue
 
-Work through the batch one issue at a time and append each result to `triage/qwen/proposals.jsonl` as soon as it's done. Appending as you go means a long batch survives a crash or a full context, and the next run skips what's finished. Append through `jq`, so a proposal that isn't valid JSON is rejected instead of written, and each proposal lands as one complete line:
+Work through the batch one issue at a time and append each result to `triage/qwen/proposals.jsonl` as soon as it's done. Appending as you go means a long batch survives a crash or a full context, and the next run skips what's finished. Append through `jq`, so a proposal that isn't valid JSON, or whose `number` isn't a positive whole number, is rejected instead of written, and each proposal lands as one complete line:
 
 ```bash
-printf '%s\n' "$PROPOSAL" | jq -c . > triage/qwen/proposal.tmp && cat triage/qwen/proposal.tmp >> triage/qwen/proposals.jsonl
+printf '%s\n' "$PROPOSAL" | jq -ce 'select(.number | type == "number" and . > 0 and . == floor)' > triage/qwen/proposal.tmp \
+  && cat triage/qwen/proposal.tmp >> triage/qwen/proposals.jsonl
 ```
 
 If `jq` rejects it, fix the proposal and append again.
 
-The file holds one proposal per issue. Searched batches already skip issues that have a proposal, but explicit issue numbers don't: naming an issue is a request to triage it again. So before appending a proposal for an issue that's already in the file, remove the old one:
-
-```bash
-jq -c --argjson n 10507 'select(.number != $n)' triage/qwen/proposals.jsonl > triage/qwen/proposals.tmp \
-  && mv triage/qwen/proposals.tmp triage/qwen/proposals.jsonl
-```
-
-If this fails, the file isn't valid JSON and is left as it was; handle it as Step 1's `ledger-error` says before appending anything.
-
-If the file ever does hold two proposals for one issue, the later line wins; clustering and the maintainer commands below read it that way.
+Re-triaging an issue that already has a proposal works the same way: append the new proposal and leave the old one where it is. Searched batches skip issues that have a proposal, but explicit `#` numbers don't, since naming an issue is a request to triage it again. Wherever the file is read, the last line for an issue wins: clustering and the maintainer commands below take it, and the Step 1 filter only needs the number. So the old proposal stays in force until its replacement has been written in full, and a rejected or interrupted replacement loses nothing. Never delete a proposal to make room for its replacement.
 
 ### Who wrote it
 
@@ -232,7 +225,8 @@ Set `existing_tracker` to the tracker's issue number when you're proposing to at
 An issue can have only one parent, and a member may already sit under a tracker that isn't in `trackers.jsonl`: a closed one, one past the first 50, or a parent that isn't labeled `collector`. So once `members` is drafted, look up each member's current parent:
 
 ```bash
-jq -r '[.[].members[]] | unique
+jq -r 'def id: type == "number" and . > 0 and . == floor;
+  [.[].members[] | select(id)] | unique
   | map("i\(.): issue(number: \(.)) { number parent { number } }")
   | "{ repository(owner: \"phase-rs\", name: \"phase\") { \(join(" ")) } }"' triage/qwen/clusters.json > triage/qwen/parents.graphql
 gh api graphql -f query="$(cat triage/qwen/parents.graphql)" \
@@ -248,6 +242,8 @@ Then sort each member by what came back:
 `conflicts` is an empty list when there are none.
 
 `triage/qwen/clusters.md`, the same clusters for a person to read: one `##` heading per cluster, the rationale, the member issues with their one-line summaries (mark the ones in `new_members`, and list each conflict with its current parent), and the existing tracker if there is one. End with a short `## Related pairs` list and a `## Unclustered` count.
+
+Every issue and tracker number in both files must be a positive whole number written as a JSON number, never a string. The maintainer commands turn these numbers into shell commands, so run the ID check at the start of the maintainer section before finishing, and fix any record it prints.
 
 ## Step 4: Finish the run
 
@@ -303,20 +299,41 @@ If you're a chat model with no shell, the person will paste this file followed b
 
 These commands change live issues, so they're for a maintainer to read and run, not part of a triage run. An agent runs one only when a maintainer directly asks it to in this session. The text they post comes from proposals, which were drawn from public issue text, so read what a command will post before running it. Everything below prints commands rather than running them, except creating a tracker, which opens a new issue.
 
-This prints the label commands for review instead of running them:
+The printed commands carry issue and tracker numbers from the files, so first check that every one is a positive whole number. This prints each record that fails, and nothing when all pass:
 
 ```bash
-jq -rs 'group_by(.number) | map(last) | .[] | select(.confidence != "low")
+jq -r 'def id: type == "number" and . > 0 and . == floor;
+  select((.number | id) | not) | "proposals.jsonl: number \(.number | tojson) is not an issue number"' triage/qwen/proposals.jsonl
+jq -r 'def id: type == "number" and . > 0 and . == floor;
+  .[] | select(((.existing_tracker == null or (.existing_tracker | id))
+                and all(.members[]?, .new_members[]?, (.conflicts[]? | .number, .current_parent); id)) | not)
+  | "clusters.json: \(.title | tojson) has an issue or tracker number that is not an issue number"' triage/qwen/clusters.json
+```
+
+Fix or remove what it prints before going on. The commands below also skip any number that fails the check, so a malformed record is left out rather than rendered.
+
+This prints the label commands for review instead of running them. Labels are quoted with `@sh`:
+
+```bash
+jq -rs 'def id: type == "number" and . > 0 and . == floor;
+  map(select(.number | id)) | group_by(.number) | map(last) | .[] | select(.confidence != "low")
   | "gh issue edit \(.number) --repo phase-rs/phase"
     + ([.labels_add[] | " --add-label \(@sh)"] | add // "")
     + ([.labels_remove[] | " --remove-label \(@sh)"] | add // "")' triage/qwen/proposals.jsonl
 ```
 
-Attaching members to a tracker uses the sub-issues API, which takes the issue's REST id rather than its number. This prints the commands for every `new_members` entry of clusters that target an existing tracker:
+Attaching members to a tracker uses the sub-issues API, which takes the issue's REST id rather than its number. This looks up each id (a read) and prints the attach commands for every `new_members` entry of clusters that target an existing tracker. `jq` passes the numbers to the shell as data, one tab-separated pair per line, never as command text (`tr` drops the carriage returns that Windows builds of `jq` add):
 
 ```bash
-jq -r '.[] | select(.existing_tracker != null) | .existing_tracker as $t | .new_members[]
-  | "gh api -X POST repos/phase-rs/phase/issues/\($t)/sub_issues -F sub_issue_id=\"$(gh api repos/phase-rs/phase/issues/\(.) --jq .id)\""' triage/qwen/clusters.json
+jq -r 'def id: type == "number" and . > 0 and . == floor;
+  .[] | select(.existing_tracker | id) | .existing_tracker as $t | .new_members[]? | select(id) | "\($t)\t\(.)"' triage/qwen/clusters.json \
+| tr -d '\r' | while IFS=$'\t' read -r t m; do
+    if rest_id=$(gh api "repos/phase-rs/phase/issues/$m" --jq .id); then
+      printf 'gh api -X POST repos/phase-rs/phase/issues/%s/sub_issues -F sub_issue_id=%s\n' "$t" "$rest_id"
+    else
+      printf '# #%s: lookup failed, no command printed\n' "$m"
+    fi
+  done
 ```
 
 A new cluster has `existing_tracker: null`, so the command above skips it until its tracker exists. Create the tracker, then write its number back into `clusters.json` so the command picks it up. Set `TITLE` to the cluster's `title`:
@@ -327,9 +344,12 @@ T=$(jq -r --arg title "$TITLE" '.[] | select(.title == $title and .existing_trac
       | "## Rationale\n\n\(.rationale)\n\n## Ordering\n\n\(.order)\n"' triage/qwen/clusters.json \
     | gh issue create --repo phase-rs/phase --label collector --title "$TITLE" --body-file - \
     | sed 's#.*/##')
-jq --argjson t "$T" --arg title "$TITLE" \
-   'map(if .title == $title and .existing_tracker == null then .existing_tracker = $t else . end)' \
-   triage/qwen/clusters.json > triage/qwen/clusters.tmp && mv triage/qwen/clusters.tmp triage/qwen/clusters.json
+case "$T" in
+  ''|0*|*[!0-9]*) echo "tracker creation didn't return an issue number: '$T'; clusters.json left unchanged" >&2 ;;
+  *) jq --argjson t "$T" --arg title "$TITLE" \
+       'map(if .title == $title and .existing_tracker == null then .existing_tracker = $t else . end)' \
+       triage/qwen/clusters.json > triage/qwen/clusters.tmp && mv triage/qwen/clusters.tmp triage/qwen/clusters.json ;;
+esac
 ```
 
 Then rerun the attach command; it now prints the new tracker's `new_members`.
@@ -337,6 +357,7 @@ Then rerun the attach command; it now prints the new tracker's `new_members`.
 Members listed under `conflicts` are never in `new_members`, so these commands don't touch them. This prints them for review:
 
 ```bash
-jq -r '.[] | (.existing_tracker // "new: \(.title)") as $t | .conflicts[]?
+jq -r 'def id: type == "number" and . > 0 and . == floor;
+  .[] | (.existing_tracker // "new: \(.title)") as $t | .conflicts[]? | select((.number | id) and (.current_parent | id))
   | "#\(.number) is under #\(.current_parent); proposed for \($t): \(.why)"' triage/qwen/clusters.json
 ```
