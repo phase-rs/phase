@@ -157,12 +157,23 @@ describe("openPhaseSocket", () => {
     expect(order).toEqual(["message", "close"]);
   });
 
-  it("preserves FIFO through sustained binary traffic that never empties the pending tail", async () => {
+  it("bounds retained receive slots during sustained binary traffic while preserving FIFO", async () => {
     const pending = openPhaseSocket("ws://test");
     const raw = MockWebSocket.instances[0];
     raw.deliverMessage(helloFrame({ wire_formats: ["GzipEnvelopeV1"] }));
     const socket = await pending;
     const total = 1024;
+    const maximumPendingTail = 2;
+    let peakRetainedSlots = 0;
+    const sampleRetainedSlots = () => {
+      // Read-only resource evidence: cleared-but-retained prefix slots still
+      // consume storage, even when their payload references are undefined.
+      const storage: unknown = Reflect.get(socket.ws, "pendingReceives");
+      peakRetainedSlots = Math.max(
+        peakRetainedSlots,
+        Array.isArray(storage) ? storage.length : Number.POSITIVE_INFINITY,
+      );
+    };
     const received: number[] = [];
     let next = 2;
     let finish!: () => void;
@@ -174,9 +185,11 @@ describe("openPhaseSocket", () => {
     socket.ws.onmessage = (event) => {
       const message: { data: { timestamp: number } } = JSON.parse(event.data);
       received.push(message.data.timestamp);
+      sampleRetainedSlots();
       // There is already one successor queued. Admit another before returning,
       // so promotion always leaves a nonempty tail throughout the stream.
       if (next < total) raw.deliverMessage(frame(next++));
+      sampleRetainedSlots();
       if (received.length === total) finish();
     };
     try {
@@ -184,6 +197,7 @@ describe("openPhaseSocket", () => {
       raw.deliverMessage(frame(1));
       await completed;
       expect(received).toEqual(Array.from({ length: total }, (_, index) => index));
+      expect(peakRetainedSlots).toBeLessThanOrEqual(2 * maximumPendingTail);
     } finally {
       socket.close();
     }

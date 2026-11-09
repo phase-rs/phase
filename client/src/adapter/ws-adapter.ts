@@ -2226,6 +2226,31 @@ export class WebSocketAdapter implements EngineAdapter {
     }
   }
 
+  /**
+   * Retiring a socket loses its addressed replies just like a close. Clear
+   * every request owner before notifying consumers: a synchronous pending
+   * listener may already submit or preview on the replacement. Initialization
+   * and game-start waiters instead belong to the join/handoff, not this socket.
+   */
+  private rejectSocketRequests(): void {
+    const dropped = this.submission.drop();
+    dropped?.reject(new AdapterError("WS_CLOSED", "Connection closed during action", true));
+    this.rejectPendingManaPaymentPreviews(
+      new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
+    );
+    this.rejectAuthoritativeStateExport(
+      new AdapterError("WS_CLOSED", "Connection closed during authoritative-state export", true),
+    );
+    this.rejectPendingInteractionPreviews(
+      new AdapterError("WS_CLOSED", "Connection closed during interaction preview", true),
+    );
+    this.rejectPregameMutation(
+      new AdapterError("WS_CLOSED", "Connection closed during seat mutation", true),
+    );
+    this.rejectAbandon(new AdapterError("WS_CLOSED", "Connection closed while abandoning game", true));
+    if (dropped) this.emit({ type: "actionPendingChanged", pending: false });
+  }
+
   /** Connect to a local native full server and stop once this socket has a
    * server-issued pregame seat identity. `initialize()` intentionally remains
    * game-start based for normal server sessions. */
@@ -2397,16 +2422,23 @@ export class WebSocketAdapter implements EngineAdapter {
       socket.ws.onmessage = null;
       socket.ws.onerror = null;
       socket.ws.onclose = null;
-      if (this.ws === socket.ws) {
-        this.ws = null;
-        this.closeSocket = null;
-        this.stateCodec.clearRecovery();
-        if (this.pingInterval) {
-          clearInterval(this.pingInterval);
-          this.pingInterval = null;
+      try {
+        if (this.ws === socket.ws) {
+          this.ws = null;
+          this.closeSocket = null;
+          this.stateCodec.clearRecovery();
+          if (this.pingInterval) {
+            clearInterval(this.pingInterval);
+            this.pingInterval = null;
+          }
+          // This continuation still owns B. A listener may have claimed B
+          // before disposing, throwing, or starting C; never leave its work
+          // parked when B is retired, and never touch an already-adopted C.
+          this.rejectSocketRequests();
         }
+      } finally {
+        closeSocket();
       }
-      closeSocket();
     };
     // Until setup completes, this continuation owns cleanup even if a public
     // listener throws, disposes the adapter, or starts another attachment.
@@ -2439,14 +2471,20 @@ export class WebSocketAdapter implements EngineAdapter {
       // settle B's work or schedule another reconnect. The server's seat swap
       // does not close A, so adoption must release its wrapper and baseline.
       this.stateCodec.adopt(bootstrap, socket.ws);
+      this._serverInfo = socket.serverInfo;
       if (previous) {
         previous.onmessage = null;
         previous.onerror = null;
         previous.onclose = null;
-        closePrevious?.();
+        try {
+          this.rejectSocketRequests();
+        } finally {
+          // The old lease must be released even if a pending listener throws
+          // or synchronously disposes/supersedes the adopted socket.
+          closePrevious?.();
+        }
       }
       if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
-      this._serverInfo = socket.serverInfo;
       this.emit({ type: "serverHello", info: socket.serverInfo, compatible: true });
       if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
       this.startPing();

@@ -5416,6 +5416,258 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
     serverUrl: "wss://localhost:9374/ws", timestamp: Date.now(),
   });
 
+  interface PendingObservation {
+    settled: (outcome: unknown) => void;
+    value: () => unknown;
+  }
+
+  function observe(promise: Promise<unknown>): PendingObservation {
+    let value: unknown = "never settled";
+    const settled = vi.fn((outcome: unknown) => { value = outcome; });
+    void promise.then((result) => settled({ resolvedWith: result }), settled);
+    return { settled, value: () => value };
+  }
+
+  it.each(["Action", "Interaction"] as const)(
+    "settles A's pending correlated %s before a live handoff and never consumes B's command",
+    async (kind) => {
+      const codec = realRuntimeCodec();
+      const { adapter, raw, events } = await establishCodecAdapter(codec.provider);
+      const baseline = codec.latestBaseline();
+      const old = observe(kind === "Action"
+        ? adapter.submitAction({ type: "PassPriority" }, 0)
+        : adapter.submitInteraction(interactionSubmission("pending-A"), 0));
+      const oldId = lastSubmissionCommandId(raw);
+      try {
+        expect(submissionTypes(raw)).toEqual([kind]);
+        expect(raw.readyState).toBe(MockWebSocket.OPEN);
+        expect(adapter.tryReconnect(session())).toBe(true);
+        const successor = await codecHandshake("Reconnect", raw);
+        deliverCodec(successor, "Full", codecGameStarted(5, 5));
+        await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
+        expect(old.value()).toMatchObject({ code: "WS_CLOSED", recoverable: true });
+        expect(old.settled).toHaveBeenCalledOnce();
+        expect(raw.close).toHaveBeenCalledOnce();
+        expect(codec.leases[0].close).toHaveBeenCalledOnce();
+        expect(baseline.free).toHaveBeenCalledOnce();
+
+        const next = observe(adapter.submitInteraction(interactionSubmission("pending-B"), 0));
+        const nextId = lastSubmissionCommandId(successor);
+        expect(nextId).not.toBe(oldId);
+        // Completion is addressed to the submitting A, not broadcast to B.
+        // A's server-side connection is never closed by this fixture.
+        deliverCodec(raw, "Delta", codecStateUpdate(99, 99, { command_id: oldId }));
+        raw.dispatchSynthetic("close");
+        await vi.advanceTimersByTimeAsync(0);
+        expect(next.value()).toBe("never settled");
+        expect(old.settled).toHaveBeenCalledOnce();
+        expect((await adapter.getSnapshot()).state.turn_number).toBe(5);
+        deliverCodec(successor, "Delta", codecStateUpdate(6, 6, { command_id: nextId }));
+        await vi.waitFor(() => expect(next.value()).toMatchObject({ resolvedWith: { events: [] } }));
+        expect(next.settled).toHaveBeenCalledOnce();
+        adapter.dispose();
+        expect(old.settled).toHaveBeenCalledOnce();
+        expect(raw.close).toHaveBeenCalledOnce();
+        expect(codec.leases[0].close).toHaveBeenCalledOnce();
+        expect(baseline.free).toHaveBeenCalledOnce();
+      } finally {
+        adapter.dispose();
+        codec.runtime.dispose();
+      }
+    },
+  );
+
+  it("clears every A preview/export owner before a pending listener claims B work, including a reused engine preview ID", async () => {
+    const codec = realRuntimeCodec();
+    const { adapter, raw, events } = await establishCodecAdapter(codec.provider);
+    const request: InteractionPreviewRequest = {
+      requestId: "handoff-preview" as PreviewRequestId,
+      ...interactionSubmission("handoff-preview-interaction"),
+    };
+    const old = [
+      observe(adapter.submitAction({ type: "PassPriority" }, 0)),
+      observe(adapter.previewManaPayment({ type: "PassPriority" }, 0)),
+      observe(adapter.previewInteraction(request, 0)),
+      observe(adapter.exportPersistenceState()),
+    ];
+    let next: PendingObservation[] = [];
+    let armed = true;
+    adapter.onEvent((event) => {
+      if (event.type !== "actionPendingChanged" || event.pending || !armed) return;
+      armed = false;
+      next = [
+        observe(adapter.submitInteraction(interactionSubmission("listener-B"), 0)),
+        observe(adapter.previewManaPayment({ type: "PassPriority" }, 0)),
+        observe(adapter.previewInteraction(request, 0)),
+        observe(adapter.exportPersistenceState()),
+      ];
+    });
+    try {
+      expect(adapter.tryReconnect(session())).toBe(true);
+      const successor = await codecHandshake("Reconnect", raw);
+      deliverCodec(successor, "Full", codecGameStarted(5, 5));
+      await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
+      expect(next).toHaveLength(4);
+      for (const outcome of old) {
+        expect(outcome.value()).toMatchObject({ code: "WS_CLOSED", recoverable: true });
+        expect(outcome.settled).toHaveBeenCalledOnce();
+      }
+      for (const outcome of next) expect(outcome.value()).toBe("never settled");
+      const manaRequest = successor.send.mock.calls
+        .map(([text]) => JSON.parse(text as string) as { type: string; data?: { request_id: number } })
+        .find((frame) => frame.type === "PreviewManaPayment");
+      expect(manaRequest?.data?.request_id).toBe(2);
+      raw.dispatchSynthetic("message", JSON.stringify({
+        type: "InteractionPreviewFailed", data: { request_id: request.requestId, message: "late A preview" },
+      }));
+      raw.dispatchSynthetic("message", JSON.stringify({
+        type: "AuthoritativeStateExportFailed", data: { message: "late A export" },
+      }));
+      raw.dispatchSynthetic("close");
+      await vi.advanceTimersByTimeAsync(0);
+      for (const outcome of next) expect(outcome.value()).toBe("never settled");
+      successor.dispatchSynthetic("message", JSON.stringify({
+        type: "ManaPaymentPreview", data: { request_id: manaRequest!.data!.request_id, source_ids: [12] },
+      }));
+      successor.dispatchSynthetic("message", JSON.stringify({
+        type: "InteractionPreviewFailed", data: { request_id: request.requestId, message: "B preview answered" },
+      }));
+      successor.dispatchSynthetic("message", JSON.stringify({ type: "AuthoritativeStateExport", data: { state: "B envelope" } }));
+      deliverCodec(successor, "Delta", codecStateUpdate(6, 6, { command_id: lastSubmissionCommandId(successor) }));
+      await vi.waitFor(() => expect(next[0].value()).toMatchObject({ resolvedWith: { events: [] } }));
+      expect(next[1].value()).toEqual({ resolvedWith: [12] });
+      expect(next[2].value()).toMatchObject({ code: "REQUEST_FAILED", message: "B preview answered" });
+      expect(next[3].value()).toEqual({ resolvedWith: "B envelope" });
+      for (const outcome of [...old, ...next]) expect(outcome.settled).toHaveBeenCalledOnce();
+    } finally {
+      adapter.dispose();
+      codec.runtime.dispose();
+    }
+  });
+
+  it.each([
+    ["actionPendingChanged", "dispose"], ["actionPendingChanged", "throw"],
+    ["actionPendingChanged", "supersede"], ["actionPendingChanged", "supersede then throw"],
+    ["serverHello", "throw"], ["serverHello", "supersede then throw"],
+  ] as const)(
+    "releases A once and settles abandoned B requests when %s listeners %s",
+    async (notification, ending) => {
+      const codec = realRuntimeCodec();
+      const { adapter, raw } = await establishCodecAdapter(codec.provider);
+      const baseline = codec.latestBaseline();
+      const old = observe(adapter.submitAction({ type: "PassPriority" }, 0));
+      let next: PendingObservation | undefined;
+      let secondary: PendingObservation[] = [];
+      let initialization: PendingObservation | undefined;
+      let armed = true;
+      adapter.onEvent((event) => {
+        if (!armed || event.type !== notification) return;
+        if (event.type === "actionPendingChanged" && event.pending) return;
+        armed = false;
+        next = observe(adapter.submitInteraction(interactionSubmission("abandoned-B"), 0));
+        secondary = [
+          observe(adapter.previewManaPayment({ type: "PassPriority" }, 0)),
+          observe(adapter.previewInteraction({
+            requestId: "abandoned-B-preview" as PreviewRequestId,
+            ...interactionSubmission("abandoned-B-preview"),
+          }, 0)),
+          observe(adapter.exportPersistenceState()),
+        ];
+        if (ending === "dispose") adapter.dispose();
+        if (ending.startsWith("supersede")) {
+          // Permit an explicit C attachment: this listener is deliberately
+          // replacing B before its Reconnect setup has been sent.
+          initialization = observe(adapter.initialize());
+        }
+        if (ending.includes("throw")) throw new Error("pending listener failed");
+      });
+      try {
+        expect(adapter.tryReconnect(session())).toBe(true);
+        await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
+        const abandoned = latestSocket();
+        abandoned.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(next).toBeDefined();
+        expect(old.value()).toMatchObject({ code: "WS_CLOSED" });
+        expect(next!.value()).toMatchObject({ code: "WS_CLOSED" });
+        expect(old.settled).toHaveBeenCalledOnce();
+        expect(next!.settled).toHaveBeenCalledOnce();
+        for (const outcome of secondary) {
+          expect(outcome.value()).toMatchObject({ code: "WS_CLOSED" });
+          expect(outcome.settled).toHaveBeenCalledOnce();
+        }
+        expect(raw.close).toHaveBeenCalledOnce();
+        expect(codec.leases[0].close).toHaveBeenCalledOnce();
+        expect(baseline.free).toHaveBeenCalledOnce();
+        expect(abandoned.close).toHaveBeenCalledOnce();
+        expect(codec.leases[1].close).toHaveBeenCalledOnce();
+        expect(abandoned.send).not.toHaveBeenCalledWith(expect.stringContaining('"type":"Reconnect"'));
+        if (ending.startsWith("supersede")) {
+          const current = await codecHandshake("JoinGameWithPassword", abandoned);
+          deliverCodec(current, "Full", codecGameStarted(5, 5));
+          await vi.waitFor(() => expect(initialization!.value()).toEqual({ resolvedWith: undefined }));
+          const command = observe(adapter.submitAction({ type: "PassPriority" }, 0));
+          deliverCodec(current, "Delta", codecStateUpdate(6, 6, { command_id: lastSubmissionCommandId(current) }));
+          await vi.waitFor(() => expect(command.value()).toMatchObject({ resolvedWith: { events: [] } }));
+          expect(current.close).not.toHaveBeenCalled();
+          expect(codec.leases[2].close).not.toHaveBeenCalled();
+        }
+      } finally {
+        armed = false;
+        adapter.dispose();
+        codec.runtime.dispose();
+      }
+    },
+  );
+
+  it("rejects A's pregame mutation, slot waiter and abandon without rejecting the handoff's game-start waiter", async () => {
+    const codec = realRuntimeCodec();
+    MockWebSocket.last = null;
+    const adapter = new WebSocketAdapter(
+      "native-engine", "host", { main_deck: [], sideboard: [] }, undefined, undefined, undefined, "Host",
+      {
+        nativePregame: {
+          kind: "host", playerCount: 2, aiSeats: [],
+          socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+        },
+        stateCodecSessionProvider: codec.provider,
+      },
+    );
+    const attached = adapter.initializePregame();
+    const raw = await codecHandshake("CreateGameWithSettings", null);
+    raw.dispatchSynthetic("message", JSON.stringify({
+      type: "SessionAttached",
+      data: { game_code: "GAME01", player_id: 0, player_token: "codec-token", full_key: REPLY_OWNERSHIP_FULL_KEY },
+    }));
+    await attached;
+    const started = observe(adapter.waitForGameStarted());
+    const old = [
+      observe(adapter.sendSeatMutation({ type: "Start" })),
+      observe(adapter.waitForPlayerSlots()),
+      observe(adapter.sendAbandonGame()),
+    ];
+    try {
+      expect(adapter.tryReconnect(session())).toBe(true);
+      const successor = await codecHandshake("Reconnect", raw);
+      await vi.advanceTimersByTimeAsync(0);
+      for (const outcome of old) {
+        expect(outcome.value()).toMatchObject({ code: "WS_CLOSED", recoverable: true });
+        expect(outcome.settled).toHaveBeenCalledOnce();
+      }
+      expect(started.value()).toBe("never settled");
+      raw.dispatchSynthetic("message", JSON.stringify({ type: "PlayerSlotsUpdate", data: { slots: [] } }));
+      raw.dispatchSynthetic("message", JSON.stringify({ type: "GameAbandoned" }));
+      deliverCodec(successor, "Full", codecGameStarted(5, 5));
+      await vi.waitFor(() => expect(started.value()).toEqual({ resolvedWith: undefined }));
+      expect(started.settled).toHaveBeenCalledOnce();
+      for (const outcome of old) expect(outcome.settled).toHaveBeenCalledOnce();
+      expect(codec.leases[0].close).toHaveBeenCalledOnce();
+    } finally {
+      adapter.dispose();
+      codec.runtime.dispose();
+    }
+  });
+
   it("retires a healthy predecessor and its live baseline while the successor still completes commands", async () => {
     const codec = realRuntimeCodec();
     const { adapter, raw, events } = await establishCodecAdapter(codec.provider);

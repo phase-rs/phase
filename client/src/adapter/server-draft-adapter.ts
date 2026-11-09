@@ -261,7 +261,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     draftCode: string;
     playerToken: string | null;
     instanceId: string;
-    transferable: boolean;
+    completeSelection: boolean;
   } | null = null;
   private pendingInit: DraftInit | null = null;
   private unfinishedAttachment: DraftAttachment | null = null;
@@ -634,7 +634,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         draftCode,
         playerToken,
         instanceId: cardInstanceId,
-        transferable: view?.required_pick_count === 1
+        completeSelection: view?.required_pick_count === 1
           && view.current_pack?.some((card) => card.instance_id === cardInstanceId) === true
           && !view.pool.some((card) => card.instance_id === cardInstanceId),
       };
@@ -784,6 +784,31 @@ export class ServerDraftAdapter implements EngineAdapter {
     else resolve(result);
     this.retireIdleSockets();
     return true;
+  }
+
+  /**
+   * Draft broadcasts are not acknowledgements. Every socket must show the
+   * requested new instance in inventory, backed by the complete selection the
+   * engine offered when it was sent. Counter/phase changes and reply ownership
+   * alone cannot identify a pick outcome. The wire cannot distinguish a timer
+   * selecting that same instance from acceptance of this request.
+   */
+  private settleDraftView(
+    view: DraftPlayerView,
+    sourceSocket: PhaseSocketTransport,
+    initOwner: DraftInit | null,
+  ): void {
+    if (this.draftActionStage !== "AwaitingReply") return;
+    const pick = this.draftPick;
+    if (pick && (!pick.completeSelection
+      || !view.pool.some((card) => card.instance_id === pick.instanceId)
+      || (this.draftActionSocket !== sourceSocket
+        && (initOwner?.kind !== "reconnect"
+          || initOwner.draftCode !== pick.draftCode
+          || initOwner.playerToken !== pick.playerToken)))) return;
+    // Non-pick actions retain the legacy current-stream completion semantics;
+    // retired frames have already been restricted to their own pending reply.
+    this.settleDraftAction(view);
   }
 
   private takeInteractionPreview(socket: PhaseSocketTransport, requestId: string) {
@@ -1159,41 +1184,31 @@ export class ServerDraftAdapter implements EngineAdapter {
           seat_index: number;
           view: DraftPlayerView;
         };
-        this.draftCode = data.draft_code;
-        this.draftToken = data.player_token;
-        this.seatIndex = data.seat_index;
-        this.draftView = data.view;
-        this.updatePhaseFromView(data.view);
-        if (this.draftActionStage === "AwaitingReply") {
-          this.settleDraftAction(data.view, this.draftPick ? sourceSocket : undefined);
+        if (this.ws === sourceSocket) {
+          this.draftCode = data.draft_code;
+          this.draftToken = data.player_token;
+          this.seatIndex = data.seat_index;
+          this.draftView = data.view;
+          this.updatePhaseFromView(data.view);
         }
+        this.settleDraftView(data.view, sourceSocket, initOwner);
         break;
       }
 
       case "DraftStateUpdate": {
         const data = msg.data as { view: DraftPlayerView };
-        this.draftView = data.view;
-        this.updatePhaseFromView(data.view);
-        if (initOwner?.kind === "reconnect" && this.ws === sourceSocket) this.settleInit(initOwner);
-        // Reconnect installs B's sender before it captures the bootstrap. An A
-        // pick handled afterward is rejected on A; an A pick handled beforehand
-        // is already in B's pool, even if its broadcast is delayed until after
-        // replacement. Only a complete selection from A's authoritative view
-        // newly appearing in B's pool can complete a transferred pick, never an
-        // unchanged snapshot or a pick/phase/count change. Missing source
-        // authority leaves the reply owned by A.
-        // The wire exposes inventory outcomes, not request acknowledgements:
-        // a timer choosing the same instance is indistinguishable from A's pick.
-        const pick = this.draftPick;
-        const ownsAction = this.draftActionSocket === sourceSocket;
-        if (this.draftActionStage === "AwaitingReply"
-          && (!pick || ownsAction
-            || (initOwner?.kind === "reconnect" && pick.transferable
-              && initOwner.draftCode === pick.draftCode && initOwner.playerToken === pick.playerToken
-              && data.view.pool.some((card) => card.instance_id === pick.instanceId)))) {
-          this.settleDraftAction(data.view);
+        const current = this.ws === sourceSocket;
+        if (current) {
+          this.draftView = data.view;
+          this.updatePhaseFromView(data.view);
+          if (initOwner?.kind === "reconnect") this.settleInit(initOwner);
         }
-        this.emit({ type: "draftViewUpdated", view: data.view });
+        // Reconnect captures B's bootstrap after installing its sender. An A
+        // selection accepted before that cutover is already in B's pool; a
+        // later A selection is rejected on A. Either stream must prove the
+        // captured selection, and A can settle only its reply, never B's view.
+        this.settleDraftView(data.view, sourceSocket, initOwner);
+        if (current) this.emit({ type: "draftViewUpdated", view: data.view });
         break;
       }
 
