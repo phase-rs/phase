@@ -570,6 +570,7 @@ fn transformed_entry_departed_chooser_releases_projection_before_priority_and_sa
         .add_creature_to_graveyard(P1, "Latent front", 2, 2)
         .id();
     let latent_move = |target, destination, transformed| Effect::ChangeZone {
+        library_shuffle: Default::default(),
         origin: Some(Zone::Graveyard),
         destination,
         target,

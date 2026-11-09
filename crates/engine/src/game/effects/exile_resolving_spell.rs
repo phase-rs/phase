@@ -175,6 +175,7 @@ fn arm_return_to(
 ) {
     let ability = ResolvedAbility::new(
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             // CR 603.7c: only return the card if it is still in exile.
             origin: Some(Zone::Exile),
             destination,

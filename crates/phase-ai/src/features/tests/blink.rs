@@ -41,6 +41,7 @@ fn spell(effect: Effect) -> AbilityDefinition {
 /// A `ChangeZone` effect with the non-flicker fields defaulted.
 fn change_zone(origin: Option<Zone>, destination: Zone, target: TargetFilter) -> Effect {
     Effect::ChangeZone {
+        library_shuffle: Default::default(),
         origin,
         destination,
         target,
