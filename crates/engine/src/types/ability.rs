@@ -5265,13 +5265,11 @@ impl ResolvedAbility {
     /// 400.7j as well — and only that object, not what it becomes after moving
     /// again.
     ///
-    /// A forward-result continuation whose `source_id` was rebound by
-    /// `rebind_child_to_forwarded_objects` to an object its producer moved
-    /// keeps that rebound binding unchanged here; its trigger provenance still
-    /// names the original source, so the provenance check cannot judge it. This
-    /// preserves the existing forward-result binding and is not a rules claim:
-    /// a rebound child whose SelfRef prints the source's own name (General Leo
-    /// Cristophe) is mis-bound upstream, and that is a separate defect.
+    /// A legacy forwarded-recipient body may deliberately carry a rebound
+    /// `source_id` while its trigger provenance still names the creating source;
+    /// that separate binding is retained here. Primary source-naming SelfRef
+    /// instructions keep the original source in the forwarding handoff, so they
+    /// continue through the normal exact-source/successor proof below.
     pub fn self_ref_binding(
         &self,
         state: &crate::types::game_state::GameState,
