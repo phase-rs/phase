@@ -3301,7 +3301,7 @@ fn mimeoplasm_forced_cost_board(
 
 #[test]
 fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exiles_only() {
-    let (mut runner, first, second, mimeoplasm) = mimeoplasm_forced_cost_board(P0);
+    let (runner, first, second, mimeoplasm) = mimeoplasm_forced_cost_board(P0);
 
     let state = runner.state();
     let Some(PendingCostMoveResume::ReplacementMayCost { remaining, .. }) =
@@ -3415,14 +3415,8 @@ fn fu7_nested_may_cost_departure_preserves_outer_cursor_or_retires_departed_paye
             panic!("the inner move must retain its exact outer MayCost root");
         };
         assert_eq!(*current, if cost_owner == P0 { first } else { second });
-        assert_eq!(
-            remaining.as_slice(),
-            if cost_owner == P0 {
-                &[second]
-            } else {
-                &[first]
-            }
-        );
+        let expected_remaining = [if cost_owner == P0 { second } else { first }];
+        assert_eq!(remaining.as_slice(), expected_remaining);
         assert_eq!(outer.choice_player, Some(P0));
         assert!(outer.may_cost_paid);
         runner
