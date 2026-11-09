@@ -719,12 +719,7 @@ pub(crate) fn eliminate_players(
             super::engine::resume_pending_continuation_if_priority(state, &mut resumed)
                 .expect("a surviving canceled ChangeZone pause resumes at its ordinary boundary");
             if departure_triggers == DepartureTriggers::CollectedByDeparture {
-                super::triggers::collect_unclaimed_triggers_into_deferred(
-                    state,
-                    &mut resumed,
-                    0,
-                    None,
-                );
+                super::triggers::collect_unclaimed_triggers_into_deferred(state, &resumed, 0, None);
             }
             events.extend(resumed);
             drain_or_clear_deferred_triggers_after_elimination(state, departure_triggers, events);
@@ -2920,23 +2915,9 @@ mod tests {
         let mut events = Vec::new();
         eliminate_player(&mut state, PlayerId(1), &mut events);
 
-        let iteration = state
-            .active_change_zone_frame()
-            .and_then(|frame| frame.pending.as_ref())
-            .expect("living controller keeps the change-zone family");
-        assert!(iteration.paused_current.is_none());
-        assert_eq!(
-            iteration
-                .remaining
-                .iter()
-                .map(|member| member.object_id)
-                .collect::<Vec<_>>(),
-            vec![surviving]
-        );
         assert!(state.pending_replacement.is_none());
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 
-        crate::game::effects::drain_pending_continuation(&mut state, &mut events);
         assert!(state.active_change_zone_frame().is_none());
         assert_eq!(state.objects[&leaving].zone, Zone::Exile);
         assert_eq!(state.objects[&surviving].zone, Zone::Graveyard);
