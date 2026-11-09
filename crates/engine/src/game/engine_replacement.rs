@@ -281,6 +281,9 @@ pub(crate) fn retire_replacement_at_game_over(
     let Some(interrupted) = interrupted else {
         return;
     };
+    if let ProposedEvent::BeginPhase { phase, .. } = &interrupted.boundary {
+        super::turns::abandon_phase_begin_choice(state, *phase);
+    }
     if state
         .pending_replacement
         .as_ref()
@@ -398,6 +401,9 @@ fn finish_abandoned_replacement(
 ) -> Result<WaitingFor, EngineError> {
     // This is cancellation, not replacement prevention: no paid-cost completion,
     // occurrence, or Prevented staged terminal is fabricated for the lost member.
+    if let ProposedEvent::BeginPhase { phase, .. } = boundary {
+        super::turns::abandon_phase_begin_choice(state, *phase);
+    }
     finish_replacement_execute_epilogue(
         state,
         ReplacementExecuteEpilogue {
@@ -757,6 +763,27 @@ fn finish_replacement_execute_epilogue(
     {
         crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            waiting_for = state.waiting_for.clone();
+        }
+    }
+
+    // CR 120.3f + CR 120.1 + CR 616.1: a non-combat player-damage leg
+    // whose life loss paused owes its damage event, record, and lifelink gain.
+    // Finish the stashed stages after the loss batch settles and before outer
+    // continuations. The combat remnant owns combat-flagged stashes instead.
+    if matches!(waiting_for, WaitingFor::Priority { .. })
+        && state
+            .pending_damage_post_loss
+            .as_ref()
+            .is_some_and(|stashed| !stashed.is_combat)
+        && state.active_batch_delivery().is_none()
+    {
+        let outcome =
+            crate::game::effects::deal_damage::drain_pending_damage_post_loss(state, events);
+        if matches!(
+            outcome,
+            crate::game::effects::deal_damage::DamagePostLossDrainOutcome::PausedForReplacement
+        ) {
             waiting_for = state.waiting_for.clone();
         }
     }

@@ -54,6 +54,7 @@ I'm not trying to make money off this. There are no ads. I'm just a dude who lik
 ## Features
 
 - **Rules engine** — Turns, priority, stack, combat, state-based actions, layers, triggers, replacement effects
+- **Resumable batch effects** — Simultaneous destruction and supported zone moves retain replacement choices and private library order across save/restore; surviving replacement choices are reassigned after a player leaves.
 - **34,300+ cards** — Parsed from MTGJSON with format support (Commander, Modern, Pioneer, Standard, and more)
 - **AI opponent** — Per-card decision logic, game tree search, and evaluation heuristics
 - **Game UI** — Battlefield, hand, stack, targeting overlays, mana payment, animations, and ambient audio

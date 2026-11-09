@@ -1076,6 +1076,9 @@ fn c4_targeted_later_member_pause_keeps_every_return() {
         builder.with_replacement_definition(
             ReplacementDefinition::new(ReplacementEvent::Moved)
                 .mode(ReplacementMode::Optional { decline: None })
+                // CR 113.6h + CR 614.12: only the entrant's own replacement
+                // functions while this source is still in the graveyard.
+                .valid_card(TargetFilter::SelfRef)
                 .destination_zone(Zone::Battlefield)
                 .description("enters with a +1/+1 counter".to_string())
                 .execute(AbilityDefinition::new(
@@ -1705,6 +1708,8 @@ fn c10_paused_targeted_population_pins_count_and_moved_ledger() {
         builder.with_replacement_definition(
             ReplacementDefinition::new(ReplacementEvent::Moved)
                 .mode(ReplacementMode::Optional { decline: None })
+                // CR 113.6h + CR 614.12: the graveyard source modifies only its own entry.
+                .valid_card(TargetFilter::SelfRef)
                 .destination_zone(Zone::Battlefield)
                 .description("enters tapped".to_string())
                 .execute(AbilityDefinition::new(
@@ -1785,6 +1790,8 @@ fn c10_paused_mass_population_pins_non_abandoned_count_and_ledger() {
         builder.with_replacement_definition(
             ReplacementDefinition::new(ReplacementEvent::Moved)
                 .mode(ReplacementMode::Optional { decline: None })
+                // CR 113.6h + CR 614.12: the graveyard source modifies only its own entry.
+                .valid_card(TargetFilter::SelfRef)
                 .destination_zone(Zone::Battlefield)
                 .description("enters tapped".to_string())
                 .execute(AbilityDefinition::new(

@@ -467,16 +467,17 @@ pub(super) fn resume_phase_begin_choice(
     resume_deferred_step_triggers(state, events).unwrap_or_else(|| state.waiting_for.clone())
 }
 
-/// CR 800.4a: the affected player left with their choice unanswered, so the
-/// transition it held is gone with it. The turn continues through CR 800.4j's
-/// skip of the departed player's remaining phases.
-pub(super) fn abandon_phase_begin_choice(state: &mut GameState) {
+/// CR 800.4a/j + CR 104.1: retire a genuinely cancelled phase-begin event,
+/// or its terminal-game obligation. A surviving reconsult does not call this:
+/// its transition remains parked until the ordinary replacement result arrives.
+pub(super) fn abandon_phase_begin_choice(state: &mut GameState, phase: Phase) {
     let parked = state
         .pending_phase_transition_progress
         .as_ref()
         .is_some_and(|progress| {
-            progress.drain_state
-                == crate::types::game_state::PhaseTransitionDrainState::AwaitingBeginChoice
+            progress.next_phase == phase
+                && progress.drain_state
+                    == crate::types::game_state::PhaseTransitionDrainState::AwaitingBeginChoice
         });
     if parked {
         state.pending_phase_transition_progress = None;
@@ -13889,6 +13890,46 @@ card into your hand at the beginning of your next end step.";
         assert_eq!(
             state.current_combat_attacker_restriction_source,
             Some(ObjectId(99))
+        );
+    }
+
+    #[test]
+    fn phase_begin_abandonment_retires_only_its_unanswered_transition() {
+        use crate::types::game_state::{PhaseTransitionDrainState, PhaseTransitionProgress};
+
+        let mut state = setup();
+        state.phase = Phase::EndCombat;
+        state.pending_phase_transition_progress = Some(PhaseTransitionProgress {
+            remaining_players: std::collections::VecDeque::new(),
+            next_phase: Phase::BeginCombat,
+            previous_phase: Some(Phase::EndCombat),
+            owed_life_loss: std::collections::VecDeque::new(),
+            in_flight_life_loss: None,
+            entering_cleanup: false,
+            drain_state: PhaseTransitionDrainState::AwaitingBeginChoice,
+            scheduled_begin: None,
+        });
+
+        abandon_phase_begin_choice(&mut state, Phase::Upkeep);
+        assert!(state.pending_phase_transition_progress.is_some());
+        state
+            .pending_phase_transition_progress
+            .as_mut()
+            .unwrap()
+            .drain_state = PhaseTransitionDrainState::Ready;
+        abandon_phase_begin_choice(&mut state, Phase::BeginCombat);
+        assert!(state.pending_phase_transition_progress.is_some());
+        state
+            .pending_phase_transition_progress
+            .as_mut()
+            .unwrap()
+            .drain_state = PhaseTransitionDrainState::AwaitingBeginChoice;
+        abandon_phase_begin_choice(&mut state, Phase::BeginCombat);
+        assert!(state.pending_phase_transition_progress.is_none());
+        assert_eq!(
+            state.phase,
+            Phase::EndCombat,
+            "cancellation must not begin the step"
         );
     }
 
