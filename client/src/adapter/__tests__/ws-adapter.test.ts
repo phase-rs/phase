@@ -5949,27 +5949,32 @@ describe("WebSocketAdapter — codec degradation policy", () => {
   describe("after a decoder trap on the shared runtime", () => {
     afterEach(() => { sharedEngine.open = null; });
 
-    it("settles an adopted candidate normally when the shared runtime traps on the retired attachment before the candidate's next decode", async () => {
+    it("settles an adopted candidate normally when the shared runtime traps on another live adapter before the candidate's next decode", async () => {
       const { runtime, script, provider } = realRuntimeCodec();
       const { adapter, raw, events } = await establishCodecAdapter(provider);
+      let trapAdapter: WebSocketAdapter | null = null;
       try {
         expect(runtime.state).toEqual({ kind: "ready" });
-        // B bootstraps on its own session of the same runtime while A is retired but still live.
+        // B bootstraps on its own session after A has been retired and closed.
         expect(adapter.tryReconnect(RECONNECT_SESSION as never)).toBe(true);
         const candidate = await codecHandshake("Reconnect", raw);
         expect(offeredCodec(candidate)).toBe(true);
         deliverCodec(candidate, "Full", codecGameStarted(5, 5));
         await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
-        expect(provider).toHaveBeenCalledTimes(2);
         const outcome = outcomeOf(adapter.submitAction(action, 0));
         await vi.waitFor(() => expect(submissionTypes(candidate)).toHaveLength(1));
 
-        // A genuine wasm trap on the retired attachment poisons the shared runtime.
+        // Another genuinely live adapter shares the runtime. Its trap poisons
+        // B's already-open lease without relying on impossible traffic from A.
+        const trapSource = await establishCodecAdapter(provider);
+        trapAdapter = trapSource.adapter;
+        expect((await trapSource.adapter.getSnapshot()).state.turn_number).toBe(1);
         script.trapNext = true;
-        deliverCodec(raw, "Delta", codecStateUpdate(6, 6));
+        deliverCodec(trapSource.raw, "Delta", codecStateUpdate(6, 6));
         await vi.waitFor(() => expect(runtime.state).toEqual({ kind: "poisoned", reason: "wasmTrap" }));
-        await vi.waitFor(() => expect(raw.close).toHaveBeenCalled());
-        // Reach guard: B already held a session and was neither closed nor degraded by A's trap.
+        await vi.waitFor(() => expect(trapSource.raw.close).toHaveBeenCalled());
+        trapSource.adapter.dispose();
+        // Reach guard: B already held a session and was neither closed nor degraded by the other adapter's trap.
         expect(candidate.close).not.toHaveBeenCalled();
         expect(policyOf(adapter)).toEqual({ kind: "negotiate" });
 
@@ -5985,9 +5990,9 @@ describe("WebSocketAdapter — codec degradation policy", () => {
 
         // The existing reconnect path continues on plain frames without the provider.
         await restoreFromPlainFrames(adapter, events, candidate);
-        expect(provider).toHaveBeenCalledTimes(2);
       } finally {
         adapter.dispose();
+        trapAdapter?.dispose();
       }
     });
 
@@ -7685,11 +7690,13 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
         // replaces it while the join is pending, and the replacement's codec fails.
         const join = await startHeld(false);
         try {
+          const secondCodec = scriptedCodec();
+          join.provider.mockResolvedValueOnce(secondCodec.session);
           expect(join.adapter.tryReconnect(RECONNECT_SESSION as never)).toBe(true);
           const second = await codecHandshake("Reconnect", join.raw);
-          join.codec.decode.mockRejectedValueOnce(new Error("decoder trapped"));
+          secondCodec.decode.mockRejectedValueOnce(new Error("decoder trapped"));
           deliverCodec(second, "Delta", codecStateUpdate(2, 2));
-          await vi.waitFor(() => expect(join.codec.close).toHaveBeenCalled());
+          await vi.waitFor(() => expect(secondCodec.close).toHaveBeenCalled());
           // Reach guard: the replacement's failure was reported as the sticky policy.
           expect(policyOf(join.adapter)).toEqual({ kind: "snapshotOnly", reason: "decodeFailure" });
           await expect(settledAs(join)).resolves.toMatchObject({

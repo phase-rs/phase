@@ -4379,6 +4379,24 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
     };
   }
 
+  async function receiveDraftView(
+    adapter: ServerDraftAdapter,
+    ws: MockWebSocket,
+    view: DraftPlayerView,
+  ): Promise<void> {
+    const update = new Promise<DraftPlayerView>((resolve) => {
+      const off = adapter.onEvent((event) => {
+        if (event.type !== "draftViewUpdated") return;
+        off();
+        resolve(event.view);
+      });
+    });
+    receive(ws, "DraftStateUpdate", { view });
+    const committed = await update;
+    expect(adapter.currentDraftView).toBe(committed);
+    expect(committed).toEqual(view);
+  }
+
   it.each(["replacement snapshot first", "old rejection first"] as const)(
     "does not acknowledge a rejected old pick across cutover: %s",
     async (order) => {
@@ -4390,7 +4408,7 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
         const baseline = codec.latestBaseline();
         const card = cutoverCard("cutover-rejected");
         const unchanged = createMockDraftView({ current_pack: [card], required_pick_count: 1 });
-        receive(ws, "DraftStateUpdate", { view: unchanged });
+        await receiveDraftView(adapter, ws, unchanged);
         const pick = adapter.submitPick(card.instance_id);
         const observed = trackRejection(pick);
         const resolved = vi.fn();
@@ -4443,9 +4461,9 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
       await enterCodecMatch(ws, events);
       const baseline = codec.latestBaseline();
       const card = cutoverCard("cutover-accepted");
-      receive(ws, "DraftStateUpdate", {
-        view: createMockDraftView({ current_pack: [card], required_pick_count: 1 }),
-      });
+      await receiveDraftView(adapter, ws, createMockDraftView({
+        current_pack: [card], required_pick_count: 1,
+      }));
       const pick = adapter.submitPick(card.instance_id);
       const settled = vi.fn();
       void pick.then(settled, settled);
@@ -4462,8 +4480,7 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
       expect(ws.close).toHaveBeenCalledOnce();
       expect(leaseClose).toHaveBeenCalledOnce();
       expect(baseline.free).toHaveBeenCalledOnce();
-      receive(replacement.ws, "DraftStateUpdate", { view: selected });
-      await drainArt();
+      await receiveDraftView(adapter, replacement.ws, selected);
       expect(settled).toHaveBeenCalledOnce();
       expect(adapter.currentDraftView).toEqual(selected);
       const successor = adapter.submitPick("cutover-next");
@@ -4492,7 +4509,7 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
           current_pack: request === "already owned" ? [other] : [card, other],
           pool: request === "already owned" ? [card] : [],
         });
-        receive(ws, "DraftStateUpdate", { view: before });
+        await receiveDraftView(adapter, ws, before);
         const pick = adapter.submitPick(card.instance_id);
         const observed = trackRejection(pick);
         const replacement = await replaceRuntimeSocket(adapter, provider, codec.provider, ws, false);
@@ -4525,11 +4542,9 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
       try {
         const card = cutoverCard("unproven-source-selection");
         if (authority === "missing source card") {
-          receive(ws, "DraftStateUpdate", {
-            view: createMockDraftView({
-              current_pack: [cutoverCard("other-source-card")], required_pick_count: 1,
-            }),
-          });
+          await receiveDraftView(adapter, ws, createMockDraftView({
+            current_pack: [cutoverCard("other-source-card")], required_pick_count: 1,
+          }));
         }
         const pick = adapter.submitPick(card.instance_id);
         const observed = trackRejection(pick);
@@ -4557,9 +4572,9 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
     const { adapter, ws, provider, codec, leaseClose } = await startRuntimeDraft();
     try {
       const card = cutoverCard("same-instance-id-in-another-draft");
-      receive(ws, "DraftStateUpdate", {
-        view: createMockDraftView({ current_pack: [card], required_pick_count: 1 }),
-      });
+      await receiveDraftView(adapter, ws, createMockDraftView({
+        current_pack: [card], required_pick_count: 1,
+      }));
       const pick = adapter.submitPick(card.instance_id);
       const observed = trackRejection(pick);
       const newSession = await codec.provider();
@@ -4570,12 +4585,12 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
         tournamentFormat: "Swiss", podPolicy: "Competitive", podSize: 8,
       });
       void creating.catch(() => undefined);
-      await drainArt();
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(ws));
       const newDraft = MockWebSocket.last!;
       expect(newDraft).not.toBe(ws);
       newDraft.dispatchSynthetic("message", CODEC_SERVER_HELLO);
-      await drainArt();
-      expect(newDraft.send).toHaveBeenCalledWith(expect.stringContaining('"type":"CreateDraftWithSettings"'));
+      await vi.waitFor(() => expect(newDraft.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"CreateDraftWithSettings"')));
       newDraft.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
       receive(newDraft, "DraftCreated", {
         draft_code: "NEXT12", player_token: "new-draft-token", seat_index: 0,
@@ -4611,7 +4626,7 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
         .find((frame) => frame.type === "PreviewManaPayment")!;
       const card = cutoverCard("source-scoped-pick");
       const before = createMockDraftView({ current_pack: [card], required_pick_count: 1 });
-      receive(ws, "DraftStateUpdate", { view: before });
+      await receiveDraftView(adapter, ws, before);
       const pick = adapter.submitPick(card.instance_id);
       const observed = trackRejection(pick);
       const settled = vi.fn();
@@ -4620,7 +4635,7 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
       receive(replacement.ws, "DraftActionRejected", { reason: "replacement reconnect rejected" });
       await expect(replacement.reconnected).rejects.toMatchObject({ message: "replacement reconnect rejected" });
       expect(await observed()).toBe("never settled");
-      receive(replacement.ws, "DraftStateUpdate", { view: before });
+      await receiveDraftView(adapter, replacement.ws, before);
       expect(await observed()).toBe("never settled");
       receive(ws, "DraftActionRejected", { reason: "old pick rejected" });
       await expect(pick).rejects.toMatchObject({ message: "old pick rejected" });

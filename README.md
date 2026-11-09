@@ -424,6 +424,16 @@ Raw death alone still permits healthy admitted frames to drain before that
 terminal boundary. This is attachment cleanup, not a new compressed-queue or
 total-heap size limit.
 
+During healthy traffic the gzip FIFO also reclaims its consumed prefix in place.
+Its storage scales with the pending tail rather than cumulative frame count;
+compacting only after half is consumed amortizes copying across the stream.
+This does not impose a new live compressed-backlog limit.
+
+Game transport adoption closes the predecessor wrapper and its decoder lease;
+the server's sender replacement need not close the old peer. Each acquired
+candidate keeps an idempotent cleanup owner through public `serverHello`
+callbacks, including throwing, disposal and superseding reconnect callbacks.
+
 Draft adapters explicitly own current and retired transports. Healthy replacement
 closes an idle predecessor immediately; a source with a permitted command,
 preview or sent draft reply remains owned until that work settles or the source
@@ -433,6 +443,14 @@ Disposal rejects owned work and closes every current or retired transport even
 when the server never closes the old peer. Abandoning an adopted setup candidate
 also settles that source's owned work before releasing it, including synchronous
 `serverHello` reentry and setup-send failure. No new reply timeout is introduced.
+
+A reconnect draft snapshot does not complete an old pick merely by arriving.
+Cross-source completion requires the original draft code/token and the exact
+newly selected instance from a complete selection in the original authoritative
+view. Without that authority the original source retains its reply ownership.
+This reports the selected-inventory outcome, not a new request-level
+acknowledgement: an automatic timer pick of the identical instance is
+indistinguishable on the existing wire.
 
 ### Design Principles
 
