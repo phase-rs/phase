@@ -57,11 +57,13 @@ pub fn resolve(
     }
 
     let target_player = match &shuffle_target {
-        // CR 400.3: "its owner's library" resolves to the owner of source_id.
+        // CR 400.3 + CR 701.24c: ownership still determines the library when
+        // the source has ceased to exist before its shuffle instruction.
         TargetFilter::Owner => state
             .objects
             .get(&ability.source_id)
             .map(|obj| obj.owner)
+            .or_else(|| state.lki_cache.get(&ability.source_id).map(|lki| lki.owner))
             .unwrap_or(ability.controller),
         // CR 608.2b: a slot that was an illegal target names no player, so no library is shuffled.
         TargetFilter::ParentTargetSlot { index } => {
