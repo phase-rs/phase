@@ -311,6 +311,7 @@ mod swords_target_legality_recheck;
 mod three_opponent_drain_shortcut;
 mod tromokratis;
 mod veteran_bodyguard_tap_redirect;
+mod watery_grasp_resolution_host;
 mod yurlok_of_scorch_thrash;
 mod zenos_yae_galvus_chosen_object;
 

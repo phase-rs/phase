@@ -440,6 +440,43 @@ mod tests {
         );
     }
 
+    // Synthetic consumer contract: no printed Oracle producer is known for
+    // this ordinary Or(SelfRef, TypedCreature) AST. Unlike Dream Fighter's
+    // all-context union, it declares a target and must affect only that choice.
+    // CR 115.1 + CR 608.2c: SelfRef is an eligible alternative, not extra work.
+    #[test]
+    fn ordinary_phase_out_union_phases_only_the_announced_object() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let chosen = add_creature(&mut state, PlayerId(0), "Chosen");
+        let bystander = add_creature(&mut state, PlayerId(0), "Bystander");
+        let effect = Effect::PhaseOut {
+            target: TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::SelfRef,
+                    TargetFilter::Typed(TypedFilter::creature()),
+                ],
+            },
+        };
+        assert!(crate::types::ability::effect_has_stack_target_declaration(&effect));
+        let ability = ResolvedAbility::new(
+            effect,
+            vec![TargetRef::Object(chosen)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(state.objects[&chosen].is_phased_out());
+        assert!(state.objects[&source].is_phased_in());
+        assert!(state.objects[&bystander].is_phased_in());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved { kind: EffectKind::PhaseOut, source_id, .. }
+                if *source_id == source
+        )));
+    }
+
     #[test]
     fn compound_phase_out_batches_an_attachment_with_its_host_indirectly() {
         let mut state = GameState::new_two_player(42);
