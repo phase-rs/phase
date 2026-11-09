@@ -785,7 +785,7 @@ fn open_the_vaults_aura_host_chooser_concession_resumes_surviving_member() {
     assert_eq!(pending.remaining.len(), 1, "the artifact is still parked");
     assert_eq!(
         move_count(
-            &outcome.events(),
+            outcome.events(),
             pacifism,
             Zone::Graveyard,
             Zone::Battlefield
@@ -794,7 +794,7 @@ fn open_the_vaults_aura_host_chooser_concession_resumes_surviving_member() {
         "the Aura's counted entry is delivered exactly once"
     );
     assert_eq!(
-        move_count(&outcome.events(), ingot, Zone::Graveyard, Zone::Battlefield),
+        move_count(outcome.events(), ingot, Zone::Graveyard, Zone::Battlefield),
         0,
         "the parked artifact has not entered before the pick is answered"
     );
