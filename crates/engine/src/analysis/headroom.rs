@@ -188,8 +188,9 @@ impl PeriodExcursions {
     /// Each scalar is stepped repetition by repetition from its value on `state`, the board the
     /// repetitions start from, under [`Excursion::nth`], once toward each end of its range. A
     /// period whose effect grows faster than by a fixed amount per repetition is outside what
-    /// two repetitions show; its take still refuses the repetition that does not fit. The per-turn tallies reset at a turn's start,
-    /// so a period that crosses a turn is counted as if they did not, which can only understate.
+    /// two repetitions show; its take still refuses the repetition that does not fit. The
+    /// per-turn tallies reset at a turn's start, so a period that crosses a turn is counted as if
+    /// they did not, which can only understate.
     pub(crate) fn representable_repetitions(
         cycles: &[Self; 2],
         state: &GameState,
