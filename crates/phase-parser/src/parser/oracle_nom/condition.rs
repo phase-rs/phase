@@ -10366,7 +10366,8 @@ fn parse_filtered_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> 
         return Err(oracle_err(input));
     }
     let (filter, remainder) = parse_type_phrase_folding(noun);
-    if !remainder.trim().is_empty() || !is_admissible_zone_card_count_filter(&filter) {
+    if !remainder.trim().is_empty() || !nom_quantity::is_admissible_zone_card_count_filter(&filter)
+    {
         return Err(oracle_err(input));
     }
     let (rest, _) = tag(" in ").parse(rest_after_noun)?;
@@ -10384,113 +10385,6 @@ fn parse_filtered_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> 
             scope,
         },
     ))
-}
-
-/// Limits the filtered zone-count bridge to card descriptions whose semantics
-/// remain valid in every counted zone. All other filter forms deliberately fall
-/// through to the legacy quantity grammar instead of being partially accepted.
-///
-/// CR 109.2a + CR 404.1: a card description that names a zone counts matching
-/// cards in that zone.
-/// CR 205.1 + CR 205.2a + CR 205.3m: juxtaposed subtype + non-`Card` core type
-/// ("Zombie creature cards") is a type-line conjunction (creature AND the
-/// Zombie creature type). Empty-`properties` nouns are admitted only in that
-/// shape, encoded as `filter: Some(Typed { .. })` so `matches_target_filter`
-/// ANDs the type filters. Property-free core-only ("creature cards") or
-/// subtype-only ("Lesson cards" / "Zombie cards") nouns stay on the legacy
-/// `card_types` path.
-fn is_admissible_zone_card_count_filter(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Typed(TypedFilter {
-            type_filters,
-            controller,
-            properties,
-        }) => {
-            controller.is_none()
-                && !type_filters.is_empty()
-                && !type_filters.iter().any(type_filter_contains_any)
-                && if properties.is_empty() {
-                    type_filters_are_juxtaposed_subtype_and_core(type_filters)
-                } else {
-                    properties
-                        .iter()
-                        .all(is_admissible_zone_card_count_property)
-                }
-        }
-        TargetFilter::Or { filters } => {
-            !filters.is_empty() && filters.iter().all(is_admissible_zone_card_count_filter)
-        }
-        _ => false,
-    }
-}
-
-/// `TypeFilter::Any` would make this bridge a broad unfiltered count. Descend
-/// through its recursive variants so nested `Any` filters cannot bypass that
-/// boundary.
-fn type_filter_contains_any(filter: &TypeFilter) -> bool {
-    match filter {
-        TypeFilter::Any => true,
-        TypeFilter::Non(filter) => type_filter_contains_any(filter),
-        TypeFilter::AnyOf(filters) => filters.iter().any(type_filter_contains_any),
-        TypeFilter::Creature
-        | TypeFilter::Land
-        | TypeFilter::Artifact
-        | TypeFilter::Enchantment
-        | TypeFilter::Instant
-        | TypeFilter::Sorcery
-        | TypeFilter::Planeswalker
-        | TypeFilter::Battle
-        | TypeFilter::Kindred
-        | TypeFilter::Permanent
-        | TypeFilter::Card
-        | TypeFilter::Subtype(_) => false,
-    }
-}
-
-/// CR 205.2a: non-`Card` core types that can juxtapose with a subtype in a
-/// zone-card description. `Card` / `Any` / `Subtype` / `Non` / `AnyOf` are not
-/// cores for this gate — admitting them would steal `"creature cards"` /
-/// `"Lesson cards"` / `"instant or sorcery cards"` onto the filtered bridge.
-fn type_filter_is_non_card_core(filter: &TypeFilter) -> bool {
-    match filter {
-        TypeFilter::Creature
-        | TypeFilter::Land
-        | TypeFilter::Artifact
-        | TypeFilter::Enchantment
-        | TypeFilter::Instant
-        | TypeFilter::Sorcery
-        | TypeFilter::Planeswalker
-        | TypeFilter::Battle
-        | TypeFilter::Kindred
-        | TypeFilter::Permanent => true,
-        TypeFilter::Card
-        | TypeFilter::Any
-        | TypeFilter::Subtype(_)
-        | TypeFilter::Non(_)
-        | TypeFilter::AnyOf(_) => false,
-    }
-}
-
-/// CR 205.1 + CR 205.3m: a juxtaposed subtype + non-`Card` core type
-/// ("Zombie creature") is a type-line conjunction, not a disjunction.
-fn type_filters_are_juxtaposed_subtype_and_core(type_filters: &[TypeFilter]) -> bool {
-    type_filters
-        .iter()
-        .any(|filter| matches!(filter, TypeFilter::Subtype(_)))
-        && type_filters.iter().any(type_filter_is_non_card_core)
-}
-
-/// Only static card-description properties can be evaluated meaningfully in a
-/// named card zone. The default is intentionally reject-by-default so a future
-/// property cannot widen this parser without an explicit admissibility decision.
-fn is_admissible_zone_card_count_property(property: &FilterProp) -> bool {
-    matches!(
-        property,
-        FilterProp::Historic
-            | FilterProp::NotHistoric
-            | FilterProp::HasSupertype { .. }
-            | FilterProp::NotSupertype { .. }
-    )
 }
 
 /// Self-referential source alternatives shared by the "exiled with [source]"
@@ -27787,6 +27681,17 @@ mod counters_among_condition_tests {
         assert_eq!(
             counters_among("there are two or more stun counters among creatures you control"),
             (Some(CounterType::Stun), Comparator::GE, 2)
+        );
+    }
+
+    /// Jace, Reality Sculptor — "Jaces" is a pluralized planeswalker subtype.
+    #[test]
+    fn loyalty_counters_among_plural_planeswalker_subtype() {
+        assert_eq!(
+            counters_among(
+                "there are twenty-five or more loyalty counters among Jaces you control"
+            ),
+            (Some(CounterType::Loyalty), Comparator::GE, 25)
         );
     }
 }

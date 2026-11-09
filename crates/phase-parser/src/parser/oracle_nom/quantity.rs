@@ -3022,7 +3022,196 @@ fn parse_defending_player_hand_count(input: &str) -> OracleResult<'_, QuantityRe
     ))
 }
 
+/// Limits the filtered zone-count bridge to card descriptions whose semantics
+/// remain valid in every counted zone. All other filter forms deliberately fall
+/// through to the legacy quantity grammar instead of being partially accepted.
+///
+/// CR 109.2a + CR 404.1: a card description that names a zone counts matching
+/// cards in that zone.
+/// CR 205.1 + CR 205.2a + CR 205.3m: juxtaposed subtype + non-`Card` core type
+/// ("Zombie creature cards") is a type-line conjunction (creature AND the
+/// Zombie creature type). Empty-`properties` nouns are admitted only in that
+/// shape, encoded as `filter: Some(Typed { .. })` so `matches_target_filter`
+/// ANDs the type filters. Property-free core-only ("creature cards") or
+/// subtype-only ("Lesson cards" / "Zombie cards") nouns stay on the legacy
+/// `card_types` path.
+pub(crate) fn is_admissible_zone_card_count_filter(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller,
+            properties,
+        }) => {
+            controller.is_none()
+                && !type_filters.is_empty()
+                && !type_filters.iter().any(type_filter_contains_any)
+                && if properties.is_empty() {
+                    type_filters_are_juxtaposed_subtype_and_core(type_filters)
+                } else {
+                    properties
+                        .iter()
+                        .all(is_admissible_zone_card_count_property)
+                }
+        }
+        TargetFilter::Or { filters } => {
+            !filters.is_empty() && filters.iter().all(is_admissible_zone_card_count_filter)
+        }
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::Not { .. }
+        | TargetFilter::And { .. }
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
+/// `TypeFilter::Any` would make this bridge a broad unfiltered count. Descend
+/// through its recursive variants so nested `Any` filters cannot bypass that
+/// boundary.
+fn type_filter_contains_any(filter: &TypeFilter) -> bool {
+    match filter {
+        TypeFilter::Any => true,
+        TypeFilter::Non(filter) => type_filter_contains_any(filter),
+        TypeFilter::AnyOf(filters) => filters.iter().any(type_filter_contains_any),
+        TypeFilter::Creature
+        | TypeFilter::Land
+        | TypeFilter::Artifact
+        | TypeFilter::Enchantment
+        | TypeFilter::Instant
+        | TypeFilter::Sorcery
+        | TypeFilter::Planeswalker
+        | TypeFilter::Battle
+        | TypeFilter::Kindred
+        | TypeFilter::Permanent
+        | TypeFilter::Card
+        | TypeFilter::Subtype(_) => false,
+    }
+}
+
+/// CR 205.2a: non-`Card` core types that can juxtapose with a subtype in a
+/// zone-card description. `Card` / `Any` / `Subtype` / `Non` / `AnyOf` are not
+/// cores for this gate — admitting them would steal `"creature cards"` /
+/// `"Lesson cards"` / `"instant or sorcery cards"` onto the filtered bridge.
+fn type_filter_is_non_card_core(filter: &TypeFilter) -> bool {
+    match filter {
+        TypeFilter::Creature
+        | TypeFilter::Land
+        | TypeFilter::Artifact
+        | TypeFilter::Enchantment
+        | TypeFilter::Instant
+        | TypeFilter::Sorcery
+        | TypeFilter::Planeswalker
+        | TypeFilter::Battle
+        | TypeFilter::Kindred
+        | TypeFilter::Permanent => true,
+        TypeFilter::Card
+        | TypeFilter::Any
+        | TypeFilter::Subtype(_)
+        | TypeFilter::Non(_)
+        | TypeFilter::AnyOf(_) => false,
+    }
+}
+
+/// CR 205.1 + CR 205.3m: a juxtaposed subtype + non-`Card` core type
+/// ("Zombie creature") is a type-line conjunction, not a disjunction.
+fn type_filters_are_juxtaposed_subtype_and_core(type_filters: &[TypeFilter]) -> bool {
+    type_filters
+        .iter()
+        .any(|filter| matches!(filter, TypeFilter::Subtype(_)))
+        && type_filters.iter().any(type_filter_is_non_card_core)
+}
+
+/// Only static card-description properties can be evaluated meaningfully in a
+/// named card zone. The default is intentionally reject-by-default so a future
+/// property cannot widen this parser without an explicit admissibility decision.
+fn is_admissible_zone_card_count_property(property: &FilterProp) -> bool {
+    matches!(
+        property,
+        FilterProp::Historic
+            | FilterProp::NotHistoric
+            | FilterProp::HasSupertype { .. }
+            | FilterProp::NotSupertype { .. }
+    )
+}
+
 fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
+    // CR 205.4a: a supertype-qualified type phrase is not a type list.
+    // Keep the folded qualifier on ZoneCardCount::filter, which
+    // matches_zone_card_filter ANDs per card in the counted zone.
+    if let Ok((after_cards, noun)) = terminated(take_until(" card"), parse_card_word).parse(input) {
+        let (filter, remainder) = parse_type_phrase_folding(noun);
+        if remainder.trim().is_empty()
+            && matches!(&filter, TargetFilter::Typed(TypedFilter { properties, .. })
+                if is_admissible_zone_card_count_filter(&filter)
+                    && properties.iter().any(|property| matches!(property,
+                        FilterProp::HasSupertype { .. } | FilterProp::NotSupertype { .. })))
+        {
+            let (rest, _) = tag(" in ").parse(after_cards)?;
+            let (rest, (zone, scope)) = parse_scoped_zone_ref(rest)?;
+            return Ok((
+                rest,
+                QuantityRef::ZoneCardCount {
+                    zone,
+                    card_types: Vec::new(),
+                    filter: Some(filter),
+                    scope,
+                },
+            ));
+        }
+    }
     let (rest, card_types) = if let Ok((typed_rest, typed_filters)) = parse_type_filter_list(input)
     {
         if let Ok((rest, _)) = parse_card_word(typed_rest) {

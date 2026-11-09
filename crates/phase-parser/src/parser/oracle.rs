@@ -1987,6 +1987,7 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
@@ -10055,6 +10056,7 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
+        | Effect::HordePlayCard { .. }
         | Effect::Unimplemented { .. } => {}
     }
 }
@@ -11143,6 +11145,7 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
+        | Effect::HordePlayCard { .. }
         | Effect::Unimplemented { .. } => {}
     }
 }
@@ -12164,11 +12167,29 @@ fn parse_loyalty_ability_ir(
     cost: AbilityCost,
     ctx: &mut ParseContext,
 ) -> AbilityIr {
+    // CR 602.1b + CR 602.5: lower printed activation restrictions through the
+    // shared stripper so the loyalty activation gate can enforce them.
+    //
+    // Keep the original text when the stripper finds no restriction or peels
+    // an activator permission. The loyalty gate only supports the controller,
+    // so an explicit permission must remain visible to coverage.
+    let (stripped_effect_text, constraints) = strip_activated_constraints(effect_text);
+    let has_supported_restrictions = !constraints.restrictions.is_empty()
+        && constraints.activator_filter.is_none()
+        && !constraints.any_player_may_activate;
+    let effect_text = if has_supported_restrictions {
+        stripped_effect_text.as_str()
+    } else {
+        effect_text
+    };
     ctx.subject = None;
     ctx.actor = None;
     let mut ir = parse_ability_ir_with_context(effect_text, AbilityKind::Activated, ctx);
     ir.shell.cost = Some(cost);
     ir.shell.description = Some(description.to_string());
+    if has_supported_restrictions {
+        ir.shell.activation_restrictions = constraints.restrictions;
+    }
     apply_loyalty_restrictions(&mut ir.shell);
     ir
 }

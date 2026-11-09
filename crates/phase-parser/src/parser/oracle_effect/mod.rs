@@ -142,12 +142,12 @@ use crate::types::ability::{
     QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, ReplacementCondition,
     ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope,
     RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition,
-    SkipScope, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
-    SubAbilityLink, TapStateChange, TargetFilter, TargetReadOrigin, TargetSelectionMode,
-    ThisWayCause, TokenAttackDestination, TrackedAnaphorSource, TriggerCondition,
-    TriggerDefinition, TurnGate, TypeFilter, TypedFilter, UnlessPayModifier, UnloweredGuard,
-    UntilCondition, VoteSubject, WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser,
-    ZoneChoiceGatherRole, ZoneOwner,
+    SkipScope, SpellStackToGraveyardReplacement, SpellbookSelection, StaticCondition,
+    StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter,
+    TargetReadOrigin, TargetSelectionMode, ThisWayCause, TokenAttackDestination,
+    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter,
+    UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject, WheneverEventExpiry,
+    ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneChoiceGatherRole, ZoneOwner,
 };
 // `DoubleTarget` has no production use in this module since the counter-doubling
 // discriminator moved to `Effect::is_counter_multiplication()`; the child
@@ -196,12 +196,12 @@ use self::subject::{
     try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life,
 };
 use crate::parser::oracle_ir::ast::*;
-use crate::parser::oracle_ir::context::BodyScope;
 pub(crate) use crate::parser::oracle_ir::context::{
     BareCardAggregateBinding, ChosenColorQualifierScope, DeclaredSlotEntry, DeclaredSlotRegistry,
     HeadWindowProbe, ParseContext, PriorZoneChoicePartition, SpellAnaphorBinding, TokenPtFollowup,
     TriggerConditionScope,
 };
+use crate::parser::oracle_ir::context::{BodyScope, PendingTrackedSet, TrackedSetProducer};
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseId,
     ClauseIr, ClauseIrBuilder, ClausePlacement, DieResultBranchIr, EffectChainIr,
@@ -12807,9 +12807,10 @@ fn parse_effect_clause_inner_with_damage_context(
         return parsed_clause(effect);
     }
 
-    // Digital-only Alchemy: "draft a card from [X]'s spellbook [+ destination]".
-    if let Some(effect) = try_parse_spellbook_draft(tp) {
-        return parsed_clause(effect);
+    // Digital-only Alchemy: "draft a card from [X]'s spellbook [+ destination
+    // or exile rider]".
+    if let Some(clause) = try_parse_spellbook_draft(tp) {
+        return clause;
     }
 
     // Digital-only Alchemy: "conjure a card of your choice from [X]'s spellbook
@@ -13806,7 +13807,7 @@ fn parse_perpetual_self_subject<'a>(
         //  2. An earlier SAME-CHAIN typed/chosen referent -- a prior "choose a
         //     card in your hand" clause (`ctx.parent_target_available`) or an
         //     immediately preceding `Effect::ChooseFromZone`
-        //     (`ctx.pending_tracked_set_origin`) -- mirrors
+        //     (`ctx.chosen_tracked_set_pending()`) -- mirrors
         //     `parse_bound_it_perpetual_gain_cost_subject`'s own gate exactly,
         //     since this is the identical same-chain-referent question the
         //     cost-grant sibling arm already answers correctly.
@@ -13831,7 +13832,7 @@ fn parse_perpetual_self_subject<'a>(
         // rather than a wrong install.
         let target = match counter::counter_anaphor_created_token_binding("it", ctx) {
             Some(target) => target,
-            None if ctx.parent_target_available || ctx.pending_tracked_set_origin.is_some() => {
+            None if ctx.parent_target_available || ctx.chosen_tracked_set_pending() => {
                 TargetFilter::ParentTarget
             }
             None => {
@@ -13869,14 +13870,14 @@ fn parse_perpetual_self_subject<'a>(
         //  2. An earlier SAME-CHAIN typed/chosen referent (Racketeer Boss's
         //     "choose up to two ... cards in your hand") --
         //     `ctx.parent_target_available` /
-        //     `ctx.pending_tracked_set_origin`.
+        //     `ctx.chosen_tracked_set_pending()`.
         //
         // The "it" arm's third antecedent (the trigger's own non-self subject)
         // has NO plural mirror -- no card needs it -- so a "they" with neither
         // of the two above fails the clause closed.
         let target = if ctx.token_created_in_chain {
             TargetFilter::LastCreated
-        } else if ctx.parent_target_available || ctx.pending_tracked_set_origin.is_some() {
+        } else if ctx.parent_target_available || ctx.chosen_tracked_set_pending() {
             TargetFilter::ParentTarget
         } else {
             return None;
@@ -13923,7 +13924,7 @@ fn parse_bound_it_perpetual_gain_cost_subject<'a>(
     lower: &'a str,
     ctx: &ParseContext,
 ) -> Option<&'a str> {
-    if !(ctx.parent_target_available || ctx.pending_tracked_set_origin.is_some()) {
+    if !(ctx.parent_target_available || ctx.chosen_tracked_set_pending()) {
         return None;
     }
 
@@ -14106,7 +14107,7 @@ fn try_parse_perpetual_modify_cost(tp: TextPair, ctx: &ParseContext) -> Option<E
         // CREATED an object (Conjure/Token/CopyTokenOf/Manifest/Cloak), "it"
         // binds to that just-created object, not the legacy chosen/tracked
         // antecedent `parse_bound_it_perpetual_gain_cost_subject`'s own gate
-        // (`ctx.parent_target_available || ctx.pending_tracked_set_origin`)
+        // (`ctx.parent_target_available || ctx.chosen_tracked_set_pending()`)
         // was written for. Checked first so a genuine chain-created referent
         // always wins; falls through to the existing ParentTarget binding
         // otherwise, leaving every currently-passing case unchanged.
@@ -14384,23 +14385,34 @@ fn try_parse_typed_cards_in_hand_perpetual_gain_cost(tp: TextPair) -> Option<Eff
 }
 
 /// Digital-only Alchemy keyword action: parse "draft a card from [X]'s spellbook"
-/// with its destination. The source name between "from " and "spellbook" is the
+/// with its rider. The source name between "from " and "spellbook" is the
 /// card's own name (or "this creature/artifact/…") and is irrelevant to the
-/// effect — the resolver reads the spellbook list from the source object.
+/// effect — the resolver reads the spellbook list from the source object. Every
+/// draft is `SpellbookSelection::Draft`: the game offers a random sample of the
+/// book and the controller chooses one.
 ///
 /// To avoid silently dropping unmodeled riders (which the coverage tooling
 /// counts as swallowed clauses), the clause tail must be **fully consumed**:
 /// the bare draft goes to the hand; "and put it onto the battlefield[ tapped]"
-/// goes to the battlefield (honouring the tapped rider); "and exile it" goes to
-/// exile. Anything else — "and exile it face down", "twice, then …", or a
-/// trailing "then …" continuation not split off by the effect chain — returns
-/// `None` so the card falls through to `Unimplemented` rather than parsing to a
-/// subtly wrong effect.
-fn try_parse_spellbook_draft(tp: TextPair) -> Option<Effect> {
+/// goes to the battlefield (honouring the tapped rider); "and exile it" / ",
+/// then exile it" drafts into the hand and then exiles the drafted card (a
+/// following `ChangeZone` sub-ability). Anything else — "and exile it face
+/// down", "twice, then …", or a trailing "then …" continuation not split off by
+/// the effect chain — returns `None` so the card falls through to
+/// `Unimplemented` rather than parsing to a subtly wrong effect.
+fn try_parse_spellbook_draft(tp: TextPair) -> Option<ParsedEffectClause> {
     /// The clause tail is fully consumed when nothing (or just a sentence
     /// period) remains.
     fn tail_done(tail: &str) -> bool {
         tail.is_empty() || tail == "."
+    }
+
+    fn draft(destination: Zone, tapped: bool) -> Effect {
+        Effect::DraftFromSpellbook {
+            destination,
+            tapped,
+            selection: SpellbookSelection::Draft,
+        }
     }
 
     let (rest, _) = tag::<_, _, OracleError<'_>>("draft a card from ")
@@ -14416,14 +14428,12 @@ fn try_parse_spellbook_draft(tp: TextPair) -> Option<Effect> {
 
     // Default: a bare "draft a card from X's spellbook" creates it in hand.
     if tail_done(after_book) {
-        return Some(Effect::DraftFromSpellbook {
-            destination: Zone::Hand,
-            tapped: false,
-            random: false,
-        });
+        return Some(parsed_clause(draft(Zone::Hand, false)));
     }
 
-    // "… and put it onto the battlefield[ tapped]".
+    // "… and put it onto the battlefield[ tapped]". The literal reading (draft
+    // into hand, then put it onto the battlefield) is deferred: the card is
+    // still created directly on the battlefield.
     if let Ok((tail, _)) =
         tag::<_, _, OracleError<'_>>(" and put it onto the battlefield").parse(after_book)
     {
@@ -14431,21 +14441,49 @@ fn try_parse_spellbook_draft(tp: TextPair) -> Option<Effect> {
             Ok((tail, _)) => (tail, true),
             Err(_) => (tail, false),
         };
-        return tail_done(tail).then_some(Effect::DraftFromSpellbook {
-            destination: Zone::Battlefield,
-            tapped,
-            random: false,
-        });
+        return tail_done(tail).then(|| parsed_clause(draft(Zone::Battlefield, tapped)));
     }
 
-    // "… and exile it" — but not "and exile it face down" (face-down exile is
-    // not modeled yet), which leaves an unconsumed tail and is rejected.
-    if let Ok((tail, _)) = tag::<_, _, OracleError<'_>>(" and exile it").parse(after_book) {
-        return tail_done(tail).then_some(Effect::DraftFromSpellbook {
-            destination: Zone::Exile,
-            tapped: false,
-            random: false,
-        });
+    // Connector axis (` and` / `, then`) × destination-verb (` exile it`);
+    // `tail_done` still rejects " face down" (not modeled yet).
+    if let Ok((tail, _)) = preceded(
+        alt((
+            tag::<_, _, OracleError<'_>>(" and"),
+            tag::<_, _, OracleError<'_>>(", then"),
+        )),
+        tag::<_, _, OracleError<'_>>(" exile it"),
+    )
+    .parse(after_book)
+    {
+        if !tail_done(tail) {
+            return None;
+        }
+        // CR 608.2c: the controller follows the instructions in the order
+        // written — the card is drafted into its default zone, hand, then exiled
+        // from there (the move Ranar the Ever-Watchful's "put into exile from
+        // your hand" observes). CR 701.13a: to exile an object, move it to the
+        // exile zone from wherever it is. "it" is the drafted card: the draft
+        // publishes the created referent (`TargetFilter::LastCreated`).
+        let mut clause = parsed_clause(draft(Zone::Hand, false));
+        clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::LastCreated,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )));
+        return Some(clause);
     }
 
     // Unmodeled tail ("twice, then …", a trailing chained clause, …) — leave it
@@ -14454,34 +14492,31 @@ fn try_parse_spellbook_draft(tp: TextPair) -> Option<Effect> {
 }
 
 /// Digital-only Alchemy keyword action: parse "conjure a card of your choice from
-/// [X]'s spellbook [+ destination]". This is the "conjure ... of your choice" wording of
-/// the same operation as `draft a card from [X]'s spellbook`: reveal the source card's
-/// spellbook, the controller chooses one card, and it is created in the destination zone.
-/// Both map to `Effect::DraftFromSpellbook` — the resolver reads the spellbook list from the
-/// source object, so the printed source name in the text is irrelevant. The clause tail must
-/// be fully consumed (mirroring `try_parse_spellbook_draft`) so an unmodeled rider falls
-/// through to `Unimplemented` rather than parsing to a subtly wrong effect.
+/// [X]'s spellbook [+ destination]" and "conjure a random card from [X]'s spellbook
+/// [+ destination]". Both are the same take-one-card-from-the-spellbook operation as
+/// `draft a card from [X]'s spellbook`, so both map to `Effect::DraftFromSpellbook` — the
+/// resolver reads the spellbook list from the source object, so the printed source name in
+/// the text is irrelevant. The clause tail must be fully consumed (mirroring
+/// `try_parse_spellbook_draft`) so an unmodeled rider falls through to `Unimplemented`
+/// rather than parsing to a subtly wrong effect.
 ///
-/// Coupling note: this mapping is correct while `Effect::DraftFromSpellbook` offers the
-/// controller the *entire* spellbook to choose from, which is exactly what "a card of your
-/// choice" means. (In Arena, `draft a card from ... spellbook` presents three random cards,
-/// whereas "conjure a card of your choice" reveals the whole book.) If `DraftFromSpellbook`
-/// is ever narrowed to model the real three-card draft, these conjure-of-your-choice cards
-/// must retain the whole-book choice rather than following it.
+/// Selection: a draft offers a random sample of the book (`SpellbookSelection::Draft`),
+/// while "a card of your choice" keeps the whole-book choice (`SpellbookSelection::Chosen`)
+/// and "a random card" has the engine pick one with no prompt
+/// (`SpellbookSelection::Random`).
 fn try_parse_conjure_from_spellbook(tp: TextPair) -> Option<Effect> {
-    // Two wordings of the same draft-from-spellbook operation: "of your choice" lets the
-    // controller choose (random = false); "a random card" has the engine pick (random = true).
-    let (rest, random) = if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("conjure a card of your choice from ").parse(tp.lower)
-    {
-        (rest, false)
-    } else if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("conjure a random card from ").parse(tp.lower)
-    {
-        (rest, true)
-    } else {
-        return None;
-    };
+    let (rest, selection) = alt((
+        value(
+            SpellbookSelection::Chosen,
+            tag::<_, _, OracleError<'_>>("conjure a card of your choice from "),
+        ),
+        value(
+            SpellbookSelection::Random,
+            tag::<_, _, OracleError<'_>>("conjure a random card from "),
+        ),
+    ))
+    .parse(tp.lower)
+    .ok()?;
     // Consume the (irrelevant) source-card name up to "spellbook".
     let (after_book, _src) = take_until::<_, _, OracleError<'_>>("spellbook")
         .parse(rest)
@@ -14492,8 +14527,8 @@ fn try_parse_conjure_from_spellbook(tp: TextPair) -> Option<Effect> {
 
     // Destination via the shared conjure-zone parser; " tapped" only after the
     // battlefield. `DraftFromSpellbook` has no positional slot, so an "into the top
-    // N … at random" position is not carried (its `random` flag already captures
-    // the randomized-draft intent); the destination still collapses to the zone.
+    // N … at random" position is not carried (its `selection` already captures
+    // the randomized-pick intent); the destination still collapses to the zone.
     let (destination, _library_position, _library_players, zone_rest) =
         parse_conjure_zone(after_book)?;
     let (tail, tapped) = if destination == Zone::Battlefield {
@@ -14509,7 +14544,7 @@ fn try_parse_conjure_from_spellbook(tp: TextPair) -> Option<Effect> {
     (tail.is_empty() || tail == ".").then_some(Effect::DraftFromSpellbook {
         destination,
         tapped,
-        random,
+        selection,
     })
 }
 
@@ -15771,6 +15806,7 @@ fn quantity_ref_reads_chain_local_result(reference: &QuantityRef) -> bool {
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::BasicLandTypeCount { .. }
@@ -24330,6 +24366,7 @@ fn parent_population_amount_is_plain(amount: &QuantityExpr) -> bool {
             | QuantityRef::SharedCardTypes { .. }
             | QuantityRef::DistinctSubtypes { .. }
             | QuantityRef::CardsExiledBySource
+            | QuantityRef::DeployedBossCount
             | QuantityRef::ExiledCardPower { .. }
             | QuantityRef::ZoneCardCount { .. }
             | QuantityRef::BasicLandTypeCount { .. }
@@ -28527,13 +28564,14 @@ fn chain_declared_object_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
 /// (Craterous Stomp: "… target creature an opponent controls. Each other
 /// creature that player controls …").
 fn declared_object_target_controller_antecedent(clauses: &[ClauseIr]) -> Option<ControllerRef> {
-    match chain_declared_object_target(clauses)? {
-        TargetFilter::Typed(TypedFilter {
-            controller: Some(ControllerRef::Opponent),
-            ..
-        }) => Some(ControllerRef::ParentTargetController),
-        _ => None,
-    }
+    let TargetFilter::Typed(TypedFilter {
+        controller: Some(ControllerRef::Opponent),
+        ..
+    }) = chain_declared_object_target(clauses)?
+    else {
+        return None;
+    };
+    Some(ControllerRef::ParentTargetController)
 }
 
 /// CR 601.2c + CR 115.1: the single target filter a chain node announces as
@@ -41799,6 +41837,7 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
         | Effect::ChooseCounterKind { .. }
         | Effect::PutChosenCounter { .. }
         | Effect::ReproduceEventCounters { .. }
+        | Effect::HordePlayCard { .. }
         | Effect::Unimplemented { .. } => {}
     }
 }
@@ -45571,8 +45610,8 @@ fn parse_effect_chain_ir_body(
     let full_text = text; // bind AFTER the strip so diagnostics track the parsed chunks
     ctx.effect_chain_full_lower = Some(full_text.to_ascii_lowercase());
     // CR 608.2c: A tracked-set source-zone binding is scoped to the chain that
-    // publishes it. The per-chunk `chunk_ctx` re-seeds `pending_tracked_set_origin`
-    // from the `chain_pending_tracked_set_origin` loop-local (initialized to
+    // publishes it. The per-chunk `chunk_ctx` re-seeds `pending_tracked_set`
+    // from the `chain_pending_tracked_set` loop-local (initialized to
     // None) each iteration, so a binding from one chain can never leak into the
     // next; the outer `ctx` field is left untouched here.
     // CR 701.42a: The meld effect clause "exile them, then meld them into
@@ -45632,7 +45671,7 @@ fn parse_effect_chain_ir_body(
     // CR 611.2a + CR 608.2c: expand any chunk whose leading duration governs conjuncts the
     // single-clause parse discarded. The expanded conjuncts become ORDINARY chunks of THIS
     // chain, which is the only construction under which chain-level anaphor state
-    // (`ctx.subject`, `carried_player`, `chain_pending_tracked_set_origin`,
+    // (`ctx.subject`, `carried_player`, `chain_pending_tracked_set`,
     // `chain_declared_target_slots`) is available to them at all — a NESTED
     // `parse_effect_chain_ir` restarts that state and binds `SelfRef` unconditionally
     // (measured on Opportunistic Dragon). Availability is necessary, not sufficient:
@@ -45713,9 +45752,9 @@ fn parse_effect_chain_ir_body(
     // battlefield" consumer so the `TrackedSet` move scans the right zone
     // (Breach the Multiverse: graveyard, not the impulse-default exile). Like
     // the chosen-player locals, the per-chunk `chunk_ctx` is rebuilt fresh each
-    // iteration, so this loop-local seeds each `chunk_ctx.pending_tracked_set_origin`
+    // iteration, so this loop-local seeds each `chunk_ctx.pending_tracked_set`
     // and is refreshed from the finalized `ChooseFromZone` clause after parse.
-    let mut chain_pending_tracked_set_origin: Option<crate::types::zones::Zone> = None;
+    let mut chain_pending_tracked_set: Option<PendingTrackedSet> = None;
     // CR 608.2e + CR 109.5: Sticky across chunks of a "For each opponent who
     // doesn't, <body>" decline-consequence sentence. Set true on the chunk that
     // carries the "for each opponent who doesn't" prefix; every chunk while
@@ -48639,7 +48678,7 @@ fn parse_effect_chain_ir_body(
             // "choose card(s) in <zone>" producer so this chunk's "put those
             // cards onto the battlefield" anaphor binds its `TrackedSet` move to
             // that origin instead of the impulse-default exile.
-            pending_tracked_set_origin: chain_pending_tracked_set_origin,
+            pending_tracked_set: chain_pending_tracked_set,
             // CR 601.2c + CR 608.2c: seed the declared target-slot registry so a
             // later clause's definite anaphor ("that Equipment", "the chosen
             // creature") resolves to the slot the "Choose target X and target Y"
@@ -49419,8 +49458,11 @@ fn parse_effect_chain_ir_body(
         // cards" chain), never a single hardcoded card. Any chunk that is not
         // itself such a producer clears it, so the binding never leaks past the
         // immediately-following consumer.
-        chain_pending_tracked_set_origin = match &clause.effect {
-            Effect::ChooseFromZone { zone, .. } => Some(*zone),
+        chain_pending_tracked_set = match &clause.effect {
+            Effect::ChooseFromZone { zone, .. } => Some(PendingTrackedSet {
+                zone: *zone,
+                producer: TrackedSetProducer::Chosen,
+            }),
             // CR 701.20b: revealed cards stay in the library they were revealed
             // from, so "put those cards …" reads them out of the library. A bare
             // reveal is still a reveal `Dig` with no kept-card destination here;
@@ -49434,7 +49476,10 @@ fn parse_effect_chain_ir_body(
                 destination: None,
                 keep_count: None,
                 ..
-            } => Some(Zone::Library),
+            } => Some(PendingTrackedSet {
+                zone: Zone::Library,
+                producer: TrackedSetProducer::Revealed,
+            }),
             _ => None,
         };
         // CR 608.2d + CR 115.7d: The chunk loop intentionally keeps the full
