@@ -1066,13 +1066,7 @@ export const PermanentCard = memo(function PermanentCard({
           ("needs 2") and that the rules make public. The engine owns and
           documents the contract on `battlefield_keyword_badges` itself and pins
           both halves (`face_down_keyword_badges_carry_only_granted_keywords`,
-          `a_face_down_profile_ward_is_badged_like_any_public_keyword`).
-
-          Known gap: `KeywordStrip` styles printed vs granted off
-          `base_keywords`, which `visibility.rs` clears for observers of a
-          face-down permanent — so the same ward reads as printed to its
-          controller and as granted to everyone else. Cosmetic only, and in the
-          safe direction; not addressed here. */}
+          `a_face_down_profile_ward_is_badged_like_any_public_keyword`). */}
       {showKeywordStrip && battlefieldKeywordBadges.length > 0 && (
         <KeywordStrip
           keywords={battlefieldKeywordBadges}
