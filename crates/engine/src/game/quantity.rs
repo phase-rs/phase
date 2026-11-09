@@ -5810,18 +5810,20 @@ fn resolve_ref(
             scope,
         } => {
             let mut count = 0;
-            // Per-player zones (graveyard, library)
+            // Per-player zones (graveyard, library, hand)
             match zone {
                 ZoneRef::Graveyard | ZoneRef::Library | ZoneRef::Hand => {
                     for player in scoped_zone_holders(state, zone, scope, ctx, controller) {
                         for &obj_id in zone_container(state, zone, player) {
-                            if matches_zone_card_filter(
-                                state,
-                                obj_id,
-                                card_types,
-                                filter.as_ref(),
-                                &filter_ctx,
-                            ) {
+                            if state.objects.get(&obj_id).is_some_and(|obj| {
+                                matches_zone_card_filter(
+                                    state,
+                                    obj,
+                                    card_types,
+                                    filter.as_ref(),
+                                    &filter_ctx,
+                                )
+                            }) {
                                 count += 1;
                             }
                         }
@@ -5838,14 +5840,10 @@ fn resolve_ref(
                                 controller,
                                 obj.owner,
                             );
-                            // CR 108.2 + CR 109.1: count only cards in exile;
-                            // the CR 722.3c retained prepare copy is a copy of
-                            // a card, not a card.
-                            if obj.is_card_population_member()
-                                && owner_matches
+                            if owner_matches
                                 && matches_zone_card_filter(
                                     state,
-                                    obj_id,
+                                    obj,
                                     card_types,
                                     filter.as_ref(),
                                     &filter_ctx,
@@ -7079,26 +7077,28 @@ fn damage_source_controller_matches(
     }
 }
 
-/// Check if an object matches a set of type filters for zone card counting.
-/// Empty `card_types` means all cards match.
+/// CR 109.2a + CR 111.6: zoned card descriptions count cards, not tokens.
+/// Check card identity before optional type and target filters, even before
+/// non-card objects are removed by state-based actions.
+/// Empty `card_types` leaves only the optional target filter.
 fn matches_zone_card_filter(
     state: &GameState,
-    obj_id: ObjectId,
+    obj: &crate::game::game_object::GameObject,
     card_types: &[TypeFilter],
     filter: Option<&TargetFilter>,
     filter_ctx: &FilterContext<'_>,
 ) -> bool {
-    if !card_types.is_empty() {
-        let matches_type = state.objects.get(&obj_id).is_some_and(|obj| {
-            card_types
-                .iter()
-                .any(|tf| type_filter_matches(tf, obj, &state.all_creature_types))
-        });
-        if !matches_type {
-            return false;
-        }
+    if !obj.is_represented_by_a_card() {
+        return false;
     }
-    filter.is_none_or(|filter| matches_target_filter(state, obj_id, filter, filter_ctx))
+    if !card_types.is_empty()
+        && !card_types
+            .iter()
+            .any(|tf| type_filter_matches(tf, obj, &state.all_creature_types))
+    {
+        return false;
+    }
+    filter.is_none_or(|filter| matches_target_filter(state, obj.id, filter, filter_ctx))
 }
 
 /// CR 608.2 + CR 109.5: Resolve which player a `CountScope` variant binds to,
@@ -28842,6 +28842,120 @@ mod dandan_scoped_zone_tests {
     }
 }
 
+/// CR 109.2a + CR 111.6: a zoned card count excludes tokens even before
+/// CR 111.7 removes them at the next state-based-action check.
+#[cfg(test)]
+mod graveyard_zone_card_population_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::card_type::Supertype;
+    use crate::types::identifiers::CardId;
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+
+    fn graveyard_land(state: &mut GameState, card: u64, name: &str) -> ObjectId {
+        let id = create_object(state, CardId(card), P1, name.to_string(), Zone::Graveyard);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types = vec![CoreType::Land];
+        obj.base_card_types = obj.card_types.clone();
+        id
+    }
+
+    fn board() -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            P0,
+            "Population Reader".to_string(),
+            Zone::Battlefield,
+        );
+        graveyard_land(&mut state, 2, "Nonbasic Land Card");
+        let basic = graveyard_land(&mut state, 3, "Basic Land Card");
+        let obj = state.objects.get_mut(&basic).unwrap();
+        obj.card_types.supertypes = vec![Supertype::Basic];
+        obj.base_card_types = obj.card_types.clone();
+
+        // Everywhere has all five basic land types but no Basic supertype.
+        // This fixture models its transient graveyard state before token cleanup.
+        let token = graveyard_land(&mut state, 4, "Everywhere");
+        let obj = state.objects.get_mut(&token).unwrap();
+        obj.is_token = true;
+        obj.card_types.subtypes = ["Plains", "Island", "Swamp", "Mountain", "Forest"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        obj.base_card_types = obj.card_types.clone();
+        let copy = graveyard_land(&mut state, 5, "Nonbasic Land Copy");
+        state.objects.get_mut(&copy).unwrap().is_copy = true;
+
+        for id in [token, copy] {
+            let obj = &state.objects[&id];
+            assert!(state.players[1].graveyard.contains(&id));
+            assert_eq!(obj.zone, Zone::Graveyard);
+            assert!(obj.card_types.core_types.contains(&CoreType::Land));
+            assert!(!obj.card_types.supertypes.contains(&Supertype::Basic));
+            assert!(!obj.is_represented_by_a_card());
+        }
+        (state, source)
+    }
+
+    fn read(state: &GameState, source: ObjectId, filter: Option<TargetFilter>) -> i32 {
+        resolve_quantity(
+            state,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: Vec::new(),
+                    filter,
+                    scope: CountScope::Opponents,
+                },
+            },
+            P0,
+            source,
+        )
+    }
+
+    #[test]
+    fn opponent_graveyard_nonbasic_land_card_count_excludes_transient_non_cards() {
+        let (mut state, source) = board();
+        let nonbasic =
+            TargetFilter::Typed(
+                TypedFilter::land().properties(vec![FilterProp::NotSupertype {
+                    value: Supertype::Basic,
+                }]),
+            );
+        assert_eq!(
+            read(&state, source, Some(nonbasic.clone())),
+            1,
+            "neither the nonbasic land token nor the copy is a land card"
+        );
+        graveyard_land(&mut state, 6, "Second Nonbasic Land Card");
+        assert_eq!(
+            read(&state, source, Some(nonbasic)),
+            2,
+            "another real nonbasic land card raises the count"
+        );
+    }
+
+    #[test]
+    fn opponent_graveyard_unfiltered_card_count_excludes_transient_non_cards() {
+        let (mut state, source) = board();
+        assert_eq!(
+            read(&state, source, None),
+            2,
+            "both real land cards count, but the token and copy do not"
+        );
+        graveyard_land(&mut state, 6, "Second Nonbasic Land Card");
+        assert_eq!(
+            read(&state, source, None),
+            3,
+            "an unfiltered count still includes another real card"
+        );
+    }
+}
+
 /// CR 108.2 + CR 109.1 + CR 722.3c: quantities over the CARDS in exile exclude
 /// non-card objects there. Building-block rows: each quantity arm is read
 /// against one real Sorcery card, one non-card copy of a card (the CR 722.3c
@@ -28967,6 +29081,25 @@ mod exile_card_population_tests {
                 zone: ZoneRef::Exile,
                 scope: ControllerRef::TargetPlayer,
                 binding: CountBinding::Anaphoric,
+            },
+            1,
+        );
+    }
+
+    /// Preserves the global-zone path while the card-identity check is shared
+    /// with per-player zones. All three fixture objects match the type list.
+    #[test]
+    fn exile_card_population_zone_card_count_with_type_filters() {
+        assert_counts(
+            QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Exile,
+                card_types: vec![
+                    TypeFilter::Sorcery,
+                    TypeFilter::Instant,
+                    TypeFilter::Artifact,
+                ],
+                filter: None,
+                scope: CountScope::Owner,
             },
             1,
         );
