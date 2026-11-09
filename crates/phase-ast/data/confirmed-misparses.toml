@@ -924,7 +924,6 @@ face = [
   { key = "galvanoth", class = "dropped_qualifier", clauses = ["You may cast it without paying its mana cost if it's an instant or sorcery spell."] },
   { key = "game preserve", class = "missing_effect", clauses = ["If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control."] },
   { key = "gandalf of the secret fire", class = "missing_effect", clauses = ["Whenever you cast an instant or sorcery spell from your hand during an opponent's turn, exile that card with three time counters on it instead of putting it into your graveyard as it resolves.", "Then if the exiled card doesn't have suspend, it gains suspend."] },
-  { key = "gandalf, wandering wizard", class = "missing_effect", clauses = ["{6}: Gandalf's owner shuffles him into their library and draws three cards."] },
   { key = "gargantuan leech", class = "wrong_zone", clauses = ["This spell costs {1} less to cast for each Cave you control and each Cave card in your graveyard."] },
   { key = "garland, royal kidnapper", class = "target_wrong", clauses = ["Whenever an opponent becomes the monarch, gain control of target creature that player controls for as long as they're the monarch.", "Creatures you control but don't own get +2/+2 and can't be sacrificed."] },
   { key = "garna, the bloodflame", class = "dropped_qualifier", clauses = ["When Garna enters, return to your hand all creature cards in your graveyard that were put there from anywhere this turn."] },
