@@ -493,7 +493,7 @@ fn collect_phase_in_targets(
 mod tests {
     use super::*;
     use crate::game::combat::AttackTarget;
-    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
     use crate::game::zones::create_object;
     use crate::types::ability::{ControllerRef, TypedFilter};
     use crate::types::actions::GameAction;
@@ -504,6 +504,7 @@ mod tests {
     use crate::types::identifiers::{CardId, LEGACY_INCARNATION};
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
+    use crate::types::resolution::OptionalEffectFrame;
     use crate::types::zones::Zone;
 
     fn add_creature(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
@@ -980,7 +981,7 @@ mod tests {
             .stack_trigger_event_batches
             .remove(&entry.id)
             .unwrap_or_default();
-        state.current_trigger_event = event;
+        state.current_trigger_event = event.clone();
         state.resolving_stack_entry = Some(entry);
         let pending = PendingContinuation::new(chain, &state);
         state.park_ability_continuation(pending);
@@ -993,17 +994,35 @@ mod tests {
             .pending
             .chain
             .set_target_incarnations_recursive(Vec::new());
+        // Keep a real typed decision above the parked instruction: exposing a
+        // ready continuation at Priority is deliberately invalid persistence.
+        for parked in [&mut state, &mut unbound] {
+            parked.push_optional_effect_frame(OptionalEffectFrame {
+                ability: Box::new(ResolvedAbility::new(Effect::NoOp, Vec::new(), fighter, P1)),
+                trigger_event: event.clone(),
+                trigger_events: Vec::new(),
+                trigger_match_count: None,
+                return_result_occurrence: None,
+            });
+            parked.waiting_for = WaitingFor::OptionalEffectChoice {
+                player: P1,
+                decision_subject_id: None,
+                source_id: fighter,
+                description: None,
+                may_trigger_key: None,
+                same_card_may_trigger_choice_available: false,
+            };
+        }
         for trusted in [false, true] {
-            let mut restored = restore_phase_state(&state, trusted)
+            let restored = restore_phase_state(&state, trusted)
                 .expect("the parked chain owns its captured trigger context");
-            crate::game::engine::resume_pending_continuation_if_priority(
-                &mut restored,
-                &mut Vec::new(),
-            )
-            .unwrap();
-            assert!(restored.objects[&fighter].is_phased_out());
-            assert!(restored.objects[&partner].is_phased_out());
-            assert!(restored.resolution_stack.is_empty());
+            let mut runner = GameRunner::from_state(restored);
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: false })
+                .unwrap();
+            assert!(runner.state().objects[&fighter].is_phased_out());
+            assert!(runner.state().objects[&partner].is_phased_out());
+            assert!(runner.state().resolution_stack.is_empty());
             assert!(
                 restore_phase_state(&unbound, trusted).is_err(),
                 "the entry's pin cannot repair a different resumed ability copy"
