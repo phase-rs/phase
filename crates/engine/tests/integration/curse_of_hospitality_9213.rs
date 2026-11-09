@@ -764,15 +764,6 @@ fn loop_relational_kinnan_mana_receipt_does_not_rerank_a_pending_curse_damage_so
         P1,
         |_| panic!("Kinnan and Curse require no trigger ordering"),
         |runner| {
-            eprintln!(
-                "pr10613 fixture priority={:?} blink zones={:?}/{:?} receipt={:?} captured={} stack={:?}",
-                runner.state().waiting_for,
-                runner.state().objects[&responses[0]].zone,
-                runner.state().objects[&responses[1]].zone,
-                mana_receipt,
-                pending_after_blinks.is_some(),
-                runner.state().stack.iter().map(|entry| entry.source_id).collect::<Vec<_>>()
-            );
             let Some(entry) = runner.state().stack.iter().find(|e| e.source_id == curse) else {
                 return false;
             };
@@ -807,15 +798,22 @@ fn loop_relational_kinnan_mana_receipt_does_not_rerank_a_pending_curse_damage_so
             if runner.state().objects[&responses[0]].zone != Zone::Graveyard {
                 return false;
             }
+            // Announce the second response before P1's mana activation. It
+            // still targets the intermediate Kinnan and has not resolved;
+            // P1 can activate Elves at the ensuing real response window.
+            if blink_again(runner) {
+                return true;
+            }
             if mana_receipt.is_none() {
-                // P2 cast the first Flicker, but P1 now controls Kinnan and
-                // Elves. Wait for P1's real priority rather than changing seats.
+                // P1 controls the returned Kinnan and Elves. Wait for P1's
+                // actual priority with the second Flicker above Curse.
                 if !matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1)
                 {
                     return false;
                 }
                 let state = runner.state();
-                assert_eq!(state.stack.len(), 1, "only Curse is pending");
+                assert_eq!(state.stack.len(), 2, "second Flicker is above Curse");
+                assert_eq!(state.stack[1].source_id, responses[1]);
                 let returned = &state.objects[&kinnan];
                 assert_eq!(returned.zone, Zone::Battlefield);
                 assert_eq!(returned.controller, P1);
@@ -839,8 +837,9 @@ fn loop_relational_kinnan_mana_receipt_does_not_rerank_a_pending_curse_damage_so
                 assert!(
                     matches!(state.waiting_for, WaitingFor::Priority { player } if player == P1)
                 );
-                assert_eq!(state.stack.len(), 1);
+                assert_eq!(state.stack.len(), 2);
                 assert_eq!(state.stack[0].source_id, curse);
+                assert_eq!(state.stack[1].source_id, responses[1]);
                 assert!(state.objects[&elves].tapped);
                 let pool = &state.players[1].mana_pool;
                 assert_eq!(pool.total(), 2);
@@ -852,11 +851,6 @@ fn loop_relational_kinnan_mana_receipt_does_not_rerank_a_pending_curse_damage_so
                     .triggered_abilities_added_mana_this_turn
                     .contains(&(definition.clone(), P1)));
                 mana_receipt = Some(definition);
-                return true;
-            }
-            // Only after the intermediate Kinnan has produced its receipt may
-            // P2 cast the second paid Flicker at P2's next actual priority.
-            if blink_again(runner) {
                 return true;
             }
             if pending_after_blinks.is_none()
