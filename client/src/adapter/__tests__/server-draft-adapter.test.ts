@@ -1335,8 +1335,10 @@ describe("ServerDraftAdapter", () => {
       const pending = adapter.submitDeck(["Plains"], []);
       const rejected = expect(pending).rejects.toThrow();
       await drainArt();
-      if (cancel === "close") ws.dispatchSynthetic("close");
-      else if (cancel === "error") ws.onerror?.();
+      if (cancel === "close") {
+        ws.readyState = MockWebSocket.CLOSED;
+        ws.dispatchSynthetic("close");
+      } else if (cancel === "error") ws.onerror?.();
       else adapter.dispose();
       await rejected;
       let live = ws;
@@ -1345,6 +1347,12 @@ describe("ServerDraftAdapter", () => {
         successor = adapter.joinDraft("NEXT12", "Next");
         live = await completeHandshake();
       } else {
+        if (cancel === "close") {
+          const reconnected = adapter.reconnectDraft();
+          live = await completeHandshake();
+          receive(live, "DraftStateUpdate", { view: createMockDraftView() });
+          await reconnected;
+        }
         successor = adapter.submitPick("successor");
       }
       const successorSettled = vi.fn();
@@ -2286,13 +2294,14 @@ describe("draft attachment settlement", () => {
   it.each([
     ["create", "create"], ["create", "reconnect"],
     ["reconnect", "create"], ["reconnect", "reconnect"],
-  ] as const)("6 supersedes %s with %s without retiring a sent socket", async (firstKind, nextKind) => {
+  ] as const)("6 supersedes %s with %s and retires its idle socket after replacement adoption", async (firstKind, nextKind) => {
     const first = start(firstKind);
     const a = await completeHandshake();
     const next = start(nextKind);
     expect(await first()).toMatchObject({ code: "WS_CLOSED", message: expect.stringMatching(/supersed/i), recoverable: true });
     expect(a.close).not.toHaveBeenCalled();
     const b = await completeHandshake();
+    expect(a.close).toHaveBeenCalledOnce();
     receive(b, nextKind === "create" ? "DraftStateUpdate" : "DraftCreated",
       nextKind === "create" ? { view: createMockDraftView() } : credentials);
     expect(await next()).toBe("never settled");
@@ -2335,11 +2344,10 @@ describe("draft attachment settlement", () => {
     async (type) => {
       const read = start("reconnect");
       const b = await completeHandshake();
-      expect(established.onmessage).toBeTypeOf("function");
       const staleView = createMockDraftView({ pick_number: 9 });
       receive(established, type, type === "DraftStateUpdate" ? { view: staleView } : { reason: "old failure" });
       expect(await read()).toBe("never settled");
-      if (type === "DraftStateUpdate") expect(adapter.currentDraftView).toEqual(staleView);
+      if (type === "DraftStateUpdate") expect(adapter.currentDraftView).toBeNull();
       reply(b, "reconnect");
       expect(await read()).toEqual({ resolvedWith: undefined });
     },
@@ -2348,10 +2356,10 @@ describe("draft attachment settlement", () => {
   it.each(["error", "close"] as const)("8b/8c stale %s preserves current init", async (type) => {
     const events = vi.fn();
     adapter.onEvent(events);
-    const read = start("reconnect");
-    const b = await completeHandshake();
     const callback = type === "error" ? established.onerror : established.onclose;
     expect(callback).toBeTypeOf("function");
+    const read = start("reconnect");
+    const b = await completeHandshake();
     callback!();
     expect(await read()).toBe("never settled");
     expect(events).not.toHaveBeenCalledWith({ type: "disconnected" });
@@ -2408,6 +2416,7 @@ describe("draft attachment settlement", () => {
     expect(frames(j)).toContain("JoinDraftWithPassword");
     const read = start("reconnect");
     const b = await completeHandshake();
+    expect(j.close).not.toHaveBeenCalled();
     if (outcome === "failure") {
       receive(b, "Error", { message: "reconnect failed" });
       expect(await read()).toMatchObject({ code: "WS_ERROR", message: "reconnect failed" });
@@ -2416,7 +2425,6 @@ describe("draft attachment settlement", () => {
     const view = createMockDraftView({ pick_number: 3 });
     receive(j, "DraftJoined", { ...credentials, view });
     expect(await join()).toEqual({ resolvedWith: view });
-    expect(j.close).not.toHaveBeenCalled();
     if (outcome === "success") {
       expect(await read()).toBe("never settled");
       reply(b, "reconnect");
@@ -2538,11 +2546,10 @@ describe("draft attachment settlement", () => {
   });
 
   it("D1 settles the owning init before close notification listeners run (failing-before regression)", async () => {
-    enterAcceptedFullMatch(adapter, established);
-    const submission = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
     const reconnect = start("reconnect");
     const b = await completeHandshake();
-    expect(frames(b)).toContain("ReconnectDraft");
+    enterAcceptedFullMatch(adapter, b);
+    const submission = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
     expect(b.onclose).toBeTypeOf("function");
 
     const sentinel = new Error("close notification listener sentinel");
@@ -2923,9 +2930,10 @@ function realRuntimeCodec() {
   const script = { trapNext: false };
   const handle = (json: string): FakeHandle => ({
     json: () => json,
-    free: () => undefined,
+    free: vi.fn(),
     clone_handle: () => handle(json),
   });
+  const decodedHandles: FakeHandle[] = [];
   const engine = {
     state_codec_decode: vi.fn((frame: Uint8Array) => {
       if (script.trapNext) {
@@ -2933,7 +2941,9 @@ function realRuntimeCodec() {
         throw new WebAssembly.RuntimeError("unreachable");
       }
       const parsed = JSON.parse(new TextDecoder().decode(frame)) as { data: { state: unknown } };
-      return handle(JSON.stringify(parsed.data.state));
+      const decoded = handle(JSON.stringify(parsed.data.state));
+      decodedHandles.push(decoded);
+      return decoded;
     }),
   };
   const runtime = new StateCodecRuntime(engine as unknown as EngineModule);
@@ -2944,7 +2954,12 @@ function realRuntimeCodec() {
       close: () => runtime.close(sessionId),
     };
   });
-  return { engine, runtime, script, provider };
+  const latestBaseline = () => {
+    const baseline = decodedHandles[decodedHandles.length - 1];
+    if (!baseline) throw new Error("No codec baseline was decoded");
+    return baseline;
+  };
+  return { engine, runtime, script, provider, latestBaseline };
 }
 
 /**
@@ -3333,6 +3348,8 @@ describe("ServerDraftAdapter — retired codec transport", () => {
     const events: unknown[] = [];
     adapter.onEvent((event) => events.push(event));
     await enterCodecMatch(ws, events);
+    // The retired attachment remains live only because its preview still owns a reply.
+    void adapter.previewManaPayment({ type: "PassPriority" }, 0).catch(() => undefined);
 
     const replacementSession = draftCodecSession(decodeEnvelope);
     provider.mockResolvedValueOnce(replacementSession.session);
@@ -3906,6 +3923,10 @@ describe("ServerDraftAdapter — codec degradation policy", () => {
     await enterCodecMatch(ws, events);
     try {
       expect(runtime.state).toEqual({ kind: "ready" });
+      // A owns a permitted preview reply, so replacement must retain its decoder.
+      const retiredPreview = adapter.previewManaPayment(pass, 0);
+      const retiredPreviewSettled = vi.fn();
+      void retiredPreview.then(retiredPreviewSettled, retiredPreviewSettled);
       // B bootstraps on its own session of the same runtime while A is retired but still live.
       const reattached = adapter.reconnectDraft();
       await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(ws));
@@ -3922,12 +3943,16 @@ describe("ServerDraftAdapter — codec degradation policy", () => {
       expect(provider).toHaveBeenCalledTimes(2);
       const pending = trackRejection(adapter.submitAction(pass, 0));
       await vi.waitFor(() => expect(submissionTypes(candidate)).toHaveLength(1));
+      expect(retiredPreviewSettled).not.toHaveBeenCalled();
 
       // A genuine wasm trap on the retired attachment poisons the shared runtime.
       script.trapNext = true;
       ws.dispatchSynthetic("message", draftFrame("Delta", stateUpdate("trap")));
       await vi.waitFor(() => expect(runtime.state).toEqual({ kind: "poisoned", reason: "wasmTrap" }));
       await vi.waitFor(() => expect(ws.close).toHaveBeenCalled());
+      await expect(retiredPreview).rejects.toMatchObject({
+        code: "WS_CLOSED", message: "Connection closed during mana-payment preview",
+      });
       // Reach guard: B already held a session and was neither closed nor degraded by A's trap.
       expect(candidate.close).not.toHaveBeenCalled();
       expect(policyOf(adapter)).toEqual({ kind: "negotiate" });
@@ -4172,6 +4197,180 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
     await reattached;
     return { replacement, replacementSession };
   }
+
+  async function startRuntimeDraft() {
+    const codec = realRuntimeCodec();
+    const session = await codec.provider();
+    if (!session) throw new Error("The runtime did not open its first codec lease");
+    const leaseClose = vi.spyOn(session, "close");
+    return { ...await startCodecDraft(session), codec, leaseClose };
+  }
+
+  async function replaceRuntimeSocket(
+    adapter: ServerDraftAdapter,
+    provider: { mockResolvedValueOnce: (session: StateCodecSession) => unknown },
+    openSession: () => Promise<StateCodecSession | null>,
+    previous: MockWebSocket,
+    finishReconnect = true,
+  ) {
+    const session = await openSession();
+    if (!session) throw new Error("The runtime did not open a replacement codec lease");
+    const leaseClose = vi.spyOn(session, "close");
+    provider.mockResolvedValueOnce(session);
+    const reconnected = adapter.reconnectDraft();
+    void reconnected.catch(() => undefined);
+    await drainArt();
+    const ws = MockWebSocket.last!;
+    expect(ws).not.toBe(previous);
+    ws.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+    await drainArt();
+    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('"type":"ReconnectDraft"'));
+    ws.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+    if (finishReconnect) {
+      receive(ws, "DraftStateUpdate", { view: createMockDraftView() });
+      await reconnected;
+    } else {
+      await drainArt();
+    }
+    return { ws, session, leaseClose, reconnected };
+  }
+
+  it("closes each idle attachment and frees its runtime baseline exactly once across healthy replacements", async () => {
+    const { adapter, ws, session, provider, codec, leaseClose } = await startRuntimeDraft();
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    try {
+      await enterCodecMatch(ws, events);
+      const attachments = [{ ws, session, leaseClose, baseline: codec.latestBaseline() }];
+      for (let replacementIndex = 0; replacementIndex < 3; replacementIndex++) {
+        const previous = attachments[attachments.length - 1];
+        // Local close can reenter immediately; it must already be a retired binding.
+        previous.ws.close.mockImplementation(() => previous.ws.dispatchSynthetic("close"));
+        const next = await replaceRuntimeSocket(adapter, provider, codec.provider, previous.ws);
+        expect.soft(previous.ws.close).toHaveBeenCalledOnce();
+        expect.soft(previous.leaseClose).toHaveBeenCalledOnce();
+        expect.soft(previous.baseline.free).toHaveBeenCalledOnce();
+        expect(next.ws.close).not.toHaveBeenCalled();
+        expect(next.leaseClose).not.toHaveBeenCalled();
+        events.length = 0;
+        await enterCodecMatch(next.ws, events);
+        attachments.push({ ...next, baseline: codec.latestBaseline() });
+        expect(events).not.toContainEqual({ type: "disconnected" });
+      }
+
+      const current = attachments[attachments.length - 1];
+      const command = adapter.submitInteraction(interactionSubmission("healthy-replacement"), 0);
+      current.ws.dispatchSynthetic("message", draftFrame("Delta", {
+        type: "StateUpdate", command_id: lastSubmissionCommandId(current.ws),
+        data: { state: matchState("still-current"), events: [], full_key: FULL_KEY },
+      }));
+      await expect(command).resolves.toMatchObject({ events: [] });
+      const finalBaseline = codec.latestBaseline();
+      adapter.dispose();
+      adapter.dispose();
+      for (const attachment of attachments) {
+        expect(attachment.ws.close).toHaveBeenCalledOnce();
+        expect(attachment.leaseClose).toHaveBeenCalledOnce();
+        expect(attachment.baseline.free).toHaveBeenCalledOnce();
+      }
+      expect(finalBaseline.free).toHaveBeenCalledOnce();
+    } finally {
+      adapter.dispose();
+      codec.runtime.dispose();
+    }
+  });
+
+  it.each(["Action", "Interaction"] as const)(
+    "retains a retired %s lease until its owned reply, then frees it without changing the current snapshot or command",
+    async (kind) => {
+      const { adapter, ws, provider, codec, leaseClose } = await startRuntimeDraft();
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      try {
+        await enterCodecMatch(ws, events);
+        const baseline = codec.latestBaseline();
+        const claimed = kind === "Action"
+          ? adapter.submitAction({ type: "PassPriority" }, 0)
+          : adapter.submitInteraction(interactionSubmission("retired-lease"), 0);
+        const settled = vi.fn();
+        void claimed.then(settled, settled);
+        const commandId = lastSubmissionCommandId(ws);
+        const replacement = await replaceRuntimeSocket(adapter, provider, codec.provider, ws);
+        events.length = 0;
+        await enterCodecMatch(replacement.ws, events);
+        const currentSnapshot = await adapter.getSnapshot();
+        const currentBaseline = codec.latestBaseline();
+        events.length = 0;
+        expect(settled).not.toHaveBeenCalled();
+        expect(ws.close).not.toHaveBeenCalled();
+        expect(leaseClose).not.toHaveBeenCalled();
+        expect(baseline.free).not.toHaveBeenCalled();
+
+        const completion = draftFrame("Delta", {
+          type: "StateUpdate", command_id: commandId,
+          data: { state: matchState("owned-retired-reply"), events: [{ marker: "owned-retired-reply" }], full_key: FULL_KEY },
+        });
+        ws.dispatchSynthetic("message", completion);
+        await expect(claimed).resolves.toMatchObject({ events: [{ marker: "owned-retired-reply" }] });
+        const retiredFinalBaseline = codec.latestBaseline();
+        expect.soft(ws.close).toHaveBeenCalledOnce();
+        expect.soft(leaseClose).toHaveBeenCalledOnce();
+        expect.soft(retiredFinalBaseline.free).toHaveBeenCalledOnce();
+        expect(await adapter.getSnapshot()).toEqual(currentSnapshot);
+        expect(currentBaseline.free).not.toHaveBeenCalled();
+        expect(events).not.toContainEqual(expect.objectContaining({ type: "gameStateUpdated" }));
+
+        const successor = adapter.submitAction({ type: "PassPriority" }, 0);
+        const successorSettled = vi.fn();
+        void successor.then(successorSettled, successorSettled);
+        ws.dispatchSynthetic("message", completion);
+        await drainArt();
+        expect(successorSettled).not.toHaveBeenCalled();
+        expect(await adapter.getSnapshot()).toEqual(currentSnapshot);
+        replacement.ws.dispatchSynthetic("message", draftFrame("Delta", {
+          type: "StateUpdate", command_id: lastSubmissionCommandId(replacement.ws),
+          data: { state: matchState("current-completion"), events: [{ marker: "current-completion" }], full_key: FULL_KEY },
+        }));
+        await expect(successor).resolves.toMatchObject({ events: [{ marker: "current-completion" }] });
+        adapter.dispose();
+        expect(leaseClose).toHaveBeenCalledOnce();
+        expect(ws.close).toHaveBeenCalledOnce();
+      } finally {
+        adapter.dispose();
+        codec.runtime.dispose();
+      }
+    },
+  );
+
+  it("keeps a sent draft reply's lease until completion and then frees its retained baseline", async () => {
+    const { adapter, ws, provider, codec, leaseClose } = await startRuntimeDraft();
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    try {
+      await enterCodecMatch(ws, events);
+      const baseline = codec.latestBaseline();
+      const pick = adapter.submitPick("owned-retired-pick");
+      const replacement = await replaceRuntimeSocket(adapter, provider, codec.provider, ws, false);
+      expect(ws.close).not.toHaveBeenCalled();
+      expect(leaseClose).not.toHaveBeenCalled();
+      expect(baseline.free).not.toHaveBeenCalled();
+      const view = createMockDraftView({ pick_number: 11 });
+      receive(ws, "DraftStateUpdate", { view });
+      await expect(pick).resolves.toEqual(view);
+      expect.soft(ws.close).toHaveBeenCalledOnce();
+      expect.soft(leaseClose).toHaveBeenCalledOnce();
+      expect.soft(baseline.free).toHaveBeenCalledOnce();
+      receive(replacement.ws, "DraftStateUpdate", { view: createMockDraftView({ pick_number: 12 }) });
+      await replacement.reconnected;
+      expect(adapter.currentDraftView).toMatchObject({ pick_number: 12 });
+      adapter.dispose();
+      expect(ws.close).toHaveBeenCalledOnce();
+      expect(leaseClose).toHaveBeenCalledOnce();
+    } finally {
+      adapter.dispose();
+      codec.runtime.dispose();
+    }
+  });
 
   it.each(["is answered", "is closed"] as const)(
     "settles a command claimed before reconnectDraft replaced the socket when the retired socket %s",
@@ -4504,6 +4703,185 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
       },
     },
   } as const;
+
+  it.each(["mana-payment", "interaction"] as const)(
+    "retains a retired attachment through its last %s preview, then frees its runtime baseline",
+    async (lastKind) => {
+      const { adapter, ws, provider, codec, leaseClose } = await startRuntimeDraft();
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      try {
+        await enterCodecMatch(ws, events);
+        const baseline = codec.latestBaseline();
+        const mana = PREVIEW_KINDS["mana-payment"].start(adapter, "retired-mana");
+        const interaction = PREVIEW_KINDS.interaction.start(adapter, "retired-interaction");
+        const manaSettled = vi.fn();
+        const interactionSettled = vi.fn();
+        void mana.then(manaSettled, manaSettled);
+        void interaction.then(interactionSettled, interactionSettled);
+        const replacement = await replaceRuntimeSocket(adapter, provider, codec.provider, ws);
+        events.length = 0;
+        await enterCodecMatch(replacement.ws, events);
+        const currentSnapshot = await adapter.getSnapshot();
+        const currentBaseline = codec.latestBaseline();
+        const command = adapter.submitAction({ type: "PassPriority" }, 0);
+        const commandSettled = vi.fn();
+        void command.then(commandSettled, commandSettled);
+        expect(manaSettled).not.toHaveBeenCalled();
+        expect(interactionSettled).not.toHaveBeenCalled();
+        expect(ws.close).not.toHaveBeenCalled();
+        expect(leaseClose).not.toHaveBeenCalled();
+        expect(baseline.free).not.toHaveBeenCalled();
+
+        if (lastKind === "mana-payment") {
+          PREVIEW_KINDS.interaction.answer(ws, "retired-interaction");
+          await interaction;
+        } else {
+          PREVIEW_KINDS["mana-payment"].answer(ws, "retired-mana");
+          await mana;
+        }
+        expect(ws.close).not.toHaveBeenCalled();
+        expect(leaseClose).not.toHaveBeenCalled();
+        expect(baseline.free).not.toHaveBeenCalled();
+        expect(commandSettled).not.toHaveBeenCalled();
+
+        PREVIEW_KINDS[lastKind].answer(ws, lastKind === "interaction" ? "retired-interaction" : "retired-mana");
+        await expect(mana).resolves.toEqual([7]);
+        await expect(interaction).resolves.toMatchObject({ requestId: "retired-interaction" });
+        expect.soft(ws.close).toHaveBeenCalledOnce();
+        expect.soft(leaseClose).toHaveBeenCalledOnce();
+        expect.soft(baseline.free).toHaveBeenCalledOnce();
+        expect(replacement.leaseClose).not.toHaveBeenCalled();
+        expect(currentBaseline.free).not.toHaveBeenCalled();
+        expect(commandSettled).not.toHaveBeenCalled();
+        expect(await adapter.getSnapshot()).toEqual(currentSnapshot);
+
+        PREVIEW_KINDS["mana-payment"].answer(ws, "retired-mana");
+        PREVIEW_KINDS.interaction.answer(ws, "retired-interaction");
+        await drainArt();
+        expect(commandSettled).not.toHaveBeenCalled();
+        replacement.ws.dispatchSynthetic("message", draftFrame("Delta", {
+          type: "StateUpdate", command_id: lastSubmissionCommandId(replacement.ws),
+          data: { state: matchState("current-after-previews"), events: [], full_key: FULL_KEY },
+        }));
+        await expect(command).resolves.toMatchObject({ events: [] });
+        adapter.dispose();
+        expect(ws.close).toHaveBeenCalledOnce();
+        expect(leaseClose).toHaveBeenCalledOnce();
+      } finally {
+        adapter.dispose();
+        codec.runtime.dispose();
+      }
+    },
+  );
+
+  it.each(["answers", "fails"] as const)(
+    "keeps reused interaction-preview IDs source-owned when the retired socket %s",
+    async (reply) => {
+      const { adapter, ws, provider, codec, leaseClose } = await startRuntimeDraft();
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      try {
+        await enterCodecMatch(ws, events);
+        const baseline = codec.latestBaseline();
+        const retired = PREVIEW_KINDS.interaction.start(adapter, "same-preview-id");
+        const retiredSettled = vi.fn();
+        void retired.then(retiredSettled, retiredSettled);
+        const replacement = await replaceRuntimeSocket(adapter, provider, codec.provider, ws);
+        events.length = 0;
+        await enterCodecMatch(replacement.ws, events);
+        const currentBaseline = codec.latestBaseline();
+        const current = PREVIEW_KINDS.interaction.start(adapter, "same-preview-id");
+        const currentSettled = vi.fn();
+        void current.then(currentSettled, currentSettled);
+
+        if (reply === "answers") {
+          receive(ws, "InteractionPreview", { preview: { requestId: "same-preview-id", marker: "retired" } });
+        } else {
+          receive(ws, "InteractionPreviewFailed", { request_id: "same-preview-id", message: "retired preview failed" });
+        }
+        await drainArt();
+        if (reply === "answers") {
+          expect(retiredSettled).toHaveBeenCalledWith({ requestId: "same-preview-id", marker: "retired" });
+        } else {
+          expect(retiredSettled).toHaveBeenCalledWith(expect.objectContaining({
+            code: "REQUEST_FAILED", message: "retired preview failed",
+          }));
+        }
+        expect(currentSettled).not.toHaveBeenCalled();
+        expect(ws.close).toHaveBeenCalledOnce();
+        expect(leaseClose).toHaveBeenCalledOnce();
+        expect(baseline.free).toHaveBeenCalledOnce();
+        expect(replacement.leaseClose).not.toHaveBeenCalled();
+        expect(currentBaseline.free).not.toHaveBeenCalled();
+
+        receive(ws, "InteractionPreviewFailed", { request_id: "same-preview-id", message: "duplicate retired failure" });
+        await drainArt();
+        expect(currentSettled).not.toHaveBeenCalled();
+        receive(replacement.ws, "InteractionPreview", {
+          preview: { requestId: "same-preview-id", marker: "current" },
+        });
+        await expect(current).resolves.toMatchObject({ requestId: "same-preview-id", marker: "current" });
+      } finally {
+        adapter.dispose();
+        codec.runtime.dispose();
+      }
+    },
+  );
+
+  it("disposes every current and retired runtime lease and settles all owned promises without a server close", async () => {
+    const first = await startRuntimeDraft();
+    const { adapter, ws, provider, codec } = first;
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    try {
+      await enterCodecMatch(ws, events);
+      const firstBaseline = codec.latestBaseline();
+      const command = adapter.submitAction({ type: "PassPriority" }, 0);
+      const mana = PREVIEW_KINDS["mana-payment"].start(adapter, "dispose-retired-mana");
+      const second = await replaceRuntimeSocket(adapter, provider, codec.provider, ws);
+      events.length = 0;
+      await enterCodecMatch(second.ws, events);
+      const secondBaseline = codec.latestBaseline();
+      const interaction = PREVIEW_KINDS.interaction.start(adapter, "dispose-retired-interaction");
+      const pick = adapter.submitPick("dispose-retired-pick");
+      const third = await replaceRuntimeSocket(adapter, provider, codec.provider, second.ws, false);
+      events.length = 0;
+      await enterCodecMatch(third.ws, events);
+      const thirdBaseline = codec.latestBaseline();
+      const currentPreview = PREVIEW_KINDS["mana-payment"].start(adapter, "dispose-current-mana");
+      const outcomes = Promise.allSettled([command, mana, interaction, pick, third.reconnected, currentPreview]);
+      for (const attachment of [first, second, third]) {
+        expect(attachment.ws.close).not.toHaveBeenCalled();
+        expect(attachment.leaseClose).not.toHaveBeenCalled();
+      }
+      for (const baseline of [firstBaseline, secondBaseline, thirdBaseline]) {
+        expect(baseline.free).not.toHaveBeenCalled();
+      }
+
+      // Mock close deliberately emits no raw close event: disposal is the release authority.
+      adapter.dispose();
+      expect(await outcomes).toMatchObject([
+        { status: "rejected", reason: { code: "WS_CLOSED", message: "Adapter disposed during action" } },
+        { status: "rejected", reason: { code: "WS_CLOSED", message: "Adapter disposed during mana-payment preview" } },
+        { status: "rejected", reason: { code: "WS_CLOSED", message: "Adapter disposed during interaction preview" } },
+        { status: "rejected", reason: { code: "WS_CLOSED", message: "Adapter disposed during draft operation" } },
+        { status: "rejected", reason: { code: "WS_CLOSED", message: "Adapter disposed before draft started" } },
+        { status: "rejected", reason: { code: "WS_CLOSED", message: "Adapter disposed during mana-payment preview" } },
+      ]);
+      adapter.dispose();
+      for (const attachment of [first, second, third]) {
+        expect.soft(attachment.ws.close).toHaveBeenCalledOnce();
+        expect.soft(attachment.leaseClose).toHaveBeenCalledOnce();
+      }
+      for (const baseline of [firstBaseline, secondBaseline, thirdBaseline]) {
+        expect.soft(baseline.free).toHaveBeenCalledOnce();
+      }
+    } finally {
+      adapter.dispose();
+      codec.runtime.dispose();
+    }
+  });
 
   it.each(Object.keys(PREVIEW_KINDS) as (keyof typeof PREVIEW_KINDS)[])(
     "rejects the %s preview sent on the retired socket when that socket closes after reconnectDraft",
