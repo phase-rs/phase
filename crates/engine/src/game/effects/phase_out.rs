@@ -498,7 +498,9 @@ mod tests {
     use crate::types::ability::{ControllerRef, TypedFilter};
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
-    use crate::types::game_state::{PendingContinuation, PersistedGameState, StackEntryKind};
+    use crate::types::game_state::{
+        PendingContinuation, PersistedGameState, StackEntryKind, WaitingFor,
+    };
     use crate::types::identifiers::{CardId, LEGACY_INCARNATION};
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
