@@ -1,13 +1,16 @@
 //! Production controls for source-owner shuffles and properties-only targets.
 
 use engine::game::combat::AttackTarget;
-use engine::game::scenario::{GameScenario, P0, P1, P2};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
+
+const P2: PlayerId = PlayerId(2);
 
 // Full Oracle verified against MTGJSON AtomicCards.json.
 const ETRATA: &str = "Etrata can't be blocked.\nWhenever Etrata deals combat damage to a player, exile target creature that player controls and put a hit counter on that card. That player loses the game if they own three or more exiled cards with hit counters on them. Etrata's owner shuffles Etrata into their library.";
