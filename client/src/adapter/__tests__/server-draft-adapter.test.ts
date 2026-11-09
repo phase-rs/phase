@@ -763,6 +763,7 @@ describe("ServerDraftAdapter", () => {
         },
       }),
     );
+    receive(ws, "GameStarted", { state: matchState("send-failure-ready"), your_player: 0, full_key: FULL_KEY });
     ws.send.mockImplementationOnce(() => {
       throw new Error("InvalidStateError");
     });
@@ -1565,6 +1566,7 @@ describe("ServerDraftAdapter", () => {
         },
       }),
     );
+    receive(ws, "GameStarted", { state: matchState("dispose-ready"), your_player: 0, full_key: FULL_KEY });
 
     const submit = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
     const pick = trackRejection(adapter.submitPick("card-1"));
@@ -1648,6 +1650,7 @@ describe("ServerDraftAdapter", () => {
           },
         }),
       );
+      receive(ws, "GameStarted", { state: matchState("rejection-ready"), your_player: 0, full_key: FULL_KEY });
     });
 
     it("classifies a stale ReorderHand rejection as STALE_ACTION", async () => {
@@ -2054,9 +2057,13 @@ describe("ServerDraftAdapter game-command correlation", () => {
         const closed = expect(dropped).rejects.toMatchObject({ code: "WS_CLOSED" });
         socket.dispatchSynthetic("close");
         await closed;
-        socket.readyState = MockWebSocket.OPEN;
+        const reconnected = seat.reconnectDraft();
+        const replacement = await completeHandshake(CORRELATED_HELLO);
+        enterAcceptedFullMatch(seat, replacement);
+        receive(replacement, "DraftStateUpdate", { view: createMockDraftView({ status: "MatchInProgress" }) });
+        await reconnected;
         const next = trackRejection(seat.submitAction(keep, 0));
-        expect(sentCommandId(socket)).not.toEqual(oldId);
+        expect(sentCommandId(replacement)).not.toEqual(oldId);
         expect(await next()).toBe("never settled");
       } finally {
         seat.dispose();
@@ -2367,6 +2374,127 @@ describe("draft attachment settlement", () => {
     expect(await read()).toEqual({ resolvedWith: undefined });
   });
 
+  it.each(["same match", "different match"] as const)(
+    "does not claim A's key for hello requests before B accepts its own %s bootstrap",
+    async (match) => {
+      enterAcceptedFullMatch(adapter, established);
+      const nextKey = match === "same match" ? FULL_KEY : { game_code: "GAME02", generation: 8 };
+      const nextMatch = match === "same match" ? "r1-t0" : "r2-t0";
+      const nextPlayer = match === "same match" ? 0 : 1;
+      const initialized = start("reconnect");
+      const candidate = MockWebSocket.last!;
+      let authenticated = false;
+      let ownBootstrapSent = false;
+      const premature: string[] = [];
+      const request = {
+        requestId: "current-socket-preview" as PreviewRequestId,
+        interactionId: "current-socket-interaction" as InteractionId,
+        response: { type: "shortcut" as const, data: { decision: { type: "fixed" as const, data: { iterations: 1 } }, pins: [] } },
+      };
+      candidate.send.mockImplementation((raw: string) => {
+        const frame = JSON.parse(raw) as {
+          type: string; command_id?: unknown;
+          data?: { request_id?: number; request?: { requestId: string } };
+        };
+        if (frame.type === "ClientHello") return;
+        if (frame.type === "ReconnectDraft") { authenticated = true; return; }
+        if (!authenticated) throw new Error(`Strict peer rejected ${frame.type} before draft setup`);
+        if (!ownBootstrapSent) {
+          // The server may already attach B to another match while its
+          // bootstrap is in flight. Accepting a request here would bind an
+          // A-stamped slot to a B-key response. The client must not send it.
+          premature.push(frame.type);
+          return;
+        }
+        if (frame.type === "Action" || frame.type === "Interaction") {
+          candidate.dispatchSynthetic("message", JSON.stringify({
+            type: "StateUpdate", command_id: frame.command_id,
+            data: { state: matchState("B-owned-completion"), events: [{ marker: "B-owned-completion" }], full_key: nextKey },
+          }));
+        } else if (frame.type === "PreviewManaPayment") {
+          receive(candidate, "ManaPaymentPreview", { request_id: frame.data?.request_id, source_ids: [7] });
+        } else if (frame.type === "PreviewInteraction") {
+          receive(candidate, "InteractionPreview", { preview: { requestId: frame.data?.request?.requestId } });
+        }
+      });
+      const hello: (() => Promise<unknown>)[] = [];
+      const bootstrap: (() => Promise<unknown>)[] = [];
+      const pending = vi.fn();
+      const off = adapter.onEvent((event) => {
+        if (event.type === "actionPendingChanged") pending(event.pending);
+        const consumers = event.type === "serverHello" ? hello
+          : event.type === "gameStateUpdated" && event.state.turn_number === 42 ? bootstrap : null;
+        if (!consumers) return;
+        consumers.push(trackRejection(adapter.submitAction({ type: "PassPriority" }, nextPlayer)));
+        consumers.push(trackRejection(adapter.submitInteraction(interactionSubmission("own-bootstrap"), nextPlayer)));
+        consumers.push(trackRejection(adapter.previewManaPayment({ type: "PassPriority" }, nextPlayer)));
+        consumers.push(trackRejection(adapter.previewInteraction(request, nextPlayer)));
+      });
+      const started = { ...matchState("B-own-bootstrap"), turn_number: 42 };
+      try {
+        await completeHandshake(CORRELATED_HELLO);
+        expect(hello).toHaveLength(4);
+        for (const read of hello) expect(await read()).toMatchObject({ code: "ACTION_NOT_SENT" });
+        expect(premature).toEqual([]);
+        expect(pending).not.toHaveBeenCalled();
+        receive(candidate, "DraftMatchStart", {
+          match_id: nextMatch, round: 2, game_code: nextKey.game_code, full_key: nextKey,
+          player_token: "match-draft-token", your_player: nextPlayer, opponent_name: "B opponent",
+        });
+        const beforeBootstrap = trackRejection(adapter.submitAction({ type: "PassPriority" }, nextPlayer));
+        expect(await beforeBootstrap()).toMatchObject({ code: "ACTION_NOT_SENT" });
+        if (match === "different match") {
+          receive(candidate, "GameStarted", { state: matchState("wrong-A-bootstrap"), your_player: nextPlayer, full_key: FULL_KEY });
+          expect(await trackRejection(adapter.previewManaPayment({ type: "PassPriority" }, nextPlayer))()).toMatchObject({ code: "ACTION_NOT_SENT" });
+        }
+        expect(premature).toEqual([]);
+        ownBootstrapSent = true;
+        receive(candidate, "GameStarted", { state: started, your_player: nextPlayer, full_key: nextKey });
+        receive(candidate, "DraftStateUpdate", { view: createMockDraftView({ status: "MatchInProgress" }) });
+        expect(await initialized()).toEqual({ resolvedWith: undefined });
+        expect(bootstrap).toHaveLength(4);
+        expect(await bootstrap[0]()).toMatchObject({ resolvedWith: { events: [{ marker: "B-owned-completion" }] } });
+        expect(await bootstrap[1]()).toMatchObject({ resolvedWith: { events: [{ marker: "B-owned-completion" }] } });
+        expect(await bootstrap[2]()).toEqual({ resolvedWith: [7] });
+        expect(await bootstrap[3]()).toMatchObject({ resolvedWith: { requestId: request.requestId } });
+        expect(adapter.currentMatchId).toBe(nextMatch);
+        expect(adapter.gameCode).toBe(nextKey.game_code);
+        expect(adapter.playerId).toBe(nextPlayer);
+        expect(await adapter.getState()).toMatchObject({ label: "B-owned-completion" });
+      } finally {
+        off();
+      }
+    },
+  );
+
+  it("releases a claimed command unsent when pending-true reentry revokes its match authority", async () => {
+    enterAcceptedFullMatch(adapter, established);
+    const nextKey = { game_code: "GAME02", generation: 8 };
+    const pending: boolean[] = [];
+    let changed = false;
+    adapter.onEvent((event) => {
+      if (event.type !== "actionPendingChanged") return;
+      pending.push(event.pending);
+      if (!event.pending || changed) return;
+      changed = true;
+      receive(established, "DraftMatchStart", {
+        match_id: "r2-t0", round: 2, game_code: nextKey.game_code, full_key: nextKey,
+        player_token: "match-draft-token", your_player: 1, opponent_name: "Next opponent",
+      });
+    });
+    expect(await trackRejection(adapter.submitAction({ type: "PassPriority" }, 0))()).toMatchObject({ code: "ACTION_NOT_SENT" });
+    expect(submissionTypes(established)).toEqual([]);
+    expect(pending).toEqual([true, false]);
+    receive(established, "GameStarted", {
+      state: matchState("next-match-ready"), your_player: 1, full_key: nextKey,
+    });
+    const current = trackRejection(adapter.submitAction({ type: "PassPriority" }, 1));
+    receive(established, "StateUpdate", {
+      state: matchState("next-match-complete"), events: [{ marker: "next-match-complete" }], full_key: nextKey,
+    });
+    expect(await current()).toMatchObject({ resolvedWith: { events: [{ marker: "next-match-complete" }] } });
+  });
+
   it.each(["create", "join", "reconnect"] as const)(
     "orders %s setup before callbacks without lending a new draft the prior match's authority",
     async (kind) => {
@@ -2447,11 +2575,14 @@ describe("draft attachment settlement", () => {
         }
         expect(helloAction).toBeTypeOf("function");
         if (kind === "reconnect") {
-          expect(await helloAction!()).toMatchObject({ resolvedWith: { events: [{ marker: "hello-command" }] } });
-          expect(await helloMana!()).toEqual({ resolvedWith: [7] });
-          expect(await helloInteraction!()).toMatchObject({ resolvedWith: { requestId: "setup-first-preview" } });
-          expect(await timerMana!()).toEqual({ resolvedWith: [7] });
+          for (const read of [helloAction, helloMana, helloInteraction, timerMana]) {
+            expect(await read!()).toMatchObject({ code: "ACTION_NOT_SENT" });
+          }
           expect(await helloDraft!()).toMatchObject({ code: "ACTION_REJECTED", message: "invalid transition from MatchInProgress: SharedStackDecision" });
+          expect(submissionTypes(candidate)).toEqual([]);
+          enterAcceptedFullMatch(adapter, candidate);
+          await expect(adapter.submitAction({ type: "PassPriority" }, 0)).resolves.toMatchObject({ events: [{ marker: "hello-command" }] });
+          await expect(adapter.previewManaPayment({ type: "PassPriority" }, 0)).resolves.toEqual([7]);
         } else {
           for (const read of [helloAction, helloMana, helloInteraction, helloDraft, timerMana]) {
             expect(await read!()).toMatchObject({ code: "PHASE_ERROR" });
@@ -2544,23 +2675,26 @@ describe("draft attachment settlement", () => {
     }
   });
 
-  it("settles setup-safe hello consumer work once when that callback disposes the adapter", async () => {
+  it("settles unready game refusals and an owned draft request once when the hello callback disposes", async () => {
     enterAcceptedFullMatch(adapter, established);
     const action = vi.fn();
     const preview = vi.fn();
+    const draft = vi.fn();
     const initialized = start("reconnect");
     const candidate = MockWebSocket.last!;
     adapter.onEvent((event) => {
       if (event.type !== "serverHello") return;
       void adapter.submitAction({ type: "PassPriority" }, 0).then(action, action);
       void adapter.previewManaPayment({ type: "PassPriority" }, 0).then(preview, preview);
+      void adapter.submitSharedStackDecision(0, "Take").then(draft, draft);
       adapter.dispose();
     });
     await completeHandshake();
     expect(await initialized()).toMatchObject({ code: "WS_CLOSED" });
     await drainArt();
-    expect(action).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ code: "WS_CLOSED" }));
-    expect(preview).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ code: "WS_CLOSED" }));
+    expect(action).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ code: "ACTION_NOT_SENT" }));
+    expect(preview).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ code: "ACTION_NOT_SENT" }));
+    expect(draft).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ code: "WS_CLOSED" }));
     expect(candidate.close).toHaveBeenCalledOnce();
   });
 
@@ -3053,6 +3187,7 @@ async function enterCodecMatch(
   events: unknown[],
   matchId = "r1-t0",
 ): Promise<void> {
+  const firstEvent = events.length;
   receive(ws, "DraftMatchStart", {
     match_id: matchId,
     round: 1,
@@ -3067,14 +3202,16 @@ async function enterCodecMatch(
     data: { state: matchState("accepted-full-start"), your_player: 0, full_key: FULL_KEY },
   }));
   await vi.waitFor(() =>
-    expect(events).toContainEqual(expect.objectContaining({ type: "gameStateUpdated" })),
+    expect(events.slice(firstEvent)).toContainEqual(expect.objectContaining({
+      type: "gameStateUpdated", state: expect.objectContaining({ label: "accepted-full-start" }),
+    })),
   );
   // GameStarted cannot be a Delta baseline. Establish StateUpdate shape first.
   ws.dispatchSynthetic("message", draftFrame("Full", {
     type: "StateUpdate",
     data: { state: matchState("accepted-update"), events: [], full_key: FULL_KEY },
   }));
-  await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+  await vi.waitFor(() => expect(events.slice(firstEvent)).toContainEqual(expect.objectContaining({
     type: "gameStateUpdated", state: expect.objectContaining({ label: "accepted-update" }),
   })));
   ws.send.mockClear();
@@ -5381,6 +5518,10 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
       expect(result.events).toEqual([{ marker: "retired-answer" }]);
       expect(await labelOf(adapter)).toMatchObject({ label: "retired-answer" });
       expect((await adapter.getLegalActions()).actions).toEqual([passPriority]);
+      // Caching A's answer preserves the caller's read, not B's authority to
+      // submit. B must still accept its own GameStarted before new game work.
+      await expect(adapter.submitAction(passPriority, 0)).rejects.toMatchObject({ code: "ACTION_NOT_SENT" });
+      await expect(adapter.previewManaPayment(passPriority, 0)).rejects.toMatchObject({ code: "ACTION_NOT_SENT" });
       expect(await observed()).toMatchObject({ resolvedWith: { events: [{ marker: "retired-answer" }] } });
       // The retired socket still never delivers game state.
       expect(events).toContainEqual({ type: "actionPendingChanged", pending: false });
@@ -5637,7 +5778,7 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
   } as const;
 
   it.each(["supersession", "listener throw"] as const)(
-    "settles serverHello-claimed work when candidate abandonment follows %s",
+    "settles unready game refusals and hello-owned draft work when candidate abandonment follows %s",
     async (abandonment) => {
       const { adapter, ws, provider, codec } = await startRuntimeDraft();
       const events: unknown[] = [];
@@ -5659,16 +5800,18 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
         const actionSettled = vi.fn();
         const manaSettled = vi.fn();
         const interactionSettled = vi.fn();
+        const draftSettled = vi.fn();
         let replacementInit: Promise<void> | null = null;
         const off = adapter.onEvent((event) => {
           if (event.type !== "serverHello") return;
           off();
-          // Setup is already on the wire; abandoning this public candidate
-          // still has to settle every request claimed by its hello consumer.
+          // Setup permits draft requests, not borrowing A's Full-game key.
+          // The draft request still needs source-scoped abandonment cleanup.
           void adapter.submitAction({ type: "PassPriority" }, 0).then(actionSettled, actionSettled);
           void adapter.previewManaPayment({ type: "PassPriority" }, 0).then(manaSettled, manaSettled);
           void PREVIEW_KINDS.interaction.start(adapter, "abandoned-hello-preview")
             .then(interactionSettled, interactionSettled);
+          void adapter.submitSharedStackDecision(0, "Take").then(draftSettled, draftSettled);
           if (abandonment === "supersession") {
             replacementInit = adapter.reconnectDraft();
             void replacementInit.catch(() => undefined);
@@ -5682,8 +5825,9 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
         expect(initSettled).toHaveBeenCalledWith(expect.objectContaining({ code: "WS_CLOSED" }));
         for (const settled of [actionSettled, manaSettled, interactionSettled]) {
           expect.soft(settled).toHaveBeenCalledOnce();
-          expect.soft(settled).toHaveBeenCalledWith(expect.objectContaining({ code: "WS_CLOSED" }));
+          expect.soft(settled).toHaveBeenCalledWith(expect.objectContaining({ code: "ACTION_NOT_SENT" }));
         }
+        expect(draftSettled).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ code: "WS_CLOSED" }));
         expect(candidate.close).toHaveBeenCalledOnce();
         expect(candidateLeaseClose).toHaveBeenCalledOnce();
 

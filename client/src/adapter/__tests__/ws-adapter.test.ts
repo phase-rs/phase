@@ -8681,7 +8681,7 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
     });
 
     describe("terminal failures keep the published session", () => {
-      const terminated = async (join: Join, waitingSnapshot: boolean) => {
+      const terminated = async (join: Join) => {
         // Terminal failure preserves the held session and clears the episode.
         expect(join.adapter.nativeSession).toEqual(HELD_SESSION);
         expect(latchesOf(join.adapter)).toEqual(CLEAN_LATCHES);
@@ -8697,7 +8697,7 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
           await expect(settledAs(join)).resolves.toMatchObject({
             code: "WS_CLOSED", message: FAILURE_MESSAGE, recoverable: true,
           });
-          await terminated(join, waitingSnapshot);
+          await terminated(join);
         } finally {
           join.adapter.dispose();
         }
@@ -8717,7 +8717,7 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
             code: "WS_CLOSED", message: FAILURE_MESSAGE, recoverable: true,
           });
           expect(fallback.close).toHaveBeenCalled();
-          await terminated(join, false);
+          await terminated(join);
         } finally {
           join.adapter.dispose();
         }
@@ -8732,7 +8732,7 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
         try {
           fallback.dispatchSynthetic("message", JSON.stringify({ type: "Error", data }));
           await expect(settledAs(join)).resolves.toMatchObject({ code, message: data.message, recoverable });
-          await terminated(join, true);
+          await terminated(join);
         } finally {
           join.adapter.dispose();
         }
@@ -8774,7 +8774,7 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
           await expect(settledAs(join)).resolves.toMatchObject({
             code: "PASSWORD_REQUIRED", message: "Room requires a password", recoverable: true,
           });
-          await terminated(join, false);
+          await terminated(join);
         } finally {
           join.adapter.dispose();
         }
@@ -8794,7 +8794,7 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
           await expect(settledAs(join)).resolves.toMatchObject({
             code: "REQUEST_FAILED", message: "The game state is too large to send.", recoverable: true,
           });
-          await terminated(join, waitingSnapshot);
+          await terminated(join);
         } finally {
           join.adapter.dispose();
         }

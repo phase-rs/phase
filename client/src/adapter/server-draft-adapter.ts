@@ -232,6 +232,8 @@ export class ServerDraftAdapter implements EngineAdapter {
   private activeFullKey: FullSessionKey | null = null;
   /** Full match lifetime whose matching GameStarted has been accepted. */
   private acceptedFullKey: FullSessionKey | null = null;
+  /** Only this socket's accepted GameStarted authorizes new game requests. */
+  private acceptedGameSocket: PhaseSocketTransport | null = null;
 
   // ── Infrastructure ─────────────────────────────────────────────────
   private ws: PhaseSocketTransport | null = null;
@@ -351,6 +353,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
     }
+    this.assertGameReady(this.ws);
 
     return this.submitGameFrame(
       { type: "Action", data: { action } },
@@ -369,10 +372,21 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
     }
+    this.assertGameReady(this.ws);
 
     return this.submitGameFrame(
       { type: "Interaction", data: { submission } },
       new AdapterError("WS_CLOSED", "Failed to send interaction", true),
+    );
+  }
+
+  private assertGameReady(socket: PhaseSocketTransport | null): void {
+    if (socket !== null && socket === this.ws && this.acceptedGameSocket === socket
+      && fullSessionKeysEqual(this.acceptedFullKey, this.activeFullKey)) return;
+    throw new AdapterError(
+      AdapterErrorCode.ACTION_NOT_SENT,
+      "This connection has not accepted the current draft match; the request was not sent.",
+      true,
     );
   }
 
@@ -411,6 +425,19 @@ export class ServerDraftAdapter implements EngineAdapter {
       // A synchronous listener may close/dispose the adapter or otherwise
       // settle this slot. Do not send after that owner has been released.
       if (!this.submission.owns(submission)) return;
+      try {
+        // Pending notifications may synchronously announce another match.
+        // Never stamp or send with authority revoked by that reentry.
+        this.assertGameReady(this.submissionSocket);
+      } catch (error) {
+        this.submission.release(submission);
+        this.submissionSocket = null;
+        this.submissionFullKey = null;
+        this.retireIdleSockets();
+        reject(error instanceof Error ? error : new Error(String(error)));
+        this.emit({ type: "actionPendingChanged", pending: false });
+        return;
+      }
       this.submissionFullKey = this.activeFullKey;
       if (!this.send(this.submission.stamp(frame, submission)) && this.submission.release(submission)) {
         this.submissionSocket = null;
@@ -430,6 +457,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
     }
+    this.assertGameReady(socket);
 
     const requestId = this.nextManaPaymentPreviewRequestId++;
     return new Promise<ObjectId[]>((resolve, reject) => {
@@ -453,6 +481,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
     }
+    this.assertGameReady(socket);
 
     return new Promise<InteractionPreview>((resolve, reject) => {
       let previews = this.pendingInteractionPreviews.get(socket);
@@ -766,6 +795,7 @@ export class ServerDraftAdapter implements EngineAdapter {
   /** Remove ownership and callbacks before close: native close may synchronously reenter. */
   private releaseSocket(socket: PhaseSocketTransport, close = true): void {
     if (!this.sockets.delete(socket)) return;
+    if (this.acceptedGameSocket === socket) this.acceptedGameSocket = null;
     socket.onmessage = null;
     socket.onerror = null;
     socket.onclose = null;
@@ -1162,6 +1192,7 @@ export class ServerDraftAdapter implements EngineAdapter {
       // Adoption retires the previous binding only after setup is on the wire.
       this.stateCodec.adopt(bootstrap, sourceSocket);
       this.ws = sourceSocket;
+      this.acceptedGameSocket = null;
       if (initOwner?.kind !== "reconnect") {
         // Create/Join attach a new draft seat, not the previous draft's Full
         // game. Only replies on this attachment may establish its authority.
@@ -1304,6 +1335,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         if (!sameMatch) {
           this.clearSnapshot();
           this.acceptedFullKey = null;
+          this.acceptedGameSocket = null;
           // A new match needs its own GameStarted: reset before any listener
           // can observe the transition.
           this.stateCodec.reset(sourceSocket);
@@ -1397,6 +1429,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         const started = ServerDraftAdapter.snapshotPair(data);
         const startedSnapshot = this.cacheSnapshot(started.state, started.legalResult, sourceSocket);
         this._playerId = data.your_player;
+        this.acceptedGameSocket = sourceSocket;
         // Accepted after the match/player/full-key guards above and after the
         // snapshot is cached, but before the listener emit.
         this.stateCodec.accept(sourceSocket);
@@ -1591,6 +1624,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         this._gameCode = null;
         this.activeFullKey = null;
         this.acceptedFullKey = null;
+        if (this.acceptedGameSocket === sourceSocket) this.acceptedGameSocket = null;
         this.clearSnapshot();
         this.emit({ type: "actionPendingChanged", pending: false });
         this.emit({
@@ -1763,6 +1797,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     this.activeMatchId = null;
     this.activeFullKey = null;
     this.acceptedFullKey = null;
+    this.acceptedGameSocket = null;
     this.stateCodec.release();
     this.submission.drop()?.reject(
       new AdapterError("WS_CLOSED", "Adapter disposed during action", true),
