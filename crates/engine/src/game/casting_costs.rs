@@ -20397,8 +20397,8 @@ mod tests {
                 .add_land_from_oracle(P0, "Island", "({T}: Add {U}.)")
                 .with_subtypes(vec!["Island"])
                 .id();
-            let prairie = scenario
-                .add_land_from_oracle(P0, "Sungrass Prairie", "{1}, {T}: Add {G}{W}.")
+            let valley = scenario
+                .add_land_from_oracle(P0, "Mossfire Valley", "{1}, {T}: Add {R}{G}.")
                 .id();
             let auras: Vec<_> = (0..2).map(|_| scenario.add_enchantment_from_oracle(P0, "Fertile Ground",
                 "Enchant land\nWhenever enchanted land is tapped for mana, its controller adds an additional one mana of any color.")
@@ -20410,15 +20410,11 @@ mod tests {
                         .id()
                 })
                 .collect();
-            let spell = scenario
-                .add_creature_to_hand_from_oracle(P0, "Fusion Elemental", 8, 8, "")
-                .with_subtypes(vec!["Elemental"])
-                .with_mana_cost(crate::types::mana::parse_mtgjson_mana_cost(
-                    "{W}{U}{B}{R}{G}",
-                ))
-                .id();
+            let spell = scenario.add_creature_to_hand_from_oracle(P0, "Glint-Eye Nephilim", 2, 2,
+                "Whenever this creature deals combat damage to a player, draw that many cards.\n{1}, Discard a card: This creature gets +1/+1 until end of turn.")
+                .with_subtypes(vec!["Nephilim"]).with_mana_cost(crate::types::mana::parse_mtgjson_mana_cost("{U}{B}{R}{G}")).id();
             let mut runner = scenario.build();
-            for (aura, land) in auras.iter().copied().zip([island, prairie]) {
+            for (aura, land) in auras.iter().copied().zip([island, valley]) {
                 crate::game::effects::attach::attach_to(runner.state_mut(), aura, land);
             }
             crate::game::layers::evaluate_layers(runner.state_mut());
@@ -20451,7 +20447,7 @@ mod tests {
             auto_tap_mana_sources(
                 runner.state_mut(),
                 P0,
-                &crate::types::mana::parse_mtgjson_mana_cost("{W}{U}{B}{R}{G}"),
+                &crate::types::mana::parse_mtgjson_mana_cost("{U}{B}{R}{G}"),
                 &mut payment_events,
                 None,
             );
@@ -20463,21 +20459,21 @@ mod tests {
             // prefix before the next producer enters either an empty actual
             // cost slice or a nonempty external funding tap slice.
             assert_eq!(produced(auras[0], ManaType::Black), 1);
-            assert_eq!(produced(auras[1], ManaType::Red), 1);
-            assert_eq!(produced(prairie, ManaType::Green), 1);
-            assert_eq!(produced(prairie, ManaType::White), 1);
+            assert_eq!(produced(auras[1], ManaType::White), 1);
+            assert_eq!(produced(valley, ManaType::Red), 1);
+            assert_eq!(produced(valley, ManaType::Green), 1);
             assert_eq!(produced(auras[0], ManaType::White), 0);
-            assert_eq!(produced(auras[1], ManaType::White), 0);
+            assert_eq!(produced(auras[1], ManaType::Black), 0);
             assert_eq!(
                 produced(wastes[0], ManaType::Colorless),
                 usize::from(initial_c == 0)
             );
             let black_event = payment_events.iter().position(|event| matches!(event, GameEvent::ManaAdded { source_id, mana_type: ManaType::Black, .. } if *source_id == auras[0])).unwrap();
-            let later_base = payment_events.iter().position(|event| matches!(event, GameEvent::ManaAdded { source_id, .. } if *source_id == prairie)).unwrap();
+            let later_base = payment_events.iter().position(|event| matches!(event, GameEvent::ManaAdded { source_id, .. } if *source_id == valley)).unwrap();
             assert!(black_event < later_base);
             let paid = runner.cast(spell).commit();
-            assert_eq!(paid.state().objects[&spell].mana_spent_to_cast_amount, 5);
-            assert_eq!(paid.state().players[0].mana_pool.total(), 0);
+            assert_eq!(paid.state().objects[&spell].mana_spent_to_cast_amount, 4);
+            assert_eq!(paid.state().players[0].mana_pool.total(), 1);
             assert!(paid.state().pending_taps_for_mana_overrides.is_empty());
             paid.resolve().assert_zone(&[spell], Zone::Battlefield);
             assert!(runner.state().stack.is_empty());
