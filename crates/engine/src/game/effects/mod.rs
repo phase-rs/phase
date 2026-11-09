@@ -1458,9 +1458,10 @@ pub(crate) fn settle_empty_forwarded_zone_result(state: &mut GameState, producer
 
 /// Resumes ready continuations and restores the caller's trigger context.
 ///
-/// Die completions in the resumed event span retain their result, including a
-/// prevented roll's cleared result. If the buffer shrinks below the span's start,
-/// the span is empty and does not claim ownership of the die result.
+/// Only writes by the die-instruction publisher survive context restoration:
+/// survivor values, completed aggregates and explicit clears. Nested drains
+/// propagate their latest publication, or retain the enclosing publication when
+/// they do not write. Numeric Attraction events and context replay are not writes.
 pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 601.2h + CR 605.3b + CR 608.2c: a parked counter-cost root whose
     // replacement subtree has retired resumes before any further resolution
@@ -1642,7 +1643,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                 object_incarnations: Vec::new(),
             }));
         }
-        let die_mark = events.len();
+        let enclosing_die_publication = state.die_result_publication.take();
         let mut chain_progress = None;
         if !player_scope_queue_end {
             if bound_result_is_empty(&chain)
@@ -1710,30 +1711,16 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         // outer context only once both the chain and its tail have run.
         // CR 706.2 + CR 608.2c: each die's result is its final value after modifiers;
         // the ability's own instruction determines how multiple dice are used.
-        // A die instruction settled inside this drain owns `die_result_this_resolution`
-        // (the instructed survivors' aggregate, or the CR 614.6 clear for a prevented
-        // roll); the caller's pre-push snapshot must not overwrite it.
-        let published_die = events
-            .get(die_mark..)
-            .unwrap_or_default()
-            .iter()
-            .any(|event| {
-                matches!(
-                    event,
-                    GameEvent::DieRolled { .. }
-                        | GameEvent::EffectResolved {
-                            kind: EffectKind::RollDie,
-                            ..
-                        }
-                )
-            })
-            .then_some(state.die_result_this_resolution);
+        // Actual writer authority, not event kind or scalar inequality, determines
+        // ownership. An Attraction can emit a numeric die without publishing.
+        let published_die = state.die_result_publication.take();
         if let Some(snapshot) = trigger_snapshot {
             super::triggers::restore_trigger_event_context(state, snapshot);
         }
         if let Some(value) = published_die {
             state.die_result_this_resolution = value;
         }
+        state.die_result_publication = published_die.or(enclosing_die_publication);
         if let Some(kind) = parent_kind {
             events.push(GameEvent::EffectResolved {
                 kind,
@@ -28842,6 +28829,7 @@ mod tests {
             },
             player: TargetFilter::Controller,
         });
+        state.die_result_publication = Some(Some(23));
         let before = state.players[0].life;
         // An earlier die completion in the action must not count as a roll inside this drain.
         let mut events = vec![GameEvent::EffectResolved {
@@ -28853,11 +28841,160 @@ mod tests {
 
         assert_eq!(state.players[0].life, before + 7);
         assert_eq!(state.die_result_this_resolution, Some(11));
+        assert_eq!(state.die_result_publication, Some(Some(23)));
         assert_eq!(state.current_trigger_event, Some(ambient.clone()));
         assert_eq!(state.current_trigger_events, vec![ambient]);
         assert_eq!(state.current_trigger_match_count, Some(17));
         assert!(state.resolution_stack.is_empty());
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    /// Composed split-context fixture; Line Cutter and Command Performance anchor
+    /// the Attraction instruction, not this parked-7/caller-11 ancestry.
+    #[test]
+    fn continuation_attraction_roll_is_not_a_die_result_publication() {
+        let (mut state, _, ambient) =
+            continuation_die_context_fixture(Effect::RollToVisitAttractions);
+        let attraction = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(2),
+            P0,
+            "Context Attraction".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&attraction)
+            .unwrap()
+            .attraction_lights = vec![6];
+        let mut events = vec![];
+        drain_pending_continuation(&mut state, &mut events);
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::DieRolled {
+                result: Some(_),
+                ..
+            }
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::AttractionsRolledToVisit { .. })));
+        assert_eq!(state.die_result_this_resolution, Some(11));
+        assert_eq!(state.die_result_publication, None);
+        assert_eq!(state.current_trigger_event, Some(ambient.clone()));
+        assert_eq!(state.current_trigger_events, vec![ambient]);
+        assert_eq!(state.current_trigger_match_count, Some(17));
+        assert!(state.resolution_stack.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    /// Composed writer control: replay and publication have the same scalar but
+    /// different authority. Printed die payload anchors are listed above.
+    #[test]
+    fn continuation_same_value_die_write_survives_caller_restoration() {
+        let (mut state, _, _) = continuation_die_context_fixture(Effect::RollDie {
+            count: QuantityExpr::Fixed { value: 1 },
+            sides: 1,
+            modifier: None,
+            results: vec![],
+        });
+        state
+            .active_ability_continuation_frame_mut()
+            .unwrap()
+            .pending
+            .trigger_context
+            .as_mut()
+            .unwrap()
+            .die_result = Some(1);
+        let mut events = vec![];
+        drain_pending_continuation(&mut state, &mut events);
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::DieRolled {
+                result: Some(1),
+                ..
+            }
+        )));
+        assert_eq!(state.die_result_this_resolution, Some(1));
+        assert_eq!(state.die_result_publication, Some(Some(1)));
+        assert!(state.resolution_stack.is_empty());
+    }
+
+    /// Composed nested continuation fixture, not printed-card ancestry. A d1 is
+    /// followed by a Clash tail, causing the recursive drain boundary.
+    /// The zero-sided child is an engine fail-safe, not printed die text.
+    #[test]
+    fn nested_continuation_die_publication_propagates_or_preserves_the_outer_write() {
+        for child_sides in [Some(0), Some(1), None] {
+            let child = match child_sides {
+                Some(sides) => Effect::RollDie {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    sides,
+                    modifier: None,
+                    results: vec![],
+                },
+                None => Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                    player: TargetFilter::Controller,
+                },
+            };
+            let (mut state, source, ambient) = continuation_die_context_fixture(Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 1,
+                modifier: Some(crate::types::ability::DieRollModifier::Add {
+                    value: QuantityExpr::Fixed { value: 6 },
+                }),
+                results: vec![],
+            });
+            state
+                .active_ability_continuation_frame_mut()
+                .unwrap()
+                .pending
+                .chain
+                .sub_ability = Some(Box::new(
+                ResolvedAbility::new(Effect::Clash, vec![], source, P0)
+                    .sub_ability(ResolvedAbility::new(child, vec![], source, P0)),
+            ));
+            let before = state.players[0].life;
+            let mut events = vec![];
+            drain_pending_continuation(&mut state, &mut events);
+
+            assert!(events
+                .iter()
+                .any(|event| matches!(event, GameEvent::Clash { .. })));
+            assert!(events.iter().any(|event| matches!(
+                event,
+                GameEvent::DieRolled {
+                    result: Some(7),
+                    ..
+                }
+            )));
+            let expected = match child_sides {
+                Some(0) => None,
+                Some(1) => Some(1),
+                None => {
+                    assert_eq!(state.players[0].life, before + 5);
+                    Some(7)
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                state.die_result_this_resolution, expected,
+                "{child_sides:?}"
+            );
+            assert_eq!(
+                state.die_result_publication,
+                Some(expected),
+                "{child_sides:?}"
+            );
+            assert_eq!(state.current_trigger_event, Some(ambient.clone()));
+            assert_eq!(state.current_trigger_events, vec![ambient]);
+            assert_eq!(state.current_trigger_match_count, Some(17));
+            assert!(state.resolution_stack.is_empty());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        }
     }
 
     /// Composed fail-safe fixture: no printed card rolls a zero-sided die.
