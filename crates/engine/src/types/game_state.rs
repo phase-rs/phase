@@ -35923,8 +35923,9 @@ impl GameState {
     /// `DamageDealt` / `CombatDamageDealtToPlayer` and the CR 702.110b
     /// exploiter stamp of `CreatureExploited`), the may-trigger
     /// origins and stored answers, the turn and combat block-history pairs
-    /// (CR 509.1g), and the live incarnation of every object those or a tracked-set
-    /// origin (CR 608.2c) name. Ranks count down from the
+    /// (CR 509.1g), the live incarnation of every object those or a tracked-set
+    /// origin (CR 608.2c) name, and the attachment incarnation pins the
+    /// retained `lki_by_incarnation` snapshots carry. Ranks count down from the
     /// highest member, so the live incarnation anchors them: two positions
     /// minted at different times compare equal, while which incarnation each
     /// carrier names, relative to the live one, and whether a snapshot sits
