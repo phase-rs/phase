@@ -7000,8 +7000,8 @@ fn eq_except_growable(
     if let Some(cohort) = fodder_recipients {
         // Quotient only the proven homogeneous recipient cohort. Ineligible
         // rows stay intact in the ordinary remainder, including legacy rows.
-        if take_fodder_recipient_facts(&mut a, pa, grown, cohort)
-            != take_fodder_recipient_facts(&mut b, pb, grown, cohort)
+        if take_fodder_recipient_groups(&mut a, pa, grown, cohort)
+            != take_fodder_recipient_groups(&mut b, pb, grown, cohort)
         {
             return false;
         }
@@ -7026,19 +7026,24 @@ struct FodderRecipientFact {
     tapped: bool,
 }
 
-/// Extract only stamped recipient witnesses whose identities the fodder proof
-/// already makes interchangeable. No fake object id, source renaming or class
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct FodderRecipientGroup {
+    facts: smallvec::SmallVec<[FodderRecipientFact; 4]>,
+}
+
+/// Keep which stamped damage keys share a recipient before forgetting that
+/// interchangeable recipient's id. No fake id, source renaming or class
 /// reselection. All ineligible rows remain full records in the remainder.
-fn take_fodder_recipient_facts(
+fn take_fodder_recipient_groups(
     frame: &mut ResourceProjectedFrame,
     original: &ResourceProjectedFrame,
     grown: &HashSet<ObjectId>,
     cohort: &HashSet<ObjectId>,
-) -> smallvec::SmallVec<[FodderRecipientFact; 4]> {
-    let mut facts = smallvec::SmallVec::new();
+) -> smallvec::SmallVec<[FodderRecipientGroup; 4]> {
     if cohort.is_empty() {
-        return facts;
+        return smallvec::SmallVec::new();
     }
+    let mut keyed = smallvec::SmallVec::<[(ObjectId, FodderRecipientFact); 4]>::new();
     frame.0.damage_dealt_this_turn.retain(|record| {
         let Some(epoch) = record.target_incarnation else {
             return true;
@@ -7062,19 +7067,40 @@ fn take_fodder_recipient_facts(
             amount,
             is_combat,
         } = record.event_key();
-        facts.push(FodderRecipientFact {
-            source_id,
-            source_incarnation,
-            amount,
-            is_combat,
-            is_live: epoch != 0,
-            tapped: object.tapped,
-        });
+        keyed.push((
+            *target,
+            FodderRecipientFact {
+                source_id,
+                source_incarnation,
+                amount,
+                is_combat,
+                is_live: epoch != 0,
+                tapped: object.tapped,
+            },
+        ));
         false
     });
-    // Multiplicity is material: distinct pending occurrences are not deduped.
-    facts.sort_unstable();
-    facts
+    // Actual ids partition the facts; tuple ordering also sorts each group's
+    // contents. Only the resulting groups, not their raw ids, are compared.
+    keyed.sort_unstable();
+    let mut groups = smallvec::SmallVec::<[FodderRecipientGroup; 4]>::new();
+    let mut recipient = None;
+    for (target, fact) in keyed {
+        if recipient != Some(target) {
+            groups.push(FodderRecipientGroup {
+                facts: smallvec::SmallVec::new(),
+            });
+            recipient = Some(target);
+        }
+        groups
+            .last_mut()
+            .expect("a recipient group is created before adding its facts")
+            .facts
+            .push(fact);
+    }
+    // Preserve both occurrence and distinct-recipient multiplicity. No dedup.
+    groups.sort_unstable();
+    groups
 }
 
 /// CR 603.7a + CR 603.7b: a one-shot delayed trigger for a step after the frame's, whose every
