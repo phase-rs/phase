@@ -39,6 +39,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::{
     DiscardFrameId, LogicalZoneChangeGroupId, ObjectId, ObjectIncarnationRef,
 };
+
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::EtbTapState;
@@ -5829,7 +5830,21 @@ fn migrate_legacy_change_zone_member_entries(
     Ok(())
 }
 
-fn migrate_legacy_change_zone_performer(carrier: &mut Value) {
+/// A missing-actor mass-Exile carrier whose overloaded controller still needs
+/// immutable family authority after the ordinary typed decode.
+struct LegacyChangeZoneControllerMigration {
+    group: LogicalZoneChangeGroupId,
+    controller: Option<PlayerId>,
+}
+
+/// Stable refusal when a historical mass exile did not preserve enough
+/// resolution-owned context to separate its actor from its family controller.
+pub const LEGACY_CHANGE_ZONE_CONTROLLER_RESTORE_ERROR: &str = "RESTORE_INCOMPATIBLE_CHANGE_ZONE_CONTROLLER: This saved game paused a mass exile without an independent family controller, and its saved resolution context does not identify one unambiguously.";
+
+fn migrate_legacy_change_zone_performer(
+    carrier: &mut Value,
+    migrations: &mut Vec<LegacyChangeZoneControllerMigration>,
+) {
     let Some(carrier) = carrier.as_object_mut() else {
         return;
     };
@@ -5838,13 +5853,31 @@ fn migrate_legacy_change_zone_performer(carrier: &mut Value) {
     }
     if let Some(controller) = carrier.get("controller").and_then(Value::as_u64) {
         carrier.insert("performed_by".to_string(), Value::from(controller));
+        if carrier.get("destination").and_then(Value::as_str) == Some("Exile")
+            && carrier.get("effect_kind").and_then(Value::as_str) == Some("ChangeZoneAll")
+        {
+            if let Some(group) = carrier
+                .get("logical_zone_change_group")
+                .and_then(|group| group.get("logical_group_id"))
+                .and_then(Value::as_u64)
+            {
+                migrations.push(LegacyChangeZoneControllerMigration {
+                    group: LogicalZoneChangeGroupId(group),
+                    controller: None,
+                });
+            }
+        }
     }
 }
 
 /// Preserve the actor encoded by historical ChangeZone carriers. This runs
 /// only at the versioned save boundary; current carriers must supply their
 /// actor explicitly and no live object/controller lookup reconstructs it.
-fn migrate_legacy_change_zone_performers(value: &mut Value, version: u64) {
+fn migrate_legacy_change_zone_performers(
+    value: &mut Value,
+    version: u64,
+    migrations: &mut Vec<LegacyChangeZoneControllerMigration>,
+) {
     if !(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION
         ..=LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION)
         .contains(&version)
@@ -5867,9 +5900,142 @@ fn migrate_legacy_change_zone_performers(value: &mut Value, version: u64) {
             .get_mut("data")
             .and_then(|data| data.get_mut("pending"))
         {
-            migrate_legacy_change_zone_performer(carrier);
+            migrate_legacy_change_zone_performer(carrier, migrations);
         }
     }
+}
+
+/// Recover only the role the old mass-Exile writer overloaded. A saved
+/// continuation and the already-resolving stack entry are immutable resolution
+/// authority; live objects, pending stack entries and frame proximity are not.
+/// Source equality binds the resolving entry only when no second ChangeZone
+/// family for that source is parked. A continuation additionally needs a
+/// matching parent kind, producer occurrence or logical-group marker; a bare
+/// same-source tail is not proof. Every applicable marker and authority must
+/// agree. Older saves without that proof are refused, not losslessly guessed.
+fn recover_legacy_change_zone_controllers(
+    frames: &mut ResolutionStack,
+    resolving: Option<&crate::types::game_state::StackEntry>,
+    mut replacement: Option<&mut crate::types::game_state::PendingReplacement>,
+    migrations: &mut [LegacyChangeZoneControllerMigration],
+) -> Result<(), String> {
+    if migrations.is_empty() {
+        return Ok(());
+    }
+    let incompatible = || LEGACY_CHANGE_ZONE_CONTROLLER_RESTORE_ERROR.to_string();
+    for migration in migrations.iter_mut() {
+        let mut owners = frames.iter().filter_map(|frame| match frame {
+            ResolutionFrame::ChangeZone(frame) => frame.pending.as_ref().filter(|pending| {
+                pending.logical_zone_change_group.logical_group_id == migration.group
+            }),
+            _ => None,
+        });
+        let pending = owners.next().ok_or_else(incompatible)?;
+        if owners.next().is_some()
+            || frames.iter().any(|frame| {
+                matches!(frame, ResolutionFrame::ChangeZone(frame)
+                    if frame.pending.as_ref().is_some_and(|other|
+                        other.source_id == pending.source_id
+                            && other.logical_zone_change_group.logical_group_id != migration.group))
+            })
+        {
+            return Err(incompatible());
+        }
+        let mut controller = None;
+        let mut observe = |candidate| -> Result<(), String> {
+            if controller.is_some_and(|controller| controller != candidate) {
+                return Err(incompatible());
+            }
+            controller = Some(candidate);
+            Ok(())
+        };
+        if let Some(entry) = resolving.filter(|entry| entry.source_id == pending.source_id) {
+            if let Some(ability) = entry
+                .ability()
+                .filter(|ability| ability.source_id == pending.source_id)
+            {
+                observe(entry.controller)?;
+                observe(ability.controller)?;
+            }
+        }
+        for continuation in frames.ability_continuations() {
+            if continuation.player_scope_queue_end
+                || continuation.chain.source_id != pending.source_id
+            {
+                continue;
+            }
+            let mut bound = false;
+            let mut conflicting_binding = false;
+            if let Some(kind) = continuation.parent_kind {
+                bound |= kind == pending.effect_kind;
+                conflicting_binding |= kind != pending.effect_kind;
+            }
+            if let Some((occurrence, _)) = pending.pending_return_result_producer {
+                bound |= continuation.return_result_occurrence == Some(occurrence);
+                conflicting_binding |= continuation.return_result_occurrence != Some(occurrence);
+            }
+            if let Some(result) = continuation
+                .chain
+                .context
+                .pending_forwarded_zone_result
+                .as_ref()
+            {
+                bound |= result.group == Some(migration.group);
+                conflicting_binding |= result.producer != pending.source_id
+                    || result.group.is_some_and(|group| group != migration.group);
+            }
+            if bound {
+                if conflicting_binding {
+                    return Err(incompatible());
+                }
+                observe(continuation.chain.controller)?;
+            }
+        }
+        let controller = controller.ok_or_else(incompatible)?;
+        if let Some(replacement) = replacement.as_deref_mut() {
+            if pending.paused_current.as_ref().is_some_and(|paused| {
+                replacement.parks_delivery(&paused.expected_event)
+                    && matches!(
+                        replacement.delivery_boundary_event(),
+                        ProposedEvent::ZoneChange {
+                            object_id,
+                            cause: Some(source_id),
+                            ..
+                        } if *object_id == paused.member.object_id
+                            && *source_id == pending.source_id
+                    )
+            }) {
+                if replacement.exile_duration != pending.duration
+                    || replacement.exile_controller.is_some_and(|anchor| {
+                        anchor != pending.performed_by && anchor != controller
+                    })
+                {
+                    return Err(incompatible());
+                }
+                // The exact saved delivery boundary binds the in-flight
+                // member. Its actor stays on the proposed event; only the
+                // historically overloaded duration anchor changes.
+                replacement.exile_controller = Some(controller);
+            }
+        }
+        migration.controller = Some(controller);
+    }
+    // Content-only migration: no frame is inserted, removed or reordered, and
+    // the logical-group identity, not a remembered vector position, binds it.
+    for frame in frames.frames.iter_mut() {
+        if let ResolutionFrame::ChangeZone(frame) = frame {
+            if let Some(pending) = frame.pending.as_mut() {
+                if let Some(migration) = migrations.iter().find(|migration| {
+                    migration.group == pending.logical_zone_change_group.logical_group_id
+                }) {
+                    pending.controller = migration
+                        .controller
+                        .expect("every migrated family was recovered before mutation");
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Declares the resolution-wire shape of an UNVERSIONED raw `GameState`
@@ -6291,8 +6457,11 @@ impl ResolutionStateWire {
     /// ownership (a version-4 draw frame simply has no dealer). A v2–v6 parked
     /// ChangeZone carrier is migrated or refused by
     /// `migrate_legacy_change_zone_member_entries`; the v1 reader handles its
-    /// top-level carrier. Pre-v12 carriers also split their recorded actor
-    /// through `migrate_legacy_change_zone_performers` before typed decoding.
+    /// top-level carrier. Pre-v12 carriers preserve their recorded actor before
+    /// typed decoding. A historical mass exile then recovers its independent
+    /// controller only from unambiguous, source-bound immutable resolution
+    /// context; absent/conflicting authority is refused. This admission never
+    /// decides whether begun resolution continues after a player leaves.
     ///
     /// Every version then passes the onset admission (`admit_entry_onset_record`, CR 611.2e): a
     /// payload written before ability onsets were recorded is admitted only when it holds no
@@ -6342,7 +6511,12 @@ impl ResolutionStateWire {
         }
         reject_ambiguous_legacy_paused_draw_result(&value, version)?;
         migrate_legacy_change_zone_member_entries(&mut value, version)?;
-        migrate_legacy_change_zone_performers(&mut value, version);
+        let mut legacy_change_zone_controllers = Vec::new();
+        migrate_legacy_change_zone_performers(
+            &mut value,
+            version,
+            &mut legacy_change_zone_controllers,
+        );
         // `ResolutionStateWire` is a public persistence boundary in its own
         // right. Its historic-shape preparation and raw-state materialization
         // both belong to `GameStateDecode`; no wire branch gets a private
@@ -6432,7 +6606,10 @@ impl ResolutionStateWire {
                     .filter(|carrier| !carrier.is_null())
                 {
                     migrate_legacy_change_zone_carrier(carrier)?;
-                    migrate_legacy_change_zone_performer(carrier);
+                    migrate_legacy_change_zone_performer(
+                        carrier,
+                        &mut legacy_change_zone_controllers,
+                    );
                 }
                 let legacy_draw_sequence_frames = value
                     .get("draw_sequences")
@@ -6605,6 +6782,12 @@ impl ResolutionStateWire {
                         legacy.resolution_stack.push_inner(frame);
                     }
                 }
+                recover_legacy_change_zone_controllers(
+                    &mut legacy.resolution_stack,
+                    legacy.resolving_stack_entry.as_ref(),
+                    legacy.pending_replacement.as_mut(),
+                    &mut legacy_change_zone_controllers,
+                )?;
                 normalize_legacy_completed_resolution_carrier(&mut legacy);
                 crate::types::game_state::normalize_resolution_cast_offer_allocator(&mut legacy)?;
                 let frames = canonicalize_legacy_resolution_state(&legacy)?;
@@ -6659,7 +6842,13 @@ impl ResolutionStateWire {
                             .to_string(),
                     );
                 }
-                let state = GameStateDecode::materialize_prepared(state_value)?;
+                let mut state = GameStateDecode::materialize_prepared(state_value)?;
+                recover_legacy_change_zone_controllers(
+                    &mut frames,
+                    state.resolving_stack_entry.as_ref(),
+                    state.pending_replacement.as_mut(),
+                    &mut legacy_change_zone_controllers,
+                )?;
                 frames
                     .validate_at_rest(&state.waiting_for)
                     .map_err(|error| error.to_string())?;
@@ -7698,9 +7887,9 @@ mod tests {
     use crate::game::scenario::{GameRunner, GameScenario, P0};
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, CardSelectionMode, Chooser, CoinFlipRun, CopyChooseScope,
-        Effect, EffectKind, ForEachCategoryAction, IterationCategory, PerPlayerScope,
-        PostReplacementContinuation, QuantityExpr, RepeatContinuation, ReplacementDefinition,
-        SpellContext, TargetFilter, TypedFilter, ZoneOwner,
+        Effect, EffectKind, ForEachCategoryAction, IterationCategory, PendingForwardedZoneResult,
+        PerPlayerScope, PostReplacementContinuation, QuantityExpr, RepeatContinuation,
+        ReplacementDefinition, ReturnResultId, SpellContext, TargetFilter, TypedFilter, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::game_state::{
@@ -7711,8 +7900,8 @@ mod tests {
         PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingRepeatIteration,
         PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration,
         PendingZoneChangeDelivery, PersistedGameState, PostReplacementDrain, RandomDraw,
-        RepeatUntilStopWitness, ResidentDrainPolicy, StackEntry, StackEntryKind,
-        ZoneDeliveryExileTracking, ZoneMoveCompletion,
+        RepeatUntilStopWitness, ResidentDrainPolicy, ReturnResultOccurrenceId, StackEntry,
+        StackEntryKind, ZoneDeliveryExileTracking, ZoneMoveCompletion,
     };
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
@@ -8795,6 +8984,91 @@ mod tests {
         );
     }
 
+    #[test]
+    fn legacy_mass_exile_continuation_authority_requires_matching_family_binding() {
+        for binding in [
+            "unbound",
+            "parent_kind",
+            "wrong_parent",
+            "group",
+            "wrong_group",
+            "occurrence",
+            "wrong_occurrence",
+            "conflicting_markers",
+        ] {
+            let ResolutionFrame::ChangeZone(mut owner) = change_zone_frame(55) else {
+                unreachable!("the fixture constructs a ChangeZone owner")
+            };
+            let pending = owner.pending.as_mut().unwrap();
+            pending.controller = PlayerId(1);
+            pending.performed_by = PlayerId(1);
+            pending.destination = Zone::Exile;
+            pending.effect_kind = EffectKind::ChangeZoneAll;
+            let group = pending.logical_zone_change_group.logical_group_id;
+            let ResolutionFrame::AbilityContinuation(mut continuation) = continuation_frame(55)
+            else {
+                unreachable!("the fixture constructs a continuation")
+            };
+            match binding {
+                "unbound" => {}
+                "parent_kind" => continuation.pending.parent_kind = Some(EffectKind::ChangeZoneAll),
+                "wrong_parent" => continuation.pending.parent_kind = Some(EffectKind::Draw),
+                "group" | "wrong_group" | "conflicting_markers" => {
+                    continuation
+                        .pending
+                        .chain
+                        .context
+                        .pending_forwarded_zone_result = Some(PendingForwardedZoneResult {
+                        producer: pending.source_id,
+                        selected: None,
+                        group: Some(if binding == "group" {
+                            group
+                        } else {
+                            LogicalZoneChangeGroupId(group.0 + 1)
+                        }),
+                    });
+                    if binding == "conflicting_markers" {
+                        continuation.pending.parent_kind = Some(EffectKind::ChangeZoneAll);
+                    }
+                }
+                "occurrence" | "wrong_occurrence" => {
+                    pending.pending_return_result_producer =
+                        Some((ReturnResultOccurrenceId(9), ReturnResultId(1)));
+                    continuation.pending.return_result_occurrence =
+                        Some(ReturnResultOccurrenceId(if binding == "occurrence" {
+                            9
+                        } else {
+                            10
+                        }));
+                }
+                _ => unreachable!(),
+            }
+            let mut frames = ResolutionStack::default();
+            frames.push_inner(ResolutionFrame::AbilityContinuation(continuation));
+            frames.push_inner(ResolutionFrame::ChangeZone(owner));
+            let mut migrations = [LegacyChangeZoneControllerMigration {
+                group,
+                controller: None,
+            }];
+            let recovered =
+                recover_legacy_change_zone_controllers(&mut frames, None, None, &mut migrations);
+            if matches!(binding, "parent_kind" | "group" | "occurrence") {
+                recovered.unwrap_or_else(|error| panic!("{binding}: {error}"));
+                let ResolutionFrame::ChangeZone(owner) = frames.last().unwrap() else {
+                    unreachable!("content migration cannot reorder the owner")
+                };
+                let pending = owner.pending.as_ref().unwrap();
+                assert_eq!(pending.controller, PlayerId(0), "{binding}");
+                assert_eq!(pending.performed_by, PlayerId(1), "{binding}");
+            } else {
+                assert_eq!(
+                    recovered.unwrap_err(),
+                    LEGACY_CHANGE_ZONE_CONTROLLER_RESTORE_ERROR,
+                    "{binding}"
+                );
+            }
+        }
+    }
     fn paused_post_replacement_frame() -> ResolutionFrame {
         let mut drains = PostReplacementDrainStack::default();
         let installed = drains.install(

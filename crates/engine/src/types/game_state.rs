@@ -4885,7 +4885,14 @@ pub struct PendingChangeZoneIteration {
     pub controller: PlayerId,
     /// Instruction performer, captured independently across every pause.
     /// Required on current carriers: the controller no longer determines it.
-    /// Versioned save migration preserves historical controller-encoded actors.
+    /// Versioned v1–v11 admission copies the recorded controller-encoded actor
+    /// exactly. Historical mass-Exile family controllers are recovered separately
+    /// from immutable, source-and-family-bound saved resolution context or
+    /// explicitly refused when that authority is absent or conflicting. A
+    /// continuation needs its saved parent-kind, occurrence or group binding;
+    /// source equality alone does not make an unrelated tail its family. No
+    /// live source, subject ownership, actor fallback or default player
+    /// reconstructs either role.
     pub performed_by: PlayerId,
     pub origin: Option<crate::types::zones::Zone>,
     pub destination: crate::types::zones::Zone,

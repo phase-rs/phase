@@ -167,18 +167,21 @@ pub fn eliminate_players_simultaneously(
 
 /// CR 104.3a + CR 800.4a: A player concedes and leaves the game.
 ///
-/// A concession is an action of its own, not part of a resolution or a
-/// state-based action check, so no post-action pipeline scans the events it
-/// produces. The departure collects the abilities they trigger itself (CR 603.2):
-/// a leaves-the-battlefield observer sees the conceding player's permanents leave
-/// the game (CR 603.6c).
-pub fn concede(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
-    eliminate_players(
+/// The departure collects its own and resumed instruction events (CR 603.2 +
+/// CR 603.6c). A continuing concession returns the collected end boundary:
+/// the caller converges the final part and SBAs without rescanning this prefix.
+/// The caller owns rollback if resumption or convergence fails.
+pub fn concede(
+    state: &mut GameState,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<usize>, super::engine::EngineError> {
+    eliminate_players_inner(
         state,
         &[player],
         DepartureTriggers::CollectedByDeparture,
         events,
-    );
+    )
 }
 
 /// CR 603.2 + CR 603.6c: who collects the triggered abilities a departure's own
@@ -191,17 +194,28 @@ pub(crate) enum DepartureTriggers {
     /// A post-action pass in progress scans the events and places the waiting queue at its
     /// own settle (CR 117.5).
     PlacedByPass,
-    /// Nothing scans the departure's events after it returns (a concession,
-    /// CR 104.3a), so the departure queues their triggers itself.
+    /// The departure queues its own triggers (a concession, CR 104.3a);
+    /// a resumed family's ordinary pipeline must not scan that prefix again.
     CollectedByDeparture,
 }
 
+/// Caller-scanned departures retain their existing invariant-only interface.
 pub(crate) fn eliminate_players(
     state: &mut GameState,
     players_to_eliminate: &[PlayerId],
     departure_triggers: DepartureTriggers,
     events: &mut Vec<GameEvent>,
 ) {
+    let _ = eliminate_players_inner(state, players_to_eliminate, departure_triggers, events)
+        .expect("a caller-scanned departure settles its captured resolution work");
+}
+
+fn eliminate_players_inner(
+    state: &mut GameState,
+    players_to_eliminate: &[PlayerId],
+    departure_triggers: DepartureTriggers,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<usize>, super::engine::EngineError> {
     let first_event = events.len();
     let first_record = state.zone_changes_this_turn.len();
     let mut eliminated_any = false;
@@ -301,6 +315,19 @@ pub(crate) fn eliminate_players(
                 pending.controller,
             )
         });
+    let canceled_change_zone_is_resumable = |state: &GameState| {
+        interrupted_change_zone.is_some_and(|(group, controller)| {
+            state
+                .active_change_zone_frame()
+                .and_then(|frame| frame.pending.as_ref())
+                .is_some_and(|pending| {
+                    pending.logical_zone_change_group.logical_group_id == group
+                        && pending.controller == controller
+                        && pending.paused_current.is_none()
+                })
+        }) && state.pending_replacement.is_none()
+            && matches!(state.waiting_for, WaitingFor::Priority { .. })
+    };
 
     let interrupted_ordinary_search = state
         .pending_scoped_library_search
@@ -370,7 +397,7 @@ pub(crate) fn eliminate_players(
     }
 
     if !eliminated_any {
-        return;
+        return Ok(None);
     }
     mark_left_game_departures_simultaneous(state, events, first_event, first_record);
     let departure_end = events.len();
@@ -466,8 +493,7 @@ pub(crate) fn eliminate_players(
                     state.pending_player_scope_unless_payment = Some(pending);
                     crate::game::engine_payment_choices::settle_eliminated_player_scope_token_unless_payment(
                         state, events,
-                    )
-                    .expect("eliminated final payer must settle a token-unless aggregate");
+                    )?;
                 }
             } else {
                 state.pending_player_scope_unless_payment = Some(pending);
@@ -535,8 +561,7 @@ pub(crate) fn eliminate_players(
             state,
             interrupted_replacement,
             events,
-        )
-        .expect("interrupted replacement must settle through its existing delivery owner");
+        )?;
         // CR 800.4a + CR 608.2m + CR 800.4g/800.4h: once every departure,
         // control-effect end and stack removal above has settled, reconcile an
         // active per-player zone choice against the final set of living
@@ -567,7 +592,9 @@ pub(crate) fn eliminate_players(
         // resolution behind unrelated priority (CR 117.2e).
         let owner_arrangement =
             match super::engine_resolution_choices::settle_owner_library_arrangement_after_departure(
-                state, events,
+                state,
+                events,
+                departure_triggers,
             ) {
                 Ok(settlement) => settlement,
                 Err(error) => {
@@ -591,7 +618,9 @@ pub(crate) fn eliminate_players(
         // triggers it queued, CR 603.3) and before the generic dead-actor repoint.
         let player_scope_sacrifice =
             match super::engine_resolution_choices::settle_player_scope_sacrifice_after_departure(
-                state, events,
+                state,
+                events,
+                departure_triggers,
             ) {
                 Ok(settlement) => settlement,
                 Err(error) => {
@@ -606,8 +635,7 @@ pub(crate) fn eliminate_players(
 
         if let Some(frame) = staged_optional_sacrifice_decline {
             state.push_optional_effect_frame(frame);
-            super::engine_payment_choices::handle_optional_effect_choice(state, false, events)
-                .expect("departed optional sacrifice payer must follow the canonical decline path");
+            super::engine_payment_choices::handle_optional_effect_choice(state, false, events)?;
         }
 
         // CR 603.3b: If prune collapsed an ordering pass into
@@ -721,6 +749,7 @@ pub(crate) fn eliminate_players(
         // reconciliation reports whether the departure itself settled the
         // instruction, so the resolving-spell retirement below can tell a
         // settled instruction from an abandoned unanswered one.
+        let staged_event_start = events.len();
         let staged_batch_settlement =
             match super::zone_pipeline::reconcile_staged_batch_after_departure(state, events) {
                 Ok(settlement) => settlement,
@@ -733,6 +762,22 @@ pub(crate) fn eliminate_players(
                     super::engine_resolution_choices::DepartureSettlement::NotSettled
                 }
             };
+        if departure_triggers == DepartureTriggers::CollectedByDeparture
+            && matches!(
+                staged_batch_settlement,
+                super::engine_resolution_choices::DepartureSettlement::Settled
+            )
+        {
+            // CR 603.2c + CR 603.7b: final staged settlement already claimed
+            // ordinary population events; its unclaimed tail and delayed
+            // observers still belong to this exact, appended segment.
+            super::triggers::collect_unclaimed_triggers_into_deferred(
+                state,
+                events,
+                staged_event_start,
+                None,
+            );
+        }
 
         if let Some(waiting_pid) = state.waiting_for.acting_player() {
             if !players::is_alive(state, waiting_pid) {
@@ -741,29 +786,11 @@ pub(crate) fn eliminate_players(
             }
         }
 
-        // CR 800.4a + CR 608.2c: removing a paused member is not abandonment
-        // of its surviving family. Resume through the ordinary resolution
-        // boundary before exposing priority, but only after this exact pause
-        // was canceled and every departure/control-effect sweep has settled.
-        let resume_canceled_change_zone =
-            interrupted_change_zone.is_some_and(|(group, controller)| {
-                players::is_alive(state, controller)
-                    && state
-                        .active_change_zone_frame()
-                        .and_then(|frame| frame.pending.as_ref())
-                        .is_some_and(|pending| {
-                            pending.logical_zone_change_group.logical_group_id == group
-                                && pending.controller == controller
-                                && pending.paused_current.is_none()
-                        })
-            }) && state.pending_replacement.is_none()
-                && matches!(state.waiting_for, WaitingFor::Priority { .. });
-        if resume_canceled_change_zone {
-            // A concession has no post-action event scan. Keep its departure
-            // events outside the resumed instruction's observer-collection span.
+        // CR 800.4a + CR 608.2c + CR 608.2m: resume only the captured canceled
+        // member's begun family, in the same order as other departure work.
+        if canceled_change_zone_is_resumable(state) {
             let mut resumed = Vec::new();
-            super::engine::resume_pending_continuation_if_priority(state, &mut resumed)
-                .expect("a surviving canceled ChangeZone pause resumes at its ordinary boundary");
+            super::engine::resume_pending_continuation_if_priority(state, &mut resumed)?;
             if departure_triggers == DepartureTriggers::CollectedByDeparture {
                 super::triggers::collect_unclaimed_triggers_into_deferred(state, &resumed, 0, None);
             }
@@ -859,6 +886,13 @@ pub(crate) fn eliminate_players(
     // CR 800.4a: the departure's events belong to the departure, not to a
     // surviving player's paused announcement.
     super::announcement_triggers::disown_events_through(state, events.len());
+    // CR 117.5: the concession's caller now owns only newly produced final-
+    // part/SBA events. Every event before this boundary stays collected here.
+    Ok(
+        (departure_triggers == DepartureTriggers::CollectedByDeparture
+            && game_over_winner.is_none())
+        .then_some(events.len()),
+    )
 }
 
 /// CR 103.5 + CR 800.4a: Prune eliminated players from the in-flight
@@ -1039,8 +1073,10 @@ fn drain_or_clear_deferred_triggers_after_elimination(
 ) {
     // CR 117.5 + CR 603.3b: a post-action pass in progress places its queue whole at its
     // settle to priority.
-    if departure_triggers == DepartureTriggers::PlacedByPass
-        || state.deferred_triggers.is_empty()
+    if matches!(
+        departure_triggers,
+        DepartureTriggers::PlacedByPass | DepartureTriggers::CollectedByDeparture
+    ) || state.deferred_triggers.is_empty()
         || state.pending_trigger.is_some()
         || state.pending_trigger_order.is_some()
     {
@@ -1564,7 +1600,6 @@ fn do_eliminate(
 
     abandon_source_bound_resolution_prompt(state, player, leaving_set, events);
     retire_pending_zone_change_contexts_owned_by(state, player);
-    abandon_change_zone_family_for_controller(state, player, leaving_set, events);
 
     crate::game::planechase::preserve_phenomenon_stack_abilities_for_handoff(state, planar_handoff);
 
@@ -2124,68 +2159,6 @@ fn finish_abandoned_source_bound_resolution_carrier(
         state,
         crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
     );
-}
-
-/// CR 800.4a: A paused ChangeZone iteration is a single resolving family's
-/// owner. Dropping only its prompt would let an unrelated later resume consume
-/// the captured source context, so abandonment removes the owner and its tail
-/// together. `PendingBatchDeliveries` is intentionally not included: it is a
-/// shared per-object batch and retains the existing prune/resume rules.
-fn abandon_change_zone_family_for_controller(
-    state: &mut GameState,
-    player: PlayerId,
-    leaving_set: &HashSet<PlayerId>,
-    events: &mut Vec<GameEvent>,
-) {
-    let Some(pending) = state
-        .active_change_zone_frame()
-        .and_then(|frame| frame.pending.as_ref())
-    else {
-        return;
-    };
-    if pending.controller != player {
-        return;
-    }
-    // CR 608.2m + CR 800.4a: a spell already resolving continues after its
-    // controller's stack object leaves. Its exact interrupted replacement,
-    // including an outer event boxed behind a MayCost child, is reconciled
-    // after the full departure sweep rather than abandoning the living tail.
-    if pending.paused_current.as_ref().is_some_and(|paused| {
-        state
-            .pending_replacement
-            .as_ref()
-            .is_some_and(|replacement| replacement.parks_delivery(&paused.expected_event))
-            || matches!(state.pending_cost_move_resume.as_ref(),
-                Some(PendingCostMoveResume::ReplacementMayCost {
-                    outer_replacement: Some(outer), ..
-                }) if outer.parks_delivery(&paused.expected_event))
-    }) {
-        return;
-    }
-
-    // CR 800.4a: the family's out-of-band replacement pause retires with
-    // its controller, even when a surviving player was answering it. Match
-    // the exact delivery boundary so no unrelated/new child pause is cleared.
-    let owns_replacement = pending.paused_current.as_ref().is_some_and(|paused| {
-        state
-            .pending_replacement
-            .as_ref()
-            .is_some_and(|replacement| replacement.parks_delivery(&paused.expected_event))
-    });
-
-    if owns_replacement {
-        state.pending_replacement = None;
-        state.replacement_may_cost_paused = false;
-    }
-    // Retire this owner through its ordinary family authority. Do not clear
-    // a post-replacement parent that becomes exposed only after the pop.
-    let _ = state
-        .take_active_change_zone_frame()
-        .expect("elimination cannot consume a buried ChangeZone frame");
-    finish_abandoned_source_bound_resolution_carrier(state, leaving_set, events);
-    state.waiting_for = WaitingFor::Priority {
-        player: players::next_player(state, player),
-    };
 }
 
 /// CR 104.2a: A player wins if all opponents have left. CR 104.3g: A team loses if all members have lost.

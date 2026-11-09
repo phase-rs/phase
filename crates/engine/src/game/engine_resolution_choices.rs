@@ -28,6 +28,7 @@ use crate::types::zones::Zone;
 
 use super::ability_utils::node_has_stack_target_declaration;
 use super::effects;
+use super::elimination::DepartureTriggers;
 use super::engine::EngineError;
 use super::turns;
 use super::zones;
@@ -267,6 +268,7 @@ pub(crate) enum DepartureSettlement {
 pub(crate) fn settle_owner_library_arrangement_after_departure(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
+    departure_triggers: DepartureTriggers,
 ) -> Result<DepartureSettlement, EngineError> {
     match effects::change_zone::reconcile_owner_library_arrangement(state) {
         effects::change_zone::OwnerLibraryArrangementReconciliation::Unchanged
@@ -280,14 +282,24 @@ pub(crate) fn settle_owner_library_arrangement_after_departure(
         effects::change_zone::OwnerLibraryArrangementReconciliation::Settle { chooser, cards } => {
             state.priority_player = chooser;
             let waiting_for = state.waiting_for.clone();
+            let event_start = events.len();
             match handle_resolution_choice(
                 state,
                 waiting_for,
                 GameAction::SelectCards { cards },
                 events,
             )? {
-                ResolutionChoiceOutcome::WaitingFor(_)
-                | ResolutionChoiceOutcome::WaitingForWithInlineTriggers(_) => {}
+                ResolutionChoiceOutcome::WaitingFor(_) => {
+                    if departure_triggers == DepartureTriggers::CollectedByDeparture {
+                        super::triggers::collect_unclaimed_triggers_into_deferred(
+                            state,
+                            events,
+                            event_start,
+                            None,
+                        );
+                    }
+                }
+                ResolutionChoiceOutcome::WaitingForWithInlineTriggers(_) => {}
                 ResolutionChoiceOutcome::ActionResult(result) => events.extend(result.events),
             }
             Ok(DepartureSettlement::Settled)
@@ -303,6 +315,7 @@ pub(crate) fn settle_owner_library_arrangement_after_departure(
 pub(crate) fn settle_player_scope_sacrifice_after_departure(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
+    departure_triggers: DepartureTriggers,
 ) -> Result<DepartureSettlement, EngineError> {
     match effects::reconcile_player_scope_sacrifice(state) {
         effects::PlayerScopeSacrificeReconciliation::Unchanged
@@ -320,12 +333,23 @@ pub(crate) fn settle_player_scope_sacrifice_after_departure(
                 state.priority_player = chooser;
             }
             let waiting_for = state.waiting_for.clone();
+            let event_start = events.len();
             let outcome = handle_resolution_choice(
                 state,
                 waiting_for,
                 GameAction::SelectCards { cards },
                 events,
             )?;
+            if departure_triggers == DepartureTriggers::CollectedByDeparture
+                && matches!(&outcome, ResolutionChoiceOutcome::WaitingFor(_))
+            {
+                super::triggers::collect_unclaimed_triggers_into_deferred(
+                    state,
+                    events,
+                    event_start,
+                    None,
+                );
+            }
             // CR 603.3d + CR 601.2c: a completed batch's observer drained by the
             // answer can return its target prompt without writing it; adopt it as
             // the answered route's reducer would.
@@ -353,6 +377,7 @@ pub(crate) fn settle_player_scope_sacrifice_after_departure(
             // an instant or sorcery still owing its final part is left to the
             // action boundary's final-part convergence (CR 608.2n).
             resume_with_error_propagation(state, events)?;
+            let tail_end = events.len();
             // CR 603.2 + CR 603.10a: a concession is not scanned by the post-action
             // pipeline, so the resumed batch's observers ("whenever a creature
             // dies", "whenever a player sacrifices") are collected here, through
@@ -367,6 +392,16 @@ pub(crate) fn settle_player_scope_sacrifice_after_departure(
                 ) {
                     // No reducer adopts a departure's wait; adopt it here.
                     adopt_departure_choice_outcome(state, events, outcome);
+                }
+                if departure_triggers == DepartureTriggers::CollectedByDeparture {
+                    // CR 603.2c + CR 603.7: the completed sacrifice batch
+                    // above owns only its span, not its later instruction tail.
+                    super::triggers::collect_unclaimed_triggers_into_deferred(
+                        state,
+                        &events[..tail_end],
+                        base + span.end,
+                        None,
+                    );
                 }
             }
             // `resume.next_wait` is deliberately not adopted: it is a clone of

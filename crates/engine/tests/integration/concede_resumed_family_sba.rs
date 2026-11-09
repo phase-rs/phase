@@ -209,3 +209,74 @@ fn liliana_vess_concession_resumes_family_through_sba_before_triggers() {
     );
     assert_eq!(runner.life(P0), 20);
 }
+
+/// CR 117.5 + CR 704.5a: removing loss prevention must settle the newly
+/// applicable player loss in this concession, even without a parked family.
+#[test]
+fn concession_settles_newly_unprevented_player_loss_once() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P2, 0);
+    scenario
+        .add_creature(P1, "Abyssal Persecutor", 6, 6)
+        .with_subtypes(vec!["Demon"])
+        .from_oracle_text_with_keywords(
+            &["Flying", "Trample"],
+            "Flying, trample\nYou can't win the game and your opponents can't lose the game.",
+        );
+    let mut runner = scenario.build();
+    assert_eq!(runner.life(P2), 0);
+    assert!(!runner.state().players[P2.0 as usize].is_eliminated);
+    let result = runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("the player preventing an opponent's loss concedes");
+    assert!(runner.state().players[P1.0 as usize].is_eliminated);
+    assert!(runner.state().players[P2.0 as usize].is_eliminated);
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    ));
+    for player in [P1, P2] {
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .filter(|event| matches!(
+                    event, GameEvent::PlayerEliminated { player_id } if *player_id == player
+                ))
+                .count(),
+            1
+        );
+    }
+}
+
+/// CR 104.2a + CR 104.3a: a terminal concession does not run or replace an
+/// already completed game result while converging an empty continuation.
+#[test]
+fn terminal_concession_preserves_its_single_game_result() {
+    let mut runner = GameScenario::new().build();
+    let result = runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("a player may concede before a priority action");
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    ));
+    assert_eq!(result.waiting_for, runner.state().waiting_for);
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::PlayerEliminated { player_id: P1 }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::GameOver { winner: Some(P0) }))
+            .count(),
+        1
+    );
+}
