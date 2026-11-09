@@ -33,6 +33,31 @@ fn two_creatures() -> (
     (sc.state, host, rider, P0)
 }
 
+/// CR 603.7c + CR 608.2c: the event/delayed binding records a keyed pin for the
+/// referent it found, which is what proves a recorded departure. A fresh choice
+/// has no such pin.
+fn departure_reference(
+    state: &crate::types::game_state::GameState,
+    id: ObjectId,
+) -> crate::types::ability::ResolvedAbility {
+    let mut ability = fresh_reference(id);
+    ability.set_target_incarnations_recursive(vec![ObjectIncarnationRef::from_object(
+        &state.objects[&id],
+    )]);
+    ability
+}
+
+fn fresh_reference(id: ObjectId) -> crate::types::ability::ResolvedAbility {
+    crate::types::ability::ResolvedAbility::new(
+        crate::types::ability::Effect::Shuffle {
+            target: crate::types::ability::TargetFilter::Any,
+        },
+        Vec::new(),
+        id,
+        PlayerId(0),
+    )
+}
+
 #[test]
 fn merge_top_uses_riders_characteristics_and_keeps_target_id() {
     // CR 730.2c: the merged permanent keeps the TARGET's ObjectId.
@@ -459,22 +484,33 @@ fn exile_records_component_backlink_and_continuity_return_collects_all() {
     );
 
     // A continuity reference ("return it") resolving to the survivor expands to
-    // include the co-exiled component (CR 730.3c).
-    let expanded =
-        expand_returned_merge_components(&state, vec![host], &TargetFilter::ParentTarget);
+    // include the co-exiled component (CR 730.3c) — the event binding recorded a
+    // keyed pin for that referent.
+    let expanded = expand_returned_merge_components(
+        &state,
+        &departure_reference(&state, host),
+        vec![host],
+        &TargetFilter::ParentTarget,
+    );
     assert_eq!(
         expanded,
         vec![host, rider],
         "a flicker returns the whole pile, not just the survivor"
     );
 
-    // A freshly chosen target (e.g. reanimating one specific card) must NOT
-    // over-return — only continuity references expand.
-    let fresh = expand_returned_merge_components(&state, vec![host], &TargetFilter::Any);
+    // A freshly chosen target (Riftsweeper choosing one exiled card; reanimating
+    // one specific card) must NOT over-return: its ParentTarget carries only an
+    // announcement occurrence, no recorded departure.
+    let fresh = expand_returned_merge_components(
+        &state,
+        &fresh_reference(host),
+        vec![host],
+        &TargetFilter::ParentTarget,
+    );
     assert_eq!(
         fresh,
         vec![host],
-        "a non-continuity target returns only the chosen object"
+        "a fresh ParentTarget choice returns only the chosen object"
     );
 }
 
@@ -491,8 +527,12 @@ fn flicker_returns_components_unmerged_and_clears_backlink() {
 
     // Return the whole pile — what the `ChangeZone` return loop does for each
     // expanded id (CR 730.3c).
-    let to_return =
-        expand_returned_merge_components(&state, vec![host], &TargetFilter::ParentTarget);
+    let to_return = expand_returned_merge_components(
+        &state,
+        &departure_reference(&state, host),
+        vec![host],
+        &TargetFilter::ParentTarget,
+    );
     for id in to_return {
         crate::game::zones::move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
     }
@@ -553,8 +593,12 @@ fn split_component_backlink_clears_on_non_battlefield_zone_move() {
     // former component in one zone. A continuity reference to the survivor must
     // NOT re-collect the moved-on component (the stale link is gone).
     crate::game::zones::move_to_zone(&mut state, host, Zone::Graveyard, &mut events);
-    let expanded =
-        expand_returned_merge_components(&state, vec![host], &TargetFilter::ParentTarget);
+    let expanded = expand_returned_merge_components(
+        &state,
+        &departure_reference(&state, host),
+        vec![host],
+        &TargetFilter::ParentTarget,
+    );
     assert_eq!(
         expanded,
         vec![host],

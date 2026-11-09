@@ -54,7 +54,8 @@ use crate::game::game_object::{DisplayIdentity, GameObject, ObjectIncarnationRef
 use crate::game::printed_cards::intrinsic_copiable_values;
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{
-    ContinuousModification, CopiableValues, Duration, LibraryPosition, TargetFilter,
+    ContinuousModification, CopiableValues, Duration, LibraryPosition, ResolvedAbility,
+    TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -561,16 +562,18 @@ pub(crate) fn restore_pre_merge_tokenness_for_leave(state: &mut GameState, merge
 /// merging is not re-established) and their back-links clear on battlefield
 /// entry.
 ///
-/// This is a no-op unless `target_filter` is a continuity reference AND a
-/// resolved object is a former merged survivor with co-located components. In
-/// particular it does NOT fire for a freshly chosen target (e.g. reanimating one
-/// specific card from a graveyard), which must not over-return.
+/// This is a no-op unless the effect references a RECORDED DEPARTURE — the
+/// object a merged permanent became when it left the battlefield — and a
+/// resolved object is a former survivor with co-located components. A freshly
+/// chosen target (Riftsweeper choosing one exiled card; reanimating one specific
+/// card) carries a current announcement pin and must not over-return.
 pub(crate) fn expand_returned_merge_components(
     state: &GameState,
+    ability: &ResolvedAbility,
     resolved: Vec<ObjectId>,
     target_filter: &TargetFilter,
 ) -> Vec<ObjectId> {
-    if !references_object_that_left(target_filter) {
+    if !expansion_records_departure(state, ability, target_filter) {
         return resolved;
     }
     let mut expanded = resolved.clone();
@@ -630,20 +633,39 @@ fn leave_successor(survivor: &GameObject) -> ObjectIncarnationRef {
     ObjectIncarnationRef::of(survivor.id, survivor.incarnation + 1)
 }
 
-/// CR 730.3c: Target references that denote "the object that just left the
-/// battlefield" — i.e. continuity references that find the object a merged
-/// permanent became — as opposed to a freshly chosen target. Only these expand
-/// to a former merged permanent's component cards.
-fn references_object_that_left(target_filter: &TargetFilter) -> bool {
-    matches!(
-        target_filter,
-        TargetFilter::ParentTarget
-            | TargetFilter::ParentTargetSlot { .. }
-            | TargetFilter::TrackedSet { .. }
-            | TargetFilter::TrackedSetFiltered { .. }
-            | TargetFilter::TriggeringSource
-            | TargetFilter::ExiledBySource
-    )
+/// CR 730.3c + CR 400.7e + CR 603.7c: Whether this effect references the object
+/// a merged permanent became when it LEFT the battlefield, rather than an object
+/// it merely chose. The filter kind alone cannot answer this: a fresh
+/// `ParentTarget` selection and a flicker continuation carry the same announced
+/// occurrence. Departure provenance is a separate recorded fact:
+///
+/// * `SelfRef` names its own source only while the ability's trigger context
+///   proves the source is that departure's public-zone successor (CR 400.7e) —
+///   Alabaster Dragon's dies trigger, not an activated return.
+/// * `ParentTarget`/`ParentTargetSlot` are departure continuations only when the
+///   referent was pinned by an event/delayed binding (`target_incarnations`) or
+///   by an immediate producer that moved objects (`forwarded_result_context`).
+///   A fresh choice has only positional announcement pins.
+/// * `TrackedSet`/`TrackedSetFiltered` and `ExiledBySource` are formed by an
+///   earlier move in the chain, and `TriggeringSource` is an event referent;
+///   those already record a departure.
+pub(crate) fn expansion_records_departure(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> bool {
+    match target_filter {
+        TargetFilter::SelfRef => ability.self_ref_is_current(state),
+        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => {
+            !ability.target_incarnations.is_empty()
+                || ability.context.forwarded_result_context.is_some()
+        }
+        TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource => true,
+        TargetFilter::TriggeringSource => state.current_trigger_event.is_some(),
+        _ => false,
+    }
 }
 
 /// CR 730.3 + CR 712.21: Put a non-surviving merge component into `dest` as a

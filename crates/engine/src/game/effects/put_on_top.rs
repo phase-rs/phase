@@ -275,6 +275,21 @@ pub fn resolve(
             .collect();
     }
 
+    // CR 730.3c + CR 400.7e: a dies trigger's "shuffle it into its owner's
+    // library" lowers to this exact-source placement, not a ChangeZone. When the
+    // source's own departure is recorded, the placement covers every object that
+    // merged permanent became; a fresh choice stays the single chosen card.
+    let original_population_len = collected_targets.len();
+    let collected_targets = crate::game::merge::expand_returned_merge_components(
+        state,
+        ability,
+        collected_targets,
+        &target_filter,
+    );
+    // CR 730.3c: the same action is taken upon each object the merged permanent
+    // became, so a departure expansion is not a choose-among-candidates prompt.
+    let departure_expanded = collected_targets.len() > original_population_len;
+
     // CR 115.1 + CR 400.2: When the filter specifies a private zone (hand/library)
     // and no targets were pre-selected during casting (because the Oracle text does
     // not say "target"), present an EffectZoneChoice for resolution-time selection.
@@ -282,7 +297,11 @@ pub fn resolve(
     // of your library"), whose prompt demands exactly `count` — and an any-number
     // count — Valakut Awakening ("put any number of cards from your hand on the
     // bottom of your library"), whose prompt accepts 0..=count.
-    let expected = resolve_quantity_with_targets(state, &count_expr, ability).max(0) as usize;
+    let expected = if departure_expanded {
+        collected_targets.len()
+    } else {
+        resolve_quantity_with_targets(state, &count_expr, ability).max(0) as usize
+    };
     // CR 107.1c + CR 608.2d: "put ANY NUMBER of <population> …" carries its
     // player-chosen cardinality as the `UpTo` wrapper (the parser's
     // `LibraryPlacementCardinality::AnyNumber` arm — the same encoding as

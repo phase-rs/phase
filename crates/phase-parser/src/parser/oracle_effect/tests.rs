@@ -69,6 +69,7 @@ fn watery_grasp_owner_shuffle_keeps_a_resolution_host_operand() {
             target,
             destination: Zone::Library,
             owner_library: true,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::TerminalShuffle,
             ..
         } if target.contains_source_attachment_host()
     ));

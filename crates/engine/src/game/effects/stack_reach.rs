@@ -920,7 +920,7 @@ fn node_acted_on(
             let filter = targeting::resolve_tracked_set_sentinel(state, target.clone());
             let ids = super::resolved_effect_object_ids(state, bound, &filter);
             objects(crate::game::merge::expand_returned_merge_components(
-                state, ids, &filter,
+                state, bound, ids, &filter,
             ))
         }
         Effect::SetTapState {

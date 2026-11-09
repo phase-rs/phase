@@ -458,3 +458,88 @@ fn worldsouls_rage_keeps_damage_target_and_resolution_land_choice_separate() {
         assert_eq!(runner.state().objects[&nonland].zone, Zone::Graveyard);
     }
 }
+
+// CR 730.3c + CR 400.7e: a fresh choice among exiled cards is not a reference to
+// "the object a merged permanent became". Choosing one co-exiled card must move
+// only that card; its split sibling stays in exile.
+#[test]
+fn riftsweeper_moves_only_the_chosen_card_not_its_co_exiled_merge_component() {
+    use engine::game::merge::{merge_object_onto, MergeSide};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_to_hand(P0, "Riftsweeper", 2, 2)
+        .with_subtypes(vec!["Elf", "Shaman"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+        .from_oracle_text(RIFTSWEEPER)
+        .id();
+    let survivor = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let component = scenario.add_creature(P1, "Gemrazer", 4, 4).id();
+    scenario.with_mana_pool(
+        P0,
+        (0..2)
+            .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        // The mutating spell resolved off the stack, never listed on the battlefield.
+        state.battlefield.retain(|&id| id != component);
+        let mut merge_events = vec![];
+        merge_object_onto(
+            state,
+            component,
+            survivor,
+            MergeSide::Top,
+            &mut merge_events,
+        );
+        engine::game::zones::move_to_zone(state, survivor, Zone::Exile, &mut merge_events);
+    }
+    assert_eq!(runner.state().objects[&survivor].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&component].zone, Zone::Exile);
+    assert!(
+        runner.state().objects[&component]
+            .split_from_merge_survivor
+            .is_some(),
+        "reach guard: the component records the survivor it split from"
+    );
+
+    runner.cast(source).commit();
+    runner.advance_until_stack_empty();
+    let WaitingFor::TriggerTargetSelection { target_slots, .. } = &runner.state().waiting_for
+    else {
+        panic!(
+            "Riftsweeper must announce one exile target: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    for id in [survivor, component] {
+        assert!(
+            target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(id)),
+            "both co-exiled cards are independently choosable"
+        );
+    }
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(survivor)),
+        })
+        .unwrap();
+    let mut events = vec![];
+    for _ in 0..2 {
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    finished(&runner);
+    assert_eq!(shuffles(&events), vec![P1]);
+    assert_eq!(runner.state().objects[&survivor].zone, Zone::Library);
+    assert!(runner.state().players[1].library.contains(&survivor));
+    assert_eq!(
+        runner.state().objects[&component].zone,
+        Zone::Exile,
+        "the unselected sibling must not be swept into the library"
+    );
+    assert!(!runner.state().players[1].library.contains(&component));
+}

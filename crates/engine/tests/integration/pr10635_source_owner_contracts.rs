@@ -179,3 +179,66 @@ fn ceased_stolen_dragon_token_still_shuffles_its_owners_library() {
     assert!(state.stack.is_empty());
     assert!(state.resolution_stack.is_empty());
 }
+
+// CR 400.7e + CR 730.3c: a merged permanent that dies is one departure, and the
+// dies trigger's "shuffle it" finds every object that merged permanent became.
+// Both the survivor and its absorbed component must arrive before the one shuffle.
+#[test]
+fn alabaster_dragon_death_shuffles_the_whole_merged_pile_once() {
+    use engine::game::merge::{merge_object_onto, MergeSide};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dragon = scenario
+        .add_creature(P0, "Alabaster Dragon", 4, 4)
+        .from_oracle_text_with_keywords(&["Flying"], ALABASTER_DRAGON)
+        .id();
+    let component = scenario.add_creature(P0, "Gemrazer", 4, 4).id();
+    scenario.with_library_top(P0, &["Owner A", "Owner B", "Owner C"]);
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        // The mutating spell resolved off the stack, never listed on the battlefield.
+        state.battlefield.retain(|&id| id != component);
+        let mut merge_events = vec![];
+        merge_object_onto(state, component, dragon, MergeSide::Top, &mut merge_events);
+    }
+
+    let outcome = runner.cast(murder).target_object(dragon).resolve();
+
+    // Reach guard: the trigger fired from the merged permanent's death, and the
+    // component split out of that same departure.
+    outcome.assert_zone(&[dragon, component], Zone::Library);
+    let state = outcome.state();
+    assert!(state.players[P0.0 as usize].library.contains(&dragon));
+    assert!(
+        state.players[P0.0 as usize].library.contains(&component),
+        "the absorbed component is part of the object the trigger found"
+    );
+    let shuffled_players: Vec<_> = outcome
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shuffled_players,
+        vec![P0],
+        "the pile shuffles exactly once into its owner's library"
+    );
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(state.stack.is_empty());
+    assert!(state.resolution_stack.is_empty());
+}

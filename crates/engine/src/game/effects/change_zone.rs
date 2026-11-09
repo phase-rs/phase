@@ -727,9 +727,14 @@ fn bound_move_members(
     // CR 730.3c: when this effect references the object that just left the
     // battlefield (a flicker/blink's "return it") and that object was a merged
     // permanent's survivor, act on the component cards it split into as well, so
-    // the whole pile is moved — not just the survivor. A no-op for ordinary
-    // (freshly chosen) targets.
-    crate::game::merge::expand_returned_merge_components(state, targeted_objects, target_filter)
+    // the whole pile is moved — not just the survivor. The ability's recorded
+    // departure pins keep a fresh choice (one exiled card) from expanding.
+    crate::game::merge::expand_returned_merge_components(
+        state,
+        ability,
+        targeted_objects,
+        target_filter,
+    )
 }
 
 /// The single per-member test for "this object can no longer undergo the
@@ -2903,9 +2908,11 @@ pub fn resolve_all(
                     )
                 };
                 // CR 730.3c: expand merged components only after binding the
-                // actual referent; absent selections never fall back to source.
+                // actual referent; absent selections never fall back to source,
+                // and a fresh selection (Riftsweeper) is not a departure.
                 Some(crate::game::merge::expand_returned_merge_components(
                     state,
+                    ability,
                     objects,
                     &target_filter,
                 ))
@@ -3072,9 +3079,12 @@ pub fn resolve_all(
     };
     // CR 607.2a + CR 730.3c: the linked return finds every object an exiled merged permanent became.
     let matching = match &target_filter {
-        TargetFilter::ExiledBySource => {
-            crate::game::merge::expand_returned_merge_components(state, matching, &target_filter)
-        }
+        TargetFilter::ExiledBySource => crate::game::merge::expand_returned_merge_components(
+            state,
+            ability,
+            matching,
+            &target_filter,
+        ),
         _ => matching,
     };
     let matching: Vec<_> = if dest_zone == Zone::Exile {
