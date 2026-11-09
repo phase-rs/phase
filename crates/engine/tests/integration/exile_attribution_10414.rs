@@ -854,12 +854,6 @@ fn mudhole_replacement_fixture_with_response(
                 ))
                 .destination_zone(Zone::Exile),
         );
-    scenario.with_mana_pool(
-        P0,
-        (0..3)
-            .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
-            .collect(),
-    );
     let mudhole = scenario
         .add_spell_to_hand_from_oracle(P0, "Mudhole", true, MUDHOLE)
         .with_mana_cost(parse_mtgjson_mana_cost("{2}{R}"))
