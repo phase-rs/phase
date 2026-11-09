@@ -16244,8 +16244,8 @@ fn try_parse_owner_of_target_shuffle(
     // subject ("This creature's owner shuffles it into their library" —
     // Cerulean Sphinx) moves the source ITSELF. CR 115.10a: being affected by
     // the ability does not make the object a target, so the clause declares no
-    // slot and the movement authority is the single-object `ChangeZone`
-    // (`SelfRef`), never the selected-population `ChangeZoneAll`. This is a
+    // slot and source-bound placement (`SelfRef`) precedes one owner shuffle,
+    // never a selected-population `ChangeZoneAll`. This is a
     // text-anchored whole-clause recognizer, matching the "its owner" form it
     // sits beside: the possessor is typed on the printed subject, not derived
     // from a target declaration.

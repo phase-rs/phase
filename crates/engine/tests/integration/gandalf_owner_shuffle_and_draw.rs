@@ -172,8 +172,19 @@ fn unavailable_stolen_gandalf_still_shuffles_once_before_its_owner_draws() {
         .resolve();
     assert_eq!(outcome.state().objects[&gandalf].zone, Zone::Hand);
     assert_eq!(outcome.state().objects[&gandalf].owner, P1);
-    outcome.assert_hand_drawn(P1, 3);
-    outcome.assert_hand_drawn(P0, 0);
+    // The bounced Gandalf also enters P1's hand; count actual draw events,
+    // not the hand-size delta across Unsummon and the activated ability.
+    for (player, count) in [(P0, 0), (P1, 3)] {
+        assert_eq!(
+            outcome
+                .events()
+                .iter()
+                .filter(|event| matches!(event, GameEvent::CardDrawn { player_id, .. } if *player_id == player))
+                .count(),
+            count,
+            "only the owner draws the printed three cards"
+        );
+    }
     outcome.assert_counters(trickster, CounterType::Plus1Plus1, 1);
     let shuffles: Vec<_> = outcome
         .events()

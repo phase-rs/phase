@@ -10359,8 +10359,8 @@ pub(super) fn parse_shuffle_ast(
     // The pronoun's referent decides the MOVEMENT AUTHORITY, not just the
     // destination: a bare "it" with no announced antecedent names the ability's
     // own source (CR 400.7e — the object that left is the departure event's
-    // source), so the move is one `ChangeZone`. `ParentTarget` is reserved for a
-    // genuinely announced object, because lowering turns it into the
+    // source), so source-bound placement precedes its one terminal owner shuffle.
+    // `ParentTarget` is reserved for a genuinely announced object; lowering uses
     // selected-population `ChangeZoneAll`, which resolves only against announced
     // targets (CR 115.10a: being affected is not being a target).
     if let Some(((object, owner_library), _)) = nom_on_lower(text, lower, |input| {
