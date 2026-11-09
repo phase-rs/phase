@@ -5695,15 +5695,20 @@ impl ResolutionStateWire {
                 Err("invalid resolution-state wire decode mode".to_string())
             }
         })();
-        decoded.map_err(|error: String| {
-            if version <= LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
-                && error.contains("INVALID_COIN_BRANCH_BINDINGS:")
-            {
-                LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR.to_string()
-            } else {
-                error
-            }
-        })
+        decoded
+            .and_then(|wire: Self| {
+                crate::types::game_state::validate_restored_event_context_pins(&wire.state)?;
+                Ok(wire)
+            })
+            .map_err(|error: String| {
+                if version <= LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
+                    && error.contains("INVALID_COIN_BRANCH_BINDINGS:")
+                {
+                    LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR.to_string()
+                } else {
+                    error
+                }
+            })
     }
 }
 

@@ -178,6 +178,21 @@ fn phase_out_event_referent(
     })
 }
 
+fn uses_event_context_pins(ability: &ResolvedAbility) -> bool {
+    fn uses_triggering_source(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::Or { filters } => filters.iter().any(uses_triggering_source),
+            other => matches!(other, TargetFilter::TriggeringSource),
+        }
+    }
+    matches!(
+        &ability.effect,
+        Effect::PhaseOut {
+            target: target @ TargetFilter::Or { .. },
+        } if phase_out_filter_is_context_union(target) && uses_triggering_source(target)
+    )
+}
+
 /// CR 400.7 + CR 603.3 + CR 608.2k: capture event referents before response
 /// priority, independently of announced targets. Existing serialized context
 /// pins preserve these identities across saves and non-declaring continuations.
@@ -186,36 +201,78 @@ pub(crate) fn seed_event_context_pins(
     ability: &mut ResolvedAbility,
     event: &GameEvent,
 ) {
-    fn uses_triggering_source(filter: &TargetFilter) -> bool {
-        match filter {
-            TargetFilter::Or { filters } => filters.iter().any(uses_triggering_source),
-            other => matches!(other, TargetFilter::TriggeringSource),
-        }
-    }
-    if let Effect::PhaseOut {
-        target: target @ TargetFilter::Or { .. },
-    } = &ability.effect
-    {
-        if phase_out_filter_is_context_union(target) && uses_triggering_source(target) {
-            if let Some(pin) = phase_out_event_referent(state, ability.source_id, event)
-                .and_then(|id| state.objects.get(&id))
-                .map(ObjectIncarnationRef::from_object)
-            {
-                if !ability
+    if uses_event_context_pins(ability) {
+        if let Some(pin) = phase_out_event_referent(state, ability.source_id, event)
+            .and_then(|id| state.objects.get(&id))
+            .map(ObjectIncarnationRef::from_object)
+        {
+            let existing = ability
+                .target_incarnations
+                .iter()
+                .position(|captured| captured.object_id == pin.object_id);
+            if existing.is_none_or(|index| {
+                ability.target_incarnations[index].incarnation
+                    == crate::types::identifiers::LEGACY_INCARNATION
+            }) {
+                let captured = ability
                     .target_incarnations
                     .iter()
-                    .any(|captured| captured.object_id == pin.object_id)
-                {
-                    let mut pins = ability.target_incarnations.clone();
-                    pins.push(pin);
-                    ability.set_target_incarnations_recursive(pins);
+                    .find(|captured| {
+                        captured.object_id == pin.object_id
+                            && captured.incarnation != crate::types::identifiers::LEGACY_INCARNATION
+                    })
+                    .copied()
+                    .unwrap_or(pin);
+                let mut pins = ability.target_incarnations.clone();
+                if let Some(index) = existing {
+                    pins[index] = captured;
+                } else {
+                    pins.push(captured);
                 }
+                ability.set_target_incarnations_recursive(pins);
             }
         }
     }
     for (_, child) in ability.child_links_mut() {
         seed_event_context_pins(state, child, event);
     }
+}
+
+/// CR 400.7 + CR 608.2k: a live raw id cannot reconstruct a lost event
+/// incarnation. Retain exact stale pins, but refuse ambiguous live referents.
+pub(crate) fn validate_event_context_pins(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    event: Option<&GameEvent>,
+) -> Result<(), String> {
+    let Some(event) = event else {
+        return Ok(());
+    };
+    if uses_event_context_pins(ability) {
+        if let Some(partner) =
+            phase_out_event_referent(state, ability.source_id, event).filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|object| object.zone == crate::types::zones::Zone::Battlefield)
+            })
+        {
+            if !ability
+                .target_incarnations
+                .iter()
+                .find(|pin| pin.object_id == partner)
+                .is_some_and(|pin| pin.incarnation != crate::types::identifiers::LEGACY_INCARNATION)
+            {
+                return Err(format!(
+                    "phase-out event context lacks a captured incarnation for {partner:?}"
+                ));
+            }
+        }
+    }
+    for (_, child) in ability.child_links() {
+        validate_event_context_pins(state, child, Some(event))?;
+    }
+    Ok(())
 }
 
 /// Resolve the target object set for a `PhaseOut` effect. Explicit
