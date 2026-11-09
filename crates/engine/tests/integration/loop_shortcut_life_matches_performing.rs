@@ -913,8 +913,8 @@ fn gain_specs() -> Vec<Spec> {
         vec![(P0, WARDEN), (P1, WARDEN)],
         vec![(P0, WARDEN), (P0, printed("Rhox Faithmender"))],
     ];
-    // No counter set; P0's gained counter three short of its pin, so the take crosses it; P0's
-    // lost counter at its pin.
+    // No counter set; P0's gained counter three short of its pin, so a take on a board where P0
+    // gains crosses it (with only P1's Soul Warden it stays put); P0's lost counter at its pin.
     let counters: &[&[(usize, u32, u32)]] = &[&[], &[(0, PIN - 3, 0)], &[(0, 0, PIN)]];
     let mut specs = Vec::new();
     for payoffs in &payoff_sets {
@@ -1129,10 +1129,11 @@ fn giant_specs() -> Vec<Spec> {
     specs
 }
 
-/// Two shortcuts taken in one step, a cycle that only gains life. With two Soul Wardens, the cycle
-/// by hand that offers the first take, two takes of three cycles and the cycle by hand between
-/// them gain 16, so from MAX-17 the second take stays short of the cap, from MAX-16 it reaches it
-/// exactly and from MAX-15 it passes it.
+/// Two shortcuts taken in one step, a cycle that only gains life. With both Soul Wardens under P0,
+/// the cycle by hand that offers the first take, two takes of three cycles and the cycle by hand
+/// between them gain P0's total 16, so from MAX-17 the second take stays short of the cap, from
+/// MAX-16 it reaches it exactly and from MAX-15 it passes it. The Two-Headed Giant rows with one
+/// Soul Warden per team gain team A's total 8, so they stay short of the cap.
 fn twice_specs() -> Vec<Spec> {
     let counters: &[&[(usize, u32, u32)]] = &[&[], &[(0, PIN, 0)], &[(0, PIN - 9, 0)]];
     let mut specs = Vec::new();
