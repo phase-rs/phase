@@ -499,15 +499,16 @@ fn resolution_untaps_ready_mana_source(
     if !chain_has_effect(root, is_untap) {
         return false;
     }
-    let sources = mana_sources::ready_tap_mana_sources(state, player);
-    if sources.is_empty() {
-        return false;
-    }
-    stack_entry_node_reach(state, top)
+    let untapped: Vec<ObjectId> = stack_entry_node_reach(state, top)
         .iter()
         .filter(|reach| is_untap(&reach.node.effect))
         .flat_map(|reach| &reach.acted_on)
-        .any(|acted_on| matches!(acted_on, TargetRef::Object(id) if sources.contains(id)))
+        .filter_map(|acted_on| match acted_on {
+            TargetRef::Object(id) => Some(*id),
+            TargetRef::Player(_) => None,
+        })
+        .collect();
+    mana_sources::untap_repeats_mana(state, player, &untapped)
 }
 
 fn is_untap(effect: &Effect) -> bool {

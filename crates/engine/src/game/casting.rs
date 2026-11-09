@@ -23112,6 +23112,88 @@ fn mana_type_from_index(index: usize) -> crate::types::mana::ManaType {
     }
 }
 
+/// CR 601.2f-h + CR 605.3a: the permanents the automatic part of a
+/// cast's mana payment taps or moves, read off that payment run on a copy of
+/// the game against the spell's total cost (X as 0). For a caller predicting
+/// what a cast leaves untapped, such as which creatures can still block
+/// (CR 509.1a). The payer gives each colored shard its least flexible source,
+/// so the order sources sort in doesn't settle it: Llanowar Elves pays {G}
+/// before a Mirrored Lotus that sorts ahead of it.
+///
+/// `mode` is the cast's own. `Auto` pays in full; `None` when it can't, or stops
+/// at a choice. `AutoExceptSacrificialMana` taps every row with no sacrifice
+/// first, and the caster picks any sacrificial source after that: what it
+/// returns is that first leg, and the picked source is sacrificed rather than
+/// tapped. `Manual` pays nothing automatically, so it's `None`.
+pub fn auto_payment_sources(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    mode: CastPaymentMode,
+) -> Option<Vec<ObjectId>> {
+    let mut cost = effective_spell_cost(state, player, source_id)?;
+    if let crate::types::mana::ManaCost::Cost { shards, .. } = &mut cost {
+        shards.retain(|shard| *shard != crate::types::mana::ManaCostShard::X);
+    }
+    let mut simulated = state.clone();
+    super::layers::flush_layers(&mut simulated);
+    match mode {
+        CastPaymentMode::Auto => {
+            let spell_meta = build_spell_meta(&simulated, player, source_id);
+            let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+            let paid = can_pay_mana_cost_after_auto_tap_with_context_and_cache(
+                &mut simulated,
+                player,
+                Some(source_id),
+                &cost,
+                spell_ctx.as_ref(),
+                &HashSet::new(),
+                AutoTapProbeOptions {
+                    source_cache: None,
+                    explicit_tap_payment_mode: None,
+                    paused: PausedManaPayment::Unresumable,
+                    phyrexian_life_budget: ProbeLifeBudget::AfterAutoTap,
+                },
+            );
+            if !paid {
+                return None;
+            }
+        }
+        CastPaymentMode::AutoExceptSacrificialMana => {
+            let keep_untapped = super::casting_costs::sacrificial_tap_sources_to_keep(
+                &simulated, player, &cost, source_id,
+            );
+            let mut events = Vec::new();
+            super::casting_costs::auto_tap_non_sacrificial_mana_sources(
+                &mut simulated,
+                player,
+                &cost,
+                &mut events,
+                source_id,
+                &keep_untapped,
+            );
+            if mana_ability_cost_payment_is_paused(&simulated) {
+                return None;
+            }
+        }
+        CastPaymentMode::Manual => return None,
+    }
+    Some(
+        state
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|id| {
+                state.objects.get(id).is_some_and(|before| {
+                    simulated.objects.get(id).is_none_or(|after| {
+                        after.zone != before.zone || (after.tapped && !before.tapped)
+                    })
+                })
+            })
+            .collect(),
+    )
+}
+
 pub fn can_pay_cost_after_auto_tap(
     state: &GameState,
     player: PlayerId,

@@ -447,40 +447,75 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
     actions
 }
 
-/// CR 605.3a + CR 701.26b: the permanents `player` can tap for mana now, read
-/// from [`activatable_mana_actions_for_player`]. An untap gives such a
-/// permanent its mana a second time only if it is tapped first. A mana ability
-/// with no {T} in its cost can't be repeated by untapping, and a source its own
-/// cost removes isn't there to untap.
-pub(crate) fn ready_tap_mana_sources(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
-    let repeatable_by_untap = |source: ObjectId, ability_index: usize| {
-        state
-            .objects
-            .get(&source)
-            .and_then(|object| object.abilities.get(ability_index))
-            .is_some_and(|ability| {
-                has_tap_component(&ability.cost)
-                    && mana_abilities::is_renewable_mana_ability(ability)
-            })
-    };
-    activatable_mana_actions_for_player(state, player)
-        .iter()
-        .filter(|action| match action {
-            GameAction::TapLandForMana { selection } => {
-                selection.ability_index.is_none_or(|ability_index| {
-                    repeatable_by_untap(selection.source.object_id, ability_index)
-                })
-            }
-            GameAction::ActivateAbility {
-                source_id,
-                ability_index,
-                ..
-            } => repeatable_by_untap(*source_id, *ability_index),
-            // The sweep emits only the two arms above.
-            _ => false,
+/// CR 605.3a + CR 605.3b + CR 701.26b: whether untapping any of `objects` gives
+/// `player` its mana a second time. An object needs a mana ability with {T} in
+/// its cost that `player` can activate now, and after that activation the object
+/// must still be on the battlefield and, untapped, able to activate it again. A
+/// mana ability with no {T} can't be repeated by untapping. The activation runs
+/// on a copy of the game, so the source's own cost answers: a cost that removes
+/// the source (Treasure, Lotus Petal, Mirrored Lotus) leaves nothing to untap,
+/// and a cost that can't be paid again stops a second use (Gemstone Mine or Peat
+/// Bog on its last counter, whose effect then sacrifices it, CR 701.21a). An
+/// ability that stops for its color (Gemstone Mine) stops the copy after its
+/// cost and before its effect, so there only the cost answers; every such rider
+/// in card data sits beside a counter cost that runs out with it. One that stops
+/// for a choice inside its cost (Gilded Goose's Food, Bog Witch's discard) can't
+/// be read this way and keeps the pass.
+pub(crate) fn untap_repeats_mana(
+    state: &GameState,
+    player: PlayerId,
+    objects: &[ObjectId],
+) -> bool {
+    if objects.is_empty() {
+        return false;
+    }
+    let taps = |selection: &ManaSourceSelection| {
+        selection.ability_index.is_none_or(|ability_index| {
+            state
+                .objects
+                .get(&selection.source.object_id)
+                .and_then(|source| source.abilities.get(ability_index))
+                .is_some_and(|ability| has_tap_component(&ability.cost))
         })
-        .filter_map(GameAction::source_object)
-        .collect()
+    };
+    activatable_mana_source_selections(state, player)
+        .iter()
+        .filter(|selection| objects.contains(&selection.source.object_id) && taps(selection))
+        .any(|selection| {
+            let object = selection.source.object_id;
+            let mut copy = state.clone();
+            let mut events = Vec::new();
+            // Only a paid cost answers. A prompt for the cost itself (a card to
+            // discard, a Food to sacrifice, creatures to tap) comes before any of
+            // it is paid, so the copy can't tell whether a second payment exists,
+            // and the pass stays. The color prompt comes after the cost.
+            let paid = matches!(
+                activate_mana_source_selection(
+                    &mut copy,
+                    player,
+                    selection,
+                    &mut events,
+                    ManaAbilityResume::Priority,
+                ),
+                Ok(WaitingFor::Priority { .. } | WaitingFor::ChooseManaColor { .. })
+            );
+            if !paid || copy.pending_cost_move_resume.is_some() {
+                return false;
+            }
+            let Some(after) = copy.objects.get_mut(&object) else {
+                return false;
+            };
+            if after.zone != Zone::Battlefield {
+                return false;
+            }
+            after.tapped = false;
+            activatable_mana_source_selections(&copy, player)
+                .iter()
+                .any(|again| {
+                    again.source.object_id == object
+                        && again.ability_index == selection.ability_index
+                })
+        })
 }
 
 /// The non-land sources auto-tap ranks ahead of every creature in a payment by

@@ -27,10 +27,11 @@
 //! - Illusionist's Bracers: "Whenever an ability of equipped creature is
 //!   activated, if it isn't a mana ability, copy that ability. You may choose new
 //!   targets for the copy."
-//! - Gilded Goose: "{T}, Sacrifice a Food: Add one mana of any color." sacrifices
-//!   something else, so it is still there to untap.
 //!
 //! What keeps the pass:
+//! - Gilded Goose: "{T}, Sacrifice a Food: Add one mana of any color." asks which
+//!   Food as its cost is paid, so a copy of the game can't read whether a second
+//!   use exists. With one Food there is none.
 //! - Krark-Clan Ironworks: "Sacrifice an artifact: Add {C}{C}." has no {T}.
 //! - Lotus Petal: "{T}, Sacrifice this artifact: Add one mana of any color." is
 //!   gone once it is tapped.
@@ -60,6 +61,7 @@ use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::stack::stack_display_groups;
 use engine::types::ability::{Effect, TapStateChange, TargetRef};
 use engine::types::actions::GameAction;
+use engine::types::counter::parse_counter_type;
 use engine::types::game_state::{
     CastPaymentMode, LoopDetectionMode, PriorityPassingMode, StackEntryKind, WaitingFor,
 };
@@ -595,6 +597,94 @@ fn a_source_that_exiles_itself_keeps_the_pass() {
     assert!(recommends_pass(&runner));
 }
 
+/// Garruk Wildspeaker, verbatim.
+const GARRUK_WILDSPEAKER: &str = "[+1]: Untap two target lands.\n[\u{2212}1]: Create a 3/3 green Beast creature token.\n[\u{2212}4]: Creatures you control get +3/+3 and gain trample until end of turn.";
+/// Gemstone Mine, verbatim.
+const GEMSTONE_MINE: &str = "This land enters with three mining counters on it.\n{T}, Remove a mining counter from this land: Add one mana of any color. If there are no mining counters on this land, sacrifice it.";
+
+/// Garruk Wildspeaker's +1 on the stack, targeting a tapped Forest and an
+/// untapped Gemstone Mine with `mining_counters` on it. Returns the runner and
+/// the Mine.
+fn garruk_over_gemstone_mine(db: &CardDatabase, mining_counters: u32) -> (GameRunner, ObjectId) {
+    let mut scenario = main_phase_scenario();
+    let garruk = scenario
+        .add_planeswalker_from_oracle(P0, "Garruk Wildspeaker", "Garruk", 3, GARRUK_WILDSPEAKER)
+        .id();
+    let forest = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    let mine = scenario
+        .add_land_from_oracle(P0, "Gemstone Mine", GEMSTONE_MINE)
+        .id();
+    // Scenario permanents skip the enters replacement, so the counters are set here.
+    scenario.with_counter(mine, parse_counter_type("mining"), mining_counters);
+    let mut runner = scenario.build();
+    tap_for_mana(&mut runner, forest);
+    activate(&mut runner, garruk, 0, &[forest, mine]);
+    assert_eq!(
+        top_source_name(&runner).as_deref(),
+        Some("Garruk Wildspeaker"),
+        "the +1 is on the stack"
+    );
+    (runner, mine)
+}
+
+/// Tapping Gemstone Mine removes a mining counter. On its last one the cost
+/// can't be paid again, and the mana ability then sacrifices the Mine as it
+/// resolves (CR 605.3b + CR 701.21a), so Garruk's untap has nothing to give it
+/// and the pass stays. With two counters the Mine keeps one, and untapped it can
+/// be used again, so the window holds.
+#[test]
+fn an_untap_holds_only_for_a_source_that_survives_its_use() {
+    let Some(db) = shared_card_db() else { return };
+    for (counters, holds) in [(1, false), (2, true)] {
+        let (runner, mine) = garruk_over_gemstone_mine(db, counters);
+        assert!(
+            mana_action(&runner, mine).is_some() && !is_tapped(&runner, mine),
+            "{counters} counters: the Mine can tap for mana now"
+        );
+        assert_eq!(
+            !recommends_pass(&runner),
+            holds,
+            "{counters} counters: whether the untap window holds"
+        );
+    }
+}
+
+/// The two-counter row played out: the player taps the Mine in the held window,
+/// and Garruk's untap then untaps it with a counter left to use.
+#[test]
+fn an_untap_gives_a_surviving_source_its_second_use() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, mine) = garruk_over_gemstone_mine(db, 2);
+    assert!(!recommends_pass(&runner));
+    tap_for_mana(&mut runner, mine);
+    if !p0_has_priority(&runner) {
+        let choose = legal_actions(runner.state())
+            .into_iter()
+            .next()
+            .expect("the Mine's color choice offers an answer");
+        runner.act(choose).expect("choose a color");
+    }
+    assert!(is_tapped(&runner, mine), "the Mine was tapped for mana");
+    for _ in 0..4 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("pass");
+    }
+    let state = runner.state();
+    assert!(state.stack.is_empty(), "Garruk's +1 resolved");
+    assert_eq!(state.objects[&mine].zone, Zone::Battlefield);
+    assert!(!state.objects[&mine].tapped, "the untap reached the Mine");
+    assert_eq!(
+        state.objects[&mine]
+            .counters
+            .get(&parse_counter_type("mining"))
+            .copied(),
+        Some(1),
+        "one counter is left for the second use"
+    );
+}
+
 /// Vitalize, its {G} floated first so that automatic payment leaves the board
 /// untapped, over what `add_board` adds and a spare Forest, which can tap for
 /// mana and is outside "creatures you control".
@@ -617,10 +707,11 @@ fn vitalize_on_the_stack(
     (runner, creature, spare)
 }
 
-/// Gilded Goose's cost sacrifices a Food, not the Goose, so it is still there to
-/// untap.
+/// Gilded Goose's cost sacrifices a Food, not the Goose, but which Food is asked
+/// as the cost is paid, before any of it is, so the repeat check can't read a
+/// second use and the pass stays. With this one Food there is no second use.
 #[test]
-fn a_source_that_sacrifices_something_else_holds() {
+fn a_source_whose_cost_asks_a_choice_keeps_the_pass() {
     let Some(db) = shared_card_db() else { return };
     let (runner, goose, _) = vitalize_on_the_stack(db, |scenario| {
         let goose = scenario.add_real_card(P0, "Gilded Goose", Zone::Battlefield, db);
@@ -632,7 +723,7 @@ fn a_source_that_sacrifices_something_else_holds() {
     let goose = goose.expect("the Goose was added");
     assert!(mana_action(&runner, goose).is_some());
     assert!(!is_tapped(&runner, goose));
-    assert!(!recommends_pass(&runner));
+    assert!(recommends_pass(&runner));
 }
 
 #[test]

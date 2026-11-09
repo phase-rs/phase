@@ -15760,7 +15760,7 @@ pub(crate) fn spell_cost_is_payable_after_non_sacrificial_auto_tap(
 /// row needs `{T}` (Phyrexian Tower, Crystal Vein) loses that row once the first
 /// leg taps it for another row, so it is kept whenever tapping it would leave
 /// the cast unpayable by the castability authority.
-fn sacrificial_tap_sources_to_keep(
+pub(super) fn sacrificial_tap_sources_to_keep(
     state: &GameState,
     player: PlayerId,
     cost: &ManaCost,
