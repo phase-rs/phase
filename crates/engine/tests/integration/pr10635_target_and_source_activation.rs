@@ -205,3 +205,60 @@ fn forge_announces_only_commanders_that_entered_this_turn() {
     assert!(state.stack.is_empty());
     assert!(state.resolution_stack.is_empty());
 }
+
+#[test]
+fn oblation_selected_owner_draws_after_the_owner_shuffle() {
+    // Full Oracle verified from MTGJSON; this is the selected-owner counterpart
+    // to Gandalf's untargeted source-owner coordinated draw.
+    const OBLATION: &str =
+        "The owner of target nonland permanent shuffles it into their library, then draws two cards.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victim = scenario
+        .add_creature(P1, "Owner's creature", 2, 2)
+        .controlled_by(P0)
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Oblation", true, OBLATION)
+        .id();
+    scenario.with_library_top(P0, &["Controller A", "Controller B", "Controller C"]);
+    scenario.with_library_top(P1, &["Owner A", "Owner B", "Owner C", "Owner D", "Owner E"]);
+    let mut runner = scenario.build();
+    let controller_library = runner.state().players[P0.0 as usize].library.clone();
+    let outcome = runner.cast(spell).target_object(victim).resolve();
+    outcome.assert_hand_drawn(P1, 2);
+    outcome.assert_hand_drawn(P0, 0);
+    assert!(outcome.events().iter().any(|event| matches!(
+        event,
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            to: Zone::Library,
+            ..
+        } if *object_id == victim
+    )));
+    let shuffled_players: Vec<_> = outcome
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shuffled_players.as_slice(), &[P1]);
+    assert_eq!(outcome.state().players[P1.0 as usize].library.len(), 4);
+    assert_eq!(
+        outcome.state().players[P0.0 as usize].library,
+        controller_library
+    );
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+    assert!(outcome.state().resolution_stack.is_empty());
+}

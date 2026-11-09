@@ -277,6 +277,7 @@ mod dream_fighter_context_phasing;
 mod dromokas_command_spell_prevention;
 mod elixir_of_immortality_stolen_activation;
 mod enchant_tapped_creature;
+mod gandalf_owner_shuffle_and_draw;
 mod impulsive_maneuvers_batch_shield;
 mod kang_dynasty_until_next_turn_rider;
 mod keyword_anaphor_subject_binding;
