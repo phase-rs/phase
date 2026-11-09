@@ -6943,9 +6943,9 @@ mod tests {
     use crate::game::scenario::{GameRunner, GameScenario, P0};
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, CardSelectionMode, Chooser, CoinFlipRun, CopyChooseScope,
-        Effect, EffectKind, ForEachCategoryAction, IterationCategory, PerPlayerScope,
-        PostReplacementContinuation, QuantityExpr, RepeatContinuation, ReplacementDefinition,
-        SpellContext, TargetFilter, TypedFilter, ZoneOwner,
+        Effect, EffectKind, ForEachCategoryAction, IterationCategory, PendingForwardedZoneResult,
+        PerPlayerScope, PostReplacementContinuation, QuantityExpr, RepeatContinuation,
+        ReplacementDefinition, ReturnResultId, SpellContext, TargetFilter, TypedFilter, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::game_state::{
@@ -6956,8 +6956,8 @@ mod tests {
         PendingPerPlayerZoneChoice, PendingRepeatIteration, PendingRepeatUntil,
         PendingSpellResolution, PendingVoteBallotIteration, PendingZoneChangeDelivery,
         PersistedGameState, PostReplacementDrain, RandomDraw, RepeatUntilStopWitness,
-        ResidentDrainPolicy, StackEntry, StackEntryKind, ZoneDeliveryExileTracking,
-        ZoneMoveCompletion,
+        ResidentDrainPolicy, ReturnResultOccurrenceId, StackEntry, StackEntryKind,
+        ZoneDeliveryExileTracking, ZoneMoveCompletion,
     };
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
@@ -7579,9 +7579,6 @@ mod tests {
 
     #[test]
     fn legacy_mass_exile_continuation_authority_requires_matching_family_binding() {
-        use crate::types::ability::{PendingForwardedZoneResult, ReturnResultId};
-        use crate::types::game_state::ReturnResultOccurrenceId;
-
         for binding in [
             "unbound",
             "parent_kind",

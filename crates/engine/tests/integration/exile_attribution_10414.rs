@@ -77,6 +77,7 @@ use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
+use engine::types::resolution::LEGACY_CHANGE_ZONE_CONTROLLER_RESTORE_ERROR;
 use engine::types::zones::Zone;
 
 const P2: PlayerId = PlayerId(2);
@@ -1253,8 +1254,6 @@ fn historical_controller_departure_restore_finishes_after_surviving_subject_answ
 
 #[test]
 fn historical_subject_exile_restore_refuses_absent_unbound_or_conflicting_authority() {
-    use engine::types::resolution::LEGACY_CHANGE_ZONE_CONTROLLER_RESTORE_ERROR;
-
     let (mut runner, _, relic, mudhole) = mudhole_replacement_fixture(true);
     runner.cast(mudhole).target_player(P1).resolve();
     for version in [1, 11] {
@@ -1333,8 +1332,6 @@ fn historical_subject_exile_restore_refuses_absent_unbound_or_conflicting_author
 
 #[test]
 fn historical_subject_exile_restore_refuses_competing_same_source_families() {
-    use engine::types::resolution::LEGACY_CHANGE_ZONE_CONTROLLER_RESTORE_ERROR;
-
     let (mut runner, _, _, mudhole) = mudhole_replacement_fixture(true);
     runner.cast(mudhole).target_player(P1).resolve();
     let mut wire = historical_subject_exile_wire(&runner, 11, false);
