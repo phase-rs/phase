@@ -36840,6 +36840,13 @@ impl GameState {
                 .or_default()
                 .extend(history.keys().copied());
         }
+        for (_, history) in self.lki_by_incarnation.iter_mut() {
+            for (_, snapshot) in history.iter_mut() {
+                lki_incarnations(snapshot, &mut |object_id, incarnation| {
+                    present.entry(object_id).or_default().push(*incarnation);
+                });
+            }
+        }
         let mut grants: HashMap<ObjectId, Vec<u64>> = HashMap::new();
         let mut carrier_read: HashSet<ObjectIncarnationRef> = HashSet::new();
         self.for_each_trigger_event_carrier_mut(&mut |event| {
@@ -37110,7 +37117,12 @@ impl GameState {
             .map(|(object_id, history)| {
                 let history = history
                     .into_iter()
-                    .map(|(incarnation, snapshot)| (key_name(object_id, incarnation), snapshot))
+                    .map(|(incarnation, mut snapshot)| {
+                        lki_incarnations(&mut snapshot, &mut |object_id, incarnation| {
+                            *incarnation = canonical(object_id, *incarnation);
+                        });
+                        (key_name(object_id, incarnation), snapshot)
+                    })
                     .collect();
                 (object_id, history)
             })
