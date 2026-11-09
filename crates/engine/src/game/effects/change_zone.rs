@@ -831,9 +831,16 @@ fn zone_move_member_cannot_move(
         return true;
     };
     // CR 114.5: Emblems cannot be moved between zones.
+    // CR 702.26b: a phased-out permanent is treated as though it doesn't exist,
+    // so a zone-change effect cannot move it. The phasing effect itself uses
+    // `PhaseOut`/`PhaseIn`, never this boundary. Without this guard Fblthp,
+    // Impossibly Lost's "owner shuffles him into their library" would move a
+    // phased-out Fblthp off the battlefield even though it cannot be affected.
     // CR 400.7 + CR 603.7c: If an origin zone is specified and the object is
     // no longer in that zone, the zone change is impossible — skip silently.
-    object.is_emblem || expected_origin.is_some_and(|zone| object.zone != zone)
+    object.is_emblem
+        || object.is_phased_out_permanent()
+        || expected_origin.is_some_and(|zone| object.zone != zone)
 }
 
 /// The bound members of an untargeted context-referent move and the zone each
