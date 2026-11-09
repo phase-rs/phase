@@ -2144,6 +2144,7 @@ mod preroll_tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(origin),
                 destination,
                 target: TargetFilter::SelfRef,

@@ -493,6 +493,7 @@ fn optional_exile_instead_except(spell: ObjectId) -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,

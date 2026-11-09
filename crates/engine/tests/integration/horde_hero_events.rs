@@ -1174,6 +1174,7 @@ fn add_decline_rigging(state: &mut GameState, owner: PlayerId, card: ObjectId, d
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
