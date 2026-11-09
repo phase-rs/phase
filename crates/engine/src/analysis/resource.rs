@@ -30601,18 +30601,19 @@ mod tests {
             ),
             "accounted, the id leaves BOTH frames' zone collections and the rest compares equal"
         );
-        // The strip must not become blanket equality: an unrelated live `players` drift is
-        // NOT projected away, and this is the same accounted call above.
-        let mut drifted = prior.clone();
-        drifted.players[0].life -= 1;
+        // The strip must not become a blanket accept of `players`: the projection does NOT
+        // erase per-player land plays, so an unrelated drift on that axis still refuses
+        // under the same accounted id.
+        let mut drifted = current.clone();
+        drifted.players[1].lands_played_this_turn += 1;
         assert!(
             !eq_except_growable(
+                &project_out_resources(&prior),
                 &project_out_resources(&drifted),
-                &project_out_resources(&current),
                 &HashSet::from([ObjectId(900)]),
                 None,
             ),
-            "stripping the id does not excuse an unrelated players drift"
+            "stripping the id does not excuse an unrelated `players` drift"
         );
     }
 
