@@ -28304,7 +28304,12 @@ fn chain_has_prior_typed_referent(clauses: &[ClauseIr], skip_first_conditional: 
         // `has_typed_target` is still used at its other call sites
         // (immediate-prior-clause anaphor rewrite) because they depend on
         // the leaf-only semantics.
-        if has_typed_target_widened(&prev.parsed.effect) {
+        // CR 701.23a + CR 608.2c: a search also publishes its chosen card
+        // referent. Later bare-object anaphora must use that result rather
+        // than borrowing the printed source through legacy SelfRef rebinding.
+        if has_typed_target_widened(&prev.parsed.effect)
+            || matches!(prev.parsed.effect, Effect::SearchLibrary { .. })
+        {
             return true;
         }
         if matches!(
