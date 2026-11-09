@@ -1,0 +1,17 @@
+# The Comprehensive Rules edition this repository's CR citations are written
+# against. docs/MagicCompRules.txt is gitignored and every checkout fetches its
+# own copy, so without a pin two checkouts can hold different editions and cite
+# different rules under the same number — a CR renumbering moves the rule a
+# citation names without changing a byte of the citation.
+#
+# scripts/fetch-comp-rules.sh downloads exactly this edition, and
+# scripts/check-cr-edition.sh reports whether the local copy matches it.
+# Change this file only in the commit that migrates the tree's citations to the
+# new edition; `./scripts/fetch-comp-rules.sh --latest` reports what Wizards
+# currently publishes.
+#
+# effective: the date on line 3 of the rules text ("These rules are effective
+#            as of <date>.")
+# url:       the published .txt for that edition
+effective=September 25, 2026
+url=https://media.wizards.com/2026/downloads/MagicCompRules%2020260925.txt

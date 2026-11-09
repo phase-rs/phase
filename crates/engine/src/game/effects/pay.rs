@@ -4,8 +4,9 @@ use crate::game::targeting::resolve_effect_player_ref;
 use crate::game::{casting, casting_costs};
 use crate::types::ability::{is_pay_any_amount, AbilityCost, Effect};
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PayableResource, WaitingFor};
-use crate::types::mana::ManaCost;
+use crate::types::game_state::{GameState, ManaAmountComposition, PayableResource, WaitingFor};
+use crate::types::identifiers::ObjectId;
+use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::player::PlayerId;
 
 use super::{EffectError, ResolvedAbility};
@@ -125,6 +126,27 @@ pub fn resolve(
                 "PayCost.scale requires a Mana cost base".to_string(),
             ));
         };
+        // CR 107.1c + CR 107.3f + CR 118.1: a scale that still carries the unannounced X
+        // ("pay any amount of {R}") is a player-chosen multiplier — offer 0..=max and pay
+        // base.scaled(n) on submit (engine_resolution_choices). A scale without X
+        // (TrackedSetSize: Thelon's Curse, Magnetic Mountain, Mudslide, Dream Tides)
+        // was already chosen by an earlier instruction and stays on the direct path below.
+        if times.contains_x() {
+            let max = resolution_mana_per_unit_max(state, payer, ability.source_id, base);
+            state.waiting_for = WaitingFor::PayAmountChoice {
+                player: payer,
+                resource: PayableResource::Mana {
+                    base_cost: base.clone(),
+                    composition: ManaAmountComposition::PerUnit,
+                },
+                min: 0,
+                max,
+                accumulated: 0,
+                source_id: ability.source_id,
+                pending_mana_ability: None,
+            };
+            return Ok(());
+        }
         let times = resolve_quantity_with_targets(state, times, &payment_ability).max(0);
         let times = u32::try_from(times).unwrap_or(0);
         let scaled = scale_mana_cost(base, times);
@@ -152,8 +174,9 @@ pub fn resolve(
                         .map_or(max, |amount| max.min(amount));
                     state.waiting_for = WaitingFor::PayAmountChoice {
                         player: payer,
-                        resource: PayableResource::ManaGeneric {
+                        resource: PayableResource::Mana {
                             base_cost: mana_cost.clone(),
+                            composition: ManaAmountComposition::ConcretizeX,
                         },
                         min: 0,
                         max,
@@ -266,16 +289,7 @@ pub(crate) fn scale_mana_cost(base: &ManaCost, times: u32) -> ManaCost {
         | ManaCost::SelfManaCost
         | ManaCost::SelfManaValue
         | ManaCost::SelfManaCostReduced { .. } => ManaCost::zero(),
-        ManaCost::Cost { shards, generic } => {
-            let mut scaled_shards = Vec::with_capacity(shards.len() * times as usize);
-            for _ in 0..times {
-                scaled_shards.extend(shards.iter().copied());
-            }
-            ManaCost::Cost {
-                shards: scaled_shards,
-                generic: generic.saturating_mul(times),
-            }
-        }
+        ManaCost::Cost { .. } => base.scaled(times),
     }
 }
 
@@ -376,6 +390,11 @@ fn resolve_ability_cost_payment(
 /// payable, X = 0 is payable too. The downward search below therefore never
 /// needs to re-check 0 separately — reaching `max == 0` and failing there is
 /// exactly the "not even 0 works" case.
+///
+/// The search starts at `casting::effect_payment_ceiling` (the larger of the
+/// simulated production and the announcement-time `max_x_value` estimate) and
+/// descends to the largest X at or below it that the unchanged single-pass exact
+/// check accepts; see `resolution_mana_per_unit_max` for the contract.
 fn resolution_mana_x_max(
     state: &GameState,
     payer: PlayerId,
@@ -384,20 +403,32 @@ fn resolution_mana_x_max(
 ) -> Option<u32> {
     // Resolution-time X costs are not spell casts — convoke/improvise/waterbend
     // tap-payments do not apply, so no spell object is passed.
-    let mut max = casting_costs::max_x_value(state, payer, cost, None);
+    //
+    // CR 118.1 + CR 605.3a + CR 106.12b: the starting point is the larger of the
+    // simulated production (which counts replacement multipliers such as
+    // Nyxbloom Ancient and TapsForMana bonuses) and the announcement-time
+    // `max_x_value` estimate, which stays the floor and is itself untouched.
+    // The exact check below still gates every candidate, so an over-estimate is
+    // never offered.
+    let legacy = casting_costs::max_x_value(state, payer, cost, None);
+    let mut max = casting::effect_payment_ceiling(state, payer, source_id, legacy, |x| {
+        x_concrete_checked(cost, x)
+    });
     loop {
-        let mut concrete = cost.clone();
-        concrete.concretize_x(max);
+        // `None` (X not representable) counts as not payable.
+        let concrete = x_concrete_checked(cost, max);
         // CR 605.3b + CR 616.1: the chosen amount is paid through
         // `pay_unless_cost`, which has no resume root, so the offered range must
         // not count a mana source whose own cost would pause.
-        if casting::can_pay_effect_mana_cost_after_auto_tap(
-            state,
-            payer,
-            source_id,
-            &concrete,
-            casting::PausedManaPayment::Unresumable,
-        ) {
+        if concrete.as_ref().is_some_and(|concrete| {
+            casting::can_pay_effect_mana_cost_after_auto_tap(
+                state,
+                payer,
+                source_id,
+                concrete,
+                casting::PausedManaPayment::Unresumable,
+            )
+        }) {
             return Some(max);
         }
         if max == 0 {
@@ -405,6 +436,92 @@ fn resolution_mana_x_max(
         }
         max -= 1;
     }
+}
+
+/// `cost` with every `{X}` concretized to `x` (`ManaCost::concretize_x`), or
+/// `None` when the resulting generic amount is not representable in `u32`.
+/// `concretize_x` multiplies and adds unchecked, so the width is checked here
+/// before the cost is built.
+fn x_concrete_checked(cost: &ManaCost, x: u32) -> Option<ManaCost> {
+    if let ManaCost::Cost { shards, generic } = cost {
+        let x_count = u32::try_from(
+            shards
+                .iter()
+                .filter(|shard| matches!(shard, ManaCostShard::X))
+                .count(),
+        )
+        .ok()?;
+        generic.checked_add(x.checked_mul(x_count)?)?;
+    }
+    let mut concrete = cost.clone();
+    concrete.concretize_x(x);
+    Some(concrete)
+}
+
+/// CR 107.1c + CR 118.1: Largest N for which `per_unit` repeated N times
+/// (`ManaCost::scaled`) is payable right now at resolution — the upper bound of
+/// a "pay any amount of {R}" prompt (Leyline Tyrant).
+///
+/// Unlike `resolution_mana_x_max` this never fails: `per_unit.scaled(0)` is
+/// `{0}`, which CR 118.5 makes payable by acknowledgment alone, so the search
+/// floors at 0 rather than returning `None`.
+///
+/// The search starts at `casting::effect_payment_ceiling` — the larger of the
+/// simulated production (the real effect-context auto-tap and inline-trigger
+/// pipeline on an over-sized probe, which counts replacement multipliers such as
+/// Nyxbloom Ancient, TapsForMana bonuses and colour rules) and the per-permanent
+/// capacity bound `casting::effect_payment_mana_ceiling` — and descends to the
+/// largest N at or below it that the unchanged single-pass exact check
+/// `casting::can_pay_effect_mana_cost_after_auto_tap` accepts, so colors the
+/// unit demands, and sources whose mana may not be spent at resolution, are
+/// enforced exactly as on submit. That is the largest accepted N overall
+/// whenever no exactly-acceptable N exceeds the starting ceiling; the ceiling
+/// is derived from the same pipeline the exact check runs, but this is not
+/// proved for every printed producer. Like the X path it builds one probe cost
+/// per candidate.
+///
+/// CR 605.3a + CR 605.3b: the chosen amount is paid through `pay_unless_cost`,
+/// which has no resume root, so the offered range must not count a mana source
+/// whose own cost would pause.
+fn resolution_mana_per_unit_max(
+    state: &GameState,
+    payer: PlayerId,
+    source_id: ObjectId,
+    per_unit: &ManaCost,
+) -> u32 {
+    let legacy = casting::effect_payment_mana_ceiling(state, payer);
+    let mut n = casting::effect_payment_ceiling(state, payer, source_id, legacy, |n| {
+        per_unit_scaled_checked(per_unit, n)
+    });
+    loop {
+        if n == 0 {
+            return 0;
+        }
+        if per_unit_scaled_checked(per_unit, n).is_some_and(|scaled| {
+            casting::can_pay_effect_mana_cost_after_auto_tap(
+                state,
+                payer,
+                source_id,
+                &scaled,
+                casting::PausedManaPayment::Unresumable,
+            )
+        }) {
+            return n;
+        }
+        n -= 1;
+    }
+}
+
+/// `per_unit` repeated `n` times (`ManaCost::scaled`), or `None` when the
+/// scaled shard count or generic amount is not representable in `u32`.
+/// `ManaCost::scaled` multiplies unchecked, so the width is checked here before
+/// any cost is built.
+fn per_unit_scaled_checked(per_unit: &ManaCost, n: u32) -> Option<ManaCost> {
+    if let ManaCost::Cost { shards, generic } = per_unit {
+        let width = u32::try_from(shards.len()).ok()?.checked_add(*generic)?;
+        n.checked_mul(width)?;
+    }
+    Some(per_unit.scaled(n))
 }
 
 fn trigger_event_amount(state: &GameState) -> Option<u32> {
@@ -434,12 +551,14 @@ mod tests {
 
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ChooseOneOfKind, ManaProduction, ManaSpendRestriction,
-        QuantityExpr, QuantityRef, TargetFilter,
+        AbilityDefinition, AbilityKind, ChooseOneOfKind, ManaContribution, ManaProduction,
+        ManaSpendRestriction, QuantityExpr, QuantityRef, TargetFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
-    use crate::types::mana::{ManaCost, ManaCostShard, ManaRestriction, ManaType, ManaUnit};
+    use crate::types::mana::{
+        ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaType, ManaUnit,
+    };
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -1708,11 +1827,12 @@ mod tests {
             WaitingFor::PayAmountChoice { resource, max, .. } => {
                 assert_eq!(
                     *resource,
-                    PayableResource::ManaGeneric {
+                    PayableResource::Mana {
                         base_cost: ManaCost::Cost {
                             shards: vec![ManaCostShard::X],
                             generic: 0,
                         },
+                        composition: ManaAmountComposition::ConcretizeX,
                     }
                 );
                 assert_eq!(*max, 3);
@@ -1847,7 +1967,7 @@ mod tests {
             WaitingFor::PayAmountChoice { resource, max, .. } => {
                 assert_eq!(
                     *resource,
-                    PayableResource::ManaGeneric {
+                    PayableResource::Mana {
                         base_cost: ManaCost::Cost {
                             shards: vec![
                                 ManaCostShard::X,
@@ -1857,6 +1977,7 @@ mod tests {
                             ],
                             generic: 0,
                         },
+                        composition: ManaAmountComposition::ConcretizeX,
                     },
                     "base_cost must carry the colored pips alongside X, not just per_x"
                 );
@@ -2090,11 +2211,12 @@ mod tests {
             } => {
                 assert_eq!(
                     *resource,
-                    PayableResource::ManaGeneric {
+                    PayableResource::Mana {
                         base_cost: ManaCost::Cost {
                             shards: vec![ManaCostShard::X, ManaCostShard::White],
                             generic: 0,
                         },
+                        composition: ManaAmountComposition::ConcretizeX,
                     }
                 );
                 assert_eq!(*min, 0);
@@ -2246,11 +2368,12 @@ mod tests {
             WaitingFor::PayAmountChoice { resource, max, .. } => {
                 assert_eq!(
                     *resource,
-                    PayableResource::ManaGeneric {
+                    PayableResource::Mana {
                         base_cost: ManaCost::Cost {
                             shards: vec![ManaCostShard::X],
                             generic: 0,
                         },
+                        composition: ManaAmountComposition::ConcretizeX,
                     }
                 );
                 assert_eq!(
@@ -3610,6 +3733,574 @@ mod tests {
         assert_eq!(scale_mana_cost(&colored, 0), ManaCost::zero());
     }
 
+    // ---- "pay any amount of {R}" (per-unit mana prompt) -------------------
+    //
+    // No printed card parses to the per-unit shape yet (the parser leaf lands
+    // separately), so these tests build Leyline Tyrant's resolution-time
+    // payment directly: `PayCost { {R}, scale: Some(X) }`, the encoding of
+    // "you may pay any amount of {R}. When you do, it deals that much
+    // damage to any target." The source objects carry the real card names.
+
+    fn add_pool_mana(state: &mut GameState, color: ManaType, count: usize) {
+        for _ in 0..count {
+            state.players[0].mana_pool.add(ManaUnit {
+                color,
+                source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            });
+        }
+    }
+
+    /// A land whose only ability is `{T}: Add {R}.` (Mountain).
+    fn create_red_source(
+        state: &mut GameState,
+        card_id: CardId,
+        name: &str,
+        restrictions: Vec<ManaSpendRestriction>,
+    ) -> ObjectId {
+        let source = create_object(
+            state,
+            card_id,
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Red],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions,
+                    grants: Vec::new(),
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+        source
+    }
+
+    fn create_leyline_tyrant(state: &mut GameState) -> ObjectId {
+        create_object(
+            state,
+            CardId(600),
+            PlayerId(0),
+            "Leyline Tyrant".to_string(),
+            Zone::Battlefield,
+        )
+    }
+
+    fn variable_x() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }
+    }
+
+    fn red_unit() -> ManaCost {
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        }
+    }
+
+    /// `PayCost { base, scale }` paid by the controller of `source_id`.
+    fn scaled_pay(source_id: ObjectId, base: ManaCost, scale: QuantityExpr) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Mana { cost: base },
+                scale: Some(scale),
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        )
+    }
+
+    /// Leyline Tyrant's payment followed by a "that much" rider. The rider is
+    /// `Draw { EventContextAmount }` so the bound amount is observable as a
+    /// hand-size delta.
+    fn per_unit_red_pay_then_draw_that_many(source_id: ObjectId) -> ResolvedAbility {
+        let draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut pay = scaled_pay(source_id, red_unit(), variable_x());
+        pay.sub_ability = Some(Box::new(draw));
+        pay
+    }
+
+    fn fill_library(state: &mut GameState, count: u64) {
+        for n in 0..count {
+            create_object(
+                state,
+                CardId(100 + n),
+                PlayerId(0),
+                format!("Card {n}"),
+                Zone::Library,
+            );
+        }
+    }
+
+    fn pay_amount_prompt(state: &GameState) -> (PayableResource, u32, u32) {
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice {
+                resource, min, max, ..
+            } => (resource.clone(), *min, *max),
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
+    }
+
+    fn submit_pay_amount(
+        state: &mut GameState,
+        amount: u32,
+        events: &mut Vec<GameEvent>,
+    ) -> Result<
+        crate::game::engine_resolution_choices::ResolutionChoiceOutcome,
+        crate::game::engine::EngineError,
+    > {
+        let waiting_for = state.waiting_for.clone();
+        crate::game::engine_resolution_choices::handle_resolution_choice(
+            state,
+            waiting_for,
+            crate::types::actions::GameAction::SubmitPayAmount { amount },
+            events,
+        )
+    }
+
+    /// CR 107.1c + CR 118.1 + CR 603.12a: "pay any amount of {R}" offers
+    /// 0..=available red, pays `{R}` × N, and binds "that much" to N.
+    #[test]
+    fn pay_any_amount_per_unit_red_mana_prompts_and_pays_scaled_cost() {
+        use crate::game::effects::resolve_ability_chain;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_leyline_tyrant(&mut state);
+        fill_library(&mut state, 5);
+        add_pool_mana(&mut state, ManaType::Red, 3);
+
+        let pay = per_unit_red_pay_then_draw_that_many(source_id);
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+
+        let (resource, min, max) = pay_amount_prompt(&state);
+        assert_eq!(
+            resource,
+            PayableResource::Mana {
+                base_cost: red_unit(),
+                composition: ManaAmountComposition::PerUnit,
+            }
+        );
+        assert_eq!(min, 0);
+        assert_eq!(max, 3);
+
+        submit_pay_amount(&mut state, 2, &mut events).unwrap();
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Red),
+            1,
+            "{{R}} paid twice, not once"
+        );
+        assert_eq!(state.last_effect_count, Some(2));
+        assert_eq!(state.players[0].hand.len(), 2, "drew that many (2)");
+    }
+
+    /// CR 107.1c + CR 118.1: `{R}` can't be paid with colorless mana, so the
+    /// per-unit `max` counts only red.
+    #[test]
+    fn pay_any_amount_per_unit_ignores_colorless_mana_in_max() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_leyline_tyrant(&mut state);
+        add_pool_mana(&mut state, ManaType::Red, 1);
+        add_pool_mana(&mut state, ManaType::Colorless, 3);
+
+        let pay = scaled_pay(source_id, red_unit(), variable_x());
+        let mut events = Vec::new();
+        resolve(&mut state, &pay, &mut events).unwrap();
+
+        let (_, _, max) = pay_amount_prompt(&state);
+        assert_eq!(max, 1);
+    }
+
+    /// CR 605.3b + CR 616.1: a red source whose mana may only be spent to
+    /// activate abilities can't fund a resolution-time payment, so it is not
+    /// counted toward `max`; the same board with an unrestricted Mountain
+    /// counts it (paired reach-guard).
+    #[test]
+    fn pay_any_amount_per_unit_max_rejects_activation_only_red_source() {
+        let mut restricted_state = GameState::new_two_player(42);
+        let source_id = create_leyline_tyrant(&mut restricted_state);
+        add_pool_mana(&mut restricted_state, ManaType::Red, 1);
+        let restricted_land = create_red_source(
+            &mut restricted_state,
+            CardId(10),
+            "Mountain",
+            vec![ManaSpendRestriction::ActivateOnly],
+        );
+        let pay = scaled_pay(source_id, red_unit(), variable_x());
+        let mut events = Vec::new();
+        resolve(&mut restricted_state, &pay, &mut events).unwrap();
+        let (_, _, max) = pay_amount_prompt(&restricted_state);
+        assert_eq!(max, 1, "the activation-only red source must not count");
+        assert!(!restricted_state.objects[&restricted_land].tapped);
+
+        let mut open_state = GameState::new_two_player(42);
+        let source_id = create_leyline_tyrant(&mut open_state);
+        add_pool_mana(&mut open_state, ManaType::Red, 1);
+        create_red_source(&mut open_state, CardId(10), "Mountain", Vec::new());
+        let pay = scaled_pay(source_id, red_unit(), variable_x());
+        resolve(&mut open_state, &pay, &mut events).unwrap();
+        let (_, _, max) = pay_amount_prompt(&open_state);
+        assert_eq!(max, 2, "an unrestricted Mountain counts toward max");
+    }
+
+    /// CR 605.3a: an untapped Mountain ("{T}: Add {R}.") counts toward `max`
+    /// and is tapped when the chosen amount needs it.
+    #[test]
+    fn pay_any_amount_per_unit_counts_and_taps_auto_tappable_red_source() {
+        use crate::game::effects::resolve_ability_chain;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_leyline_tyrant(&mut state);
+        fill_library(&mut state, 5);
+        add_pool_mana(&mut state, ManaType::Red, 1);
+        let mountain = create_red_source(&mut state, CardId(10), "Mountain", Vec::new());
+
+        let pay = per_unit_red_pay_then_draw_that_many(source_id);
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        let (_, _, max) = pay_amount_prompt(&state);
+        assert_eq!(max, 2);
+
+        submit_pay_amount(&mut state, 2, &mut events).unwrap();
+        assert!(state.objects[&mountain].tapped, "Mountain tapped for {{R}}");
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 0);
+        assert_eq!(state.players[0].hand.len(), 2);
+    }
+
+    /// CR 107.1c + CR 118.5: zero is always a legal amount — `{R}` × 0 is
+    /// `{0}`, paid by acknowledgment — so the prompt opens even with no mana,
+    /// and choosing 0 binds "that much" to 0 (CR 120.8: 0 damage is not dealt).
+    #[test]
+    fn pay_any_amount_per_unit_zero_is_always_offered() {
+        use crate::game::effects::resolve_ability_chain;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_leyline_tyrant(&mut state);
+        fill_library(&mut state, 5);
+
+        let pay = per_unit_red_pay_then_draw_that_many(source_id);
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        assert!(
+            !state.cost_payment_failed_flag,
+            "an empty pool must not fail the payment"
+        );
+        let (_, min, max) = pay_amount_prompt(&state);
+        assert_eq!((min, max), (0, 0));
+
+        submit_pay_amount(&mut state, 0, &mut events).unwrap();
+        assert_eq!(state.last_effect_count, Some(0));
+        assert!(state.players[0].hand.is_empty(), "drew 0 cards");
+    }
+
+    /// The shared range guard rejects an amount above `max` before anything
+    /// is paid; the same board accepts `max` itself (paired positive).
+    #[test]
+    fn pay_any_amount_per_unit_submit_above_max_is_rejected_without_payment() {
+        use crate::game::effects::resolve_ability_chain;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_leyline_tyrant(&mut state);
+        fill_library(&mut state, 5);
+        add_pool_mana(&mut state, ManaType::Red, 3);
+        let pay = per_unit_red_pay_then_draw_that_many(source_id);
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        let (_, _, max) = pay_amount_prompt(&state);
+        assert_eq!(max, 3);
+        let last_effect_count_before = state.last_effect_count;
+
+        assert!(submit_pay_amount(&mut state, 4, &mut events).is_err());
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 3);
+        assert_eq!(state.last_effect_count, last_effect_count_before);
+
+        let mut fresh = GameState::new_two_player(42);
+        let source_id = create_leyline_tyrant(&mut fresh);
+        fill_library(&mut fresh, 5);
+        add_pool_mana(&mut fresh, ManaType::Red, 3);
+        let pay = per_unit_red_pay_then_draw_that_many(source_id);
+        resolve_ability_chain(&mut fresh, &pay, &mut events, 0).unwrap();
+        submit_pay_amount(&mut fresh, 3, &mut events).unwrap();
+        assert_eq!(fresh.players[0].mana_pool.count_color(ManaType::Red), 0);
+        assert_eq!(fresh.players[0].hand.len(), 3);
+    }
+
+    /// CR 118.1: Thelon's Curse ("pay {U} for each creature chosen this way")
+    /// scales by an already-chosen tracked-set size, not by a prompt — no
+    /// `PayAmountChoice`, exactly two `{U}` paid.
+    #[test]
+    fn per_object_tracked_set_size_payment_mints_no_prompt() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(601),
+            PlayerId(0),
+            "Thelon's Curse".to_string(),
+            Zone::Battlefield,
+        );
+        let a = create_object(
+            &mut state,
+            CardId(602),
+            PlayerId(0),
+            "Creature A".to_string(),
+            Zone::Battlefield,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(603),
+            PlayerId(0),
+            "Creature B".to_string(),
+            Zone::Battlefield,
+        );
+        crate::game::effects::publish_tracked_set(&mut state, vec![a, b]);
+        add_pool_mana(&mut state, ManaType::Blue, 3);
+        let blue_unit = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        };
+        let pay = scaled_pay(
+            source_id,
+            blue_unit,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            },
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &pay, &mut events).unwrap();
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::PayAmountChoice { .. }),
+            "a TrackedSetSize scale must not mint a prompt"
+        );
+        assert!(!state.cost_payment_failed_flag);
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Blue),
+            1,
+            "exactly two {{U}} paid"
+        );
+    }
+
+    /// The per-unit prompt is gated on the scale carrying X, not on the
+    /// scale being present: the same board mints the prompt for `X` and pays
+    /// directly for `TrackedSetSize`.
+    #[test]
+    fn per_unit_scale_prompt_is_gated_on_x_not_on_scale() {
+        let board = |scale: QuantityExpr| {
+            let mut state = GameState::new_two_player(42);
+            let source_id = create_leyline_tyrant(&mut state);
+            let a = create_object(
+                &mut state,
+                CardId(602),
+                PlayerId(0),
+                "Creature A".to_string(),
+                Zone::Battlefield,
+            );
+            let b = create_object(
+                &mut state,
+                CardId(603),
+                PlayerId(0),
+                "Creature B".to_string(),
+                Zone::Battlefield,
+            );
+            crate::game::effects::publish_tracked_set(&mut state, vec![a, b]);
+            add_pool_mana(&mut state, ManaType::Red, 3);
+            let pay = scaled_pay(source_id, red_unit(), scale);
+            let mut events = Vec::new();
+            resolve(&mut state, &pay, &mut events).unwrap();
+            state
+        };
+
+        let x_state = board(variable_x());
+        let (resource, _, max) = pay_amount_prompt(&x_state);
+        assert_eq!(
+            resource,
+            PayableResource::Mana {
+                base_cost: red_unit(),
+                composition: ManaAmountComposition::PerUnit,
+            }
+        );
+        assert_eq!(max, 3);
+
+        let tracked_state = board(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        });
+        assert!(!matches!(
+            tracked_state.waiting_for,
+            WaitingFor::PayAmountChoice { .. }
+        ));
+        assert_eq!(
+            tracked_state.players[0]
+                .mana_pool
+                .count_color(ManaType::Red),
+            1
+        );
+    }
+
+    /// CR 107.3a + CR 107.3f: Elenda and Azor's `{X}{W}{U}{B}` still opens the
+    /// X prompt with `ConcretizeX` and still demands the colored pips on submit.
+    #[test]
+    fn mana_x_path_still_concretizes_composition() {
+        use crate::game::effects::resolve_ability_chain;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Elenda and Azor".to_string(),
+            Zone::Battlefield,
+        );
+        add_pool_mana(&mut state, ManaType::White, 1);
+        add_pool_mana(&mut state, ManaType::Blue, 1);
+        add_pool_mana(&mut state, ManaType::Black, 1);
+        add_pool_mana(&mut state, ManaType::Colorless, 2);
+        let base_cost = ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::X,
+                ManaCostShard::White,
+                ManaCostShard::Blue,
+                ManaCostShard::Black,
+            ],
+            generic: 0,
+        };
+        let pay = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Mana {
+                    cost: base_cost.clone(),
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        let (resource, _, max) = pay_amount_prompt(&state);
+        assert_eq!(
+            resource,
+            PayableResource::Mana {
+                base_cost,
+                composition: ManaAmountComposition::ConcretizeX,
+            }
+        );
+        assert_eq!(max, 2);
+
+        submit_pay_amount(&mut state, 2, &mut events).unwrap();
+        assert!(
+            state.players[0].mana_pool.is_empty(),
+            "{{2}}{{W}}{{U}}{{B}} paid in full, pool: {:?}",
+            state.players[0].mana_pool
+        );
+    }
+
+    /// CR 107.3i: Well of Lost Dreams caps its X by the life gained through a
+    /// where-X clause; "pay any amount of {R}" has no such clause, so a
+    /// trigger event amount must not cap the per-unit `max`.
+    #[test]
+    fn pay_any_amount_per_unit_max_is_not_capped_by_trigger_event_amount() {
+        let max_with_event = |event: Option<GameEvent>| {
+            let mut state = GameState::new_two_player(42);
+            let source_id = create_leyline_tyrant(&mut state);
+            add_pool_mana(&mut state, ManaType::Red, 3);
+            state.current_trigger_event = event;
+            let pay = scaled_pay(source_id, red_unit(), variable_x());
+            let mut events = Vec::new();
+            resolve(&mut state, &pay, &mut events).unwrap();
+            pay_amount_prompt(&state).2
+        };
+
+        assert_eq!(max_with_event(None), 3);
+        assert_eq!(
+            max_with_event(Some(GameEvent::LifeChanged {
+                player_id: PlayerId(0),
+                amount: 1,
+                new_total: crate::types::events::LifeTotalReading::default(),
+            })),
+            3,
+            "the trigger event's amount must not cap a per-unit payment"
+        );
+    }
+
+    /// CR 107.3f + CR 118.12: both mana compositions announce the amount
+    /// paid to the parked rider; Counters/Speed do not.
+    #[test]
+    fn paused_payment_x_announcement_classifies_both_mana_compositions_as_paid_amount() {
+        use crate::game::engine_resolution_choices::paused_payment_x_announcement;
+        use crate::types::game_state::ContinuationXAnnouncement;
+
+        let paying = scaled_pay(ObjectId(1), red_unit(), variable_x());
+        let prompt = |resource: PayableResource| WaitingFor::PayAmountChoice {
+            player: PlayerId(0),
+            resource,
+            min: 0,
+            max: 3,
+            accumulated: 0,
+            source_id: ObjectId(1),
+            pending_mana_ability: None,
+        };
+
+        // Reach-guard: the classifier is entered for this paying ability.
+        assert_eq!(
+            paused_payment_x_announcement(&paying, &prompt(PayableResource::Energy)),
+            Some(ContinuationXAnnouncement::PaidAmount)
+        );
+        for composition in [
+            ManaAmountComposition::ConcretizeX,
+            ManaAmountComposition::PerUnit,
+        ] {
+            assert_eq!(
+                paused_payment_x_announcement(
+                    &paying,
+                    &prompt(PayableResource::Mana {
+                        base_cost: red_unit(),
+                        composition,
+                    })
+                ),
+                Some(ContinuationXAnnouncement::PaidAmount),
+                "{composition:?}"
+            );
+        }
+        for resource in [PayableResource::Counters, PayableResource::Speed] {
+            assert_eq!(
+                paused_payment_x_announcement(&paying, &prompt(resource.clone())),
+                None,
+                "{resource:?}"
+            );
+        }
+    }
+
     /// CR 119.4 + CR 118.3: Install a CantLoseLife permanent for `owner`, used
     /// to verify the "pay any amount of life" prompt clamps `max` to 0 (CR 119.8).
     fn add_cant_lose_life_permanent(state: &mut GameState, owner: PlayerId) {
@@ -3982,5 +4673,257 @@ mod tests {
             0,
             "paying 0 life draws 0 cards"
         );
+    }
+}
+
+/// Tests for the resolution-time per-unit payment ceiling
+/// (`casting::effect_payment_ceiling`) against printed mana producers.
+#[cfg(test)]
+mod ceiling_tests {
+    use super::*;
+    use crate::game::game_object::AttachTarget;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+    use crate::types::ability::ChosenAttribute;
+    use crate::types::mana::{ManaColor, ManaCostShard};
+    use crate::types::phase::Phase;
+    use crate::types::zones::Zone;
+
+    const VIRTUE_OF_STRENGTH: &str =
+        "If you tap a basic land for mana, it produces three times as much of that mana instead.";
+
+    fn red_unit() -> ManaCost {
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        }
+    }
+
+    /// Builds a P0 board of `cards` (printed cards from the shared fixture;
+    /// "Mountain" / "Island" are the scenario basics; "Virtue of Strength" is
+    /// absent from the fixture and is built from its verbatim Oracle text).
+    /// Caged Sun's chosen colour is Red and Fertile Ground is attached to the
+    /// first Mountain. Returns the state and a source object for the payment.
+    fn board(cards: &[&str], sun_color: ManaColor) -> (GameState, ObjectId) {
+        let db = crate::test_support::shared_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut first_mountain = None;
+        let mut sun = None;
+        let mut aura = None;
+        for &name in cards {
+            match name {
+                "Mountain" => {
+                    let id = scenario.add_basic_land(P0, ManaColor::Red);
+                    first_mountain.get_or_insert(id);
+                }
+                "Island" => {
+                    scenario.add_basic_land(P0, ManaColor::Blue);
+                }
+                "Virtue of Strength" => {
+                    scenario.add_enchantment_from_oracle(P0, name, VIRTUE_OF_STRENGTH);
+                }
+                _ => {
+                    let id = scenario.add_real_card(P0, name, Zone::Battlefield, db);
+                    match name {
+                        "Caged Sun" => sun = Some(id),
+                        "Fertile Ground" => aura = Some(id),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let source = scenario.add_creature(P0, "Payment Source", 1, 1).id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        if let Some(sun) = sun {
+            // The as-enters choice is abandoned by `add_real_card`; set it.
+            let obj = state.objects.get_mut(&sun).expect("Caged Sun");
+            obj.chosen_attributes
+                .retain(|a| !matches!(a, ChosenAttribute::Color(_)));
+            obj.chosen_attributes
+                .push(ChosenAttribute::Color(sun_color));
+        }
+        if let (Some(aura), Some(land)) = (aura, first_mountain) {
+            state
+                .objects
+                .get_mut(&aura)
+                .expect("Fertile Ground")
+                .attached_to = Some(AttachTarget::Object(land));
+            state
+                .objects
+                .get_mut(&land)
+                .expect("Mountain")
+                .attachments
+                .push(aura);
+        }
+        state.layers_dirty.mark_full();
+        (runner.state().clone(), source)
+    }
+
+    fn exact(state: &GameState, source: ObjectId, n: u32) -> bool {
+        per_unit_scaled_checked(&red_unit(), n).is_some_and(|cost| {
+            casting::can_pay_effect_mana_cost_after_auto_tap(
+                state,
+                P0,
+                source,
+                &cost,
+                casting::PausedManaPayment::Unresumable,
+            )
+        })
+    }
+
+    /// The BASE algorithm: largest N <= the capacity bound the exact check
+    /// accepts.
+    fn base_offer(state: &GameState, source: ObjectId) -> u32 {
+        let mut n = casting::effect_payment_mana_ceiling(state, P0);
+        while n > 0 && !exact(state, source, n) {
+            n -= 1;
+        }
+        n
+    }
+
+    fn offered(state: &GameState, source: ObjectId) -> u32 {
+        resolution_mana_per_unit_max(state, P0, source, &red_unit())
+    }
+
+    fn simulated(state: &GameState, source: ObjectId) -> Option<u32> {
+        casting::effect_payment_simulated_ceiling(state, P0, source, |n| {
+            per_unit_scaled_checked(&red_unit(), n)
+        })
+    }
+
+    const TABLE: &[&[&str]] = &[
+        &["Mountain"],
+        &["Nyxbloom Ancient", "Mountain"],
+        &["Nyxbloom Ancient", "Mountain", "Mountain"],
+        &["Virtue of Strength", "Mountain"],
+        &["Virtue of Strength", "Great Furnace"],
+        &["Mana Flare", "Mountain"],
+        &["Caged Sun", "Mountain"],
+        &["Lotus Petal", "Mountain"],
+        &["Nyxbloom Ancient", "Mountain", "Fertile Ground"],
+        &["Rugged Prairie", "Mountain"],
+        &["Prophetic Prism", "Mountain"],
+        &["Mountain", "Arena of Glory"],
+        &["Nyxbloom Ancient", "Prophetic Prism", "Mountain"],
+        &["Nyxbloom Ancient", "Rugged Prairie", "Mountain"],
+        &["Island"],
+    ];
+
+    /// K1: the offered maximum is never below what the capacity-only (BASE)
+    /// algorithm offered. Asserts the floor property only.
+    #[test]
+    fn offered_max_is_never_below_the_capacity_floor() {
+        for cards in TABLE {
+            let (state, source) = board(cards, ManaColor::Red);
+            let base = base_offer(&state, source);
+            let now = offered(&state, source);
+            assert!(now >= base, "{cards:?}: offered {now} < BASE offer {base}");
+        }
+    }
+
+    /// K2: on the table boards the offered maximum is the largest N the exact
+    /// check accepts (completeness), with reach guards.
+    #[test]
+    fn offered_max_is_the_largest_exactly_payable_amount_on_table_boards() {
+        for cards in TABLE {
+            let (state, source) = board(cards, ManaColor::Red);
+            let legacy = casting::effect_payment_mana_ceiling(&state, P0);
+            let scan_to = simulated(&state, source).unwrap_or(0).max(legacy) + 8;
+            let largest = (0..=scan_to)
+                .rev()
+                .find(|&n| n == 0 || exact(&state, source, n))
+                .expect("zero is always payable");
+            assert!(largest < scan_to, "{cards:?}: the scan was truncated");
+            assert_eq!(offered(&state, source), largest, "{cards:?}");
+            if !matches!(cards, ["Island"]) {
+                assert!(largest >= 1, "{cards:?}: reach guard, a red source exists");
+            }
+            let plain_multiplier_board = matches!(
+                cards,
+                [
+                    "Nyxbloom Ancient",
+                    "Mountain",
+                    "Mountain" | "Fertile Ground"
+                ] | ["Nyxbloom Ancient", "Mountain"]
+            );
+            if plain_multiplier_board {
+                assert!(
+                    largest > legacy,
+                    "{cards:?}: reach guard, the multiplier is beyond the capacity bound \
+                     (largest {largest}, legacy {legacy})"
+                );
+            }
+        }
+    }
+
+    /// K3: the simulation fires and sees the Nyxbloom multiplier.
+    #[test]
+    fn simulated_ceiling_sees_the_nyxbloom_multiplier() {
+        let (state, source) = board(&["Nyxbloom Ancient", "Mountain"], ManaColor::Red);
+        let legacy = casting::effect_payment_mana_ceiling(&state, P0);
+        let v = simulated(&state, source).expect("the probe completes");
+        assert!(v >= 3, "Mountain taps for three red under Nyxbloom: {v}");
+        assert!(
+            v > legacy,
+            "simulated {v} exceeds the capacity bound {legacy}"
+        );
+    }
+
+    /// K4: `max_payable_units` is the threshold of a monotone predicate;
+    /// scaling overflow is `None` rather than a wrapped or huge cost.
+    #[test]
+    fn max_payable_units_finds_the_threshold_and_scaling_is_checked() {
+        for threshold in [0u32, 1, 7, 20] {
+            assert_eq!(
+                casting::max_payable_units(20, |n| n <= threshold),
+                threshold
+            );
+        }
+        assert_eq!(casting::max_payable_units(0, |_| false), 0);
+        assert_eq!(casting::max_payable_units(u32::MAX, |n| n <= 5), 5);
+
+        let wide = ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 1,
+        };
+        assert!(per_unit_scaled_checked(&wide, u32::MAX).is_none());
+        assert!(per_unit_scaled_checked(&wide, 3).is_some());
+    }
+
+    /// K4b: `x_concrete_checked` concretizes every `{X}` like
+    /// `ManaCost::concretize_x`, and returns `None` rather than a wrapped or
+    /// panicking cost when the generic amount does not fit in `u32`.
+    #[test]
+    fn x_concrete_checked_scales_every_x_and_detects_overflow() {
+        let double_x = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::X, ManaCostShard::Red],
+            generic: 1,
+        };
+        assert_eq!(
+            x_concrete_checked(&double_x, 3),
+            Some(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 7,
+            })
+        );
+        assert!(x_concrete_checked(&double_x, u32::MAX).is_none());
+        // The multiplication fits but the added fixed generic does not.
+        let single_x = ManaCost::Cost {
+            shards: vec![ManaCostShard::X],
+            generic: 1,
+        };
+        assert!(x_concrete_checked(&single_x, u32::MAX).is_none());
+        assert_eq!(
+            x_concrete_checked(&single_x, u32::MAX - 1),
+            Some(ManaCost::Cost {
+                shards: vec![],
+                generic: u32::MAX,
+            })
+        );
+        // No `{X}`: the cost is unchanged whatever `x` is.
+        let fixed = red_unit();
+        assert_eq!(x_concrete_checked(&fixed, u32::MAX), Some(fixed));
     }
 }

@@ -1063,6 +1063,7 @@ where
         | Effect::ChooseCounterKind { .. }
         | Effect::PutChosenCounter { .. }
         | Effect::ReproduceEventCounters { .. }
+        | Effect::HordePlayCard { .. }
         | Effect::Unimplemented { .. } => {}
     }
     ControlFlow::Continue(())

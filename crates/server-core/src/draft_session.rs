@@ -144,10 +144,10 @@ impl DraftSession {
         {
             return Err("persisted draft player tokens must be unique".to_string());
         }
-        core.validate_persisted_snapshot()
-            .map_err(|error| format!("invalid persisted draft snapshot: {error}"))?;
         core.validate_legacy_admission()
             .map_err(|_| draft_core::types::FIFO_UNSUPPORTED_BY_RUNTIME.to_string())?;
+        core.validate_persisted_snapshot()
+            .map_err(|error| format!("invalid persisted draft snapshot: {error}"))?;
         Ok(Self::from_validated_persisted(ps))
     }
 
@@ -1980,6 +1980,181 @@ mod tests {
         assert_eq!(restored.session, legacy.session);
         let mut fresh = DraftSessionManager::new();
         fresh.restore_session(legacy).unwrap();
+        let token = fresh.sessions[&code].player_tokens[0].clone();
+        fresh
+            .handle_draft_action(
+                &code,
+                &token,
+                DraftAction::Pick {
+                    seat: 0,
+                    card_instance_ids: vec!["TST-0-0-0".into()],
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(fresh.sessions[&code].session.pools[0].len(), 1);
+    }
+
+    /// A started FIFO core over a legacy pod's seats and draft code, and the
+    /// FIFO configuration it runs under.
+    fn started_fifo_core(
+        legacy: &PersistedDraftSession,
+    ) -> (DraftConfig, draft_core::types::DraftSession) {
+        use draft_core::types::{DraftClockPolicy, DraftFlow, DraftSessionId, PickClockPolicy};
+        let mut config = legacy.config.clone();
+        config.flow = DraftFlow::FifoAsync;
+        config.cards_per_pack = 2;
+        config.clock_policy = DraftClockPolicy {
+            pick: PickClockPolicy::Fixed { duration_ms: 1000 },
+            review_duration_ms: 1000,
+        };
+        let mut core = draft_core::types::DraftSession::new_fifo(
+            config.clone(),
+            legacy.session.seats.clone(),
+            legacy.draft_code.clone(),
+            DraftSessionId("native-restore".into()),
+        )
+        .unwrap();
+        let source = draft_core::pack_source::FixturePackSource {
+            set_code: "TST".into(),
+            cards_per_pack: 2,
+        };
+        draft_core::session::apply_at(&mut core, DraftAction::StartDraft, Some(&source), 1000)
+            .unwrap();
+        (config, core)
+    }
+
+    /// Restoring `payload` fails with `expected` through both native entry
+    /// points, and the manager is unchanged.
+    fn assert_restore_refused(
+        manager: &mut DraftSessionManager,
+        code: &str,
+        payload: PersistedDraftSession,
+        expected: &str,
+    ) {
+        let before = serde_json::to_value(manager.sessions[code].to_persisted()).unwrap();
+        let tokens = manager.token_to_draft.clone();
+        let sessions = manager.sessions.len();
+        assert_eq!(
+            DraftSession::from_persisted(payload.clone()).err().unwrap(),
+            expected
+        );
+        assert_eq!(
+            manager.restore_persisted_session(payload),
+            Err(expected.to_string())
+        );
+        assert_eq!(manager.sessions.len(), sessions);
+        assert_eq!(manager.token_to_draft, tokens);
+        assert_eq!(
+            serde_json::to_value(manager.sessions[code].to_persisted()).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn dormant_native_restore_refuses_malformed_fifo_rows_with_the_shared_text() {
+        let mut manager = DraftSessionManager::new();
+        let code = start_pod(&mut manager, test_config());
+        let legacy = manager.sessions[&code].to_persisted();
+        let (config, fifo) = started_fifo_core(&legacy);
+        // A valid FIFO row is refused with the shared text.
+        fifo.validate_persisted_snapshot().unwrap();
+        let mut payload = legacy.clone();
+        payload.config = config.clone();
+        payload.session = fifo.clone();
+        assert_restore_refused(
+            &mut manager,
+            &code,
+            payload,
+            draft_core::types::FIFO_UNSUPPORTED_BY_RUNTIME,
+        );
+
+        // The shared stack of a started legacy Winston pod, which no FIFO
+        // session keeps, and a FIFO row that lost its FIFO state.
+        let mut winston_manager = DraftSessionManager::new();
+        let winston = start_pod(&mut winston_manager, winston_test_config());
+        let mut with_stack = fifo.clone();
+        with_stack.shared_stack = winston_manager.sessions[&winston]
+            .session
+            .shared_stack
+            .clone();
+        assert!(with_stack.shared_stack.is_some());
+        let mut without_fifo_state = fifo;
+        without_fifo_state.fifo = None;
+        for malformed in [with_stack, without_fifo_state] {
+            // Reach: the snapshot validator refuses this row by itself.
+            assert!(malformed.validate_persisted_snapshot().is_err());
+            let mut payload = legacy.clone();
+            payload.config = config.clone();
+            payload.session = malformed;
+            assert_restore_refused(
+                &mut manager,
+                &code,
+                payload,
+                draft_core::types::FIFO_UNSUPPORTED_BY_RUNTIME,
+            );
+        }
+    }
+
+    #[test]
+    fn dormant_native_restore_refuses_legacy_rows_carrying_fifo_state_with_the_shared_text() {
+        let mut manager = DraftSessionManager::new();
+        let code = start_pod(&mut manager, test_config());
+        let legacy = manager.sessions[&code].to_persisted();
+        let (_, fifo) = started_fifo_core(&legacy);
+        let mut review = legacy.clone();
+        review.session.status = DraftStatus::Review;
+        let mut residual = legacy.clone();
+        residual.session.fifo = fifo.fifo;
+        let mut burning = legacy.clone();
+        burning.config.selection_policy.burns_per_pick = 1;
+        burning.session.config = burning.config.clone();
+        for payload in [review, residual, burning] {
+            // Reach: a legacy-flow row that the snapshot validator refuses
+            // through the same runtime admission.
+            assert_eq!(
+                payload.session.config.flow,
+                draft_core::types::DraftFlow::LegacyBarrier
+            );
+            assert_eq!(
+                payload.session.validate_persisted_snapshot(),
+                Err(draft_core::types::DraftError::IncompatibleFlow)
+            );
+            assert_restore_refused(
+                &mut manager,
+                &code,
+                payload,
+                draft_core::types::FIFO_UNSUPPORTED_BY_RUNTIME,
+            );
+        }
+    }
+
+    #[test]
+    fn native_restore_still_validates_legacy_rows_after_the_runtime_admission() {
+        let mut manager = DraftSessionManager::new();
+        let code = start_pod(&mut manager, test_config());
+        let legacy = manager.sessions[&code].to_persisted();
+        // A legacy row whose session kind disagrees with its configuration
+        // passes the runtime admission and keeps the validator's refusal.
+        let mut mislabelled = legacy.clone();
+        mislabelled.session.kind = DraftKind::Traditional;
+        mislabelled.session.validate_legacy_admission().unwrap();
+        let refusal = mislabelled
+            .session
+            .validate_persisted_snapshot()
+            .unwrap_err();
+        assert_restore_refused(
+            &mut manager,
+            &code,
+            mislabelled,
+            &format!("invalid persisted draft snapshot: {refusal}"),
+        );
+
+        // A valid legacy row restores, and its seats can pick.
+        let restored = DraftSession::from_persisted(legacy.clone()).unwrap();
+        assert_eq!(restored.session, legacy.session);
+        let mut fresh = DraftSessionManager::new();
+        fresh.restore_persisted_session(legacy).unwrap();
         let token = fresh.sessions[&code].player_tokens[0].clone();
         fresh
             .handle_draft_action(

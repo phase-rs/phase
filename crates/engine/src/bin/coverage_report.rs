@@ -309,6 +309,28 @@ fn main() {
         }
     };
 
+    let misparses = engine::types::confirmed_misparse::ConfirmedMisparses::committed();
+    let mut present = 0;
+    let mut marked = 0;
+    let mut absent: std::collections::BTreeSet<&str> =
+        misparses.iter().map(|face| face.key.as_str()).collect();
+    for (key, face) in db.face_iter() {
+        if absent.remove(key) {
+            present += 1;
+        }
+        if face.metadata.confirmed_misparse.is_some() {
+            marked += 1;
+        }
+    }
+    eprintln!(
+        "Confirmed misparses: listed={}, exported/present={}, marked={}; absent={} sample={:?}",
+        misparses.len(),
+        present,
+        marked,
+        absent.len(),
+        absent.iter().take(10).collect::<Vec<_>>()
+    );
+
     let mut summary = analyze_coverage(&db);
 
     // Populate per-category diagnostic counts for JSON output (D-08).
