@@ -900,7 +900,19 @@ pub struct PeriodicDelta {
     /// slot's magnitude.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub seat_takes: Vec<(BTreeSet<PlayerId>, DecisionSlot, PlayerId, i64)>,
+    /// CR 704.5g + CR 732.2a: per seat where a slot measured taking nothing at the offer, the
+    /// repetitions the period came round from the offer with every slot measured there declared
+    /// there, where it then stopped with no seat gone; a seat absent here keeps its zero.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zero_lifetimes: Vec<(PlayerId, u32)>,
 }
+
+/// What the confirmer measured for [`PeriodicDelta::seat_takes`] and
+/// [`PeriodicDelta::zero_lifetimes`].
+pub(crate) type MeasuredTakes = (
+    Vec<(BTreeSet<PlayerId>, DecisionSlot, PlayerId, i64)>,
+    Vec<(PlayerId, u32)>,
+);
 
 /// CR 119.3 + CR 800.4a: the life `slot` takes at `seat` once the seats in `gone` have left,
 /// else where the offer measured it.
@@ -928,7 +940,15 @@ fn gone_before(departed: &[(u32, PlayerId)], index: IterationIndex) -> BTreeSet<
         .collect()
 }
 
-/// Whether the witness keeps a slot at, and orders last, a seat where it measured taking nothing.
+/// CR 119.3 + CR 704.5g + CR 800.4a: where a parked slot takes nothing — each seat measured after
+/// the ones before it leave — and, when the first zero ends sooner, the announcements it lasts.
+struct ZeroChain<'a> {
+    slot: &'a DecisionSlot,
+    seats: Vec<PlayerId>,
+    lasts: Option<u32>,
+}
+
+/// Whether the witness follows a slot's zero chain from a seat where it measured taking nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WitnessParking {
     AtMeasuredZero,
@@ -2257,11 +2277,13 @@ impl PeriodicDelta {
     /// resolution, or any slot when that resolution is unknown, switches in the departure's own
     /// repetition, every other slot in the next. A seat that crosses at or before the previous
     /// departure gets no segment. Seats are taken in the charged point's published
-    /// `legal_targets` order, except that a seat where a slot measured taking nothing — the
-    /// observation's own seat for a non-taking slot, or a seat `seat_takes` measured at 0 for a
-    /// taking one — goes last, with that slot pinned there, unless it is built with
-    /// `WitnessParking::Never`. Each seat's charge is read at the takes measured after the
-    /// departures the earlier segments predict.
+    /// `legal_targets` order, except that a slot measured taking nothing — at the observation's
+    /// own seat for a non-taking slot, or at a seat `seat_takes` measured at 0 for a taking one —
+    /// follows its zero chain unless the witness is built with `WitnessParking::Never`: pinned at
+    /// each seat where the table measures it taking nothing once the seats before have left,
+    /// those seats last in that order; or, when that seat's measured lifetime ends the zero
+    /// first, re-aimed after it with its seat drained first. Each seat's charge is read at the
+    /// takes measured after the departures the earlier segments predict.
     ///
     /// # The refusal, and the one over-charge
     ///
@@ -2306,9 +2328,10 @@ impl PeriodicDelta {
         if !parks {
             charged.extend(self.victim_slot.iter().map(|(slot, _)| slot));
         }
-        // With parking, a slot that took nothing keeps the seat the observation pinned it to.
+        // With parking, a slot that took nothing starts its zero chain at the seat the observation
+        // pinned it to.
         let seen = decision_template::resolve(observed, 0, state).unwrap_or_default();
-        let mut parked: BTreeSet<PlayerId> = self
+        let observed_zeros = self
             .victim_slot
             .iter()
             .filter(|(slot, _)| !charged.contains(slot))
@@ -2318,38 +2341,71 @@ impl PeriodicDelta {
                         slot: pinned,
                         targets,
                     } if pinned == slot => match targets.as_slice() {
-                        [ConcreteTarget::Player(seat)] if *seat != proposer => Some(*seat),
+                        [ConcreteTarget::Player(seat)] if *seat != proposer => Some((slot, *seat)),
                         _ => None,
                     },
                     _ => None,
                 })
-            })
-            .collect();
-        // CR 119.3: a slot measured taking nothing at a living seat keeps that seat, whose
-        // departure goes last.
-        let zero_parked: Vec<(&DecisionSlot, PlayerId)> = self
+            });
+        let living = |seat: &PlayerId| {
+            *seat != proposer
+                && self.declarable_victims.contains(seat)
+                && state
+                    .players
+                    .iter()
+                    .any(|p| p.id == *seat && !p.is_eliminated)
+        };
+        // CR 119.3: a slot measured taking nothing at a living seat starts its zero chain there.
+        let measured_zeros = self
             .taking_slots()
             .filter(|_| parks)
             .filter_map(|(slot, _)| {
                 self.seat_takes
                     .iter()
                     .find(|(gone, s, seat, took)| {
-                        gone.is_empty()
-                            && s == slot
-                            && *took == 0
-                            && *seat != proposer
-                            && self.declarable_victims.contains(seat)
-                            && state
-                                .players
-                                .iter()
-                                .any(|p| p.id == *seat && !p.is_eliminated)
+                        gone.is_empty() && s == slot && *took == 0 && living(seat)
                     })
                     .map(|(_, _, seat, _)| (slot, *seat))
+            });
+        // CR 704.5g + CR 800.4a: a zero ends after the announcements its seat's measured lifetime
+        // allows, else when its seat leaves, and the table may measure the slot taking nothing at
+        // a next seat once it has.
+        let zeros: Vec<ZeroChain<'_>> = observed_zeros
+            .chain(measured_zeros)
+            .map(|(slot, seat)| {
+                let lasts = self
+                    .zero_lifetimes
+                    .iter()
+                    .find(|(at, _)| *at == seat)
+                    .map(|(_, came)| came.saturating_sub(lead.repetitions(slot)));
+                let mut seats = vec![seat];
+                while lasts.is_none() {
+                    let gone: BTreeSet<PlayerId> = seats.iter().copied().collect();
+                    let Some(next) = self
+                        .seat_takes
+                        .iter()
+                        .find(|(left, s, at, took)| {
+                            *left == gone
+                                && s == slot
+                                && *took == 0
+                                && !gone.contains(at)
+                                && living(at)
+                        })
+                        .map(|(_, _, at, _)| *at)
+                    else {
+                        break;
+                    };
+                    seats.push(next);
+                }
+                ZeroChain { slot, seats, lasts }
             })
             .collect();
-        for (slot, seat) in &zero_parked {
-            charged.remove(slot);
-            parked.insert(*seat);
+        for zero in &zeros {
+            if zero.lasts.is_some() {
+                charged.insert(zero.slot);
+            } else {
+                charged.remove(zero.slot);
+            }
         }
         if charged.is_empty() {
             return None;
@@ -2383,7 +2439,16 @@ impl PeriodicDelta {
                     .map(|p| (i64::from(p.life), p.id))
             })
             .collect();
-        order.sort_by_key(|&(_, seat)| parked.contains(&seat));
+        // A seat whose zero ends first is drained first; a chain's seats go last, in chain order.
+        order.sort_by_key(|&(_, seat)| {
+            zeros
+                .iter()
+                .find_map(|zero| match zero.lasts {
+                    Some(_) => (zero.seats[0] == seat).then_some(0),
+                    None => zero.seats.iter().position(|at| *at == seat).map(|i| 2 + i),
+                })
+                .unwrap_or(1)
+        });
         // CR 603.3d + CR 601.2c: after a departure at `(repetition, rank)`, a slot's first
         // announcement aimed at the next seat is the one its first resolution after that
         // departure makes — in the departure's own repetition when the slot resolves after the
@@ -2405,25 +2470,51 @@ impl PeriodicDelta {
         // Segment by segment, because a segment's own END is the crossing the segments BEFORE it
         // produce — the switch point is not knowable without them. Each step carries the
         // departure that ended the segment before it.
-        let mut steps: Vec<(Option<SeatDeparture>, Ranking)> = Vec::new();
+        let mut steps: Vec<(Option<SeatDeparture>, PlayerId)> = Vec::new();
         let mut witness: Option<DecisionTemplate> = None;
         let mut boundary: Option<SeatDeparture> = None;
         let mut departed: Vec<(u32, PlayerId)> = Vec::new();
+        let mut departures: Vec<(PlayerId, SeatDeparture)> = Vec::new();
         for (_, seat) in order {
-            steps.push((boundary, Ranking::one(AnnouncementSubject::Seat(seat))));
+            steps.push((boundary, seat));
             let mut candidate = observed.clone();
             for decision in &mut candidate.decisions {
                 if let PinnedDecision::Targets { slot, targets } = decision {
-                    if let Some((_, seat)) = zero_parked.iter().find(|(zero, _)| *zero == &*slot) {
-                        *targets = vec![TargetPin::Scheduled(TargetSchedule::Constant(
-                            Ranking::one(AnnouncementSubject::Seat(*seat)),
-                        ))];
+                    let zero = zeros.iter().find(|zero| zero.slot == &*slot);
+                    if let Some(zero) = zero.filter(|zero| zero.lasts.is_none()) {
+                        let seat = |at: PlayerId| Ranking::one(AnnouncementSubject::Seat(at));
+                        if let [only] = zero.seats.as_slice() {
+                            *targets =
+                                vec![TargetPin::Scheduled(TargetSchedule::Constant(seat(*only)))];
+                        } else {
+                            let mut segments = vec![(0, seat(zero.seats[0]))];
+                            for link in zero.seats.windows(2) {
+                                let Some((_, left)) =
+                                    departures.iter().find(|(at, _)| *at == link[0])
+                                else {
+                                    break;
+                                };
+                                let at = slot_start(slot, Some(*left));
+                                segments.retain(|(start, _)| *start < at);
+                                segments.push((at, seat(link[1])));
+                            }
+                            *targets =
+                                vec![TargetPin::Scheduled(TargetSchedule::Piecewise(segments))];
+                        }
                     } else if charged.contains(slot) {
+                        let clip = zero.and_then(|zero| Some((zero.seats[0], zero.lasts?)));
                         let mut segments: Vec<(u32, Ranking)> = Vec::new();
-                        for (earlier, ranking) in &steps {
-                            let at = slot_start(slot, *earlier);
+                        let mut previous: Option<PlayerId> = None;
+                        for (earlier, at_seat) in &steps {
+                            let mut at = slot_start(slot, *earlier);
+                            if let Some((zero_seat, lasts)) = clip {
+                                if previous == Some(zero_seat) {
+                                    at = at.min(lasts);
+                                }
+                            }
+                            previous = Some(*at_seat);
                             segments.retain(|(start, _)| *start < at);
-                            segments.push((at, ranking.clone()));
+                            segments.push((at, Ranking::one(AnnouncementSubject::Seat(*at_seat))));
                         }
                         *targets = vec![TargetPin::Scheduled(TargetSchedule::Piecewise(segments))];
                     }
@@ -2469,6 +2560,7 @@ impl PeriodicDelta {
             }
             boundary = Some((crossing, rank));
             departed.push((crossing, seat));
+            departures.push((seat, (crossing, rank)));
             witness = Some(candidate);
         }
         witness
@@ -2493,7 +2585,7 @@ impl PeriodicDelta {
 ///
 /// ONE STATEMENT, shared by the cascade and by the witness construction, so the two cannot
 /// disagree about how far a crossing may be deferred.
-fn cascade_horizon(state: &GameState) -> u32 {
+pub(crate) fn cascade_horizon(state: &GameState) -> u32 {
     state
         .players
         .iter()
@@ -18139,6 +18231,7 @@ mod tests {
             growth: Default::default(),
             seat_life_charge_growth: Vec::new(),
             seat_takes: Vec::new(),
+            zero_lifetimes: Vec::new(),
         };
         let points = [seat_point(&slot, &[0, 1])];
         let observed = seat_schedule_declaration(&[(&slot, &[1])]);
@@ -18340,6 +18433,7 @@ mod tests {
             growth: Default::default(),
             seat_life_charge_growth: Vec::new(),
             seat_takes: Vec::new(),
+            zero_lifetimes: Vec::new(),
         };
         let points = [seat_point(&slot, &[0, 1])];
         let observed = seat_schedule_declaration(&[(&slot, &[1])]);
@@ -18425,6 +18519,7 @@ mod tests {
             growth: Default::default(),
             seat_life_charge_growth: Vec::new(),
             seat_takes: Vec::new(),
+            zero_lifetimes: Vec::new(),
         };
         assert_eq!(
             dipping.seat_life_charge,
@@ -18489,6 +18584,7 @@ mod tests {
                 growth: Default::default(),
                 seat_life_charge_growth: Vec::new(),
                 seat_takes: Vec::new(),
+                zero_lifetimes: Vec::new(),
             };
             let DeclaredLifeCharge { net, dip } = nth_charge(
                 &period,
@@ -18593,6 +18689,7 @@ mod tests {
             growth: Default::default(),
             seat_life_charge_growth: Vec::new(),
             seat_takes: Vec::new(),
+            zero_lifetimes: Vec::new(),
         };
         let swap_points = [seat_point(&s1, &[0, 1]), seat_point(&s2, &[0, 1])];
         let swap_observed = seat_schedule_declaration(&[(&s1, &[0]), (&s2, &[1])]);
@@ -18659,6 +18756,7 @@ mod tests {
             growth: Default::default(),
             seat_life_charge_growth: Vec::new(),
             seat_takes: Vec::new(),
+            zero_lifetimes: Vec::new(),
         };
         let away = seat_schedule_declaration(&[(&g, &[1])]);
         let kept = seat_schedule_declaration(&[(&g, &[0])]);
@@ -18706,6 +18804,7 @@ mod tests {
             growth: Default::default(),
             seat_life_charge_growth: Vec::new(),
             seat_takes: Vec::new(),
+            zero_lifetimes: Vec::new(),
         };
         assert_eq!(
             nth_charge(&even, p0, None, None, &[], 0, &board, ChargeBound::Ceiling),
@@ -18768,6 +18867,7 @@ mod tests {
             growth: Default::default(),
             seat_life_charge_growth: Vec::new(),
             seat_takes: Vec::new(),
+            zero_lifetimes: Vec::new(),
         };
         let landing_points = [seat_point(&s1, &[0, 1]), seat_point(&s2, &[1])];
         let both_on_p1 = seat_schedule_declaration(&[(&s1, &[1]), (&s2, &[1])]);
@@ -18820,6 +18920,7 @@ mod tests {
             growth: Default::default(),
             seat_life_charge_growth: Vec::new(),
             seat_takes: Vec::new(),
+            zero_lifetimes: Vec::new(),
         };
         assert_eq!(
             leaving.declarable_victims,
@@ -18870,6 +18971,7 @@ mod tests {
                 growth: Default::default(),
                 seat_life_charge_growth: Vec::new(),
                 seat_takes: Vec::new(),
+                zero_lifetimes: Vec::new(),
             }
         };
         let charge = |period: &PeriodicDelta| {
@@ -20550,6 +20652,7 @@ mod tests {
             growth: Default::default(),
             seat_life_charge_growth: Vec::new(),
             seat_takes: Vec::new(),
+            zero_lifetimes: Vec::new(),
         };
         let json = serde_json::to_string(&populated)
             .expect("a populated PeriodicDelta must serialize (engine-wasm PANICS otherwise)");
@@ -20770,6 +20873,7 @@ mod tests {
                 growth: Default::default(),
                 seat_life_charge_growth: Vec::new(),
                 seat_takes: Vec::new(),
+                zero_lifetimes: Vec::new(),
             })),
             shortened_by: None,
             published_declaration: None,
@@ -25290,6 +25394,7 @@ mod tests {
             growth: victim_life(&[(1, -step)]),
             seat_life_charge_growth: vec![(PlayerId(1), step)],
             seat_takes: Vec::new(),
+            zero_lifetimes: Vec::new(),
             ..PeriodicDelta::default()
         }
     }
@@ -25332,6 +25437,7 @@ mod tests {
             growth: ResourceVector::default(),
             seat_life_charge_growth: Vec::new(),
             seat_takes: Vec::new(),
+            zero_lifetimes: Vec::new(),
             ..growing_loss(9, 0)
         };
         assert_eq!(crossings(&growing_loss(9, 1)), (Some(13), Some(13)));
@@ -25406,6 +25512,7 @@ mod tests {
             growth: Default::default(),
             seat_life_charge_growth: Vec::new(),
             seat_takes: Vec::new(),
+            zero_lifetimes: Vec::new(),
         }
     }
 

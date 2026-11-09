@@ -1576,6 +1576,22 @@ fn replay_cycle_ordered(
             {
                 return Ok(performed);
             }
+            // CR 616.1: an answer whose prompt never comes within the step is not a choice the
+            // shortcut describes; it stays pending and answers a later prompt. CR 117.4: passing
+            // on an empty stack ends the step, so only a period inside one step goes past it.
+            let next = match &pending {
+                Some(range)
+                    if end.reach == PeriodReach::InStep
+                        && replay.stack.is_empty()
+                        && range.end < items.len()
+                        && range
+                            .clone()
+                            .all(|at| done[at] || items[at].mandatory_answer) =>
+                {
+                    Some(range.end)
+                }
+                _ => next,
+            };
             let Some(at) = next else {
                 pass(replay, player, &mut performed, events)?;
                 continue;
@@ -2548,7 +2564,7 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
             .then(|| CleanupPair::measure(&frames, holder))
             .flatten();
             let takes = if grows {
-                Vec::new()
+                (Vec::new(), Vec::new())
             } else {
                 measure_seat_takes(frame, holder, &s_n, &items, &end, &frames, &choices)
             };
@@ -3434,9 +3450,9 @@ pub(crate) fn perform_declared_on(
 }
 
 /// CR 119.3 + CR 601.2c + CR 800.4a: per slot that took life at an opponent, the life one
-/// resolution takes at its recorded aim and at each reachable living opponent where that is at most
-/// the recorded take, replayed from the offer frame with the slot declared there, and again with
-/// each set of opponents that leaves one in the game eliminated first.
+/// resolution takes at its recorded aim and at each reachable living opponent, replayed from the
+/// offer frame with the slot declared there, and again with each set of opponents that leaves one
+/// in the game eliminated first, and how many repetitions each offer-frame zero lasts.
 fn measure_seat_takes(
     frame: &GameState,
     holder: PlayerId,
@@ -3445,7 +3461,7 @@ fn measure_seat_takes(
     end: &FrameEnd,
     frames: &[GameState],
     choices: &[PinnedDecision],
-) -> Vec<(BTreeSet<PlayerId>, DecisionSlot, PlayerId, i64)> {
+) -> crate::analysis::resource::MeasuredTakes {
     use crate::analysis::decision_template::{
         AnnouncementSubject, DecisionGroupKey, DecisionKind, IterationCount, Ranking, ReplayMode,
         TargetSchedule,
@@ -3468,7 +3484,7 @@ fn measure_seat_takes(
         )
     };
     let Some(recorded) = charges(frames) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let record: Vec<(DecisionSlot, PlayerId, i64)> = recorded
         .iter()
@@ -3477,6 +3493,28 @@ fn measure_seat_takes(
             Some((charge.slot.clone(), aim, charge.magnitude))
         })
         .collect();
+    let declared_at = |seat: PlayerId, slots: &[&DecisionSlot], count: u32| DecisionTemplate {
+        owner: holder,
+        decisions: choices
+            .iter()
+            .cloned()
+            .map(|decision| match decision {
+                PinnedDecision::Targets { slot, .. } if slots.contains(&&slot) => {
+                    PinnedDecision::Targets {
+                        slot,
+                        targets: vec![TargetPin::Scheduled(TargetSchedule::Constant(
+                            Ranking::one(AnnouncementSubject::Seat(seat)),
+                        ))],
+                    }
+                }
+                other => other,
+            })
+            .collect(),
+        replay: ReplayMode::Scheduled {
+            count: IterationCount::Fixed(count),
+        },
+        key: DecisionGroupKey::from_sources(&[], DecisionKind::LoopChoice),
+    };
     let mut takes: Vec<(BTreeSet<PlayerId>, DecisionSlot, PlayerId, i64)> = record
         .iter()
         .map(|(slot, aim, took)| (BTreeSet::new(), slot.clone(), *aim, *took))
@@ -3510,9 +3548,8 @@ fn measure_seat_takes(
         {
             let probes: Vec<&(DecisionSlot, PlayerId, i64)> = record
                 .iter()
-                .filter(|(slot, aim, took)| {
-                    *took > 0
-                        && (!gone.is_empty() || *aim != seat)
+                .filter(|(slot, aim, _)| {
+                    (!gone.is_empty() || *aim != seat)
                         && recorded
                             .iter()
                             .any(|charge| charge.slot == *slot && charge.reaches.contains(&seat))
@@ -3521,30 +3558,8 @@ fn measure_seat_takes(
             if probes.is_empty() {
                 continue;
             }
-            let template = DecisionTemplate {
-                owner: holder,
-                decisions: choices
-                    .iter()
-                    .cloned()
-                    .map(|decision| match decision {
-                        PinnedDecision::Targets { slot, .. }
-                            if probes.iter().any(|(probe, ..)| *probe == slot) =>
-                        {
-                            PinnedDecision::Targets {
-                                slot,
-                                targets: vec![TargetPin::Scheduled(TargetSchedule::Constant(
-                                    Ranking::one(AnnouncementSubject::Seat(seat)),
-                                ))],
-                            }
-                        }
-                        other => other,
-                    })
-                    .collect(),
-                replay: ReplayMode::Scheduled {
-                    count: IterationCount::Fixed(2),
-                },
-                key: DecisionGroupKey::from_sources(&[], DecisionKind::LoopChoice),
-            };
+            let probed: Vec<&DecisionSlot> = probes.iter().map(|(slot, ..)| slot).collect();
+            let template = declared_at(seat, &probed, 2);
             let mut replay = start.clone();
             let mut measured = Vec::new();
             let came_round = end.repeat(
@@ -3567,20 +3582,52 @@ fn measure_seat_takes(
                 continue;
             };
             takes.extend(at.into_iter().filter_map(|charge| {
-                let (_, _, record_take) =
-                    probes.iter().find(|(probe, ..)| *probe == charge.slot)?;
-                // CR 800.4a: a take above the record's may come from a permanent whose controller
-                // leaves first, so it is not published.
-                (charge.aimed_at == Some(seat) && charge.magnitude <= *record_take).then_some((
-                    gone.clone(),
-                    charge.slot,
-                    seat,
-                    charge.magnitude,
-                ))
+                (charge.aimed_at == Some(seat)
+                    && probes.iter().any(|(probe, ..)| *probe == charge.slot))
+                .then_some((gone.clone(), charge.slot, seat, charge.magnitude))
             }));
         }
     }
-    takes
+    // CR 704.5g + CR 732.2a: a zero measured at a seat lasts as many repetitions as the period
+    // still comes round with every slot measured there declared there, where it stops with no
+    // seat having left; one that outlasts a seat is read as lasting.
+    let cap = crate::analysis::resource::cascade_horizon(frame);
+    let zero_seats: BTreeSet<PlayerId> = takes
+        .iter()
+        .filter(|(gone, .., took)| gone.is_empty() && *took == 0)
+        .map(|(_, _, seat, _)| *seat)
+        .collect();
+    let mut lifetimes = Vec::new();
+    for seat in zero_seats {
+        let slots: Vec<&DecisionSlot> = takes
+            .iter()
+            .filter(|(gone, _, at, _)| gone.is_empty() && *at == seat)
+            .map(|(_, slot, ..)| slot)
+            .collect();
+        let template = declared_at(seat, &slots, cap);
+        let mut replay = s_n.clone();
+        let mut came = 0u32;
+        while came < cap
+            && end.repeat(
+                &mut replay,
+                items,
+                &mut Vec::new(),
+                None,
+                &mut Vec::new(),
+                Some((&template, came)),
+            ) == CycleEnd::CameRound
+        {
+            came += 1;
+        }
+        let left = replay
+            .players
+            .iter()
+            .any(|p| p.is_eliminated && opponents.contains(&p.id));
+        if came < cap && !left {
+            lifetimes.push((seat, came));
+        }
+    }
+    (takes, lifetimes)
 }
 
 /// CR 732.2a: performs the offer's own declaration and its suggestion — of two witnesses, the one

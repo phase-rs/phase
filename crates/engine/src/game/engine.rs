@@ -7836,8 +7836,9 @@ fn try_offer_object_growth_shortcut(
 /// period — `frames` its priority frames in order, `choices` the answers it recorded,
 /// `cleanup` the hand a turn-cycle period carries into each cleanup (CR 514.1), and `growth`
 /// what each repetition adds to the one before it (`resource::repetition_growth`), in which case
-/// `frames` are the offer's first repetition's; `seat_takes` is what the confirmer measured each
-/// charged slot taking per seat and departed set (`PeriodicDelta::seat_takes`).
+/// `frames` are the offer's first repetition's; `measured` is what the confirmer measured each
+/// slot taking per seat and departed set, and each offer-frame zero's lifetime
+/// (`PeriodicDelta::{seat_takes, zero_lifetimes}`).
 pub(crate) fn replay_bounded_offer(
     state: &GameState,
     caster: PlayerId,
@@ -7848,14 +7849,10 @@ pub(crate) fn replay_bounded_offer(
         crate::analysis::resource::ResourceVector,
         Vec<(PlayerId, i64)>,
     ),
-    seat_takes: Vec<(
-        BTreeSet<PlayerId>,
-        crate::analysis::decision_template::DecisionSlot,
-        PlayerId,
-        i64,
-    )>,
+    measured: crate::analysis::resource::MeasuredTakes,
 ) -> Result<Option<super::period_confirm::BoundedOfferParts>, OfferRefusal> {
     let (growth, seat_life_charge_growth) = growth;
+    let (seat_takes, zero_lifetimes) = measured;
     let frames: Vec<&GameState> = frames.iter().collect();
     // CR 732.1b: fewer than two frames is a period that did not come round.
     let (&current, window) = frames.split_last().ok_or(OfferRefusal::NoRecurrence)?;
@@ -7872,6 +7869,7 @@ pub(crate) fn replay_bounded_offer(
         growth,
         seat_life_charge_growth,
         seat_takes,
+        zero_lifetimes,
     };
     // CR 732.2a: the points are the game choices the replay answered.
     let points = pinned_decisions_to_points(choices, state, caster)
@@ -8020,6 +8018,7 @@ pub(crate) fn counted_offer(
                 growth: Default::default(),
                 seat_life_charge_growth: Vec::new(),
                 seat_takes: Vec::new(),
+                zero_lifetimes: Vec::new(),
             },
         )),
     };
