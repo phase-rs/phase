@@ -933,19 +933,15 @@ export class ServerDraftAdapter implements EngineAdapter {
       this.startPing();
 
       sourceSocket.onmessage = (event) => {
+        const message: { type: string; data?: unknown; command_id?: unknown } = JSON.parse(event.data);
         // Preserve uncorrelated draft replies from sent older attachments, but
         // game delivery belongs only to the current socket generation.
         if (this.ws !== sourceSocket) {
-          const message = JSON.parse(event.data as string) as {
-            type?: string;
-            data?: unknown;
-            command_id?: unknown;
-          };
           if (message.type === "StateUpdate") this.settleRetiredCompletion(sourceSocket, message);
           if (message.type === "GameStarted" || message.type === "StateUpdate"
             || message.type === "DraftMatchStart") return;
         }
-        return this.handleMessage(JSON.parse(event.data as string), initOwner, sourceSocket);
+        return this.handleMessage(message, initOwner, sourceSocket);
       };
       sourceSocket.onerror = () => {
         const err = new AdapterError("WS_ERROR", "WebSocket connection failed", true);

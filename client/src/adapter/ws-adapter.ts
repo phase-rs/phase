@@ -56,7 +56,6 @@ import {
   prepareStateCodecSession as prepareBoundedStateCodecSession,
   StateCodecAttachment,
   type StateCodecBootstrapBinding,
-  type StateCodecFailureReason,
   type StateCodecJoinCredentials,
   type StateCodecName,
   type StateCodecSessionProvider,
@@ -1657,7 +1656,6 @@ type InitialFallback =
       readonly kind: "reconnecting";
       readonly source: InitialFallbackSource;
       readonly credentials: StateCodecJoinCredentials;
-      readonly originatingReason: StateCodecFailureReason;
       readonly deadlineTimer: ReturnType<typeof setTimeout>;
       readonly pregameReturn: "none" | "gameCreated";
     }
@@ -3108,7 +3106,6 @@ export class WebSocketAdapter implements EngineAdapter {
       kind: "reconnecting",
       source,
       credentials,
-      originatingReason: failure.reason,
       deadlineTimer,
       pregameReturn: "none",
     };
