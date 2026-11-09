@@ -5103,16 +5103,16 @@ fn migrate_legacy_change_zone_performers(
 }
 
 /// Recover only the role the old mass-Exile writer overloaded. A saved
-/// continuation and the already-resolving stack entry are immutable resolution
-/// authority; live objects, pending stack entries and frame proximity are not.
-/// Source equality binds the resolving entry only when no second ChangeZone
-/// family for that source is parked. A continuation additionally needs a
-/// matching parent kind, producer occurrence or logical-group marker; a bare
-/// same-source tail is not proof. Every applicable marker and authority must
-/// agree. Older saves without that proof are refused, not losslessly guessed.
+/// continuation must carry its actual execution controller and a matching
+/// parent kind, producer occurrence or logical-group marker as well as source.
+/// Every applicable marker and bound continuation must agree; a bare same-source
+/// tail, live object, queued entry or frame proximity establishes no authority.
+/// The retained resolving entry and its baked ability also establish none:
+/// `resolve_top` saves both before rebinding the executable spell to its actual
+/// controller. Their agreement can preserve only the original caster. Older
+/// saves without independent proof are refused, never losslessly guessed.
 fn recover_legacy_change_zone_controllers(
     frames: &mut ResolutionStack,
-    resolving: Option<&crate::types::game_state::StackEntry>,
     mut replacement: Option<&mut crate::types::game_state::PendingReplacement>,
     migrations: &mut [LegacyChangeZoneControllerMigration],
 ) -> Result<(), String> {
@@ -5146,15 +5146,6 @@ fn recover_legacy_change_zone_controllers(
             controller = Some(candidate);
             Ok(())
         };
-        if let Some(entry) = resolving.filter(|entry| entry.source_id == pending.source_id) {
-            if let Some(ability) = entry
-                .ability()
-                .filter(|ability| ability.source_id == pending.source_id)
-            {
-                observe(entry.controller)?;
-                observe(ability.controller)?;
-            }
-        }
         for continuation in frames.ability_continuations() {
             if continuation.player_scope_queue_end
                 || continuation.chain.source_id != pending.source_id
@@ -5525,8 +5516,12 @@ impl ResolutionStateWire {
     /// `migrate_legacy_change_zone_member_entries`; the v1 reader handles its
     /// top-level carrier. Pre-v12 carriers preserve their recorded actor before
     /// typed decoding. A historical mass exile then recovers its independent
-    /// controller only from unambiguous, source-bound immutable resolution
-    /// context; absent/conflicting authority is refused. This admission never
+    /// controller only from an unambiguously source-and-family-bound executing
+    /// continuation; absent/conflicting authority is refused. The retained
+    /// announcement entry is not resolution-start controller evidence. Old
+    /// missing-actor mass exiles with only an unbound tail or retained announcement
+    /// entry therefore refuse, even when its controller fields agree. Explicit
+    /// actors and current carriers keep their independent roles. Admission never
     /// decides whether begun resolution continues after a player leaves.
     ///
     /// Every version then passes the onset admission (`admit_entry_onset_record`, CR 611.2e): a
@@ -5850,7 +5845,6 @@ impl ResolutionStateWire {
                 }
                 recover_legacy_change_zone_controllers(
                     &mut legacy.resolution_stack,
-                    legacy.resolving_stack_entry.as_ref(),
                     legacy.pending_replacement.as_mut(),
                     &mut legacy_change_zone_controllers,
                 )?;
@@ -5911,7 +5905,6 @@ impl ResolutionStateWire {
                 let mut state = GameStateDecode::materialize_prepared(state_value)?;
                 recover_legacy_change_zone_controllers(
                     &mut frames,
-                    state.resolving_stack_entry.as_ref(),
                     state.pending_replacement.as_mut(),
                     &mut legacy_change_zone_controllers,
                 )?;
@@ -6943,9 +6936,10 @@ mod tests {
     use crate::game::scenario::{GameRunner, GameScenario, P0};
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, CardSelectionMode, Chooser, CoinFlipRun, CopyChooseScope,
-        Effect, EffectKind, ForEachCategoryAction, IterationCategory, PendingForwardedZoneResult,
-        PerPlayerScope, PostReplacementContinuation, QuantityExpr, RepeatContinuation,
-        ReplacementDefinition, ReturnResultId, SpellContext, TargetFilter, TypedFilter, ZoneOwner,
+        Duration, Effect, EffectKind, ForEachCategoryAction, IterationCategory,
+        PendingForwardedZoneResult, PerPlayerScope, PlayerScope, PostReplacementContinuation,
+        QuantityExpr, RepeatContinuation, ReplacementDefinition, ReturnResultId, SpellContext,
+        TargetFilter, TypedFilter, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::game_state::{
@@ -7577,6 +7571,8 @@ mod tests {
         }))
     }
 
+    // Finite constructed carrier contracts, not claims that a historical
+    // Mudhole writer recorded these bindings.
     #[test]
     fn legacy_mass_exile_continuation_authority_requires_matching_family_binding() {
         for binding in [
@@ -7588,6 +7584,7 @@ mod tests {
             "occurrence",
             "wrong_occurrence",
             "conflicting_markers",
+            "conflicting_controllers",
         ] {
             let ResolutionFrame::ChangeZone(mut owner) = change_zone_frame(55) else {
                 unreachable!("the fixture constructs a ChangeZone owner")
@@ -7604,7 +7601,9 @@ mod tests {
             };
             match binding {
                 "unbound" => {}
-                "parent_kind" => continuation.pending.parent_kind = Some(EffectKind::ChangeZoneAll),
+                "parent_kind" | "conflicting_controllers" => {
+                    continuation.pending.parent_kind = Some(EffectKind::ChangeZoneAll);
+                }
                 "wrong_parent" => continuation.pending.parent_kind = Some(EffectKind::Draw),
                 "group" | "wrong_group" | "conflicting_markers" => {
                     continuation
@@ -7637,6 +7636,11 @@ mod tests {
                 _ => unreachable!(),
             }
             let mut frames = ResolutionStack::default();
+            if binding == "conflicting_controllers" {
+                let mut competing = continuation.clone();
+                competing.pending.chain.controller = PlayerId(2);
+                frames.push_inner(ResolutionFrame::AbilityContinuation(competing));
+            }
             frames.push_inner(ResolutionFrame::AbilityContinuation(continuation));
             frames.push_inner(ResolutionFrame::ChangeZone(owner));
             let mut migrations = [LegacyChangeZoneControllerMigration {
@@ -7644,7 +7648,7 @@ mod tests {
                 controller: None,
             }];
             let recovered =
-                recover_legacy_change_zone_controllers(&mut frames, None, None, &mut migrations);
+                recover_legacy_change_zone_controllers(&mut frames, None, &mut migrations);
             if matches!(binding, "parent_kind" | "group" | "occurrence") {
                 recovered.unwrap_or_else(|error| panic!("{binding}: {error}"));
                 let ResolutionFrame::ChangeZone(owner) = frames.last().unwrap() else {
@@ -7660,6 +7664,76 @@ mod tests {
                     "{binding}"
                 );
             }
+        }
+    }
+
+    /// This is deliberately constructed wire with an explicit family binding,
+    /// not a projection pretending that the actual old Mudhole writer saved one.
+    #[test]
+    fn legacy_mass_exile_constructed_bound_wire_preserves_roles_across_versions() {
+        let duration = Some(Duration::UntilNextTurnOf {
+            player: PlayerScope::Controller,
+        });
+        for version in 1..=11 {
+            let mut state = GameState::new_two_player(55);
+            state.waiting_for = WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+            let ResolutionFrame::ChangeZone(mut owner) = change_zone_frame(55) else {
+                unreachable!("the fixture constructs a ChangeZone owner")
+            };
+            let pending = owner.pending.as_mut().unwrap();
+            pending.controller = PlayerId(1);
+            pending.performed_by = PlayerId(1);
+            pending.destination = Zone::Exile;
+            pending.effect_kind = EffectKind::ChangeZoneAll;
+            pending.duration = duration.clone();
+            state.next_logical_zone_change_group_id =
+                pending.logical_zone_change_group.logical_group_id.0 + 1;
+            let ResolutionFrame::AbilityContinuation(mut continuation) = continuation_frame(55)
+            else {
+                unreachable!("the fixture constructs a continuation")
+            };
+            continuation.pending.parent_kind = Some(EffectKind::ChangeZoneAll);
+            let mut frames = ResolutionStack::default();
+            frames.push_inner(ResolutionFrame::AbilityContinuation(continuation));
+            frames.push_inner(ResolutionFrame::ChangeZone(owner));
+            let mut wire = v2_fixture_with_frames(state, frames);
+            wire["resolution_state_version"] = Value::from(version);
+            let frames = wire["resolution_frames"]["frames"].as_array_mut().unwrap();
+            let carrier = frames
+                .iter_mut()
+                .find(|frame| frame["type"] == "ChangeZone")
+                .unwrap()["data"]["pending"]
+                .as_object_mut()
+                .unwrap();
+            carrier.remove("performed_by");
+            if version <= 6 {
+                carrier.insert("enter_tapped".to_string(), Value::Bool(false));
+                carrier.insert("enters_attacking".to_string(), Value::Bool(false));
+            }
+            if version == 1 {
+                let object = wire.as_object_mut().unwrap();
+                let frames = object.remove("resolution_frames").unwrap();
+                for frame in frames["frames"].as_array().unwrap() {
+                    let field = match frame["type"].as_str().unwrap() {
+                        "ChangeZone" => "pending_change_zone_iteration",
+                        "AbilityContinuation" => "pending_continuation",
+                        other => panic!("unexpected constructed frame: {other}"),
+                    };
+                    object.insert(field.to_string(), frame["data"]["pending"].clone());
+                }
+            }
+            let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+                .unwrap_or_else(|error| panic!("constructed bound v{version}: {error}"))
+                .into_game_state();
+            let pending = restored
+                .active_change_zone_frame()
+                .and_then(|frame| frame.pending.as_ref())
+                .expect("the constructed family remains parked");
+            assert_eq!(pending.controller, PlayerId(0), "v{version}");
+            assert_eq!(pending.performed_by, PlayerId(1), "v{version}");
+            assert_eq!(pending.duration, duration, "v{version}");
         }
     }
 

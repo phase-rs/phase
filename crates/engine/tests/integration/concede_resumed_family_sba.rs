@@ -34,13 +34,7 @@ fn move_count(events: &[GameEvent], object: ObjectId, from: Zone, to: Zone) -> u
         .count()
 }
 
-/// CR 107.3g: Ballista's X is zero off the stack. CR 704.5f + CR 704.3:
-/// the resulting 0/0 dies before the resumed ability's triggers are ordered,
-/// not on the next action. CR 603.6c: a stolen Thragtusk leaving with its
-/// owner supplies an independently owned departure-prefix trigger, which
-/// must not be collected again by the resumed segment's convergence pass.
-#[test]
-fn liliana_vess_concession_resumes_family_through_sba_before_triggers() {
+fn liliana_clone_ballista_scenario() -> (GameScenario, [ObjectId; 5]) {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
     // Nine loyalty is reachable from her printed five via earlier +1 uses;
@@ -80,6 +74,18 @@ fn liliana_vess_concession_resumes_family_through_sba_before_triggers() {
         })
         .from_oracle_text(WALKING_BALLISTA)
         .id();
+    (scenario, [liliana, warden, thragtusk, clone, ballista])
+}
+
+/// CR 107.3g: Ballista's X is zero off the stack. CR 704.5f + CR 704.3:
+/// the resulting 0/0 dies before the resumed ability's triggers are ordered,
+/// not on the next action. CR 603.6c: a stolen Thragtusk leaving with its
+/// owner supplies an independently owned departure-prefix trigger, which
+/// must not be collected again by the resumed segment's convergence pass.
+#[test]
+fn liliana_vess_concession_resumes_family_through_sba_before_triggers() {
+    let (scenario, [liliana, warden, thragtusk, clone, ballista]) =
+        liliana_clone_ballista_scenario();
 
     let mut runner = scenario.build();
     let outcome = runner.activate(liliana, 2).resolve();
@@ -208,4 +214,102 @@ fn liliana_vess_concession_resumes_family_through_sba_before_triggers() {
         "the complete batch still awaits ordering"
     );
     assert_eq!(runner.life(P0), 20);
+}
+
+/// CR 800.4b: a surviving owner's card cannot enter under the departed
+/// resolving controller. CR 117.2e + CR 608.2m: retiring that exact unanswered
+/// delivery must finish the begun family before anybody receives priority.
+#[test]
+fn liliana_vess_departed_clone_chooser_completes_family_before_priority() {
+    let (scenario, [liliana, warden, thragtusk, clone, ballista]) =
+        liliana_clone_ballista_scenario();
+    let mut runner = scenario.build();
+    let outcome = runner.activate(liliana, 2).resolve();
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::ReplacementChoice {
+                player: P0,
+                kind: ReplacementChoiceKind::OptionalBranch,
+                ..
+            }
+        ),
+        "reach: the resolving controller owes Clone's actual optional replacement"
+    );
+    assert_eq!(runner.state().objects[&clone].owner, P1);
+    assert_eq!(runner.state().objects[&ballista].owner, P2);
+    assert_eq!(runner.state().objects[&clone].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&ballista].zone, Zone::Graveyard);
+
+    let result = runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("the latched Clone chooser concedes through the public action");
+
+    // Inspect the public action's immediate result, with no follow-up answer,
+    // priority action, manual SBA pass, or private continuation drain.
+    let state = runner.state();
+    assert!(state.players[P0.0 as usize].is_eliminated);
+    assert!(!state.players[P1.0 as usize].is_eliminated);
+    assert!(!state.players[P2.0 as usize].is_eliminated);
+    for (object, owner) in [(clone, P1), (ballista, P2)] {
+        assert_eq!(state.objects[&object].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&object].owner, owner);
+        assert_eq!(state.objects[&object].controller, owner);
+        assert!(state.players[owner.0 as usize].graveyard.contains(&object));
+        assert!(!state.battlefield.contains(&object));
+        assert_eq!(
+            move_count(&result.events, object, Zone::Graveyard, Zone::Battlefield),
+            0,
+            "CR 800.4b does not transfer the intended destination controller"
+        );
+        assert_eq!(
+            move_count(&result.events, object, Zone::Graveyard, Zone::Exile),
+            0,
+            "the surviving owners' cards do not leave with the chooser"
+        );
+    }
+    assert!(state.pending_replacement.is_none());
+    assert!(state.resolution_stack.is_empty());
+    assert!(state.resolving_stack_entry.is_none());
+    assert!(state.stack.is_empty());
+    assert_eq!(result.waiting_for, state.waiting_for);
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::Priority { player: P1 | P2 }
+    ));
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved { source_id, .. } if *source_id == liliana
+            ))
+            .count(),
+        1,
+        "the begun family completes exactly once even though its controller left"
+    );
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::PlayerEliminated { player_id: P0 }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        move_count(&result.events, liliana, Zone::Battlefield, Zone::Exile),
+        1
+    );
+    assert_eq!(
+        move_count(&result.events, warden, Zone::Battlefield, Zone::Exile),
+        1
+    );
+    assert_eq!(
+        move_count(&result.events, thragtusk, Zone::Battlefield, Zone::Exile),
+        1
+    );
+    assert_eq!(state.objects[&thragtusk].owner, P1);
+    assert_eq!(runner.life(P1), 20);
+    assert_eq!(runner.life(P2), 20);
 }

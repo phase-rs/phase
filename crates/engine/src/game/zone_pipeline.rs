@@ -813,6 +813,81 @@ pub(crate) fn zone_move_is_primitive_noop(
         || (object.zone == Zone::Battlefield && to == Zone::Battlefield)
 }
 
+/// CR 800.4b: an object that would enter under a departed player's control
+/// remains in its current zone. This is independent of the effect's controller,
+/// the card's owner, and the player performing its move.
+fn entry_controller_has_left(
+    state: &GameState,
+    object: &GameObject,
+    to: Zone,
+    controller_override: Option<PlayerId>,
+) -> bool {
+    to == Zone::Battlefield
+        && !crate::game::players::is_alive(state, controller_override.unwrap_or(object.controller))
+}
+
+/// CR 800.4b + CR 616.1: finish only the active ChangeZone owner's exact parked
+/// entry when its latched chooser and intended entry controller have left.
+/// The owner retains the `Remained` result for its ordinary resume driver;
+/// neither a child frame nor a replacement-cost payer is ours to retire.
+pub(crate) fn terminalize_paused_entry_for_departed_controller(
+    state: &mut GameState,
+    departed: PlayerId,
+) -> bool {
+    if state.waiting_for.acting_player() != Some(departed) || state.replacement_may_cost_paused {
+        return false;
+    }
+    let paused = state
+        .active_change_zone_frame()
+        .and_then(|frame| frame.pending.as_ref())
+        .and_then(|pending| pending.paused_current.as_ref());
+    let Some(paused) = paused else {
+        return false;
+    };
+    if paused.terminal_completion.is_some() {
+        return false;
+    }
+    let Some(replacement) = state.pending_replacement.as_ref() else {
+        return false;
+    };
+    if !replacement.parks_delivery(&paused.expected_event) {
+        return false;
+    }
+    let ProposedEvent::ZoneChange {
+        object_id,
+        to,
+        controller_override,
+        ..
+    } = &replacement.proposed
+    else {
+        return false;
+    };
+    let Some(object) = state.objects.get(object_id) else {
+        return false;
+    };
+    if ObjectIncarnationRef::from_object(object) != paused.member
+        || controller_override.unwrap_or(object.controller) != departed
+        || !entry_controller_has_left(state, object, *to, *controller_override)
+    {
+        return false;
+    }
+    let member = paused.member;
+    let expected_event = paused.expected_event.clone();
+    // No ZoneChanged occurrence is manufactured: the entry did not happen.
+    // The shared capture boundary, not field removal, terminalizes the member.
+    assert!(state.capture_paused_zone_change_delivery(
+        member,
+        &expected_event,
+        &[],
+        ZoneMoveCompletion::Remained,
+    ));
+    state
+        .pending_replacement
+        .take()
+        .expect("the terminalized delivery owns its parked replacement");
+    true
+}
+
 pub(crate) fn move_object_with_terminal(
     state: &mut GameState,
     req: ZoneMoveRequest,
@@ -835,6 +910,9 @@ pub(crate) fn move_object_with_terminal(
     // effect, so testing them up front cannot change observable behavior — it
     // only avoids spending a one-shot replacement on a move that never happens.
     if zone_move_is_primitive_noop(state, object, req.to) {
+        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+    }
+    if entry_controller_has_left(state, object, req.to, req.mods.controller_override) {
         return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
     }
 
@@ -3787,6 +3865,13 @@ pub(crate) fn deliver_replaced_zone_change(
         ..
     } = event
     {
+        if state
+            .objects
+            .get(&object_id)
+            .is_some_and(|object| entry_controller_has_left(state, object, to, ctrl_override))
+        {
+            return ZoneDeliveryResult::Done;
+        }
         if let Some(entry) = state.liminal_entries.get_mut(&object_id) {
             entry.replacement_applied = applied.clone();
         }
@@ -4750,6 +4835,9 @@ fn execute_zone_move_with_applied_terminal(
     // replacement for an object that never left. Remaining in place with no
     // event is exactly what CR 111.8 and CR 400.6/CR 603.6d say.
     if zone_move_is_primitive_noop(&*state, object, dest_zone) {
+        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+    }
+    if entry_controller_has_left(state, object, dest_zone, controller_override) {
         return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
     }
     // CR 712.14a: A single-faced object instructed to enter transformed

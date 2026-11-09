@@ -290,9 +290,9 @@ pub(crate) fn eliminate_players(
         )
     });
 
-    // CR 800.4a + CR 608.2c: retain the exact family whose current member is
-    // parked. If that member leaves, only this surviving family may resume
-    // after the departure sweep; a new child or unrelated frame is not ours.
+    // CR 800.4a + CR 608.2c: retain the exact parked family and delivery before
+    // teardown. A departed member is removed; a surviving member whose entry
+    // controller leaves instead completes as Remained through the zone boundary.
     let interrupted_change_zone = state
         .active_change_zone_frame()
         .and_then(|frame| frame.pending.as_ref())
@@ -305,24 +305,38 @@ pub(crate) fn eliminate_players(
             })
         })
         .map(|pending| {
+            let paused = pending
+                .paused_current
+                .as_ref()
+                .expect("the interrupted family has a paused delivery");
             (
                 pending.logical_zone_change_group.logical_group_id,
                 pending.controller,
+                paused.member,
+                paused.expected_event.clone(),
             )
         });
-    let canceled_change_zone_is_resumable = |state: &GameState| {
-        interrupted_change_zone.is_some_and(|(group, controller)| {
-            state
-                .active_change_zone_frame()
-                .and_then(|frame| frame.pending.as_ref())
-                .is_some_and(|pending| {
-                    pending.logical_zone_change_group.logical_group_id == group
-                        && pending.controller == controller
-                        && pending.paused_current.is_none()
+    let canceled_change_zone_is_resumable =
+        |state: &GameState| {
+            interrupted_change_zone
+                .as_ref()
+                .is_some_and(|(group, controller, member, proposal)| {
+                    state
+                        .active_change_zone_frame()
+                        .and_then(|frame| frame.pending.as_ref())
+                        .is_some_and(|pending| {
+                            pending.logical_zone_change_group.logical_group_id == *group
+                                && pending.controller == *controller
+                                && pending.paused_current.as_ref().is_none_or(|paused| {
+                                    paused.captures(*member, proposal)
+                                && paused.terminal_completion
+                                    == Some(crate::types::game_state::ZoneMoveCompletion::Remained)
+                                })
+                        })
                 })
-        }) && state.pending_replacement.is_none()
-            && matches!(state.waiting_for, WaitingFor::Priority { .. })
-    };
+                && state.pending_replacement.is_none()
+                && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        };
 
     let interrupted_ordinary_search = state
         .pending_scoped_library_search
@@ -1465,6 +1479,14 @@ fn do_eliminate(
     // cast-abandonment teardown can replace its prompt with priority.
     let leaving_is_latched_chooser = state.waiting_for.acting_player() == Some(player);
 
+    // CR 800.4b + CR 117.2e: a surviving owner's parked entry cannot enter
+    // under this departed controller. Capture and terminalize its exact
+    // delivery before any teardown can consume the replacement record or
+    // replace its latched prompt. The begun family stays for its ordinary
+    // resume/convergence boundary after every departure has settled.
+    let terminalized_departed_entry =
+        super::zone_pipeline::terminalize_paused_entry_for_departed_controller(state, player);
+
     abandon_source_bound_resolution_prompt(state, player, leaving_set, events);
     retire_pending_zone_change_contexts_owned_by(state, player);
 
@@ -1626,10 +1648,11 @@ fn do_eliminate(
         grants.retain(|(_, grant)| grant.grantee != player && grant.controller != player);
     }
 
-    // CR 800.4a + CR 616.1 + CR 704.4: Abandon a parked replacement choice this
-    // leaving player was answering. A CR 616.1 replacement-order (or optional
-    // MayCost / MayCost sub-choice re-park) is held in `state.pending_replacement`
-    // and resumed ONLY via `(WaitingFor::ReplacementChoice, ChooseReplacement)`
+    // CR 800.4a + CR 616.1 + CR 704.4: abandon a parked replacement choice this
+    // leaving player was answering unless its exact logical entry has already
+    // completed as Remained through the shared zone boundary above. A CR 616.1
+    // replacement-order (or optional MayCost sub-choice) is otherwise held in
+    // `state.pending_replacement` and resumed ONLY via ChooseReplacement
     // (engine.rs) or that sub-choice's own resolution — both re-enter
     // `continue_replacement`. If the player who must answer leaves the game, the
     // choice is unanswerable: the post-loop reconcile rewrite advances
@@ -1652,15 +1675,12 @@ fn do_eliminate(
     // the stack-owned Connive re-entry). The resume drain also touches OTHER resolution
     // slots on a normal answer (e.g. `pending_phase_transition_progress`,
     // `pending_team_draw_step`, `pending_continuation`); those are intentionally
-    // NOT cleared here. Stranding some of them is its own PRE-EXISTING soft-lock
-    // (PPT gates `auto_advance`; `pending_continuation` gates the deferred-trigger
-    // drain) that predates this PR and is NOT the reported regression; repairing
-    // them correctly requires resuming the interrupted APNAP queue for the
-    // remaining players (not field-nulling), tracked as a separate follow-up. This
-    // fix deliberately addresses only the CR 704.4 SBA-freeze introduced by the
-    // `pending_replacement` guard. A player-scope sacrifice batch parked on this
-    // choice is the exception: `settle_player_scope_sacrifice_after_departure`
-    // resumes it for the remaining players once every departure has settled.
+    // NOT cleared here. An active ChangeZone entry that must remain under
+    // CR 800.4b was terminalized before teardown and keeps its begun family;
+    // do not consume any new child replacement that later teardown installed.
+    // A player-scope sacrifice batch similarly resumes for the remaining
+    // players through `settle_player_scope_sacrifice_after_departure` once
+    // every departure has settled.
     // CR 800.4a: Tear down choices and continuations owned by the leaving player.
     // CR 616.1: SearchFound owns an outer per-card batch, and a replacement-
     // selected zone move may own a nested batch completion. The
@@ -1684,7 +1704,10 @@ fn do_eliminate(
                 .expect("eliminated search batch must own the active frame");
         }
     }
-    if state.pending_replacement.is_some() && leaving_is_latched_chooser {
+    if !terminalized_departed_entry
+        && state.pending_replacement.is_some()
+        && leaving_is_latched_chooser
+    {
         state.pending_replacement = None;
         // CR 800.4a: a paused frameless single-card discard belongs to the
         // abandoned choice of the leaving player; left behind it would go stale.
