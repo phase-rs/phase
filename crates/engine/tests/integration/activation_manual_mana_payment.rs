@@ -8,12 +8,13 @@
 
 use crate::support::shared_card_db;
 use engine::ai_support::legal_actions_full;
+use engine::game::casting::activated_ability_definitions;
 use engine::game::mana_abilities::is_mana_ability;
 use engine::game::printed_cards::rehydrate_game_from_card_db;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
-    AbilityCost, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
+    AbilityCost, Effect, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::casting_costs::{ActivationCostLock, ActivationCostLockPoint};
@@ -4480,4 +4481,94 @@ fn a_manual_activation_funded_by_sacrificed_creatures_completes() {
     assert!(is_priority(&waiting_for), "{waiting_for:?}");
     assert!(runner.state().stack.is_empty());
     assert_eq!(hand_size(&runner, P0), hand_before + 1, "the draw resolved");
+}
+
+const KRARK_CLAN_IRONWORKS: &str = "Sacrifice an artifact: Add {C}{C}.";
+const MINDLESS_AUTOMATON: &str = "This creature enters with two +1/+1 counters on it.\n\
+{1}, Discard a card: Put a +1/+1 counter on this creature.\n\
+Remove two +1/+1 counters from this creature: Draw a card.";
+
+/// CR 601.2g + CR 118.3 (#10190): When an activated ability's source is the
+/// only creature on the battlefield, Ashnod's Altar ("Sacrifice a creature: Add {C}{C}.")
+/// has an incomplete selection (`choices.len() < count` after filtering the source).
+/// Rejecting incomplete selections before clamping `count` prevents exhausting the
+/// witness budget on empty selections, allowing the search to explore Krark-Clan Ironworks
+/// ("Sacrifice an artifact: Add {C}{C}."), which can sacrifice Ashnod's Altar to fund
+/// the activation.
+#[test]
+fn incomplete_sacrifice_selection_does_not_exhaust_witness_budget() {
+    let mut scenario = scenario_at_main();
+    let automaton = scenario
+        .add_creature_from_oracle(P0, "Mindless Automaton", 2, 2, MINDLESS_AUTOMATON)
+        .as_artifact_creature()
+        .with_plus_counters(2)
+        .id();
+    let ashnods = scenario
+        .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let ironworks = scenario
+        .add_artifact_from_oracle(P0, "Krark-Clan Ironworks", KRARK_CLAN_IRONWORKS)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let discard = scenario.add_card_to_hand(P0, "Discard fodder");
+    let mut runner = scenario.build();
+
+    let discard_ability = activated_ability_definitions(runner.state(), automaton)
+        .iter()
+        .find(|(_, ability)| matches!(ability.effect.as_ref(), Effect::PutCounter { .. }))
+        .map(|(index, _)| *index)
+        .expect("Mindless Automaton's {1}, Discard a card ability");
+
+    let (_, _, grouped) = legal_actions_full(runner.state());
+    let automaton_actions = grouped.get(&automaton).cloned().unwrap_or_default();
+    let manual_discard_activation = automaton_actions.iter().find(|action| match action {
+        GameAction::ActivateAbility {
+            ability_index,
+            payment_mode,
+            ..
+        } => *ability_index == discard_ability && *payment_mode == CastPaymentMode::Manual,
+        _ => false,
+    });
+    assert!(
+        manual_discard_activation.is_some(),
+        "Mindless Automaton's {{1}}, Discard ability must be offered in Manual mode; actions: {automaton_actions:?}"
+    );
+
+    let waiting_for = activate_index(
+        &mut runner,
+        automaton,
+        discard_ability,
+        CastPaymentMode::Manual,
+    );
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+
+    // Sacrifice Ashnod's Altar to Krark-Clan Ironworks for {C}{C}
+    let waiting_for = activate_mana_ability(&mut runner, ironworks);
+    assert!(
+        is_cost_prompt(&waiting_for, |kind| *kind == PayCostKind::Sacrifice),
+        "{waiting_for:?}"
+    );
+    let waiting_for = select_cards(&mut runner, &[ashnods]);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    assert_eq!(pool_total(&runner), 2);
+
+    // Pass out of mana window and pay the discard cost
+    let waiting_for = pass(&mut runner);
+    assert!(
+        is_cost_prompt(&waiting_for, |kind| *kind == PayCostKind::Discard),
+        "{waiting_for:?}"
+    );
+    let waiting_for = select_cards(&mut runner, &[discard]);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert_eq!(
+        pool_total(&runner),
+        1,
+        "the {{1}} cost left one {{C}} floating"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "the activation is on the stack"
+    );
 }

@@ -63196,3 +63196,55 @@ fn index_combinations_enumerates_each_selection_once() {
         "the empty selection"
     );
 }
+
+#[test]
+fn mana_choice_answers_produces_choices_lazily() {
+    let single = ManaChoicePrompt::SingleColor {
+        options: vec![ManaType::Red, ManaType::Green],
+    };
+    let answers: Vec<_> = mana_choice_answers(&single).collect();
+    assert_eq!(
+        answers,
+        vec![
+            ManaChoice::SingleColor(ManaType::Red),
+            ManaChoice::SingleColor(ManaType::Green)
+        ]
+    );
+
+    let comb = ManaChoicePrompt::Combination {
+        options: vec![
+            vec![ManaType::White, ManaType::Blue],
+            vec![ManaType::Red, ManaType::Black],
+        ],
+    };
+    let answers: Vec<_> = mana_choice_answers(&comb).collect();
+    assert_eq!(
+        answers,
+        vec![
+            ManaChoice::Combination(vec![ManaType::White, ManaType::Blue]),
+            ManaChoice::Combination(vec![ManaType::Red, ManaType::Black]),
+        ]
+    );
+
+    // AnyCombination with count = 60 and 5 options would produce millions of
+    // multisets if eagerly materialized. The iterator yields the first ones lazily.
+    let any = ManaChoicePrompt::AnyCombination {
+        count: 60,
+        options: vec![
+            ManaType::White,
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Green,
+        ],
+    };
+    let first_two: Vec<_> = mana_choice_answers(&any).take(2).collect();
+    assert_eq!(first_two.len(), 2);
+    assert_eq!(
+        first_two[0],
+        ManaChoice::Combination(vec![ManaType::White; 60])
+    );
+    let mut second_expected = vec![ManaType::White; 59];
+    second_expected.push(ManaType::Blue);
+    assert_eq!(first_two[1], ManaChoice::Combination(second_expected));
+}

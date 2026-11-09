@@ -23751,7 +23751,6 @@ fn settle_exact_mana_ability_prompts(
             ManaChoicePrompt::AnyCombination { .. } => Vec::new(),
             ManaChoicePrompt::SingleColor { .. } | ManaChoicePrompt::Combination { .. } => {
                 mana_choice_answers(choice)
-                    .into_iter()
                     .map(|choice| GameAction::ChooseManaColor { choice, count: 1 })
                     .collect()
             }
@@ -28290,6 +28289,16 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
                     .into_iter()
                     .filter(|id| *id != self.source_id)
                     .collect();
+                if choices.len() < count
+                    && matches!(
+                        &kind,
+                        PayCostKind::Discard
+                            | PayCostKind::ExileFromManaZone { .. }
+                            | PayCostKind::Sacrifice
+                    )
+                {
+                    return false;
+                }
                 // CR 118.3: pay exactly the printed count where the cost
                 // allows it; an X-sentinel form pays its largest.
                 let count = count.min(choices.len());
@@ -28359,24 +28368,23 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
 }
 
 /// CR 106.1 + CR 605.3b: every answer `prompt` accepts — each color or
-/// combination offered, or for one color per unit, each multiset of colors.
-fn mana_choice_answers(prompt: &ManaChoicePrompt) -> Vec<ManaChoice> {
+/// combination offered, or for one color per unit, each multiset of colors,
+/// produced lazily so the caller can stop enumeration early.
+fn mana_choice_answers<'a>(
+    prompt: &'a ManaChoicePrompt,
+) -> Box<dyn Iterator<Item = ManaChoice> + 'a> {
     match prompt {
-        ManaChoicePrompt::SingleColor { options } => options
-            .iter()
-            .copied()
-            .map(ManaChoice::SingleColor)
-            .collect(),
-        ManaChoicePrompt::Combination { options } => options
-            .iter()
-            .cloned()
-            .map(ManaChoice::Combination)
-            .collect(),
-        ManaChoicePrompt::AnyCombination { count, options } => {
-            index_combinations(options.len(), *count, Repetition::Allowed)
-                .map(|picked| ManaChoice::Combination(picked.iter().map(|&i| options[i]).collect()))
-                .collect()
+        ManaChoicePrompt::SingleColor { options } => {
+            Box::new(options.iter().copied().map(ManaChoice::SingleColor))
         }
+        ManaChoicePrompt::Combination { options } => {
+            Box::new(options.iter().cloned().map(ManaChoice::Combination))
+        }
+        ManaChoicePrompt::AnyCombination { count, options } => Box::new(
+            index_combinations(options.len(), *count, Repetition::Allowed).map(move |picked| {
+                ManaChoice::Combination(picked.iter().map(|&i| options[i]).collect())
+            }),
+        ),
     }
 }
 
