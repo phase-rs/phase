@@ -7682,8 +7682,9 @@ pub(crate) fn seed_intrinsic_entry_counters(state: &GameState, proposed: &mut Pr
 /// mover and the staged batch member so both apply the same guards, entry
 /// modifications, intrinsic loyalty/defense seeding and effect counters.
 ///
-/// Returns `None` for a missing object or primitive zone-move no-op, a
-/// prohibited transformed entry, or an unpositioned same-library request.
+/// Returns `None` for a missing object or primitive zone-move no-op, an entry
+/// under a departed controller, a prohibited transformed entry, or an
+/// unpositioned same-library request. Both consumers classify it as Remained.
 #[allow(clippy::too_many_arguments)]
 fn prepare_zone_move_proposal(
     state: &GameState,
@@ -7712,7 +7713,7 @@ fn prepare_zone_move_proposal(
         return None;
     }
     if entry_controller_has_left(state, object, dest_zone, controller_override) {
-        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+        return None;
     }
     // CR 712.14a: A single-faced object instructed to enter transformed
     // cannot enter the battlefield. A single-faced copy of a transforming
