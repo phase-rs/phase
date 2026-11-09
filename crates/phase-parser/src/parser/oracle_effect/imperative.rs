@@ -10354,9 +10354,6 @@ pub(super) fn parse_shuffle_ast(
         let (input, _) = opt(tag(".")).parse(input)?;
         Ok((input, (object.to_string(), explicit_owner)))
     }) {
-        if !remainder.trim().is_empty() {
-            return None;
-        }
         let owner_context = ctx.relative_player_scope == Some(ControllerRef::ParentTargetOwner)
             && ctx.object_pronoun_ref == Some(TargetFilter::ParentTarget);
         if owner_library || owner_context {
@@ -10388,6 +10385,12 @@ pub(super) fn parse_shuffle_ast(
                     _ => None,
                 };
                 if let Some(target) = target {
+                    // Only this arm's object-anaphor body must be exhausted.
+                    // Descriptive targets fall through to their own grammar;
+                    // their where-X tail is bound by the shared chain lowerer.
+                    if !remainder.trim().is_empty() {
+                        return None;
+                    }
                     return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
                         target,
                         owner_library: true,
@@ -19617,6 +19620,89 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn teferi_akosa_owner_shuffle_retains_shared_where_x_binding() {
+        let text = "[+1]: Draw two cards. Then discard two cards unless you discard a creature card.\n[−2]: You get an emblem with \"Knights you control get +1/+0 and have ward {1}.\"\n[−3]: Tap any number of untapped creatures you control. When you do, shuffle target nonland permanent an opponent controls with mana value X or less into its owner's library, where X is the number of creatures tapped this way.";
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            text,
+            "Teferi Akosa of Zhalfir",
+            &[],
+            &["Planeswalker".to_string()],
+            &[],
+        );
+        let ability = parsed
+            .abilities
+            .iter()
+            .find(|ability| matches!(ability.cost, Some(AbilityCost::Loyalty { amount: -3 })))
+            .expect("printed minus-three ability");
+        assert!(
+            matches!(*ability.effect, Effect::SetTapState { .. }),
+            "{ability:?}"
+        );
+        assert_eq!(
+            ability.multi_target,
+            Some(MultiTargetSpec { min: 0, max: None })
+        );
+        let movement = ability.sub_ability.as_deref().expect("When you do shuffle");
+        assert_eq!(movement.condition, Some(AbilityCondition::WhenYouDo));
+        let Effect::ChangeZone {
+            target: TargetFilter::Typed(target),
+            destination: Zone::Library,
+            owner_library: true,
+            ..
+        } = movement.effect.as_ref()
+        else {
+            panic!("{movement:?}");
+        };
+        assert_eq!(target.controller, Some(ControllerRef::Opponent));
+        assert!(target.type_filters.contains(&TypeFilter::Permanent));
+        assert!(target
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+        let quantity = target
+            .properties
+            .iter()
+            .find_map(|property| match property {
+                FilterProp::Cmc {
+                    comparator: crate::types::ability::Comparator::LE,
+                    value,
+                } => Some(value),
+                _ => None,
+            })
+            .expect("at-most-X mana value restriction");
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::FilteredTrackedSetSize {
+                    filter,
+                    caused_by: None,
+                },
+        } = quantity
+        else {
+            panic!("where-X binding lost: {quantity:?}");
+        };
+        assert_eq!(
+            filter.as_ref(),
+            &TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                ..Default::default()
+            })
+        );
+        let shuffle = movement
+            .sub_ability
+            .as_deref()
+            .expect("owner library shuffle");
+        assert!(
+            matches!(
+                *shuffle.effect,
+                Effect::Shuffle {
+                    target: TargetFilter::ParentTargetOwner
+                }
+            ),
+            "{shuffle:?}"
+        );
+        assert!(shuffle.sub_ability.is_none(), "{shuffle:?}");
+    }
 
     #[test]
     fn seeded_owner_shuffle_preserves_target_and_requires_complete_body() {
