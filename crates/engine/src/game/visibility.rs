@@ -16183,11 +16183,19 @@ mod tests {
             "reach guard: the ETB trigger cloaked Serra Angel with ward {{2}}"
         );
         assert_redacted_for_p1(&state, angel);
+        assert_eq!(
+            state.objects[&coat]
+                .attached_to
+                .as_ref()
+                .and_then(|attached| attached.as_object()),
+            Some(angel),
+            "reach guard: the Coat equips the cloaked card"
+        );
 
-        // Live power is not asserted: "then attach this Equipment to it" does not attach.
         let view = after_layer_pass(proposer_hidden_view(&state, P1));
         let obj = &view.objects[&angel];
         assert_eq!((obj.base_power, obj.base_toughness), (Some(2), Some(2)));
+        assert_eq!((obj.power, obj.toughness), (Some(3), Some(2)));
         assert_eq!(obj.base_card_types.core_types, vec![CoreType::Creature]);
         assert_eq!(obj.keywords, ward);
         assert_eq!(obj.base_keywords, ward);

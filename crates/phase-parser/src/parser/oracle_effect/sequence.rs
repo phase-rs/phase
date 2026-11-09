@@ -3661,12 +3661,12 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // cluster over and trip the `Choice<...>` trait-bound check at compile
     // time.
     .or(value((), tag("puts ")))
-    // CR 301.5b + CR 608.2c: these attach forms are imperative game actions,
-    // not noun-phrase continuations. Keep the matcher narrow so name-based
-    // chains like "put counters on it and attach Fractal Harness to it" stay
-    // available to the token-counter attach rewriter. "That Equipment" is the
-    // selected-object anaphor used by Grip of Phyresis.
+    // CR 701.3a + CR 608.2c: an attach whose attachment is the source (`~`
+    // after self-reference normalization) or an Equipment anaphor is its own
+    // instruction, never a noun-phrase continuation; "that Equipment" is Grip
+    // of Phyresis's selected-object anaphor.
     .or(alt((
+        value((), tag("attach ~ ")),
         value((), tag("attach this equipment ")),
         value((), tag("attach that equipment ")),
         value((), tag("attach an equipment that was attached ")),
@@ -12122,6 +12122,21 @@ mod tests {
     }
 
     #[test]
+    fn bare_and_splits_source_attach_after_counters_and_token() {
+        assert_eq!(
+            clause_texts("Put X +1/+1 counters on it and attach ~ to it"),
+            vec!["Put X +1/+1 counters on it", "attach ~ to it"]
+        );
+        assert_eq!(
+            clause_texts("create a 2/2 colorless Robot artifact creature token and attach ~ to it"),
+            vec![
+                "create a 2/2 colorless Robot artifact creature token",
+                "attach ~ to it"
+            ]
+        );
+    }
+
+    #[test]
     fn bare_and_keeps_chosen_name_search_exile_compound() {
         // CR 701.23a + CR 701.18a: "search ... with the chosen name and exile
         // them" is one search compound, not a SearchLibrary followed by a second
@@ -12647,12 +12662,15 @@ mod tests {
     }
 
     #[test]
-    fn bare_and_starts_equipment_attachment_anaphors_but_not_other_attachment_forms() {
-        for clause in ["attach this Equipment to it", "attach that Equipment to it"] {
+    fn bare_and_starts_source_and_equipment_attachment_anaphors_but_not_other_attachment_forms() {
+        for clause in [
+            "attach ~ to it",
+            "attach this Equipment to it",
+            "attach that Equipment to it",
+        ] {
             assert!(starts_bare_and_clause(clause), "must split: {clause}");
         }
         for clause in [
-            "attach ~ to it",
             "attach this Aura to it",
             "attach that Aura to it",
             "attach this Fortification to it",

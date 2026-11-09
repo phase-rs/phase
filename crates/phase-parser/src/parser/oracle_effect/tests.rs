@@ -16143,17 +16143,8 @@ fn effect_direct_manifest_top_library_parses_controller_override_only_for_impera
     let attach_continuation =
         parse_effect("Manifest the top card of your library and attach Lightform to it.");
     assert!(
-        matches!(
-            &attach_continuation,
-            Effect::Manifest {
-                target: TargetFilter::Controller,
-                count: QuantityExpr::Fixed { value: 1 },
-                object_source: None,
-                enters_under: Some(ControllerRef::You),
-                profile: None,
-            }
-        ),
-        "direct manifest should accept bounded attach-to-it continuation, got: {attach_continuation:?}"
+        !matches!(attach_continuation, Effect::Manifest { .. }),
+        "direct manifest must not absorb an attach tail, got: {attach_continuation:?}"
     );
 
     let invalid_tail = parse_effect("Manifest the top card of your library with haste.");

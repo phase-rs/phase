@@ -20,19 +20,27 @@
 //! `client/public/card-data.json`: 7 cards change parse, these three plus the
 //! four Equipment.
 //!
+//! A bare "it" host after cloak, manifest or manifest dread binds the same
+//! referent, and a source attach joined by a bare "and" gets its own clause.
+//!
 //! Cards are built from Oracle text (CI has no card database). The Equipment
 //! subtype is stamped explicitly: without it CR 301.5 makes the attachment
 //! illegal and state-based actions unattach it again, which would make every
 //! assertion here vacuous — the token control test is what proves the harness
 //! attaches at all.
 
+use engine::game::combat::has_cant_be_blocked_static;
+use engine::game::layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::WaitingFor;
+use engine::types::events::GameEvent;
+use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
+use engine::types::keywords::Keyword;
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 const MACHETE: &str = "When this Equipment enters, manifest dread, then attach this Equipment to that creature.\nEquipped creature gets +2/+1.\nEquip {4}";
 
@@ -132,7 +140,11 @@ fn an_empty_library_manifests_nothing_and_attaches_nothing() {
 /// something when the Machete's own producer runs. Both Equipment start in
 /// hand; the Blade is cast and resolved, leaving its Soldier token as the
 /// chain's most-recent referent.
-fn board_with_a_prior_referent(library: usize) -> (GameRunner, ObjectId, ObjectId) {
+fn board_with_a_prior_referent(
+    name: &str,
+    oracle: &str,
+    library: usize,
+) -> (GameRunner, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     for i in 0..library {
@@ -143,8 +155,8 @@ fn board_with_a_prior_referent(library: usize) -> (GameRunner, ObjectId, ObjectI
         .with_subtypes(vec!["Equipment"])
         .with_mana_cost(ManaCost::generic(0))
         .id();
-    let machete = scenario
-        .add_artifact_to_hand_from_oracle(P0, "Conductive Machete", MACHETE)
+    let equipment = scenario
+        .add_artifact_to_hand_from_oracle(P0, name, oracle)
         .with_subtypes(vec!["Equipment"])
         .with_mana_cost(ManaCost::generic(0))
         .id();
@@ -160,7 +172,7 @@ fn board_with_a_prior_referent(library: usize) -> (GameRunner, ObjectId, ObjectI
         "setup: the prior producer left its token as the chain referent"
     );
 
-    (runner, machete, prior)
+    (runner, equipment, prior)
 }
 
 /// The reviewer's continuation case, accepted: with a PRIOR referent already in
@@ -172,7 +184,8 @@ fn board_with_a_prior_referent(library: usize) -> (GameRunner, ObjectId, ObjectI
 /// both leave a slot that happens to be right.
 #[test]
 fn a_paused_continuation_overwrites_a_prior_referent() {
-    let (mut runner, machete, prior) = board_with_a_prior_referent(2);
+    let (mut runner, machete, prior) =
+        board_with_a_prior_referent("Conductive Machete", MACHETE, 2);
     let manifested = runner.state().players[0].library[0];
 
     runner.cast(machete).resolve();
@@ -220,7 +233,8 @@ fn a_paused_continuation_overwrites_a_prior_referent() {
 /// `prior`.
 #[test]
 fn a_producer_that_produces_nothing_does_not_leave_a_prior_referent_standing() {
-    let (mut runner, machete, prior) = board_with_a_prior_referent(0);
+    let (mut runner, machete, prior) =
+        board_with_a_prior_referent("Conductive Machete", MACHETE, 0);
 
     runner.cast(machete).resolve();
     runner.advance_until_stack_empty();
@@ -304,16 +318,10 @@ fn a_plain_manifest_puts_its_counter_on_the_manifested_creature() {
     );
 }
 
-/// The bare object pronoun is NOT re-routed. "…then attach this Equipment to
-/// **it**" keeps the binding its own subject-aware authority
-/// (`attach_neuter_recipient_resolves_via_subject`) gives it, which for this
-/// shape is `SelfRef` — Cryptic Coat prints exactly this line after a cloak.
-///
-/// The demonstrative-only entry point is what makes that true: routing bare "it"
-/// through the chain-created binding as well would change attachment for chains
-/// that have nothing to do with a chain-created referent.
+/// CR 608.2c + CR 701.62a: a bare "it" host after manifest dread names the
+/// manifested creature, as the demonstrative does.
 #[test]
-fn the_bare_pronoun_recipient_is_left_to_its_own_authority() {
+fn the_bare_pronoun_recipient_binds_the_manifested_creature() {
     let parsed = engine::parser::parse_oracle_text(
         "When this Equipment enters, manifest dread, then attach this Equipment to it.",
         "Bare Pronoun Coat",
@@ -330,11 +338,11 @@ fn the_bare_pronoun_recipient_is_left_to_its_own_authority() {
         matches!(
             &*attach.effect,
             engine::types::ability::Effect::Attach {
-                target: engine::types::ability::TargetFilter::SelfRef,
+                target: engine::types::ability::TargetFilter::LastCreated,
                 ..
             }
         ),
-        "bare \"it\" must keep its pre-existing binding, got {:?}",
+        "bare \"it\" must bind the manifested creature, got {:?}",
         attach.effect
     );
 }
@@ -388,4 +396,160 @@ fn a_gated_face_down_producer_keeps_its_consumer_under_the_gate() {
         attach.condition, producer.condition,
         "and it cannot resolve when the gate is false"
     );
+}
+
+const CRYPTIC_COAT: &str = "When this Equipment enters, cloak the top card of your library, then attach this Equipment to it. (To cloak a card, put it onto the battlefield face down as a 2/2 creature with ward {2}. Turn it face up any time for its mana cost if it's a creature card.)\nEquipped creature gets +1/+0 and can't be blocked.\n{1}{U}: Return this Equipment to its owner's hand.";
+
+const CLOUDFORM: &str = "When this enchantment enters, it becomes an Aura with enchant creature. Manifest the top card of your library and attach this enchantment to it. (To manifest a card, put it onto the battlefield face down as a 2/2 creature. Turn it face up any time for its mana cost if it's a creature card.)\nEnchanted creature has flying and hexproof.";
+
+const AUXILIARY_BOOSTERS: &str = "When this Equipment enters, create a 2/2 colorless Robot artifact creature token and attach this Equipment to it.\nEquipped creature gets +1/+2 and has flying.\nEquip {3} ({3}: Attach to target creature you control. Equip only as a sorcery.)";
+
+const FIELD_TESTED_FRYING_PAN: &str = "When this Equipment enters, create a Food token, then create a 1/1 white Halfling creature token and attach this Equipment to it.\nEquipped creature has \"Whenever you gain life, this creature gets +X/+X until end of turn, where X is the amount of life you gained.\"\nEquip {2}";
+
+const NIM_DEATHMANTLE: &str = "Equipped creature gets +2/+2, has intimidate, and is a black Zombie. (A creature with intimidate can't be blocked except by artifact creatures and/or creatures that share a color with it.)\nWhenever a nontoken creature is put into your graveyard from the battlefield, you may pay {4}. If you do, return that card to the battlefield and attach this Equipment to it.\nEquip {4}";
+
+fn after_layer_pass(runner: &GameRunner) -> GameState {
+    let mut state = runner.state().clone();
+    layers::mark_layers_full(&mut state);
+    layers::flush_layers(&mut state);
+    state
+}
+
+fn tokens(runner: &GameRunner) -> Vec<ObjectId> {
+    let state = runner.state();
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| state.objects[id].is_token)
+        .collect()
+}
+
+/// CR 701.58a + CR 608.2c: Cryptic Coat equips the card it just cloaked.
+#[test]
+fn cryptic_coat_equips_the_card_it_cloaked() {
+    let (mut runner, coat) = board("Cryptic Coat", CRYPTIC_COAT, 1);
+    let cloaked = runner.state().players[0].library[0];
+
+    runner.cast(coat).resolve();
+    runner.advance_until_stack_empty();
+
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().objects[&cloaked].face_down);
+    assert_eq!(host_of(&runner, coat), Some(cloaked));
+    let state = after_layer_pass(&runner);
+    let obj = &state.objects[&cloaked];
+    assert_eq!((obj.power, obj.toughness), (Some(3), Some(2)));
+    assert!(has_cant_be_blocked_static(&state, cloaked));
+}
+
+/// CR 608.2c: a cloak of an empty library produces nothing, so the Coat does
+/// not reach back to the earlier producer's token.
+#[test]
+fn cryptic_coat_with_an_empty_library_does_not_equip_a_prior_referent() {
+    let (mut runner, coat, prior) = board_with_a_prior_referent("Cryptic Coat", CRYPTIC_COAT, 0);
+
+    runner.cast(coat).resolve();
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        host_of(&runner, coat),
+        None,
+        "nothing was cloaked, so the Coat must not equip {prior:?}"
+    );
+}
+
+/// CR 701.40a + CR 701.3a: Cloudform becomes an Aura and enchants the creature
+/// it manifested.
+#[test]
+fn cloudform_enchants_the_creature_it_manifested() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_card_to_library_top(P0, "Library 0");
+    let cloudform = {
+        let mut builder = scenario.add_spell_to_hand(P0, "Cloudform", false);
+        builder
+            .as_enchantment()
+            .from_oracle_text(CLOUDFORM)
+            .with_mana_cost(ManaCost::generic(0));
+        builder.id()
+    };
+    let mut runner = scenario.build();
+    let manifested = runner.state().players[0].library[0];
+
+    runner.cast(cloudform).resolve();
+    runner.advance_until_stack_empty();
+
+    assert!(runner.state().objects[&manifested].face_down);
+    assert_eq!(host_of(&runner, cloudform), Some(manifested));
+    let state = after_layer_pass(&runner);
+    assert_eq!(state.objects[&cloudform].zone, Zone::Battlefield);
+    let keywords = &state.objects[&manifested].keywords;
+    assert!(keywords.contains(&Keyword::Flying));
+    assert!(keywords.contains(&Keyword::Hexproof));
+}
+
+/// CR 111.1 + CR 701.3a: Auxiliary Boosters equips the Robot it created.
+#[test]
+fn auxiliary_boosters_equips_the_robot_it_created() {
+    let (mut runner, boosters) = board("Auxiliary Boosters", AUXILIARY_BOOSTERS, 0);
+
+    runner.cast(boosters).resolve();
+    runner.advance_until_stack_empty();
+
+    let created = tokens(&runner);
+    assert_eq!(created.len(), 1);
+    assert_eq!(runner.state().objects[&created[0]].name, "Robot");
+    assert_eq!(host_of(&runner, boosters), Some(created[0]));
+}
+
+/// CR 608.2c: Field-Tested Frying Pan equips the Halfling, the most recent
+/// token, not the Food.
+#[test]
+fn frying_pan_equips_the_halfling_not_the_food() {
+    let (mut runner, pan) = board("Field-Tested Frying Pan", FIELD_TESTED_FRYING_PAN, 0);
+
+    runner.cast(pan).resolve();
+    runner.advance_until_stack_empty();
+
+    assert_eq!(tokens(&runner).len(), 2);
+    let host = host_of(&runner, pan).expect("the Pan equips a token");
+    assert_eq!(runner.state().objects[&host].name, "Halfling");
+}
+
+/// CR 603.6c + CR 608.2c: Nim Deathmantle returns the dead creature and equips it.
+#[test]
+fn nim_deathmantle_equips_the_creature_it_returned() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let nim = scenario
+        .add_artifact_from_oracle(P0, "Nim Deathmantle", NIM_DEATHMANTLE)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let bolt = scenario.add_bolt_to_hand(P0);
+    scenario.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+
+    let outcome = runner
+        .cast(bolt)
+        .target_object(bear)
+        .accept_optional()
+        .resolve();
+    runner.advance_until_stack_empty();
+
+    assert!(
+        outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { object_id, to: Zone::Graveyard, .. } if *object_id == bear
+        )),
+        "reach guard: the Bear died"
+    );
+    assert_eq!(runner.state().objects[&bear].zone, Zone::Battlefield);
+    assert_eq!(host_of(&runner, nim), Some(bear));
 }
