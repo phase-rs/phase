@@ -4991,7 +4991,7 @@ pub(crate) fn loop_states_cover_modulo_object_growth(
         // equality and the stack-growth cover use, and the reason
         // `static_mode_references_growing_class` no longer vetoes the projected read alone.
         && !cost_modifier_reads_changed_projected_resource(prior, current)
-        && eq_except_growable(&pa, &pb, &grown_ids))
+        && eq_except_growable(&pa, &pb, &grown_ids, None))
     {
         return false;
     }
@@ -5484,12 +5484,51 @@ pub(crate) fn fodder_growth_cover_refusals(
     fodder_class: &GameObject,
     caster: PlayerId,
 ) -> (Vec<FodderCoverRefusal>, CoveredGrowth) {
+    use crate::types::events::GameEvent;
+
     bump_loop_detect_cost(|cost| cost.compares_cover_modulo_fodder_growth += 1);
     let mut refusals = Vec::new();
     let pf = flush_clone(prior);
     let cf = flush_clone(current);
     let mut pa = project_out_resources(&pf);
     let mut pb = project_out_resources(&cf);
+    // Reuse the board cover's class authority before discarding stack carriers.
+    // The recipient quotient is narrower than `growing`: each present object
+    // must belong to the battlefield class on BOTH feeds.
+    let mut growing = HashSet::new();
+    let mut recipient_cohort = HashSet::new();
+    for id in pa.battlefield.iter().chain(pb.battlefield.iter()).copied() {
+        if growing.contains(&id) {
+            continue;
+        }
+        let prior_object = pa.objects.get(&id);
+        let current_object = pb.objects.get(&id);
+        let prior_member = prior_object.is_some_and(|o| fodder_content_eq(o, fodder_class));
+        let current_member = current_object.is_some_and(|o| fodder_content_eq(o, fodder_class));
+        if prior_member || current_member {
+            growing.insert(id);
+            if prior_object.is_none_or(|o| prior_member && o.zone == Zone::Battlefield)
+                && current_object.is_none_or(|o| current_member && o.zone == Zone::Battlefield)
+            {
+                recipient_cohort.insert(id);
+            }
+        }
+    }
+    // Dealer identities remain exact. Never anonymously rename a recipient
+    // that is also a retained damage dealer: the source/target alias matters.
+    // The existing visitor includes player damage and all parked carriers.
+    for frame in [&mut pa.0, &mut pb.0] {
+        frame.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::DamageDealt { source_id, .. } = event {
+                recipient_cohort.remove(&*source_id);
+            }
+            if let GameEvent::CombatDamageDealtToPlayer { source_amounts, .. } = event {
+                for (source, _) in source_amounts.iter() {
+                    recipient_cohort.remove(source);
+                }
+            }
+        });
+    }
     pa.0.stack.clear();
     pb.0.stack.clear();
 
@@ -5509,13 +5548,6 @@ pub(crate) fn fodder_growth_cover_refusals(
     //
     // The name is not `all_fodder`: it stops being all-fodder the moment it holds an accounted
     // id, and every one of the four obligations below reads THIS set.
-    let mut growing: HashSet<ObjectId> = pa
-        .battlefield
-        .iter()
-        .chain(pb.battlefield.iter())
-        .copied()
-        .filter(|id| is_fodder(&pa, id, fodder_class) || is_fodder(&pb, id, fodder_class))
-        .collect();
     if let Some(certified) = certified.as_ref() {
         growing.extend(certified.departed.iter().copied());
     }
@@ -5548,7 +5580,7 @@ pub(crate) fn fodder_growth_cover_refusals(
         && cf.stack.is_empty()
         && last_known_records_grow_unread(&pa, &pb)
         && HistoryMember::LastKnownRecords.equalize(&mut pb.0, &pa);
-    if !eq_except_growable(&pa, &pb, &growing) {
+    if !eq_except_growable(&pa, &pb, &growing, Some(&recipient_cohort)) {
         refusals.push(FodderCoverRefusal::NonObjectRemainder);
     }
 
@@ -6885,10 +6917,15 @@ fn grown_objects_are_inert(current: &GameState, grown: &HashSet<ObjectId>) -> bo
 /// compared. A reader that takes the highest id rather than a carried one —
 /// `targeting::latest_tracked_set_id` behind `resolve_tracked_set_sentinel`'s legacy fallback — is
 /// not confined to the resolution that produced the set by this code; CR 608.2c confines it.
+///
+/// Only the fodder caller supplies `fodder_recipients`: its pair-verified
+/// homogeneous battlefield cohort, excluding retained damage dealers. Other
+/// callers keep exact recipient ids. This is not general object-id renaming.
 fn eq_except_growable(
     pa: &ResourceProjectedFrame,
     pb: &ResourceProjectedFrame,
     grown: &HashSet<ObjectId>,
+    fodder_recipients: Option<&HashSet<ObjectId>>,
 ) -> bool {
     // CR 104.4b: the restricted normalization contract — a state holding an
     // unsettled delivery carrier is never loop-comparable.
@@ -6971,20 +7008,16 @@ fn eq_except_growable(
     b.0.tracked_set_member_origins
         .retain(|id, _| id.0 < window_floor);
     b.0.next_tracked_set_id = a.next_tracked_set_id;
-    let equal = a.0 == b.0;
-    if !equal && std::env::var_os("PHASE_PR10613_GROWTH_DEBUG").is_some() {
-        let a_journal = std::mem::take(&mut a.0.damage_dealt_this_turn);
-        let b_journal = std::mem::take(&mut b.0.damage_dealt_this_turn);
-        eprintln!(
-            "[DEBUG-pr10613-growth3104] grown={grown:?} a_journal={:?} b_journal={:?} without_journal_equal={}",
-            a_journal.iter().map(|row| (row.event_key(), row.target_incarnation)).collect::<Vec<_>>(),
-            b_journal.iter().map(|row| (row.event_key(), row.target_incarnation)).collect::<Vec<_>>(),
-            a.0 == b.0,
-        );
-        a.0.damage_dealt_this_turn = a_journal;
-        b.0.damage_dealt_this_turn = b_journal;
+    if let Some(cohort) = fodder_recipients {
+        // Quotient only the proven homogeneous recipient cohort. Ineligible
+        // rows stay intact in the ordinary remainder, including legacy rows.
+        if take_fodder_recipient_facts(&mut a, pa, grown, cohort)
+            != take_fodder_recipient_facts(&mut b, pb, grown, cohort)
+        {
+            return false;
+        }
     }
-    equal
+    a.0 == b.0
         && a.post_replacement_token_substitution_count
             == b.post_replacement_token_substitution_count
         // CR 104.4b + CR 615.3: `PartialEq` skips the floating registry, so this gate asks
@@ -6992,6 +7025,67 @@ fn eq_except_growable(
         // shields (a spent one can never apply again, CR 615.3 + CR 614.3), so identical
         // live growth covers and any differing live shield does not.
         && crate::types::game_state::pending_shields_loop_eq(&a, &b)
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct FodderRecipientFact {
+    source_id: ObjectId,
+    source_incarnation: Option<u64>,
+    amount: u32,
+    is_combat: bool,
+    is_live: bool,
+    tapped: bool,
+}
+
+/// Extract only stamped recipient witnesses whose identities the fodder proof
+/// already makes interchangeable. No fake object id, source renaming or class
+/// reselection. All ineligible rows remain full records in the remainder.
+fn take_fodder_recipient_facts(
+    frame: &mut ResourceProjectedFrame,
+    original: &ResourceProjectedFrame,
+    grown: &HashSet<ObjectId>,
+    cohort: &HashSet<ObjectId>,
+) -> smallvec::SmallVec<[FodderRecipientFact; 4]> {
+    let mut facts = smallvec::SmallVec::new();
+    if cohort.is_empty() {
+        return facts;
+    }
+    frame.0.damage_dealt_this_turn.retain(|record| {
+        let Some(epoch) = record.target_incarnation else {
+            return true;
+        };
+        let TargetRef::Object(target) = &record.target else {
+            return true;
+        };
+        if !grown.contains(target) || !cohort.contains(target) {
+            return true;
+        }
+        let Some(object) = original.objects.get(target) else {
+            return true;
+        };
+        if object.zone != Zone::Battlefield {
+            return true;
+        }
+        let DamageEventKey {
+            source_id,
+            source_incarnation,
+            target: _,
+            amount,
+            is_combat,
+        } = record.event_key();
+        facts.push(FodderRecipientFact {
+            source_id,
+            source_incarnation,
+            amount,
+            is_combat,
+            is_live: epoch != 0,
+            tapped: object.tapped,
+        });
+        false
+    });
+    // Multiplicity is material: distinct pending occurrences are not deduped.
+    facts.sort_unstable();
+    facts
 }
 
 /// CR 603.7a + CR 603.7b: a one-shot delayed trigger for a step after the frame's, whose every
@@ -10275,7 +10369,8 @@ mod tests {
             eq_except_growable(
                 &cover_projection(&a).projected,
                 &cover_projection(&b).projected,
-                &HashSet::new()
+                &HashSet::new(),
+                None,
             ),
             "cover's post-stack rekey preserves the same stale class beside Curse pin4/live7"
         );
@@ -10311,7 +10406,7 @@ mod tests {
         let a = project_out_resources(&stale);
         let b = project_out_resources(&live);
         assert!(
-            eq_except_growable(&a, &a, &grown),
+            eq_except_growable(&a, &a, &grown, None),
             "identical grown-root journal is permitted"
         );
         let mut no_journal = stale.clone();
@@ -10323,12 +10418,109 @@ mod tests {
                 &project_out_resources(&no_journal),
                 &project_out_resources(&taller),
                 &grown,
+                None,
             ),
             "ordinary no-journal growth remains permitted"
         );
         assert!(
-            !eq_except_growable(&a, &b, &grown),
+            !eq_except_growable(&a, &b, &grown, None),
             "the recipient is removed, but the previously selected read class must still refuse"
+        );
+    }
+
+    #[test]
+    fn loop_relational_fodder_recipient_churn_keeps_classes_taps_and_dealer_aliases() {
+        // Abstract growth-comparison fixture; actual Polyraptor gameplay is
+        // exercised by the unchanged mandatory_loop_draws integration cases.
+        let prior = relational_recipient_frame(Some(7), false, false);
+        let mut current = prior.clone();
+        let mut fresh = prior.objects[&ObjectId(21)].clone();
+        fresh.id = ObjectId(22);
+        current.objects.insert(fresh.id, fresh);
+        current.battlefield.push_back(ObjectId(22));
+        current.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::DamageDealt { target, .. } = event {
+                *target = TargetRef::Object(ObjectId(22));
+            }
+        });
+        current.damage_dealt_this_turn[0].target = TargetRef::Object(ObjectId(22));
+        let mut class = prior.objects[&ObjectId(21)].clone();
+        project_object_for_loop(&mut class);
+        let refusals = fodder_growth_cover_refusals(&prior, &current, &class, PlayerId(0)).0;
+        assert!(
+            refusals.is_empty(),
+            "live same-class fresh recipient must cover: {refusals:?}"
+        );
+
+        let mut stale = current.clone();
+        stale.damage_dealt_this_turn[0].target_incarnation = Some(3);
+        let mut unknown = current.clone();
+        unknown.damage_dealt_this_turn[0].target_incarnation = None;
+        let mut tapped = current.clone();
+        tapped.objects.get_mut(&ObjectId(22)).unwrap().tapped = true;
+        let mut outside_class = current.clone();
+        outside_class
+            .objects
+            .get_mut(&ObjectId(22))
+            .unwrap()
+            .controller = PlayerId(0);
+        let mut two_occurrences = current.clone();
+        let mut second = prior.objects[&ObjectId(21)].clone();
+        second.id = ObjectId(23);
+        two_occurrences.objects.insert(second.id, second);
+        two_occurrences.battlefield.push_back(ObjectId(23));
+        let mut entry = two_occurrences.stack[0].clone();
+        entry.id = ObjectId(200);
+        let StackEntryKind::TriggeredAbility {
+            trigger_event: Some(GameEvent::DamageDealt { target, .. }),
+            ..
+        } = &mut entry.kind
+        else {
+            panic!("fixture keeps its damage carrier");
+        };
+        *target = TargetRef::Object(ObjectId(23));
+        two_occurrences.stack.push_back(entry);
+        let mut second_row = two_occurrences.damage_dealt_this_turn[0].clone();
+        second_row.target = TargetRef::Object(ObjectId(23));
+        two_occurrences.damage_dealt_this_turn.push_back(second_row);
+        for (label, changed) in [
+            ("all-stale", stale),
+            ("legacy unknown", unknown),
+            ("different tapped recipient", tapped),
+            ("outside the homogeneous class", outside_class),
+            ("two distinct retained occurrences", two_occurrences),
+        ] {
+            let refusals = fodder_growth_cover_refusals(&prior, &changed, &class, PlayerId(0)).0;
+            assert!(
+                refusals.contains(&FodderCoverRefusal::NonObjectRemainder),
+                "{label}: {refusals:?}"
+            );
+        }
+
+        let mut alias_prior = prior.clone();
+        let mut alias_current = current.clone();
+        for frame in [&mut alias_prior, &mut alias_current] {
+            frame.for_each_trigger_event_carrier_mut(&mut |event| {
+                if let GameEvent::DamageDealt {
+                    source_id,
+                    source_incarnation,
+                    ..
+                } = event
+                {
+                    *source_id = ObjectId(21);
+                    *source_incarnation = Some(7);
+                }
+            });
+            for row in frame.damage_dealt_this_turn.iter_mut() {
+                row.source_id = ObjectId(21);
+                row.source_incarnation = Some(7);
+            }
+        }
+        let refusals =
+            fodder_growth_cover_refusals(&alias_prior, &alias_current, &class, PlayerId(0)).0;
+        assert!(
+            refusals.contains(&FodderCoverRefusal::NonObjectRemainder),
+            "a recipient that is also the exact dealer cannot be anonymously renamed: {refusals:?}"
         );
     }
 
@@ -10410,18 +10602,18 @@ mod tests {
         let a = project_out_resources(&live);
         let same = project_out_resources(&relational_resource_grants(30, 31, &[30]));
         assert!(
-            eq_except_growable(&a, &same, &provider),
+            eq_except_growable(&a, &same, &provider, None),
             "identical common-root fact, shifted allocation"
         );
         assert!(
-            !eq_except_growable(&a, &project_out_resources(&retired), &provider),
+            !eq_except_growable(&a, &project_out_resources(&retired), &provider, None),
             "common host remains constrained even though its provider is stripped"
         );
-        assert!(eq_except_growable(&a, &a, &HashSet::from([ObjectId(20)])),
+        assert!(eq_except_growable(&a, &a, &HashSet::from([ObjectId(20)]), None),
             "identical grown-root ledger remains subject to the existing raw conjunct, not blanket rejection");
         let empty = project_out_resources(&relational_resource_grants(10, 11, &[]));
         assert!(
-            !eq_except_growable(&a, &empty, &HashSet::from([ObjectId(20)])),
+            !eq_except_growable(&a, &empty, &HashSet::from([ObjectId(20)]), None),
             "the old raw ledger conjunct is not weakened for removed roots"
         );
     }
@@ -29035,7 +29227,8 @@ mod tests {
             eq_except_growable(
                 &project_out_resources(&prior),
                 &project_out_resources(&current),
-                &HashSet::new()
+                &HashSet::new(),
+                None,
             ),
             "a fresh set re-stamping the same member's identical departure must stay covered"
         );
@@ -29122,11 +29315,13 @@ mod tests {
                 &project_out_resources(prior),
                 &project_out_resources(current),
                 &none,
+                None,
             ),
             eq_except_growable(
                 &project_out_resources(&prior.normalize_for_loop()),
                 &project_out_resources(&current.normalize_for_loop()),
                 &none,
+                None,
             ),
         )
     }
@@ -29241,7 +29436,8 @@ mod tests {
             eq_except_growable(
                 &project_out_resources(&prior),
                 &project_out_resources(&current),
-                &HashSet::new()
+                &HashSet::new(),
+                None,
             ),
             "a fresh set naming another member must leave the live member's stamp covered"
         );
@@ -29609,13 +29805,13 @@ mod tests {
         };
 
         let (pa, pb) = normalized_pair(LkiCarrier::StackEntryEvent);
-        assert!(eq_except_growable(&pa, &pb, &HashSet::new()));
+        assert!(eq_except_growable(&pa, &pb, &HashSet::new(), None));
 
         let (pa, pb) = normalized_pair(LkiCarrier::PendingTriggerEventBatch);
-        assert!(!eq_except_growable(&pa, &pb, &HashSet::new()));
+        assert!(!eq_except_growable(&pa, &pb, &HashSet::new(), None));
 
         let (pa, pb) = normalized_pair(LkiCarrier::StackTriggerEventBatch);
-        assert!(eq_except_growable(&pa, &pb, &HashSet::new()));
+        assert!(eq_except_growable(&pa, &pb, &HashSet::new(), None));
     }
 
     /// CR 104.4b + CR 608.2h: a departed-spell record only a stack entry's spell-cast trigger names
@@ -29689,7 +29885,7 @@ mod tests {
         };
         let (pa, pb) = (frame(2), frame(4));
         assert_ne!(pa.departed_stack_spells, pb.departed_stack_spells);
-        assert!(eq_except_growable(&pa, &pb, &HashSet::new()));
+        assert!(eq_except_growable(&pa, &pb, &HashSet::new(), None));
     }
 
     /// CR 104.4b + CR 602.2a + CR 608.2h: a departed activated ability only a stack entry's
@@ -29757,7 +29953,7 @@ mod tests {
             pa.departed_activated_abilities, pb.departed_activated_abilities,
             "reach-guard: the named record survives normalization and differs"
         );
-        assert!(eq_except_growable(&pa, &pb, &HashSet::new()));
+        assert!(eq_except_growable(&pa, &pb, &HashSet::new(), None));
     }
 
     #[test]
@@ -29767,7 +29963,7 @@ mod tests {
         let pa = project_out_resources(&a);
         let pb = project_out_resources(&accumulated_entry_frame(7, None));
         assert_ne!(pa.stack_paid_facts, pb.stack_paid_facts);
-        assert!(eq_except_growable(&pa, &pb, &HashSet::new()));
+        assert!(eq_except_growable(&pa, &pb, &HashSet::new(), None));
     }
 
     /// CR 104.4b: an incarnation only a stack entry named leaves `eq_except_growable`'s remainder
@@ -29802,7 +29998,7 @@ mod tests {
             pa.pending_trigger_event_batch, pb.pending_trigger_event_batch,
             "reach guard: the stack's incarnation shifts the batch's rank"
         );
-        assert!(eq_except_growable(&pa, &pb, &HashSet::new()));
+        assert!(eq_except_growable(&pa, &pb, &HashSet::new(), None));
     }
 
     /// **`eq_except_growable` strips an accounted id from the per-player zone COLLECTION its
@@ -29824,7 +30020,8 @@ mod tests {
             !eq_except_growable(
                 &project_out_resources(&prior),
                 &project_out_resources(&current),
-                &HashSet::new()
+                &HashSet::new(),
+                None,
             ),
             "control: unaccounted, the library/graveyard vectors compare unequal"
         );
@@ -29832,7 +30029,8 @@ mod tests {
             eq_except_growable(
                 &project_out_resources(&prior),
                 &project_out_resources(&current),
-                &HashSet::from([ObjectId(900)])
+                &HashSet::from([ObjectId(900)]),
+                None,
             ),
             "accounted, the id leaves BOTH frames' zone collections and the rest compares equal"
         );
@@ -31545,9 +31743,9 @@ mod tests {
         ));
         assert_eq!(
             (
-                eq_except_growable(&prior, &relieved, &grown),
-                eq_except_growable(&prior, &carrier_moved, &grown),
-                eq_except_growable(&prior, &prior_mutated, &grown),
+                eq_except_growable(&prior, &relieved, &grown, None),
+                eq_except_growable(&prior, &carrier_moved, &grown, None),
+                eq_except_growable(&prior, &prior_mutated, &grown, None),
             ),
             (true, false, false)
         );
@@ -31765,7 +31963,8 @@ mod tests {
             !eq_except_growable(
                 &project_out_resources(a),
                 &project_out_resources(b),
-                &HashSet::new()
+                &HashSet::new(),
+                None,
             ),
             "`eq_except_growable` must refuse a differing LIVE floating shield"
         );
@@ -31781,7 +31980,8 @@ mod tests {
             eq_except_growable(
                 &project_out_resources(a),
                 &project_out_resources(b),
-                &HashSet::new()
+                &HashSet::new(),
+                None,
             ),
             "`eq_except_growable` must accept equal floating shields"
         );
@@ -31935,7 +32135,8 @@ mod tests {
             !eq_except_growable(
                 &project_out_resources(&a),
                 &project_out_resources(&b),
-                &HashSet::new()
+                &HashSet::new(),
+                None,
             ),
             "`eq_except_growable` must refuse differing riders"
         );
@@ -32068,7 +32269,8 @@ mod tests {
         assert!(eq_except_growable(
             &project_out_resources(&na),
             &project_out_resources(&nb),
-            &HashSet::new()
+            &HashSet::new(),
+            None,
         ));
 
         let remembered = |state: &mut GameState, amount: i32| {
@@ -32107,7 +32309,8 @@ mod tests {
         assert!(!eq_except_growable(
             &project_out_resources(&ra),
             &project_out_resources(&rb),
-            &HashSet::new()
+            &HashSet::new(),
+            None,
         ));
     }
 
