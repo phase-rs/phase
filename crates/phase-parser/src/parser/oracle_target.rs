@@ -4612,6 +4612,11 @@ fn parse_type_phrase_folding_unbound<'a>(
         pos += consumed;
     }
 
+    if let Some((prop, consumed)) = parse_not_put_there_this_way_suffix(&lower[pos..]) {
+        properties.push(prop);
+        pos += consumed;
+    }
+
     // Check "of the chosen type" / "of that type" suffix (Cavern of Souls,
     // Metallic Mimic; Selfless Safewright). CR 205.3m + CR 608.2c: "of that
     // type" is the anaphor form of "of the chosen type" — same typed reference,
@@ -9945,6 +9950,33 @@ pub(crate) fn parse_zone_changed_this_turn_suffix(
     to: Option<Zone>,
 ) -> Option<(FilterProp, usize)> {
     parse_zone_change_provenance(input, to, false)
+}
+
+fn parse_not_put_there_this_way_suffix(input: &str) -> Option<(FilterProp, usize)> {
+    let trimmed = input.trim_start();
+    let offset = input.len() - trimmed.len();
+    let (rest, _) = (
+        tag::<_, _, OracleError<'_>>("that "),
+        alt((
+            tag("weren't "),
+            tag("were not "),
+            tag("wasn't "),
+            tag("was not "),
+        )),
+        alt((tag("put "), tag("placed "), tag("moved "))),
+        tag("there this way"),
+    )
+        .parse(trimmed)
+        .ok()?;
+
+    Some((
+        FilterProp::Not {
+            prop: Box::new(FilterProp::InTrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            }),
+        },
+        offset + trimmed.len() - rest.len(),
+    ))
 }
 
 fn zone_for_scope(props: &[FilterProp]) -> Option<Zone> {
@@ -22403,6 +22435,36 @@ mod tests {
                 }
             )));
         }
+        assert!(
+            rest.trim().is_empty(),
+            "expected empty remainder, got: {rest:?}"
+        );
+    }
+
+    #[test]
+    fn type_phrase_cards_not_put_there_this_way_excludes_tracked_set() {
+        let (filter, rest) = parse_type_phrase_folding(
+            "creature cards from your graveyard that weren't put there this way",
+        );
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
+        assert!(
+            tf.properties.iter().any(|prop| matches!(
+                prop,
+                FilterProp::Not { prop }
+                    if matches!(
+                        &**prop,
+                        FilterProp::InTrackedSet { id }
+                            if *id == crate::types::identifiers::TrackedSetId(0)
+                    )
+            )),
+            "the negative this-way qualifier must exclude the current tracked set: {tf:?}"
+        );
         assert!(
             rest.trim().is_empty(),
             "expected empty remainder, got: {rest:?}"

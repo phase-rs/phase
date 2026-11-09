@@ -84,6 +84,68 @@ fn watery_grasp_owner_shuffle_keeps_a_resolution_host_operand() {
     assert!(shuffle.sub_ability.is_none());
 }
 
+#[test]
+fn bringer_of_the_last_gift_tracks_sacrificed_creatures_as_excluded() {
+    let parsed = parse_oracle_text(
+        "Flying\nWhen this creature enters, if you cast it, each player sacrifices all other \
+         creatures they control. Then each player returns all creature cards from their \
+         graveyard that weren't put there this way to the battlefield.",
+        "Bringer of the Last Gift",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let trigger = parsed.triggers.first().expect("Bringer ETB trigger");
+    assert!(matches!(
+        trigger.condition,
+        Some(crate::types::ability::TriggerCondition::WasCast { .. })
+    ));
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    assert!(matches!(*execute.effect, Effect::Sacrifice { .. }));
+    let returned = execute
+        .sub_ability
+        .as_deref()
+        .expect("graveyard return follows the sacrifice");
+    let Effect::ChangeZoneAll {
+        origin,
+        destination,
+        target,
+        ..
+    } = &*returned.effect
+    else {
+        panic!("expected mass return, got {:?}", returned.effect);
+    };
+    assert_eq!(*origin, Some(crate::types::zones::Zone::Graveyard));
+    assert_eq!(*destination, crate::types::zones::Zone::Battlefield);
+    let TargetFilter::Typed(filter) = target else {
+        panic!("expected a typed graveyard filter, got {target:?}");
+    };
+    assert!(filter
+        .type_filters
+        .contains(&crate::types::ability::TypeFilter::Creature));
+    assert!(
+        filter.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::Not { prop }
+                if matches!(
+                    &**prop,
+                    FilterProp::InTrackedSet { id }
+                        if *id == crate::types::identifiers::TrackedSetId(0)
+                )
+        )),
+        "the returned population must exclude cards moved by the sacrifice: {filter:?}"
+    );
+    let mut node = Some(execute);
+    while let Some(ability) = node {
+        assert!(
+            !matches!(&*ability.effect, Effect::Unimplemented { .. }),
+            "Bringer must parse without a swallowed effect: {:?}",
+            ability.effect
+        );
+        node = ability.sub_ability.as_deref();
+    }
+}
+
 /// SHAPE: real Technomancer Oracle keeps mill before the direct whole-graveyard
 /// choice, whose immediate continuation moves only the selected parents.
 #[test]
