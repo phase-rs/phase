@@ -5669,6 +5669,18 @@ mod tests {
     /// Defiant Strike, verbatim.
     const DEFIANT_STRIKE: &str = "Target creature gets +1/+0 until end of turn.\nDraw a card.";
 
+    /// One blocker-penalty row: its label, the rocks beside the Elves, the pump, the payment
+    /// mode the engine offers the cast with, whether that payment taps the Elves, and whether it
+    /// spends the last rock.
+    type BlockerRow<'a> = (
+        &'a str,
+        &'a [(&'a str, &'a str)],
+        PumpRow,
+        CastPaymentMode,
+        bool,
+        bool,
+    );
+
     /// A pump the blocker-penalty rows cast: its name, Oracle text and mana cost.
     struct PumpRow {
         name: &'static str,
@@ -5801,7 +5813,7 @@ mod tests {
         let opal = ("Mox Opal", MOX_OPAL);
         let auto = CastPaymentMode::Auto;
         let except = CastPaymentMode::AutoExceptSacrificialMana;
-        let rows: [(&str, &[(&str, &str)], PumpRow, CastPaymentMode, bool, bool); 5] = [
+        let rows: [BlockerRow; 5] = [
             (
                 "Lotus, Defiant Strike",
                 &[lotus],
@@ -6068,6 +6080,10 @@ mod tests {
         );
         let land_obj = state.objects.get_mut(&land_id).unwrap();
         land_obj.card_types.core_types.push(CoreType::Land);
+        // CR 305.6: the Forest subtype is what gives it "{T}: Add {G}." The payment the
+        // penalty reads taps it, so it needs a mana ability.
+        land_obj.card_types.subtypes.push("Forest".to_string());
+        land_obj.base_card_types = land_obj.card_types.clone();
 
         add_creature(&mut state, PlayerId(1), "Goblin", 2, 2);
 

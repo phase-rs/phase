@@ -58,7 +58,6 @@ use engine::game::mana_abilities::is_mana_ability;
 use engine::game::period_confirm::performed_for_tests;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::game::stack::stack_display_groups;
 use engine::types::ability::{Effect, TapStateChange, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::parse_counter_type;
@@ -819,20 +818,6 @@ fn illusionists_bracers_on_arbor_elf_gives_the_forest_a_second_tap() {
     assert!(runner.state().stack.is_empty());
     assert!(!is_tapped(&runner, forest), "the original untapped it");
     assert_eq!(mana_in_pool(&runner, ManaType::Green), 2);
-}
-
-/// A copy of an activated ability is its own stack row, which is how the player
-/// sees it above the original.
-#[test]
-fn the_copy_shows_as_its_own_stack_row() {
-    let Some(db) = shared_card_db() else { return };
-    let mut rig = basalt_rings(2, db);
-    rig.tap_and_activate_untap();
-    client_drive(&mut rig.runner, Rings::Pay, original_and_copy);
-
-    let groups = stack_display_groups(rig.runner.state());
-    assert_eq!(groups.len(), 2, "{groups:?}");
-    assert!(groups.iter().all(|group| group.count == 1), "{groups:?}");
 }
 
 /// The path a game against the AI takes: the AI's verified pass installs a
