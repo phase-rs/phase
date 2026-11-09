@@ -2713,8 +2713,9 @@ impl ResourceVector {
     /// player individually") decides which member carries that change, never its sign or its
     /// size, so a bounded entry has its total's sign or is 0. In a two-member team (CR 810.1)
     /// whose counters sum to `t`, the members' entries still sum to `t`; where a limit held the
-    /// total back, each member carries at most `t`. In the Archenemy Commander heroes'
-    /// three-member total (CR 904.13b) neither need hold: a member whose counter change equals
+    /// total back, each member carries at most `t`. In a total of three or more members (the
+    /// Archenemy Commander heroes', CR 904.13b, or a Horde game's three or more survivors',
+    /// `game::topology::has_shared_life`) neither need hold: a member whose counter change equals
     /// its stored change keeps that change, so where another member lost life one member's gain
     /// can exceed `t` and the entries can sum to more than `t`.
     ///
@@ -6827,9 +6828,9 @@ struct LifeTotalChanges {
 
 /// The [`LifeTotalChanges`] of every life total in `current`: players grouped by the total their
 /// life changes adjust (`game::topology::shared_life_dedup_key`: a shared life total (a
-/// Two-Headed Giant team's, CR 810.4, or the Archenemy Commander heroes', CR 904.13b), and
-/// otherwise the player's own). Its two readers are the take's gate
-/// ([`life_not_stored_as_gains`]) and the offer's attribution
+/// Two-Headed Giant team's, CR 810.4, the Archenemy Commander heroes', CR 904.13b, or a Horde
+/// game's survivors', `game::topology::has_shared_life`), and otherwise the player's own). Its
+/// two readers are the take's gate ([`life_not_stored_as_gains`]) and the offer's attribution
 /// ([`ResourceVector::with_life_attributed`]).
 fn life_total_changes(prior: &GameState, current: &GameState) -> Vec<LifeTotalChanges> {
     let mut totals: BTreeMap<crate::game::topology::SharedLifeKey, Vec<PlayerId>> = BTreeMap::new();

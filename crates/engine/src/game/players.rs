@@ -548,7 +548,8 @@ pub fn team_life_total(state: &GameState, player: PlayerId) -> i32 {
 /// then the other living members of its shared life total in
 /// `topology::shared_life_members` order (a Two-Headed Giant team has one
 /// teammate, CR 810.1; the Archenemy Commander heroes share one total,
-/// CR 904.13b). Outside a shared-life format this is `player` alone; `player` is
+/// CR 904.13b; a Horde game's survivors share one, `topology::has_shared_life`).
+/// Outside a shared-life format this is `player` alone; `player` is
 /// always included, so a player outside every living team adjusts its own
 /// total.
 fn life_change_fields(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
@@ -564,7 +565,8 @@ fn life_change_fields(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
 /// CR 810.4 + CR 810.9: The exact total a life change to `player` adjusts:
 /// the sum of [`life_change_fields`]. Outside a shared-life format it is the
 /// player's own life; in a shared-life format (Two-Headed Giant, CR 810.4; the
-/// Archenemy Commander heroes, CR 904.13b) it is the team's shared total
+/// Archenemy Commander heroes, CR 904.13b; a Horde game's survivors,
+/// `topology::has_shared_life`) it is the team's shared total
 /// ([`team_life_sum`] for a living player).
 pub(crate) fn life_change_total(state: &GameState, player: PlayerId) -> i64 {
     life_change_fields(state, player)
