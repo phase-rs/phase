@@ -383,9 +383,11 @@ Transport-agnostic `EngineAdapter` interface with multiple implementations:
 - **WebSocketAdapter** — WebSocket (multiplayer)
 - **P2PHostAdapter / P2PGuestAdapter** — WebRTC peer-to-peer via PeerJS
 
-Default server game and draft sockets negotiate `StateCodecV1` only when the shared
-WASM runtime is already ready. A cold runtime warms in the background while the
-current connection opens snapshot-only; later connections can use the decoder.
+Default server game and draft sockets never wait for a shared codec lease before
+dialing. A cold WASM runtime warms in the background; a warm runtime can prepare
+its lease while the handshake proceeds. At the first `ServerHello`, only an
+already-ready lease can negotiate `StateCodecV1`. Otherwise that connection stays
+snapshot-only and a late lease is released, never used for a live upgrade.
 Explicit codec providers retain their bounded preparation wait. The codec wrapper
 runs after optional gzip decompression and preserves frame order. Canonical codec
 headers are read without materializing their payload; Rust validates the body.
@@ -403,6 +405,16 @@ A declined stale/foreign Full or a callback that throws before acknowledging it
 closes the transport; healthy-stream ignores are unchanged. The wrapper reports
 `CLOSED` before close callbacks, so synchronous reentrant submissions reject
 rather than occupying an unsent slot.
+
+A natural close is latched when it reaches the codec wrapper: `readyState`
+immediately reports `CLOSED` and no new sends or receives are admitted.
+Already-received healthy frames retain their ordered drain, bounded by an
+independent five-second event-loop timer rather than the 60-second decoder
+watchdog. A stalled decoder or missing consumer cannot retain the lease beyond
+that drain; late results are fenced. A codec rejection or resync request after
+network death settles the original network close instead of replacing its cause
+or downgrading the reconnect policy. The timer cannot preempt synchronous
+main-thread WASM.
 
 ### Design Principles
 
