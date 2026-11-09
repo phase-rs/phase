@@ -50842,6 +50842,464 @@ mod tests {
         loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop())
     }
 
+    // Controlled identity fixtures, not independently played damage histories.
+    fn relational_damage_frame(selected: u64, shift: u64) -> GameState {
+        let (mut state, dealer) = records_naming(7 + shift, &[]);
+        let recipient = create_object(
+            &mut state,
+            CardId(61),
+            PlayerId(1),
+            "Recipient".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&recipient).unwrap().incarnation = 6 + shift;
+        let snapshot = state.objects[&dealer].snapshot_public_characteristics();
+        for (source, target) in [(3, 4), (5, 6)] {
+            state
+                .lki_by_incarnation
+                .entry(dealer)
+                .or_default()
+                .insert(source + shift, snapshot.clone());
+            state.damage_dealt_this_turn.push_back(DamageRecord {
+                source_id: dealer,
+                source_incarnation: Some(source + shift),
+                target: TargetRef::Object(recipient),
+                target_incarnation: Some(target + shift),
+                amount: 1,
+                source_name: "Dealer".to_string(),
+                source_power: Some(2),
+                ..Default::default()
+            });
+        }
+        push_trigger(
+            &mut state,
+            dealer,
+            draw_one(dealer),
+            Some(GameEvent::DamageDealt {
+                source_id: dealer,
+                source_incarnation: Some(selected + shift),
+                target: TargetRef::Object(recipient),
+                amount: 1,
+                is_combat: false,
+                excess: 0,
+            }),
+        );
+        state
+    }
+
+    /// CR 400.7 + CR 608.2k: the same journal can bind either the returned or departed recipient.
+    #[test]
+    fn loop_relational_strict_damage_recipient_join() {
+        let stale = relational_damage_frame(3, 0);
+        let live = relational_damage_frame(5, 0);
+        assert_eq!(stale.damage_dealt_this_turn, live.damage_dealt_this_turn);
+        assert!(objects_content_eq(&stale.objects, &live.objects));
+        assert!(
+            normalized_equal(&live, &relational_damage_frame(5, 20)),
+            "positive control: later source AND target mints preserve the relation"
+        );
+        assert!(
+            !normalized_equal(&stale, &live),
+            "dealer3/target4 must not collapse into dealer5/target6 with live7/6"
+        );
+    }
+
+    /// CR 608.2i: strict comparison preserves complete meaningful history, not just pending readers.
+    #[test]
+    fn loop_relational_strict_damage_full_history() {
+        let state = relational_damage_frame(5, 0);
+        assert!(normalized_equal(&state, &state));
+        let once = state.normalize_for_loop();
+        assert!(loop_states_equal(&once, &once.normalize_for_loop()));
+        assert_eq!(once.damage_dealt_this_turn.len(), 2);
+        for changed in 0..6 {
+            let mut other = state.clone();
+            match changed {
+                0 => other.damage_dealt_this_turn[0].source_power = Some(8),
+                1 => other.damage_dealt_this_turn[0].source_controller_snapshot = PlayerId(1),
+                2 => other.damage_dealt_this_turn[0].amount = 2,
+                3 => {
+                    other.damage_dealt_this_turn =
+                        other.damage_dealt_this_turn.iter().rev().cloned().collect();
+                }
+                4 => {
+                    let row = other.damage_dealt_this_turn[0].clone();
+                    other.damage_dealt_this_turn.push_back(row);
+                }
+                5 => other.damage_dealt_this_turn[0].source_name = "Other dealer".to_string(),
+                _ => unreachable!(),
+            }
+            assert!(
+                !normalized_equal(&state, &other),
+                "meaningful history mutation {changed}"
+            );
+        }
+        let mut legacy = state.clone();
+        legacy.damage_dealt_this_turn[0].source_incarnation = None;
+        legacy.damage_dealt_this_turn[0].target = TargetRef::Player(PlayerId(1));
+        legacy.damage_dealt_this_turn[0].target_incarnation = None;
+        let normalized = legacy.normalize_for_loop();
+        assert_eq!(
+            normalized.damage_dealt_this_turn[0].source_incarnation,
+            None
+        );
+        assert_eq!(
+            normalized.damage_dealt_this_turn[0].target,
+            TargetRef::Player(PlayerId(1))
+        );
+        assert_eq!(
+            normalized.damage_dealt_this_turn[0].target_incarnation,
+            None
+        );
+    }
+
+    // WR/SS identify independent static producers; no card parsing or event admission is claimed here.
+    fn relational_grant_frame(wr: u64, ss: u64, spent: &[u64], ledger: usize) -> GameState {
+        use crate::types::ability::{TriggerGrantProducerKey, TriggerProducerOrigin};
+        let (mut state, host) = records_naming(7, &[]);
+        let grants = &mut state
+            .objects
+            .get_mut(&host)
+            .unwrap()
+            .trigger_occurrence_state;
+        for generation in 1..=wr.max(ss) {
+            if generation == wr || generation == ss {
+                let actual = grants
+                    .grant_instance_for(TriggerGrantProducerKey::Granted {
+                        origin: TriggerProducerOrigin::Static {
+                            source: ObjectIncarnationRef::of(host, 7),
+                            definition_index: if generation == wr { 0 } else { 1 },
+                            modification_index: 0,
+                        },
+                        output_index: 0,
+                    })
+                    .unwrap();
+                assert_eq!(actual.0, generation);
+            } else {
+                grants.allocate_trigger_grant_instance().unwrap();
+            }
+        }
+        assert_eq!(grants.active_grants().count(), 2);
+        for &generation in spent {
+            let reference = TriggerDefinitionRef {
+                source: ObjectIncarnationRef::of(host, 7),
+                occurrence: TriggerDefinitionOccurrenceRef::Granted {
+                    grant_instance: TriggerGrantInstanceRef(generation),
+                },
+            };
+            match ledger {
+                0 => {
+                    state.triggers_fired_this_turn.insert(reference);
+                }
+                1 => {
+                    state.triggers_fired_this_game.insert(reference);
+                }
+                2 => {
+                    state.trigger_fire_counts_this_turn.insert(reference, 2);
+                }
+                3 => {
+                    state
+                        .triggers_fired_this_turn_per_opponent
+                        .insert((reference, PlayerId(1)));
+                }
+                4 => {
+                    state
+                        .trigger_indicated_actions_this_turn
+                        .insert((reference, PlayerId(0)));
+                }
+                5 => {
+                    state
+                        .triggered_abilities_added_mana_this_turn
+                        .insert((reference, PlayerId(1)));
+                }
+                _ => unreachable!(),
+            }
+        }
+        state
+    }
+
+    /// CR 113.2c: a spent current Well Rested instance is not a retired instance or Sixth Sense.
+    #[test]
+    fn loop_relational_strict_current_grant_spent_binding() {
+        for ledger in 0..6 {
+            let live = relational_grant_frame(10, 11, &[10], ledger);
+            assert!(
+                normalized_equal(&live, &relational_grant_frame(30, 31, &[30], ledger)),
+                "shifted current fact, ledger {ledger}"
+            );
+            let retired = relational_grant_frame(13, 9, &[12], ledger);
+            assert!(
+                normalized_equal(&retired, &relational_grant_frame(33, 29, &[32], ledger)),
+                "shifted retired fact, ledger {ledger}"
+            );
+            assert!(
+                !normalized_equal(&live, &retired),
+                "retired12 vs current10, ledger {ledger}"
+            );
+            assert!(
+                !normalized_equal(&live, &relational_grant_frame(11, 9, &[10], ledger)),
+                "same raw retired10 vs current10, ledger {ledger}"
+            );
+            assert!(
+                !normalized_equal(&live, &relational_grant_frame(11, 10, &[10], ledger)),
+                "same numeric ledger now spends Sixth Sense, ledger {ledger}"
+            );
+        }
+    }
+
+    #[test]
+    fn loop_relational_strict_grant_allocation_true_controls() {
+        let empty = relational_grant_frame(10, 11, &[], 0);
+        let reversed = relational_grant_frame(31, 30, &[], 0);
+        let raw_grants = |state: &GameState| {
+            state
+                .objects
+                .values()
+                .next()
+                .unwrap()
+                .trigger_occurrence_state
+                .active_grants()
+                .map(|(p, g)| (p.clone(), g))
+                .collect::<Vec<_>>()
+        };
+        assert_ne!(
+            raw_grants(&empty),
+            raw_grants(&reversed),
+            "raw allocation differs"
+        );
+        assert!(
+            normalized_equal(&empty, &reversed),
+            "unspent producers add no ordering noise"
+        );
+        for ledger in [0, 1, 3, 4, 5] {
+            let both = relational_grant_frame(10, 11, &[10, 11], ledger);
+            assert!(
+                normalized_equal(&both, &relational_grant_frame(31, 30, &[30, 31], ledger)),
+                "both-spent SET permutation, ledger {ledger}"
+            );
+        }
+    }
+
+    #[test]
+    fn loop_relational_strict_grant_payload_binding() {
+        let mut a = relational_grant_frame(10, 11, &[10, 11], 2);
+        let mut refs: Vec<_> = a.trigger_fire_counts_this_turn.keys().cloned().collect();
+        refs.sort();
+        a.trigger_fire_counts_this_turn.insert(refs[0].clone(), 1);
+        let mut b = a.clone();
+        b.trigger_fire_counts_this_turn.insert(refs[0].clone(), 2);
+        b.trigger_fire_counts_this_turn.insert(refs[1].clone(), 1);
+        assert!(normalized_equal(&a, &a));
+        assert!(
+            !normalized_equal(&a, &b),
+            "counts belong to their producers"
+        );
+        for ledger in [3, 4, 5] {
+            let a = relational_grant_frame(10, 11, &[10], ledger);
+            let mut b = a.clone();
+            match ledger {
+                3 => {
+                    b.triggers_fired_this_turn_per_opponent = a
+                        .triggers_fired_this_turn_per_opponent
+                        .iter()
+                        .map(|(r, _)| (r.clone(), PlayerId(0)))
+                        .collect();
+                }
+                4 => {
+                    *b.trigger_indicated_actions_this_turn = a
+                        .trigger_indicated_actions_this_turn
+                        .iter()
+                        .map(|(r, _)| (r.clone(), PlayerId(1)))
+                        .collect();
+                }
+                5 => {
+                    b.triggered_abilities_added_mana_this_turn = a
+                        .triggered_abilities_added_mana_this_turn
+                        .iter()
+                        .map(|(r, _)| (r.clone(), PlayerId(0)))
+                        .collect();
+                }
+                _ => unreachable!(),
+            }
+            assert!(!normalized_equal(&a, &b), "player payload, ledger {ledger}");
+        }
+    }
+
+    #[test]
+    fn loop_relational_strict_grant_payload_same_numeric_ledger_counterexample() {
+        for ledger in [2, 3, 4, 5] {
+            let mut a = relational_grant_frame(10, 11, &[10, 11], ledger);
+            let mut b = relational_grant_frame(11, 10, &[10, 11], ledger);
+            let mut refs: Vec<_> = a.objects.keys().copied().collect();
+            refs.sort();
+            let host = refs[0];
+            let reference = |generation| TriggerDefinitionRef {
+                source: ObjectIncarnationRef::of(host, 7),
+                occurrence: TriggerDefinitionOccurrenceRef::Granted {
+                    grant_instance: TriggerGrantInstanceRef(generation),
+                },
+            };
+            for frame in [&mut a, &mut b] {
+                match ledger {
+                    2 => {
+                        frame.trigger_fire_counts_this_turn.insert(reference(10), 1);
+                    }
+                    3 => {
+                        frame
+                            .triggers_fired_this_turn_per_opponent
+                            .remove(&(reference(10), PlayerId(1)));
+                        frame
+                            .triggers_fired_this_turn_per_opponent
+                            .insert((reference(10), PlayerId(0)));
+                    }
+                    4 => {
+                        frame
+                            .trigger_indicated_actions_this_turn
+                            .remove(&(reference(10), PlayerId(0)));
+                        frame
+                            .trigger_indicated_actions_this_turn
+                            .insert((reference(10), PlayerId(1)));
+                    }
+                    5 => {
+                        frame
+                            .triggered_abilities_added_mana_this_turn
+                            .remove(&(reference(10), PlayerId(1)));
+                        frame
+                            .triggered_abilities_added_mana_this_turn
+                            .insert((reference(10), PlayerId(0)));
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            assert!(
+                normalized_equal(&a, &a),
+                "identical fact population control"
+            );
+            assert!(
+                !normalized_equal(&a, &b),
+                "identical numeric rows assign different payloads to WR/SS, ledger {ledger}"
+            );
+        }
+    }
+
+    // Finite carried provider tree only: no lookup API or recursive live graph fixture.
+    fn relational_nested_provider_frame(shift: u64, retired: bool) -> GameState {
+        use crate::types::ability::{
+            occurrence_for_grant, TriggerGrantProducerKey, TriggerProducerOrigin,
+        };
+        let (mut state, host) = records_naming(7 + shift, &[]);
+        let provider = create_object(
+            &mut state,
+            CardId(62),
+            PlayerId(0),
+            "Provider".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&provider).unwrap().incarnation = 7 + shift;
+        let origin = TriggerProducerOrigin::Static {
+            source: ObjectIncarnationRef::of(provider, 7 + shift),
+            definition_index: 0,
+            modification_index: 0,
+        };
+        let inner_key = TriggerGrantProducerKey::Granted {
+            origin: origin.clone(),
+            output_index: 0,
+        };
+        let inner = {
+            let grants = &mut state
+                .objects
+                .get_mut(&provider)
+                .unwrap()
+                .trigger_occurrence_state;
+            for _ in 0..shift {
+                grants.allocate_trigger_grant_instance().unwrap();
+            }
+            grants.grant_instance_for(inner_key.clone()).unwrap()
+        };
+        let inner_ref = TriggerDefinitionRef {
+            source: ObjectIncarnationRef::of(provider, 7 + shift),
+            occurrence: occurrence_for_grant(&inner_key, inner),
+        };
+        let outer_key = TriggerGrantProducerKey::ExpandedGrant {
+            origin,
+            provider: Box::new(inner_ref),
+            provider_output_index: 0,
+        };
+        let outer = {
+            let grants = &mut state
+                .objects
+                .get_mut(&host)
+                .unwrap()
+                .trigger_occurrence_state;
+            for _ in 0..shift {
+                grants.allocate_trigger_grant_instance().unwrap();
+            }
+            grants.grant_instance_for(outer_key.clone()).unwrap()
+        };
+        state.triggers_fired_this_turn.insert(TriggerDefinitionRef {
+            source: ObjectIncarnationRef::of(host, 7 + shift),
+            occurrence: occurrence_for_grant(&outer_key, outer),
+        });
+        if retired {
+            let grants = &mut state
+                .objects
+                .get_mut(&provider)
+                .unwrap()
+                .trigger_occurrence_state;
+            grants.retire_absent_grants(&[]);
+            let reminted = grants.grant_instance_for(inner_key).unwrap();
+            assert_ne!(inner, reminted, "provider really reminted");
+        }
+        state
+    }
+
+    #[test]
+    fn loop_relational_strict_finite_nested_provider_binding() {
+        let current = relational_nested_provider_frame(0, false);
+        let shifted = relational_nested_provider_frame(20, false);
+        assert!(
+            normalized_equal(&current, &shifted),
+            "consistently shifted finite provider tree"
+        );
+        let retired = relational_nested_provider_frame(0, true);
+        assert!(
+            normalized_equal(&retired, &relational_nested_provider_frame(20, true)),
+            "shifted retired provider tree"
+        );
+        let once = current.normalize_for_loop();
+        assert!(
+            loop_states_equal(&once, &once.normalize_for_loop()),
+            "finite tree fixed point"
+        );
+        assert!(
+            !normalized_equal(&current, &retired),
+            "active versus retired inner provider"
+        );
+    }
+
+    #[test]
+    fn loop_relational_strict_damage_zero_and_absent_source_controls() {
+        let mut zero = relational_damage_frame(5, 0);
+        zero.damage_dealt_this_turn[0].target_incarnation = Some(0);
+        let mut shifted = relational_damage_frame(5, 20);
+        shifted.damage_dealt_this_turn[0].target_incarnation = Some(20);
+        assert!(
+            normalized_equal(&zero, &shifted),
+            "raw epoch zero is an ordinary named identity"
+        );
+        for state in [&mut zero, &mut shifted] {
+            let dealer = state.damage_dealt_this_turn[0].source_id;
+            state.objects.remove(&dealer);
+            state.battlefield.retain(|id| *id != dealer);
+        }
+        assert!(
+            normalized_equal(&zero, &shifted),
+            "journal source epochs rank even without a live source object"
+        );
+        let once = zero.normalize_for_loop();
+        assert!(loop_states_equal(&once, &once.normalize_for_loop()));
+    }
+
     /// CR 701.20a + CR 104.4b: disclosure history is not position.
     #[test]
     fn normalize_for_loop_clears_disclosure_history() {

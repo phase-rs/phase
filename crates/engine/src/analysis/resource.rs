@@ -9363,6 +9363,357 @@ mod tests {
         oid
     }
 
+    // Controlled comparison fixtures: object 20 is the Matsu dealer, object 21 the
+    // recipient and also the dealer named by a retained Curse event at incarnation 4.
+    fn relational_recipient_frame(pin: Option<u64>, curse: bool, receipt: bool) -> GameState {
+        use crate::types::ability::{
+            Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+        };
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::{DamageRecord, StackEntry, StackEntryKind};
+        let mut state = GameState::new_two_player(7);
+        let dealer = battlefield_creature(&mut state, 20, 0);
+        let recipient = battlefield_creature(&mut state, 21, 1);
+        state.objects.get_mut(&dealer).unwrap().incarnation = 7;
+        state.objects.get_mut(&recipient).unwrap().incarnation = 7;
+        let mut events = vec![(dealer, Some(3), TargetRef::Object(recipient))];
+        if curse {
+            events.push((recipient, Some(4), TargetRef::Player(PlayerId(0))));
+        }
+        for (source, incarnation, target) in events {
+            let snapshot = state.objects[&source].snapshot_public_characteristics();
+            state
+                .lki_by_incarnation
+                .entry(source)
+                .or_default()
+                .insert(incarnation.unwrap(), snapshot);
+            state.stack.push_back(StackEntry {
+                id: ObjectId(100 + state.stack.len() as u64),
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                        vec![],
+                        source,
+                        PlayerId(0),
+                    )),
+                    condition: None,
+                    trigger_event: Some(GameEvent::DamageDealt {
+                        source_id: source,
+                        source_incarnation: incarnation,
+                        target,
+                        amount: 1,
+                        is_combat: false,
+                        excess: 0,
+                    }),
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+        }
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: dealer,
+            source_incarnation: Some(3),
+            target: TargetRef::Object(recipient),
+            target_incarnation: pin,
+            amount: 1,
+            ..Default::default()
+        });
+        if receipt {
+            use crate::types::ability::{
+                TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
+            };
+            use crate::types::identifiers::ObjectIncarnationRef;
+            state.triggered_abilities_added_mana_this_turn.insert((
+                TriggerDefinitionRef {
+                    source: ObjectIncarnationRef::of(recipient, 5),
+                    occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                        base_set: TriggerBaseSetInstanceRef::INITIAL,
+                        printed_index: 0,
+                    },
+                },
+                PlayerId(1),
+            ));
+        }
+        state
+    }
+
+    fn relational_projection_feeds(a: &GameState, b: &GameState, expected: bool) {
+        use crate::types::game_state::LoopDetectSample;
+        let sample = LoopDetectSample {
+            normalized: a.normalize_for_loop(),
+            live: a.loop_detect_live_sample(),
+            tally: Default::default(),
+            trace_at: None,
+        };
+        for prior in [a, &sample.normalized] {
+            for current in [b, &b.normalize_for_loop()] {
+                assert_eq!(
+                    loop_states_equal_modulo_resources(prior, current),
+                    expected,
+                    "deriving feed"
+                );
+                let frames = SharedCurrentFrames::new(current);
+                assert_eq!(
+                    loop_states_equal_modulo_resources_side(prior, &frames),
+                    expected,
+                    "shared current / normalized ring feed"
+                );
+            }
+        }
+    }
+
+    /// CR 400.7 + CR 608.2k: stale, live and unknown recipients are three different futures.
+    #[test]
+    fn loop_relational_projected_recipient_read_classes() {
+        let live = relational_recipient_frame(Some(7), false, false);
+        let stale = relational_recipient_frame(Some(3), false, false);
+        let unknown = relational_recipient_frame(None, false, false);
+        relational_projection_feeds(&live, &live, true);
+        relational_projection_feeds(
+            &stale,
+            &relational_recipient_frame(Some(5), false, false),
+            true,
+        );
+        relational_projection_feeds(&live, &stale, false);
+        relational_projection_feeds(&unknown, &live, false);
+        relational_projection_feeds(&unknown, &stale, false);
+        let raw_zero = relational_recipient_frame(Some(0), false, false);
+        relational_projection_feeds(&raw_zero, &stale, true);
+        let mut zero_live = raw_zero.clone();
+        zero_live
+            .objects
+            .get_mut(&ObjectId(21))
+            .unwrap()
+            .incarnation = 0;
+        relational_projection_feeds(&zero_live, &raw_zero, false);
+        let projected = project_out_resources(&raw_zero);
+        assert!(
+            loop_states_equal(&projected, &project_out_resources(&projected)),
+            "P(P(raw0)) keeps stale read-class rather than interpreting a raw sentinel"
+        );
+        let mut player = unknown.clone();
+        player.damage_dealt_this_turn[0].target =
+            crate::types::ability::TargetRef::Player(PlayerId(1));
+        assert!(
+            project_out_resources(&player)
+                .damage_dealt_this_turn
+                .is_empty(),
+            "player damage without a retained object reader needs no witness"
+        );
+    }
+
+    /// CR 608.2i: strict history differs while the bounded retained reader relation is identical.
+    #[test]
+    fn loop_relational_projected_recipient_bounded_mixed_curse() {
+        let a = relational_recipient_frame(Some(3), true, false);
+        let b = relational_recipient_frame(Some(5), true, false);
+        assert!(!loop_states_equal(
+            &a.normalize_for_loop(),
+            &b.normalize_for_loop()
+        ));
+        assert_eq!(
+            a.lki_by_incarnation, b.lki_by_incarnation,
+            "identical Curse-selected snapshots"
+        );
+        relational_projection_feeds(&a, &b, true);
+        let mut pumped = a.clone();
+        let mut same_carriers = a.clone();
+        for frame in [&mut same_carriers, &mut pumped] {
+            frame.objects.get_mut(&ObjectId(21)).unwrap().incarnation = 100;
+        }
+        for epoch in 10..74 {
+            assert!(
+                epoch < pumped.objects[&ObjectId(21)].incarnation,
+                "history is strictly past the live recipient"
+            );
+            let mut row = a.damage_dealt_this_turn[0].clone();
+            row.target_incarnation = Some(epoch);
+            row.source_name = format!("discarded history {epoch}");
+            row.source_power = Some(epoch as i32);
+            pumped.damage_dealt_this_turn.push_back(row.clone());
+            pumped.damage_dealt_this_turn.push_back(row);
+        }
+        let duplicate = pumped.stack[0].clone();
+        pumped.resolving_stack_entry = Some(duplicate);
+        // A second publication does not multiply journal witnesses; compare the same
+        // carrier population on both sides so this is not a stack-equality assertion.
+        same_carriers.resolving_stack_entry = Some(same_carriers.stack[0].clone());
+        relational_projection_feeds(&same_carriers, &pumped, true);
+        let projected = project_out_resources(&pumped);
+        assert_eq!(
+            projected.damage_dealt_this_turn.len(),
+            1,
+            "one object-reader tuple, not history size"
+        );
+        assert!(loop_states_equal(
+            &projected,
+            &project_out_resources(&projected)
+        ));
+        relational_projection_feeds(&a, &relational_recipient_frame(Some(7), true, false), false);
+        assert!(
+            eq_except_growable(
+                &cover_projection(&a),
+                &cover_projection(&b),
+                &HashSet::new()
+            ),
+            "cover's post-stack rekey preserves the same stale class beside Curse pin4/live7"
+        );
+    }
+
+    #[test]
+    fn loop_relational_projected_mana_receipt_noise_raw_and_ring() {
+        let clean = relational_recipient_frame(Some(3), true, false);
+        let receipt = relational_recipient_frame(Some(3), true, true);
+        assert_eq!(receipt.triggered_abilities_added_mana_this_turn.len(), 1);
+        assert!(
+            !loop_states_equal(&clean.normalize_for_loop(), &receipt.normalize_for_loop()),
+            "strict receipt history remains meaningful"
+        );
+        assert_eq!(clean.lki_by_incarnation, receipt.lki_by_incarnation);
+        relational_projection_feeds(&clean, &receipt, true);
+        let projected = project_out_resources(&receipt);
+        assert!(projected
+            .triggered_abilities_added_mana_this_turn
+            .is_empty());
+        assert!(loop_states_equal(
+            &projected,
+            &project_out_resources(&projected)
+        ));
+    }
+
+    /// CR 104.4b: removing an accounted recipient does not excuse its retained event's live/stale relation.
+    #[test]
+    fn loop_relational_growth_recipient_live_stale_and_positive_controls() {
+        let stale = relational_recipient_frame(Some(3), false, false);
+        let live = relational_recipient_frame(Some(7), false, false);
+        let grown = HashSet::from([ObjectId(21)]);
+        let a = project_out_resources(&stale);
+        let b = project_out_resources(&live);
+        assert!(
+            eq_except_growable(&a, &a, &grown),
+            "identical grown-root journal is permitted"
+        );
+        let mut no_journal = stale.clone();
+        no_journal.damage_dealt_this_turn.clear();
+        let mut taller = no_journal.clone();
+        taller.objects.get_mut(&ObjectId(21)).unwrap().power = Some(99);
+        assert!(
+            eq_except_growable(
+                &project_out_resources(&no_journal),
+                &project_out_resources(&taller),
+                &grown,
+            ),
+            "ordinary no-journal growth remains permitted"
+        );
+        assert!(
+            !eq_except_growable(&a, &b, &grown),
+            "the recipient is removed, but the previously selected read class must still refuse"
+        );
+    }
+
+    fn relational_resource_grants(wr: u64, ss: u64, spent: &[u64]) -> GameState {
+        use crate::types::ability::{
+            TriggerDefinitionOccurrenceRef, TriggerGrantInstanceRef, TriggerGrantProducerKey,
+            TriggerProducerOrigin,
+        };
+        use crate::types::identifiers::ObjectIncarnationRef;
+        let mut state = GameState::new_two_player(7);
+        let host = battlefield_creature(&mut state, 20, 0);
+        let provider = battlefield_creature(&mut state, 22, 0);
+        state.objects.get_mut(&host).unwrap().incarnation = 7;
+        state.objects.get_mut(&provider).unwrap().incarnation = 7;
+        let grants = &mut state
+            .objects
+            .get_mut(&host)
+            .unwrap()
+            .trigger_occurrence_state;
+        for generation in 1..=wr.max(ss) {
+            if generation == wr || generation == ss {
+                let actual = grants
+                    .grant_instance_for(TriggerGrantProducerKey::Granted {
+                        origin: TriggerProducerOrigin::Static {
+                            source: ObjectIncarnationRef::of(provider, 7),
+                            definition_index: if generation == wr { 0 } else { 1 },
+                            modification_index: 0,
+                        },
+                        output_index: 0,
+                    })
+                    .unwrap();
+                assert_eq!(actual.0, generation);
+            } else {
+                grants.allocate_trigger_grant_instance().unwrap();
+            }
+        }
+        assert_eq!(grants.active_grants().count(), 2);
+        for &generation in spent {
+            state.triggers_fired_this_turn.insert(TriggerDefinitionRef {
+                source: ObjectIncarnationRef::of(host, 7),
+                occurrence: TriggerDefinitionOccurrenceRef::Granted {
+                    grant_instance: TriggerGrantInstanceRef(generation),
+                },
+            });
+        }
+        state
+    }
+
+    /// CR 113.2c: projection and cover retain the common host's current producer binding.
+    #[test]
+    fn loop_relational_projected_grant_current_spent_and_allocation_controls() {
+        let live = relational_resource_grants(10, 11, &[10]);
+        let shifted = relational_resource_grants(30, 31, &[30]);
+        relational_projection_feeds(&live, &shifted, true);
+        relational_projection_feeds(
+            &relational_resource_grants(10, 11, &[]),
+            &relational_resource_grants(31, 30, &[]),
+            true,
+        );
+        relational_projection_feeds(
+            &relational_resource_grants(10, 11, &[10, 11]),
+            &relational_resource_grants(31, 30, &[30, 31]),
+            true,
+        );
+        for retired in [
+            relational_resource_grants(13, 9, &[12]),
+            relational_resource_grants(11, 9, &[10]),
+        ] {
+            relational_projection_feeds(&live, &retired, false);
+        }
+    }
+
+    /// CR 104.4b: the cover scopes ledger roots, not providers consulted by a common root.
+    #[test]
+    fn loop_relational_growth_grant_common_root_grown_provider() {
+        let live = relational_resource_grants(10, 11, &[10]);
+        let retired = relational_resource_grants(13, 9, &[12]);
+        let provider = HashSet::from([ObjectId(22)]);
+        let a = project_out_resources(&live);
+        let same = project_out_resources(&relational_resource_grants(30, 31, &[30]));
+        assert!(
+            eq_except_growable(&a, &same, &provider),
+            "identical common-root fact, shifted allocation"
+        );
+        assert!(
+            !eq_except_growable(&a, &project_out_resources(&retired), &provider),
+            "common host remains constrained even though its provider is stripped"
+        );
+        assert!(eq_except_growable(&a, &a, &HashSet::from([ObjectId(20)])),
+            "identical grown-root ledger remains subject to the existing raw conjunct, not blanket rejection");
+        let empty = project_out_resources(&relational_resource_grants(10, 11, &[]));
+        assert!(
+            !eq_except_growable(&a, &empty, &HashSet::from([ObjectId(20)])),
+            "the old raw ledger conjunct is not weakened for removed roots"
+        );
+    }
+
     /// Inflate one of the real 4p dumps through the PRODUCTION decoder — the same
     /// chokepoint the server's `from_persisted` and WASM's `decode_restored_game_state`
     /// funnel through, never a bare `GameState` decode.

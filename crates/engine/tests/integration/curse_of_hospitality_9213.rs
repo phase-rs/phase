@@ -20,7 +20,7 @@ use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -660,6 +660,291 @@ fn a_blinked_damage_dealer_names_the_controller_of_the_object_that_dealt_it() {
     assert!(
         !loop_states_equal_modulo_resources(&pending, &alternate_controller),
         "different selected damage-source controllers have different futures"
+    );
+}
+
+/// CR 605.4a + CR 400.7: Kinnan's immediate mana receipt names the
+/// intermediate Kinnan, not the Elves or either of Kinnan's other incarnations.
+/// That projected-away history must not change the retained Curse binding.
+#[test]
+fn loop_relational_kinnan_mana_receipt_does_not_rerank_a_pending_curse_damage_source() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let curse = scenario
+        .add_enchantment_from_oracle(P0, "Curse of Hospitality", CURSE)
+        .with_subtypes(vec!["Aura", "Curse"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 2,
+        })
+        .id();
+    let kinnan = scenario
+        .add_creature_from_oracle(
+            P1,
+            "Kinnan, Bonder Prodigy",
+            2,
+            2,
+            "Whenever you tap a nonland permanent for mana, add one mana of any type that permanent produced.\n\
+{5}{G}{U}: Look at the top five cards of your library. You may put a non-Human creature card from among them onto the battlefield. Put the rest on the bottom of your library in a random order.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green, ManaCostShard::Blue],
+            generic: 0,
+        })
+        .id();
+    let elves = scenario
+        .add_creature_from_oracle(P1, "Llanowar Elves", 1, 1, "{T}: Add {G}.")
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        })
+        .id();
+    let control = scenario
+        .add_enchantment_from_oracle(
+            P2,
+            "Control Magic",
+            "Enchant creature\nYou control enchanted creature.",
+        )
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            generic: 2,
+        })
+        .id();
+    let responses: Vec<_> = (0..2)
+        .map(|_| {
+            scenario
+                .add_spell_to_hand_from_oracle(
+                    P2,
+                    "Flicker of Fate",
+                    true,
+                    "Exile target creature or enchantment, then return it to the battlefield under its owner's control.",
+                )
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::White],
+                    generic: 1,
+                })
+                .id()
+        })
+        .collect();
+    let plains: Vec<_> = (0..4)
+        .map(|_| scenario.add_basic_land(P2, ManaColor::White))
+        .collect();
+    for player in [P0, P1, P2] {
+        scenario.add_land_to_library_top(player, "Forest");
+    }
+    let top_card = scenario.add_card_to_library_top(P1, "Hill Giant");
+    let mut runner = scenario.build();
+    attach_to_player(runner.state_mut(), curse, P1);
+    engine::game::effects::attach::attach_to(runner.state_mut(), control, kinnan);
+    evaluate_layers(runner.state_mut());
+    reindex_object_triggers(runner.state_mut(), curse);
+    // CR 302.6: initial-board setup represents Control Magic already having
+    // controlled Kinnan since before P2's turn, not a fresh control change.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&kinnan)
+        .unwrap()
+        .summoning_sick = false;
+    assert_eq!(runner.state().objects[&kinnan].controller, P2);
+    assert_eq!(runner.state().objects[&elves].controller, P1);
+    assert!(!runner.state().objects[&elves].tapped);
+    assert!(!runner.state().objects[&kinnan].summoning_sick);
+
+    let mut original_stamp = None;
+    let mut mana_receipt = None;
+    let mut pending_after_blinks = None;
+    let mut blink = respond_once(P2, responses[0], kinnan, curse_trigger_pending(curse));
+    let mut blink_again = respond_once(P2, responses[1], kinnan, curse_trigger_pending(curse));
+    attack_with(
+        &mut runner,
+        kinnan,
+        P2,
+        P1,
+        |_| panic!("Kinnan and Curse require no trigger ordering"),
+        |runner| {
+            let Some(entry) = runner.state().stack.iter().find(|e| e.source_id == curse) else {
+                return false;
+            };
+            assert_eq!(entry.controller, P0);
+            let StackEntryKind::TriggeredAbility {
+                trigger_event:
+                    Some(GameEvent::DamageDealt {
+                        source_id,
+                        source_incarnation: Some(stamp),
+                        target,
+                        amount: 2,
+                        is_combat: true,
+                        ..
+                    }),
+                ..
+            } = &entry.kind
+            else {
+                panic!("combat must publish the real stamped Curse trigger");
+            };
+            assert_eq!(*source_id, kinnan);
+            assert_eq!(*target, engine::types::ability::TargetRef::Player(P1));
+            let stamp = *stamp;
+            if let Some(original) = original_stamp {
+                assert_eq!(stamp, original, "Curse keeps the old damage-dealer pin");
+            } else {
+                assert_eq!(runner.state().objects[&kinnan].incarnation, stamp);
+                original_stamp = Some(stamp);
+            }
+            if blink(runner) {
+                return true;
+            }
+            if runner.state().objects[&responses[0]].zone != Zone::Graveyard {
+                return false;
+            }
+            if mana_receipt.is_none() {
+                // P2 cast the first Flicker, but P1 now controls Kinnan and
+                // Elves. Wait for P1's real priority rather than changing seats.
+                if !matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1)
+                {
+                    return false;
+                }
+                let state = runner.state();
+                assert_eq!(state.stack.len(), 1, "only Curse is pending");
+                let returned = &state.objects[&kinnan];
+                assert_eq!(returned.zone, Zone::Battlefield);
+                assert_eq!(returned.controller, P1);
+                assert!(stamp < returned.incarnation);
+                assert_eq!(returned.trigger_definitions.len(), 1);
+                let definition = returned.trigger_definition_ref(&returned.trigger_definitions[0]);
+                assert_eq!(definition.source.object_id, kinnan);
+                assert_eq!(definition.source.incarnation, returned.incarnation);
+                assert!(state.triggered_abilities_added_mana_this_turn.is_empty());
+                assert_eq!(state.players[1].mana_pool.total(), 0);
+                runner
+                    .act(GameAction::ActivateAbility {
+                        source_id: elves,
+                        ability_index: 0,
+                        payment_mode: CastPaymentMode::Auto,
+                    })
+                    .expect("P1 activates the Elves while Curse remains pending");
+                let state = runner.state();
+                // CR 605.4a: single-type Elves mana requires no choice or
+                // stack entry; Kinnan's additional green resolves immediately.
+                assert!(
+                    matches!(state.waiting_for, WaitingFor::Priority { player } if player == P1)
+                );
+                assert_eq!(state.stack.len(), 1);
+                assert_eq!(state.stack[0].source_id, curse);
+                assert!(state.objects[&elves].tapped);
+                let pool = &state.players[1].mana_pool;
+                assert_eq!(pool.total(), 2);
+                assert_eq!(pool.count_color(ManaType::Green), 2);
+                assert_eq!(pool.count_where(|mana| mana.source_id == elves), 1);
+                assert_eq!(pool.count_where(|mana| mana.source_id == kinnan), 1);
+                assert_eq!(state.triggered_abilities_added_mana_this_turn.len(), 1);
+                assert!(state
+                    .triggered_abilities_added_mana_this_turn
+                    .contains(&(definition.clone(), P1)));
+                mana_receipt = Some(definition);
+                return true;
+            }
+            // Only after the intermediate Kinnan has produced its receipt may
+            // P2 cast the second paid Flicker at P2's next actual priority.
+            if blink_again(runner) {
+                return true;
+            }
+            if pending_after_blinks.is_none()
+                && runner.state().objects[&responses[1]].zone == Zone::Graveyard
+            {
+                let state = runner.state();
+                let receipt = mana_receipt.as_ref().expect("the real Kinnan mana receipt");
+                assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+                assert_eq!(state.stack.len(), 1);
+                assert_eq!(state.players[1].life, 18, "the 2/2 Kinnan connected");
+                assert_eq!(state.objects[&top_card].zone, Zone::Library);
+                assert!(grants(runner, top_card).is_empty());
+                assert_eq!(state.objects[&kinnan].zone, Zone::Battlefield);
+                assert_eq!(state.objects[&kinnan].controller, P1);
+                assert!(stamp < receipt.source.incarnation);
+                assert!(receipt.source.incarnation < state.objects[&kinnan].incarnation);
+                assert_eq!(receipt.source.object_id, kinnan, "not the Elf's epoch");
+                assert_eq!(state.triggered_abilities_added_mana_this_turn.len(), 1);
+                assert!(state
+                    .triggered_abilities_added_mana_this_turn
+                    .contains(&(receipt.clone(), P1)));
+                assert_eq!(state.players[1].mana_pool.count_color(ManaType::Green), 2);
+                assert!(plains.iter().all(|land| state.objects[land].tapped));
+                assert_eq!(state.players[2].mana_pool.total(), 0);
+                // CR 608.2h: only the old Kinnan snapshot supplies P2.
+                assert_eq!(state.lki_by_incarnation[&kinnan][&stamp].controller, P2);
+                assert_eq!(state.lki_cache[&kinnan].controller, P1);
+                let active_set = state.chain_tracked_set_id.expect("second Flicker's set");
+                let latest_nonempty_set = state
+                    .tracked_object_sets
+                    .iter()
+                    .filter(|(_, members)| !members.is_empty())
+                    .max_by_key(|(id, _)| id.0)
+                    .map(|(&id, _)| id);
+                assert_eq!(latest_nonempty_set, Some(active_set));
+                assert_ne!(
+                    state.tracked_set_member_origins[&active_set][&kinnan].departure_incarnation,
+                    stamp,
+                    "the latest Flicker origin does not independently retain old Kinnan"
+                );
+                pending_after_blinks = Some(state.clone());
+            }
+            false
+        },
+    );
+    assert_eq!(runner.state().objects[&top_card].zone, Zone::Exile);
+    // CR 608.2h + CR 611.2a: old Kinnan's controller gets the printed
+    // until-end-of-turn permission and its AnyColor rider.
+    let expected_grant = vec![(
+        P2,
+        Duration::UntilEndOfTurn,
+        Some(ManaSpendPermission::AnyColor),
+    )];
+    assert_eq!(grants(&runner, top_card), expected_grant);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+
+    let pending = pending_after_blinks.expect("capture actual Priority before Curse resolves");
+    // Controlled comparator twin, NOT an independently played history:
+    // change only this receipt ledger, keeping mana and the selected LKI.
+    let mut receipt_free = pending.clone();
+    receipt_free
+        .triggered_abilities_added_mana_this_turn
+        .clear();
+    let mut receipt_free_future = GameRunner::from_state(receipt_free.clone());
+    receipt_free_future.advance_until_stack_empty();
+    assert_eq!(
+        receipt_free_future.state().objects[&top_card].zone,
+        Zone::Exile
+    );
+    assert_eq!(grants(&receipt_free_future, top_card), expected_grant);
+    assert!(receipt_free_future.state().stack.is_empty());
+    assert!(matches!(
+        receipt_free_future.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    // Strict equality intentionally retains meaningful mana history; only
+    // resource projection may erase it. Never resume a normalized comparand.
+    assert_ne!(pending, receipt_free);
+    assert!(loop_states_equal_modulo_resources(
+        &pending,
+        &pending.clone()
+    ));
+    assert!(loop_states_equal_modulo_resources(
+        &receipt_free,
+        &receipt_free.clone()
+    ));
+    assert!(
+        loop_states_equal_modulo_resources(&pending, &receipt_free),
+        "erasing the intermediate Kinnan mana receipt must not rerank the retained Curse pin"
+    );
+    assert!(
+        loop_states_equal_modulo_resources(&receipt_free, &pending),
+        "projected equivalence must also accept the reversed raw pair"
     );
 }
 
