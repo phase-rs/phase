@@ -7632,20 +7632,19 @@ mod tests {
     use crate::types::actions::GameAction;
     use crate::types::game_state::{
         CastingVariant, CopyChosenStage, DrainStatus, DrawSequenceOrigin, ExiledStopInput, GameRng,
-        GameState, PendingBatchDeliveries, PendingChooseOneOf, PendingCopyTokenResolution,
-        PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemovalQueue,
-        PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingPerCategoryZoneChoice,
-        PendingPerPlayerZoneChoice, PendingRepeatIteration, PendingRepeatUntil,
-        PendingSpellResolution, PendingVoteBallotIteration, PendingZoneChangeDelivery,
-        PersistedGameState, PostReplacementDrain, RandomDraw, RepeatUntilStopWitness,
-        ResidentDrainPolicy, StackEntry, StackEntryKind, ZoneDeliveryExileTracking,
-        ZoneMoveCompletion,
+        GameState, PendingBatchDeliveries, PendingChooseOneOf, PendingComponentDeliveryParent,
+        PendingCopyTokenResolution, PendingCounterAdditionQueue, PendingCounterMoveQueue,
+        PendingCounterRemovalQueue, PendingEachPlayerCopyChosen, PendingLifeTotalAssignment,
+        PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingRepeatIteration,
+        PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration,
+        PendingZoneChangeDelivery, PersistedGameState, PostReplacementDrain, RandomDraw,
+        RepeatUntilStopWitness, ResidentDrainPolicy, StackEntry, StackEntryKind,
+        ZoneDeliveryExileTracking, ZoneMoveCompletion,
     };
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
     use rand::Rng;
 
-    use crate::types::game_state::{PendingComponentDeliveryParent, PendingZoneChangeDelivery};
     use crate::types::identifiers::ObjectIncarnationRef;
     use crate::types::identifiers::{CardId, LogicalZoneChangeGroupId, ObjectId};
     use crate::types::player::PlayerId;

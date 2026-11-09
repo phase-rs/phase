@@ -14691,6 +14691,7 @@ mod staged_batch_tests {
             source_id: Some(source),
             rest_cards: misses.clone(),
             rest_destination: Zone::Library,
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
             rest_order: DigRestOrder::PlayerChoice,
             rest_split_top_count: None,
             clear_markers: misses.clone(),
