@@ -2966,11 +2966,12 @@ pub fn resolve_effect_player_ref(
             })
             .or_else(|| {
                 ability.source_incarnation.and_then(|incarnation| {
-                    state
-                        .lki_by_incarnation
-                        .get(&ability.source_id)
-                        .and_then(|by_incarnation| by_incarnation.get(&incarnation))
-                        .map(|lki| lki.owner)
+                    crate::game::filter::exit_lki_for_incarnation(
+                        state,
+                        ability.source_id,
+                        incarnation,
+                    )
+                    .map(|lki| lki.owner)
                 })
             })
             .or_else(|| state.lki_cache.get(&ability.source_id).map(|lki| lki.owner)),
