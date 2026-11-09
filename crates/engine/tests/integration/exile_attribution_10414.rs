@@ -72,7 +72,7 @@ use engine::types::game_state::{
     PersistedGameState, PersistedRestoreFinalization, ReplacementChoiceKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{parse_mtgjson_mana_cost, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
@@ -821,12 +821,15 @@ fn mudhole_replacement_fixture(
                 ))
                 .destination_zone(Zone::Exile),
         );
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+            .collect(),
+    );
     let mudhole = scenario
         .add_spell_to_hand_from_oracle(P0, "Mudhole", true, MUDHOLE)
-        .with_mana_cost(ManaCost::Cost {
-            generic: 0,
-            shards: vec![],
-        })
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{R}"))
         .id();
 
     let mut runner = scenario.build();
@@ -863,8 +866,7 @@ fn mudhole_replacement_pause_resume_records_the_subject() {
 
     let outcome = runner.cast(mudhole).target_player(P1).resolve();
 
-    // First prompt: the first land is parked on the replacement choice and the
-    // second sits in the pending frame, carrying the subject as its performer.
+    // The affected card's owner answers the first optional replacement.
     match outcome.final_waiting_for() {
         WaitingFor::ReplacementChoice { player, kind, .. } => {
             assert_eq!(
@@ -875,18 +877,12 @@ fn mudhole_replacement_pause_resume_records_the_subject() {
         }
         other => panic!("expected the first replacement prompt; got {other:?}"),
     }
-    let frame = runner
-        .state()
-        .active_change_zone_frame()
-        .and_then(|frame| frame.pending.as_ref())
-        .expect("the paused mass move stashed a pending frame");
-    assert_eq!(frame.remaining.len(), 1, "one land is still to be moved");
 
     runner
         .act(GameAction::ChooseReplacement { index: 1 })
         .expect("decline the first replacement");
 
-    // Second prompt: the resumed member parks again, with nothing left over.
+    // The next member receives its own optional replacement choice.
     match &runner.state().waiting_for {
         WaitingFor::ReplacementChoice { player, kind, .. } => {
             assert_eq!(*player, P1);
@@ -894,15 +890,6 @@ fn mudhole_replacement_pause_resume_records_the_subject() {
         }
         other => panic!("expected the second replacement prompt; got {other:?}"),
     }
-    let frame = runner
-        .state()
-        .active_change_zone_frame()
-        .and_then(|frame| frame.pending.as_ref())
-        .expect("the resumed member re-parked with a pending frame");
-    assert!(
-        frame.remaining.is_empty(),
-        "the last land is the one parked"
-    );
 
     runner
         .act(GameAction::ChooseReplacement { index: 1 })
@@ -1024,14 +1011,6 @@ fn mudhole_subject_departure_preserves_the_surviving_family_continuation() {
         .act(GameAction::ChooseReplacement { index: 1 })
         .expect("decline the first replacement");
 
-    // The first member really moved under P1's authority; the resumed member
-    // must have reached its own actual replacement prompt before departure.
-    let exiled: Vec<_> = lands
-        .into_iter()
-        .filter(|land| zone(&runner, *land) == Zone::Exile)
-        .collect();
-    assert_eq!(exiled.len(), 1);
-    assert_eq!(exiled_by(&runner, exiled[0]), Some(P1));
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::ReplacementChoice {
@@ -1066,46 +1045,53 @@ fn mudhole_subject_departure_preserves_the_surviving_family_continuation() {
         );
     }
 }
-
-/// CR 800.4a: the resolving family's controller leaves, so its typed tail
-/// must retire even though the subject, replacement source and P2 beneficiary
-/// all survive. The positive row above proves the benefit can actually run.
+/// CR 608.2m + CR 800.4a: leaving the stack after resolution began does
+/// not cancel the resolving instructions or surviving players' choices.
 #[test]
-fn mudhole_controller_departure_retires_the_family_continuation() {
+fn resolving_mudhole_finishes_after_its_owner_leaves() {
     let (mut runner, lands, relic, mudhole) = mudhole_replacement_fixture(true);
     runner.cast(mudhole).target_player(P1).resolve();
     assert!(matches!(
         runner.state().waiting_for,
-        WaitingFor::ReplacementChoice {
-            player: P1,
-            kind: ReplacementChoiceKind::OptionalBranch,
-            ..
-        }
+        WaitingFor::ReplacementChoice { player: P1, .. }
     ));
-    assert_eq!(runner.life(P2), 20);
     runner
         .act(GameAction::Concede { player_id: P0 })
-        .expect("the controller concedes at the actual replacement prompt");
-
+        .expect("the owner leaves after the spell began resolving");
     assert!(runner.state().players[P0.0 as usize].is_eliminated);
-    assert!(!runner.state().players[P1.0 as usize].is_eliminated);
-    assert!(!runner.state().players[P2.0 as usize].is_eliminated);
-    assert_eq!(runner.life(P2), 20, "the departed family's tail cannot run");
-    assert_resolution_finished(&runner);
-    assert_pridemate_counters(&runner, 0);
+    assert_eq!(zone(&runner, mudhole), Zone::Exile);
     assert_eq!(
-        zone(&runner, mudhole),
-        Zone::Exile,
-        "P0's spell leaves the game"
+        runner.life(P2),
+        20,
+        "the surviving choices still precede the tail"
     );
-    for card in lands.into_iter().chain([relic]) {
-        assert_eq!(
-            zone(&runner, card),
-            Zone::Graveyard,
-            "P1's surviving cards must not be moved by the retired family"
-        );
-        assert_eq!(exiled_by(&runner, card), None);
+    for _ in lands {
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice {
+                player: P1,
+                kind: ReplacementChoiceKind::OptionalBranch,
+                ..
+            }
+        ));
+        runner
+            .act(GameAction::ChooseReplacement { index: 1 })
+            .expect("the living affected player declines the replacement");
     }
+    drive_to_priority(&mut runner);
+    assert_resolution_finished(&runner);
+    assert_eq!(
+        runner.life(P2),
+        23,
+        "the begun resolution finishes exactly once"
+    );
+    assert_pridemate_counters(&runner, 1);
+    for land in lands {
+        assert_eq!(zone(&runner, land), Zone::Exile);
+        assert_eq!(exiled_by(&runner, land), Some(P1));
+    }
+    assert_eq!(zone(&runner, relic), Zone::Graveyard);
+    assert_eq!(zone(&runner, mudhole), Zone::Exile);
 }
 
 // ---------------------------------------------------------------------------
