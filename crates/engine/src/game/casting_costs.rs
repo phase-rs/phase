@@ -16317,13 +16317,12 @@ fn auto_tap_mana_sources_inner(
     };
     // CR 107.4e + CR 107.4h: pool allocations are scratch continuations;
     // the same source planner decides which complete residual it can fund.
-    let ambiguous_snow_hybrid = needs_snow
-        && matches!(cost, ManaCost::Cost { shards, .. }
+    let ambiguous_hybrid = matches!(cost, ManaCost::Cost { shards, .. }
         if shards.iter().any(|shard| matches!(mana_payment::shard_to_mana_type(*shard),
             mana_payment::ShardRequirement::Hybrid(..)
             | mana_payment::ShardRequirement::HybridPhyrexian(..)
             | mana_payment::ShardRequirement::ColorlessHybrid(..))));
-    let residual = if ambiguous_snow_hybrid {
+    let residual = if ambiguous_hybrid {
         state
             .players
             .iter()

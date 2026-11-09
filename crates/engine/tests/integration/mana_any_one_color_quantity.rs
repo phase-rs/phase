@@ -14,7 +14,7 @@ use engine::game::mana_sources::{
 };
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    ActivationManaPaymentRestriction, ActivationRestriction, ChosenAttribute, Effect,
+    AbilityCost, ActivationManaPaymentRestriction, ActivationRestriction, ChosenAttribute, Effect,
     ManaProduction, ManaSpendPermission,
 };
 use engine::types::actions::GameAction;
@@ -507,8 +507,21 @@ fn toluz_keeps_a_payable_hybrid_suffix_with_ineligible_mana() {
     // The Lute's spell-only mana cannot pay for this creature. Eligible U=2
     // must not make the first hybrid strand the later strict U and U/B.
     const TOLUZ: &str = "When Toluz enters, it connives. (Draw a card, then discard a card. If you discarded a nonland card, put a +1/+1 counter on this creature.)\nWhenever you discard one or more cards, exile them from your graveyard.\nWhen Toluz dies, put the cards exiled with it into their owner's hand.";
-    for extra in [Some(ManaType::White), Some(ManaType::Blue), None] {
+    for (extra, krrik) in [
+        (Some(ManaType::White), false),
+        (Some(ManaType::Blue), false),
+        (None, false),
+        (Some(ManaType::White), true),
+    ] {
         let mut s = board();
+        if krrik {
+            s.with_life(P0, 1);
+            s.add_creature_from_oracle(P0, "K'rrik, Son of Yawgmoth", 2, 2,
+                "({B/P} can be paid with either {B} or 2 life.)\nLifelink\nFor each {B} in a cost, you may pay 2 life rather than pay that mana.\nWhenever you cast a black spell, put a +1/+1 counter on K'rrik.")
+                .as_legendary()
+                .with_subtypes(vec!["Phyrexian", "Horror", "Minion"])
+                .with_mana_cost(parse_mtgjson_mana_cost("{4}{B/P}{B/P}{B/P}"));
+        }
         s.add_artifact_from_oracle(P0, "Resonating Lute", LUTE)
             .with_mana_cost(parse_mtgjson_mana_cost("{2}{U}{R}"));
         let plains = s.add_basic_land(P0, ManaColor::White);
@@ -524,6 +537,16 @@ fn toluz_keeps_a_payable_hybrid_suffix_with_ineligible_mana() {
             .id();
         let mut r = s.build();
         evaluate_layers(r.state_mut());
+        if krrik {
+            assert!(
+                engine::game::static_abilities::player_life_payment_colors(r.state(), P0)
+                    .contains(ManaColor::Black)
+            );
+            assert_eq!(
+                engine::game::life_costs::max_phyrexian_life_payments(r.state(), P0),
+                0
+            );
+        }
         for (source, color) in [
             (plains, ManaType::White),
             (island_a, ManaType::Blue),
@@ -583,7 +606,11 @@ fn toluz_keeps_a_payable_hybrid_suffix_with_ineligible_mana() {
         // Deliberately stop at the fully paid casting boundary; Toluz's
         // enters/connive resolution is not the behavior under test.
         assert_eq!(payment.state().objects[&toluz].zone, Zone::Stack);
-        assert_eq!(payment.state().stack.len(), 1);
+        // K'rrik's printed black-spell trigger is also on the stack.
+        assert_eq!(payment.state().stack.len(), 1 + usize::from(krrik));
+        if krrik {
+            assert_eq!(payment.state().players[0].life, 1);
+        }
         assert_eq!(payment.state().objects[&toluz].mana_spent_to_cast_amount, 3);
         assert_eq!(
             payment.state().objects[&toluz]
@@ -960,7 +987,23 @@ fn scalar_counted_output_keeps_the_separate_same_color_snow_producer() {
             let paid = r.cast(wurm).commit();
             // CR 106.3 + CR 107.4h: scalar credit limits only the base
             // output. Equal-colored Aura and Lotus mana retain their sources.
-            assert_eq!(production_count(paid.events(), land, ManaType::Green), 3);
+            let base_colors: Vec<_> = [
+                ManaType::White,
+                ManaType::Blue,
+                ManaType::Black,
+                ManaType::Red,
+                ManaType::Green,
+            ]
+            .into_iter()
+            .filter(|&color| production_count(paid.events(), land, color) > 0)
+            .collect();
+            assert_eq!(base_colors.len(), 1);
+            let base_color = base_colors[0];
+            assert_eq!(production_count(paid.events(), land, base_color), 3);
+            if !land_is_snow {
+                // Only the Aura is Snow: Lotus must provide the printed G.
+                assert_eq!(base_color, ManaType::Green);
+            }
             assert_eq!(production_count(paid.events(), aura, ManaType::Green), 1);
             assert_eq!(production_count(paid.events(), signet, ManaType::Blue), 1);
             assert_eq!(production_count(paid.events(), signet, ManaType::Black), 1);
@@ -970,7 +1013,7 @@ fn scalar_counted_output_keeps_the_separate_same_color_snow_producer() {
                 .mana_pool
                 .units()
                 .all(|unit| unit.source_id == land
-                    && unit.color == ManaType::Green
+                    && unit.color == base_color
                     && unit.supertype == land_is_snow.then_some(ManaSupertype::Snow)));
             paid.resolve().assert_zone(&[wurm], Zone::Battlefield);
             assert!([land, signet].iter().all(|id| r.state().objects[id].tapped));
@@ -1169,17 +1212,50 @@ fn nykthos_aura_board(
     // CR 700.5 + CR 608.2h: the printed Owl's two U symbols supply
     // devotion two; Fertile Ground supplies one G. Opponent costs do not count.
     assert!(r.state().players[0].mana_pool.is_empty());
+    assert_eq!(
+        engine::game::devotion::count_devotion(r.state(), P0, &[ManaColor::Blue]),
+        2
+    );
+    let (_, ability) = activated_ability_definitions(r.state(), nykthos)
+        .into_iter()
+        .find(|(_, ability)| {
+            matches!(
+                &*ability.effect,
+                Effect::Mana {
+                    produced: ManaProduction::AnyOneColor { .. },
+                    ..
+                }
+            )
+        })
+        .expect("the printed chosen-color devotion ability is present");
+    assert!(
+        matches!(&ability.cost, Some(AbilityCost::Composite { costs })
+        if costs.len() == 2
+            && costs.iter().any(|cost| matches!(cost, AbilityCost::Tap))
+            && costs.iter().any(|cost| matches!(cost,
+                AbilityCost::Mana { cost } if *cost == parse_mtgjson_mana_cost("{2}"))))
+    );
     let rows = activatable_land_mana_options(r.state(), nykthos, P0);
     assert!(rows
         .iter()
         .any(|row| row.mana_type == ManaType::Colorless && row.taps_for_mana_overrides.len() == 1));
-    assert!(rows.iter().any(|row| row.mana_type == ManaType::Blue
-        && row.atomic_combination.as_ref()
-            == Some(&vec![ManaType::Blue, ManaType::Blue, ManaType::Green])
-        && row.taps_for_mana_overrides.len() == 1
-        && row.taps_for_mana_overrides[0].0.source.object_id == aura
-        && row.taps_for_mana_overrides[0].1
-            == engine::types::game_state::ProductionOverride::SingleColor(ManaType::Green)));
+    if paused || wastes_count >= 2 {
+        assert!(
+            rows.iter().any(|row| row.mana_type == ManaType::Blue
+                && row.atomic_combination.as_ref() == Some(&vec![ManaType::Blue, ManaType::Green])
+                && row.taps_for_mana_overrides.len() == 1
+                && row.taps_for_mana_overrides[0].0.source.object_id == aura
+                && row.taps_for_mana_overrides[0].1
+                    == engine::types::game_state::ProductionOverride::SingleColor(ManaType::Green)),
+            "currently payable choices: {rows:?}"
+        );
+    } else {
+        assert!(!rows.iter().any(|row| row.mana_type == ManaType::Blue));
+        assert_eq!(funders.len(), 1);
+        assert!(activatable_land_mana_options(r.state(), funders[0], P0)
+            .iter()
+            .any(|row| row.mana_type == ManaType::Colorless));
+    }
     (r, nykthos, aura, spiral, funders)
 }
 

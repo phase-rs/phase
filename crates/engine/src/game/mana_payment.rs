@@ -1140,7 +1140,7 @@ pub fn can_pay_for_spell(
     // complete payment; partial payments are not allowed.
     // CR 118.3a: The selected mana units are only previewed here. The caller's
     // pool is not mutated until the committed payment removes those exact units.
-    select_mana_payment(
+    select_mana_payment_with_life_budget(
         pool,
         cost,
         None,
@@ -1149,6 +1149,7 @@ pub fn can_pay_for_spell(
         None,
         permissions.life_colors,
         &[],
+        Some(usize::try_from(permissions.max_life).unwrap_or(usize::MAX)),
     )
     .is_ok_and(|(_, life_payments)| life_payments.len() <= permissions.max_life as usize)
 }
@@ -1318,7 +1319,12 @@ impl PaymentContinuation<'_> {
         max_life_payments: Option<usize>,
     ) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
         let mut failure = PaymentError::InsufficientMana;
-        for color in [colors.0, colors.1] {
+        // An eligible preferred pin retains the player's selected color.
+        let alternative = pool
+            .first_pinned_where(pins, |unit| is_eligible_color_unit(unit, colors.0, spell))
+            .is_none()
+            .then_some(colors.1);
+        for color in std::iter::once(colors.0).chain(alternative) {
             let mut remaining = pool.clone();
             let Some(unit) =
                 spend_eligible(&mut remaining, color, spell, pins, self.quality_demand)
@@ -1338,6 +1344,7 @@ impl PaymentContinuation<'_> {
                 pins,
                 choice_cursor,
                 preferences,
+                max_life_payments,
             ) {
                 Ok((mut spent, life))
                     if max_life_payments.is_none_or(|limit| life.len() <= limit) =>
@@ -1523,8 +1530,8 @@ fn reduce_cost_by_pool_from(
             quality_demand,
         };
         let shard = shards[idx];
-        // CR 107.4e + CR 107.4h + CR 601.2g: either eligible hybrid half
-        // may leave the Snow symbol unpaid. Ask the existing source planner
+        // CR 107.4e + CR 601.2g: each eligible hybrid half can leave
+        // different requirements unpaid. Ask the existing source planner
         // about the completed whole-cost residual, retaining the old preferred
         // residual if neither allocation is fundable. All spending is scratch.
         let hybrid_halves = match shard_to_mana_type(shard) {
@@ -1534,10 +1541,7 @@ fn reduce_cost_by_pool_from(
             ShardRequirement::ColorlessHybrid(color) => Some((ManaType::Colorless, color)),
             _ => None,
         };
-        if let Some(((a, b), accepts)) = hybrid_halves
-            .zip(fundable)
-            .filter(|_| !any_color && quality_demand.snow > 0)
-        {
+        if let Some(((a, b), accepts)) = hybrid_halves.zip(fundable).filter(|_| !any_color) {
             let preferred = remaining_payment.hybrid_color(&scratch, a, b, spell, &[]);
             let other = if preferred == a { b } else { a };
             let mut residuals = Vec::new();
@@ -1562,8 +1566,24 @@ fn reduce_cost_by_pool_from(
                     residuals.push(residual);
                 }
             }
-            if let Some(preferred_residual) = residuals.into_iter().next() {
-                return preferred_residual;
+            if let Some(preferred_residual) = residuals.first() {
+                // CR 107.4e + CR 601.2g: the remaining board may fund this
+                // hybrid while the floating color pays later requirements.
+                let mut unpaid = residual_shards.clone();
+                unpaid[idx] = Some(shard);
+                let deferred = reduce_cost_by_pool_from(
+                    &scratch,
+                    remaining_payment,
+                    spell,
+                    mana_spend_permission,
+                    demand,
+                    &unpaid,
+                    fundable,
+                );
+                if !residuals.contains(&deferred) && accepts(&deferred) {
+                    return deferred;
+                }
+                return preferred_residual.clone();
             }
         }
         let paid = match shard_to_mana_type(shard) {
@@ -1745,6 +1765,7 @@ fn reduce_cost_by_pool_from(
                             &[],
                             0,
                             Vec::new(),
+                            Some(0),
                         )
                         .ok()
                         .and_then(|(_, life)| life.is_empty().then_some(0))
@@ -1928,6 +1949,33 @@ pub(crate) fn select_mana_payment(
     life_colors: crate::types::mana::LifePaymentColors,
     pins: &[ManaPipId],
 ) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
+    select_mana_payment_with_life_budget(
+        pool,
+        cost,
+        hand_demand,
+        spell,
+        mana_spend_permission,
+        phyrexian_choices,
+        life_colors,
+        pins,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn select_mana_payment_with_life_budget(
+    pool: &ManaPool,
+    cost: &ManaCost,
+    hand_demand: Option<&ColorDemand>,
+    spell: Option<&PaymentContext<'_>>,
+    mana_spend_permission: Option<ManaSpendPermission>,
+    phyrexian_choices: Option<&[ShardChoice]>,
+    life_colors: crate::types::mana::LifePaymentColors,
+    pins: &[ManaPipId],
+    max_life_payments: Option<usize>,
+) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
+    // CR 107.4f + CR 118.3 + CR 119.8: affordability limits each candidate
+    // continuation before a color choice is committed.
     // CR 601.2h: Partial payments are not allowed. Spend from scratch pools so a
     // failed attempt never leaks a partial payment into the caller's real pool.
     let mut scratch = pool.clone();
@@ -1940,6 +1988,7 @@ pub(crate) fn select_mana_payment(
         phyrexian_choices,
         life_colors,
         pins,
+        max_life_payments,
     ) {
         Ok(payment) => Ok(payment),
         Err(PaymentError::InsufficientMana) if hand_demand.is_some() => {
@@ -1953,6 +2002,7 @@ pub(crate) fn select_mana_payment(
                 phyrexian_choices,
                 life_colors,
                 pins,
+                max_life_payments,
             ) {
                 Ok(payment) => Ok(payment),
                 Err(error) => Err(error),
@@ -1972,6 +2022,7 @@ fn pay_cost_with_demand_and_choices_once(
     phyrexian_choices: Option<&[ShardChoice]>,
     life_colors: crate::types::mana::LifePaymentColors,
     pins: &[ManaPipId],
+    max_life_payments: Option<usize>,
 ) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
     match cost {
         ManaCost::NoCost
@@ -1997,6 +2048,7 @@ fn pay_cost_with_demand_and_choices_once(
                 pins,
                 0,
                 Vec::new(),
+                max_life_payments,
             )
         }
     }
@@ -2014,6 +2066,7 @@ fn pay_cost_with_demand_and_choices_from(
     pins: &[ManaPipId],
     mut choice_cursor: usize,
     mut preferred_hybrid_colors: Vec<(ManaType, ManaType, ManaType)>,
+    max_life_payments: Option<usize>,
 ) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
     let PaymentContinuation {
         shards,
@@ -2089,7 +2142,7 @@ fn pay_cost_with_demand_and_choices_from(
                         pins,
                         choice_cursor,
                         &preferred_hybrid_colors,
-                        None,
+                        max_life_payments.map(|limit| limit.saturating_sub(life_payments.len())),
                     )?;
                     spent.extend(suffix_spent);
                     life_payments.extend(suffix_life);
@@ -2231,6 +2284,8 @@ fn pay_cost_with_demand_and_choices_from(
                             pins,
                             choice_cursor,
                             preferred_hybrid_colors.clone(),
+                            max_life_payments
+                                .map(|limit| limit.saturating_sub(life_payments.len())),
                         )
                         .ok()
                         .map(|(_, life)| life.len())
@@ -2326,7 +2381,8 @@ fn pay_cost_with_demand_and_choices_from(
                                 pins,
                                 choice_cursor,
                                 &preferred_hybrid_colors,
-                                None,
+                                max_life_payments
+                                    .map(|limit| limit.saturating_sub(life_payments.len())),
                             )?;
                             spent.extend(suffix_spent);
                             life_payments.extend(suffix_life);
@@ -2379,7 +2435,8 @@ fn pay_cost_with_demand_and_choices_from(
                                     pins,
                                     choice_cursor,
                                     &preferred_hybrid_colors,
-                                    None,
+                                    max_life_payments
+                                        .map(|limit| limit.saturating_sub(life_payments.len())),
                                 ) {
                                     spent.extend(suffix_spent);
                                     life_payments.extend(suffix_life);
@@ -2528,6 +2585,9 @@ fn pay_cost_with_demand_and_choices_from(
         spent.push(unit);
     }
 
+    if max_life_payments.is_some_and(|limit| life_payments.len() > limit) {
+        return Err(PaymentError::InsufficientMana);
+    }
     Ok((spent, life_payments))
 }
 
@@ -2747,6 +2807,7 @@ pub fn compute_phyrexian_shards(
                             &[],
                             0,
                             preferred_hybrid_colors.clone(),
+                            Some(usize::try_from(life_budget).unwrap_or(usize::MAX)),
                         )
                         .ok()
                         .map(|(_, life)| life.len())
@@ -4407,7 +4468,13 @@ mod tests {
             });
             let context = PaymentContext::Effect;
             let mut pool = ManaPool::from_units(units);
+            let original = pool.clone();
             let choices = choice.map(|choice| vec![choice]);
+            let pins: &[ManaPipId] = if text.starts_with("{W/U/P}") {
+                &[ManaPipId(3)]
+            } else {
+                &[]
+            };
             let (spent, life) = pay_cost_with_demand_and_choices(
                 &mut pool,
                 &cost,
@@ -4416,7 +4483,7 @@ mod tests {
                 None,
                 choices.as_deref(),
                 crate::types::mana::LifePaymentColors::EMPTY,
-                &[ManaPipId(3)],
+                pins,
             )
             .unwrap();
             assert_eq!(life.len(), expected_life, "{text} {choice:?}");
@@ -4428,6 +4495,20 @@ mod tests {
                 pool.count_where(|unit| unit.pip_id == ManaPipId(4) || unit.pip_id == ManaPipId(5)),
                 2
             );
+            if text == "{W/U}{U}{U/B}" {
+                let mut colors = crate::types::mana::LifePaymentColors::EMPTY;
+                colors.insert(ManaColor::Black);
+                assert!(can_pay_for_spell(
+                    &original,
+                    &cost,
+                    Some(&context),
+                    crate::types::mana::CostPermissionContext {
+                        max_life: 0,
+                        life_colors: colors,
+                        ..Default::default()
+                    },
+                ));
+            }
             if text.contains("/P}") {
                 let preview_pool = ManaPool::from_units([
                     make_unit(ManaType::White),
