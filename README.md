@@ -429,10 +429,13 @@ Its storage scales with the pending tail rather than cumulative frame count;
 compacting only after half is consumed amortizes copying across the stream.
 This does not impose a new live compressed-backlog limit.
 
-Game transport adoption closes the predecessor wrapper and its decoder lease;
-the server's sender replacement need not close the old peer. Each acquired
-candidate keeps an idempotent cleanup owner through public `serverHello`
-callbacks, including throwing, disposal and superseding reconnect callbacks.
+Game transport adoption rejects predecessor-owned commands, previews, exports,
+seat mutations and abandon requests with `WS_CLOSED` before releasing the old
+wrapper and decoder lease; the server need not close the old peer. All request
+owners are cleared before listeners can claim replacement work. Join/game-start
+waiters instead follow the attachment handoff. Each acquired candidate keeps an
+idempotent cleanup owner through throwing, disposal and superseding callbacks,
+including requests claimed before that candidate is abandoned.
 
 Draft adapters explicitly own current and retired transports. Healthy replacement
 closes an idle predecessor immediately; a source with a permitted command,
@@ -444,10 +447,13 @@ when the server never closes the old peer. Abandoning an adopted setup candidate
 also settles that source's owned work before releasing it, including synchronous
 `serverHello` reentry and setup-send failure. No new reply timeout is introduced.
 
-A reconnect draft snapshot does not complete an old pick merely by arriving.
-Cross-source completion requires the original draft code/token and the exact
-newly selected instance from a complete selection in the original authoritative
-view. Without that authority the original source retains its reply ownership.
+A draft view on either socket completes a pick only when its inventory proves
+the exact newly selected instance from the complete selection offered in the
+original authoritative view. Reply ownership and pick counters alone are not
+outcome evidence. A replacement must also match the original draft code/token.
+Retired views can settle their own permitted reply but cannot overwrite the
+current view, phase or credentials, or publish themselves as the current view.
+Without complete selection authority the original source retains the reply.
 This reports the selected-inventory outcome, not a new request-level
 acknowledgement: an automatic timer pick of the identical instance is
 indistinguishable on the existing wire.
