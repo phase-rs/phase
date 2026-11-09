@@ -355,8 +355,56 @@ fn gemrazer_under_gandalf_delivers_both_cards_before_one_owner_shuffle_and_three
         .accept_optional()
         .resolve();
     assert_eq!(outcome.mana_pool_total(P0), 0, "pay Gandalf's six mana");
-    let shuffles: Vec<_> = outcome
-        .events()
+    // CR 401.4 + CR 730.3a: R4 retains the owner's private order for both
+    // physical cards before delivering either component. Answer that real
+    // public prompt; stopping here is not completion of Gandalf's ability.
+    let WaitingFor::DigRestSplitChoice {
+        player,
+        library_owner,
+        cards,
+        ..
+    } = outcome.final_waiting_for()
+    else {
+        panic!("the merged permanent must offer its owner's physical order");
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*library_owner, P0);
+    assert_eq!(cards.len(), 2);
+    assert!(cards.contains(&gandalf) && cards.contains(&gemrazer));
+    assert!(!outcome.events().iter().any(|event| matches!(
+        event,
+        GameEvent::ZoneChanged {
+            to: Zone::Library,
+            ..
+        }
+    )));
+    let mut events = runner
+        .act(GameAction::SelectCards {
+            cards: vec![gemrazer, gandalf],
+        })
+        .expect("the owner submits the complete physical order")
+        .events;
+    for _ in 0..12 {
+        let action = match &runner.state().waiting_for {
+            WaitingFor::Priority { .. }
+                if runner.state().stack.is_empty()
+                    && runner.state().resolution_stack.is_empty() =>
+            {
+                break;
+            }
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::OptionalEffectChoice { .. } => {
+                GameAction::DecideOptionalEffect { accept: true }
+            }
+            other => panic!("unexpected merged-owner continuation prompt: {other:?}"),
+        };
+        let mut result = runner
+            .act(action)
+            .expect("finish the printed instruction and Cosi's actual optional trigger");
+        events.append(&mut result.events);
+    }
+    let state = runner.state();
+    let shuffles: Vec<_> = events
         .iter()
         .enumerate()
         .filter_map(|(index, event)| match event {
@@ -376,8 +424,7 @@ fn gemrazer_under_gandalf_delivers_both_cards_before_one_owner_shuffle_and_three
     let (shuffle_index, shuffler) = shuffles[0];
     assert_eq!(shuffler, P0, "only the owner's library is shuffled");
     for component in [gandalf, gemrazer] {
-        let deliveries: Vec<_> = outcome
-            .events()
+        let deliveries: Vec<_> = events
             .iter()
             .enumerate()
             .filter_map(|(index, event)| {
@@ -397,10 +444,9 @@ fn gemrazer_under_gandalf_delivers_both_cards_before_one_owner_shuffle_and_three
             "both cards arrive before the shuffle"
         );
         // Either card may be drawn by the rest of the printed instruction.
-        assert_ne!(outcome.state().objects[&component].zone, Zone::Battlefield);
+        assert_ne!(state.objects[&component].zone, Zone::Battlefield);
     }
-    let draws: Vec<_> = outcome
-        .events()
+    let draws: Vec<_> = events
         .iter()
         .enumerate()
         .filter_map(|(index, event)| match event {
@@ -413,11 +459,15 @@ fn gemrazer_under_gandalf_delivers_both_cards_before_one_owner_shuffle_and_three
         assert_eq!(drawer, P0);
         assert!(shuffle_index < index, "the one shuffle precedes every draw");
     }
-    outcome.assert_counters(trickster, CounterType::Plus1Plus1, 1);
-    assert!(matches!(
-        outcome.final_waiting_for(),
-        WaitingFor::Priority { .. }
-    ));
-    assert!(outcome.state().stack.is_empty());
-    assert!(outcome.state().resolution_stack.is_empty());
+    assert_eq!(
+        state.objects[&trickster]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        1
+    );
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.stack.is_empty());
+    assert!(state.resolution_stack.is_empty());
 }
