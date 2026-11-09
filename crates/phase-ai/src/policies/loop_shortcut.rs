@@ -100,9 +100,7 @@
 
 use engine::analysis::decision_template::{DecisionPoint, DecisionTemplate, IterationCount};
 use engine::analysis::loop_check::LoopCertificate;
-use engine::analysis::resource::{
-    AnnouncedLead, ChargeBound, PeriodSignature, PeriodicDelta, ResourceAxis,
-};
+use engine::analysis::resource::{AnnouncedLead, ChargeBound, PeriodSignature, ResourceAxis};
 use engine::game::period_confirm::{ConfirmedPeriod, PeriodPerformance};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -435,11 +433,12 @@ fn buys_only_mana_and_combats(
 ///   when what the earlier repetitions NETTED plus the deepest DIP inside `k` reaches the life
 ///   total. A period that pays 1 and gains 1 therefore never kills a proposer above 1 life,
 ///   and one that pays 4 and gains 3 kills a 5-life proposer in its second repetition, after
-///   netting only 1. The walk itself is `PeriodicDelta::first_life_crossing`, the engine's own
-///   authority over both numbers, so this policy's survival question and the engine's bound are
-///   one reduction by construction rather than by comment. Measured against the net-only rate this replaced, the
-///   check only tightens: each repetition's net and dip are both at least what the period
-///   itself nets off the proposer, so every declare that rate refused is still refused.
+///   netting only 1. The crossing is `PeriodicDelta::declared_seat_life_crossing`'s, the engine's
+///   own authority over both numbers and the reader the engine's bound asks for every living
+///   seat, so this policy's survival question and the engine's bound are one reduction by
+///   construction rather than by comment. Measured against the net-only rate this replaced, the
+///   check only tightens: each repetition's net and dip are both at least what the period itself
+///   nets off the proposer, so every declare that rate refused is still refused.
 /// - **poison**, CR 704.5c — reaching **10 or more** is the threshold.
 ///
 /// **LIBRARY IS DELIBERATELY EXCLUDED, and that is the non-obvious part of this function.**
@@ -508,9 +507,12 @@ fn cycles_to_proposer_elimination(
     let player = state.players.get(proposer.0 as usize)?;
 
     // CR 704.3 + CR 704.5a: the first repetition inside which the proposer can reach 0 or less
-    // life, off the engine's own authority — accumulated rather than divided, because a scheduled
-    // pin may name the proposer at some repetitions and another seat at the rest. The horizon is
-    // `declared`: the question is whether the proposer dies inside the count they would declare.
+    // life, off the engine's own authority. A scheduled pin may name the proposer at some
+    // repetitions and another seat at the rest, so `declared_seat_life_crossing` carries the life
+    // netted so far across each switch point and divides only inside a stretch whose charge does
+    // not change (a round robin of two or more is still stepped one repetition at a time). The
+    // horizon is `declared`: the question is whether the proposer dies inside the count they
+    // would declare.
     //
     // `ChargeBound::Ceiling`: this policy's refusal is a VETO, so its error must land on
     // refusing a declare the proposer could have survived rather than scoring one that kills
@@ -520,8 +522,8 @@ fn cycles_to_proposer_elimination(
     // disagreement.
     //
     // No announced lead: stating one would move which declarations this veto refuses.
-    let life_fatal = PeriodicDelta::first_life_crossing(
-        period.declared_seat_life_charges(
+    let life_fatal = period
+        .declared_seat_life_crossing(
             proposer,
             declaration,
             observed,
@@ -529,11 +531,10 @@ fn cycles_to_proposer_elimination(
             state,
             ChargeBound::Ceiling,
             AnnouncedLead::None,
-        ),
-        i64::from(player.life),
-        declared,
-    )
-    .map(i64::from);
+            i64::from(player.life),
+            declared,
+        )
+        .map(i64::from);
 
     // CR 704.5c: `headroom / rate` rounded UP, the first whole cycle at which ten poison
     // counters is met. Written long-hand rather than with `i64::div_ceil`, which is still
