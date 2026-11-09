@@ -8,6 +8,7 @@ use engine::ai_support::legal_actions;
 use engine::game::effects::change_zone::resolve_all;
 use engine::game::engine::apply_as_current;
 use engine::game::game_object::ObjectIncarnationRefExt;
+use engine::game::visibility::filter_state_for_viewer;
 use engine::types::ability::{
     ControllerRef, Effect, LibraryPosition, ResolvedAbility, TargetFilter, TypedFilter,
 };
@@ -434,4 +435,39 @@ fn ordinary_unmarked_battlefield_library_prompt_is_rejected() {
         .is_err(),
         "an unmarked battlefield prompt must not receive the mass-order exception"
     );
+}
+
+/// CR 402.3: a Library-scoped arrangement prompt over public battlefield
+/// permanents still hides the member ids from non-choosers; the arranger keeps
+/// the exact ids. This is the restored base redaction for the mass-order path.
+#[test]
+fn mass_library_order_prompt_redacts_public_ids_from_opponent() {
+    let (state, cards) = real_single_owner_mass_library_order_state(
+        Zone::Battlefield,
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+    );
+
+    let opponent = filter_state_for_viewer(&state, PlayerId(1));
+    let WaitingFor::EffectZoneChoice {
+        cards: opponent_cards,
+        ..
+    } = &opponent.waiting_for
+    else {
+        panic!("opponent must still see the redacted ordering envelope");
+    };
+    assert_eq!(opponent_cards.len(), cards.len());
+    assert!(
+        opponent_cards.iter().all(|id| *id == ObjectId(0)),
+        "opponent must receive placeholders, not battlefield ids; got {opponent_cards:?}"
+    );
+
+    let arranger = filter_state_for_viewer(&state, PlayerId(0));
+    let WaitingFor::EffectZoneChoice {
+        cards: arranger_cards,
+        ..
+    } = &arranger.waiting_for
+    else {
+        panic!("arranger must retain the ordering prompt");
+    };
+    assert_eq!(arranger_cards, &cards);
 }

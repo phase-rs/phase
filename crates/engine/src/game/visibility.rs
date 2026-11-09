@@ -3133,9 +3133,11 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         // would leak that subset through the placeholder count: the opponent can
         // subtract the public command-zone candidates from the number of
         // offered placeholders. For a mixed private/public set, clear the list
-        // entirely for non-choosers. A pure private set keeps one placeholder per
-        // eligible card (the existing count-only disclosure), and a pure public
-        // set is not redacted at all.
+        // entirely for non-choosers. A pure Library set keeps one placeholder per
+        // eligible card (the existing count-only disclosure); a Hand-scoped set
+        // is cleared even when unmixed because the eligible subset's size is
+        // hand information CR 402.3 withholds; a pure public set is not
+        // redacted at all.
         let has_private_card = cards.iter().any(|id| {
             state
                 .objects
