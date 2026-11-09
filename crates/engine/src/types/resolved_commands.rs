@@ -2495,6 +2495,34 @@ impl ResolvedRulesJournal {
         }
     }
 
+    /// CR 605.3b + CR 113.7: the source an ACTIVATED mana node names, or `None`
+    /// when the retained node is not an activated-mana node.
+    ///
+    /// [`Self::node_source_epoch`] deliberately answers for BOTH kinds of mana
+    /// node, because the pip a node produced may legitimately have been made by a
+    /// triggered mana ability (CR 605.4a) and its producer fact is the same fact
+    /// either way. A parked ACTIVATION may not answer that way: the node it
+    /// records is the one opened at its announcement
+    /// (`GameState::begin_activated_mana_journal_node`) and re-entered at every
+    /// resume, so a save whose pending activation names a `TriggeredMana` node is
+    /// naming an occurrence that settled a DIFFERENT ability — the object and
+    /// epoch it happens to share with this activation do not make it this
+    /// activation's node. Keeping the two questions in separate methods is what
+    /// lets a resume refuse the wrong kind instead of reading an epoch out of it.
+    ///
+    /// A node that is not a mana node at all (a proposal, a payment, a player
+    /// leave) and an unknown node both answer `None`.
+    pub fn activated_mana_source(
+        &self,
+        node: RulesExecutionNodeRef,
+    ) -> Option<ObjectIncarnationRef> {
+        let position = self.node_index(node).ok()?;
+        match &self.nodes[position].kind {
+            RulesExecutionNodeKind::ActivatedMana { source } => Some(*source),
+            _ => None,
+        }
+    }
+
     /// CR 106.3 + CR 118.3a: stamp `epoch` onto EVERY copy this journal holds of
     /// `pip`'s unit.
     ///

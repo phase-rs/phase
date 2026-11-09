@@ -7,18 +7,21 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
-    CastPaymentMode, GameState, ManaChoice, ManaChoicePrompt, PayCostKind, PersistedGameState,
-    WaitingFor,
+    CastPaymentMode, GameState, ManaChoice, ManaChoiceContext, ManaChoicePrompt,
+    ParkedActivationNodeConflict, PayCostKind, PendingCostMoveResume, PendingManaAbility,
+    PersistedGameState, PersistedRestoreError, WaitingFor,
 };
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::mana::{
     ManaColor, ManaCost, ManaSourceOutput, ManaSourcePenalty, ManaSourceQuantity, ManaType,
 };
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
+use engine::types::{RulesExecutionNodeKind, RulesExecutionNodeRef};
 
 const P0: PlayerId = PlayerId(0);
+const P1: PlayerId = PlayerId(1);
 
 fn sacrificial_mana_ability(cost: AbilityCost, color: ManaColor) -> AbilityDefinition {
     AbilityDefinition::new(
@@ -1067,4 +1070,505 @@ fn petal_prompt_with_no_producer_evidence_is_refused() {
     );
     assert_eq!(runner.state().objects[&petal].zone, Zone::Graveyard);
     assert_ne!(runner.state().objects[&petal].incarnation, announced);
+}
+
+// ---------------------------------------------------------------------------
+// CR 605.3b + CR 113.7 + CR 400.7: ONE settlement node for ONE activation,
+// however often it parks — and a retained node that cannot be that activation's
+// is refused, not read as absence.
+//
+// The parked activation names its producer twice (its execution node and its
+// announcement epoch). The resume resolves both once, so it must record BOTH on
+// the pending it is about to park again: an epoch-only pending makes the next
+// resume open a SECOND `ActivatedMana` settlement node for the same activation
+// and attribute the pip to it, leaving the first node settling nothing. And the
+// recorded node is only evidence when the journal still holds it AND it is this
+// activation's own node: a `TriggeredMana` node (CR 605.4a, a different
+// occurrence) or an `ActivatedMana` node naming another object is a save
+// contradicting itself, while a save that records nothing the journal still
+// holds is the legacy shape recovery exists for.
+// ---------------------------------------------------------------------------
+
+/// Rest in Peace, verbatim (Scryfall, exact name).
+const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
+/// Leyline of the Void, verbatim (Scryfall, exact name).
+const LEYLINE_OF_THE_VOID: &str = "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.";
+/// Synthetic companion on the REAL Lotus Petal (its activated line is verbatim):
+/// a `TapsForMana` triggered mana ability. Kinnan, Bonder Prodigy's shape —
+/// "Whenever you tap a nonland permanent for mana, add one mana of any type that
+/// permanent produced" — this ability belongs to the permanent it is printed on
+/// while firing from another permanent being tapped, so its `TriggeredMana`
+/// settlement node names the PRINTED object and that object's own epoch. The
+/// witness below therefore parks an activation of the trigger's own permanent
+/// while the journal retains the triggered node for the same object and epoch.
+const TAPPED_FOR_MANA_TRIGGER: &str =
+    "Whenever you tap an artifact for mana, add an additional {C}.";
+
+/// Every retained `ActivatedMana` settlement node naming this exact object
+/// epoch — the nodes one activation may legitimately own at most one of.
+fn activated_mana_nodes(
+    state: &GameState,
+    source: ObjectIncarnationRef,
+) -> Vec<RulesExecutionNodeRef> {
+    state
+        .resolved_rules_journal
+        .nodes()
+        .iter()
+        .filter(|node| {
+            matches!(
+                &node.kind,
+                RulesExecutionNodeKind::ActivatedMana { source: named } if *named == source
+            )
+        })
+        .map(|node| node.identity)
+        .collect()
+}
+
+/// Every retained `TriggeredMana` settlement node naming this exact object
+/// epoch.
+fn triggered_mana_nodes(
+    state: &GameState,
+    source: ObjectIncarnationRef,
+) -> Vec<RulesExecutionNodeRef> {
+    state
+        .resolved_rules_journal
+        .nodes()
+        .iter()
+        .filter(|node| {
+            matches!(
+                &node.kind,
+                RulesExecutionNodeKind::TriggeredMana { source: named, .. } if *named == source
+            )
+        })
+        .map(|node| node.identity)
+        .collect()
+}
+
+/// The parked activation inside a save taken while its cost payment waits on a
+/// replacement choice (the typed cost root, not a prompt).
+fn saved_cost_pending_mut(
+    json: &mut serde_json::Value,
+) -> &mut serde_json::Map<String, serde_json::Value> {
+    json.get_mut("state")
+        .and_then(|state| state.get_mut("pending_cost_move_resume"))
+        .and_then(|resume| resume.get_mut("ManaAbilityPayment"))
+        .and_then(|payment| payment.get_mut("pending"))
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("the paused mana-ability cost payment carries its pending activation")
+}
+
+/// The refusal a save draws at the restore chokepoint, kept typed so a witness
+/// asserts WHICH contradiction was refused rather than only that one was.
+fn admission_refusal(json: serde_json::Value) -> PersistedRestoreError {
+    let persisted = serde_json::from_value::<PersistedGameState>(json)
+        .expect("the save must decode before it can be judged");
+    match persisted.into_game_state() {
+        Ok(_) => panic!("the save must be refused at restore"),
+        Err(error) => error,
+    }
+}
+
+/// The `PendingManaAbility` a restored state parks at its colour prompt.
+fn parked_colour_pending(state: &GameState) -> &PendingManaAbility {
+    match &state.waiting_for {
+        WaitingFor::ChooseManaColor {
+            context: ManaChoiceContext::ManaAbility(pending),
+            ..
+        } => pending,
+        other => panic!("expected a parked mana-ability colour prompt, got {other:?}"),
+    }
+}
+
+/// Real Lotus Petal whose sacrifice cost pauses at a replacement choice: the two
+/// competing graveyard replacements (Rest in Peace and Leyline of the Void) apply
+/// after the ability is announced and before the ability resolves, so the
+/// activation is parked in its typed cost root (CR 616.1 + CR 605.3b) rather than
+/// at a prompt. Returns the announcement epoch.
+fn petal_cost_paused_at_the_replacement_choice() -> (GameRunner, ObjectId, u64) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = generic_spell(&mut scenario);
+    let petal = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Lotus Petal",
+            "{T}, Sacrifice this artifact: Add one mana of any color.",
+        )
+        .id();
+    scenario.add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE);
+    scenario.add_enchantment_from_oracle(P1, "Leyline of the Void", LEYLINE_OF_THE_VOID);
+    let mut runner = scenario.build();
+    let announced = runner.state().objects[&petal].incarnation;
+    begin_sacrificial_payment(&mut runner, spell);
+    let selection = offered_selection(&runner, petal);
+    runner
+        .act(GameAction::ActivateManaSource { selection })
+        .expect("the real Petal activates and its sacrifice cost pauses");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "the sacrifice must pause at its replacement choice, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        matches!(
+            runner.state().pending_cost_move_resume,
+            Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+        ),
+        "the paused cost must sit in its typed mana-ability root, got {:?}",
+        runner.state().pending_cost_move_resume
+    );
+    assert_eq!(
+        runner.state().objects[&petal].zone,
+        Zone::Battlefield,
+        "the sacrifice has not settled yet"
+    );
+    (runner, petal, announced)
+}
+
+/// CR 605.3b + CR 113.7: the cost resume binds the node it selected together with
+/// the epoch, so the pending it parks at the colour prompt already carries BOTH
+/// and the colour answer reuses that one node instead of opening a second.
+///
+/// The save is the legacy shape the epoch-only bind produced: announcement epoch
+/// present, `rules_execution_node` absent. Before the fix the cost resume created
+/// a node, bound only the epoch, and the colour answer opened a SECOND
+/// `ActivatedMana` node for the same activation — the pip went to the second and
+/// the first settled nothing.
+#[test]
+fn replacement_pause_round_trip_keeps_one_settlement_node_for_the_activation() {
+    let (runner, petal, announced) = petal_cost_paused_at_the_replacement_choice();
+    let source = ObjectIncarnationRef::of(petal, announced);
+    let before = activated_mana_nodes(runner.state(), source);
+    let mut json = persisted_json(runner.state());
+    let pending = saved_cost_pending_mut(&mut json);
+    assert_eq!(
+        pending.get("announced_source_incarnation"),
+        Some(&serde_json::json!(announced)),
+        "reach-guard: the save carries the announcement epoch"
+    );
+    assert!(
+        pending.remove("rules_execution_node").is_some(),
+        "reach-guard: the save carries no execution node"
+    );
+
+    let mut runner = GameRunner::from_state(
+        admitted(json).expect("a cost save whose node is absent is legacy, not corrupt"),
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the paused sacrifice settles through a replacement");
+
+    let pending_at_prompt = parked_colour_pending(runner.state());
+    // What the cost resume bound onto the pending it is about to park.
+    let bound = pending_at_prompt.rules_execution_node;
+    let bound_epoch = pending_at_prompt.announced_source_incarnation;
+    let after_resume = activated_mana_nodes(runner.state(), source);
+
+    // CR 605.3b: the colour prompt is the activation's second park. Its save must
+    // carry the node, so restoring it and answering does not open another.
+    let state = admitted(persisted_json(runner.state()))
+        .expect("the colour-prompt save written after the resume restores");
+    assert_eq!(
+        parked_colour_pending(&state).rules_execution_node,
+        bound,
+        "the round trip keeps whatever node the cost resume bound"
+    );
+    let mut runner = choose_blue(GameRunner::from_state(state));
+    assert_one_producer(runner.state(), announced, "the resumed activation wrote");
+    let after_choice = activated_mana_nodes(runner.state(), source);
+    let produced = runner
+        .state()
+        .resolved_rules_journal
+        .produced_mana()
+        .iter()
+        .find(|record| record.unit.color == ManaType::Blue)
+        .expect("the choice recorded its production");
+
+    assert_eq!(
+        after_choice.len(),
+        before.len() + 1,
+        "CR 605.3b: ONE activation settles under ONE activated-mana node however often it \
+         parks, so the whole resume must open exactly one more node — {} before the resume, \
+         {} after it, {} after the colour answer: {after_choice:?}",
+        before.len(),
+        after_resume.len(),
+        after_choice.len()
+    );
+    assert_eq!(
+        bound,
+        Some(produced.producer),
+        "CR 106.3 + CR 113.7: the pip is settled by the node the cost resume created and \
+         bound onto the pending, not by one a later resume opened (producer {:?})",
+        produced.producer
+    );
+    assert!(
+        !before.contains(&produced.producer),
+        "the node the resume bound is the one it opened, not the announcement's"
+    );
+    assert_eq!(
+        bound_epoch,
+        Some(announced),
+        "CR 602.2a: the same resume binds the announcement epoch beside the node"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .resolved_rules_journal
+            .produced_source_epoch(produced.unit.pip_id),
+        Some(ObjectIncarnationRef::of(petal, announced)),
+        "CR 400.7: and that node names the object that generated the ability"
+    );
+
+    // The activation still finishes the cast it was funding.
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the chosen mana pays the spell");
+    assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 0);
+}
+
+/// CR 605.4a + CR 113.7: a parked ACTIVATED colour prompt whose retained node is
+/// a TRIGGERED-mana node for the same source and epoch settles a different
+/// ability. The reference contradicts the activation, so restore refuses it
+/// instead of reading an epoch out of it.
+#[test]
+fn parked_activation_naming_a_triggered_mana_node_is_refused_at_restore() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // The trigger lives on the SECOND Petal (Kinnan's shape: a permanent you
+    // control taps for mana, and THIS object's triggered mana ability settles
+    // under its own node). The first Petal's tap fires it, so the node it opens
+    // names the second Petal's object and epoch — the exact tuple the second
+    // Petal's own activation later announces with.
+    let tapped = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Lotus Petal",
+            "{T}, Sacrifice this artifact: Add one mana of any color.",
+        )
+        .id();
+    let triggered_petal = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Lotus Petal",
+            &format!(
+                "{}\n{}",
+                "{T}, Sacrifice this artifact: Add one mana of any color.", TAPPED_FOR_MANA_TRIGGER
+            ),
+        )
+        .id();
+    let mut runner = scenario.build();
+    let announced = runner.state().objects[&triggered_petal].incarnation;
+
+    // CR 605.3a: a mana ability is activated at priority. The first Petal's
+    // production taps it for mana, which fires the second Petal's trigger.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: tapped,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the first Petal activates");
+    let mut runner = choose_blue(runner);
+    let source = ObjectIncarnationRef::of(triggered_petal, announced);
+    let triggered = triggered_mana_nodes(runner.state(), source);
+    assert_eq!(
+        triggered.len(),
+        1,
+        "reach-guard: the tapped-for-mana trigger settled under ONE TriggeredMana node \
+         naming this exact object and epoch, got {triggered:?}"
+    );
+
+    // The second Petal parks at its own colour prompt with its own activated node.
+    let park = |runner: &mut GameRunner| {
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: triggered_petal,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("the second Petal activates and parks at its colour choice");
+    };
+    park(&mut runner);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseManaColor { .. }
+        ),
+        "the activation parks at its colour prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    let activated = parked_colour_pending(runner.state())
+        .rules_execution_node
+        .expect("the parked activation carries its own activated node");
+    assert_ne!(
+        activated, triggered[0],
+        "the triggered node is a different settlement"
+    );
+
+    let mut json = persisted_json(runner.state());
+    let pending = saved_pending_mut(&mut json);
+    assert_eq!(
+        pending.get("announced_source_incarnation"),
+        Some(&serde_json::json!(announced)),
+        "reach-guard: the save carries the epoch the triggered node also names"
+    );
+    pending.insert(
+        "rules_execution_node".to_string(),
+        serde_json::to_value(triggered[0]).expect("the node identity serializes"),
+    );
+
+    let refusal = admission_refusal(json);
+    match &refusal {
+        PersistedRestoreError::ContradictoryParkedActivationNode {
+            source_id,
+            reason: ParkedActivationNodeConflict::NotAnActivatedManaNode { node },
+        } => {
+            assert_eq!(*source_id, triggered_petal);
+            assert_eq!(*node, triggered[0]);
+        }
+        other => panic!(
+            "a triggered-mana node on an activated activation must be refused as the wrong \
+             KIND, got {other:?}"
+        ),
+    }
+}
+
+/// CR 605.3b + CR 400.7: a retained ACTIVATED node naming a different object is
+/// a reference to another activation's settlement. It was silently converted to
+/// "no evidence" (the source filter dropped it) and the activation was priced
+/// from its announcement epoch instead; restore refuses it now.
+#[test]
+fn parked_activation_naming_another_object_s_activated_node_is_refused_at_restore() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Lotus Petal",
+            "{T}, Sacrifice this artifact: Add one mana of any color.",
+        )
+        .id();
+    let second = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Lotus Petal",
+            "{T}, Sacrifice this artifact: Add one mana of any color.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    let first_announced = runner.state().objects[&first].incarnation;
+
+    // The first Petal resolves completely and settles under its own node.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: first,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the first Petal activates");
+    let mut runner = choose_blue(runner);
+    let first_nodes = activated_mana_nodes(
+        runner.state(),
+        ObjectIncarnationRef::of(first, first_announced),
+    );
+    assert!(
+        !first_nodes.is_empty(),
+        "reach-guard: the first Petal settled under its own activated node"
+    );
+
+    // The second Petal parks at its colour prompt with its own node.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: second,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the second Petal activates and parks at its colour choice");
+    let parked = parked_colour_pending(runner.state());
+    assert_ne!(
+        parked.rules_execution_node,
+        Some(first_nodes[0]),
+        "reach-guard: the parked activation names its own node"
+    );
+
+    let mut json = persisted_json(runner.state());
+    let pending = saved_pending_mut(&mut json);
+    pending.insert(
+        "rules_execution_node".to_string(),
+        serde_json::to_value(first_nodes[0]).expect("the node identity serializes"),
+    );
+
+    let refusal = admission_refusal(json);
+    match &refusal {
+        PersistedRestoreError::ContradictoryParkedActivationNode {
+            source_id,
+            reason: ParkedActivationNodeConflict::ForeignSource { node, source, .. },
+        } => {
+            assert_eq!(*source_id, second);
+            assert_eq!(*node, first_nodes[0]);
+            assert_eq!(source.object_id, first);
+        }
+        other => panic!(
+            "an activated node naming another object must be refused as the wrong SOURCE, \
+             not converted to absence, got {other:?}"
+        ),
+    }
+}
+
+/// CR 605.3b + CR 602.2a: the control for both refusals. A save that records NO
+/// node the journal still holds is the legacy shape — the announcement epoch is
+/// exact evidence — so it is recovered, produces its mana, and writes a save
+/// whose one settlement node is the one recovery opened.
+#[test]
+fn node_absent_legacy_colour_prompt_is_recovered_with_one_settlement_node() {
+    let (runner, petal, announced) = petal_at_the_colour_prompt();
+    let source = ObjectIncarnationRef::of(petal, announced);
+    let before = activated_mana_nodes(runner.state(), source);
+    let mut json = persisted_json(runner.state());
+    let pending = saved_pending_mut(&mut json);
+    assert_eq!(
+        pending.get("announced_source_incarnation"),
+        Some(&serde_json::json!(announced)),
+        "reach-guard: the legacy save carries the announcement epoch"
+    );
+    assert!(
+        pending.remove("rules_execution_node").is_some(),
+        "reach-guard: and no execution node"
+    );
+
+    let mut runner = GameRunner::from_state(
+        admitted(json).expect("absence is legacy evidence, never a contradiction"),
+    );
+    runner = choose_blue(runner);
+    assert_one_producer(runner.state(), announced, "the recovered activation wrote");
+    let after = activated_mana_nodes(runner.state(), source);
+    assert_eq!(
+        after.len(),
+        before.len() + 1,
+        "the recovery opens exactly one settlement node for the activation, got {after:?} \
+         against {before:?}"
+    );
+    let produced = runner
+        .state()
+        .resolved_rules_journal
+        .produced_mana()
+        .iter()
+        .find(|record| record.unit.color == ManaType::Blue)
+        .expect("the choice recorded its production");
+    assert!(
+        after.contains(&produced.producer),
+        "the pip is settled by the node the recovery opened"
+    );
+
+    let state = admitted(persisted_json(runner.state()))
+        .expect("the save written after the choice still restores");
+    assert_one_producer(&state, announced, "the second load read");
+    assert_eq!(
+        activated_mana_nodes(&state, source),
+        after,
+        "and it keeps the same one node"
+    );
 }

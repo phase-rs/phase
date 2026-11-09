@@ -16,9 +16,9 @@ use crate::types::game_state::{
     CostResume, GameState, ManaAbilityCostCursor, ManaAbilityCostParent,
     ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume,
     ManaAmountComposition, ManaChoice, ManaChoiceContext, ManaChoicePrompt, ManaColorChoiceResume,
-    ManaTriggerFixedPointResume, PausedCounterCostRemoval, PayCostKind, PayableResource,
-    PendingCostMoveResume, PendingCounterRemoval, PendingManaAbility, ProductionOverride,
-    WaitingFor,
+    ManaTriggerFixedPointResume, ParkedActivationNodeEvidence, PausedCounterCostRemoval,
+    PayCostKind, PayableResource, PendingCostMoveResume, PendingCounterRemoval, PendingManaAbility,
+    ProductionOverride, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{ManaColor, ManaCost, ManaPool, ManaType, PaymentContext};
@@ -1404,12 +1404,17 @@ pub(crate) fn mana_choice_prompt(
 /// the journal's production record (the node the activation runs under).
 ///
 /// Resolution:
-/// * the node resolves to a source carrying THIS activation's storage id → that
-///   epoch is exact, and the node itself is reused when the journal still holds
-///   it;
+/// * the node the journal still retains resolves to an ACTIVATED mana node of
+///   this activation's own → that epoch is exact, and the node itself is reused;
+/// * a node the journal no longer retains (or none at all) proves nothing;
 /// * the announcement epoch is exact by construction (captured before any cost);
 /// * both present must agree — two epochs for one activation is a save
 ///   contradicting itself, and neither side is preferred;
+/// * a retained node that cannot be this activation's — a triggered-mana node,
+///   or an activated-mana node naming a different object — is a save
+///   contradicting itself about which settlement this activation is, and is
+///   refused rather than read as absence
+///   ([`PendingManaAbility::recorded_producer_node`]);
 /// * neither present: an activation this engine built names its producer twice,
 ///   so a save carrying neither field predates both and proves nothing — refusing
 ///   is the only answer that does not price the mana from the live occupant of the
@@ -1428,19 +1433,33 @@ fn resolve_parked_activation_producer(
     state: &mut GameState,
     pending: &PendingManaAbility,
 ) -> Result<ParkedActivationProducer, EngineError> {
-    // CR 113.7: the node names the object that generated the ability — the exact
-    // epoch, and the half of the evidence that predates
-    // `announced_source_incarnation`. A node naming another object, or one the
-    // journal no longer retains, proves nothing about this activation.
-    let recorded_source = pending.rules_execution_node.and_then(|node| {
-        state
-            .resolved_rules_journal
-            .node_source_epoch(node)
-            .filter(|source| source.object_id == pending.source_id)
-    });
-    let usable_node = pending
-        .rules_execution_node
-        .filter(|node| state.resolved_rules_journal.contains_node(*node));
+    // CR 113.7 + CR 605.3b + CR 400.7: ask the journal what the recorded node IS
+    // — not merely which source it happens to name. The node names the object
+    // that generated the ability, and the half of the evidence that predates
+    // `announced_source_incarnation`, so:
+    //
+    //  * a node the journal no longer retains, or no node at all, proves nothing
+    //    about this activation and leaves the announcement epoch as the evidence
+    //    (the legacy shapes);
+    //  * a node the journal RETAINS that is not this activation's own — a
+    //    triggered-mana node (CR 605.4a: it settles a different ability, however
+    //    exactly it shares this activation's object and epoch) or an
+    //    activated-mana node naming a different object — is a save contradicting
+    //    itself. It is refused, NOT read as absence: reading it as absence is
+    //    what let a resume price this activation from somebody else's node.
+    let recorded = pending
+        .recorded_producer_node(&state.resolved_rules_journal)
+        .map_err(|conflict| {
+            EngineError::InvalidAction(format!(
+                "Parked mana activation for {:?} records an execution node it cannot own: \
+                 {conflict}",
+                pending.source_id
+            ))
+        })?;
+    let (recorded_source, usable_node) = match recorded {
+        ParkedActivationNodeEvidence::Owned(source) => (Some(source), pending.rules_execution_node),
+        ParkedActivationNodeEvidence::None => (None, None),
+    };
     let announced = pending.announced_source_incarnation;
 
     let source = match (recorded_source, announced) {
@@ -1477,8 +1496,8 @@ fn resolve_parked_activation_producer(
     // CR 605.3b: reuse the activation's own node when the journal still retains
     // it; otherwise open one that names the resolved epoch, never the live object.
     let node = match usable_node {
-        Some(node) if recorded_source.is_some() => node,
-        _ => state.begin_activated_mana_journal_node_for_source(source),
+        Some(node) => node,
+        None => state.begin_activated_mana_journal_node_for_source(source),
     };
     Ok(ParkedActivationProducer { source, node })
 }
@@ -4431,7 +4450,18 @@ fn continue_mana_ability_cost_payment(
     // production, the activation's own sub-chain — reads the same value, and run
     // the whole cost walk under the node that names it.
     let producer = resolve_parked_activation_producer(state, &pending)?;
+    // CR 605.3b + CR 113.7: bind BOTH halves of that one identity, not just the
+    // epoch. The pending is the value every later pause serializes —
+    // `pause_mana_ability_cost_payment` stores it as `pending_cost_move_resume`,
+    // and `finish_mana_ability_cost_payment` stores it inside the
+    // `ChooseManaColor` prompt — so a pending that carries the epoch alone makes
+    // the NEXT resume find no node, open a second `ActivatedMana` settlement node
+    // for this one activation, and attribute the pip to that second node while
+    // the first settles nothing. Writing the resolved node back here is what
+    // gives the activation exactly one settlement node however many times it
+    // parks: every later resume reads the node it already carries and reuses it.
     pending.announced_source_incarnation = Some(producer.source.incarnation);
+    pending.rules_execution_node = Some(producer.node);
     state.with_rules_execution_node(producer.node, |state| {
         continue_mana_ability_cost_payment_in_node(state, pending, cursor, events, cost_event_start)
     })

@@ -11601,6 +11601,122 @@ impl PendingManaAbility {
     pub(crate) fn chain_place(&self) -> usize {
         self.suspended_chain().skip(1).count()
     }
+
+    /// CR 605.3b + CR 113.7 + CR 400.7: what the execution node this parked
+    /// activation recorded proves about ITS OWN producer, read against the
+    /// journal that owns the node.
+    ///
+    /// The field is written once, at announcement, from
+    /// `GameState::begin_activated_mana_journal_node`, and re-entered at every
+    /// resume. So there are exactly three shapes a save can carry, and they are
+    /// not interchangeable:
+    ///
+    /// * **nothing retained** — `rules_execution_node` is absent (a save written
+    ///   before the field existed) or names a node the journal no longer holds
+    ///   (the journal is turn-scoped). Neither can name a producer, and neither
+    ///   is a contradiction: a save that states nothing this activation cannot
+    ///   be is the legacy shape recovery exists for, and the announcement epoch
+    ///   (CR 602.2a) is the evidence such a save still carries.
+    /// * **this activation's own activated-mana node** — the journal retains it
+    ///   and it names this activation's source. Its `ObjectIncarnationRef` is the
+    ///   producer, and the node is the one the activation must settle under
+    ///   (CR 113.7: the source of an ability is the object that generated it).
+    /// * **a retained node this activation cannot own** — a `TriggeredMana` node
+    ///   (CR 605.4a: it settles a different ability, however exactly it shares
+    ///   this activation's object and epoch) or an `ActivatedMana` node naming a
+    ///   different object. That is a state contradicting itself, and it is
+    ///   refused rather than read as absence: reading it as absence would price
+    ///   the activation's mana from a node that settles something else.
+    ///
+    /// Both readings the caller makes — the epoch and the node to reuse — come
+    /// from this one answer, so they cannot disagree.
+    pub(crate) fn recorded_producer_node(
+        &self,
+        journal: &ResolvedRulesJournal,
+    ) -> Result<ParkedActivationNodeEvidence, ParkedActivationNodeConflict> {
+        let Some(node) = self.rules_execution_node else {
+            return Ok(ParkedActivationNodeEvidence::None);
+        };
+        if !journal.contains_node(node) {
+            return Ok(ParkedActivationNodeEvidence::None);
+        }
+        let Some(source) = journal.activated_mana_source(node) else {
+            return Err(ParkedActivationNodeConflict::NotAnActivatedManaNode { node });
+        };
+        if source.object_id != self.source_id {
+            return Err(ParkedActivationNodeConflict::ForeignSource {
+                node,
+                source,
+                activation_source: self.source_id,
+            });
+        }
+        Ok(ParkedActivationNodeEvidence::Owned(source))
+    }
+}
+
+/// CR 605.3b + CR 113.7: the producer evidence a parked mana activation's own
+/// recorded execution node carries, once the journal has been asked what that
+/// node is. See [`PendingManaAbility::recorded_producer_node`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParkedActivationNodeEvidence {
+    /// The save records no node the journal still retains — either it predates
+    /// the field, or the turn-scoped journal has since cleared it. Both answer
+    /// the same way (no epoch, no node), and neither is a contradiction.
+    None,
+    /// The journal retains this activation's own activated-mana node, naming
+    /// this exact `ObjectIncarnationRef` as the producer.
+    Owned(ObjectIncarnationRef),
+}
+
+/// CR 605.3b + CR 113.7 + CR 400.7: a parked mana activation's recorded
+/// execution node is RETAINED but cannot be the activation's own — the saved
+/// state contradicts itself, and restore refuses it rather than reading the
+/// reference as absence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParkedActivationNodeConflict {
+    /// The journal retains the recorded node, but it is not an activated-mana
+    /// node. A `TriggeredMana` node settles a triggered mana ability
+    /// (CR 605.4a) — a different occurrence, even when it names the same object
+    /// and epoch — and the other kinds settle no mana ability at all.
+    NotAnActivatedManaNode { node: RulesExecutionNodeRef },
+    /// The journal retains an activated-mana node, but it names a different
+    /// object than the activation's source (CR 400.7: a different object, and
+    /// therefore a different activation's producer).
+    ForeignSource {
+        node: RulesExecutionNodeRef,
+        source: ObjectIncarnationRef,
+        activation_source: ObjectId,
+    },
+}
+
+impl ParkedActivationNodeConflict {
+    /// The recorded node this conflict is about.
+    pub fn node(&self) -> RulesExecutionNodeRef {
+        match self {
+            Self::NotAnActivatedManaNode { node } | Self::ForeignSource { node, .. } => *node,
+        }
+    }
+}
+
+impl std::fmt::Display for ParkedActivationNodeConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAnActivatedManaNode { node } => write!(
+                f,
+                "its execution node {node:?} is not an activated-mana node, so it settles a \
+                 different ability"
+            ),
+            Self::ForeignSource {
+                node,
+                source,
+                activation_source,
+            } => write!(
+                f,
+                "its execution node {node:?} names {:?} epoch {}, not this activation's object {:?}",
+                source.object_id, source.incarnation, activation_source
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17204,6 +17320,122 @@ impl GameState {
             .is_some_and(|produced| produced.source_incarnation.is_none())
     }
 
+    /// CR 605.3b + CR 113.7 + CR 400.7: refuse a save whose PARKED mana
+    /// activation records an execution node the journal still retains but that
+    /// cannot be that activation's own.
+    ///
+    /// The floating-unit validation beside this one
+    /// ([`Self::bind_or_reject_floating_mana_provenance`]) checks every record a
+    /// save carries about its POOL. A parked activation's recorded node is a
+    /// record about an activation instead, and nothing compared it: the resume
+    /// authority read the node for its epoch without asking whether it was this
+    /// activation's node at all, so a `TriggeredMana` node naming the same object
+    /// and epoch, or an `ActivatedMana` node naming a different object, was read
+    /// as evidence — or, when the object differed, silently as no evidence, which
+    /// is the same fail-open stated twice.
+    ///
+    /// [`PendingManaAbility::recorded_producer_node`] is the authority on the
+    /// three shapes, and this walk applies it to every parked activation the save
+    /// holds. Absence stays admissible (that is the legacy shape); only a
+    /// retained-but-foreign reference is refused.
+    fn reject_foreign_parked_activation_nodes(&self) -> Result<(), PersistedRestoreError> {
+        let mut refusal: Option<PersistedRestoreError> = None;
+        self.for_each_parked_mana_ability(&mut |pending| {
+            if refusal.is_some() {
+                return;
+            }
+            if let Err(reason) = pending.recorded_producer_node(&self.resolved_rules_journal) {
+                debug_assert_eq!(Some(reason.node()), pending.rules_execution_node);
+                refusal = Some(PersistedRestoreError::ContradictoryParkedActivationNode {
+                    source_id: pending.source_id,
+                    reason,
+                });
+            }
+        });
+        match refusal {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// CR 605.3b: every parked mana-ability activation this saved state holds.
+    ///
+    /// The roots are the state-level fields that can carry one, listed so a new
+    /// carrier has to be classified here:
+    ///
+    /// * the live prompt — through `WaitingFor::continued_mana_ability`, the same
+    ///   authority that decides a prompt continues an activation, so a prompt
+    ///   variant added to that classification is walked for free;
+    /// * the replacement-paused cost root (`pending_cost_move_resume`), together
+    ///   with the suspended parent chain its cost cursor holds (each parent is a
+    ///   parked activation of its own);
+    /// * a paused triggered-mana fixed point (`pending_triggered_mana_resume`),
+    ///   whose `outer_resume` re-enters the suspended mana frame, either through
+    ///   its resume root or through an already-built colour prompt;
+    /// * the deferred-life-cost root (`pending_deferred_life_cost_resume`), whose
+    ///   mana root re-enters one.
+    ///
+    /// Each activation's own suspended chain (CR 605.3c) is walked too.
+    fn for_each_parked_mana_ability(&self, f: &mut impl FnMut(&PendingManaAbility)) {
+        fn for_each_parent_activation(
+            cursor: &ManaAbilityCostCursor,
+            f: &mut impl FnMut(&PendingManaAbility),
+        ) {
+            if let Some(parent) = cursor.parent.as_deref() {
+                parent.pending.suspended_chain().for_each(&mut *f);
+                for_each_parent_activation(&parent.cursor, f);
+            }
+        }
+        if let Some(pending) = self.waiting_for.continued_mana_ability() {
+            pending.suspended_chain().for_each(&mut *f);
+        }
+        if let Some(resume) = self.pending_cost_move_resume.as_ref() {
+            match resume {
+                PendingCostMoveResume::ManaAbilityPayment { pending, cursor } => {
+                    pending.suspended_chain().for_each(&mut *f);
+                    for_each_parent_activation(cursor, f);
+                }
+                PendingCostMoveResume::CollectEvidencePayment { resume, .. } => {
+                    if let CollectEvidenceResume::ManaAbility {
+                        pending_mana_ability,
+                    } = resume.as_ref()
+                    {
+                        pending_mana_ability.suspended_chain().for_each(&mut *f);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(paused) = self.pending_triggered_mana_resume.as_deref() {
+            match &paused.outer_resume {
+                ManaTriggerFixedPointResume::Root { resume, .. } => {
+                    if let ManaAbilityResume::ManaAbilityManaPayment {
+                        pending_mana_ability,
+                    } = resume.as_ref()
+                    {
+                        pending_mana_ability.suspended_chain().for_each(&mut *f);
+                    }
+                }
+                ManaTriggerFixedPointResume::ColorChoice(choice) => {
+                    if let ManaChoiceContext::ManaAbility(pending) = &choice.context {
+                        pending.suspended_chain().for_each(&mut *f);
+                    }
+                }
+                ManaTriggerFixedPointResume::Parent => {}
+            }
+        }
+        if let Some(DeferredLifeCostResume::ManaRoot { resume, .. }) =
+            self.pending_deferred_life_cost_resume.as_ref()
+        {
+            if let ManaAbilityResume::ManaAbilityManaPayment {
+                pending_mana_ability,
+            } = resume.as_ref()
+            {
+                pending_mana_ability.suspended_chain().for_each(&mut *f);
+            }
+        }
+    }
+
     /// CR 106.3 + CR 106.4 + CR 400.7 + CR 605.1a: the producing epoch the SAVE
     /// itself proves for ONE pin-less floating unit, or `None` when it proves none.
     ///
@@ -17809,6 +18041,27 @@ pub enum PersistedRestoreError {
         second: ObjectId,
         second_ability_index: Option<usize>,
     },
+
+    /// CR 605.3b + CR 113.7 + CR 400.7: a parked mana activation records an
+    /// execution node the journal RETAINS but which cannot be that activation's
+    /// own — a triggered-mana node (CR 605.4a: it settles a different ability) or
+    /// an activated-mana node naming a different object.
+    ///
+    /// The distinction this refuses on is the one the resume boundary needs: a
+    /// save that records NO node it can still read (the field predates the save,
+    /// or the turn-scoped journal cleared the node) is a legacy save whose
+    /// announcement epoch is still exact evidence, and it is recovered. A save
+    /// that records a node the journal holds and that contradicts the activation
+    /// is not a legacy save — it is a reference to somebody else's settlement, and
+    /// reading it as absent would let the activation's mana be priced from a node
+    /// that settles a different ability. Neither `mana_abilities` resume path
+    /// distinguishes the two on its own, so the refusal belongs here, at the one
+    /// admission chokepoint every restore funnels through.
+    #[error("persisted mana ability activation for {source_id:?} cannot be restored: {reason}")]
+    ContradictoryParkedActivationNode {
+        source_id: ObjectId,
+        reason: ParkedActivationNodeConflict,
+    },
 }
 
 impl PreparedPersistedGameState {
@@ -18023,6 +18276,7 @@ impl PersistedGameState {
         state.reject_unknown_cast_history_provenance()?;
         state.reject_unknown_activation_target_zone()?;
         state.bind_or_reject_floating_mana_provenance()?;
+        state.reject_foreign_parked_activation_nodes()?;
         state.reject_conflicting_pending_cast_owners()?;
         state.reject_unknown_pending_target_facts()?;
         crate::game::effects::choose_from_zone::migrate_legacy_per_player_frame_on_restore(
