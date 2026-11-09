@@ -2471,8 +2471,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ControlWindow, Effect, PostReplacementContinuation, ReplacementDefinition, ReplacementMode,
-        ResolvedAbility, TargetRef,
+        ControlWindow, Effect, EffectKind, PostReplacementContinuation, ReplacementDefinition,
+        ReplacementMode, ResolvedAbility, TargetRef,
     };
     use crate::types::actions::GameAction;
     use crate::types::counter::CounterType;
@@ -2481,8 +2481,8 @@ mod tests {
         ActivePlayerControl, CastingVariant, ExtraTurn, NamedChoiceSource,
         NamedChoiceSourceBinding, OpponentGuessOwner, OpponentGuessSource, PendingCast,
         PendingConniveReentry, PendingContinuation, PendingReplacement, PendingSpellResolution,
-        PromptSourceBinding, ResolutionSourceRelatch, ScheduledTurnControl, StackEntry,
-        StackEntryKind,
+        PendingZoneChangeDelivery, PromptSourceBinding, ResolutionSourceRelatch,
+        ScheduledTurnControl, StackEntry, StackEntryKind,
     };
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ObjectId,
