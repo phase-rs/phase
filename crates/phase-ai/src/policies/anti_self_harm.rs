@@ -3,7 +3,6 @@ use engine::ai_support::is_pact_payment_ability;
 use engine::ai_support::{
     certify_pact_plan, current_target_selection_targets, find_copy_targets, is_pact_payment_cast,
 };
-use engine::game::casting;
 use engine::game::combat;
 use engine::game::cost_payability::AbilityCostPayability;
 use engine::game::effects::draw::can_draw_at_least_one;
@@ -11,7 +10,6 @@ use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::keywords;
 use engine::game::life_safety::{preview_candidate_life_safety, CandidateLifeSafety};
 use engine::game::mana_abilities;
-use engine::game::mana_sources;
 use engine::game::quantity::resolve_quantity;
 use engine::game::targeting::find_legal_targets;
 use engine::game::turn_control;
@@ -1617,52 +1615,12 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
 /// sources to pay the cost. Returns a negative penalty proportional to creature
 /// blocking value lost.
 fn pump_taps_blocker_penalty(ctx: &PolicyContext<'_>) -> f64 {
-    let creatures_tapped =
-        cast_payment_creature_taps(ctx).unwrap_or_else(|| ranked_source_estimate(ctx));
-    if creatures_tapped == 0 {
-        return 0.0;
-    }
-
-    // Each creature tapped loses its blocking value during this combat.
-    -(5.0 * creatures_tapped as f64)
-}
-
-/// CR 509.1a: the AI's creatures the cast's own automatic mana payment taps or
-/// spends, read off that payment (`casting::auto_payment_sources`). `None` when
-/// it can't be read ahead: the candidate isn't a cast, or its payment stops at
-/// a choice or can't finish.
-fn cast_payment_creature_taps(ctx: &PolicyContext<'_>) -> Option<usize> {
-    let GameAction::CastSpell {
-        object_id,
-        payment_mode,
-        ..
-    } = &ctx.candidate.action
-    else {
-        return None;
-    };
-    let paid = casting::auto_payment_sources(ctx.state, ctx.ai_player, *object_id, *payment_mode)?;
-    Some(
-        paid.iter()
-            .filter(|id| {
-                ctx.state.objects.get(id).is_some_and(|obj| {
-                    obj.controller == ctx.ai_player
-                        && obj.card_types.core_types.contains(&CoreType::Creature)
-                })
-            })
-            .count(),
-    )
-}
-
-/// The creature mana sources a payment is estimated to tap when the payment
-/// itself can't be read ahead: the mana value less the pool, the lands, and the
-/// rocks auto-tap ranks ahead of creatures.
-fn ranked_source_estimate(ctx: &PolicyContext<'_>) -> usize {
     let Some(source) = ctx.source_object() else {
-        return 0;
+        return 0.0;
     };
     let spell_cost = source.mana_cost.mana_value() as usize;
     if spell_cost == 0 {
-        return 0;
+        return 0.0;
     }
 
     let pool_mana = ctx.state.players[ctx.ai_player.0 as usize]
@@ -1670,7 +1628,7 @@ fn ranked_source_estimate(ctx: &PolicyContext<'_>) -> usize {
         .total();
     let remaining_cost = spell_cost.saturating_sub(pool_mana);
     if remaining_cost == 0 {
-        return 0;
+        return 0.0;
     }
 
     // Count untapped land sources (auto_tap tier 0 — tapped first before creatures).
@@ -1690,7 +1648,7 @@ fn ranked_source_estimate(ctx: &PolicyContext<'_>) -> usize {
 
     if untapped_land_count >= remaining_cost {
         // Lands can cover the cost — auto_tap won't touch creature dorks.
-        return 0;
+        return 0.0;
     }
 
     // Shortfall: some non-land tier-1 sources must be tapped. Check if any are creatures
@@ -1714,18 +1672,42 @@ fn ranked_source_estimate(ctx: &PolicyContext<'_>) -> usize {
         .count();
 
     if creature_mana_source_count == 0 {
-        return 0;
+        return 0.0;
     }
 
-    // Non-land, non-creature sources (mana rocks) auto_tap ranks ahead of
-    // creatures, read off its own source order. A sacrifice-for-mana source
-    // (Treasure, Gold) ranks after creature dorks, so it isn't counted; a
-    // self-exiling rock (Mirrored Lotus) ranks ahead of them, so it is.
-    let non_creature_tier1_count =
-        mana_sources::auto_tap_noncreature_sources_before_creatures(ctx.state, ctx.ai_player).len();
+    // Non-land, non-creature tier-1 sources (mana rocks) that auto_tap would use
+    // before creatures. Exclude sacrifice-for-mana sources (Treasures) — those are
+    // tier 4 in auto_tap and would NOT be tapped before creature dorks.
+    // CR 701.21: the exclusion is `mana_abilities::is_renewable_mana_ability`, the
+    // single engine authority. The local copy this replaced matched only a
+    // `Composite` cost, so a Gold token (bare `Sacrifice`) defeated the stated
+    // intent and was counted as a renewable tier-1 rock.
+    let non_creature_tier1_count = ctx
+        .state
+        .battlefield
+        .iter()
+        .filter(|&&id| {
+            ctx.state.objects.get(&id).is_some_and(|obj| {
+                obj.controller == ctx.ai_player
+                    && !obj.tapped
+                    && !obj.card_types.core_types.contains(&CoreType::Land)
+                    && !obj.card_types.core_types.contains(&CoreType::Creature)
+                    && obj
+                        .abilities
+                        .iter()
+                        .any(mana_abilities::is_renewable_mana_ability)
+            })
+        })
+        .count();
 
     let creatures_at_risk = shortfall.saturating_sub(non_creature_tier1_count);
-    creatures_at_risk.min(creature_mana_source_count)
+    let creatures_tapped = creatures_at_risk.min(creature_mana_source_count);
+    if creatures_tapped == 0 {
+        return 0.0;
+    }
+
+    // Each creature tapped loses its blocking value during this combat.
+    -(5.0 * creatures_tapped as f64)
 }
 
 fn gain_control_target_has_ai_beneficiary(ctx: &PolicyContext<'_>) -> bool {
@@ -1890,7 +1872,6 @@ mod tests {
     };
     use engine::game::ability_utils::build_resolved_from_def;
     use engine::game::combat::AttackTarget;
-    use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
     use engine::game::zones::create_object;
     use engine::parser::oracle::parse_oracle_text;
     use engine::types::ability::{
@@ -5657,237 +5638,6 @@ mod tests {
         );
     }
 
-    /// Mirrored Lotus, verbatim.
-    const MIRRORED_LOTUS: &str = "Reflect {0} (As this enters, each opponent may pay {0}. When they do, they create a token copy of this except it lacks this ability.)\n{T}, Exile Mirrored Lotus: Add three mana of any one color.";
-    /// Treasure's mana ability, as the engine's token has it.
-    const TREASURE: &str = "{T}, Sacrifice this artifact: Add one mana of any color.";
-    /// Mox Opal, verbatim.
-    const MOX_OPAL: &str = "Metalcraft — {T}: Add one mana of any color. Activate only if you control three or more artifacts.";
-
-    /// Giant Growth, verbatim.
-    const GIANT_GROWTH: &str = "Target creature gets +3/+3 until end of turn.";
-    /// Defiant Strike, verbatim.
-    const DEFIANT_STRIKE: &str = "Target creature gets +1/+0 until end of turn.\nDraw a card.";
-
-    /// One blocker-penalty row: its label, the rocks beside the Elves, the pump, the payment
-    /// mode the engine offers the cast with, whether that payment taps the Elves, and whether it
-    /// spends the last rock.
-    type BlockerRow<'a> = (
-        &'a str,
-        &'a [(&'a str, &'a str)],
-        PumpRow,
-        CastPaymentMode,
-        bool,
-        bool,
-    );
-
-    /// A pump the blocker-penalty rows cast: its name, Oracle text and mana cost.
-    struct PumpRow {
-        name: &'static str,
-        text: &'static str,
-        cost: ManaCost,
-    }
-
-    /// The opponent's declare-attackers step with P0 holding priority: Llanowar Elves, the
-    /// artifacts `rocks`, no lands, the `pump` in hand and an opposing creature. Returns the
-    /// runner, the Elves, the last rock and the pump.
-    fn rocks_and_dork_board(
-        rocks: &[(&str, &str)],
-        pump: &PumpRow,
-    ) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::DeclareAttackers);
-        let elves = scenario
-            .add_creature_from_oracle(P0, "Llanowar Elves", 1, 1, "{T}: Add {G}.")
-            .id();
-        let mut rock = None;
-        for (name, text) in rocks {
-            rock = Some(scenario.add_artifact_from_oracle(P0, name, text).id());
-        }
-        let spell = {
-            let mut spell = scenario.add_spell_to_hand_from_oracle(P0, pump.name, true, pump.text);
-            spell.with_mana_cost(pump.cost.clone());
-            spell.id()
-        };
-        scenario.add_creature(P1, "Goblin", 2, 2);
-        let mut runner = scenario.build();
-        let state = runner.state_mut();
-        state.active_player = P1;
-        state.priority_player = P0;
-        state.waiting_for = WaitingFor::Priority { player: P0 };
-        (runner, elves, rock.expect("a rock"), spell)
-    }
-
-    /// The cast of `spell` the engine offers on `state`, AntiSelfHarm's score for it, and the
-    /// blocker penalty inside that score.
-    fn pump_score(state: &GameState, spell: ObjectId) -> (GameAction, f64, f64) {
-        let config = AiConfig::default();
-        let decision = AiDecisionContext {
-            waiting_for: state.waiting_for.clone(),
-            candidates: Vec::new(),
-        };
-        let action = engine::ai_support::legal_actions(state)
-            .into_iter()
-            .find(|action| {
-                matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == spell)
-            })
-            .expect("reach: the engine offers the pump");
-        let candidate = CandidateAction {
-            action: action.clone(),
-            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Spell),
-        };
-        let ctx = PolicyContext {
-            state,
-            decision: &decision,
-            candidate: &candidate,
-            ai_player: P0,
-            config: &config,
-            context: &crate::context::AiContext::empty(&config.weights),
-            cast_facts: None,
-            search_depth: crate::policies::context::SearchDepth::Root,
-        };
-        (
-            action,
-            AntiSelfHarmPolicy.score(&ctx),
-            pump_taps_blocker_penalty(&ctx),
-        )
-    }
-
-    /// Submits the offered `cast`, targeting `target`, and answers its payment the way the
-    /// payment mode asks: a sacrificial source picked by hand pays with `rock`.
-    fn submit_cast(runner: &mut GameRunner, cast: GameAction, target: ObjectId, rock: ObjectId) {
-        runner.act(cast).expect("the offered cast is accepted");
-        for _ in 0..6 {
-            let answer = match &runner.state().waiting_for {
-                WaitingFor::TargetSelection { .. } => GameAction::SelectTargets {
-                    targets: vec![TargetRef::Object(target)],
-                },
-                WaitingFor::ManaSourceSelection { options, .. } => {
-                    let selection = options
-                        .iter()
-                        .find(|option| option.source.object_id == rock)
-                        .expect("the rock is on offer")
-                        .clone();
-                    GameAction::ActivateManaSource { selection }
-                }
-                WaitingFor::ManaPayment { .. } => GameAction::PassPriority,
-                _ => return,
-            };
-            runner.act(answer).expect("the payment step is answered");
-        }
-    }
-
-    /// Maintainer reviews on #10586: the blocker penalty predicts which creatures a pump's
-    /// payment taps in the opponent's combat (CR 509.1a: a tapped creature can't block), so it
-    /// reads the cast's own automatic payment (`casting::auto_payment_sources`), in the payment
-    /// mode the engine offers the cast with. Each row scores the offered cast, then submits that
-    /// same cast on the same board, and the penalty is −5 exactly when its payment taps the
-    /// Elves:
-    ///
-    /// - Defiant Strike ({W}): the Elves can't make {W}, so a rock pays it and the Elves can
-    ///   still block. With a Treasure the cast is offered as `AutoExceptSacrificialMana`: the
-    ///   first leg taps nothing and the Treasure is picked by hand. Mox Opal is off with two
-    ///   artifacts. The source order alone counts the Lotus but not the Treasure.
-    /// - Giant Growth ({G}): the payer gives {G} its least flexible source, the Elves, though a
-    ///   Mirrored Lotus sorts ahead of them.
-    #[test]
-    fn blocker_penalty_follows_the_casts_own_payment() {
-        let strike = || PumpRow {
-            name: "Defiant Strike",
-            text: DEFIANT_STRIKE,
-            cost: ManaCost::Cost {
-                shards: vec![ManaCostShard::White],
-                generic: 0,
-            },
-        };
-        let growth = || PumpRow {
-            name: "Giant Growth",
-            text: GIANT_GROWTH,
-            cost: ManaCost::Cost {
-                shards: vec![ManaCostShard::Green],
-                generic: 0,
-            },
-        };
-        let lotus = ("Mirrored Lotus", MIRRORED_LOTUS);
-        let treasure = ("Treasure", TREASURE);
-        let opal = ("Mox Opal", MOX_OPAL);
-        let auto = CastPaymentMode::Auto;
-        let except = CastPaymentMode::AutoExceptSacrificialMana;
-        let rows: [BlockerRow; 5] = [
-            (
-                "Lotus, Defiant Strike",
-                &[lotus],
-                strike(),
-                auto,
-                false,
-                true,
-            ),
-            (
-                "Treasure, Defiant Strike",
-                &[treasure],
-                strike(),
-                except,
-                false,
-                true,
-            ),
-            (
-                "Opal and Treasure, Defiant Strike",
-                &[opal, treasure],
-                strike(),
-                except,
-                false,
-                true,
-            ),
-            ("Lotus, Giant Growth", &[lotus], growth(), auto, true, false),
-            (
-                "Treasure, Giant Growth",
-                &[treasure],
-                growth(),
-                auto,
-                true,
-                false,
-            ),
-        ];
-        for (label, rocks, pump, mode, elves_tap, rock_spent) in rows {
-            let (mut runner, elves, rock_id, spell) = rocks_and_dork_board(rocks, &pump);
-            let (cast, score, penalty) = pump_score(runner.state(), spell);
-            assert!(
-                matches!(cast, GameAction::CastSpell { payment_mode, .. } if payment_mode == mode),
-                "{label}: premise: the cast is offered as {mode:?}, got {cast:?}"
-            );
-            submit_cast(&mut runner, cast, elves, rock_id);
-            let state = runner.state();
-            let elves_tapped = state.objects[&elves].tapped;
-            let rock_left = state
-                .objects
-                .get(&rock_id)
-                .is_some_and(|rock| rock.zone == Zone::Battlefield && !rock.tapped);
-
-            assert!(
-                !state.stack.is_empty(),
-                "{label}: reach: the pump is paid for and on the stack"
-            );
-            assert_eq!(
-                elves_tapped, elves_tap,
-                "{label}: whether the payment taps the Elves"
-            );
-            assert_eq!(
-                !rock_left, rock_spent,
-                "{label}: whether the payment spends the last rock"
-            );
-            assert_eq!(
-                penalty,
-                if elves_tap { -5.0 } else { 0.0 },
-                "{label}: the blocker penalty follows the payment"
-            );
-            assert_eq!(
-                score < -4.0,
-                elves_tap,
-                "{label}: the pump's score carries the penalty, got {score}"
-            );
-        }
-    }
-
     /// Row 15 — the F-1 migration, driven through the production policy seam.
     ///
     /// CR 701.21: a **Gold** token's mana ability sacrifices its own source, so it
@@ -6080,10 +5830,6 @@ mod tests {
         );
         let land_obj = state.objects.get_mut(&land_id).unwrap();
         land_obj.card_types.core_types.push(CoreType::Land);
-        // CR 305.6: the Forest subtype is what gives it "{T}: Add {G}." The payment the
-        // penalty reads taps it, so it needs a mana ability.
-        land_obj.card_types.subtypes.push("Forest".to_string());
-        land_obj.base_card_types = land_obj.card_types.clone();
 
         add_creature(&mut state, PlayerId(1), "Goblin", 2, 2);
 

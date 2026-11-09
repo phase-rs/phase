@@ -452,7 +452,9 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
 /// its cost that `player` can activate now, and after that activation the object
 /// must still be on the battlefield and, untapped, able to activate it again. A
 /// mana ability with no {T} can't be repeated by untapping. The activation runs
-/// on a copy of the game, so the source's own cost answers: a cost that removes
+/// on a copy of the game, and the untap after it is the resolving instruction's
+/// own, so a stun counter on the source is removed instead (CR 122.1d). The
+/// source's own cost answers too: a cost that removes
 /// the source (Treasure, Lotus Petal, Mirrored Lotus) leaves nothing to untap,
 /// and a cost that can't be paid again stops a second use (Gemstone Mine or Peat
 /// Bog on its last counter, whose effect then sacrifices it, CR 701.21a). An
@@ -502,51 +504,27 @@ pub(crate) fn untap_repeats_mana(
             if !paid || copy.pending_cost_move_resume.is_some() {
                 return false;
             }
-            let Some(after) = copy.objects.get_mut(&object) else {
-                return false;
-            };
-            if after.zone != Zone::Battlefield {
+            if copy
+                .objects
+                .get(&object)
+                .is_none_or(|after| after.zone != Zone::Battlefield)
+            {
                 return false;
             }
-            after.tapped = false;
-            activatable_mana_source_selections(&copy, player)
-                .iter()
-                .any(|again| {
-                    again.source.object_id == object
-                        && again.ability_index == selection.ability_index
-                })
+            // The untap itself, as the resolving instruction does it: a stun counter
+            // is removed instead (CR 122.1d), and a replacement may apply.
+            let untapped = matches!(
+                super::effects::tap_untap::process_one_untap(&mut copy, object, &mut events),
+                Ok(super::effects::tap_untap::TapUntapOutcome::Complete)
+            ) && copy.objects.get(&object).is_some_and(|after| !after.tapped);
+            untapped
+                && activatable_mana_source_selections(&copy, player)
+                    .iter()
+                    .any(|again| {
+                        again.source.object_id == object
+                            && again.ability_index == selection.ability_index
+                    })
         })
-}
-
-/// The non-land sources auto-tap ranks ahead of every creature in a payment by
-/// `player`, read off the auto-tap sorter's own order: each source with a row
-/// ranked ahead of the first creature row, in that order. The sorter keeps
-/// creatures back as blockers (CR 509.1a), behind every non-sacrifice rock. A
-/// sacrifice row (Treasure, Gold, Ashnod's Altar) ranks after every creature
-/// row with no sacrifice; a self-exiling rock (Mirrored Lotus) ranks ahead of
-/// them. With no creature row every source is listed. This is the sort order
-/// only: the payer still
-/// gives each colored shard its least flexible source, so a creature can pay a
-/// shard ahead of a rock listed here (Llanowar Elves pays {G} before a Mirrored
-/// Lotus).
-pub fn auto_tap_noncreature_sources_before_creatures(
-    state: &GameState,
-    player: PlayerId,
-) -> Vec<ObjectId> {
-    let mut sources = Vec::new();
-    for option in super::casting_costs::sorted_auto_tap_source_options(state, player) {
-        let Some(object) = state.objects.get(&option.object_id) else {
-            continue;
-        };
-        let types = &object.card_types.core_types;
-        if types.contains(&CoreType::Creature) {
-            break;
-        }
-        if !types.contains(&CoreType::Land) && !sources.contains(&option.object_id) {
-            sources.push(option.object_id);
-        }
-    }
-    sources
 }
 
 /// The `TapLandForMana` rows [`activatable_mana_actions_for_player`] emits for

@@ -69,8 +69,8 @@ pub(crate) enum ManaPayabilityMode {
 
 /// CR 701.21a: Detects when this ability's cost sacrifices **the source itself**.
 ///
-/// Also detects a self-`ReturnToHand` or self-`Exile` cost: each form removes the
-/// source from the battlefield. Restricted to [`TargetFilter::SelfRef`] on purpose: a
+/// Also detects a self-`ReturnToHand` cost: either form removes the source from
+/// the battlefield. Restricted to [`TargetFilter::SelfRef`] on purpose: a
 /// sac-outlet mana ability that eats *other* permanents (Skirk Prospector,
 /// "Sacrifice a Goblin: Add {R}") keeps its source on the battlefield and stays
 /// renewable. Delegates to [`crate::types::ability::cost_has_component`] so a **bare**
@@ -99,12 +99,6 @@ fn cost_removes_self_from_battlefield(cost: &Option<AbilityCost>) -> bool {
         ) || matches!(
             c,
             AbilityCost::ReturnToHand {
-                filter: Some(TargetFilter::SelfRef),
-                ..
-            }
-        ) || matches!(
-            c,
-            AbilityCost::Exile {
                 filter: Some(TargetFilter::SelfRef),
                 ..
             }
@@ -7987,50 +7981,6 @@ mod tests {
         });
 
         assert!(!is_renewable_mana_ability(&composite_return));
-    }
-
-    /// Mirrored Lotus ("{T}, Exile Mirrored Lotus: Add three mana of any one
-    /// color.") and Elvish Spirit Guide ("Exile this card from your hand: Add
-    /// {G}.") are one-shot conversions. Molt Tender ("{T}, Exile a card from your
-    /// graveyard: Add one mana of any color.") exiles something else and stays
-    /// renewable.
-    #[test]
-    fn self_exile_mana_source_is_not_renewable() {
-        let exiling = |zone, filter| {
-            make_mana_ability(ManaProduction::Fixed {
-                colors: vec![ManaColor::Green],
-                contribution: ManaContribution::Base,
-            })
-            .cost(AbilityCost::Composite {
-                costs: vec![
-                    AbilityCost::Tap,
-                    AbilityCost::Exile {
-                        count: 1,
-                        zone,
-                        filter,
-                    },
-                ],
-            })
-        };
-        assert!(!is_renewable_mana_ability(&exiling(
-            None,
-            Some(TargetFilter::SelfRef)
-        )));
-        assert!(is_renewable_mana_ability(&exiling(
-            Some(Zone::Graveyard),
-            None
-        )));
-
-        let spirit_guide = make_mana_ability(ManaProduction::Fixed {
-            colors: vec![ManaColor::Green],
-            contribution: ManaContribution::Base,
-        })
-        .cost(AbilityCost::Exile {
-            count: 1,
-            zone: Some(Zone::Hand),
-            filter: Some(TargetFilter::SelfRef),
-        });
-        assert!(!is_renewable_mana_ability(&spirit_guide));
     }
 
     /// Row 4c — Powerstone and Treasure are both artifact tokens differing only in

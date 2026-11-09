@@ -504,6 +504,57 @@ fn only_the_declared_target_of_an_untap_counts() {
     );
 }
 
+/// CR 122.1d: "If a permanent with a stun counter on it would become untapped,
+/// instead remove a stun counter from it." Arbor Elf targets the untapped
+/// Forest. Plain, tapping it first gives its mana twice, so the window holds.
+/// Stunned, the untap after that tap only removes the counter, so there's no
+/// second tap and the pass stays; played out, the Forest ends tapped.
+#[test]
+fn a_stunned_target_gets_no_second_tap_from_the_untap() {
+    let Some(db) = shared_card_db() else { return };
+    for stunned in [false, true] {
+        let (mut runner, elf, _, forest) = arbor_elf_board(db);
+        if stunned {
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&forest)
+                .expect("the Forest is on the battlefield")
+                .counters
+                .insert(parse_counter_type("stun"), 1);
+        }
+        let untap = untap_ability_index(&runner, elf);
+        activate(&mut runner, elf, untap, &[forest]);
+        assert_eq!(top_source_name(&runner).as_deref(), Some("Arbor Elf"));
+        assert!(mana_action(&runner, forest).is_some() && !is_tapped(&runner, forest));
+        assert_eq!(
+            recommends_pass(&runner),
+            stunned,
+            "stunned: {stunned}: whether the untap window passes"
+        );
+
+        tap_for_mana(&mut runner, forest);
+        for _ in 0..4 {
+            if runner.state().stack.is_empty() {
+                break;
+            }
+            runner.act(GameAction::PassPriority).expect("pass");
+        }
+        let state = runner.state();
+        assert!(state.stack.is_empty(), "Arbor Elf's untap resolved");
+        assert_eq!(
+            state.objects[&forest].tapped, stunned,
+            "stunned: {stunned}: whether the Forest stays tapped"
+        );
+        assert!(
+            !state.objects[&forest]
+                .counters
+                .contains_key(&parse_counter_type("stun")),
+            "the untap removed the stun counter instead"
+        );
+    }
+}
+
 /// Dramatic Reversal, its {1}{U} floated first so that automatic payment leaves
 /// `permanents` untapped.
 fn dramatic_reversal_on_the_stack(permanents: &[&str], db: &CardDatabase) -> GameRunner {

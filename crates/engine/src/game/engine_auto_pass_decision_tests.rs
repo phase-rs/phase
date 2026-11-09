@@ -2747,15 +2747,16 @@ fn own_untap_of_your_lands(forest_tapped: bool) -> GameState {
 /// over it.
 #[test]
 fn recheck_session_pauses_an_own_top_held_for_a_wasted_untap() {
-    // The look-ahead: with an own inert entry above the untap, the skipped
-    // window over the untap is authorized only when the untap isn't wasted.
-    for (forest_tapped, limit) in [(false, 1), (true, 2)] {
+    // The look-ahead: with an own inert entry above the untap, the boundary
+    // stops before the spell either way. A spell resolves alone, so its window
+    // is read when it comes, not ahead of time.
+    for forest_tapped in [false, true] {
         let mut state = own_untap_of_your_lands(forest_tapped);
         push_simple_stack_entry(&mut state, 30_602, PlayerId(0));
         install_recheck_session(&mut state, &[PlayerId(1)]);
         assert_eq!(
             stack_resolution_session_authorized_limit(&state),
-            Some(limit),
+            Some(1),
             "Forest tapped: {forest_tapped}"
         );
     }
@@ -2783,6 +2784,83 @@ fn recheck_session_pauses_an_own_top_held_for_a_wasted_untap() {
         ),
         StackResolutionSessionPriorityDecision::Resolve { limit: 1 }
     ));
+}
+
+/// Pushes P0's activated ability `id`, Basalt Monolith's "{3}: Untap this
+/// artifact" shape: a fresh source untapping itself.
+fn push_own_self_untap_activation(state: &mut GameState, id: u64) {
+    let source_id = ObjectId(id);
+    state.stack.push_back(StackEntry {
+        id: source_id,
+        source_id,
+        controller: PlayerId(0),
+        kind: StackEntryKind::ActivatedAbility {
+            source_id,
+            ability: Box::new(ResolvedAbility::new(
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: crate::types::ability::EffectScope::Single,
+                    state: crate::types::ability::TapStateChange::Untap,
+                },
+                Vec::new(),
+                source_id,
+                PlayerId(0),
+            )),
+        },
+    });
+}
+
+/// A spell or an activated ability never joins a resolver batch, so the
+/// look-ahead neither reads a window over one nor runs past it: a stack of
+/// queued activations is one window per entry under either session policy, and
+/// a run of inert entries above one stops before it.
+#[test]
+fn authorized_limit_does_not_look_past_an_activated_ability() {
+    for policy in [
+        StackResolutionPolicy::Committed,
+        StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
+    ] {
+        let mut activations = priority_state();
+        for id in 30_701..=30_703 {
+            push_own_self_untap_activation(&mut activations, id);
+        }
+        install_stack_resolution_session(
+            &mut activations,
+            BTreeSet::from([PlayerId(0), PlayerId(1)]),
+            StackResolutionBudget::Unlimited,
+            policy,
+            BTreeMap::new(),
+        );
+        assert_eq!(
+            stack_resolution_session_authorized_limit(&activations),
+            Some(1),
+            "{policy:?}: queued activations"
+        );
+
+        let mut inert_above = priority_state();
+        push_own_self_untap_activation(&mut inert_above, 30_711);
+        for id in 30_712..=30_713 {
+            push_simple_stack_entry(&mut inert_above, id, PlayerId(0));
+        }
+        install_stack_resolution_session(
+            &mut inert_above,
+            BTreeSet::from([PlayerId(0), PlayerId(1)]),
+            StackResolutionBudget::Unlimited,
+            policy,
+            BTreeMap::new(),
+        );
+        inert_above
+            .stack_resolution_session
+            .as_mut()
+            .expect("the session was just installed")
+            .verified_pass_representatives
+            .extend([PlayerId(0), PlayerId(1)]);
+        assert_eq!(
+            stack_resolution_session_authorized_limit(&inert_above),
+            Some(2),
+            "{policy:?}: the inert run above the activation"
+        );
+    }
 }
 
 /// CR 117.3d: Resolve All is consent to resolve the stack, so a `Committed`

@@ -15760,7 +15760,7 @@ pub(crate) fn spell_cost_is_payable_after_non_sacrificial_auto_tap(
 /// row needs `{T}` (Phyrexian Tower, Crystal Vein) loses that row once the first
 /// leg taps it for another row, so it is kept whenever tapping it would leave
 /// the cast unpayable by the castability authority.
-pub(super) fn sacrificial_tap_sources_to_keep(
+fn sacrificial_tap_sources_to_keep(
     state: &GameState,
     player: PlayerId,
     cost: &ManaCost,
@@ -15858,15 +15858,6 @@ impl AutoTapSourceCache {
     }
 }
 
-/// Every auto-tap row `player` has, in the order an unrestricted payment ranks
-/// them: no source deprioritized or excluded.
-pub(super) fn sorted_auto_tap_source_options(
-    state: &GameState,
-    player: PlayerId,
-) -> Vec<ManaSourceOption> {
-    collect_sorted_auto_tap_source_options(state, player, None, &HashSet::new(), None)
-}
-
 pub(super) fn build_auto_tap_source_cache(
     state: &GameState,
     player: PlayerId,
@@ -15874,7 +15865,7 @@ pub(super) fn build_auto_tap_source_cache(
     crate::game::perf_counters::record_auto_tap_source_cache_build();
     AutoTapSourceCache {
         player,
-        sources: sorted_auto_tap_source_options(state, player),
+        sources: collect_sorted_auto_tap_source_options(state, player, None, &HashSet::new(), None),
     }
 }
 

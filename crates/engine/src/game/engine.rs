@@ -11008,6 +11008,11 @@ fn stack_resolution_session_participant_authorizes_pass(
     participant: PlayerId,
     window_top: &StackEntry,
 ) -> bool {
+    // Committed consent authorizes every window but Full Control's, so the
+    // standing-pass ladder, whose `Held` reasons probe the board, isn't read.
+    if session.policy == StackResolutionPolicy::Committed {
+        return !priority::holds_full_control(state, participant);
+    }
     let standing_pass = match priority::standing_priority_pass(state, participant, Some(window_top))
     {
         // CR 117.1: Full Control is a standing refusal to give up any window —
@@ -11083,7 +11088,21 @@ pub(crate) fn stack_resolution_session_authorized_limit(state: &GameState) -> Op
         .take_while(|(entry, fence)| fence.matches_captured_entry(entry))
         .map(|(entry, _)| entry);
     // `None` when the top entry is outside the fence.
-    fenced_prefix.next()?;
+    let top = fenced_prefix.next()?;
+    // Every run the resolver batches (`stack::resolve_next_with_limit`) is of
+    // triggered abilities, so a spell or an activated ability always resolves
+    // alone, and the window over one is read when it comes rather than looked
+    // ahead to. Basalt Monolith's queued "{3}: Untap this artifact" entries then
+    // cost one window each, not a probe of every entry below.
+    let resolves_alone = |entry: &StackEntry| match entry.kind {
+        StackEntryKind::Spell { .. } | StackEntryKind::ActivatedAbility { .. } => true,
+        StackEntryKind::TriggeredAbility { .. }
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => false,
+    };
+    if resolves_alone(top) {
+        return Some(1);
+    }
     // CR 117.3b + CR 117.4: resolving K entries skips every participant's
     // window over each of the next K − 1 entries, each with its own top; the
     // boundary ends before the first window a participant has not authorized
@@ -11099,14 +11118,15 @@ pub(crate) fn stack_resolution_session_authorized_limit(state: &GameState) -> Op
     // under-approximation.
     let authorized_skipped_windows = fenced_prefix
         .take_while(|window_top| {
-            participants.iter().all(|&participant| {
-                stack_resolution_session_participant_authorizes_pass(
-                    state,
-                    session,
-                    participant,
-                    window_top,
-                )
-            })
+            !resolves_alone(window_top)
+                && participants.iter().all(|&participant| {
+                    stack_resolution_session_participant_authorizes_pass(
+                        state,
+                        session,
+                        participant,
+                        window_top,
+                    )
+                })
         })
         .count();
     let limit = u32::try_from(1 + authorized_skipped_windows).unwrap_or(u32::MAX);
