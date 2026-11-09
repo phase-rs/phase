@@ -8077,8 +8077,8 @@ fn parse_attach_recipient<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetF
         // two consumers cannot disagree about what "that creature" means.
         //
         // The DEMONSTRATIVE-only entry point is deliberate: bare "it" is already
-        // resolved by the branch above through
-        // `attach_neuter_recipient_resolves_via_subject`, a wider gate, and
+        // resolved by the two branches above (the chain-created referent, then
+        // `attach_neuter_recipient_resolves_via_subject`, a wider gate), and
         // letting it fall through to here would change bare-pronoun attachment
         // for chains that have nothing to do with a chain-created referent.
         if let Some(bound) = super::counter::chain_created_demonstrative_binding(lower.trim(), ctx)

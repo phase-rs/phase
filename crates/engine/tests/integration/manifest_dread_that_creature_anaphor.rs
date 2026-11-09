@@ -137,7 +137,7 @@ fn an_empty_library_manifests_nothing_and_attaches_nothing() {
 }
 
 /// A board that plays a REAL producer first, so the referent slot already holds
-/// something when the Machete's own producer runs. Both Equipment start in
+/// something when the Equipment's own producer runs. Both Equipment start in
 /// hand; the Blade is cast and resolved, leaving its Soldier token as the
 /// chain's most-recent referent.
 fn board_with_a_prior_referent(
