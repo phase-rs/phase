@@ -1063,6 +1063,13 @@ fn subject_exile_legacy_frame_fixture(runner: &GameRunner) -> GameState {
         enter_attached_to: request.attach_to,
         effect_kind: tail.effect_kind,
     };
+    // The staged writer parks its typed tail between marker and batch. The
+    // old iteration writer parked that same continuation below its owner.
+    let continuation = state
+        .take_active_ability_continuation()
+        .expect("the captured population exposes its own continuation")
+        .expect("the typed lifetime witness remains captured");
+    assert_eq!(continuation.pending.chain.source_id, pending.source_id);
     let marker = state
         .take_active_change_zone_frame()
         .expect("the captured population exposes its marker")
@@ -1075,6 +1082,7 @@ fn subject_exile_legacy_frame_fixture(runner: &GameRunner) -> GameState {
             .group_id,
         pending.logical_zone_change_group.logical_group_id
     );
+    state.push_ability_continuation(continuation);
     state.push_change_zone_frame(ChangeZoneFrame {
         pending: Some(pending),
         devour_eligible_snapshot: None,
