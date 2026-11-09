@@ -2096,14 +2096,15 @@ fn abandon_change_zone_family_for_controller(
             .is_some_and(|replacement| replacement.parks_delivery(&paused.expected_event))
     });
 
-    let _ = state
-        .take_active_change_zone_frame()
-        .expect("elimination cannot consume a buried ChangeZone frame");
     if owns_replacement {
         state.pending_replacement = None;
         state.replacement_may_cost_paused = false;
-        super::replacement::abandon_post_replacement_continuation(state);
     }
+    // Retire this owner through its ordinary family authority. Do not clear
+    // a post-replacement parent that becomes exposed only after the pop.
+    let _ = state
+        .take_active_change_zone_frame()
+        .expect("elimination cannot consume a buried ChangeZone frame");
     finish_abandoned_source_bound_resolution_carrier(state, leaving_set, events);
     state.waiting_for = WaitingFor::Priority {
         player: players::next_player(state, player),
