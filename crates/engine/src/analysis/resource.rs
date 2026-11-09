@@ -29,7 +29,6 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
-use crate::types::events::GameEvent;
 use crate::types::game_state::{
     active_trigger_ledger_bindings_equal, loop_states_equal, DamageEventKey, DamageRecord,
     GameState, LKISnapshot, StackEntry, StackEntryKind, TrackedMemberOrigin,
@@ -6972,7 +6971,20 @@ fn eq_except_growable(
     b.0.tracked_set_member_origins
         .retain(|id, _| id.0 < window_floor);
     b.0.next_tracked_set_id = a.next_tracked_set_id;
-    a.0 == b.0
+    let equal = a.0 == b.0;
+    if !equal && std::env::var_os("PHASE_PR10613_GROWTH_DEBUG").is_some() {
+        let a_journal = std::mem::take(&mut a.0.damage_dealt_this_turn);
+        let b_journal = std::mem::take(&mut b.0.damage_dealt_this_turn);
+        eprintln!(
+            "[DEBUG-pr10613-growth3104] grown={grown:?} a_journal={:?} b_journal={:?} without_journal_equal={}",
+            a_journal.iter().map(|row| (row.event_key(), row.target_incarnation)).collect::<Vec<_>>(),
+            b_journal.iter().map(|row| (row.event_key(), row.target_incarnation)).collect::<Vec<_>>(),
+            a.0 == b.0,
+        );
+        a.0.damage_dealt_this_turn = a_journal;
+        b.0.damage_dealt_this_turn = b_journal;
+    }
+    equal
         && a.post_replacement_token_substitution_count
             == b.post_replacement_token_substitution_count
         // CR 104.4b + CR 615.3: `PartialEq` skips the floating registry, so this gate asks
@@ -9373,6 +9385,7 @@ fn ability_has_per_game_activation_gate(state: &GameState, key: &(ObjectId, usiz
 #[cfg(test)]
 mod tests {
     use crate::game::game_object::ObjectIncarnationRefExt;
+    use crate::types::events::GameEvent;
     use std::sync::Arc;
 
     /// CR 704.3 + CR 704.5a: reading a charge stream one stretch at a time gives the answer of
