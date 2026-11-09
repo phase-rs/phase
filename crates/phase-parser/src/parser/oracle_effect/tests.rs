@@ -17015,7 +17015,6 @@ fn compound_shuffle_it_into_library() {
         &*def.effect,
         Effect::ChangeZone {
             destination: Zone::Library,
-            library_shuffle: LibraryShuffleMode::TerminalShuffle,
             ..
         }
     ));

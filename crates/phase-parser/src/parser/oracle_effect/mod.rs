@@ -25628,8 +25628,11 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         destination: Zone::Library,
         target: first,
         owner_library,
-        // Both subjects share the terminal shuffle attached to `sub_def`.
-        library_shuffle: LibraryShuffleMode::TerminalShuffle,
+        library_shuffle: if owner_library {
+            Default::default()
+        } else {
+            LibraryShuffleMode::TerminalShuffle
+        },
         enter_transformed: false,
         enters_under: None,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,

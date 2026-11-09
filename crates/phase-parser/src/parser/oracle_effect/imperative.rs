@@ -11049,8 +11049,13 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         _ => TargetFilter::Controller,
     };
     let tracks_owner_population = matches!(&effect, Effect::ChangeZoneAll { .. });
+    // Owner-library moves can span several owners, while their existing
+    // ParentTargetOwner terminal names one player. Keep that routing unchanged;
+    // only designated-player moves and mass owner-population operations reserve
+    // delivery randomization for this terminal.
     if let Effect::ChangeZone {
         destination: Zone::Library,
+        owner_library: false,
         library_shuffle,
         ..
     }
