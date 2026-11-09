@@ -31,7 +31,7 @@ use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::match_config::{DeckCardCount, MatchPhase, MatchType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -40,6 +40,7 @@ use engine::types::zones::Zone;
 const P2: PlayerId = PlayerId(2);
 const ORACLE: &str = "When one or more of your opponents are dealt combat damage during your turn, draw two cards. If your library has no cards in it, you win the game. Fblthp's owner shuffles him into their library.";
 const SLIP_ORACLE: &str = "Put a +1/+1 counter on target creature. It phases out.";
+const MIRROR_MAD_ORACLE: &str = "Flying\n{1}{U}: This creature's owner shuffles it into their library. If that player does, they reveal cards from the top of that library until a card named Mirror-Mad Phantasm is revealed. The player puts that card onto the battlefield and all other cards revealed this way into their graveyard.";
 
 fn hand_len(runner: &GameRunner, player: PlayerId) -> usize {
     runner
@@ -155,7 +156,7 @@ fn combat_damage_to_two_opponents_is_one_trigger() {
     let mut runner = scenario.build();
     let hand_before = hand_len(&runner, P0);
 
-    let _ = drive_combat_damage(
+    let events = drive_combat_damage(
         &mut runner,
         &[
             (a1, AttackTarget::Player(P1)),
@@ -180,6 +181,22 @@ fn combat_damage_to_two_opponents_is_one_trigger() {
         .expect("P0")
         .library
         .contains(&fblthp));
+    let shuffled: Vec<PlayerId> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shuffled,
+        vec![P0],
+        "a successful self-move shuffles exactly once, for its owner"
+    );
 }
 
 /// CR 102.1: the trigger event requires the controller's turn. P1 is active and
@@ -330,6 +347,81 @@ fn owner_shuffle_follows_fblthps_owner_after_it_leaves() {
         vec![P0],
         "only Fblthp's owner's library may be shuffled"
     );
+}
+
+/// CR 608.2c + CR 400.3: Mirror-Mad Phantasm's "that player" reveal must be
+/// the same owner the terminal Shuffle resolved, even when a different player
+/// activates the ability. The libraries are distinguishable and only P0's may
+/// be revealed.
+#[test]
+fn mirror_mad_reveal_follows_the_owner_not_the_activator() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for name in ["P0 A", "P0 B", "P0 C", "P0 D", "P0 E"] {
+        scenario.add_card_to_library_top(P0, name);
+    }
+    for name in ["P1 A", "P1 B", "P1 C", "P1 D", "P1 E"] {
+        scenario.add_card_to_library_top(P1, name);
+    }
+    scenario.with_mana_pool(
+        P1,
+        vec![
+            ManaUnit::new(ManaType::Blue, ObjectId(9_999), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_998), false, vec![]),
+        ],
+    );
+    let mirror_mad = scenario
+        .add_creature_from_oracle(P1, "Mirror-Mad Phantasm", 5, 1, MIRROR_MAD_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&mirror_mad)
+        .expect("Mirror-Mad exists")
+        .owner = P0;
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+
+    let outcome = runner.activate(mirror_mad, 0).resolve();
+    let events = outcome.events();
+
+    let revealed: Vec<PlayerId> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::CardsRevealed { player, .. } => Some(*player),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !revealed.is_empty() && revealed.iter().all(|player| *player == P0),
+        "the reveal must belong to the owner, not the activator: {events:?}"
+    );
+    assert_eq!(
+        outcome
+            .state()
+            .players
+            .iter()
+            .find(|player| player.id == P1)
+            .expect("P1")
+            .library
+            .len(),
+        5,
+        "the activator's library must not be revealed or moved"
+    );
+    let shuffled: Vec<PlayerId> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shuffled, vec![P0], "exactly one shuffle, for the owner");
 }
 
 /// CR 702.26b + CR 701.24c: a phased-out Fblthp is treated as though it does
