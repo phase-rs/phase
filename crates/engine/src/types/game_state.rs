@@ -32256,8 +32256,8 @@ impl GameState {
         });
     }
 
-    /// Insert a continuation immediately below the active child that paused
-    /// before its sub-ability was discovered.
+    /// Insert a continuation outside the active child operation that paused
+    /// before its sub-ability was discovered, preserving any exact component pair.
     pub fn insert_ability_continuation_parent_of_active(
         &mut self,
         pending: PendingContinuation,

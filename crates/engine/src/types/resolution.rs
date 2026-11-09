@@ -4519,10 +4519,11 @@ impl ResolutionStack {
         while self.frames.pop().is_some() {}
     }
 
-    /// Install an outer continuation immediately below the active child.
+    /// Install an outer continuation below the active operation.
     ///
-    /// There is deliberately no fallback insertion position: callers that do
-    /// not have an active child must first trace the real nesting relationship.
+    /// A component delivery and its exact immediate original owner are one
+    /// operation: inserting between them would sever the captured handoff.
+    /// Never search for another owner or relax the component-link invariant.
     pub fn insert_parent_of_active(
         &mut self,
         frame: ResolutionFrame,
@@ -4531,7 +4532,29 @@ impl ResolutionStack {
             .frames
             .top()
             .ok_or(ResolutionStackError::NoActiveChild)?;
-        self.frames.insert_below(active, frame);
+        let insertion = match self.frames.get(active) {
+            Some(ResolutionFrame::BatchDelivery(child))
+                if child.component_delivery_parent.is_some() =>
+            {
+                let parent_slot = self.frames.below(active).ok_or_else(|| {
+                    ResolutionStackError::InvalidPayload {
+                        frame: FrameKind::BatchDelivery,
+                        message: "component delivery has no immediate batch parent".into(),
+                    }
+                })?;
+                let Some(ResolutionFrame::BatchDelivery(parent)) = self.frames.get(parent_slot)
+                else {
+                    return Err(ResolutionStackError::InvalidPayload {
+                        frame: FrameKind::BatchDelivery,
+                        message: "component delivery has no immediate batch parent".into(),
+                    });
+                };
+                Self::validate_component_parent(child, parent)?;
+                parent_slot
+            }
+            _ => active,
+        };
+        self.frames.insert_below(insertion, frame);
         Ok(())
     }
 
