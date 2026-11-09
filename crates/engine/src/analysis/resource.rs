@@ -30,8 +30,8 @@ use crate::types::ability::{
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{
-    active_trigger_ledger_bindings_equal, loop_states_equal, DamageEventKey, DamageRecord,
-    GameState, LKISnapshot, StackEntry, StackEntryKind, TrackedMemberOrigin,
+    active_trigger_ledger_bindings_equal, DamageEventKey, DamageRecord, GameState, LKISnapshot,
+    StackEntry, StackEntryKind, TrackedMemberOrigin,
 };
 use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
 use crate::types::mana::ManaType;
@@ -9731,6 +9731,7 @@ mod tests {
     use crate::game::game_object::GameObject;
     use crate::types::ability::{AggregateFunction, TriggerDefinitionRef};
     use crate::types::actions::ReplacementAutoChoice;
+    use crate::types::game_state::loop_states_equal;
     use crate::types::game_state::{
         ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey,
         ReplacementAutoChoiceRecord, ReplacementChoiceKind,
@@ -16682,6 +16683,61 @@ mod tests {
         assert!(
             cover(&prior, &current),
             "pure inert single-token growth of an existing class must COVER"
+        );
+    }
+
+    /// A retained damage carrier naming the freshly grown token is part of the growth,
+    /// not a board difference: the object-growth cover still certifies. Its obligation is
+    /// pure inert board growth; recipient relations are the FODDER cover's quotient.
+    #[test]
+    fn object_growth_ignores_retained_damage_witnesses() {
+        use crate::types::ability::{Effect, ResolvedAbility, TargetRef};
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::{DamageRecord, StackEntry, StackEntryKind};
+
+        let (prior, mut current) = og_cover_base();
+        let grown = ObjectId(702);
+        let incarnation = current.objects[&grown].incarnation;
+        let event = GameEvent::DamageDealt {
+            source_id: grown,
+            source_incarnation: Some(incarnation),
+            target: TargetRef::Object(grown),
+            amount: 1,
+            is_combat: false,
+            excess: 0,
+        };
+        current.stack.push_back(StackEntry {
+            id: ObjectId(900),
+            source_id: grown,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: grown,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![],
+                    grown,
+                    PlayerId(0),
+                )),
+                condition: None,
+                trigger_event: Some(event),
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        current.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: grown,
+            source_incarnation: Some(incarnation),
+            target: TargetRef::Object(grown),
+            target_incarnation: Some(incarnation),
+            amount: 1,
+            ..Default::default()
+        });
+        assert!(
+            cover(&prior, &current),
+            "retained damage history naming the grown token is part of the growth"
         );
     }
 

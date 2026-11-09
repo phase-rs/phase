@@ -53962,9 +53962,11 @@ mod tests {
         selected.colors = vec![ManaColor::Red];
         selected.chosen_attributes = vec![ChosenAttribute::Number(17)];
         if let Some(pin) = remembered_pin {
-            selected.chosen_attributes.push(ChosenAttribute::Card(
-                ObjectIncarnationRef::of(remembered, pin),
-            ));
+            selected
+                .chosen_attributes
+                .push(ChosenAttribute::Card(ObjectIncarnationRef::of(
+                    remembered, pin,
+                )));
         }
         let latest = state.objects[&source].snapshot_public_characteristics();
         let history = state.lki_by_incarnation.entry(source).or_default();
