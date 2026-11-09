@@ -28,6 +28,9 @@ fn etrata_shuffles_the_source_not_its_earlier_exile_target() {
         .controlled_by(P0)
         .id();
     let victim = scenario.add_creature(P1, "Exile target", 2, 2).id();
+    let other_victim = scenario
+        .add_creature(P1, "Other exile candidate", 2, 2)
+        .id();
     scenario.with_library_top(P0, &["Controller's card"]);
     scenario.with_library_top(P1, &["Defender's card"]);
     scenario.with_library_top(P2, &["Owner A", "Owner B", "Owner C"]);
@@ -52,6 +55,10 @@ fn etrata_shuffles_the_source_not_its_earlier_exile_target() {
         } => {
             assert_eq!(*player, P0);
             assert_eq!(target_slots.len(), 1);
+            assert_eq!(target_slots[0].legal_targets.len(), 2);
+            assert!(target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(other_victim)));
             assert!(target_slots[0]
                 .legal_targets
                 .contains(&TargetRef::Object(victim)));
