@@ -7311,6 +7311,7 @@ mod tests {
                 remaining: Vec::new(),
                 source_id: ObjectId(group_seed),
                 controller: PlayerId(0),
+                performed_by: PlayerId(0),
                 origin: None,
                 destination: Zone::Battlefield,
                 enter_transformed: false,

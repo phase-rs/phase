@@ -2563,6 +2563,7 @@ mod tests {
                 .collect(),
             source_id,
             controller,
+            performed_by: controller,
             origin: Some(Zone::Battlefield),
             destination: Zone::Graveyard,
             enter_transformed: false,

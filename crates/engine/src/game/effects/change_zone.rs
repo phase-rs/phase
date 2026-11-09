@@ -496,10 +496,10 @@ fn resolution_zone_candidates(
 ///   * a destination other than Exile — `performed_by` also feeds entry
 ///     ownership under `EntryOwnership::ActorOwns` (`zone_pipeline.rs::entry_receiver`,
 ///     Dandan), so a non-Exile move keeps the controller;
-///   * a library-owned subject filter (`ScopedPlayer` + `InZone { Library }`),
-///     where "their library" names whose library it is, not who acts — Rahilda,
-///     Wanted Cutthroat: "exile a nonland card from their library at random" is
-///     the controller's exile;
+///   * a library-owned subject filter (`ScopedPlayer` with an effective Library
+///     origin, explicit or inline), where "their library" names whose library
+///     it is, not who acts — Rahilda, Wanted Cutthroat: "exile a nonland card
+///     from their library at random" is the controller's exile;
 ///   * a mass sweep scoped to the parent target's controller
 ///     (`sweep_names_parent_target_controllers_objects`) — Declaration in Stone,
 ///     Eradicate: "its controller" names whose objects are swept, not who acts.
@@ -522,9 +522,10 @@ fn move_performer(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
     destination: Zone,
+    origin_zones: &[Zone],
     filter_controller: PlayerId,
 ) -> PlayerId {
-    let names_whose_objects = filter_names_library_owner(target_filter)
+    let names_whose_objects = filter_names_library_owner(target_filter, origin_zones)
         || sweep_names_parent_target_controllers_objects(ability, target_filter);
     if destination != Zone::Exile || names_whose_objects {
         ability.controller
@@ -619,21 +620,26 @@ fn any_typed_leg<F: Fn(&TypedFilter) -> bool>(filter: &TargetFilter, pred: &F) -
     }
 }
 
-/// `ScopedPlayer` together with `InZone { Library }` on the same typed leg, in
-/// either encoding (typed `controller: ScopedPlayer`, or
-/// `Owned { ScopedPlayer }`): the filter picks a card out of that player's
-/// library by ownership.
-fn filter_names_library_owner(filter: &TargetFilter) -> bool {
+/// A scoped library leg names whose library is used, not who performs the
+/// instruction. An explicit effective Library origin supplies a missing inline
+/// zone, but never changes a leg that explicitly names another zone.
+fn filter_names_library_owner(filter: &TargetFilter, origin_zones: &[Zone]) -> bool {
     any_typed_leg(filter, &|leg| {
-        leg_names_player(leg, &ControllerRef::ScopedPlayer)
-            && leg.properties.iter().any(|p| {
-                matches!(
-                    p,
-                    FilterProp::InZone {
-                        zone: Zone::Library
-                    }
-                )
+        let mut inline_zones = leg
+            .properties
+            .iter()
+            .filter_map(|property| match property {
+                FilterProp::InZone { zone } => Some(std::slice::from_ref(zone)),
+                FilterProp::InAnyZone { zones } => Some(zones.as_slice()),
+                _ => None,
             })
+            .peekable();
+        let library_only = if inline_zones.peek().is_some() {
+            inline_zones.all(|zones| zones == [Zone::Library])
+        } else {
+            origin_zones == [Zone::Library]
+        };
+        leg_names_player(leg, &ControllerRef::ScopedPlayer) && library_only
     })
 }
 
@@ -1149,7 +1155,13 @@ pub fn resolve(
         crate::game::effects::controller_for_relative_filter(state, ability, target_filter);
     // CR 608.2c: who performs this move, decided once per instruction beside the
     // chooser (see `move_performer` for the three shapes where they differ).
-    let performer = move_performer(ability, target_filter, dest_zone, filter_controller);
+    let performer = move_performer(
+        ability,
+        target_filter,
+        dest_zone,
+        origin.as_slice(),
+        filter_controller,
+    );
     let track_exiled_by_source =
         crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
 
@@ -1614,6 +1626,7 @@ pub fn resolve(
         // exile up to one target … that player controls" records each seat
         // rather than the Saga's controller (CR 608.2c).
         controller: ability.controller,
+        performed_by: ability.controller,
         origin,
         destination: dest_zone,
         enter_transformed: effect_enter_transformed,
@@ -1731,6 +1744,7 @@ pub fn resolve(
                         remaining: members[i + 1..].to_vec(),
                         source_id: ctx.source_id,
                         controller: ctx.controller,
+                        performed_by: ctx.performed_by,
                         origin: ctx.origin,
                         destination: ctx.destination,
                         enter_transformed: ctx.enter_transformed,
@@ -1783,6 +1797,7 @@ pub fn resolve(
                         remaining: members[i + 1..].to_vec(),
                         source_id: ctx.source_id,
                         controller: ctx.controller,
+                        performed_by: ctx.performed_by,
                         origin: ctx.origin,
                         destination: ctx.destination,
                         enter_transformed: ctx.enter_transformed,
@@ -2098,12 +2113,12 @@ pub(crate) fn resolving_stack_ability_for_source(
 #[derive(Clone)]
 pub(crate) struct ChangeZoneIterationCtx {
     pub source_id: ObjectId,
-    /// The player who performs this instruction's move (CR 608.2c) — the
-    /// controller for announced targets, bound referents and
-    /// search-outside-the-game pulls, `move_performer`'s answer on the mass
-    /// path, and the `EffectZoneChoice` chooser on an interactive pick resume
-    /// (which has no `ResolvedAbility` to re-derive it from).
+    /// Family controller and controller-relative duration anchor on direct,
+    /// mass and search paths. The legacy interactive `EffectZoneChoice` path
+    /// still supplies its chooser here; this patch does not change that path.
     pub controller: PlayerId,
+    /// Instruction performer, independent of family/duration authority.
+    pub performed_by: PlayerId,
     pub origin: Option<Zone>,
     pub destination: Zone,
     pub enter_transformed: bool,
@@ -2224,11 +2239,9 @@ pub(crate) fn process_one_zone_move_with_terminal(
         ctx.library_placement.clone(),
         ctx.enter_attached_to,
         Some(ctx.controller),
-        // CR 608.2c: `ctx.controller` is the performer the caller computed —
-        // the controller for announced targets, bound referents and
-        // search-outside-the-game pulls, `move_performer`'s answer on a
-        // mass-move resume, the chooser on an `EffectZoneChoice` resume.
-        Some(ctx.controller),
+        // CR 608.2c: attribution follows the captured instruction performer,
+        // not the controller-relative duration anchor above.
+        Some(ctx.performed_by),
         events,
     );
 
@@ -3015,7 +3028,13 @@ pub fn resolve_all(
     // gates keep those moves on the controller (`move_performer`). The classifier
     // reads both filter encodings, so computing it before
     // `owner_scoped_nonbattlefield_mass_filter` is order-independent.
-    let performer = move_performer(ability, &target_filter, dest_zone, filter_controller);
+    let performer = move_performer(
+        ability,
+        &target_filter,
+        dest_zone,
+        &origin_zones,
+        filter_controller,
+    );
     let target_filter = owner_scoped_nonbattlefield_mass_filter(target_filter, &origin_zones);
 
     // Use a permissive default filter if the effect's target is None
@@ -3309,13 +3328,9 @@ pub fn resolve_all(
             track_exiled_by_source,
             member_library_placement.clone(),
             None,
-            // CR 608.2c + CR 610.3: `exile_controller` and `performed_by` are
-            // both the instruction's performer on this path, so a member resumed
-            // through the pause carrier records the same player the direct
-            // member does. `exile_controller` only anchors an
-            // `UntilOpponentBecomesMonarch` link; no printed mass move creates
-            // one (Palace Jailer is a targeted single-object move).
-            Some(performer),
+            // CR 610.3: the return duration remains relative to the resolving
+            // controller, independently of the subject performing the exile.
+            Some(ability.controller),
             // CR 608.2c: the instruction's own subject performs the move
             // ("that player exiles …"); where no subject is named this is the
             // controller (the exceptions are `move_performer`'s gates).
@@ -3393,16 +3408,8 @@ pub fn resolve_all(
                             })
                             .collect(),
                         source_id: ability.source_id,
-                        // CR 608.2h + CR 608.2c: the performer, carried across a
-                        // replacement/aura pause so every resumed member of this
-                        // mass move records the same one. Known limit: the
-                        // CR 800.4a elimination sweep reads this field as the
-                        // resolving family's controller, so a performer other
-                        // than the controller (only reachable through a
-                        // replacement on a move into exile; no printed card the
-                        // engine supports has one) would be matched against the
-                        // wrong player there.
-                        controller: performer,
+                        controller: ability.controller,
+                        performed_by: performer,
                         origin: None,
                         destination: dest_zone,
                         enter_transformed: false,
@@ -3464,16 +3471,8 @@ pub fn resolve_all(
                             })
                             .collect(),
                         source_id: ability.source_id,
-                        // CR 608.2h + CR 608.2c: the performer, carried across a
-                        // replacement/aura pause so every resumed member of this
-                        // mass move records the same one. Known limit: the
-                        // CR 800.4a elimination sweep reads this field as the
-                        // resolving family's controller, so a performer other
-                        // than the controller (only reachable through a
-                        // replacement on a move into exile; no printed card the
-                        // engine supports has one) would be matched against the
-                        // wrong player there.
-                        controller: performer,
+                        controller: ability.controller,
+                        performed_by: performer,
                         origin: None,
                         destination: dest_zone,
                         enter_transformed: false,
@@ -4091,6 +4090,7 @@ mod tests {
         let ctx = ChangeZoneIterationCtx {
             source_id: ObjectId(100),
             controller: PlayerId(0),
+            performed_by: PlayerId(0),
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,
             enter_transformed: false,
@@ -10451,6 +10451,7 @@ mod tests {
             ],
             source_id: ObjectId(100),
             controller: PlayerId(0),
+            performed_by: PlayerId(0),
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,
             enter_transformed: false,
@@ -13111,6 +13112,117 @@ mod tests {
     // rewrites.
     // ---------------------------------------------------------------------
 
+    // Latent typed contract, not a printed card: combine Mudhole's subject-form
+    // mass exile with Palace Jailer's monarch duration. The optional redirect
+    // below is synthetic too; declining it exposes the real delivery resume.
+    fn assert_subject_mass_monarch_duration(paused: bool) {
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let cards: Vec<_> = (0..2)
+            .map(|i| {
+                create_object(
+                    &mut state,
+                    CardId(9800 + i),
+                    PlayerId(1),
+                    format!("Typed duration subject {i}"),
+                    Zone::Graveyard,
+                )
+            })
+            .collect();
+        if paused {
+            let source = create_object(
+                &mut state,
+                CardId(9802),
+                PlayerId(0),
+                "Synthetic optional exile redirect".to_string(),
+                Zone::Battlefield,
+            );
+            let mut redirect =
+                performer_test_pick_exile(None, TargetFilter::SelfRef, PlayerId(0)).effect;
+            if let Effect::ChangeZone { destination, .. } = &mut redirect {
+                *destination = Zone::Graveyard;
+            }
+            state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .replacement_definitions
+                .push(
+                    ReplacementDefinition::new(ReplacementEvent::Moved)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .execute(AbilityDefinition::new(AbilityKind::Spell, redirect))
+                        .destination_zone(Zone::Exile),
+                );
+        }
+        let mut ability = performer_test_mass_exile(
+            Some(Zone::Graveyard),
+            card_leg(
+                None,
+                vec![FilterProp::Owned {
+                    controller: ControllerRef::ScopedPlayer,
+                }],
+            ),
+            PlayerId(0),
+        );
+        ability.scoped_player = Some(PlayerId(1));
+        ability.duration = Some(Duration::UntilOpponentBecomesMonarch);
+        resolve_all(&mut state, &ability, &mut Vec::new()).expect("typed mass exile resolves");
+        if paused {
+            for _ in 0..2 {
+                assert!(matches!(
+                    state.waiting_for,
+                    WaitingFor::ReplacementChoice { .. }
+                ));
+                crate::game::engine::apply_as_current(
+                    &mut state,
+                    GameAction::ChooseReplacement { index: 1 },
+                )
+                .expect("decline the synthetic redirect");
+            }
+            assert!(state.active_change_zone_frame().is_none());
+        }
+        for id in &cards {
+            assert_eq!(state.objects[id].zone, Zone::Exile);
+            assert_eq!(state.objects[id].exiled_by, Some(PlayerId(1)));
+        }
+        // CR 610.3: the duration's opponent relation remains relative to P0,
+        // independently of P1 performing every exile, including resumed ones.
+        let mut events = vec![GameEvent::MonarchChanged {
+            player_id: PlayerId(0),
+        }];
+        crate::game::engine::check_exile_returns(&mut state, &mut events);
+        for id in &cards {
+            assert_eq!(
+                state.objects[id].zone,
+                Zone::Exile,
+                "P0 is not their own opponent"
+            );
+        }
+        let mut events = vec![GameEvent::MonarchChanged {
+            player_id: PlayerId(1),
+        }];
+        crate::game::engine::check_exile_returns(&mut state, &mut events);
+        for id in cards {
+            assert_eq!(
+                state.objects[&id].zone,
+                Zone::Graveyard,
+                "P1 is P0's opponent"
+            );
+        }
+        assert!(state.exile_links.is_empty());
+    }
+
+    #[test]
+    fn subject_mass_exile_duration_stays_controller_relative() {
+        assert_subject_mass_monarch_duration(false);
+    }
+
+    #[test]
+    fn paused_subject_mass_exile_duration_stays_controller_relative() {
+        assert_subject_mass_monarch_duration(true);
+    }
+
     fn performer_test_mass_exile(
         origin: Option<Zone>,
         target: TargetFilter,
@@ -13353,7 +13465,7 @@ mod tests {
             );
             for (label, f) in [("raw", &filter), ("normalised", &normalised)] {
                 assert_eq!(
-                    filter_names_library_owner(f),
+                    filter_names_library_owner(f, &[]),
                     expect_library,
                     "{name} ({label}): library-owner classification"
                 );
@@ -13465,6 +13577,83 @@ mod tests {
         );
         assert_eq!(b.1, Some(PlayerId(0)), "encoding B is the caster's exile");
         assert_eq!(a.1, b.1, "encoding A must classify exactly as encoding B");
+    }
+
+    // Latent typed-origin contract: Rahilda is the nearest printed library-owner
+    // instruction; these fixtures deliberately omit its redundant inline zone.
+    #[test]
+    fn explicit_library_origin_mass_performer_matches_with_and_without_inline_zone() {
+        let without_inline = card_leg(
+            None,
+            vec![FilterProp::Owned {
+                controller: ControllerRef::ScopedPlayer,
+            }],
+        );
+        let with_inline = mass_library_exile_outcome(library_leg_encoding_b());
+        let without_inline = mass_library_exile_outcome(without_inline);
+        assert_eq!(with_inline, vec![(Zone::Exile, Some(PlayerId(0))); 2]);
+        assert_eq!(without_inline, with_inline);
+    }
+
+    #[test]
+    fn explicit_library_origin_pick_performer_matches_with_and_without_inline_zone() {
+        let without_inline = card_leg(
+            None,
+            vec![FilterProp::Owned {
+                controller: ControllerRef::ScopedPlayer,
+            }],
+        );
+        let with_inline = pick_library_exile_outcome(library_leg_encoding_b());
+        let without_inline = pick_library_exile_outcome(without_inline);
+        assert_eq!(with_inline, (Zone::Exile, Some(PlayerId(0)), false));
+        assert_eq!(without_inline, with_inline);
+    }
+
+    // Synthetic mixed-zone contract: retain the hand subject's meaning when a
+    // separate library leg is present; do not turn every leg into a library leg.
+    #[test]
+    fn mixed_origin_mass_exile_keeps_scoped_hand_leg_performer() {
+        let mut state = GameState::new_two_player(42);
+        let hand = create_object(
+            &mut state,
+            CardId(9790),
+            PlayerId(1),
+            "Subject hand".to_string(),
+            Zone::Hand,
+        );
+        let library = create_object(
+            &mut state,
+            CardId(9791),
+            PlayerId(0),
+            "Other library".to_string(),
+            Zone::Library,
+        );
+        let filter = TargetFilter::Or {
+            filters: vec![
+                card_leg(
+                    None,
+                    vec![
+                        FilterProp::Owned {
+                            controller: ControllerRef::ScopedPlayer,
+                        },
+                        FilterProp::InZone { zone: Zone::Hand },
+                    ],
+                ),
+                card_leg(
+                    None,
+                    vec![FilterProp::InZone {
+                        zone: Zone::Library,
+                    }],
+                ),
+            ],
+        };
+        let mut ability = performer_test_mass_exile(None, filter, PlayerId(0));
+        ability.scoped_player = Some(PlayerId(1));
+        resolve_all(&mut state, &ability, &mut Vec::new()).expect("mixed-zone exile resolves");
+        for id in [hand, library] {
+            assert_eq!(state.objects[&id].zone, Zone::Exile);
+            assert_eq!(state.objects[&id].exiled_by, Some(PlayerId(1)));
+        }
     }
 
     /// CR 608.2c + CR 701.23a: "Search its controller's graveyard, hand, and
