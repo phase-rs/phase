@@ -23794,22 +23794,48 @@ fn manual_mana_payment_route(
 
     let spell_meta = source_id.and_then(|sid| build_spell_meta(state, player, sid));
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    player_choice_mana_payment_route(
+        state,
+        player,
+        source_id,
+        source_id,
+        cost,
+        spell_ctx.as_ref(),
+    )
+}
 
+/// CR 117.1d + CR 601.2g + CR 605.3a: The payment-context-generic core of the
+/// manual mana route, shared by spells ([`manual_mana_payment_route`]) and
+/// activations ([`activation_manual_mana_payment_route`]): whether `cost`, less
+/// the player's floating mana, can be paid once the player activates mana
+/// abilities the Auto payer can't (a choice-bearing or non-tap mana ability:
+/// KCI, Phyrexian Altar, Ashnod's Altar). `payment_source` is the object whose
+/// cost is paid (its mana-spend permissions apply); `excluded` is a permanent
+/// whose mana abilities can't help pay (the spell itself, or an activation
+/// source whose cost needs it untapped).
+fn player_choice_mana_payment_route(
+    state: &GameState,
+    player: PlayerId,
+    payment_source: Option<ObjectId>,
+    excluded: Option<ObjectId>,
+    cost: &ManaCost,
+    payment_ctx: Option<&PaymentContext<'_>>,
+) -> ManualPaymentRoute {
     // CR 601.2g: Once the exact auto-tap payment probe has failed, only a
-    // mana ability that requires a manual choice can make the cast reachable.
+    // mana ability that requires a manual choice can make the payment reachable.
     // Do not re-estimate tap-cost or unambiguous self-sacrifice sources here:
     // their resource dependencies belong exclusively to the exact probe.
     if !super::mana_sources::has_activatable_player_choice_mana_ability_for_payment(
         state,
         player,
-        source_id,
-        spell_ctx.as_ref(),
+        excluded,
+        payment_ctx,
     ) {
         return ManualPaymentRoute::Infeasible;
     }
 
     let Some(residual) =
-        spell_cost_residual_after_pool(state, player, source_id, cost, spell_ctx.as_ref())
+        spell_cost_residual_after_pool(state, player, payment_source, cost, payment_ctx)
     else {
         return ManualPaymentRoute::Infeasible;
     };
@@ -23829,8 +23855,8 @@ fn manual_mana_payment_route(
         super::mana_sources::can_cover_shards_with_activatable_mana(
             state,
             player,
-            source_id,
-            spell_ctx.as_ref(),
+            excluded,
+            payment_ctx,
             residual_shards,
         );
     if !residual_shards.is_empty() && !shards_covered {
@@ -23858,14 +23884,11 @@ fn manual_mana_payment_route(
     // under-count was the original #562 bug — is intentional. A bounded-
     // flow model that respects sacrifice/discard/life supply is tracked in
     // issue #1235.
-    let excluded = source_id;
     let capacity: u32 = state
         .battlefield
         .iter()
         .filter(|id| Some(**id) != excluded)
-        .map(|&id| {
-            super::mana_sources::feasible_mana_capacity(state, id, player, spell_ctx.as_ref())
-        })
+        .map(|&id| super::mana_sources::feasible_mana_capacity(state, id, player, payment_ctx))
         .sum::<u32>()
         .saturating_sub(shard_charge);
 
@@ -23874,6 +23897,39 @@ fn manual_mana_payment_route(
     } else {
         ManualPaymentRoute::Infeasible
     }
+}
+
+/// CR 602.2b + CR 601.2g + CR 605.3a: The manual mana route for an activation's
+/// mana leg `mana` — the activation analog of [`spell_payment_manual_route`].
+/// The leg is judged in the activation's payment context (CR 106.6
+/// restrictions and spend permissions scoped to the activated ability), and a
+/// source whose cost needs it untapped contributes none of its own mana
+/// abilities, as on the automatic path
+/// ([`ability_mana_payment_excluded_sources`]).
+fn activation_manual_mana_payment_route(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: Option<usize>,
+    cost: &AbilityCost,
+    mana: &ManaCost,
+) -> ManualPaymentRoute {
+    // CR 601.2f + CR 107.1b: X = 0 is the cheapest concrete probe of a leg
+    // whose X is not yet announced, as on the spell side.
+    let mut mana = mana.clone();
+    if super::casting_costs::cost_has_x(&mana) {
+        mana.concretize_x(0);
+    }
+    let activation_context = activation_payment_context(state, source_id, ability_index);
+    let activation_ctx = activation_context.as_payment_context();
+    player_choice_mana_payment_route(
+        state,
+        player,
+        Some(source_id),
+        requires_untapped(cost).then_some(source_id),
+        &mana,
+        Some(&activation_ctx),
+    )
 }
 
 /// Returns true if the player can pay this activated-ability mana cost after
@@ -27474,7 +27530,7 @@ pub(crate) fn can_pay_ability_cost_now(
         return false;
     }
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
-    payable_with_mana_ability_window_life(state, player, source_id, cost, life, |state, cost| {
+    let payable = |state: &GameState, cost: &AbilityCost| {
         super::costs::can_pay(
             state,
             player,
@@ -27485,7 +27541,50 @@ pub(crate) fn can_pay_ability_cost_now(
                 ability_index,
             },
         )
-    })
+    };
+    payable_with_mana_ability_window_life(state, player, source_id, cost, life, payable)
+        || payable_with_mana_ability_window_mana(
+            state,
+            player,
+            source_id,
+            cost,
+            ability_index,
+            life,
+            payable,
+        )
+}
+
+/// CR 601.2g + CR 602.2b + CR 605.3a: a manually paid activation's mana is
+/// judged by what the player's mana abilities can produce during the CR 601.2g
+/// opportunity — including those the automatic payer never activates, a mana
+/// ability whose cost is a sacrifice, discard or life payment (Ashnod's Altar:
+/// "Sacrifice a creature: Add {C}{C}."). The automatic dry run `payable` cannot
+/// see that mana, so when it refuses `cost` in a manual payment's window, the
+/// cost is judged the way `handle_activate_ability` pays it: its mana leg first,
+/// on the intact board ([`casting_costs::extract_mana_leg`]), by the manual mana
+/// route the spell-side castability gate also uses
+/// ([`player_choice_mana_payment_route`]), and the rest of the cost by
+/// `payable`. Like that gate, the route counts each mana ability's capacity
+/// independently of the rest of the cost's resources (issue #1235).
+fn payable_with_mana_ability_window_mana(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    ability_index: Option<usize>,
+    life: &ActivationLifeWindow,
+    payable: impl Fn(&GameState, &AbilityCost) -> bool,
+) -> bool {
+    // An automatic payment activates only the mana abilities its payer can.
+    if !matches!(life, ActivationLifeWindow::ManaAbilityWindow { .. }) {
+        return false;
+    }
+    let Some((mana, rest)) = casting_costs::extract_mana_leg(cost) else {
+        return false;
+    };
+    activation_manual_mana_payment_route(state, player, source_id, ability_index, cost, &mana)
+        == ManualPaymentRoute::Feasible
+        && rest.as_ref().is_none_or(|rest| payable(state, rest))
 }
 
 /// CR 107.4f + CR 119.4 + CR 601.2h: whether an automatic payment of `cost`'s
@@ -28162,9 +28261,11 @@ pub fn can_activate_ability_now_with_payment_mode(
 /// the automatic payer can complete the activation. Otherwise `Manual` when
 /// only a manual payment can: its life is judged after the CR 601.2g
 /// opportunity, in which the player may first activate mana abilities that gain
-/// them life ([`payable_with_mana_ability_window_life`]). `None` when neither
-/// can. The manual verdict runs only for a cost whose window route pays life
-/// while the player controls such a mana ability.
+/// them life ([`payable_with_mana_ability_window_life`]) or that the automatic
+/// payer never activates ([`payable_with_mana_ability_window_mana`]). `None`
+/// when neither can. The manual verdict runs only for a cost whose window route
+/// pays life while the player controls such a life-gaining mana ability, or for
+/// a cost with a mana leg while the player controls such a choice-bearing one.
 pub(crate) fn activation_offer_payment_mode(
     state: &GameState,
     player: PlayerId,
@@ -28181,7 +28282,8 @@ pub(crate) fn activation_offer_payment_mode(
     ) {
         return Some(CastPaymentMode::Auto);
     }
-    (manual_activation_life_retry_possible(state, player, source_id, ability_index)
+    ((manual_activation_life_retry_possible(state, player, source_id, ability_index)
+        || manual_activation_mana_route_possible(state, player, source_id, ability_index))
         && matches!(
             activation_verdict(
                 state,
@@ -28197,8 +28299,36 @@ pub(crate) fn activation_offer_payment_mode(
     .then_some(CastPaymentMode::Manual)
 }
 
+/// CR 601.2g + CR 605.3a: a manual activation's verdict can differ from the
+/// automatic one through [`payable_with_mana_ability_window_mana`]: the
+/// ability's cost has a mana leg, and the player controls an activatable mana
+/// ability the automatic payer never activates (a choice-bearing or non-tap
+/// cost: Ashnod's Altar's sacrifice).
+fn manual_activation_mana_route_possible(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> bool {
+    let Some(def) = activation_ability_definition(state, source_id, ability_index) else {
+        return false;
+    };
+    // CR 605.3a: a mana ability is activated during a payment, not paid for by
+    // hand, so it has no manual payment to relax.
+    if super::mana_abilities::is_mana_ability(&def) {
+        return false;
+    }
+    def.cost
+        .as_ref()
+        .and_then(casting_costs::extract_mana_leg)
+        .is_some()
+        && super::mana_sources::has_activatable_player_choice_mana_ability_for_payment(
+            state, player, None, None,
+        )
+}
+
 /// CR 601.2g + CR 119.4: a manual activation's verdict can differ from the
-/// automatic one only through [`payable_with_mana_ability_window_life`]'s
+/// automatic one through [`payable_with_mana_ability_window_life`]'s
 /// retry: the ability's cost has a window route that pays life, and the player
 /// controls a mana ability that would gain them life in that window.
 fn manual_activation_life_retry_possible(
