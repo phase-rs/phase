@@ -3403,6 +3403,21 @@ fn finalize_staged_pending_outcome_on(
     let Some(member) = staged.members.get_mut(cursor) else {
         return false;
     };
+    // CR 800.4b + CR 616.1: an exact paused entry can finish as Remained
+    // without an Execute/Prevented consultation handback when its intended
+    // controller leaves. Consume that retained terminal through the same
+    // member/cursor authority; it is neither approval nor replacement prevention.
+    if member.state == StagedBatchMemberState::InnerConsulting
+        && member.pending_outcome.is_none()
+        && owner.paused_current.as_ref().is_some_and(|paused| {
+            paused.member == member.identity
+                && paused.terminal_completion == Some(ZoneMoveCompletion::Remained)
+                && matches!(paused.expected_event, ProposedEvent::ZoneChange { .. })
+        })
+    {
+        mark_staged_member_terminal(state, owner, cursor, ZoneMoveCompletion::Remained, events);
+        return true;
+    }
     let Some(outcome) = member.pending_outcome.clone() else {
         return false;
     };
