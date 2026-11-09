@@ -11343,16 +11343,24 @@ pub(crate) fn scan_zone_phrase_span(
 ) -> Option<(&str, Zone, Option<ControllerRef>, Vec<FilterProp>)> {
     let mut offset = 0;
     while offset <= text.len() {
-        if let Some((props, ctrl, consumed)) = parse_zone_suffix(&text[offset..]) {
-            let zone = props.iter().find_map(|p| match p {
-                FilterProp::InZone { zone } => Some(*zone),
-                _ => None,
-            })?;
-            // `consumed` counts bytes of the lowercased phrase, so the span is exact
-            // only for text whose lowercase keeps its byte length (callers pass
-            // lowercased text); otherwise it may be empty.
-            let span = text[offset..].get(..consumed).unwrap_or_default();
-            return Some((span, zone, ctrl, props));
+        match parse_zone_suffix_outcome(&text[offset..], NounPhraseOwnership::Unestablished) {
+            ZoneSuffixOutcome::Parsed(props, ctrl, consumed) => {
+                let zone = props.iter().find_map(|p| match p {
+                    FilterProp::InZone { zone } => Some(*zone),
+                    _ => None,
+                })?;
+                // `consumed` counts bytes of the lowercased phrase, so the span is exact
+                // only for text whose lowercase keeps its byte length (callers pass
+                // lowercased text); otherwise it may be empty.
+                let span = text[offset..].get(..consumed).unwrap_or_default();
+                return Some((span, zone, ctrl, props));
+            }
+            // The head is a zone list the grammar deliberately declined (mixed
+            // possession, a committed "or" to a non-zone phrase, or an invalid
+            // preposition). Resuming past it would half-read a later leg, so
+            // the whole scan declines.
+            ZoneSuffixOutcome::DeclinedList => return None,
+            ZoneSuffixOutcome::NoMatch => {}
         }
         match text[offset..].find(' ') {
             Some(i) => offset += i + 1,
@@ -11410,6 +11418,14 @@ pub(crate) fn parse_zone_suffix(
     parse_zone_suffix_with_ownership(text, NounPhraseOwnership::Unestablished)
 }
 
+/// Distinguishes a genuine non-match from a deliberately declined zone list,
+/// so a boundary scanner cannot resume past the list and half-read a later leg.
+enum ZoneSuffixOutcome {
+    Parsed(Vec<FilterProp>, Option<ControllerRef>, usize),
+    DeclinedList,
+    NoMatch,
+}
+
 /// CR 400.1 + CR 400.3: `parse_zone_suffix`, with the caller's noun phrase
 /// ownership provenance.
 ///
@@ -11423,13 +11439,28 @@ fn parse_zone_suffix_with_ownership(
     text: &str,
     ownership: NounPhraseOwnership,
 ) -> Option<(Vec<FilterProp>, Option<ControllerRef>, usize)> {
+    match parse_zone_suffix_outcome(text, ownership) {
+        ZoneSuffixOutcome::Parsed(props, ctrl, consumed) => Some((props, ctrl, consumed)),
+        ZoneSuffixOutcome::DeclinedList | ZoneSuffixOutcome::NoMatch => None,
+    }
+}
+
+fn parse_zone_suffix_outcome(text: &str, ownership: NounPhraseOwnership) -> ZoneSuffixOutcome {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
     let lower = trimmed.to_lowercase();
 
-    let (rest, (props, ctrl, _qual)) = parse_zone_suffix_nom(&lower, ownership).ok()?;
-    let consumed = lower.len() - rest.len();
-    Some((props, ctrl, leading_ws + consumed))
+    match parse_zone_suffix_nom(&lower, ownership) {
+        Ok((rest, (props, ctrl, _qual))) => {
+            let consumed = lower.len() - rest.len();
+            ZoneSuffixOutcome::Parsed(props, ctrl, leading_ws + consumed)
+        }
+        Err(nom::Err::Failure(_)) => ZoneSuffixOutcome::DeclinedList,
+        Err(nom::Err::Error(error)) if error.code == nom::error::ErrorKind::Fail => {
+            ZoneSuffixOutcome::DeclinedList
+        }
+        Err(_) => ZoneSuffixOutcome::NoMatch,
+    }
 }
 
 /// Recover a single graveyard source using the shared zone grammar, without
@@ -26110,6 +26141,21 @@ mod zone_list_grammar {
     /// "in"/"from" (CR 110.1: "a permanent is a card or token ON the
     /// battlefield"). A committed "or" continuation that breaks that fails the
     /// whole suffix; an uncommitted "and" one simply is not part of the list.
+    /// A declined zone list must stop the boundary scanner, not let it resume
+    /// at a later leg and return only that zone.
+    #[test]
+    fn boundary_scanner_declines_a_whole_list() {
+        assert_eq!(
+            scan_zone_phrase("this creature in your graveyard or on the battlefield"),
+            None,
+        );
+        assert_eq!(
+            scan_zone_phrase("this creature in exile and in your graveyard"),
+            None,
+            "the mixed list declines without noun-phrase ownership",
+        );
+    }
+
     #[test]
     fn zone_list_rejects_on_for_a_non_battlefield_zone() {
         assert_eq!(parse_zone_suffix("in exile or on exile"), None);

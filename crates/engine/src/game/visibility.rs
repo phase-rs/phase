@@ -3149,10 +3149,11 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 .is_some_and(|object| object.zone.is_public())
         });
         let mixed_private_public = has_private_card && has_public_card;
-        if !can_view_private_for_player(player) && has_private_card {
+        let private_scope = !zone.is_public() || has_private_card;
+        if !can_view_private_for_player(player) && private_scope {
             filtered.waiting_for = WaitingFor::EffectZoneChoice {
                 player,
-                cards: if mixed_private_public {
+                cards: if mixed_private_public || zone == Zone::Hand {
                     Vec::new()
                 } else {
                     cards.iter().map(|_| ObjectId(0)).collect()

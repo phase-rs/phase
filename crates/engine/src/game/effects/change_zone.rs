@@ -1463,7 +1463,14 @@ pub fn resolve(
             up_to: choice_up_to,
             source_id: ability.source_id,
             effect_kind: EffectKind::ChangeZone,
-            zone: scan_zone,
+            // A mixed scope with a private leg must report the private zone so
+            // visibility redaction can key on the choice's scope, not on which
+            // candidates happen to be eligible right now (CR 402.3).
+            zone: scan_zones
+                .iter()
+                .copied()
+                .find(|zone| !zone.is_public())
+                .unwrap_or(scan_zone),
             destination: Some(dest_zone),
             enter_tapped: effect_enter_tapped,
             enter_transformed: effect_enter_transformed,

@@ -18475,7 +18475,7 @@ mod change_zone_target_choice_timing_tests {
         )
     }
 
-    /// CR 400.1 + CR 400.7: a multi-origin filter is a resolution choice even
+    /// CR 400.1 + CR 115.10a + CR 608.2d: a multi-origin filter is a resolution choice even
     /// when the producer suppressed the single `origin` field. A single-zone
     /// off-battlefield filter without `origin` keeps its historical Stack
     /// default (Deadly Cover-Up's class), and printed "target" still wins.
