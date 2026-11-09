@@ -53,6 +53,7 @@ const WOWZER: &str = "Whenever Wowzer, the Aspirational attacks, if you have an 
 const RAPTOR: &str = "Flying\n{S}{S}: This creature gains shroud until end of turn. ({S} can be paid with one mana from a snow source. A creature with shroud can't be the target of spells or abilities.)";
 const NYKTHOS: &str = "{T}: Add {C}.\n{2}, {T}: Choose a color. Add an amount of mana of that color equal to your devotion to that color. (Your devotion to a color is the number of mana symbols of that color in the mana costs of permanents you control.)";
 const SPIRAL: &str = "Draw a card. You may put a land card from your hand onto the battlefield.";
+const DIG: &str = "{T}: Add {C}.\n{T}, Sacrifice this land: Add one mana of any color.";
 const RUINS: &str =
     "This land enters tapped.\n{T}: Add {R}.\n{T}, Sacrifice this land: Add {R}{R}.";
 const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
@@ -1239,7 +1240,7 @@ fn nykthos_aura_board(
     assert!(rows
         .iter()
         .any(|row| row.mana_type == ManaType::Colorless && row.taps_for_mana_overrides.len() == 1));
-    if paused || wastes_count >= 2 {
+    if !paused && wastes_count >= 2 {
         assert!(
             rows.iter().any(|row| row.mana_type == ManaType::Blue
                 && row.atomic_combination.as_ref() == Some(&vec![ManaType::Blue, ManaType::Green])
@@ -1249,7 +1250,7 @@ fn nykthos_aura_board(
                     == engine::types::game_state::ProductionOverride::SingleColor(ManaType::Green)),
             "currently payable choices: {rows:?}"
         );
-    } else {
+    } else if !paused {
         assert!(!rows.iter().any(|row| row.mana_type == ManaType::Blue));
         assert_eq!(funders.len(), 1);
         assert!(activatable_land_mana_options(r.state(), funders[0], P0)
@@ -1283,7 +1284,7 @@ fn assert_replacement_pair(r: &GameRunner) {
         .any(|candidate| candidate.source_name == "Leyline of the Void"));
 }
 
-fn finish_growth_spiral(r: &mut GameRunner, spiral: ObjectId, exiled: bool) {
+fn finish_growth_spiral(r: &mut GameRunner, spiral: ObjectId, exiled: bool, remaining: usize) {
     let library_before = r.state().players[0].library.len();
     assert_eq!(r.state().objects[&spiral].zone, Zone::Stack);
     r.resolve_top();
@@ -1319,7 +1320,7 @@ fn finish_growth_spiral(r: &mut GameRunner, spiral: ObjectId, exiled: bool) {
         r.state().objects[&spiral].zone,
         if exiled { Zone::Exile } else { Zone::Graveyard }
     );
-    assert_complete(r, 1);
+    assert_complete(r, remaining);
 }
 
 #[test]
@@ -1358,7 +1359,7 @@ fn costed_counted_source_keeps_nondefault_aura_through_actual_payment() {
         .units()
         .all(|unit| unit.source_id == nykthos && unit.color == ManaType::Blue));
     drop(paid);
-    finish_growth_spiral(&mut r, spiral, false);
+    finish_growth_spiral(&mut r, spiral, false, 1);
 }
 
 #[test]
@@ -1378,56 +1379,104 @@ fn costed_counted_source_cannot_fund_itself_from_future_aura_output() {
     assert_complete(&r, 0);
 }
 
+fn dig_aura_consent(
+    paused: bool,
+    aura_color: ManaType,
+) -> (
+    GameRunner,
+    ObjectId,
+    ObjectId,
+    ObjectId,
+    engine::types::mana::ManaSourceSelection,
+) {
+    let mut s = board();
+    let dig = s.add_land_from_oracle(P0, "Archaeological Dig", DIG).id();
+    let aura = s
+        .add_enchantment_from_oracle(P0, "Fertile Ground", FERTILE_GROUND)
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+        .id();
+    if paused {
+        s.add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE)
+            .with_mana_cost(parse_mtgjson_mana_cost("{1}{W}"));
+        s.add_enchantment_from_oracle(P1, "Leyline of the Void", LEYLINE_VOID)
+            .with_mana_cost(parse_mtgjson_mana_cost("{2}{B}{B}"));
+    }
+    let spiral = spell(&mut s, "Growth Spiral", true, SPIRAL, "{G}{U}");
+    let mut r = s.build();
+    engine::game::effects::attach::attach_to(r.state_mut(), aura, dig);
+    evaluate_layers(r.state_mut());
+    let card_id = r.state().objects[&spiral].card_id;
+    r.act(GameAction::CastSpell {
+        object_id: spiral,
+        card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::AutoExceptSacrificialMana,
+    })
+    .unwrap();
+    let WaitingFor::ManaSourceSelection {
+        player, options, ..
+    } = &r.state().waiting_for
+    else {
+        panic!(
+            "Dig's printed sacrifice must require consent, got {:?}",
+            r.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    let selection = options
+        .iter()
+        .find(|selection| {
+            selection.source.object_id == dig
+                && matches!(
+                    selection.output,
+                    ManaSourceOutput::DeferredColorChoice {
+                        quantity: ManaSourceQuantity::Fixed(1)
+                    }
+                )
+                && selection.taps_for_mana.iter().any(|selected| {
+                    selected.source.object_id == aura
+                        && selected.production_override
+                            == engine::types::game_state::ProductionOverride::SingleColor(
+                                aura_color,
+                            )
+                })
+        })
+        .expect("the offered consent retains the independent Aura choice")
+        .clone();
+    assert!(!r.state().objects[&dig].tapped);
+    assert!(r.state().players[0].mana_pool.is_empty());
+    (r, dig, aura, spiral, selection)
+}
+
 #[test]
-fn manual_costed_counted_source_keeps_its_independent_aura_and_base_choices() {
-    for (base_color, aura_color, base_count) in [
-        (ManaType::Blue, ManaType::Green, 2),
-        (ManaType::Green, ManaType::Blue, 1),
+fn manual_sacrificial_source_keeps_its_independent_aura_and_base_choices() {
+    for (base_color, aura_color) in [
+        (ManaType::Blue, ManaType::Green),
+        (ManaType::Green, ManaType::Blue),
     ] {
-        let (mut r, nykthos, aura, spiral, funders) = nykthos_aura_board(false, 2);
-        let selection = activatable_mana_source_selections(r.state(), P0)
-            .into_iter()
-            .find(|selection| {
-                selection.source.object_id == nykthos
-                    && matches!(
-                        selection.output,
-                        ManaSourceOutput::DeferredColorChoice { .. }
-                    )
-                    && selection.taps_for_mana.iter().any(|selected| {
-                        selected.source.object_id == aura
-                            && selected.production_override
-                                == engine::types::game_state::ProductionOverride::SingleColor(
-                                    aura_color,
-                                )
-                    })
-            })
-            .expect("the unchanged public selection carries the independent Aura color");
+        let (mut r, dig, aura, spiral, selection) = dig_aura_consent(false, aura_color);
         let mut events = r
-            .act(GameAction::TapLandForMana { selection })
+            .act(GameAction::ActivateManaSource { selection })
             .unwrap()
             .events;
         let WaitingFor::ChooseManaColor {
             player,
             choice: ManaChoicePrompt::SingleColor { options },
-            context,
+            context: engine::types::game_state::ManaChoiceContext::ManaAbility(pending),
         } = &r.state().waiting_for
         else {
             panic!("the base choice remains mandatory after actual cost payment");
         };
         assert_eq!(*player, P0);
         assert!(options.contains(&base_color));
-        let engine::types::game_state::ManaChoiceContext::ManaAbility(pending) = context else {
-            panic!("the pending activation owns the choice");
-        };
         assert_eq!(pending.selected_taps_for_mana.len(), 1);
         assert_eq!(
             pending.selected_taps_for_mana[0].production_override,
             engine::types::game_state::ProductionOverride::SingleColor(aura_color)
         );
+        assert_eq!(r.state().objects[&dig].zone, Zone::Graveyard);
         assert!(r.state().players[0].mana_pool.is_empty());
-        assert!(funders
-            .iter()
-            .all(|source| r.state().objects[source].tapped));
         events.extend(
             r.act(GameAction::ChooseManaColor {
                 choice: ManaChoice::SingleColor(base_color),
@@ -1436,20 +1485,18 @@ fn manual_costed_counted_source_keeps_its_independent_aura_and_base_choices() {
             .unwrap()
             .events,
         );
-        // CR 608.2d + CR 106.3: choosing the base color neither overwrites
-        // nor defaults the independently selected triggered producer's color.
-        assert_eq!(production_count(&events, nykthos, base_color), base_count);
+        // CR 608.2d + CR 605.4a: the real manual choice consumer retains
+        // the separately selected producer after the source's sacrifice.
+        assert_eq!(production_count(&events, dig, base_color), 1);
         assert_eq!(production_count(&events, aura, aura_color), 1);
         assert_eq!(production_count(&events, aura, ManaType::White), 0);
-        let paid = r.cast(spiral).commit();
-        assert_eq!(paid.state().objects[&spiral].mana_spent_to_cast_amount, 2);
-        if base_color == ManaType::Blue {
-            drop(paid);
-            finish_growth_spiral(&mut r, spiral, false);
-        } else {
-            paid.resolve().assert_hand_drawn(P0, 1);
-            assert_complete(&r, 0);
-        }
+        assert!(matches!(
+            r.state().waiting_for,
+            WaitingFor::ManaPayment { .. }
+        ));
+        r.act(GameAction::PassPriority).unwrap();
+        assert_eq!(r.state().objects[&spiral].mana_spent_to_cast_amount, 2);
+        finish_growth_spiral(&mut r, spiral, false, 0);
     }
 }
 
@@ -1461,7 +1508,7 @@ fn selected_aura_survives_prefunding_pause_roundtrip_and_terminal_siblings() {
     let selected = activatable_land_mana_options(r.state(), nykthos, P0)
         .into_iter()
         .find(|row| {
-            row.mana_type == ManaType::Blue
+            row.mana_type == ManaType::Colorless
                 && row.taps_for_mana_overrides.iter().any(|(trigger, value)| {
                     trigger.source.object_id == aura
                         && *value == ProductionOverride::SingleColor(ManaType::Green)
@@ -1562,34 +1609,20 @@ fn selected_aura_survives_prefunding_pause_roundtrip_and_terminal_siblings() {
         .units()
         .all(|unit| unit.source_id == nykthos && unit.color == ManaType::Blue));
     assert!(r.state().pending_taps_for_mana_overrides.is_empty());
-    finish_growth_spiral(&mut r, spiral, true);
+    finish_growth_spiral(&mut r, spiral, true, 1);
 }
 
 #[test]
 fn manual_selected_aura_survives_actual_cost_pause_and_color_response() {
-    let (mut r, nykthos, aura, spiral, _) = nykthos_aura_board(true, 0);
-    let selection = activatable_mana_source_selections(r.state(), P0)
-        .into_iter()
-        .find(|selection| {
-            selection.source.object_id == nykthos
-                && matches!(
-                    selection.output,
-                    ManaSourceOutput::DeferredColorChoice { .. }
-                )
-                && selection.taps_for_mana.iter().any(|selected| {
-                    selected.source.object_id == aura
-                        && selected.production_override
-                            == engine::types::game_state::ProductionOverride::SingleColor(
-                                ManaType::Green,
-                            )
-                })
-        })
-        .unwrap();
+    let (mut r, dig, aura, spiral, selection) = dig_aura_consent(true, ManaType::Green);
     let mut events = r
-        .act(GameAction::TapLandForMana { selection })
+        .act(GameAction::ActivateManaSource { selection })
         .unwrap()
         .events;
     assert_replacement_pair(&r);
+    assert_eq!(production_count(&events, dig, ManaType::Blue), 0);
+    assert_eq!(production_count(&events, aura, ManaType::Green), 0);
+    assert!(r.state().pending_taps_for_mana_overrides.is_empty());
     let restored = serde_json::from_slice(&serde_json::to_vec(r.state()).unwrap()).unwrap();
     r = GameRunner::from_state(restored);
     events.extend(
@@ -1613,6 +1646,7 @@ fn manual_selected_aura_survives_actual_cost_pause_and_color_response() {
         pending.selected_taps_for_mana[0].production_override,
         engine::types::game_state::ProductionOverride::SingleColor(ManaType::Green)
     );
+    assert_eq!(r.state().objects[&dig].zone, Zone::Exile);
     events.extend(
         r.act(GameAction::ChooseManaColor {
             choice: ManaChoice::SingleColor(ManaType::Blue),
@@ -1621,13 +1655,17 @@ fn manual_selected_aura_survives_actual_cost_pause_and_color_response() {
         .unwrap()
         .events,
     );
-    // CR 608.2d + CR 605.4a: the resumed color consumer uses the same
-    // selected producer as unprompted completion, after the actual cost payer.
-    assert_eq!(production_count(&events, nykthos, ManaType::Blue), 2);
+    // CR 608.2d + CR 605.4a + CR 616.1: the resumed manual color
+    // consumer preserves the exact selected trigger after replacement.
+    assert_eq!(production_count(&events, dig, ManaType::Blue), 1);
     assert_eq!(production_count(&events, aura, ManaType::Green), 1);
     assert_eq!(production_count(&events, aura, ManaType::White), 0);
-    r.cast(spiral).commit();
-    finish_growth_spiral(&mut r, spiral, true);
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    r.act(GameAction::PassPriority).unwrap();
+    finish_growth_spiral(&mut r, spiral, true, 0);
 }
 
 fn owl(s: &mut GameScenario) -> ObjectId {

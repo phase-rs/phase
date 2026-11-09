@@ -1963,7 +1963,7 @@ pub(crate) fn select_mana_payment(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn select_mana_payment_with_life_budget(
+pub(crate) fn select_mana_payment_with_life_budget(
     pool: &ManaPool,
     cost: &ManaCost,
     hand_demand: Option<&ColorDemand>,
@@ -2261,6 +2261,15 @@ fn pay_cost_with_demand_and_choices_from(
                     phyrexian_choices.map(|choices| &choices[choice_cursor..]),
                     life_colors,
                 );
+                // CR 118.3 + CR 119.8: no allocation of the remaining Z
+                // units can pay an unavoidable life cost beyond this budget.
+                // Reject before enumerating equivalent Z permutations.
+                if minimum_life.is_some_and(|minimum| {
+                    max_life_payments
+                        .is_some_and(|limit| minimum > limit.saturating_sub(life_payments.len()))
+                }) {
+                    return Err(PaymentError::InsufficientMana);
+                }
                 let unit = spend_two_or_more_color_source_eligible(
                     pool,
                     spell,

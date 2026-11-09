@@ -17750,7 +17750,14 @@ fn assign_combination_sources(
     // Flexible one-color choices stay in the scarce-shard loop even when
     // an Aura adds a separate color; fixed output retains this pre-pass.
     let prepass_combination = |option: &ManaSourceOption| {
-        option.atomic_combination.is_some() && !single_color_choice_source(state, option)
+        option.atomic_combination.is_some()
+            && !single_color_choice_source(state, option)
+            // Nykthos's C plus Fertile Ground cannot commit the source
+            // before its competing devotion bundle is considered.
+            && !available.iter().any(|other| {
+                other.object_id == option.object_id
+                    && counted_single_color_bundle(state, other, output_projection)
+            })
     };
     // Build per-object candidate list: for each object that has any
     // `atomic_combination`-bearing rows, collect all of its combination rows.
