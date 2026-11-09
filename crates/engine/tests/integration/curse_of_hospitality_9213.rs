@@ -425,18 +425,34 @@ fn respond_once(
                 payment_mode: CastPaymentMode::Auto,
             })
             .expect("P2 casts the response");
-        assert!(
-            matches!(
+        if let WaitingFor::TargetSelection { player, .. } = runner.state().waiting_for {
+            assert_eq!(player, responder);
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(engine::types::ability::TargetRef::Object(target)),
+                })
+                .expect("select the response target");
+        } else {
+            // A sole legal target is selected by the casting pipeline itself.
+            assert!(matches!(
                 runner.state().waiting_for,
-                WaitingFor::TargetSelection { player, .. } if player == responder
-            ),
-            "the response requires its target"
-        );
-        runner
-            .act(GameAction::ChooseTarget {
-                target: Some(engine::types::ability::TargetRef::Object(target)),
-            })
-            .expect("select the response target");
+                WaitingFor::Priority { .. }
+            ));
+            let spell = runner
+                .state()
+                .stack
+                .iter()
+                .find(|entry| entry.source_id == response)
+                .expect("the auto-targeted response is on the stack");
+            assert_eq!(
+                spell
+                    .ability()
+                    .expect("the response has an ability")
+                    .targets,
+                vec![engine::types::ability::TargetRef::Object(target)],
+                "automatic selection must choose the same required target"
+            );
+        }
         true
     }
 }
