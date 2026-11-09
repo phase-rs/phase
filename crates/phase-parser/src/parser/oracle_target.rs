@@ -11317,9 +11317,9 @@ enum ZoneQual {
 /// caller's return type is one `Zone` (`ParsedCondition::SourceInZone`, a
 /// `ChangeZone` origin), so resuming the scan past the list would find a LATER
 /// single-zone phrase and silently half-read the list. A caller that must handle
-/// a multi-zone phrase reads `TargetFilter::extract_zones` or falls through to a
-/// multi-zone-capable path of its own, as `oracle_condition`'s
-/// `scan_source_zone_filter` does.
+/// a multi-zone phrase reads `TargetFilter::extract_zones` or declines the
+/// phrase. `oracle_condition`'s `scan_source_zone_filter` is itself a
+/// single-zone table and does NOT provide a multi-zone fallback.
 pub(crate) fn scan_zone_phrase(
     text: &str,
 ) -> Option<(Zone, Option<ControllerRef>, Vec<FilterProp>)> {

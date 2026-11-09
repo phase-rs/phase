@@ -24,14 +24,15 @@
 //! when it moves), so a zone list in a population is a union however English
 //! joins it.
 //!
-//! DISCRIMINATING: every case drives the real cast pipeline.
-//! `display_spell_cost` is the production cost-determination readout, and each
-//! case then pays EXACTLY that cost through `runner.cast(..)`, so a cost that is
-//! off by even one generic leaves the spell in hand. Reverting the parser fix
-//! restores the unsupported `static_structure` line, so no reduction applies:
-//! the combined case's cost rises from {2}{B} to the printed {7}{B} and the
-//! graveyard-only case's from {4}{B} to {7}{B}, failing both the readout
-//! assertion and the exact-payment cast.
+//! DISCRIMINATING: every case reads the production cost-determination readout,
+//! `display_spell_cost`. The two reduction cases then pay EXACTLY that cost
+//! through `runner.cast(..)`, so a cost off by even one generic leaves the
+//! spell in hand; the ownership-exclusion case reads the same engine readout
+//! and pairs its negative board with a positive reach guard in the same test.
+//! Reverting the parser fix restores the unsupported `static_structure` line,
+//! so no reduction applies: the combined case's cost rises from {2}{B} to the
+//! printed {7}{B} and the graveyard-only case's from {4}{B} to {7}{B}, failing
+//! the readout assertion and both exact-payment casts.
 
 use engine::game::casting::display_spell_cost;
 use engine::game::scenario::{GameScenario, P0, P1};
