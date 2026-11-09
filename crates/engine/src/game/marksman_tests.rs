@@ -448,3 +448,97 @@ fn spell_targeted_non_modal_reflexive_chooses_target_and_resolves() {
     assert_eq!(runner.state().players[0].life, 20);
     assert_settled(runner.state());
 }
+
+/// Tranquil Frillback ({2}{G}) cast from hand with six Forests: three pay the
+/// cast cost, three are available for the ETB's {G} payments.
+fn frillback_cast_runtime() -> crate::game::scenario::GameRunner {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    let frillback = scenario
+        .add_creature_to_hand_from_oracle(P0, "Tranquil Frillback", 3, 3, FRILLBACK_ORACLE)
+        .with_mana_cost(crate::types::mana::ManaCost::Cost {
+            generic: 2,
+            shards: vec![crate::types::mana::ManaCostShard::Green],
+        })
+        .id();
+    for _ in 0..6 {
+        scenario.add_basic_land(P0, crate::types::mana::ManaColor::Green);
+    }
+    let mut runner = scenario.build();
+    runner.cast(frillback).commit();
+    assert_eq!(
+        tapped_lands(runner.state(), P0),
+        3,
+        "{{2}}{{G}} cast cost paid"
+    );
+    pass_until_payment_offer(&mut runner);
+    assert!(
+        runner.state().battlefield.contains(&frillback),
+        "the ETB trigger is resolving for the entered Frillback"
+    );
+    runner
+}
+
+/// CR 603.12a + CR 700.2d: through the real ETB, two payments cap the modal
+/// at two; once a mode is chosen the completed payment frame is retired, the
+/// ETB trigger settles, and the reflexive resolves from the stack.
+#[test]
+fn frillback_etb_selected_mode_retires_payment_frame_and_resolves() {
+    let mut runner = frillback_cast_runtime();
+    decide(&mut runner, true);
+    decide(&mut runner, true);
+    decide(&mut runner, false);
+    assert_eq!(tapped_lands(runner.state(), P0), 5, "two {{G}} payments");
+    assert_eq!(modal_cap(runner.state()), Some((0, 2)));
+    assert_eq!(
+        payment_count(runner.state()),
+        2,
+        "K readable at the mode prompt"
+    );
+    runner
+        .act(GameAction::SelectModes { indices: vec![2] })
+        .expect("choose the life mode");
+    assert!(
+        runner.state().resolution_stack.is_empty(),
+        "mode construction settled, so the payment frame is retired"
+    );
+    assert!(
+        runner.state().resolving_stack_entry.is_none(),
+        "ETB settled"
+    );
+    assert_eq!(runner.state().stack.len(), 1, "one reflexive trigger");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().players[0].life, 20, "not yet resolved");
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().players[0].life, 24, "gained 4 life once");
+    assert_settled(runner.state());
+}
+
+/// CR 603.12a + CR 700.2b + CR 603.3c: through the real ETB, choosing zero
+/// modes removes the reflexive; the completed payment frame is still retired
+/// and the ETB trigger settles instead of staying parked.
+#[test]
+fn frillback_etb_zero_modes_retires_payment_frame_and_settles() {
+    let mut runner = frillback_cast_runtime();
+    decide(&mut runner, true);
+    decide(&mut runner, false);
+    assert_eq!(tapped_lands(runner.state(), P0), 4, "one {{G}} payment");
+    assert_eq!(
+        modal_cap(runner.state()),
+        Some((0, 1)),
+        "reflexive was offered"
+    );
+    runner
+        .act(GameAction::SelectModes { indices: vec![] })
+        .expect("choose zero modes");
+    assert!(
+        runner.state().resolving_stack_entry.is_none(),
+        "ETB settled"
+    );
+    assert_eq!(runner.state().players[0].life, 20, "no mode resolved");
+    assert_settled(runner.state());
+}
