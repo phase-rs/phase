@@ -113,3 +113,69 @@ fn alabaster_dragon_death_follows_the_source_into_its_owners_shuffled_library() 
         assert!(state.pending_resolution_completion.is_none());
     }
 }
+
+#[test]
+fn ceased_stolen_dragon_token_still_shuffles_its_owners_library() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Rite of Replication's verified Oracle creates a token copy of a target
+    // creature. Seed that copy with Alabaster Dragon's full printed abilities.
+    let dragon = scenario
+        .add_creature(P0, "Alabaster Dragon", 4, 4)
+        .controlled_by(P1)
+        .from_oracle_text_with_keywords(&["Flying"], ALABASTER_DRAGON)
+        .id();
+    scenario.with_library_top(P0, &["Owner A", "Owner B", "Owner C"]);
+    scenario.with_library_top(P1, &["Controller A", "Controller B", "Controller C"]);
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&dragon)
+        .unwrap()
+        .is_token = true;
+    let controller_library = runner.state().players[P1.0 as usize].library.clone();
+    let outcome = runner.cast(murder).target_object(dragon).resolve();
+
+    assert!(outcome.events().iter().any(|event| matches!(
+        event,
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            ..
+        } if *object_id == dragon
+    )));
+    // CR 111.7 + CR 111.8: the token ceases before its trigger resolves and
+    // cannot move from the graveyard into a library.
+    let state = outcome.state();
+    assert!(!state.objects.contains_key(&dragon));
+    assert_eq!(state.players[P0.0 as usize].library.len(), 3);
+    assert!(!state.players[P0.0 as usize].library.contains(&dragon));
+    assert_eq!(state.players[P1.0 as usize].library, controller_library);
+
+    // CR 111.2 + CR 701.24c: ownership survives the source row's disappearance;
+    // the obligation is still the token creator's shuffle, not its controller's.
+    let shuffled_players: Vec<_> = outcome
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shuffled_players, vec![P0]);
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(state.stack.is_empty());
+    assert!(state.resolution_stack.is_empty());
+}
