@@ -8,7 +8,9 @@ use engine::game::combat::{
 };
 use engine::game::commander::commander_lethal_headroom;
 use engine::game::players;
-use engine::types::ability::{is_loyalty_ability_cost, AbilityCost, StaticDefinition};
+use engine::types::ability::{
+    is_loyalty_ability_cost, AbilityCost, StaticDefinition, TargetFilter,
+};
 use engine::types::card_type::CoreType;
 use engine::types::format::FormatTopology;
 use engine::types::game_state::GameState;
@@ -16,6 +18,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 use engine::util::Deadline;
 
@@ -308,7 +311,7 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
 
     // Use engine-provided valid attacker list when available; fall back to
     // local can_attack() for tests and hypothetical scenarios.
-    let candidates: Vec<ObjectId> = if let Some(ids) = targeting.valid_attacker_ids {
+    let mut candidates: Vec<ObjectId> = if let Some(ids) = targeting.valid_attacker_ids {
         ids.to_vec()
     } else {
         state
@@ -359,6 +362,36 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
             )
         })
         .collect();
+
+    // CR 702.16e + CR 702.16j: a voluntary attacker whose every legal target is a
+    // player preventing all of its damage (The One Ring, Teferi's Protection)
+    // gains nothing by attacking, so it is not a candidate.
+    candidates.retain(|&id| {
+        mandatory.contains(&id) || attack_can_matter(state, &targeting, &attackable, id)
+    });
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    // CR 702.16e + CR 702.16j: the per-attacker path chooses its one defender,
+    // and reads lethal, only among opponents some candidate can damage; the
+    // free-for-all comparison, which scores each defender separately, also
+    // weighs opponents only an attack trigger pays off against. Blocker
+    // grouping, crackback, and the stabilize read keep every opponent: a
+    // protected player still blocks and still attacks back. With no such
+    // opponent the candidates remain for non-player targets or attack
+    // triggers, so the full list stands in.
+    let damageable = damageable_opponents(state, &opponents, &candidates);
+    let defender_pool: &[PlayerId] = if damageable.is_empty() {
+        &opponents
+    } else {
+        &damageable
+    };
+    let worthwhile = attack_worthy_opponents(state, &opponents, &candidates);
+    let comparison_pool: &[PlayerId] = if worthwhile.is_empty() {
+        &opponents
+    } else {
+        &worthwhile
+    };
 
     let comparison_enabled = targeting.comparison_deadline.is_some()
         && matches!(
@@ -433,7 +466,7 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
                 state,
                 player,
                 ExpandedComparisonInput {
-                    opponents: &opponents,
+                    opponents: comparison_pool,
                     candidates: &candidates,
                     mandatory: &mandatory,
                     slices: &slices,
@@ -456,7 +489,7 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
             .and_then(|groups| groups.get(&defender).cloned())
             .unwrap_or_default()
     } else {
-        preferred_attack_opponent(state, player, &opponents, &candidates)
+        preferred_attack_opponent(state, player, defender_pool, &candidates)
             .map(|opponent| untapped_creature_blockers(state, opponent))
             .unwrap_or_default()
     };
@@ -486,7 +519,7 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
     };
 
     let evaluated_defender = selected_defender
-        .or_else(|| preferred_attack_opponent(state, player, &opponents, &candidates));
+        .or_else(|| preferred_attack_opponent(state, player, defender_pool, &candidates));
     let downside_weighted = matches!(profile.combat_ev_model, CombatEvModel::DownsideWeighted);
     let latent_blocker_bodies: Vec<AnimatedBody> = if downside_weighted {
         evaluated_defender
@@ -817,6 +850,13 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
             opponent_life,
             &connecting_damage,
         );
+        let assignments = retarget_prevented_player_attacks(
+            state,
+            &targeting,
+            &attackable,
+            &mandatory,
+            assignments,
+        );
         emit_attack_trace(player, &candidates, &assignments);
         return assignments;
     }
@@ -827,19 +867,24 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
         attacking_ids
             .into_iter()
             .filter(|id| {
-                targeting
-                    .valid_attack_targets_by_attacker
-                    .is_none_or(|targets_by_attacker| {
-                        targets_by_attacker.get(id).is_some_and(|targets| {
-                            targets.contains(&AttackTarget::Player(defender))
-                        })
-                    })
+                // CR 508.1d: mandatory IDs survive this single-defender proposal;
+                // the issued per-attacker slice repairs their target below.
+                mandatory.contains(id)
+                    || targeting.valid_attack_targets_by_attacker.is_none_or(
+                        |targets_by_attacker| {
+                            targets_by_attacker.get(id).is_some_and(|targets| {
+                                targets.contains(&AttackTarget::Player(defender))
+                            })
+                        },
+                    )
             })
             .map(|id| (id, AttackTarget::Player(defender)))
             .collect()
     } else {
-        assign_attack_targets(state, player, &opponents, attacking_ids)
+        assign_attack_targets(state, player, defender_pool, attacking_ids)
     };
+    let assignments =
+        retarget_prevented_player_attacks(state, &targeting, &attackable, &mandatory, assignments);
     emit_attack_trace(player, &candidates, &assignments);
     assignments
 }
@@ -1026,6 +1071,13 @@ fn redirect_attackers_to_planeswalker(
 
 const MULTIPLAYER_COMPARISON_WORK_LIMIT: usize = 4096;
 const MULTIPLAYER_COMPARISON_TIE_BAND: f64 = 0.25;
+/// Utility of a proposal whose only gain is an attack trigger's payoff (CR
+/// 508.3a + CR 508.3f) on a defender who prevents every attacker's damage. The
+/// comparison has no trigger value model, so this only places it above a
+/// decline (utility at most 0) and below any damage proposal whose net utility
+/// exceeds it. A proposal's damage pressure is at least `0.25 * 1 * 0.5`, but
+/// its trade losses can bring its net utility lower.
+const PAYOFF_ONLY_PROPOSAL_UTILITY: f64 = 0.01;
 
 #[cfg(test)]
 thread_local! {
@@ -1144,6 +1196,8 @@ struct CombatProposal {
     attackers: Vec<ObjectId>,
     utility: f64,
     finishes: bool,
+    /// Scored by `PAYOFF_ONLY_PROPOSAL_UTILITY` rather than by damage.
+    payoff_only: bool,
 }
 
 struct ExpandedComparisonInput<'a> {
@@ -1227,18 +1281,27 @@ fn expanded_multiplayer_choice(
     if reachable_opponents.is_empty() {
         return None;
     }
+    // CR 702.16e + CR 702.16j: a fallback defender is chosen without a scored
+    // proposal, so it comes only from opponents some candidate can damage —
+    // never one only an attack trigger pays off against.
+    let damage_reachable = damageable_opponents(state, &reachable_opponents, input.candidates);
+    let fallback_defenders: &[PlayerId] = if damage_reachable.is_empty() {
+        &reachable_opponents
+    } else {
+        &damage_reachable
+    };
 
     if input.shared_deadline.expired()
         || input
             .local_deadline
             .is_some_and(|deadline| deadline.expired())
     {
-        return fallback_multiplayer_defender(state, player, &reachable_opponents).map(
-            |defender| ExpandedMultiplayerChoice {
+        return fallback_multiplayer_defender(state, player, fallback_defenders).map(|defender| {
+            ExpandedMultiplayerChoice {
                 defender,
                 attackers: None,
-            },
-        );
+            }
+        });
     }
 
     let work_upper_bound = input
@@ -1255,24 +1318,24 @@ fn expanded_multiplayer_choice(
             )
         }));
     if input.shared_deadline.expired() || work_upper_bound > MULTIPLAYER_COMPARISON_WORK_LIMIT {
-        return fallback_multiplayer_defender(state, player, &reachable_opponents).map(
-            |defender| ExpandedMultiplayerChoice {
+        return fallback_multiplayer_defender(state, player, fallback_defenders).map(|defender| {
+            ExpandedMultiplayerChoice {
                 defender,
                 attackers: None,
-            },
-        );
+            }
+        });
     }
 
     if input
         .local_deadline
         .is_some_and(|deadline| deadline.expired())
     {
-        return fallback_multiplayer_defender(state, player, &reachable_opponents).map(
-            |defender| ExpandedMultiplayerChoice {
+        return fallback_multiplayer_defender(state, player, fallback_defenders).map(|defender| {
+            ExpandedMultiplayerChoice {
                 defender,
                 attackers: None,
-            },
-        );
+            }
+        });
     }
     let mut values = HashMap::new();
     for &id in input
@@ -1322,6 +1385,9 @@ fn expanded_multiplayer_choice(
         let mut credited_blockers = HashSet::new();
         let mut blocked_damage = 0;
         let mut open_damage = 0;
+        // CR 508.3a + CR 508.3f: a prevented attacker's own trigger is its whole
+        // payoff, and no damage it would have dealt is credited.
+        let mut prevented_payoff = false;
         let mut commander_finish = false;
         let mut complete = true;
 
@@ -1350,6 +1416,16 @@ fn expanded_multiplayer_choice(
                         .get(&attacker_id)
                         .is_some_and(|targets| targets.contains(&AttackTarget::Player(defender)))
                 })
+            {
+                continue;
+            }
+            // CR 702.16e + CR 702.16j: this defender prevents the attacker's
+            // damage, so it joins the proposal only when it must attack or its
+            // own trigger pays off, and it credits no damage or finish.
+            let damage_prevented = player_damage_prevented(state, defender, attacker_id);
+            if damage_prevented
+                && !input.mandatory.contains(&attacker_id)
+                && !attack_trigger_payoff(state, attacker_id, AttackTarget::Player(defender))
             {
                 continue;
             }
@@ -1425,14 +1501,22 @@ fn expanded_multiplayer_choice(
                 continue;
             }
             attackers.push(attacker_id);
-            let attacker_blocked_damage = engine::game::combat_damage::combat_damage_to_defender(
-                state,
-                attacker_id,
-                damage_blockers,
-            );
+            let attacker_blocked_damage = if damage_prevented {
+                0
+            } else {
+                engine::game::combat_damage::combat_damage_to_defender(
+                    state,
+                    attacker_id,
+                    damage_blockers,
+                )
+            };
             blocked_damage += attacker_blocked_damage;
-            open_damage +=
-                engine::game::combat_damage::combat_damage_to_defender(state, attacker_id, &[]);
+            if !damage_prevented {
+                open_damage +=
+                    engine::game::combat_damage::combat_damage_to_defender(state, attacker_id, &[]);
+            } else if attack_trigger_payoff(state, attacker_id, AttackTarget::Player(defender)) {
+                prevented_payoff = true;
+            }
             // A one-block exchange does not model menace or any other minimum
             // multi-block requirement. Keep its positive trade credit at zero
             // unless the single-block model is itself a legal block.
@@ -1450,7 +1534,9 @@ fn expanded_multiplayer_choice(
                     }
                 }
             }
-            if commander_attack_finishes(state, defender, attacker_id, attacker_blocked_damage) {
+            if !damage_prevented
+                && commander_attack_finishes(state, defender, attacker_id, attacker_blocked_damage)
+            {
                 commander_finish = true;
             }
         }
@@ -1468,7 +1554,14 @@ fn expanded_multiplayer_choice(
         let open_pressure = pressure(open_damage);
         let pre_finish_utility =
             (opposing_losses - own_losses + pressure(blocked_damage)).min(open_pressure);
-        let utility = pre_finish_utility + if finishes { 2.0 } else { 0.0 };
+        // A proposal that deals no damage but carries an attack-trigger payoff,
+        // at no net loss, beats a decline and nothing else.
+        let payoff_only = prevented_payoff && open_damage == 0 && pre_finish_utility >= 0.0;
+        let utility = if payoff_only {
+            PAYOFF_ONLY_PROPOSAL_UTILITY
+        } else {
+            pre_finish_utility + if finishes { 2.0 } else { 0.0 }
+        };
         #[cfg(test)]
         EXPANDED_PROPOSAL_ACCOUNTING.with(|accounting| {
             accounting.borrow_mut().push(ProposalAccounting {
@@ -1488,6 +1581,7 @@ fn expanded_multiplayer_choice(
             attackers,
             utility,
             finishes,
+            payoff_only,
         });
     }
 
@@ -1495,16 +1589,16 @@ fn expanded_multiplayer_choice(
         .iter()
         .max_by(|left, right| left.utility.total_cmp(&right.utility))
     else {
-        return fallback_multiplayer_defender(state, player, &reachable_opponents).map(
-            |defender| ExpandedMultiplayerChoice {
+        return fallback_multiplayer_defender(state, player, fallback_defenders).map(|defender| {
+            ExpandedMultiplayerChoice {
                 defender,
                 attackers: None,
-            },
-        );
+            }
+        });
     };
     if best.utility <= 0.0 {
         return Some(ExpandedMultiplayerChoice {
-            defender: reachable_opponents[0],
+            defender: fallback_defenders[0],
             attackers: Some(Vec::new()),
         });
     }
@@ -1515,6 +1609,7 @@ fn expanded_multiplayer_choice(
             !best.finishes
                 && !proposal.finishes
                 && proposal.utility > 0.0
+                && proposal.payoff_only == best.payoff_only
                 && best.utility - proposal.utility <= MULTIPLAYER_COMPARISON_TIE_BAND
         })
         .collect();
@@ -1608,19 +1703,283 @@ fn preferred_attack_opponent(
         return Some(opponents[0]);
     }
 
-    let total_attack_power = sum_power(state, candidate_attackers);
-    let weakest = opponents
-        .iter()
-        .min_by_key(|&&opp| state.players[opp.0 as usize].life)
-        .copied();
-    if let Some(weakest) = weakest {
-        let weak_life = state.players[weakest.0 as usize].life;
-        if weak_life > 0 && total_attack_power >= weak_life {
-            return Some(weakest);
-        }
+    if let Some(weakest) = weakest_lethal_opponent(state, opponents, candidate_attackers) {
+        return Some(weakest);
     }
 
     multiplayer_pressure_target(state, player, opponents)
+}
+
+/// CR 702.16e + CR 702.16j: whether `defender`'s protection prevents all damage
+/// `attacker` would deal to them (The One Ring, Teferi's Protection, Serra's
+/// Emissary). The engine's `pre_replacement_damage_gate` applies the same query
+/// to combat damage, so an attack into such a player deals nothing.
+fn player_damage_prevented(state: &GameState, defender: PlayerId, attacker: ObjectId) -> bool {
+    engine::game::static_abilities::player_protection_from(state, defender, Some(attacker))
+}
+
+/// Whether declaring `attacker` against `target` pays its controller off
+/// through attack triggers rather than combat damage, so prevention (CR
+/// 702.16j) doesn't make the attack pointless. Reads every attack trigger that
+/// attack fires for that player, through the engine's own per-attack matcher
+/// (`attack_trigger_matches_attack`, which also applies "attacks a player"
+/// restrictions):
+/// - the attacker's own — CR 508.3a "whenever [this creature] attacks"
+///   (including "enters or attacks" and "attacks or blocks") and CR 508.3f +
+///   CR 509.3g "attacks and isn't blocked";
+/// - CR 603.2: each functioning permanent the same player controls whose
+///   "whenever a creature you control attacks" matches it (Druids'
+///   Repository, Mardu Ascendancy).
+///
+/// The triggers' values to that player (`resolved_ability_value_for_controller`)
+/// are summed, and only a net gain counts: Ebonblade Reaper's "you lose half
+/// your life" outweighs a Druids' Repository counter, Goblin Guide's land for
+/// the defending player is worth nothing, and so is a recipient the parse
+/// leaves unbound.
+///
+/// Not read: controller-scoped "whenever you attack" payoffs (CR 508.3d),
+/// intervening-if conditions, and a targeted trigger's target availability —
+/// against a protected player (CR 702.16j: can't be targeted) a damage
+/// trigger such as Inferno Titan's still counts, even if only the attacker's
+/// own side offers targets.
+fn attack_trigger_payoff(state: &GameState, attacker: ObjectId, target: AttackTarget) -> bool {
+    let Some(controller) = state.objects.get(&attacker).map(|obj| obj.controller) else {
+        return false;
+    };
+    let mut value = 0.0;
+    for source in state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|obj| obj.controller == controller)
+    {
+        for active in engine::game::functioning_abilities::active_trigger_definitions(state, source)
+        {
+            let trigger = active.definition;
+            let mode_fires = if matches!(trigger.valid_card, Some(TargetFilter::SelfRef)) {
+                source.id == attacker
+                    && matches!(
+                        trigger.mode,
+                        TriggerMode::Attacks
+                            | TriggerMode::EntersOrAttacks
+                            | TriggerMode::AttacksOrBlocks
+                            | TriggerMode::AttackerUnblocked
+                            | TriggerMode::AttackerUnblockedOnce
+                    )
+            } else {
+                matches!(trigger.mode, TriggerMode::Attacks)
+            };
+            let fires = mode_fires
+                && engine::game::triggers::attack_trigger_matches_attack(
+                    state, source, trigger, attacker, target,
+                );
+            if !fires {
+                continue;
+            }
+            if let Some(execute) = trigger.execute.as_deref() {
+                let ability = engine::game::ability_utils::build_resolved_from_def(
+                    execute, source.id, controller,
+                );
+                value += crate::policies::effect_classify::resolved_ability_value_for_controller(
+                    state, &ability,
+                );
+            }
+        }
+    }
+    value > 0.0
+}
+
+/// CR 702.16e + CR 702.16j: the opponents at least one candidate's combat
+/// damage reaches.
+fn damageable_opponents(
+    state: &GameState,
+    opponents: &[PlayerId],
+    candidates: &[ObjectId],
+) -> Vec<PlayerId> {
+    opponents
+        .iter()
+        .copied()
+        .filter(|&opponent| {
+            candidates
+                .iter()
+                .any(|&id| !player_damage_prevented(state, opponent, id))
+        })
+        .collect()
+}
+
+/// CR 702.16e + CR 702.16j: the opponents an attack can do something to — at
+/// least one candidate's combat damage reaches them, or a candidate's attack
+/// triggers pay off whoever it attacks (`attack_trigger_payoff`).
+fn attack_worthy_opponents(
+    state: &GameState,
+    opponents: &[PlayerId],
+    candidates: &[ObjectId],
+) -> Vec<PlayerId> {
+    opponents
+        .iter()
+        .copied()
+        .filter(|&opponent| {
+            candidates.iter().any(|&id| {
+                !player_damage_prevented(state, opponent, id)
+                    || attack_trigger_payoff(state, id, AttackTarget::Player(opponent))
+            })
+        })
+        .collect()
+}
+
+/// CR 702.16e + CR 702.16j: the power of `attackers` whose damage `opponent`
+/// does not prevent.
+fn reaching_power(state: &GameState, opponent: PlayerId, attackers: &[ObjectId]) -> i32 {
+    let reaching: Vec<ObjectId> = attackers
+        .iter()
+        .copied()
+        .filter(|&id| !player_damage_prevented(state, opponent, id))
+        .collect();
+    sum_power(state, &reaching)
+}
+
+/// CR 702.16e + CR 702.16j: the lowest-life opponent whose life the reaching
+/// power of `attackers` covers. Every lethal read — the attack objective, the
+/// defender preference, and the alpha-strike assignment — goes through this, so
+/// a player who prevents the damage is never read as a kill.
+fn weakest_lethal_opponent(
+    state: &GameState,
+    opponents: &[PlayerId],
+    attackers: &[ObjectId],
+) -> Option<PlayerId> {
+    opponents
+        .iter()
+        .copied()
+        .filter(|&opponent| {
+            let life = state.players[opponent.0 as usize].life;
+            life > 0 && reaching_power(state, opponent, attackers) >= life
+        })
+        .min_by_key(|&opponent| state.players[opponent.0 as usize].life)
+}
+
+/// `determine_attack_objective`'s lethal read.
+fn lethal_on_damageable_opponent(
+    state: &GameState,
+    opponents: &[PlayerId],
+    candidates: &[ObjectId],
+) -> bool {
+    weakest_lethal_opponent(state, opponents, candidates).is_some()
+}
+
+/// The attack targets the engine issued for `attacker`: its per-attacker
+/// support when present (a missing key means none), else the aggregate list,
+/// else the live defender universe.
+fn attacker_legal_targets<'a>(
+    targeting: &AttackTargetingContext<'a>,
+    attackable: &'a [AttackTarget],
+    attacker: ObjectId,
+) -> &'a [AttackTarget] {
+    match targeting.valid_attack_targets_by_attacker {
+        Some(targets_by_attacker) => targets_by_attacker
+            .get(&attacker)
+            .map_or(&[], Vec::as_slice),
+        None => targeting.valid_attack_targets.unwrap_or(attackable),
+    }
+}
+
+/// Whether `attacker`'s combat damage would be dealt to `target`: a player only
+/// when their protection doesn't prevent it; planeswalkers and battles carry
+/// their own protection, which the block/damage evaluation already reads.
+fn target_takes_damage_from(state: &GameState, target: AttackTarget, attacker: ObjectId) -> bool {
+    match target {
+        AttackTarget::Player(defender) => !player_damage_prevented(state, defender, attacker),
+        AttackTarget::Planeswalker(_) | AttackTarget::Battle(_) => true,
+    }
+}
+
+/// Whether declaring `attacker` can accomplish anything: some legal target
+/// takes its damage, or the declaration itself triggers it.
+fn attack_can_matter(
+    state: &GameState,
+    targeting: &AttackTargetingContext<'_>,
+    attackable: &[AttackTarget],
+    attacker: ObjectId,
+) -> bool {
+    attacker_legal_targets(targeting, attackable, attacker)
+        .iter()
+        .any(|&target| {
+            target_takes_damage_from(state, target, attacker)
+                || attack_trigger_payoff(state, attacker, target)
+        })
+}
+
+/// CR 702.16e + CR 702.16j: settle each assignment against the engine-issued
+/// legal targets and damage prevention.
+///
+/// A must-attack creature (CR 508.1d) keeps a legal assignment even when its
+/// damage is prevented; an illegal one is repaired by `mandatory_repair_target`.
+///
+/// A voluntary attack stays when its target takes the damage or its attack
+/// triggers pay off (`attack_trigger_payoff`). Otherwise it moves only to another
+/// target with the same defending player (CR 508.5) — that player's
+/// planeswalker or battle, defended by the blockers the attack was evaluated
+/// against — or is dropped. It never moves to a different player, whose blocks
+/// and value were never weighed for it.
+fn retarget_prevented_player_attacks(
+    state: &GameState,
+    targeting: &AttackTargetingContext<'_>,
+    attackable: &[AttackTarget],
+    mandatory: &[ObjectId],
+    assignments: Vec<(ObjectId, AttackTarget)>,
+) -> Vec<(ObjectId, AttackTarget)> {
+    assignments
+        .into_iter()
+        .filter_map(|(id, target)| {
+            let legal = attacker_legal_targets(targeting, attackable, id);
+            if mandatory.contains(&id) {
+                return legal
+                    .contains(&target)
+                    .then_some(target)
+                    .or_else(|| mandatory_repair_target(state, id, legal))
+                    .map(|chosen| (id, chosen));
+            }
+            if legal.contains(&target)
+                && (target_takes_damage_from(state, target, id)
+                    || attack_trigger_payoff(state, id, target))
+            {
+                return Some((id, target));
+            }
+            let defender = engine::game::combat::defending_player_for_target(state, target);
+            let same_defender = |other: &AttackTarget| {
+                defender.is_some()
+                    && engine::game::combat::defending_player_for_target(state, *other) == defender
+            };
+            legal
+                .iter()
+                .copied()
+                .filter(same_defender)
+                .find(|&other| {
+                    target_takes_damage_from(state, other, id)
+                        || attack_trigger_payoff(state, id, other)
+                })
+                .map(|chosen| (id, chosen))
+        })
+        .collect()
+}
+
+/// CR 508.1d + CR 508.1h: a must-attack requirement is met by any legal attack,
+/// and the attacking player isn't required to pay an attack cost to meet it.
+/// So repair an illegal mandatory assignment onto the first issued target that
+/// costs nothing to attack, falling back to the first issued target. Repairing
+/// onto a taxed target instead lets tax planning strip that attack, and engine
+/// completion then replaces the whole declaration with its smallest free one.
+fn mandatory_repair_target(
+    state: &GameState,
+    attacker: ObjectId,
+    legal: &[AttackTarget],
+) -> Option<AttackTarget> {
+    legal
+        .iter()
+        .copied()
+        .find(|target| {
+            engine::game::combat::compute_attack_tax(state, &[(attacker, *target)]).is_none()
+        })
+        .or_else(|| legal.first().copied())
 }
 
 /// Assign each attacker to an opponent based on threat and lethal detection.
@@ -1632,50 +1991,44 @@ fn assign_attack_targets(
 ) -> Vec<(ObjectId, AttackTarget)> {
     let threat_ranked = threat_ranked_opponents(state, player, opponents);
 
-    let total_power: i32 = attacking_ids
-        .iter()
-        .filter_map(|&id| state.objects.get(&id))
-        .map(|obj| obj.power.unwrap_or(0))
-        .sum();
-
-    // Check for alpha-strike: can we eliminate the weakest opponent?
-    let weakest = opponents
-        .iter()
-        .min_by_key(|&&opp| state.players[opp.0 as usize].life)
-        .copied();
-
-    if let Some(weak_opp) = weakest {
+    // Check for alpha-strike: can we eliminate the weakest opponent? Only power
+    // that opponent doesn't prevent counts (CR 702.16e + CR 702.16j).
+    if let Some(weak_opp) = weakest_lethal_opponent(state, opponents, &attacking_ids) {
         let weak_life = state.players[weak_opp.0 as usize].life;
-        if weak_life > 0 && total_power >= weak_life {
-            // Send enough to kill the weakest, rest to highest threat
-            let target_weak = AttackTarget::Player(weak_opp);
-            let primary_target = AttackTarget::Player(threat_ranked[0].0);
-            let mut result = Vec::new();
-            let mut allocated_power = 0;
+        // Send enough to kill the weakest, rest to highest threat
+        let target_weak = AttackTarget::Player(weak_opp);
+        let primary_target = AttackTarget::Player(threat_ranked[0].0);
+        let mut result = Vec::new();
+        let mut allocated_power = 0;
 
-            // Sort attackers by power (ascending) — send smallest first to just-kill threshold
-            let mut sorted_attackers: Vec<(ObjectId, i32)> = attacking_ids
-                .iter()
-                .filter_map(|&id| state.objects.get(&id).map(|o| (id, o.power.unwrap_or(0))))
-                .collect();
-            sorted_attackers.sort_by_key(|&(_, p)| p);
+        // Sort attackers by power (ascending) — send smallest first to just-kill threshold
+        let mut sorted_attackers: Vec<(ObjectId, i32)> = attacking_ids
+            .iter()
+            .filter_map(|&id| state.objects.get(&id).map(|o| (id, o.power.unwrap_or(0))))
+            .collect();
+        sorted_attackers.sort_by_key(|&(_, p)| p);
 
-            for (id, power) in sorted_attackers {
-                if allocated_power < weak_life {
-                    result.push((id, target_weak));
-                    allocated_power += power;
+        for (id, power) in sorted_attackers {
+            if allocated_power < weak_life && !player_damage_prevented(state, weak_opp, id) {
+                result.push((id, target_weak));
+                allocated_power += power;
+            } else {
+                // If weakest IS the highest threat, keep sending there. An
+                // attacker the weakest prevents stays aimed there too: it was
+                // weighed against that player's blockers, not the primary's, so
+                // the retarget either keeps it on that player's own planeswalker
+                // or battle or drops it.
+                let target = if weak_opp == threat_ranked[0].0
+                    || player_damage_prevented(state, weak_opp, id)
+                {
+                    target_weak
                 } else {
-                    // If weakest IS the highest threat, keep sending there
-                    let target = if weak_opp == threat_ranked[0].0 {
-                        target_weak
-                    } else {
-                        primary_target
-                    };
-                    result.push((id, target));
-                }
+                    primary_target
+                };
+                result.push((id, target));
             }
-            return result;
         }
+        return result;
     }
 
     // Default: pressure the next opponent in turn order unless one opponent is
@@ -2556,8 +2909,12 @@ pub(crate) fn determine_attack_objective(
         .map(|&opp| state.players[opp.0 as usize].life)
         .min()
         .unwrap_or(20);
-    let total_attack_power = sum_power(state, candidate_attackers);
-    if min_opp_life > 0 && total_attack_power >= min_opp_life && opponent_blockers.is_empty() {
+    // CR 702.16e + CR 702.16j: lethal counts, per opponent, only the power whose
+    // damage that opponent does not prevent — a protected player's low life is
+    // not a kill, so the read falls through to the stabilize/race tail below.
+    if opponent_blockers.is_empty()
+        && lethal_on_damageable_opponent(state, opponents, candidate_attackers)
+    {
         return CombatObjective::PushLethal;
     }
 
@@ -2757,6 +3114,21 @@ fn crackback_damage(
     // Without a projection, fall back to current-state filtering.
     let projected_state = projection.map(|p| &p.state);
     let attacker_source = projected_state.unwrap_or(state);
+    // CR 508.1f: declaring attackers taps them, and the projection stops at
+    // `OpponentAttackersDeclared` — so the opponent's declared non-vigilance
+    // attackers are tapped there. A declared attacker cracks back exactly when
+    // its announced target (CR 508.1b) is this player, tapped or not; one sent
+    // at another player (e.g. goaded away, CR 701.15b) deals this player
+    // nothing. An undeclared creature counts only if untapped.
+    let can_crack_back = |obj: &engine::game::game_object::GameObject| -> bool {
+        match projected_state
+            .and_then(|ps| ps.combat.as_ref())
+            .and_then(|combat| combat.attackers.iter().find(|a| a.object_id == obj.id))
+        {
+            Some(attack) => attack.attack_target == AttackTarget::Player(player),
+            None => !obj.tapped,
+        }
+    };
     // Hoist block-legality statics once for the greedy O(attackers × blockers)
     // assignment sweep below. `attacker_source` is the only state queried.
     let slices = BlockLegalitySlices::collect(attacker_source);
@@ -2767,7 +3139,7 @@ fn crackback_damage(
                 let obj = attacker_source.objects.get(&id)?;
                 if obj.controller == opp
                     && obj.card_types.core_types.contains(&CoreType::Creature)
-                    && !obj.tapped
+                    && can_crack_back(obj)
                     && !obj.has_keyword(&Keyword::Defender)
                 {
                     Some((id, obj.power.unwrap_or(0)))
@@ -3610,13 +3982,18 @@ mod tests {
     use crate::config::{create_config, AiDifficulty, Platform};
     use crate::planner::quick_state_hash;
     use crate::projection::ProjectionKey;
+    use engine::game::combat::{AttackerInfo, CombatState};
     use engine::game::game_object::ObjectIncarnationRefExt;
+    use engine::game::scenario::{GameScenario, P0};
+    use engine::game::scenario_db::GameScenarioDbExt;
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        Effect, EffectScope, PreventionAmount, PreventionScope, ResolvedAbility, TargetFilter,
+        ContinuousModification, Duration, Effect, EffectScope, PreventionAmount, PreventionScope,
+        ResolvedAbility, TargetFilter,
     };
     use engine::types::game_state::WaitingFor;
     use engine::types::identifiers::CardId;
+    use engine::types::keywords::ProtectionTarget;
     use rand::{rngs::SmallRng, SeedableRng};
     use std::time::Instant;
 
@@ -3952,6 +4329,143 @@ mod tests {
 
         let cb = crackback_damage(&state, PlayerId(0), &[PlayerId(1)], &[], Some(&projection));
         assert_eq!(cb, 4, "projected flying must make the attacker unblocked");
+    }
+
+    /// CR 508.1f: at the `OpponentAttackersDeclared` horizon the opponent's
+    /// declared attackers are tapped by the declaration. They still crack back;
+    /// a tapped creature that did not attack does not.
+    #[test]
+    fn crackback_projection_counts_declared_attackers_despite_tapped() {
+        let mut state = setup();
+        let declared = add_creature(&mut state, PlayerId(1), "Giant", 5, 5, vec![]);
+        let idle = add_creature(&mut state, PlayerId(1), "Tapped Giant", 5, 5, vec![]);
+
+        let mut projected = state.clone();
+        for id in [declared, idle] {
+            projected.objects.get_mut(&id).unwrap().tapped = true;
+        }
+        projected.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                declared,
+                AttackTarget::Player(PlayerId(0)),
+                PlayerId(0),
+            )],
+            ..Default::default()
+        });
+        let projection = Projection {
+            horizon_reached: ProjectionHorizon::OpponentAttackersDeclared,
+            state: projected,
+            snapshots: Vec::new(),
+            confidence: crate::projection::Confidence::Exact,
+            target_opponent: PlayerId(1),
+        };
+
+        let cb = crackback_damage(&state, PlayerId(0), &[PlayerId(1)], &[], Some(&projection));
+        assert_eq!(
+            cb, 5,
+            "the declared attacker counts despite being tapped; the idle tapped one does not"
+        );
+    }
+
+    /// CR 508.1b + CR 701.15b: a projected attacker announced at another player
+    /// (e.g. goaded away from P0) deals P0 nothing, tapped or untapped (vigilance).
+    #[test]
+    fn crackback_projection_ignores_attackers_declared_at_another_player() {
+        let mut state = setup_multiplayer(3);
+        let at_p0 = add_creature(&mut state, PlayerId(1), "Giant", 5, 5, vec![]);
+        let at_p2 = add_creature(&mut state, PlayerId(1), "Goaded Giant", 5, 5, vec![]);
+        let vigilant_at_p2 = add_creature(
+            &mut state,
+            PlayerId(1),
+            "Vigilant Giant",
+            4,
+            4,
+            vec![Keyword::Vigilance],
+        );
+
+        let mut projected = state.clone();
+        for id in [at_p0, at_p2] {
+            projected.objects.get_mut(&id).unwrap().tapped = true;
+        }
+        projected.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::new(at_p0, AttackTarget::Player(PlayerId(0)), PlayerId(0)),
+                AttackerInfo::new(at_p2, AttackTarget::Player(PlayerId(2)), PlayerId(2)),
+                AttackerInfo::new(
+                    vigilant_at_p2,
+                    AttackTarget::Player(PlayerId(2)),
+                    PlayerId(2),
+                ),
+            ],
+            ..Default::default()
+        });
+        let projection = Projection {
+            horizon_reached: ProjectionHorizon::OpponentAttackersDeclared,
+            state: projected,
+            snapshots: Vec::new(),
+            confidence: crate::projection::Confidence::Exact,
+            target_opponent: PlayerId(1),
+        };
+
+        let cb = crackback_damage(&state, PlayerId(0), &[PlayerId(1)], &[], Some(&projection));
+        assert_eq!(cb, 5, "only the attacker declared at P0 cracks back at P0");
+    }
+
+    /// End to end: P1's tapped 5/5s untap and swing back for 10 into P0's 8 on
+    /// the projected turn, so crackback pruning keeps one 3/3 home (10 >= 8 with
+    /// all three in; 5 < 8 with one blocker). When the projected declared
+    /// attackers were read as tapped, crackback came out 0 and all three
+    /// attacked. Entered from P0's declare-attackers step, as production does;
+    /// Measurement mode makes the projection step-capped rather than
+    /// clock-bound, so this is deterministic.
+    #[test]
+    fn projected_crackback_keeps_a_blocker_home() {
+        let mut state = setup();
+        for player in [PlayerId(0), PlayerId(1)] {
+            for _ in 0..5 {
+                let card_id = CardId(state.next_object_id);
+                create_object(
+                    &mut state,
+                    card_id,
+                    player,
+                    "Library card".to_string(),
+                    Zone::Library,
+                );
+            }
+        }
+        state.players[0].life = 8;
+        for _ in 0..3 {
+            add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
+        }
+        for _ in 0..2 {
+            let giant = add_creature(&mut state, PlayerId(1), "Giant", 5, 5, vec![]);
+            state.objects.get_mut(&giant).unwrap().tapped = true;
+        }
+        state.priority_player = PlayerId(0);
+        state.phase = engine::types::phase::Phase::DeclareAttackers;
+        state.combat = Some(engine::game::combat::CombatState::default());
+        state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        ));
+
+        let attacks = choose_attackers_with_targets_with_profile(
+            &state,
+            PlayerId(0),
+            &AiProfile::default(),
+            CombatLookahead::Enabled {
+                execution_mode: ExecutionMode::Measurement { seed: 7 },
+            },
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            attacks.len(),
+            2,
+            "crackback must keep one blocker home against the 10-power swing-back, got {attacks:?}"
+        );
     }
 
     /// Battlefield planeswalker for `owner` with the given starting loyalty.
@@ -9523,5 +10037,1332 @@ mod tests {
             blocker_survives,
             "the 1/1 blocker is not dealt lethal damage"
         );
+    }
+
+    /// Grant `player` protection from everything until end of turn — the shape
+    /// The One Ring's cast trigger and Teferi's Protection install (CR 702.16j).
+    fn grant_protection_from_everything(state: &mut GameState, player: PlayerId) {
+        let source = create_object(
+            state,
+            CardId(state.next_object_id),
+            player,
+            "The One Ring".to_string(),
+            Zone::Battlefield,
+        );
+        state.add_transient_continuous_effect(
+            source,
+            player,
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: player },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::Everything),
+            }],
+            None,
+        );
+        assert!(
+            engine::game::static_abilities::player_has_protection_from_everything(state, player),
+            "fixture must grant protection from everything"
+        );
+    }
+
+    /// Give `player` a Runed Halo that named `card_name`: "You have protection
+    /// from the chosen card name." (CR 702.16a), the engine's
+    /// `PlayerProtection(ChosenCardName)` static.
+    fn add_runed_halo(state: &mut GameState, player: PlayerId, card_name: &str) {
+        let card_id = CardId(state.next_object_id);
+        let halo = create_object(
+            state,
+            card_id,
+            player,
+            "Runed Halo".to_string(),
+            Zone::Battlefield,
+        );
+        let halo = state.objects.get_mut(&halo).unwrap();
+        halo.chosen_attributes
+            .push(engine::types::ability::ChosenAttribute::CardName(
+                card_name.to_string(),
+            ));
+        halo.static_definitions.push(
+            StaticDefinition::new(engine::types::statics::StaticMode::PlayerProtection(
+                ProtectionTarget::ChosenCardName,
+            ))
+            .affected(TargetFilter::Typed(
+                engine::types::ability::TypedFilter::default()
+                    .controller(engine::types::ability::ControllerRef::You),
+            )),
+        );
+    }
+
+    /// Run a chosen declaration through production: AI tax planning
+    /// (`plan_attack_tax`), then engine completion — `search.rs`'s
+    /// `validated_declare_attackers`.
+    fn complete_through_tax_planning(
+        state: &GameState,
+        attacks: &[(ObjectId, AttackTarget)],
+    ) -> Vec<(ObjectId, AttackTarget)> {
+        let (planned, posture) = crate::combat_tax::plan_attack_tax(
+            state,
+            PlayerId(0),
+            &crate::features::DeckFeatures::default(),
+            attacks,
+        );
+        match engine::game::combat::complete_attacker_proposal(state, &planned, &[], posture) {
+            engine::types::actions::GameAction::DeclareAttackers { attacks, .. } => attacks,
+            other => panic!("completion must declare attackers, got {other:?}"),
+        }
+    }
+
+    /// Declare `attacks` and run combat to its end with no blocks, resolving
+    /// what triggers — so a test can observe an "isn't blocked" payoff.
+    fn declare_and_resolve_unblocked(
+        state: GameState,
+        attacks: &[(ObjectId, AttackTarget)],
+    ) -> GameState {
+        let action = engine::game::combat::complete_attacker_proposal(
+            &state,
+            attacks,
+            &[],
+            engine::game::combat::CombatTaxPosture::Refuse,
+        );
+        let mut runner = engine::game::scenario::GameRunner::from_state(state);
+        runner.act(action).expect("the declaration is legal");
+        for _ in 0..32 {
+            if matches!(
+                runner.state().phase,
+                engine::types::phase::Phase::EndCombat
+                    | engine::types::phase::Phase::PostCombatMain
+            ) {
+                break;
+            }
+            match &runner.state().waiting_for {
+                WaitingFor::DeclareBlockers { .. } => {
+                    runner.declare_blockers(&[]).expect("no blocks is legal");
+                }
+                WaitingFor::Priority { .. } => {
+                    runner
+                        .act(engine::types::actions::GameAction::PassPriority)
+                        .expect("priority passes");
+                }
+                other => panic!("unexpected prompt during combat: {other:?}"),
+            }
+        }
+        assert!(
+            matches!(
+                runner.state().phase,
+                engine::types::phase::Phase::EndCombat
+                    | engine::types::phase::Phase::PostCombatMain
+            ),
+            "combat must run to its end, stopped in {:?}",
+            runner.state().phase
+        );
+        runner.advance_until_stack_empty();
+        runner.state().clone()
+    }
+
+    /// Choose attacks from the engine's own declare-attackers prompt — the
+    /// attacker list, aggregate targets, and per-attacker target map production
+    /// passes (`search.rs`), with the unbounded comparison allowance.
+    fn choose_from_engine_prompt(state: &mut GameState) -> Vec<(ObjectId, AttackTarget)> {
+        choose_from_engine_prompt_with(state, Some(Deadline::none()))
+    }
+
+    /// `comparison_deadline: None` is the rollout/quiescence path
+    /// (`search.rs` passes `context.map(|c| c.deadline)`).
+    fn choose_from_engine_prompt_with(
+        state: &mut GameState,
+        comparison_deadline: Option<Deadline>,
+    ) -> Vec<(ObjectId, AttackTarget)> {
+        state.phase = engine::types::phase::Phase::DeclareAttackers;
+        state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(state);
+        let WaitingFor::DeclareAttackers {
+            valid_attacker_ids,
+            valid_attack_targets,
+            valid_attack_targets_by_attacker,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("engine must offer the declare-attackers prompt")
+        };
+        assert!(
+            valid_attack_targets_by_attacker.is_some(),
+            "the prompt must carry the per-attacker target map"
+        );
+        choose_attackers_with_targets_with_profile_and_deadline(
+            state,
+            PlayerId(0),
+            &AiProfile::default(),
+            CombatLookahead::Disabled,
+            None,
+            AttackTargetingContext {
+                valid_attacker_ids: Some(valid_attacker_ids),
+                valid_attack_targets: Some(valid_attack_targets),
+                valid_attack_targets_by_attacker: valid_attack_targets_by_attacker.as_ref(),
+                comparison_deadline,
+            },
+        )
+    }
+
+    /// A two-player state with `card` (from the real card data) on P0's
+    /// battlefield, able to attack this turn.
+    fn state_with_real_attacker(card: &str) -> (GameState, ObjectId) {
+        let mut scenario = GameScenario::new();
+        let id = scenario.add_real_card(
+            P0,
+            card,
+            Zone::Battlefield,
+            crate::test_support::shared_integration_card_db(),
+        );
+        let mut state = scenario.build().state().clone();
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.summoning_sick = false;
+        obj.entered_battlefield_turn = Some(1);
+        (state, id)
+    }
+
+    /// CR 702.16e + CR 702.16j: the engine lets a protected player be attacked
+    /// (#10315), but all the damage is prevented, so the AI declines an attack
+    /// that would otherwise be free.
+    #[test]
+    fn declines_attack_into_player_whose_damage_is_prevented() {
+        let mut state = setup();
+        let attacker = add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
+
+        // Control: open board, unprotected opponent — the free attack is taken.
+        let attacks = choose_from_engine_prompt(&mut state.clone());
+        assert_eq!(attacks, vec![(attacker, AttackTarget::Player(PlayerId(1)))]);
+
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        assert!(
+            valid_targets(&state).contains(&AttackTarget::Player(PlayerId(1))),
+            "the protected player must still be a legal attack target"
+        );
+        let attacks = choose_from_engine_prompt(&mut state);
+        assert!(
+            attacks.is_empty(),
+            "no attack into a player who prevents all of it, got {attacks:?}"
+        );
+    }
+
+    /// The protected player's planeswalker has no protection of its own, so the
+    /// attack goes there instead of being wasted on the player.
+    #[test]
+    fn redirects_attack_from_protected_player_to_their_planeswalker() {
+        let mut state = setup();
+        let attacker = add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
+        let pw = add_planeswalker(&mut state, PlayerId(1), 6);
+        grant_protection_from_everything(&mut state, PlayerId(1));
+
+        let attacks = choose_from_engine_prompt(&mut state);
+        assert_eq!(attacks, vec![(attacker, AttackTarget::Planeswalker(pw))]);
+        engine::game::combat::declare_attackers(&mut state, &attacks, &mut vec![])
+            .expect("engine must accept the redirected declaration");
+    }
+
+    /// CR 508.3a: an attack trigger pays off on the declaration, so the creature
+    /// still attacks a protected player — for the plain "attacks" mode
+    /// (Aclazotz, Deepest Betrayal: each opponent discards, no target) and the
+    /// combined "enters or attacks" mode (Inferno Titan, aimed at the protected
+    /// player's tapped creature, since the player can't be targeted).
+    #[test]
+    fn self_attack_trigger_still_attacks_protected_player() {
+        for card in ["Aclazotz, Deepest Betrayal", "Inferno Titan"] {
+            let (mut state, attacker) = state_with_real_attacker(card);
+            assert!(
+                attack_trigger_payoff(&state, attacker, AttackTarget::Player(PlayerId(1))),
+                "{card}'s parsed attack trigger must be recognized"
+            );
+            let target = add_creature(&mut state, PlayerId(1), "Bear", 2, 2, vec![]);
+            state.objects.get_mut(&target).unwrap().tapped = true;
+            grant_protection_from_everything(&mut state, PlayerId(1));
+
+            let attacks = choose_from_engine_prompt(&mut state);
+            assert_eq!(
+                attacks,
+                vec![(attacker, AttackTarget::Player(PlayerId(1)))],
+                "{card} must still attack for its trigger"
+            );
+        }
+    }
+
+    #[test]
+    fn voluntary_self_trigger_retarget_stays_in_the_per_attacker_legal_set() {
+        for protect_old_target in [false, true] {
+            let mut scenario = GameScenario::new_with_format(
+                engine::types::format::FormatConfig::free_for_all(),
+                3,
+                42,
+            );
+            scenario.at_phase(engine::types::phase::Phase::DeclareAttackers);
+            let attacker = scenario.add_real_card(
+                P0,
+                "Aclazotz, Deepest Betrayal",
+                Zone::Battlefield,
+                crate::test_support::shared_integration_card_db(),
+            );
+            let mut state = scenario.build().state().clone();
+            let object = state.objects.get_mut(&attacker).unwrap();
+            object.summoning_sick = false;
+            object.entered_battlefield_turn = Some(1);
+            assert!(attack_trigger_payoff(
+                &state,
+                attacker,
+                AttackTarget::Player(PlayerId(1))
+            ));
+
+            let old_target = AttackTarget::Player(PlayerId(1));
+            let legal_target = AttackTarget::Player(PlayerId(2));
+            grant_protection_from_everything(&mut state, PlayerId(2));
+            if protect_old_target {
+                grant_protection_from_everything(&mut state, PlayerId(1));
+            }
+            assert_eq!(
+                target_takes_damage_from(&state, old_target, attacker),
+                !protect_old_target,
+            );
+            assert!(!target_takes_damage_from(&state, legal_target, attacker));
+
+            // Scoped helper fixture: the issued per-attacker map, not damageability or the
+            // aggregate pool, is authoritative. This is not a new printed attack restriction.
+            let attackable = [old_target, legal_target];
+            let targets_by_attacker = HashMap::from([(attacker, vec![legal_target])]);
+            let targeting = AttackTargetingContext {
+                valid_attacker_ids: Some(std::slice::from_ref(&attacker)),
+                valid_attack_targets: Some(&attackable),
+                valid_attack_targets_by_attacker: Some(&targets_by_attacker),
+                comparison_deadline: Some(Deadline::none()),
+            };
+            // The legal target stays. The illegal one is dropped, not moved onto
+            // P2: that is a different defending player (CR 508.5), whose blocks
+            // were never weighed for this attack.
+            for (target, expected) in [
+                (old_target, vec![]),
+                (legal_target, vec![(attacker, legal_target)]),
+            ] {
+                assert_eq!(
+                    retarget_prevented_player_attacks(
+                        &state,
+                        &targeting,
+                        &attackable,
+                        &[],
+                        vec![(attacker, target)],
+                    ),
+                    expected,
+                    "protect_old_target={protect_old_target}, target={target:?}",
+                );
+            }
+        }
+    }
+
+    /// CR 508.1d + CR 701.15b: a goaded creature must still attack even when the
+    /// only player it can attack prevents all its damage.
+    #[test]
+    fn goaded_creature_still_attacks_protected_player() {
+        let mut state = setup();
+        let goaded = add_creature(&mut state, PlayerId(0), "Omo", 3, 3, vec![]);
+        state
+            .objects
+            .get_mut(&goaded)
+            .unwrap()
+            .goaded_by
+            .insert(PlayerId(1));
+        grant_protection_from_everything(&mut state, PlayerId(1));
+
+        let attacks = choose_from_engine_prompt(&mut state);
+        assert_eq!(attacks, vec![(goaded, AttackTarget::Player(PlayerId(1)))]);
+        engine::game::combat::declare_attackers(&mut state, &attacks, &mut vec![])
+            .expect("engine must accept the goad-compliant declaration");
+    }
+
+    /// CR 508.1c + CR 508.1d: Xantcha must attack a legal nonowner even when
+    /// protection prevents its damage, without losing a voluntary attack on
+    /// the owner. Cover both the three-player legacy assignment and the
+    /// four-player selected-defender assignment before engine completion.
+    #[test]
+    fn mandatory_legal_target_repair_preserves_the_voluntary_attack() {
+        for player_count in [3, 4] {
+            let mut scenario = GameScenario::new_with_format(
+                engine::types::format::FormatConfig::free_for_all(),
+                player_count,
+                42,
+            );
+            scenario.at_phase(engine::types::phase::Phase::DeclareAttackers);
+            // Verbatim local MTGJSON Oracle; owner and controller intentionally differ.
+            let xantcha = scenario
+                .add_creature_from_oracle(
+                    PlayerId(1),
+                    "Xantcha, Sleeper Agent",
+                    5,
+                    5,
+                    "Xantcha enters under the control of an opponent of your choice.\nXantcha attacks each combat if able and can't attack its owner or planeswalkers its owner controls.\n{3}: Xantcha's controller loses 2 life and you draw a card. Any player may activate this ability.",
+                )
+                .controlled_by(P0)
+                .id();
+            let voluntary = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+            let mut state = scenario.build().state().clone();
+            state.turn_number = 2;
+            for player in &mut state.players {
+                player.life = 100;
+            }
+            for attacker in [xantcha, voluntary] {
+                let object = state.objects.get_mut(&attacker).unwrap();
+                object.summoning_sick = false;
+                object.entered_battlefield_turn = Some(1);
+            }
+            if player_count == 4 {
+                // P3 keeps a second damageable defender in the comparison, but
+                // its two walls leave P1 as the profitable voluntary defender.
+                for _ in 0..2 {
+                    add_creature(
+                        &mut state,
+                        PlayerId(3),
+                        "Wall",
+                        0,
+                        8,
+                        vec![Keyword::Defender],
+                    );
+                }
+            }
+            grant_protection_from_everything(&mut state, PlayerId(2));
+            let attackable = engine::game::combat::attackable_defender_targets(&state);
+            assert!(
+                engine::game::combat::creature_must_attack_with_attackable_targets(
+                    &state,
+                    xantcha,
+                    &attackable,
+                )
+            );
+
+            reset_expanded_comparison_counters();
+            let attacks = choose_from_engine_prompt(&mut state);
+            let WaitingFor::DeclareAttackers {
+                valid_attack_targets_by_attacker: Some(targets_by_attacker),
+                ..
+            } = &state.waiting_for
+            else {
+                panic!("the production prompt must issue per-attacker legal targets")
+            };
+            let legal = &targets_by_attacker[&xantcha];
+            assert_eq!(legal.first(), Some(&AttackTarget::Player(PlayerId(2))));
+            assert!(!legal.contains(&AttackTarget::Player(PlayerId(1))));
+            assert!(targets_by_attacker[&voluntary].contains(&AttackTarget::Player(PlayerId(1))));
+            assert_eq!(
+                expanded_comparison_counters().0,
+                usize::from(player_count == 4)
+            );
+            assert_eq!(
+                attacks.len(),
+                2,
+                "both attacks must survive for {player_count} players"
+            );
+            assert!(attacks.contains(&(xantcha, AttackTarget::Player(PlayerId(2)))));
+            assert!(attacks.contains(&(voluntary, AttackTarget::Player(PlayerId(1)))));
+
+            let action = engine::game::combat::complete_attacker_proposal(
+                &state,
+                &attacks,
+                &[],
+                engine::game::combat::CombatTaxPosture::Refuse,
+            );
+            assert!(
+                matches!(
+                    &action,
+                    engine::types::actions::GameAction::DeclareAttackers { attacks: completed, .. }
+                        if completed == &attacks
+                ),
+                "engine completion must preserve the legal voluntary proposal"
+            );
+            engine::game::engine::apply_as_current(&mut state, action)
+                .expect("the completed mandatory-plus-voluntary declaration is legal");
+            assert!(state.stack.is_empty());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        }
+    }
+
+    /// CR 508.1d + CR 508.1h: a must-attack creature whose assignment is
+    /// illegal is repaired onto a target that costs nothing to attack. Xantcha
+    /// can't attack its owner, P1; the protected P2 (Ghostly Prison) and P3 are
+    /// its legal targets. Repairing onto taxed P2 would have tax planning strip
+    /// Xantcha, and completion would then swap the whole declaration for its
+    /// smallest free one, losing the lethal Bears attack on P1.
+    #[test]
+    fn mandatory_repair_prefers_an_untaxed_target_through_tax_planning() {
+        let mut scenario = GameScenario::new_with_format(
+            engine::types::format::FormatConfig::free_for_all(),
+            4,
+            42,
+        );
+        scenario.at_phase(engine::types::phase::Phase::DeclareAttackers);
+        // Verbatim local MTGJSON Oracle; owner and controller intentionally differ.
+        let xantcha = scenario
+            .add_creature_from_oracle(
+                PlayerId(1),
+                "Xantcha, Sleeper Agent",
+                5,
+                5,
+                "Xantcha enters under the control of an opponent of your choice.\nXantcha attacks each combat if able and can't attack its owner or planeswalkers its owner controls.\n{3}: Xantcha's controller loses 2 life and you draw a card. Any player may activate this ability.",
+            )
+            .controlled_by(P0)
+            .id();
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        scenario.add_real_card(
+            PlayerId(2),
+            "Ghostly Prison",
+            Zone::Battlefield,
+            crate::test_support::shared_integration_card_db(),
+        );
+        let mut state = scenario.build().state().clone();
+        state.turn_number = 2;
+        for player in &mut state.players {
+            player.life = 100;
+        }
+        state.players[1].life = 2;
+        for attacker in [xantcha, bears] {
+            let object = state.objects.get_mut(&attacker).unwrap();
+            object.summoning_sick = false;
+            object.entered_battlefield_turn = Some(1);
+        }
+        grant_protection_from_everything(&mut state, PlayerId(2));
+        grant_protection_from_everything(&mut state, PlayerId(3));
+        assert!(
+            engine::game::combat::compute_attack_tax(
+                &state,
+                &[(xantcha, AttackTarget::Player(PlayerId(2)))]
+            )
+            .is_some(),
+            "Ghostly Prison must tax an attack on P2"
+        );
+        assert!(engine::game::combat::compute_attack_tax(
+            &state,
+            &[(xantcha, AttackTarget::Player(PlayerId(3)))]
+        )
+        .is_none());
+
+        // P1 is the only opponent an attack can do anything to, so the
+        // free-for-all comparison doesn't run: this is the per-attacker path.
+        let attacks = choose_from_engine_prompt(&mut state);
+        let WaitingFor::DeclareAttackers {
+            valid_attack_targets_by_attacker: Some(targets_by_attacker),
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("the production prompt must issue per-attacker legal targets")
+        };
+        assert_eq!(
+            targets_by_attacker[&xantcha].first(),
+            Some(&AttackTarget::Player(PlayerId(2))),
+            "the taxed target must be issued first, or the test proves nothing"
+        );
+        let mut completed = complete_through_tax_planning(&state, &attacks);
+        completed.sort();
+        let mut expected = vec![
+            (xantcha, AttackTarget::Player(PlayerId(3))),
+            (bears, AttackTarget::Player(PlayerId(1))),
+        ];
+        expected.sort();
+        assert_eq!(
+            completed, expected,
+            "both attacks must survive tax planning and completion"
+        );
+    }
+
+    /// CR 508.3f + CR 509.3g + CR 702.16j: an "attacks and isn't blocked"
+    /// payoff isn't damage, so a player whose protection prevents the damage
+    /// still suffers it. The AI attacks that player with Abyssal Nightstalker,
+    /// and the defending player's discard resolves.
+    ///
+    /// Master of Cruelties is the control: its "that player's life total
+    /// becomes 1" parses with "that player" bound to `ParentTarget`, which the
+    /// engine doesn't resolve to the defending player, so the AI credits it
+    /// nothing and declines.
+    #[test]
+    fn unblocked_attack_payoff_still_attacks_a_protected_player() {
+        let (mut state, attacker) = state_with_real_attacker("Abyssal Nightstalker");
+        assert!(
+            attack_trigger_payoff(&state, attacker, AttackTarget::Player(PlayerId(1))),
+            "Nightstalker's parsed unblocked trigger must be recognized"
+        );
+        let card_id = CardId(state.next_object_id);
+        let in_hand = create_object(
+            &mut state,
+            card_id,
+            PlayerId(1),
+            "Card in hand".to_string(),
+            Zone::Hand,
+        );
+        grant_protection_from_everything(&mut state, PlayerId(1));
+
+        let attacks = choose_from_engine_prompt(&mut state);
+        assert_eq!(attacks, vec![(attacker, AttackTarget::Player(PlayerId(1)))]);
+        let after = declare_and_resolve_unblocked(state, &attacks);
+        assert!(
+            !after.players[1].hand.contains(&in_hand),
+            "Abyssal Nightstalker's discard must resolve"
+        );
+
+        let (mut state, master) = state_with_real_attacker("Master of Cruelties");
+        assert!(!attack_trigger_payoff(
+            &state,
+            master,
+            AttackTarget::Player(PlayerId(1))
+        ));
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        assert!(choose_from_engine_prompt(&mut state).is_empty());
+    }
+
+    /// CR 508.5 + CR 702.16e: a voluntary attack is never moved to a
+    /// different defending player after its blocks were weighed against the
+    /// first. P1 (4 life) has a Runed Halo naming Craw Wurm, so the Wurm
+    /// can't damage P1; P2 has a deathtouch blocker that would trade with it.
+    /// Bears still attack P1; the Wurm stays home rather than walking into P2's
+    /// unweighed deathtouch block. Covers the comparison and rollout paths.
+    #[test]
+    fn prevented_attack_is_not_moved_onto_another_defender() {
+        let mut scenario = GameScenario::new_with_format(
+            engine::types::format::FormatConfig::free_for_all(),
+            3,
+            42,
+        );
+        scenario.at_phase(engine::types::phase::Phase::DeclareAttackers);
+        let wurm = scenario.add_real_card(
+            P0,
+            "Craw Wurm",
+            Zone::Battlefield,
+            crate::test_support::shared_integration_card_db(),
+        );
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let mut state = scenario.build().state().clone();
+        state.turn_number = 2;
+        for player in &mut state.players {
+            player.life = 100;
+        }
+        state.players[1].life = 4;
+        for attacker in [wurm, bears] {
+            let object = state.objects.get_mut(&attacker).unwrap();
+            object.summoning_sick = false;
+            object.entered_battlefield_turn = Some(1);
+        }
+        add_creature(
+            &mut state,
+            PlayerId(2),
+            "Typhoid Rats",
+            1,
+            1,
+            vec![Keyword::Deathtouch],
+        );
+        add_runed_halo(&mut state, PlayerId(1), "Craw Wurm");
+        assert!(player_damage_prevented(&state, PlayerId(1), wurm));
+        assert!(!player_damage_prevented(&state, PlayerId(1), bears));
+
+        for comparison_deadline in [Some(Deadline::none()), None] {
+            let mut state = state.clone();
+            let attacks = choose_from_engine_prompt_with(&mut state, comparison_deadline);
+            let comparison = comparison_deadline.is_some();
+            assert!(
+                !attacks.iter().any(|&(id, _)| id == wurm),
+                "the Wurm must not attack, got {attacks:?} (comparison={comparison})"
+            );
+            assert!(
+                attacks.iter().any(|&(id, _)| id == bears),
+                "the Bears still attack (comparison={comparison})"
+            );
+            assert_eq!(complete_through_tax_planning(&state, &attacks), attacks);
+
+            // At the retarget seam itself: both attacks aimed at P1, the
+            // Wurm's damage prevented. It is dropped, not moved onto P2.
+            let WaitingFor::DeclareAttackers {
+                valid_attacker_ids,
+                valid_attack_targets,
+                valid_attack_targets_by_attacker,
+                ..
+            } = &state.waiting_for
+            else {
+                panic!("engine must offer the declare-attackers prompt")
+            };
+            let attackable = engine::game::combat::attackable_defender_targets(&state);
+            let targeting = AttackTargetingContext {
+                valid_attacker_ids: Some(valid_attacker_ids),
+                valid_attack_targets: Some(valid_attack_targets),
+                valid_attack_targets_by_attacker: valid_attack_targets_by_attacker.as_ref(),
+                comparison_deadline,
+            };
+            assert_eq!(
+                retarget_prevented_player_attacks(
+                    &state,
+                    &targeting,
+                    &attackable,
+                    &[],
+                    vec![
+                        (wurm, AttackTarget::Player(PlayerId(1))),
+                        (bears, AttackTarget::Player(PlayerId(1))),
+                    ],
+                ),
+                vec![(bears, AttackTarget::Player(PlayerId(1)))],
+            );
+        }
+    }
+
+    /// CR 508.3f + CR 509.3g + CR 702.16j: in a free-for-all, Abyssal
+    /// Nightstalker still attacks a protected opponent for its discard, and the
+    /// discard resolves. With every opponent protected, on both the comparison
+    /// and rollout paths. With one protected and the other holding a 5/5 that
+    /// would block and kill it, the comparison weighs each defender and picks
+    /// the protected one, in either seat.
+    #[test]
+    fn unblocked_attack_payoff_attacks_in_a_protected_free_for_all() {
+        for (comparison_deadline, protected_only) in [
+            (Some(Deadline::none()), None),
+            (None, None),
+            (Some(Deadline::none()), Some(PlayerId(1))),
+            (Some(Deadline::none()), Some(PlayerId(2))),
+        ] {
+            let mut scenario = GameScenario::new_with_format(
+                engine::types::format::FormatConfig::free_for_all(),
+                3,
+                42,
+            );
+            scenario.at_phase(engine::types::phase::Phase::DeclareAttackers);
+            let attacker = scenario.add_real_card(
+                P0,
+                "Abyssal Nightstalker",
+                Zone::Battlefield,
+                crate::test_support::shared_integration_card_db(),
+            );
+            let mut state = scenario.build().state().clone();
+            state.turn_number = 2;
+            let object = state.objects.get_mut(&attacker).unwrap();
+            object.summoning_sick = false;
+            object.entered_battlefield_turn = Some(1);
+            let mut in_hand = Vec::new();
+            for opponent in [PlayerId(1), PlayerId(2)] {
+                let card_id = CardId(state.next_object_id);
+                in_hand.push(create_object(
+                    &mut state,
+                    card_id,
+                    opponent,
+                    "Card in hand".to_string(),
+                    Zone::Hand,
+                ));
+                if protected_only.is_none_or(|protected| protected == opponent) {
+                    grant_protection_from_everything(&mut state, opponent);
+                } else {
+                    add_creature(&mut state, opponent, "Blocker", 5, 5, vec![]);
+                }
+            }
+
+            let comparison = comparison_deadline.is_some();
+            let attacks = choose_from_engine_prompt_with(&mut state, comparison_deadline);
+            let [(id, AttackTarget::Player(defender))] = attacks[..] else {
+                panic!(
+                    "Nightstalker must attack a player, got {attacks:?}                      (comparison={comparison}, protected_only={protected_only:?})"
+                )
+            };
+            assert_eq!(id, attacker);
+            if let Some(protected) = protected_only {
+                assert_eq!(defender, protected, "comparison={comparison}");
+            }
+
+            let after = declare_and_resolve_unblocked(state, &attacks);
+            let card = in_hand[usize::from(defender == PlayerId(2))];
+            assert!(
+                !after.players[defender.0 as usize].hand.contains(&card),
+                "the defending player must discard (comparison={comparison})"
+            );
+        }
+    }
+
+    /// CR 508.3a + CR 702.16j: one creature with an attack-trigger payoff
+    /// doesn't pull the plain attackers onto a protected player. P1 (next seat)
+    /// has The One Ring's protection; P2 is open. Aclazotz may attack either,
+    /// but both Grizzly Bears attack P2, on the comparison and rollout paths.
+    #[test]
+    fn attack_trigger_creature_does_not_redirect_plain_attackers() {
+        let mut scenario = GameScenario::new_with_format(
+            engine::types::format::FormatConfig::free_for_all(),
+            3,
+            42,
+        );
+        scenario.at_phase(engine::types::phase::Phase::DeclareAttackers);
+        let guide = scenario.add_real_card(
+            P0,
+            "Aclazotz, Deepest Betrayal",
+            Zone::Battlefield,
+            crate::test_support::shared_integration_card_db(),
+        );
+        let bears = [
+            scenario.add_creature(P0, "Grizzly Bears", 2, 2).id(),
+            scenario.add_creature(P0, "Grizzly Bears", 2, 2).id(),
+        ];
+        let mut state = scenario.build().state().clone();
+        state.turn_number = 2;
+        for attacker in std::iter::once(guide).chain(bears) {
+            let object = state.objects.get_mut(&attacker).unwrap();
+            object.summoning_sick = false;
+            object.entered_battlefield_turn = Some(1);
+        }
+        assert!(attack_trigger_payoff(
+            &state,
+            guide,
+            AttackTarget::Player(PlayerId(1))
+        ));
+        grant_protection_from_everything(&mut state, PlayerId(1));
+
+        for comparison_deadline in [Some(Deadline::none()), None] {
+            let mut state = state.clone();
+            let attacks = choose_from_engine_prompt_with(&mut state, comparison_deadline);
+            for bear in bears {
+                assert!(
+                    attacks.contains(&(bear, AttackTarget::Player(PlayerId(2)))),
+                    "both Bears attack the open P2, got {attacks:?} (comparison={})",
+                    comparison_deadline.is_some()
+                );
+            }
+        }
+    }
+
+    /// CR 508.3a + CR 702.16j: a payoff-only proposal against a protected
+    /// opponent never outscores a proposal that deals damage, however much more
+    /// threatening the protected opponent is. P1 has The One Ring's protection,
+    /// a full grip and a tapped army; P2 is open and quiet. Inferno Titan and
+    /// Grizzly Bears both attack P2.
+    #[test]
+    fn protected_high_threat_opponent_does_not_draw_the_attack() {
+        let mut scenario = GameScenario::new_with_format(
+            engine::types::format::FormatConfig::free_for_all(),
+            3,
+            42,
+        );
+        scenario.at_phase(engine::types::phase::Phase::DeclareAttackers);
+        let titan = scenario.add_real_card(
+            P0,
+            "Inferno Titan",
+            Zone::Battlefield,
+            crate::test_support::shared_integration_card_db(),
+        );
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let mut state = scenario.build().state().clone();
+        state.turn_number = 2;
+        for player in &mut state.players {
+            player.life = 40;
+        }
+        state.players[2].life = 20;
+        for attacker in [titan, bears] {
+            let object = state.objects.get_mut(&attacker).unwrap();
+            object.summoning_sick = false;
+            object.entered_battlefield_turn = Some(1);
+        }
+        for _ in 0..4 {
+            let threat = add_creature(&mut state, PlayerId(1), "Dragon", 6, 6, vec![]);
+            state.objects.get_mut(&threat).unwrap().tapped = true;
+        }
+        for _ in 0..7 {
+            let card_id = CardId(state.next_object_id);
+            create_object(
+                &mut state,
+                card_id,
+                PlayerId(1),
+                "Card in hand".to_string(),
+                Zone::Hand,
+            );
+        }
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        let threat = |target| threat_level(&state, PlayerId(0), target);
+        assert!(
+            (0.5 + threat(PlayerId(1))) / (0.5 + threat(PlayerId(2))) > 4.0 / 3.0,
+            "P1 must be threatening enough that a damage stand-in would pull the attack"
+        );
+
+        let attacks = choose_from_engine_prompt(&mut state);
+        let mut sorted = attacks.clone();
+        sorted.sort();
+        let mut expected = vec![
+            (titan, AttackTarget::Player(PlayerId(2))),
+            (bears, AttackTarget::Player(PlayerId(2))),
+        ];
+        expected.sort();
+        assert_eq!(sorted, expected, "got {attacks:?}");
+    }
+
+    /// A two-player state at P0's declare-attackers step, with P0's creatures
+    /// ready to attack.
+    fn ready_two_player_state(scenario: GameScenario, attackers: &[ObjectId]) -> GameState {
+        let mut state = scenario.build().state().clone();
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        for attacker in attackers {
+            let object = state.objects.get_mut(attacker).unwrap();
+            object.summoning_sick = false;
+            object.entered_battlefield_turn = Some(1);
+        }
+        state
+    }
+
+    /// CR 508.3a + CR 702.16j + CR 704.5a: a self attack trigger that harms
+    /// its controller, or helps only the defending player, is no reason to
+    /// attack a player who prevents the damage. Ebonblade Reaper's "you lose
+    /// half your life" at 1 life would lose the game; Goblin Guide's trigger
+    /// can give the defender a land. Both stay home. Reaper's harm also vetoes
+    /// a friendly Druids' Repository's charge counter.
+    #[test]
+    fn harmful_or_defender_only_attack_trigger_is_no_reason_to_attack() {
+        // Verbatim local MTGJSON Oracle.
+        let mut scenario = GameScenario::new();
+        let reaper = scenario
+            .add_creature_from_oracle(P0, "Ebonblade Reaper", 1, 1, "Whenever this creature attacks, you lose half your life, rounded up.\nWhenever this creature deals combat damage to a player, that player loses half their life, rounded up.")
+            .id();
+        let mut state = ready_two_player_state(scenario, &[reaper]);
+        state.players[0].life = 1;
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        assert!(!attack_trigger_payoff(
+            &state,
+            reaper,
+            AttackTarget::Player(PlayerId(1))
+        ));
+        assert!(choose_from_engine_prompt(&mut state.clone()).is_empty());
+
+        let mut scenario = GameScenario::new();
+        let reaper = scenario
+            .add_creature_from_oracle(P0, "Ebonblade Reaper", 1, 1, "Whenever this creature attacks, you lose half your life, rounded up.\nWhenever this creature deals combat damage to a player, that player loses half their life, rounded up.")
+            .id();
+        scenario.add_enchantment_from_oracle(P0, "Druids' Repository", "Whenever a creature you control attacks, put a charge counter on this enchantment.\nRemove a charge counter from this enchantment: Add one mana of any color.");
+        let mut state = ready_two_player_state(scenario, &[reaper]);
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        assert!(
+            !attack_trigger_payoff(&state, reaper, AttackTarget::Player(PlayerId(1))),
+            "the controller's life loss vetoes the charge counter"
+        );
+        assert!(choose_from_engine_prompt(&mut state).is_empty());
+
+        let (mut state, guide) = state_with_real_attacker("Goblin Guide");
+        assert!(!attack_trigger_payoff(
+            &state,
+            guide,
+            AttackTarget::Player(PlayerId(1))
+        ));
+        assert_eq!(
+            choose_from_engine_prompt(&mut state.clone()),
+            vec![(guide, AttackTarget::Player(PlayerId(1)))],
+            "control: an unprotected defender takes the damage"
+        );
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        assert!(choose_from_engine_prompt(&mut state).is_empty());
+    }
+
+    /// CR 107.14 + CR 508.3a + CR 702.16j: Aethergeode Miner's attack gives
+    /// its controller two energy even when protection prevents combat damage.
+    #[test]
+    fn energy_attack_payoff_attacks_a_protected_player_and_resolves() {
+        let mut scenario = GameScenario::new();
+        let miner = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Aethergeode Miner",
+                3,
+                1,
+                "Whenever this creature attacks, you get {E}{E} (two energy counters).\nPay {E}{E}: Exile this creature, then return it to the battlefield under its owner's control.",
+            )
+            .id();
+        let mut state = ready_two_player_state(scenario, &[miner]);
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        assert_eq!(state.players[0].energy, 0);
+
+        for comparison_deadline in [Some(Deadline::none()), None] {
+            let mut state = state.clone();
+            let attacks = choose_from_engine_prompt_with(&mut state, comparison_deadline);
+            let WaitingFor::DeclareAttackers {
+                valid_attacker_ids,
+                valid_attack_targets_by_attacker: Some(targets),
+                ..
+            } = &state.waiting_for
+            else {
+                panic!("the engine must issue the attacker's legal targets")
+            };
+            assert!(valid_attacker_ids.contains(&miner));
+            assert!(targets[&miner].contains(&AttackTarget::Player(PlayerId(1))));
+            assert_eq!(attacks, vec![(miner, AttackTarget::Player(PlayerId(1)))]);
+
+            let after = declare_and_resolve_unblocked(state, &attacks);
+            assert_eq!(after.players[0].energy, 2);
+            assert_eq!(after.players[1].energy, 0);
+            assert_eq!(after.players[1].life, 20);
+            assert!(after.stack.is_empty());
+            assert!(after.resolution_stack.is_empty());
+            assert!(matches!(after.waiting_for, WaitingFor::Priority { .. }));
+        }
+    }
+
+    /// CR 508.3a + CR 603.2 + CR 702.16j: a friendly permanent's "whenever a
+    /// creature you control attacks" pays off even when the defender prevents
+    /// the damage. A vanilla Grizzly Bears attacks a protected player for
+    /// Druids' Repository's charge counter and for Mardu Ascendancy's Goblin
+    /// token, and each resolves; Beastmaster Ascension's quest counter is
+    /// recognized too. Without such a permanent the Bears stay home.
+    #[test]
+    fn friendly_attack_trigger_payoff_attacks_a_protected_player() {
+        // Control: no observer, so the attack does nothing.
+        let mut scenario = GameScenario::new();
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let mut state = ready_two_player_state(scenario, &[bears]);
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        assert!(!attack_trigger_payoff(
+            &state,
+            bears,
+            AttackTarget::Player(PlayerId(1))
+        ));
+        assert!(choose_from_engine_prompt(&mut state).is_empty());
+
+        // Verbatim local MTGJSON Oracle.
+        for (name, oracle) in [
+            ("Druids' Repository", "Whenever a creature you control attacks, put a charge counter on this enchantment.\nRemove a charge counter from this enchantment: Add one mana of any color."),
+            ("Mardu Ascendancy", "Whenever a nontoken creature you control attacks, create a 1/1 red Goblin creature token that's tapped and attacking.\nSacrifice this enchantment: Creatures you control get +0/+3 until end of turn."),
+            ("Beastmaster Ascension", "Whenever a creature you control attacks, you may put a quest counter on this enchantment.\nAs long as this enchantment has seven or more quest counters on it, creatures you control get +5/+5."),
+        ] {
+            let mut scenario = GameScenario::new();
+            let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+            let observer = scenario.add_enchantment_from_oracle(P0, name, oracle).id();
+            let mut state = ready_two_player_state(scenario, &[bears]);
+            grant_protection_from_everything(&mut state, PlayerId(1));
+            assert!(attack_trigger_payoff(&state, bears, AttackTarget::Player(PlayerId(1))), "{name} pays off");
+
+            let attacks = choose_from_engine_prompt(&mut state);
+            assert_eq!(
+                attacks,
+                vec![(bears, AttackTarget::Player(PlayerId(1)))],
+                "{name}"
+            );
+            match name {
+                "Druids' Repository" => {
+                    let after = declare_and_resolve_unblocked(state, &attacks);
+                    assert_eq!(
+                        after.objects[&observer]
+                            .counters
+                            .get(&engine::types::counter::CounterType::Generic(
+                                "charge".to_string()
+                            ))
+                            .copied(),
+                        Some(1),
+                        "the charge counter must resolve"
+                    );
+                }
+                "Mardu Ascendancy" => {
+                    let after = declare_and_resolve_unblocked(state, &attacks);
+                    assert!(
+                        after.battlefield.iter().any(|id| {
+                            let object = &after.objects[id];
+                            object.is_token && object.name == "Goblin" && object.controller == P0
+                        }),
+                        "the Goblin token must resolve"
+                    );
+                }
+                // "You may put a quest counter" asks a question mid-combat;
+                // recognizing the payoff is the claim here.
+                _ => {}
+            }
+        }
+    }
+
+    /// CR 508.3a + CR 119.3 + CR 702.16j: life loss isn't damage, so "each
+    /// opponent loses 1 life and you gain 1 life" lands on a protected player.
+    /// Sanguine Syphoner attacks one, and both life changes resolve.
+    #[test]
+    fn drain_attack_trigger_attacks_a_protected_player() {
+        // Verbatim local MTGJSON Oracle.
+        let mut scenario = GameScenario::new();
+        let syphoner = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Sanguine Syphoner",
+                1,
+                3,
+                "Whenever this creature attacks, each opponent loses 1 life and you gain 1 life.",
+            )
+            .id();
+        let mut state = ready_two_player_state(scenario, &[syphoner]);
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        assert!(attack_trigger_payoff(
+            &state,
+            syphoner,
+            AttackTarget::Player(PlayerId(1))
+        ));
+
+        let attacks = choose_from_engine_prompt(&mut state);
+        assert_eq!(attacks, vec![(syphoner, AttackTarget::Player(PlayerId(1)))]);
+        let after = declare_and_resolve_unblocked(state, &attacks);
+        assert_eq!(after.players[1].life, 19);
+        assert_eq!(after.players[0].life, 21);
+    }
+
+    /// CR 508.3a + CR 701.21a + CR 702.16j: Daemogoth Titan's "sacrifice a
+    /// creature" is a sacrifice of the attacker's own, so against a player
+    /// who prevents its damage the Titan stays home rather than feed a
+    /// creature to an attack that does nothing.
+    #[test]
+    fn self_sacrifice_attack_trigger_is_no_reason_to_attack() {
+        // Verbatim local MTGJSON Oracle.
+        let mut scenario = GameScenario::new();
+        let titan = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Daemogoth Titan",
+                11,
+                10,
+                "Whenever this creature attacks or blocks, sacrifice a creature.",
+            )
+            .id();
+        scenario.add_creature(P0, "Grizzly Bears", 2, 2);
+        let mut state = ready_two_player_state(scenario, &[titan]);
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        assert!(!attack_trigger_payoff(
+            &state,
+            titan,
+            AttackTarget::Player(PlayerId(1))
+        ));
+        assert!(
+            !choose_from_engine_prompt(&mut state)
+                .iter()
+                .any(|&(id, _)| id == titan),
+            "the Titan stays home"
+        );
+    }
+
+    /// CR 508.3a + CR 603.2: a self attack trigger restricted to whom it
+    /// attacks is weighed per proposed attack. Preacher of the Schism's token
+    /// trigger matches an attack on the player with the most life, and not one
+    /// on a player with less.
+    #[test]
+    fn attack_trigger_with_a_target_restriction_matches_per_attack() {
+        // Verbatim local MTGJSON Oracle.
+        let mut scenario = GameScenario::new();
+        let preacher = scenario
+            .add_creature_from_oracle(P0, "Preacher of the Schism", 2, 4, "Deathtouch
+Whenever this creature attacks the player with the most life or tied for most life, create a 1/1 white Vampire creature token with lifelink.
+Whenever this creature attacks while you have the most life or are tied for most life, you draw a card and you lose 1 life.")
+            .with_keyword(Keyword::Deathtouch)
+            .id();
+        let mut state = ready_two_player_state(scenario, &[preacher]);
+        let source = state.objects[&preacher].clone();
+        let restricted = source
+            .trigger_definitions
+            .iter_all()
+            .map(|entry| entry.definition.clone())
+            .find(|trigger| trigger.valid_target.is_some())
+            .expect("the most-life trigger carries a target restriction");
+        let matches = |state: &GameState| {
+            engine::game::triggers::attack_trigger_matches_attack(
+                state,
+                &source,
+                &restricted,
+                preacher,
+                AttackTarget::Player(PlayerId(1)),
+            )
+        };
+
+        state.players[1].life = 30;
+        assert!(matches(&state), "P1 has the most life");
+        state.players[1].life = 10;
+        assert!(!matches(&state), "P1 has less life than P0");
+    }
+
+    /// CR 603.2 + CR 702.16j: in a free-for-all where every opponent is
+    /// protected, the per-defender comparison and the rollout path both carry
+    /// a friendly observer's payoff and a self trigger's harm. Grizzly Bears
+    /// attack for Druids' Repository's counter; Ebonblade Reaper, whose life
+    /// loss outweighs that counter, stays home.
+    #[test]
+    fn free_for_all_carries_observer_payoffs_and_harms() {
+        for comparison_deadline in [Some(Deadline::none()), None] {
+            let comparison = comparison_deadline.is_some();
+            for harmful in [false, true] {
+                let mut scenario = GameScenario::new_with_format(
+                    engine::types::format::FormatConfig::free_for_all(),
+                    3,
+                    42,
+                );
+                scenario.at_phase(engine::types::phase::Phase::DeclareAttackers);
+                // Verbatim local MTGJSON Oracle.
+                let attacker = if harmful {
+                    scenario
+                        .add_creature_from_oracle(P0, "Ebonblade Reaper", 1, 1, "Whenever this creature attacks, you lose half your life, rounded up.\nWhenever this creature deals combat damage to a player, that player loses half their life, rounded up.")
+                        .id()
+                } else {
+                    scenario.add_creature(P0, "Grizzly Bears", 2, 2).id()
+                };
+                scenario.add_enchantment_from_oracle(P0, "Druids' Repository", "Whenever a creature you control attacks, put a charge counter on this enchantment.\nRemove a charge counter from this enchantment: Add one mana of any color.");
+                let mut state = scenario.build().state().clone();
+                state.turn_number = 2;
+                let object = state.objects.get_mut(&attacker).unwrap();
+                object.summoning_sick = false;
+                object.entered_battlefield_turn = Some(1);
+                grant_protection_from_everything(&mut state, PlayerId(1));
+                grant_protection_from_everything(&mut state, PlayerId(2));
+
+                let attacks = choose_from_engine_prompt_with(&mut state, comparison_deadline);
+                if harmful {
+                    assert!(
+                        attacks.is_empty(),
+                        "Reaper must stay home, got {attacks:?} (comparison={comparison})"
+                    );
+                } else {
+                    assert!(
+                        matches!(attacks[..], [(id, AttackTarget::Player(_))] if id == attacker),
+                        "the Bears attack for the counter, got {attacks:?} \
+                         (comparison={comparison})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// CR 508.5 + CR 702.16e: when the alpha strike can finish the weakest
+    /// opponent, an attacker that opponent prevents is not sent on to the
+    /// primary defender, whose blockers it was never weighed against. P1 (3
+    /// life) has a Runed Halo naming Grizzly Bears; Hill Giant alone finishes
+    /// P1. P2, the bigger threat, holds a deathtouch blocker.
+    #[test]
+    fn alpha_strike_split_keeps_prevented_attackers_off_other_defenders() {
+        let mut scenario = GameScenario::new_with_format(
+            engine::types::format::FormatConfig::free_for_all(),
+            3,
+            42,
+        );
+        scenario.at_phase(engine::types::phase::Phase::DeclareAttackers);
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+        let mut state = scenario.build().state().clone();
+        state.turn_number = 2;
+        for player in &mut state.players {
+            player.life = 100;
+        }
+        state.players[1].life = 3;
+        for attacker in [bears, giant] {
+            let object = state.objects.get_mut(&attacker).unwrap();
+            object.summoning_sick = false;
+            object.entered_battlefield_turn = Some(1);
+        }
+        add_creature(
+            &mut state,
+            PlayerId(2),
+            "Typhoid Rats",
+            1,
+            1,
+            vec![Keyword::Deathtouch],
+        );
+        add_creature(&mut state, PlayerId(2), "Colossus", 8, 8, vec![]);
+        add_runed_halo(&mut state, PlayerId(1), "Grizzly Bears");
+        assert!(player_damage_prevented(&state, PlayerId(1), bears));
+        assert_eq!(
+            threat_ranked_opponents(&state, PlayerId(0), &[PlayerId(1), PlayerId(2)])[0].0,
+            PlayerId(2),
+            "P2 must be the primary defender, or the test proves nothing"
+        );
+        assert_eq!(
+            assign_attack_targets(
+                &state,
+                PlayerId(0),
+                &[PlayerId(1), PlayerId(2)],
+                vec![bears, giant]
+            )
+            .into_iter()
+            .find(|&(id, _)| id == bears),
+            Some((bears, AttackTarget::Player(PlayerId(1)))),
+            "the prevented Bears stay aimed at P1"
+        );
+
+        for comparison_deadline in [Some(Deadline::none()), None] {
+            let mut state = state.clone();
+            let attacks = choose_from_engine_prompt_with(&mut state, comparison_deadline);
+            assert_eq!(
+                attacks,
+                vec![(giant, AttackTarget::Player(PlayerId(1)))],
+                "comparison={}",
+                comparison_deadline.is_some()
+            );
+        }
+    }
+
+    /// CR 702.16e + CR 702.16j: the raw lowest-life lethal read does not hold
+    /// when that opponent prevents the damage.
+    #[test]
+    fn lethal_read_ignores_an_opponent_who_prevents_the_damage() {
+        let mut state = setup();
+        let attackers = [
+            add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]),
+            add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]),
+        ];
+        state.players[1].life = 6;
+        assert!(lethal_on_damageable_opponent(
+            &state,
+            &[PlayerId(1)],
+            &attackers
+        ));
+
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        assert!(damageable_opponents(&state, &[PlayerId(1)], &attackers).is_empty());
+        assert!(!lethal_on_damageable_opponent(
+            &state,
+            &[PlayerId(1)],
+            &attackers
+        ));
+    }
+
+    /// CR 702.16e + CR 702.16j: in a free-for-all, a protected opponent at low
+    /// life is not chosen as the defender — otherwise its "lethal" pull sends the
+    /// attack there and the retarget lands it on an opponent whose blocks were
+    /// never evaluated (here P2's deathtouch wall). The attack goes to the
+    /// open-board opponent instead.
+    #[test]
+    fn free_for_all_never_chooses_a_protected_defender() {
+        let mut state = setup_multiplayer(4);
+        add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
+        add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
+        state.players[1].life = 3;
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        add_creature(
+            &mut state,
+            PlayerId(2),
+            "Wall",
+            0,
+            8,
+            vec![Keyword::Deathtouch, Keyword::Defender],
+        );
+
+        let attacks = choose_from_engine_prompt(&mut state);
+        assert!(!attacks.is_empty(), "the open board is worth attacking");
+        assert!(
+            attacks
+                .iter()
+                .all(|(_, target)| *target == AttackTarget::Player(PlayerId(3))),
+            "every attack must go to the open-board opponent, got {attacks:?}"
+        );
+    }
+
+    /// CR 702.16e + CR 702.16j: a protected opponent's low life is not a lethal
+    /// read, so the crackback check still runs. P1 prevents all damage, so P0's
+    /// 6 power can't kill it at 2; its untapped 5/5s swing back for 10 into
+    /// P0's 8. Reading lethal from raw life skipped crackback pruning and sent
+    /// both attackers at P2.
+    #[test]
+    fn protected_low_life_opponent_is_not_a_lethal_read() {
+        let mut state = setup_multiplayer(3);
+        state.players[0].life = 8;
+        add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
+        add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
+        state.players[1].life = 2;
+        add_creature(&mut state, PlayerId(1), "Giant", 5, 5, vec![]);
+        add_creature(&mut state, PlayerId(1), "Giant", 5, 5, vec![]);
+        grant_protection_from_everything(&mut state, PlayerId(1));
+
+        let attacks = choose_from_engine_prompt_with(&mut state, None);
+        assert_eq!(
+            attacks.len(),
+            1,
+            "one Bear must stay home against the 10-power swing-back, got {attacks:?}"
+        );
+        assert!(attacks
+            .iter()
+            .all(|(_, target)| *target == AttackTarget::Player(PlayerId(2))));
     }
 }

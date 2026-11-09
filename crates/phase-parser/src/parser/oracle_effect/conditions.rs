@@ -41,9 +41,9 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AbilityUseTally, AdditionalCostOrigin,
     AttachCardinality, AttachSelection, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
     CoinFlipResult, Comparator, ControllerRef, CostCategory, CountScope, DamageChannel, DigSource,
-    Duration, Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, ObjectScope, ParsedCondition,
-    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SpentColor,
-    StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    Duration, Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, LibraryPosition, ObjectScope,
+    ParsedCondition, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
+    SpentColor, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -3851,6 +3851,32 @@ fn build_zone_change_past_counter_condition(
     )
 }
 
+/// CR 608.2c + CR 122.1: the counter kind a condition counts on the ability
+/// SOURCE ("if there are three or more promotion counters on her" →
+/// `promotion`), which a later counter anaphor in the same instruction ("remove
+/// those counters") refers back to. `None` for a condition that counts no typed
+/// source counters — including an any-kind count ("three or more counters on
+/// it"), whose anaphor already means every kind.
+pub(super) fn source_counter_kind_counted_by(condition: &AbilityCondition) -> Option<CounterType> {
+    match condition {
+        AbilityCondition::QuantityCheck {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::CountersOn {
+                            scope: ObjectScope::Source,
+                            counter_type: Some(counter_type),
+                        },
+                },
+            ..
+        } => Some(counter_type.clone()),
+        AbilityCondition::And { conditions } => {
+            conditions.iter().find_map(source_counter_kind_counted_by)
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn strip_counter_conditional(
     text: &str,
     ctx: CounterConditionalContext,
@@ -5979,8 +6005,12 @@ fn build_instead_def(
         };
     };
 
-    let instead_def =
-        super::parse_child_ability_with_parent_target(&effect_text, kind, parent_target_available);
+    let instead_def = super::parse_child_ability_with_parent_target(
+        &effect_text,
+        kind,
+        parent_target_available,
+        ctx.effective_spell_anaphor_binding(),
+    );
     let mut result = super::instead_override_definition(
         instead_def,
         AbilityCondition::ConditionInstead {
@@ -6130,6 +6160,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
         rest_destination: alt_rest,
         rest_split_top_count: alt_rest_split_top_count,
         rest_order: alt_rest_order,
+        rest_library_position: alt_rest_library_position,
         enter_tapped: alt_enter_tapped,
         enters_attacking: alt_enters_attacking,
         ..
@@ -6158,6 +6189,79 @@ pub(crate) fn try_parse_dig_instead_alternative(
     // (same-clause "and the rest on the bottom..."); otherwise falls back to the
     // preceding Dig's (already-patched or None — a trailing PutRest continuation
     // patches both branches by rewriting into the chain).
+    let alt_rest_destination = alt_rest.or(*prev_rest);
+    // CR 608.2c ("read the whole text and apply the rules of English"):
+    // the remainder instruction is inherited ONLY when the alternative is
+    // silent about the remainder. Precedence mirrors `alt_rest` /
+    // `alt_rest_order` directly above and below:
+    //
+    //   1. the alternative named its own split      -> use it;
+    //   2. the alternative named a UNIFORM remainder
+    //      destination ("...put the rest on the bottom
+    //      of your library") -> `None`, except that a remainder
+    //      it sends to the TOP of the library is the degenerate
+    //      all-top split (CR 401.4) rather than a bottom
+    //      destination. An explicit one-position instruction is
+    //      not merely a different destination, it positively says
+    //      "all of it goes to one place", which overrides the base
+    //      branch's split instead of being contaminated by it;
+    //   3. the alternative said nothing about the
+    //      remainder             -> inherit the base branch's split,
+    //                               exactly as `prev_rest` and
+    //                               `prev_reveal` are inherited.
+    //
+    // Before this precedence existed, case 2 kept the base's split and the
+    // alternative branch tried to partition a remainder its own text had
+    // already sent uniformly to one position.
+    let alt_rest_split_top_count = alt_rest_split_top_count.map(|boxed| *boxed).or_else(|| {
+        if alt_rest.is_some() {
+            // CR 401.4: an alternative that puts its remainder on TOP names
+            // the degenerate all-top split, exactly as the same clause does on
+            // the base branch.
+            (alt_rest_library_position.as_deref() == Some(&LibraryPosition::Top))
+                .then(|| prev_count.clone())
+        } else {
+            prev_rest_split_top_count.clone()
+        }
+    });
+    // CR 701.20e + CR 608.2c: the alternative is its own from-among
+    // selection, so it declares its own remainder from the same fields the
+    // base selection's `DigFromAmong` continuation does. A trailing "put the
+    // rest …" clause re-declares both branches as routes.
+    let alt_rest_remainder = super::sequence::declared_selection_remainder(
+        alt_destination,
+        alt_keep_count,
+        alt_rest_destination,
+        alt_rest_split_top_count.is_some(),
+    );
+    // CR 401.4: fail closed on a remainder split the Dig resolver cannot
+    // honor, validated on the EFFECTIVE alternative — after it inherited the
+    // base branch's split and order — exactly as the base branch's
+    // continuation does (`unsupported_rest_split`).
+    let alt_effective_rest_order = alt_rest.map_or(*prev_rest_order, |_| alt_rest_order);
+    if super::sequence::unsupported_rest_split(
+        alt_rest_split_top_count.is_some(),
+        alt_effective_rest_order,
+        alt_keep_count,
+        alt_up_to,
+        alt_destination,
+    ) {
+        return Some(AbilityIr {
+            source_text: text.to_string(),
+            body: EffectChainIr::single_clause(
+                text,
+                kind,
+                parsed_clause(super::sequence::unsupported_rest_split_effect()),
+                None,
+                None,
+                false,
+            ),
+            shell: AbilityShellIr::default(),
+            die_results: vec![],
+            root_transforms: vec![AbilityRootTransform::AppendCondition(condition)],
+            modal: None,
+        });
+    }
     let alt_effect = Effect::Dig {
         player: prev_player.clone(),
         count: prev_count.clone(),
@@ -6166,37 +6270,10 @@ pub(crate) fn try_parse_dig_instead_alternative(
         keep_count_expr: alt_keep_count_expr,
         up_to: alt_up_to,
         filter: alt_filter,
-        rest_destination: alt_rest.or(*prev_rest),
-        // CR 608.2c ("read the whole text and apply the rules of English"):
-        // the remainder instruction is inherited ONLY when the alternative is
-        // silent about the remainder. Precedence mirrors `alt_rest` /
-        // `alt_rest_order` directly above and below:
-        //
-        //   1. the alternative named its own split      -> use it;
-        //   2. the alternative named a UNIFORM remainder
-        //      destination ("...put the rest on the bottom
-        //      of your library") -> `None`. An explicit
-        //      one-position instruction is not merely a
-        //      different destination, it positively says
-        //      "all of it goes to one place", which
-        //      overrides the base branch's split instead
-        //      of being contaminated by it;
-        //   3. the alternative said nothing about the
-        //      remainder             -> inherit the base branch's split,
-        //                               exactly as `prev_rest` and
-        //                               `prev_reveal` are inherited.
-        //
-        // Before this precedence existed, case 2 kept the base's split and the
-        // alternative branch tried to partition a remainder its own text had
-        // already sent uniformly to one position.
-        rest_split_top_count: alt_rest_split_top_count.map(|boxed| *boxed).or_else(|| {
-            if alt_rest.is_some() {
-                None
-            } else {
-                prev_rest_split_top_count.clone()
-            }
-        }),
-        rest_order: alt_rest.map_or(*prev_rest_order, |_| alt_rest_order),
+        rest_destination: alt_rest_destination,
+        rest_remainder: alt_rest_remainder,
+        rest_split_top_count: alt_rest_split_top_count,
+        rest_order: alt_effective_rest_order,
         reveal: *prev_reveal,
         enter_tapped: alt_enter_tapped,
         enters_attacking: alt_enters_attacking,

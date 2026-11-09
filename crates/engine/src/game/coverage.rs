@@ -1963,6 +1963,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             }
         }
         QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
+        QuantityRef::DeployedBossCount => "deployed bosses".into(),
         QuantityRef::ExiledCardPower { index } => format!("power of exiled card {index}"),
         QuantityRef::ZoneCardCount {
             zone,
@@ -2068,6 +2069,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             )
         }
         QuantityRef::CrimesCommittedThisTurn => "crimes committed this turn".into(),
+        QuantityRef::EnergyPaidOrLostThisTurn => "energy paid or lost this turn".into(),
         QuantityRef::BendTypesThisTurn => "distinct bend types this turn".into(),
         QuantityRef::LifeGainedThisTurn { player } => {
             format!("life gained this turn ({})", fmt_player_scope(player))
@@ -2781,6 +2783,8 @@ fn fmt_core_type(ct: &CoreType) -> &'static str {
         CoreType::Phenomenon => "phenomenon",
         CoreType::Scheme => "scheme",
         CoreType::Conspiracy => "conspiracy",
+        CoreType::Boss => "boss",
+        CoreType::Event => "event",
     }
 }
 
@@ -2806,6 +2810,7 @@ fn fmt_characteristic_population(source: &CardTypeSetSource) -> String {
                             "designated for an owner-library shuffle"
                         }
                         ThisWayCause::Discarded => "discarded",
+                        ThisWayCause::Tapped => "tapped",
                         ThisWayCause::Exiled => "exiled",
                         ThisWayCause::Milled => "milled",
                         ThisWayCause::Destroyed => "destroyed",
@@ -4519,6 +4524,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::PairWith { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
+        Effect::HordePlayCard { count } => {
+            d.push(("count".into(), format!("{count}")));
+        }
         // Effects with no interesting parameters
         Effect::Unimplemented { .. }
         | Effect::Explore
@@ -5274,6 +5282,9 @@ fn fmt_attack_target_filter(filter: &crate::types::triggers::AttackTargetFilter)
         // CR 725.1: the monarch is a player designation, and no player is the
         // monarch until an effect creates one.
         ATF::Monarch => "the monarch",
+        // CR 508.6: the source's own attack history, so the label names the
+        // history rather than a player class the card does not print.
+        ATF::PlayerAttackedBySourceThisTurn => "a player it has already attacked this turn",
     }
 }
 
@@ -7139,6 +7150,8 @@ fn token_category_label(category: &crate::game::token_presets::TokenCategory) ->
         TokenCategory::Land => "land".to_string(),
         TokenCategory::Planeswalker => "planeswalker".to_string(),
         TokenCategory::Artifact => "artifact".to_string(),
+        TokenCategory::Boss => "boss".to_string(),
+        TokenCategory::Event => "event".to_string(),
     }
 }
 
@@ -7249,6 +7262,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         // this, a card can parse cleanly yet silently do nothing on resolution.
         check_resolver_features(face, &mut missing);
         check_shared_source_graveyard_slot(face, &mut missing);
+        check_confirmed_misparse(face, &mut missing);
 
         // Flag cards where the parser consumed Oracle text without producing
         // a corresponding parse item. Uses the parse tree computed above.
@@ -7736,8 +7750,16 @@ pub fn card_face_gaps(face: &CardFace) -> Vec<String> {
         &mut missing,
     );
     check_shared_source_graveyard_slot(face, &mut missing);
+    check_confirmed_misparse(face, &mut missing);
     check_entry_projection(face, &mut missing);
     missing
+}
+
+/// Project export support metadata into the existing coverage-gap authority.
+fn check_confirmed_misparse(face: &CardFace, missing: &mut Vec<String>) {
+    if let Some(class) = face.metadata.confirmed_misparse {
+        missing.push(class.handler().to_string());
+    }
 }
 
 /// The coverage label for an ability whose per-player fan-out ("each player
@@ -10101,9 +10123,10 @@ fn counter_exile_rider_drops_its_tail(def: &AbilityDefinition) -> bool {
 /// quality it could not type (`types/keywords.rs`), and
 /// `game::keywords::source_matches_card_type` can only ever match `s` against a
 /// core type word or a parseable subtype. Any other string — "each mana value
-/// other than the chosen number" (Haktos the Unscarred), "each color", "that
-/// player" — makes the grant INERT: the card parses, exports a real
-/// `AddKeyword` modification, and grants nothing at runtime.
+/// other than the chosen number" (Haktos the Unscarred), "each color" — makes
+/// the grant INERT: the card parses, exports a real `AddKeyword` modification,
+/// and grants nothing at runtime. ("that player" no longer lands here: it is
+/// typed as `FromPlayer(TargetPlayer)` and fixed to the declared target.)
 ///
 /// The predicate below mirrors `source_matches_card_type`'s two acceptance paths
 /// exactly, so the two cannot drift.
@@ -11168,6 +11191,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ("DistinctSubtypes", batch_filter_support(source))
         }
         QuantityRef::CardsExiledBySource => ("CardsExiledBySource", Handled),
+        QuantityRef::DeployedBossCount => ("DeployedBossCount", Handled),
         QuantityRef::ExiledCardPower { .. } => ("ExiledCardPower", Handled),
         QuantityRef::ZoneCardCount { .. } => ("ZoneCardCount", Handled),
         QuantityRef::BasicLandTypeCount { .. } => ("BasicLandTypeCount", Handled),
@@ -11190,6 +11214,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::EnteredThisTurn { .. } => ("EnteredThisTurn", Handled),
         QuantityRef::SacrificedThisTurn { .. } => ("SacrificedThisTurn", Handled),
         QuantityRef::CrimesCommittedThisTurn => ("CrimesCommittedThisTurn", Handled),
+        QuantityRef::EnergyPaidOrLostThisTurn => ("EnergyPaidOrLostThisTurn", Handled),
         QuantityRef::BendTypesThisTurn => ("BendTypesThisTurn", Handled),
         QuantityRef::LifeGainedThisTurn { .. } => ("LifeGainedThisTurn", Handled),
         QuantityRef::CardsDrawnThisTurn { .. } => ("CardsDrawnThisTurn", Handled),
@@ -16650,13 +16675,14 @@ mod tests {
             AttackTargetFilter::OwnerOrPlaneswalker,
             AttackTargetFilter::PlayerOrPermanents,
             AttackTargetFilter::Monarch,
+            AttackTargetFilter::PlayerAttackedBySourceThisTurn,
         ]
         .iter()
         .map(fmt_attack_target_filter)
         .collect();
         assert_eq!(
             labels.len(),
-            8,
+            9,
             "every AttackTargetFilter variant must map to a distinct label: {labels:?}"
         );
     }
