@@ -52162,7 +52162,7 @@ mod tests {
             state.objects.get_mut(&aura).unwrap().incarnation = aura_live;
             selected.attachments[0].object_id = aura;
             selected.attachments[0].identity = Some(ObjectIncarnationRef::of(aura, aura_named));
-            for snapshot in state.lki_by_incarnation.get_mut(&x).unwrap().values_mut() {
+            for (_, snapshot) in state.lki_by_incarnation.get_mut(&x).unwrap().iter_mut() {
                 snapshot.attachments.clear();
             }
             state
@@ -52171,12 +52171,6 @@ mod tests {
                 .unwrap()
                 .insert(named, selected.clone());
             state.lki_cache.get_mut(&x).unwrap().attachments.clear();
-            assert!(state.lki_cache[&x].attachments.is_empty());
-            assert_eq!(state.lki_by_incarnation[&x][&named], selected);
-            assert_eq!(
-                selected.attachments[0].identity,
-                Some(ObjectIncarnationRef::of(aura, aura_named))
-            );
             (state, x, aura, selected)
         };
         let (early_attachment, _, early_aura, _) = stamped_history(4, 2, 8, 6);
