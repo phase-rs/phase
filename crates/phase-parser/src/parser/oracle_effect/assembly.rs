@@ -5668,6 +5668,7 @@ mod arena_tests {
 
     fn zone_change(destination: Zone, target: TargetFilter) -> Effect {
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination,
             target,

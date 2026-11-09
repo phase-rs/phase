@@ -7782,6 +7782,7 @@ fn stamp_self_return_origin_skips_nested_parent_target_return() {
     let mut head = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,
             target: TargetFilter::SelfRef,
@@ -7800,6 +7801,7 @@ fn stamp_self_return_origin_skips_nested_parent_target_return() {
     head.sub_ability = Some(Box::new(AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Hand,
             target: TargetFilter::ParentTarget,

@@ -1327,18 +1327,25 @@ impl<'a> PlannerServices<'a> {
             // Mulligan as the complete legal set; neither can fail apply_as_current.
             // Skipping the clone+simulate eliminates ~2 state clones per mulligan step.
             engine::types::actions::GameAction::MulliganDecision { .. } => true,
-            // CR 608.2d + CR 614.12a + CR 701.23a: a named-choice answer from the prompt's
-            // enumerated domain, or a library search selection, is admitted by
-            // its submission guard without mutating the game; the engine decides that
-            // through the same authority `SimulationFilter` consults before its
-            // probe. Under `PromptAnswerValidation::AtSubmission` no state copy is
+            // CR 608.2d + CR 614.12a + CR 701.23a + CR 732.2b: a named-choice answer from the
+            // prompt's enumerated domain, a library search selection, or a loop-shortcut
+            // responder's answer is admitted by its submission guard without mutating the game;
+            // the engine decides that through the same authority `SimulationFilter` consults
+            // before its probe. Under `PromptAnswerValidation::AtSubmission` no state copy is
             // made here: the root search simulates the answers in its beam until one fails, and
             // the caller the one answer it submits. A shape
             // the authority declines (a scoped search, a card name, a free-entry
             // number, an answer given while a cast or activation is in progress),
             // and every answer under `EachCandidate`, is simulated below.
+            //
+            // The shortcut arm must be listed HERE and not only in the authority: the arm is
+            // gated on `admits_without_simulation`, so an unlisted shape still takes `_ =>
+            // simulation_accepts` below while the chooser's own submission check (which reads
+            // `admits_without_simulation` directly) then simulates the same answer a second
+            // time — two takes where the unadmitted shape paid one.
             engine::types::actions::GameAction::ChooseOption { .. }
             | engine::types::actions::GameAction::SelectCards { .. }
+            | engine::types::actions::GameAction::RespondToShortcut { .. }
                 if prompt_answers.admits_without_simulation(state, &candidate.action) =>
             {
                 true
@@ -2083,9 +2090,10 @@ impl<'a> PlannerServices<'a> {
 }
 
 /// How the planner legality gate (`PlannerServices::candidate_is_valid`)
-/// validates a prompt answer, a named-choice answer or a library search
-/// selection, that `engine::ai_support::structurally_valid_prompt_answer`
-/// admits. Every other candidate is validated the same way under both.
+/// validates a prompt answer, a named-choice answer, a library search selection
+/// or a loop-shortcut answer, that
+/// `engine::ai_support::structurally_valid_prompt_answer` admits. Every other
+/// candidate is validated the same way under both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PromptAnswerValidation {
     /// Simulate each answer on a state copy, as the gate's catch-all does. The
@@ -3434,11 +3442,11 @@ pub(crate) mod tests {
 
     // ------------------------------------------------------------------
     // Prompt-answer legality gate: `candidate_is_valid` admits a named-choice
-    // answer or a library search selection through
-    // `engine::ai_support::structurally_valid_prompt_answer` instead of a state
-    // copy + simulation, and only at the `NamedChoice` / `SearchChoice`
-    // windows. Every base board is reached through the real cast/play pipeline
-    // from the card's verbatim Oracle text.
+    // answer, a library search selection, or a loop-shortcut responder's answer
+    // through `engine::ai_support::structurally_valid_prompt_answer` instead of a
+    // state copy + simulation, and only at the `NamedChoice` / `SearchChoice` /
+    // `RespondToShortcut` windows. Every base board is reached through the real
+    // cast/play pipeline from the card's verbatim Oracle text.
     // ------------------------------------------------------------------
 
     const DISTANT_MELODY_ORACLE: &str =
@@ -4011,6 +4019,63 @@ pub(crate) mod tests {
             clones >= 1,
             "an answer the authority declines must be simulated"
         );
+    }
+
+    /// #10464: a loop-shortcut responder's answer passes the legality gate without a state copy.
+    ///
+    /// The gate arm is gated on `admits_without_simulation`, so a shape missing from it falls to
+    /// `_ => simulation_accepts` — and for the last responder that simulation is the whole take.
+    /// The chooser's own submission check reads the authority directly, so it then simulates the
+    /// same answer AGAIN: two takes where the unlisted shape paid one. Fails on revert of the
+    /// `RespondToShortcut` arm (one legality clone), which is why the arm is listed at the gate and
+    /// not only in the authority.
+    #[test]
+    fn shortcut_answers_pass_the_legality_gate_without_a_state_copy() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = engine::types::game_state::WaitingFor::RespondToShortcut {
+            player: P0,
+            remaining_players: vec![P1],
+            proposal: engine::analysis::loop_check::ShortcutProposal {
+                proposer: P1,
+                predicted_winner: None,
+                count: engine::analysis::decision_template::IterationCount::Fixed(2),
+                unbounded: Vec::new(),
+                rising: Vec::new(),
+                win_kind: None,
+                win_kind_at: None,
+                template: None,
+                per_cycle: None,
+                shortened_by: None,
+                published_declaration: None,
+                leading_aims: Vec::new(),
+                road: engine::analysis::loop_check::OfferRoad::Ring,
+                counted_take: Default::default(),
+                period: Default::default(),
+            },
+        };
+        let accept = GameAction::RespondToShortcut {
+            response: engine::analysis::loop_check::ShortcutResponse::Accept,
+        };
+
+        let (verdict, clones) = gate_verdict(&state, &accept);
+        assert!(verdict, "the prompt offers this answer");
+        assert_eq!(
+            clones, 0,
+            "the gate must admit a shortcut answer structurally, not simulate the take"
+        );
+
+        // Paired reach guard: the same gate still simulates an answer outside the proposal's
+        // places, so the counter above is live rather than dead.
+        let (verdict, clones) = gate_verdict(
+            &state,
+            &GameAction::RespondToShortcut {
+                response: engine::analysis::loop_check::ShortcutResponse::Shorten {
+                    at_iteration: 2,
+                },
+            },
+        );
+        assert!(!verdict, "place 2 is at the proposed count, not a place");
+        assert!(clones >= 1, "an answer the authority declines is simulated");
     }
 
     /// T2. Every selection at Demonic Tutor's library search passes the
