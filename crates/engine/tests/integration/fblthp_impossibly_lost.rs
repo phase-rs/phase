@@ -24,7 +24,7 @@ use engine::game::combat::AttackTarget;
 use engine::game::deck_loading::{load_and_hydrate_decks, DeckPayload, MOMIR_SNOW_BASICS};
 use engine::game::engine::start_game;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::actions::GameAction;
+use engine::types::actions::{DebugAction, GameAction};
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType, Supertype};
 use engine::types::events::{GameEvent, PlayerActionKind};
@@ -198,6 +198,113 @@ fn combat_damage_outside_the_controllers_turn_does_not_fire() {
     );
     assert_eq!(runner.state().objects[&fblthp].zone, Zone::Battlefield);
     assert!(runner.state().stack.iter().all(|e| e.source_id != fblthp));
+}
+
+#[test]
+fn owner_shuffle_follows_fblthps_owner_after_it_leaves() {
+    // CR 400.3 + CR 701.24c: "Fblthp's owner shuffles him into their library"
+    // names Fblthp's owner, not the owner of the combat-damage source. P0 owns
+    // Fblthp but P1 controls it (a theft/Mind Control shape); P1 attacks P0 with
+    // its own creature. Fblthp is bounced in response, so the self-move finds
+    // nothing, but the terminal shuffle must still be P0's library.
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for name in ["P0 A", "P0 B", "P0 C"] {
+        scenario.add_card_to_library_top(P0, name);
+    }
+    for name in ["P1 A", "P1 B", "P1 C", "P1 D", "P1 E"] {
+        scenario.add_card_to_library_top(P1, name);
+    }
+    let fblthp = scenario
+        .add_creature_from_oracle(P1, "Fblthp, Impossibly Lost", 1, 1, ORACLE)
+        .id();
+    let attacker = scenario.add_creature(P1, "Attacker", 1, 1).id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&fblthp)
+        .expect("Fblthp exists")
+        .owner = P0;
+    runner.state_mut().debug_mode = true;
+    runner.state_mut().active_player = P1;
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P0))])
+        .expect("P1 attacks P0");
+
+    let mut events = Vec::new();
+    let mut reached_trigger = false;
+    for _ in 0..20 {
+        if runner.state().stack.iter().any(|e| e.source_id == fblthp) {
+            reached_trigger = true;
+            break;
+        }
+        let result = runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority through combat");
+        events.extend(result.events);
+    }
+    assert!(
+        reached_trigger,
+        "reach guard: Fblthp's trigger is on the stack"
+    );
+
+    // Bounce in response: raw zone move, no ETB/trigger processing.
+    let moved = runner
+        .act(GameAction::Debug(DebugAction::MoveToZone {
+            object_id: fblthp,
+            to_zone: Zone::Hand,
+            library_position: None,
+            simulate: false,
+        }))
+        .expect("the debug bounce is accepted");
+    events.extend(moved.events);
+    assert_eq!(runner.state().objects[&fblthp].zone, Zone::Hand);
+
+    for _ in 0..20 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        let result = runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority to resolve the trigger");
+        events.extend(result.events);
+    }
+
+    assert_eq!(
+        runner.state().objects[&fblthp].zone,
+        Zone::Hand,
+        "Fblthp stays in hand: the self-move has no battlefield object"
+    );
+    assert_eq!(
+        runner.state().players[0].library.len(),
+        3,
+        "the owner's library is shuffled in place"
+    );
+    assert_eq!(
+        runner.state().players[1].library.len(),
+        3,
+        "the controller drew two (5 - 2) and its library is not shuffled"
+    );
+    let shuffled: Vec<PlayerId> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shuffled,
+        vec![P0],
+        "only Fblthp's owner's library may be shuffled"
+    );
 }
 
 /// CR 805.4 + CR 102.1: Two-Headed Giant takes turns by team, not by player.
