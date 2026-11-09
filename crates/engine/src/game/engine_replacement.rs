@@ -11165,8 +11165,9 @@ mod entry_continuation_release_tests {
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
-        DelayedTrigger, PendingBatchDeliveries, PendingCounterAdditionQueue,
-        PendingZoneChangeDelivery, ResidentDrainPolicy, ZoneDeliveryExileTracking,
+        DelayedTrigger, PausedZoneChangeDeliveryCount, PendingBatchDeliveries,
+        PendingCounterAdditionQueue, PendingZoneChangeDelivery, ResidentDrainPolicy,
+        ZoneDeliveryExileTracking,
     };
     use crate::types::identifiers::{CardId, DelayedInstallIdentity};
     use crate::types::keywords::KeywordKind;
@@ -12611,7 +12612,6 @@ mod entry_continuation_release_tests {
     /// owner-held one.
     #[test]
     fn the_delivery_tail_flush_takes_only_unowned_entries() {
-        use crate::types::game_state::PausedZoneChangeDeliveryCount;
         let mut state = settled_state(2);
         let (x, bound) = entered(&mut state, 900, P0, P0);
         let bound_ref = reference(&state, x);

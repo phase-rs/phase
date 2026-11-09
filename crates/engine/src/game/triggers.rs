@@ -695,6 +695,9 @@ struct TriggerCollectionSession {
     /// session prepares each event batch with `ObserveEventBatch` and reads
     /// these sources instead of rebuilding them (`BulkMemberTriggerCollection`).
     bulk_member_sources: Option<Vec<OffZoneTriggerSourceCache>>,
+    /// CR 603.6a + CR 603.6d: the permanents that enter in the same event as
+    /// the as-enters roll this session collects for. Empty for every other scan.
+    simultaneous_entrants: Vec<ObjectId>,
 }
 
 impl TriggerCollectionSession {
@@ -705,6 +708,7 @@ impl TriggerCollectionSession {
             operation_journal: None,
             admitted_matches: 0,
             bulk_member_sources: None,
+            simultaneous_entrants: Vec::new(),
         }
     }
 
@@ -719,16 +723,26 @@ impl TriggerCollectionSession {
             operation_journal: Some(operation_journal),
             admitted_matches: 0,
             bulk_member_sources: None,
+            simultaneous_entrants: Vec::new(),
         }
     }
 
     /// CR 603.2 + CR 603.10: the scan made when an as-enters roll is rolled, the
-    /// one scan that collects that roll's observers.
-    fn at_as_enters_roll() -> Self {
+    /// one scan that collects that roll's observers. `simultaneous_entrants` are
+    /// the permanents entering in the roll's event (CR 603.6a).
+    fn at_as_enters_roll(simultaneous_entrants: Vec<ObjectId>) -> Self {
         Self {
             as_enters_roll_scan: AsEntersRollScan::AtEmission,
+            simultaneous_entrants,
             ..Self::new(TriggerCollectionOverlay::default())
         }
+    }
+
+    /// CR 603.6a + CR 603.6d + CR 113.6: is `obj_id` one of the permanents that
+    /// enter in the same event as this as-enters roll? That event follows the
+    /// roll, so none of them is on the battlefield when it is rolled.
+    fn enters_with_the_roll(&self, obj_id: ObjectId) -> bool {
+        self.simultaneous_entrants.contains(&obj_id)
     }
 
     fn prepare(&mut self, state: &mut GameState, events: &[GameEvent]) {
@@ -5485,7 +5499,8 @@ fn collect_pending_triggers_with_collection(
                 event_idx,
                 obj_id,
                 &battlefield_entry_index,
-            ) {
+            ) || session.enters_with_the_roll(obj_id)
+            {
                 continue;
             }
             let (
@@ -5973,7 +5988,8 @@ fn collect_pending_triggers_with_collection(
                         event_idx,
                         obj_id,
                         &battlefield_entry_index,
-                    ) {
+                    ) || session.enters_with_the_roll(obj_id)
+                    {
                         continue;
                     }
                     let Some(obj) = state.objects.get(&obj_id) else {
@@ -9223,12 +9239,20 @@ pub(crate) fn collect_triggers_into_deferred(state: &mut GameState, events: &[Ga
 /// instruction triggers, collected as it is rolled, with the battlefield as it
 /// is then. Its roller is excluded by `pre_entry_source` (CR 113.6), and a
 /// permanent not yet on the battlefield (a later batch member, a newcomer) is
-/// not an observer. Delayed contexts come first, as the release queues them.
-/// Composes the two choke points; it matches nothing itself.
+/// not an observer. A co-entrant of the same simultaneous change is not an
+/// observer either (CR 603.6a + CR 603.6d). Delayed contexts come first, as the
+/// release queues them. Composes the two choke points; it matches nothing
+/// itself.
 pub(crate) fn collect_as_enters_roll_observers(
     state: &mut GameState,
     rolls: &[GameEvent],
 ) -> Vec<DeferredTrigger> {
+    let roller = rolls.first().and_then(as_enters_roller);
+    // One hold is one instruction of one source.
+    debug_assert!(rolls.iter().all(|roll| as_enters_roller(roll) == roller));
+    let simultaneous_entrants = roller
+        .map(|roller| crate::game::zone_pipeline::simultaneous_entrants_of(state, roller))
+        .unwrap_or_default();
     let mut observers = collect_matching_delayed_triggers_with(
         state,
         rolls,
@@ -9236,7 +9260,7 @@ pub(crate) fn collect_as_enters_roll_observers(
         AsEntersRollScan::AtEmission,
     )
     .contexts;
-    let mut session = TriggerCollectionSession::at_as_enters_roll();
+    let mut session = TriggerCollectionSession::at_as_enters_roll(simultaneous_entrants);
     observers.extend(collect_pending_triggers_with_collection(
         state,
         rolls,
@@ -9244,6 +9268,16 @@ pub(crate) fn collect_as_enters_roll_observers(
         &mut session,
     ));
     observers
+}
+
+/// CR 614.1c + CR 113.6: the entrant whose own as-enters roll `roll` is.
+fn as_enters_roller(roll: &GameEvent) -> Option<ObjectId> {
+    match roll {
+        GameEvent::DieRolled {
+            pre_entry_source, ..
+        } => *pre_entry_source,
+        _ => None,
+    }
 }
 
 /// CR 117.5 + CR 603.3b: the boundary's queued batch waits behind `origin`'s

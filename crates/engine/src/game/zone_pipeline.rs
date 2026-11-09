@@ -6,6 +6,7 @@
 //! layer (CR 614.1 / 614.6 replacement consult, CR 616.1 choices, CR 614.1c
 //! enters-with seeding) plus the CR 303.4f aura-host choice.
 
+use crate::game::engine_replacement::OwedEntrySeat;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
@@ -786,7 +787,6 @@ impl PausedEntryAttackSeat {
     /// CR 508.4: is an attacking battlefield entrant's seat owed, after a pause,
     /// to an authority that resumes after its entry?
     fn owed(self, enters_attacking: bool) -> crate::game::engine_replacement::OwedEntrySeat {
-        use crate::game::engine_replacement::OwedEntrySeat;
         match self {
             Self::ResumingOwner | Self::SeatFrame { .. } if enters_attacking => OwedEntrySeat::Owed,
             Self::ResumingOwner | Self::SeatFrame { .. } | Self::DeliverySeat => {
@@ -1594,6 +1594,53 @@ fn standalone_batch_record(state: &mut GameState, destination: Zone) -> PendingB
     }
 }
 
+/// CR 603.6a + CR 603.6d + CR 614.12a: deliver one member of a simultaneous
+/// zone change with that change's prospective entrants published, so an
+/// as-enters roll made during this delivery is not observed by a co-entrant
+/// (`simultaneous_entrants_of`). Restores the outer publication: a member's
+/// own continuation can run a nested simultaneous change.
+pub(crate) fn deliver_simultaneous_member<R>(
+    state: &mut GameState,
+    group: &LogicalZoneChangeGroup,
+    deliver: impl FnOnce(&mut GameState) -> R,
+) -> R {
+    let outer = std::mem::replace(
+        &mut state.active_simultaneous_entrants,
+        group
+            .prospective_entrants
+            .iter()
+            .map(|member| member.identity.object_id)
+            .collect(),
+    );
+    let result = deliver(state);
+    state.active_simultaneous_entrants = outer;
+    result
+}
+
+/// CR 603.6a + CR 603.6d + CR 614.12a: the permanents that the one event
+/// putting `entrant` onto the battlefield can put there, `entrant` among them.
+/// Empty when no logical owner is delivering it (a single put). An inline
+/// owner publishes them; a parked owner holds them on its frame.
+///
+/// Every listed id was off the battlefield when the change was announced, so a
+/// listed id now on the battlefield entered through this change.
+pub(crate) fn simultaneous_entrants_of(state: &GameState, entrant: ObjectId) -> Vec<ObjectId> {
+    if state.active_simultaneous_entrants.contains(&entrant) {
+        return state.active_simultaneous_entrants.clone();
+    }
+    state
+        .resolution_stack
+        .paused_owner_group_of(entrant)
+        .map(|group| {
+            group
+                .prospective_entrants
+                .iter()
+                .map(|member| member.identity.object_id)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// CR 603.10a + CR 616.1: shared batch delivery loop. Runs each request through
 /// `move_object_with_terminal`; on a pause, parks the prompt and stashes the
 /// undelivered tail with each request's exact heterogeneous context. The exact
@@ -1618,8 +1665,10 @@ fn deliver_batch(
         let member_stack_start = state.resolution_stack.capture_child_boundary();
         let object_id = req.object_id;
         // CR 508.4: the batch owner resumes a paused member and takes its stamp.
-        match move_object_with_attack_seat(state, req, PausedEntryAttackSeat::ResumingOwner, events)
-        {
+        // CR 603.6a: the member is delivered as part of the batch's one event.
+        match deliver_simultaneous_member(state, &logical_zone_change_group, |state| {
+            move_object_with_attack_seat(state, req, PausedEntryAttackSeat::ResumingOwner, events)
+        }) {
             ZoneMoveTerminalResult::Completed(completion) => {
                 logical_zone_change_group
                     .record_delivery_completion(object_id, completion)
@@ -8589,5 +8638,84 @@ mod effect_driven_entry_noop_tests {
 
         assert!(matches!(result, ZoneMoveResult::Done), "the move completed");
         assert!(events.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod simultaneous_entry_tests {
+    //! CR 603.6a + CR 603.6d + CR 614.12a: the publication of a simultaneous
+    //! zone change's prospective entrants while one member is delivered inline,
+    //! and the read of a parked owner's change from its frame.
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::identifiers::CardId;
+    use crate::types::resolution::ResolutionFrame;
+
+    /// U-C2. Inside a member's delivery the change's entrants are published and
+    /// a nested change restores them when it returns; outside every delivery
+    /// they are empty; a parked batch owner answers for its paused member only.
+    /// The nested restore has no printed route (no roller's continuation runs a
+    /// simultaneous change), so it is covered here alone.
+    #[test]
+    fn simultaneous_entrants_come_from_the_publication_or_the_parked_owner() {
+        let mut state = GameState::new_two_player(42);
+        let [a, b, c] = [1, 2, 3].map(|n| {
+            create_object(
+                &mut state,
+                CardId(n),
+                PlayerId(0),
+                format!("Card {n}"),
+                Zone::Hand,
+            )
+        });
+        let group = state.allocate_logical_zone_change_group(&[a, b]);
+        let empty = state.allocate_logical_zone_change_group(&[]);
+
+        let (outer, nested, restored) = deliver_simultaneous_member(&mut state, &group, |state| {
+            let outer = simultaneous_entrants_of(state, b);
+            let nested = deliver_simultaneous_member(state, &empty, |state| {
+                simultaneous_entrants_of(state, b)
+            });
+            (outer, nested, simultaneous_entrants_of(state, b))
+        });
+        assert_eq!(outer, vec![a, b]);
+        assert!(nested.is_empty(), "the nested change publishes its own");
+        assert_eq!(restored, vec![a, b], "the outer publication is restored");
+        assert!(
+            state.active_simultaneous_entrants.is_empty(),
+            "nothing is published after the delivery returns"
+        );
+        assert!(simultaneous_entrants_of(&state, b).is_empty());
+
+        let paused = PendingZoneChangeDelivery::new(
+            ObjectIncarnationRef::from_object(&state.objects[&b]),
+            ProposedEvent::zone_change(b, Zone::Hand, Zone::Battlefield, None),
+        );
+        state
+            .resolution_stack
+            .push_inner(ResolutionFrame::BatchDelivery(Box::new(
+                PendingBatchDeliveries {
+                    logical_zone_change_group: group,
+                    paused_current: Some(paused),
+                    remaining: Vec::new(),
+                    destination: Zone::Battlefield,
+                    source_id: None,
+                    enter_tapped: EtbTapState::Unspecified,
+                    exile_tracking: ZoneDeliveryExileTracking::None,
+                    library_placement: None,
+                    completion: None,
+                    replacement_applied: HashSet::new(),
+                    requests: Vec::new(),
+                    attempted: Vec::new(),
+                    zone_change_record_start: 0,
+                    deferred_events: Vec::new(),
+                },
+            )));
+        assert_eq!(simultaneous_entrants_of(&state, b), vec![a, b]);
+        assert!(
+            simultaneous_entrants_of(&state, a).is_empty(),
+            "the parked owner answers for its paused member"
+        );
+        assert!(simultaneous_entrants_of(&state, c).is_empty());
     }
 }

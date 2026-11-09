@@ -2475,6 +2475,7 @@ mod tests {
         let mut logical_zone_change_group = crate::types::game_state::LogicalZoneChangeGroup::new(
             crate::types::identifiers::LogicalZoneChangeGroupId(1),
             Vec::new(),
+            Vec::new(),
         );
         logical_zone_change_group
             .latch_immediately_before(Vec::new(), Vec::new())

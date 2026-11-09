@@ -3686,6 +3686,11 @@ pub struct LatchedSuppressTrigger {
 pub struct LogicalZoneChangeGroup {
     pub logical_group_id: LogicalZoneChangeGroupId,
     pub prospective_battlefield_members: Vec<LogicalZoneChangeProspectiveMember>,
+    /// CR 603.6a: the announced members that were not on the battlefield when
+    /// this zone change was announced. The permanents this one event puts onto
+    /// the battlefield are among them (CR 603.6d + CR 614.12a: each one's
+    /// as-enters effects are part of that event).
+    pub prospective_entrants: Vec<LogicalZoneChangeProspectiveMember>,
     pub terminal_outcomes: Vec<LogicalZoneChangeTerminalOutcome>,
     /// Exact post-delivery authority for prospective members that remained on
     /// the battlefield. A later same-ID incarnation cannot stand in for this
@@ -3714,6 +3719,7 @@ pub struct LogicalZoneChangeGroup {
 struct LogicalZoneChangeGroupWire {
     logical_group_id: LogicalZoneChangeGroupId,
     prospective_battlefield_members: Vec<LogicalZoneChangeProspectiveMember>,
+    prospective_entrants: Vec<LogicalZoneChangeProspectiveMember>,
     terminal_outcomes: Vec<LogicalZoneChangeTerminalOutcome>,
     post_event_member_contexts: Vec<Option<TriggerSourceContext>>,
     all_origin_occurrences: Vec<LogicalZoneChangeOccurrence>,
@@ -3730,6 +3736,7 @@ impl From<LogicalZoneChangeGroupWire> for LogicalZoneChangeGroup {
         Self {
             logical_group_id: wire.logical_group_id,
             prospective_battlefield_members: wire.prospective_battlefield_members,
+            prospective_entrants: wire.prospective_entrants,
             terminal_outcomes: wire.terminal_outcomes,
             post_event_member_contexts: wire.post_event_member_contexts,
             all_origin_occurrences: wire.all_origin_occurrences,
@@ -3776,6 +3783,28 @@ impl LogicalZoneChangeGroup {
                 return Err(format!(
                     "logical zone-change member {}:{} was announced more than once",
                     member.identity.object_id.0, member.identity.incarnation
+                ));
+            }
+        }
+        for (index, entrant) in self.prospective_entrants.iter().enumerate() {
+            if self.prospective_entrants[..index]
+                .iter()
+                .any(|prior| prior.identity == entrant.identity)
+            {
+                return Err(format!(
+                    "logical zone-change entrant {}:{} was announced more than once",
+                    entrant.identity.object_id.0, entrant.identity.incarnation
+                ));
+            }
+            // One announced object was either on the battlefield or not.
+            if self
+                .prospective_battlefield_members
+                .iter()
+                .any(|member| member.identity.object_id == entrant.identity.object_id)
+            {
+                return Err(format!(
+                    "logical zone-change object {} is both a battlefield member and an entrant",
+                    entrant.identity.object_id.0
                 ));
             }
         }
@@ -3962,6 +3991,7 @@ impl LogicalZoneChangeGroup {
     pub fn new(
         logical_group_id: LogicalZoneChangeGroupId,
         prospective_battlefield_members: Vec<LogicalZoneChangeProspectiveMember>,
+        prospective_entrants: Vec<LogicalZoneChangeProspectiveMember>,
     ) -> Self {
         let terminal_outcomes = prospective_battlefield_members
             .iter()
@@ -3974,6 +4004,7 @@ impl LogicalZoneChangeGroup {
         Self {
             logical_group_id,
             prospective_battlefield_members,
+            prospective_entrants,
             terminal_outcomes,
             post_event_member_contexts,
             all_origin_occurrences: Vec::new(),
@@ -23924,6 +23955,13 @@ declare_game_state! {
     // (`..GameState::default()`) in sibling engine modules requires access.
     #[serde(skip)]
     pub(crate) active_rules_execution_node: Option<RulesExecutionNodeRef>,
+    /// CR 603.6a: the prospective entrants of the simultaneous zone change whose
+    /// member a logical owner is delivering inline
+    /// (`zone_pipeline::deliver_simultaneous_member`). Empty outside that
+    /// synchronous window. A parked owner's change is read from its frame
+    /// instead. Never serialized and never compared.
+    #[serde(skip)]
+    pub(crate) active_simultaneous_entrants: Vec<ObjectId>,
     /// CR 601.2a: transient copy of the object-attached casting permission
     /// identity while finalization owns the `PendingCast` by value. Payment
     /// consults it only inside that synchronous window; it is never serialized.
@@ -32903,7 +32941,8 @@ impl GameState {
     /// any member is delivered. Only objects on the battlefield at this exact
     /// point become prospective battlefield members; nonbattlefield actions
     /// still receive an owner with an empty member list so their all-origin
-    /// occurrence authority is retained.
+    /// occurrence authority is retained. CR 603.6a: every announced object off
+    /// the battlefield at this point is a prospective entrant of the one event.
     pub fn allocate_logical_zone_change_group(
         &mut self,
         announced_members: &[ObjectId],
@@ -32913,19 +32952,28 @@ impl GameState {
             .next_logical_zone_change_group_id
             .checked_add(1)
             .expect("logical zone-change group allocator exhausted");
-        let prospective_battlefield_members = announced_members
+        let mut prospective_battlefield_members = Vec::new();
+        let mut prospective_entrants = Vec::new();
+        for object in announced_members
             .iter()
             .filter_map(|object_id| self.objects.get(object_id))
-            .filter(|object| {
+        {
+            let member = LogicalZoneChangeProspectiveMember {
+                identity: ObjectIncarnationRef::from_object(object),
+            };
+            if object.zone != Zone::Battlefield {
+                prospective_entrants.push(member);
+            } else if self.battlefield.contains(&object.id) {
                 // CR 730.2: an absorbed component represents the merged
                 // permanent, not an independent battlefield member.
-                object.zone == Zone::Battlefield && self.battlefield.contains(&object.id)
-            })
-            .map(|object| LogicalZoneChangeProspectiveMember {
-                identity: ObjectIncarnationRef::from_object(object),
-            })
-            .collect();
-        LogicalZoneChangeGroup::new(logical_group_id, prospective_battlefield_members)
+                prospective_battlefield_members.push(member);
+            }
+        }
+        LogicalZoneChangeGroup::new(
+            logical_group_id,
+            prospective_battlefield_members,
+            prospective_entrants,
+        )
     }
 
     /// Capture the live ChaCha20 stream offset into `rng_word_pos` so it
@@ -34183,6 +34231,7 @@ impl GameState {
             ability_onset_record: AbilityOnsetRecord::Recorded,
             active_payment_pins: Vec::new(),
             active_rules_execution_node: None,
+            active_simultaneous_entrants: Vec::new(),
             active_casting_permission_index: None,
             active_graveyard_permission_latch: None,
             active_paid_resolution_offer_tail: None,
@@ -37977,6 +38026,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         ability_onset_record: _,
         active_payment_pins: _,
         active_rules_execution_node: _,
+        active_simultaneous_entrants: _,
         active_casting_permission_index: _,
         active_graveyard_permission_latch: _,
         active_paid_resolution_offer_tail: _,
@@ -54996,7 +55046,7 @@ mod tests {
     #[test]
     fn change_zone_iteration_modern_shape_roundtrips() {
         let mut logical_zone_change_group =
-            LogicalZoneChangeGroup::new(LogicalZoneChangeGroupId(1), Vec::new());
+            LogicalZoneChangeGroup::new(LogicalZoneChangeGroupId(1), Vec::new(), Vec::new());
         logical_zone_change_group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("empty immediately-before authority is still explicitly latched");
@@ -55178,6 +55228,109 @@ mod tests {
         assert!(group.all_origin_occurrences.is_empty());
     }
 
+    /// U-C1. CR 603.6a: every announced object off the battlefield is a
+    /// prospective entrant of the one event, with its incarnation; a battlefield
+    /// object is a battlefield member; an absorbed component (CR 730.2) and an
+    /// absent id are neither. The entrant list is required wire authority, and a
+    /// duplicate or an object in both lists is refused.
+    #[test]
+    fn logical_zone_change_group_latches_its_prospective_entrants() {
+        let mut state = GameState::new_two_player(19);
+        let battlefield_id = ObjectId(81);
+        let library_id = ObjectId(82);
+        let absorbed_id = ObjectId(83);
+        let absent_id = ObjectId(84);
+        let mut battlefield = GameObject::new(
+            battlefield_id,
+            CardId(81),
+            PlayerId(0),
+            "battlefield member".to_string(),
+            Zone::Battlefield,
+        );
+        battlefield.incarnation = 4;
+        let mut library = GameObject::new(
+            library_id,
+            CardId(82),
+            PlayerId(0),
+            "library entrant".to_string(),
+            Zone::Library,
+        );
+        library.incarnation = 9;
+        let absorbed = GameObject::new(
+            absorbed_id,
+            CardId(83),
+            PlayerId(0),
+            "absorbed component".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(battlefield_id, battlefield);
+        state.objects.insert(library_id, library);
+        state.objects.insert(absorbed_id, absorbed);
+        state.battlefield.push_back(battlefield_id);
+
+        let mut group = state.allocate_logical_zone_change_group(&[
+            battlefield_id,
+            library_id,
+            absorbed_id,
+            absent_id,
+        ]);
+
+        assert_eq!(
+            group.prospective_battlefield_members,
+            vec![LogicalZoneChangeProspectiveMember {
+                identity: ObjectIncarnationRef::of(battlefield_id, 4),
+            }]
+        );
+        assert_eq!(
+            group.prospective_entrants,
+            vec![LogicalZoneChangeProspectiveMember {
+                identity: ObjectIncarnationRef::of(library_id, 9),
+            }]
+        );
+
+        group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("the test group owns an explicit pre-delivery latch");
+        let wire = serde_json::to_value(&group).expect("the group serializes");
+        let roundtripped: LogicalZoneChangeGroup =
+            serde_json::from_value(wire.clone()).expect("the group deserializes");
+        assert_eq!(roundtripped, group);
+
+        let mut legacy = wire;
+        legacy
+            .as_object_mut()
+            .expect("the group is a JSON object")
+            .remove("prospective_entrants")
+            .expect("reach: the entrant list is on the wire");
+        assert!(
+            serde_json::from_value::<LogicalZoneChangeGroup>(legacy).is_err(),
+            "a group without its entrant list is refused"
+        );
+
+        let rejects_on_wire = |candidate: LogicalZoneChangeGroup, reason: &str| {
+            let wire = serde_json::to_value(candidate).expect("malformed group still serializes");
+            assert!(
+                serde_json::from_value::<LogicalZoneChangeGroup>(wire).is_err(),
+                "wire boundary must reject {reason}"
+            );
+        };
+        let mut duplicate_entrant = group.clone();
+        duplicate_entrant
+            .prospective_entrants
+            .push(duplicate_entrant.prospective_entrants[0]);
+        rejects_on_wire(duplicate_entrant, "a duplicate prospective entrant");
+        let mut overlapping = group.clone();
+        overlapping
+            .prospective_entrants
+            .push(LogicalZoneChangeProspectiveMember {
+                identity: ObjectIncarnationRef::of(battlefield_id, 5),
+            });
+        rejects_on_wire(
+            overlapping,
+            "an object both a battlefield member and an entrant",
+        );
+    }
+
     #[test]
     fn logical_zone_change_group_retains_actual_events_and_terminal_outcomes() {
         let mut first = GameObject::new(
@@ -55224,6 +55377,7 @@ mod tests {
                     identity: ObjectIncarnationRef::from_object(&remained),
                 },
             ],
+            Vec::new(),
         );
         group
             .latch_immediately_before(Vec::new(), Vec::new())
@@ -55473,6 +55627,7 @@ mod tests {
                     identity: ObjectIncarnationRef::from_object(&second),
                 },
             ],
+            Vec::new(),
         );
         group
             .latch_immediately_before(Vec::new(), Vec::new())
@@ -59348,6 +59503,7 @@ mod restored_exact_attack_authority_tests {
                 5 => {
                     let mut group = LogicalZoneChangeGroup::new(
                         crate::types::identifiers::LogicalZoneChangeGroupId(1),
+                        Vec::new(),
                         Vec::new(),
                     );
                     group

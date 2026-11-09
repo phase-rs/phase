@@ -24,16 +24,17 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     AbilityOnsetRecord, ChangeZoneMemberEntry, CostResume, DrainStatus, DrawSequenceStack,
-    GameState, GameStateDecode, GameStateDecodeMode, ParentTargetOccurrences, PayCostKind,
-    PendingBatchDeliveries, PendingChangeZoneIteration, PendingChooseOneOf, PendingConniveReentry,
-    PendingContinuation, PendingCopyTokenResolution, PendingCounterAdditionQueue,
-    PendingCounterMoveQueue, PendingCounterRemoval, PendingCounterRemovalInFlight,
-    PendingCounterRemovalQueue, PendingDebugCardEntries, PendingEachPlayerCopyChosen,
-    PendingLifeTotalAssignment, PendingMultiDraw, PendingPerCategoryZoneChoice,
-    PendingPerPlayerZoneChoice, PendingRepeatIteration, PendingRepeatUntil, PendingSpellResolution,
-    PendingVoteBallotIteration, PostReplacementDrain, PostReplacementDrainDispatch,
-    PostReplacementDrainStack, PostReplacementFrameId, RepeatIterationChoice, ResidentDrainPolicy,
-    ResolvingTriggerContext, WaitingFor, ABILITY_ONSET_RECORD_FIELD,
+    GameState, GameStateDecode, GameStateDecodeMode, LogicalZoneChangeGroup,
+    ParentTargetOccurrences, PayCostKind, PendingBatchDeliveries, PendingChangeZoneIteration,
+    PendingChooseOneOf, PendingConniveReentry, PendingContinuation, PendingCopyTokenResolution,
+    PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemoval,
+    PendingCounterRemovalInFlight, PendingCounterRemovalQueue, PendingDebugCardEntries,
+    PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingMultiDraw,
+    PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingRepeatIteration,
+    PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
+    PostReplacementDrainDispatch, PostReplacementDrainStack, PostReplacementFrameId,
+    RepeatIterationChoice, ResidentDrainPolicy, ResolvingTriggerContext, WaitingFor,
+    ABILITY_ONSET_RECORD_FIELD,
 };
 use crate::types::identifiers::{DiscardFrameId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -2962,6 +2963,33 @@ impl ResolutionStack {
             }
         }
         held
+    }
+
+    /// CR 603.6a + CR 614.12a: the change that a parked logical owner anywhere
+    /// on the stack is delivering `member` into. The owner can sit beneath the
+    /// member's `PostReplacement` frame and the frames it raised.
+    pub(crate) fn paused_owner_group_of(
+        &self,
+        member: ObjectId,
+    ) -> Option<&LogicalZoneChangeGroup> {
+        self.frames.iter().find_map(|frame| match frame {
+            ResolutionFrame::ChangeZone(frame) => frame
+                .pending
+                .as_ref()
+                .filter(|pending| {
+                    pending
+                        .paused_current
+                        .as_ref()
+                        .is_some_and(|paused| paused.member.object_id == member)
+                })
+                .map(|pending| &pending.logical_zone_change_group),
+            ResolutionFrame::BatchDelivery(pending) => pending
+                .paused_current
+                .as_ref()
+                .is_some_and(|paused| paused.member.object_id == member)
+                .then_some(&pending.logical_zone_change_group),
+            _ => None,
+        })
     }
 
     /// CR 603.6d + CR 614.12a: is `entrant` bound to the resident of any

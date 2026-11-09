@@ -18,6 +18,7 @@
 //! Monoxa, Pixie Guide, Tayam, Rhythm of the Wild, Stolen Identity, Fathom Mage and
 //! Storm the Festival carry only the lines under test, and Rite of the Moth its
 //! first line, without its flashback.
+//! Ever After, Myojin of Life's Web, Oblation and Llanowar Elves are verbatim.
 //! Dice-dependent rows choose their RNG seed by search and assert against the
 //! emitted `DieRolled` results, never a hard-coded total.
 
@@ -108,6 +109,11 @@ const WINDING_CONSTRICTOR: &str = "If one or more counters would be put on an ar
 const RITE_OF_THE_MOTH: &str = "Return target creature card from your graveyard to the battlefield with a finality counter on it. (If a creature with a finality counter on it would die, exile it instead.)";
 const GRIM_REAPER_LETHAL_LEGIONNAIRE: &str = "Whenever Grim Reaper attacks, you may pay {3}{B}. When you do, return target creature card from your graveyard to the battlefield tapped and attacking with a finality counter on it. (If a creature with a finality counter on it would die, exile it instead.)";
 const POLYMORPH: &str = "Destroy target creature. It can't be regenerated. Its controller reveals cards from the top of their library until they reveal a creature card. The player puts that card onto the battlefield, then shuffles all other cards revealed this way into their library.";
+const OBLATION: &str =
+    "The owner of target nonland permanent shuffles it into their library, then draws two cards.";
+const LLANOWAR_ELVES: &str = "{T}: Add {G}.";
+const EVER_AFTER: &str = "Return up to two target creature cards from your graveyard to the battlefield. Each of those creatures is a black Zombie in addition to its other colors and types. Put Ever After on the bottom of its owner's library.";
+const MYOJIN_OF_LIFES_WEB: &str = "Myojin of Life's Web enters with a divinity counter on it if you cast it from your hand.\nMyojin of Life's Web has indestructible as long as it has a divinity counter on it.\nRemove a divinity counter from Myojin of Life's Web: Put any number of creature cards from your hand onto the battlefield.";
 
 /// The scenario module exports only `P0` and `P1`.
 const P2: PlayerId = PlayerId(2);
@@ -6345,28 +6351,53 @@ fn a_newcomer_does_not_see_an_earlier_members_roll() {
 /// battlefield with Brazen Dwarf resident + CR 603.2 + CR 603.2c + CR 113.6: each
 /// as-enters roll is its own instruction, so the resident Dwarf triggers twice.
 /// The later Hammer Jammer is not on the battlefield at the earlier roll, and its
-/// own roll is made before it enters, so it sees neither. Whether the earlier
-/// Hammer Jammer sees the later roll is the sequential-batch presence, not
-/// asserted (filed: co-entry simultaneity).
+/// own roll is made before it enters, so it sees neither. CR 603.6a +
+/// CR 603.6d: the two enter in one event, so the earlier Hammer Jammer is not
+/// an observer of the later one's roll either, and each keeps its own result.
+/// The seed is the first whose two rolls differ, so a counter replaced by the
+/// other Jammer's roll is visible.
 #[test]
 fn each_as_enters_roll_of_a_batch_is_its_own_instruction() {
+    let two_jammers = |seed| {
+        let mut scenario = board(seed);
+        let first = jammer_card(&mut scenario);
+        let second = jammer_card(&mut scenario);
+        let festival = newcomer_festival(scenario, no_extras, true, &[first, second]);
+        (festival, first, second)
+    };
+    let seed = find_seed("two differing batch rolls", |seed| {
+        let (mut board, first, second) = two_jammers(seed);
+        let mut events = Vec::new();
+        festival_keeps(
+            &mut board.runner,
+            board.festival,
+            vec![first, second],
+            &mut events,
+        );
+        settle(&mut board.runner, &mut events, DEFAULT_ANSWERS);
+        let rolls = die_results(&events);
+        rolls.len() == 2 && rolls[0] != rolls[1]
+    });
     reset_triggers_seen();
-    let mut scenario = board(7);
-    let first = jammer_card(&mut scenario);
-    let second = jammer_card(&mut scenario);
+    let (board, first, second) = two_jammers(seed);
     let NewcomerFestival {
         mut runner,
         warden,
         resident_dwarf,
         festival,
         ..
-    } = newcomer_festival(scenario, no_extras, true, &[first, second]);
+    } = board;
     let dwarf = resident_dwarf.expect("the resident Dwarf");
     let p0_before = life(runner.state(), P0);
     let mut events = Vec::new();
     festival_keeps(&mut runner, festival, vec![first, second], &mut events);
     settle(&mut runner, &mut events, DEFAULT_ANSWERS);
     let state = runner.state();
+    assert_eq!(
+        triggers_seen_from(first),
+        0,
+        "the earlier entrant enters with the later roll, so it does not see it"
+    );
     assert_eq!(
         triggers_seen_from(second),
         0,
@@ -6388,9 +6419,15 @@ fn each_as_enters_roll_of_a_batch_is_its_own_instruction() {
         .collect();
     assert_eq!(rollers, vec![Some(first), Some(second)]);
     let rolls = die_results(&events);
-    assert_eq!(plus_counters(state, second), rolls[1]);
+    assert_ne!(rolls[0], rolls[1], "reach: the seed's rolls differ");
+    assert_eq!(
+        plus_counters(state, first),
+        rolls[0],
+        "the earlier Jammer keeps its own roll, {rolls:?}"
+    );
+    assert_eq!(plus_counters(state, second), rolls[1], "{rolls:?}");
     assert_eq!(life(state, P0), p0_before + 2, "Warden twice");
-    assert_finished(state, &[dwarf, warden], "R9");
+    assert_finished(state, &[first, second, dwarf, warden], "R9");
 }
 
 /// R13 (F1-b, Devour, no owner). Ilharg, the Raze-Boar puts Thunder-Thrash Elder
@@ -6843,4 +6880,704 @@ fn a_reveal_until_kept_cards_keep_choice_owns_the_top_of_the_stack() {
     assert_eq!(reveal_until_resolved_for(&events, polymorph), 1);
     assert_eq!(zone(state, victim), Zone::Graveyard);
     assert_finished(state, &[dwarf, warden], "R18");
+}
+
+// ---------------------------------------------------------------------------
+// Simultaneous co-entrants (review 5 F2) and held contexts in projections (F1)
+// ---------------------------------------------------------------------------
+
+/// The member a parked logical owner (a `ChangeZone` or `BatchDelivery` frame)
+/// is delivering, wherever that owner sits on the stack.
+fn paused_owner_member(state: &GameState) -> Option<ObjectId> {
+    state.resolution_stack.iter().find_map(|frame| match frame {
+        ResolutionFrame::ChangeZone(frame) => frame
+            .pending
+            .as_ref()
+            .and_then(|pending| pending.paused_current.as_ref())
+            .map(|paused| paused.member.object_id),
+        ResolutionFrame::BatchDelivery(pending) => pending
+            .paused_current
+            .as_ref()
+            .map(|paused| paused.member.object_id),
+        _ => None,
+    })
+}
+
+fn first_roll_index(events: &[GameEvent]) -> usize {
+    events
+        .iter()
+        .position(|event| matches!(event, GameEvent::DieRolled { .. }))
+        .expect("Hammer Jammer rolled")
+}
+
+/// R20's cases: where Hammer Jammer's as-enters roll is made relative to the
+/// batch owner's pauses.
+#[derive(Clone, Copy, Debug)]
+enum CoEntry {
+    /// No replacement: the batch delivers both members inline.
+    Inline,
+    /// Grumgully, the Generous: the entry's ordering prompt parks the batch,
+    /// its frame on top when the roll is made.
+    Ordered,
+    /// Barbarian Class: a tie parks the batch beneath the roll's child stack.
+    Tied,
+    /// Hardened Scales and Branching Evolution: the roll is made inline, then the
+    /// counter prompt pauses.
+    CounterPrompt,
+}
+
+impl CoEntry {
+    const ALL: [CoEntry; 4] = [
+        CoEntry::Inline,
+        CoEntry::Ordered,
+        CoEntry::Tied,
+        CoEntry::CounterPrompt,
+    ];
+
+    fn extras(self) -> fn(&mut GameScenario) {
+        match self {
+            CoEntry::Inline => no_extras,
+            CoEntry::Ordered => add_grumgully,
+            CoEntry::Tied => add_barbarian_class,
+            CoEntry::CounterPrompt => add_counter_replacements,
+        }
+    }
+
+    fn counter_pick(self) -> Option<FirstPick> {
+        match self {
+            CoEntry::CounterPrompt => Some(FirstPick::Scales),
+            CoEntry::Inline | CoEntry::Ordered | CoEntry::Tied => None,
+        }
+    }
+}
+
+/// Storm the Festival over a Brazen Dwarf card, then Hammer Jammer, with a
+/// resident Brazen Dwarf and `case`'s replacements.
+fn co_entry_festival(seed: u64, case: CoEntry) -> (NewcomerFestival, ObjectId, ObjectId) {
+    let mut scenario = board(seed);
+    let newcomer = dwarf_card(&mut scenario);
+    let jammer = jammer_card(&mut scenario);
+    let festival = newcomer_festival(scenario, case.extras(), true, &[newcomer, jammer]);
+    (festival, newcomer, jammer)
+}
+
+fn run_co_entry(case: CoEntry) {
+    let what = format!("{case:?}");
+    let seed = match case {
+        CoEntry::Tied => find_seed("a co-entrant's tie", |seed| {
+            let (mut board, newcomer, jammer) = co_entry_festival(seed, case);
+            festival_keeps(
+                &mut board.runner,
+                board.festival,
+                vec![newcomer, jammer],
+                &mut Vec::new(),
+            );
+            tie_prompt_results(board.runner.state()).is_some()
+        }),
+        CoEntry::Inline | CoEntry::Ordered | CoEntry::CounterPrompt => 7,
+    };
+    reset_triggers_seen();
+    let (board, newcomer, jammer) = co_entry_festival(seed, case);
+    let NewcomerFestival {
+        mut runner,
+        warden,
+        resident_dwarf,
+        festival,
+        box_of_goblins,
+    } = board;
+    let resident = resident_dwarf.expect("the resident Dwarf");
+    let p1_before = life(runner.state(), P1);
+    let p0_before = life(runner.state(), P0);
+    let mut events = Vec::new();
+    festival_keeps(&mut runner, festival, vec![newcomer, jammer], &mut events);
+    let expected_counters = match case {
+        CoEntry::Inline => {
+            settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+            die_results(&events)[0]
+        }
+        CoEntry::Ordered => {
+            let state = runner.state();
+            assert_eq!(
+                stack_frames(state),
+                vec![FrameKind::BatchDelivery],
+                "{what}"
+            );
+            assert_eq!(paused_owner_member(state), Some(jammer), "{what}");
+            assert_eq!(zone(state, newcomer), Zone::Battlefield, "{what}");
+            assert!(die_results(&events).is_empty(), "{what}: the roll follows");
+            order_entry(&mut runner, "Hammer Jammer", &mut events);
+            settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+            die_results(&events)[0] + 1
+        }
+        CoEntry::Tied => {
+            let state = runner.state();
+            assert_eq!(
+                stack_frames(state),
+                vec![
+                    FrameKind::BatchDelivery,
+                    FrameKind::PostReplacement,
+                    FrameKind::AbilityContinuation,
+                    FrameKind::DieRoll,
+                ],
+                "{what}"
+            );
+            assert_eq!(paused_owner_member(state), Some(jammer), "{what}");
+            assert_eq!(zone(state, newcomer), Zone::Battlefield, "{what}");
+            let naturals = answer_tie(&mut runner, &mut events);
+            settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+            survivors_total(&naturals)
+        }
+        CoEntry::CounterPrompt => {
+            let pick = case.counter_pick().expect("a counter pick");
+            let settled = settle_picking(&mut runner, &mut events, pick);
+            assert_eq!(
+                settled.counter_prompts, 1,
+                "{what}: reach the counter prompt"
+            );
+            pick.counters(die_results(&events)[0])
+        }
+    };
+    let state = runner.state();
+    let newcomer_entry = battlefield_entry_index(&events, newcomer).expect("Brazen Dwarf entered");
+    assert!(
+        newcomer_entry < first_roll_index(&events),
+        "{what}: the co-entrant is delivered before the roll"
+    );
+    assert_eq!(
+        triggers_seen_from(newcomer),
+        0,
+        "{what}: the co-entrant enters with the roll's event, so it does not see the roll"
+    );
+    assert_eq!(
+        p1_before - life(state, P1),
+        1,
+        "{what}: only the resident Dwarf deals damage"
+    );
+    assert_eq!(
+        triggers_seen_from(resident),
+        1,
+        "{what}: reach: the resident sees the roll"
+    );
+    assert_eq!(triggers_seen_from(jammer), 0, "{what}");
+    assert_eq!(zone(state, jammer), Zone::Battlefield, "{what}");
+    assert_eq!(
+        plus_counters(state, jammer),
+        expected_counters,
+        "{what}: {:?}",
+        die_results(&events)
+    );
+    assert_eq!(life(state, P0), p0_before + 2, "{what}: Warden twice");
+
+    let p1_before_box = life(state, P1);
+    let _ = take_triggers_seen_from(jammer);
+    cast_box_and_settle(&mut runner, box_of_goblins, case.counter_pick());
+    let state = runner.state();
+    assert_eq!(
+        p1_before_box - life(state, P1),
+        2,
+        "{what}: both Dwarves see a later roll"
+    );
+    assert_eq!(
+        triggers_seen_from(jammer),
+        1,
+        "{what}: Hammer Jammer sees the Box's roll"
+    );
+    assert_finished(state, &[newcomer, resident, warden], &what);
+}
+
+/// R20 (review 5 F2). Storm the Festival puts a Brazen Dwarf card, then Hammer
+/// Jammer, onto the battlefield, with Brazen Dwarf resident + CR 603.6a +
+/// CR 603.6d + CR 614.12a: the two enter in one event, and Hammer Jammer's roll is
+/// part of that event, so the earlier-delivered Dwarf is not an observer of it
+/// (CR 113.6). The resident sees it once (CR 603.2), and a later roll triggers
+/// both Dwarves. (a) inline; (b) behind Grumgully's ordering prompt, the batch's
+/// frame on top; (c) Barbarian Class's tie, the batch beneath the roll's child
+/// stack; (d) the inline roll, then the counter prompt.
+#[test]
+fn a_co_entrant_does_not_see_a_later_members_roll() {
+    for case in CoEntry::ALL {
+        run_co_entry(case);
+    }
+}
+
+/// A co-entry row's board: `spell` puts the newcomer Brazen Dwarf and Hammer
+/// Jammer onto the battlefield, with a resident Brazen Dwarf.
+struct CoEntryBoard {
+    runner: GameRunner,
+    spell: ObjectId,
+    newcomer: ObjectId,
+    jammer: ObjectId,
+    resident: ObjectId,
+}
+
+fn graveyard_dwarf(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_to_graveyard(P0, "Brazen Dwarf", 1, 3)
+        .from_oracle_text(BRAZEN_DWARF)
+        .id()
+}
+
+fn graveyard_pair(scenario: &mut GameScenario, dwarf_first: bool) -> (ObjectId, ObjectId) {
+    if dwarf_first {
+        let newcomer = graveyard_dwarf(scenario);
+        let jammer = graveyard_creature(scenario, "Hammer Jammer", HAMMER_JAMMER);
+        (newcomer, jammer)
+    } else {
+        let jammer = graveyard_creature(scenario, "Hammer Jammer", HAMMER_JAMMER);
+        (graveyard_dwarf(scenario), jammer)
+    }
+}
+
+/// Rise of the Dark Realms, free in P0's hand, over Brazen Dwarf and Hammer
+/// Jammer in P0's graveyard (the Dwarf staged, so delivered, first when
+/// `dwarf_first`), with a resident Brazen Dwarf and `extras`.
+fn rise_board(seed: u64, dwarf_first: bool, extras: fn(&mut GameScenario)) -> CoEntryBoard {
+    let mut scenario = board(seed);
+    extras(&mut scenario);
+    let (newcomer, jammer) = graveyard_pair(&mut scenario, dwarf_first);
+    let resident = add_dwarf(&mut scenario);
+    let spell = free_spell(
+        &mut scenario,
+        "Rise of the Dark Realms",
+        false,
+        RISE_OF_THE_DARK_REALMS,
+    );
+    CoEntryBoard {
+        runner: scenario.build(),
+        spell,
+        newcomer,
+        jammer,
+        resident,
+    }
+}
+
+/// Ever After, free in P0's hand, targeting Brazen Dwarf and Hammer Jammer in
+/// P0's graveyard, with a resident Brazen Dwarf and `extras`.
+fn ever_after_board(seed: u64, extras: fn(&mut GameScenario)) -> CoEntryBoard {
+    let mut scenario = board(seed);
+    extras(&mut scenario);
+    let (newcomer, jammer) = graveyard_pair(&mut scenario, true);
+    let resident = add_dwarf(&mut scenario);
+    let spell = free_spell(&mut scenario, "Ever After", false, EVER_AFTER);
+    CoEntryBoard {
+        runner: scenario.build(),
+        spell,
+        newcomer,
+        jammer,
+        resident,
+    }
+}
+
+fn cast_ever_after(board: &mut CoEntryBoard, targets: &[ObjectId], events: &mut Vec<GameEvent>) {
+    let commit = board
+        .runner
+        .cast(board.spell)
+        .target_objects(targets)
+        .commit();
+    events.extend(commit.events().iter().cloned());
+    drop(commit);
+    pass_until_prompt(&mut board.runner, events);
+}
+
+/// The settled readings of a co-entry row whose Hammer Jammer enters with
+/// `extra` counters beyond its roll: the co-entrant does not see the roll, the
+/// resident sees it once, and P1 is dealt 1 damage.
+fn assert_co_entry_settled(
+    board: &CoEntryBoard,
+    events: &[GameEvent],
+    p1_before: i32,
+    extra: u32,
+    what: &str,
+) {
+    let state = board.runner.state();
+    assert_eq!(zone(state, board.newcomer), Zone::Battlefield, "{what}");
+    assert_eq!(zone(state, board.jammer), Zone::Battlefield, "{what}");
+    assert_eq!(
+        triggers_seen_from(board.newcomer),
+        0,
+        "{what}: a co-entrant does not see the roll"
+    );
+    assert_eq!(
+        p1_before - life(state, P1),
+        1,
+        "{what}: only the resident Dwarf deals damage"
+    );
+    assert_eq!(
+        triggers_seen_from(board.resident),
+        1,
+        "{what}: reach: the resident sees the roll"
+    );
+    assert_eq!(triggers_seen_from(board.jammer), 0, "{what}");
+    let rolls = die_results(events);
+    assert_eq!(rolls.len(), 1, "{what}");
+    assert_eq!(
+        plus_counters(state, board.jammer),
+        rolls[0] + extra,
+        "{what}"
+    );
+    assert_finished(state, &[board.newcomer, board.resident], what);
+}
+
+/// R21 (review 5 F2, the mass owner). Rise of the Dark Realms puts Brazen Dwarf
+/// and Hammer Jammer from P0's graveyard onto the battlefield + CR 603.6a +
+/// CR 603.6d + CR 113.6: they enter in one event, so neither Dwarf delivery order
+/// lets the newcomer see Hammer Jammer's roll. The resident Dwarf sees it once.
+#[test]
+fn a_mass_return_co_entrant_does_not_see_the_roll() {
+    for dwarf_first in [true, false] {
+        let what = format!("dwarf first: {dwarf_first}");
+        reset_triggers_seen();
+        let mut board = rise_board(7, dwarf_first, no_extras);
+        let p1_before = life(board.runner.state(), P1);
+        let mut events = Vec::new();
+        cast_and_pass(&mut board.runner, board.spell, None, None, &mut events);
+        settle(&mut board.runner, &mut events, DEFAULT_ANSWERS);
+        let newcomer_entry =
+            battlefield_entry_index(&events, board.newcomer).expect("Brazen Dwarf entered");
+        assert_eq!(
+            newcomer_entry < first_roll_index(&events),
+            dwarf_first,
+            "{what}: reach: the staging order is the delivery order"
+        );
+        assert_co_entry_settled(&board, &events, p1_before, 0, &what);
+    }
+}
+
+/// R21b (review 5 F2, the parked mass owner). R21's board with Grumgully, the
+/// Generous resident, the Dwarf delivered first + CR 616.1 + CR 603.6a +
+/// CR 614.12a: Hammer Jammer's entry asks its replacement order, so the mass
+/// owner is parked on its `ChangeZone` frame when the roll is made. The Dwarf is
+/// already on the battlefield and still does not see the roll.
+#[test]
+fn a_parked_mass_return_co_entrant_does_not_see_the_roll() {
+    reset_triggers_seen();
+    let mut board = rise_board(7, true, add_grumgully);
+    let p1_before = life(board.runner.state(), P1);
+    let mut events = Vec::new();
+    cast_and_pass(&mut board.runner, board.spell, None, None, &mut events);
+    let state = board.runner.state();
+    assert_eq!(stack_frames(state), vec![FrameKind::ChangeZone]);
+    assert_eq!(paused_owner_member(state), Some(board.jammer));
+    assert_eq!(zone(state, board.newcomer), Zone::Battlefield);
+    assert!(
+        die_results(&events).is_empty(),
+        "the roll follows the prompt"
+    );
+    order_entry(&mut board.runner, "Hammer Jammer", &mut events);
+    settle(&mut board.runner, &mut events, DEFAULT_ANSWERS);
+    assert_co_entry_settled(&board, &events, p1_before, 1, "R21b");
+}
+
+/// R22 (review 5 F2, the targeted owner). Ever After returns Brazen Dwarf and
+/// Hammer Jammer, in either target order + CR 603.6a + CR 603.6d + CR 113.6: they
+/// enter in one event, so the Dwarf does not see Hammer Jammer's roll. The
+/// resident Dwarf sees it once.
+#[test]
+fn a_targeted_co_entrant_does_not_see_the_roll() {
+    for dwarf_first in [true, false] {
+        let what = format!("dwarf targeted first: {dwarf_first}");
+        reset_triggers_seen();
+        let mut board = ever_after_board(7, no_extras);
+        let targets = if dwarf_first {
+            vec![board.newcomer, board.jammer]
+        } else {
+            vec![board.jammer, board.newcomer]
+        };
+        let p1_before = life(board.runner.state(), P1);
+        let mut events = Vec::new();
+        cast_ever_after(&mut board, &targets, &mut events);
+        settle(&mut board.runner, &mut events, DEFAULT_ANSWERS);
+        let newcomer_entry =
+            battlefield_entry_index(&events, board.newcomer).expect("Brazen Dwarf entered");
+        assert_eq!(
+            newcomer_entry < first_roll_index(&events),
+            dwarf_first,
+            "{what}: reach: the target order is the delivery order"
+        );
+        assert_co_entry_settled(&board, &events, p1_before, 0, &what);
+    }
+}
+
+/// R22b (review 5 F2, the parked targeted owner). R22's board with Grumgully,
+/// the Generous resident, the Dwarf targeted first + CR 616.1 + CR 603.6a +
+/// CR 614.12a: Hammer Jammer's entry asks its replacement order, so the targeted
+/// owner is parked on its `ChangeZone` frame, beneath the spell's continuation,
+/// when the roll is made. The Dwarf is already on the battlefield and still does
+/// not see the roll.
+#[test]
+fn a_parked_targeted_co_entrant_does_not_see_the_roll() {
+    reset_triggers_seen();
+    let mut board = ever_after_board(7, add_grumgully);
+    let targets = vec![board.newcomer, board.jammer];
+    let p1_before = life(board.runner.state(), P1);
+    let mut events = Vec::new();
+    cast_ever_after(&mut board, &targets, &mut events);
+    let state = board.runner.state();
+    assert_eq!(
+        stack_frames(state),
+        vec![FrameKind::AbilityContinuation, FrameKind::ChangeZone]
+    );
+    assert_eq!(paused_owner_member(state), Some(board.jammer));
+    assert_eq!(zone(state, board.newcomer), Zone::Battlefield);
+    assert!(
+        die_results(&events).is_empty(),
+        "the roll follows the prompt"
+    );
+    order_entry(&mut board.runner, "Hammer Jammer", &mut events);
+    settle(&mut board.runner, &mut events, DEFAULT_ANSWERS);
+    assert_co_entry_settled(&board, &events, p1_before, 1, "R22b");
+}
+
+/// Myojin of Life's Web (`spell`) with a divinity counter, Brazen Dwarf and
+/// Hammer Jammer cards in P0's hand, and a resident Brazen Dwarf.
+fn myojin_board(seed: u64) -> CoEntryBoard {
+    let mut scenario = board(seed);
+    let newcomer = dwarf_card(&mut scenario);
+    let jammer = jammer_card(&mut scenario);
+    let resident = add_dwarf(&mut scenario);
+    let myojin = scenario
+        .add_creature_from_oracle(P0, "Myojin of Life's Web", 8, 8, MYOJIN_OF_LIFES_WEB)
+        .id();
+    scenario.with_counter(myojin, CounterType::Generic("divinity".to_string()), 1);
+    CoEntryBoard {
+        runner: scenario.build(),
+        spell: myojin,
+        newcomer,
+        jammer,
+        resident,
+    }
+}
+
+/// R23 (review 5 F2, the choose-at-resolution owner). Myojin of Life's Web puts
+/// Brazen Dwarf and Hammer Jammer from P0's hand onto the battlefield, chosen in
+/// either order + CR 603.6a + CR 603.6d + CR 113.6: they enter in one event, so
+/// the Dwarf does not see Hammer Jammer's roll. The resident Dwarf sees it once.
+#[test]
+fn a_chosen_co_entrant_does_not_see_the_roll() {
+    for dwarf_first in [true, false] {
+        let what = format!("dwarf chosen first: {dwarf_first}");
+        reset_triggers_seen();
+        let mut board = myojin_board(7);
+        let p1_before = life(board.runner.state(), P1);
+        let mut events = Vec::new();
+        act(
+            &mut board.runner,
+            GameAction::ActivateAbility {
+                source_id: board.spell,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            },
+            &mut events,
+        );
+        pass_until_prompt(&mut board.runner, &mut events);
+        assert!(
+            effect_zone_choice(board.runner.state()),
+            "{what}: {:?}",
+            board.runner.state().waiting_for
+        );
+        let cards = if dwarf_first {
+            vec![board.newcomer, board.jammer]
+        } else {
+            vec![board.jammer, board.newcomer]
+        };
+        act(
+            &mut board.runner,
+            GameAction::SelectCards { cards },
+            &mut events,
+        );
+        settle(&mut board.runner, &mut events, DEFAULT_ANSWERS);
+        let newcomer_entry =
+            battlefield_entry_index(&events, board.newcomer).expect("Brazen Dwarf entered");
+        assert_eq!(
+            newcomer_entry < first_roll_index(&events),
+            dwarf_first,
+            "{what}: reach: the choice order is the delivery order"
+        );
+        assert_co_entry_settled(&board, &events, p1_before, 0, &what);
+    }
+}
+
+/// R24's board: Llanowar Elves, Hardened Scales and Branching Evolution on P0's
+/// battlefield; a {1}{R} Brazen Dwarf, a free Oblation and a free Hammer Jammer in
+/// P0's hand; {R} in P0's pool.
+struct HeldContextBoard {
+    runner: GameRunner,
+    elf: ObjectId,
+    dwarf: ObjectId,
+    oblation: ObjectId,
+    jammer: ObjectId,
+}
+
+fn held_context_board(seed: u64) -> HeldContextBoard {
+    let mut scenario = board(seed);
+    add_counter_replacements(&mut scenario);
+    let elf = scenario
+        .add_creature_from_oracle(P0, "Llanowar Elves", 1, 1, LLANOWAR_ELVES)
+        .id();
+    let dwarf = dwarf_card(&mut scenario);
+    let oblation = free_spell(&mut scenario, "Oblation", true, OBLATION);
+    let jammer = free_jammer(&mut scenario);
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+    );
+    HeldContextBoard {
+        runner: scenario.build(),
+        elf,
+        dwarf,
+        oblation,
+        jammer,
+    }
+}
+
+/// Float the Elf's {G} and cast Brazen Dwarf with it, then shuffle the Elf into
+/// P0's library with Oblation (P0 draws two).
+fn shuffle_the_paying_elf_away(board: &mut HeldContextBoard, events: &mut Vec<GameEvent>) {
+    act(
+        &mut board.runner,
+        GameAction::ActivateAbility {
+            source_id: board.elf,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        },
+        events,
+    );
+    cast_and_pass(&mut board.runner, board.dwarf, None, None, events);
+    settle(&mut board.runner, events, DEFAULT_ANSWERS);
+    cast_and_pass(
+        &mut board.runner,
+        board.oblation,
+        None,
+        Some(board.elf),
+        events,
+    );
+    settle(&mut board.runner, events, DEFAULT_ANSWERS);
+}
+
+/// Every JSON pointer in `value` whose string is `needle`.
+fn json_paths_of(value: &serde_json::Value, needle: &str) -> Vec<String> {
+    fn walk(value: &serde_json::Value, path: String, needle: &str, found: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(text) if text == needle => found.push(path),
+            serde_json::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    walk(item, format!("{path}/{index}"), needle, found);
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                for (key, field) in fields {
+                    walk(field, format!("{path}/{key}"), needle, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    walk(value, String::new(), needle, &mut found);
+    found
+}
+
+/// R24 (review 5 F1). Brazen Dwarf is cast with Llanowar Elves's {G}, Oblation
+/// shuffles the Elf into P0's library, and Hammer Jammer's as-enters roll is held
+/// with the Dwarf's trigger context while the Hardened Scales / Branching
+/// Evolution prompt is open + CR 400.2 + CR 401.2 + CR 603.3: that context names
+/// the Elf, now a hidden library card, so no audience's projection (opponent,
+/// spectator, or the owner, who cannot look at their library either) carries the
+/// held contexts. The authoritative state keeps them, and the answer places the
+/// Dwarf's trigger once.
+#[test]
+fn held_roll_contexts_stay_out_of_every_viewer_projection() {
+    let seed = find_seed("the Elf stays in the library", |seed| {
+        let mut board = held_context_board(seed);
+        shuffle_the_paying_elf_away(&mut board, &mut Vec::new());
+        zone(board.runner.state(), board.elf) == Zone::Library
+    });
+    reset_triggers_seen();
+    let mut board = held_context_board(seed);
+    let mut events = Vec::new();
+    shuffle_the_paying_elf_away(&mut board, &mut events);
+    let p1_before = life(board.runner.state(), P1);
+    cast_and_pass(&mut board.runner, board.jammer, None, None, &mut events);
+    let state = board.runner.state();
+    assert_counter_prompt(state);
+    assert_eq!(zone(state, board.elf), Zone::Library);
+    assert!(
+        state.objects[&board.dwarf]
+            .mana_spent_source_snapshots
+            .iter()
+            .any(|snapshot| snapshot.source_id == board.elf),
+        "reach: the Dwarf's payment names the Elf"
+    );
+    let held: Vec<_> = state
+        .deferred_entry_events
+        .iter()
+        .flat_map(|parked| parked.held_triggers.iter())
+        .collect();
+    assert_eq!(held.len(), 1, "reach: the roll holds one context");
+    assert_eq!(held[0].pending.source_id, board.dwarf);
+    let held_snapshot = held[0]
+        .pending
+        .ability
+        .trigger_source
+        .as_ref()
+        .expect("the held context's source")
+        .mana_spent_source_snapshots
+        .iter()
+        .find(|snapshot| snapshot.source_id == board.elf)
+        .expect("reach: the held source context names the Elf");
+    assert_eq!(held_snapshot.lki.name, "Llanowar Elves");
+
+    let authoritative = state.deferred_entry_events.clone();
+    for (audience, view) in [
+        (
+            "opponent",
+            engine::game::visibility::filter_state_for_viewer(state, P1),
+        ),
+        (
+            "spectator",
+            engine::game::visibility::filter_state_for_unseated_viewer(state),
+        ),
+        (
+            "owner",
+            engine::game::visibility::filter_state_for_viewer(state, P0),
+        ),
+    ] {
+        assert_eq!(
+            view.deferred_entry_events.len(),
+            authoritative.len(),
+            "{audience}: the parked entries stay"
+        );
+        let json = serde_json::to_value(&view).expect("the projection serializes");
+        let parked = json["deferred_entry_events"]
+            .as_array()
+            .expect("the parked entries are projected");
+        assert!(
+            parked
+                .iter()
+                .all(|entry| entry.get("held_triggers").is_none()),
+            "{audience}: {parked:?}"
+        );
+        let paths = json_paths_of(&json, "Llanowar Elves");
+        assert!(paths.is_empty(), "{audience}: {paths:?}");
+    }
+    assert_eq!(
+        board.runner.state().deferred_entry_events,
+        authoritative,
+        "projecting leaves the authoritative held contexts"
+    );
+
+    let r = die_results(&events)[0];
+    settle_picking(&mut board.runner, &mut events, FirstPick::Scales);
+    let state = board.runner.state();
+    assert_eq!(
+        p1_before - life(state, P1),
+        1,
+        "the held context is placed once"
+    );
+    assert_eq!(triggers_seen_from(board.dwarf), 1);
+    assert_eq!(
+        plus_counters(state, board.jammer),
+        FirstPick::Scales.counters(r)
+    );
+    assert_finished(state, &[board.dwarf], "R24");
 }
