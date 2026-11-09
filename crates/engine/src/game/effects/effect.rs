@@ -1276,6 +1276,36 @@ fn snapshot_transient_modifications(
                     value: resolve_quantity_with_targets(state, value, ability),
                 }
             }
+            // CR 702.16k + CR 608.2c + CR 608.2h: "you gain protection from that
+            // player" (Eon Frolicker) names the player targeted by the enclosing
+            // ability. The declared-target anaphor is fixed to that concrete
+            // player when the effect is applied, so the grant stops depending on
+            // the resolving ability's target list afterwards. No player target
+            // (or a player target that was illegal on resolution, CR 608.2b)
+            // leaves the payload unchanged: it matches nothing, per CR 609.3.
+            ContinuousModification::AddKeyword {
+                keyword:
+                    crate::types::keywords::Keyword::Protection(
+                        crate::types::keywords::ProtectionTarget::FromPlayer(
+                            crate::types::ability::ControllerRef::TargetPlayer
+                            | crate::types::ability::ControllerRef::TargetOpponent,
+                        ),
+                    ),
+            } => {
+                match crate::game::filter::target_player_from_ability_or_root(state, Some(ability))
+                {
+                    Some(player_id) => ContinuousModification::AddKeyword {
+                        keyword: crate::types::keywords::Keyword::Protection(
+                            crate::types::keywords::ProtectionTarget::FromPlayer(
+                                crate::types::ability::ControllerRef::SpecificPlayer {
+                                    id: player_id,
+                                },
+                            ),
+                        ),
+                    },
+                    None => modification.clone(),
+                }
+            }
             // CR 613.1f + CR 608.2c: the reanimator-Aura's granted Enchant restriction
             // ("enchant creature put onto the battlefield with this Aura") is a layer-6
             // ability grant (CR 613.1f) whose anaphoric ParentTarget must bind to the
@@ -1576,15 +1606,55 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         BasicLandType, ChoiceValue, ChosenSubtypeKind, ContinuousModification, ControllerRef,
-        Duration, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
+        Duration, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TargetRef,
+        TypedFilter,
     };
     use crate::types::card_type::{CoreType, SubtypeSet};
     use crate::types::events::GameEvent;
     use crate::types::game_state::{StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectIncarnationRef, TrackedSetId};
-    use crate::types::keywords::Keyword;
+    use crate::types::keywords::{Keyword, ProtectionTarget};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    /// CR 702.16k + CR 608.2c + CR 608.2h: "you gain protection from that
+    /// player" is fixed to the declared player target when the effect is
+    /// applied; with no player target (or only an object target) the payload is
+    /// left unchanged and matches nothing (CR 609.3).
+    #[test]
+    fn player_protection_from_that_player_latches_the_declared_target() {
+        let state = GameState::new_two_player(42);
+        let modifications = [ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::FromPlayer(ControllerRef::TargetPlayer)),
+        }];
+
+        let mut ability = ResolvedAbility::new(
+            Effect::NoOp,
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let latched = snapshot_transient_modifications(&state, &ability, &modifications);
+        assert!(matches!(
+            latched[0],
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::FromPlayer(
+                    ControllerRef::SpecificPlayer { id: PlayerId(1) }
+                ))
+            }
+        ));
+
+        ability.targets = vec![TargetRef::Object(ObjectId(7))];
+        let unchanged = snapshot_transient_modifications(&state, &ability, &modifications);
+        assert!(matches!(
+            unchanged[0],
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::FromPlayer(
+                    ControllerRef::TargetPlayer
+                ))
+            }
+        ));
+    }
 
     #[test]
     fn quantity_quality_static_condition_for_ability_resolves_targets() {

@@ -3,13 +3,15 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4511
-- **Total card appearances across root causes:** 4544 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4505
+- **Total card appearances across root causes:** 4538 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > Counting method: both figures count the per-root-cause card bullets only — the
 > three metadata bullets above are excluded — and are the source of truth.
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
+
+Cards listed in `crates/phase-ast/data/confirmed-misparses.toml` are held unsupported in coverage until their fix lands; fixing one means deleting its row there and regenerating card data (and the committed test fixture only when its copy of that face carries the `confirmed_misparse` marker).
 
 ## Ranked root causes
 
@@ -17,9 +19,9 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 |---|------------|--------:|----------------------------------|
 | 1 | Relative-clause / filter restriction on target dropped | 724 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
 | 2 | Dropped intervening-if / gating condition (condition: null) | 570 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
-| 3 | Anaphor bound to wrong referent | 401 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
+| 3 | Anaphor bound to wrong referent | 400 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 380 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
-| 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 327 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
+| 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 323 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
 | 6 | Disjunctive (or-list) collapsed to first branch | 225 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 207 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 208 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
@@ -37,7 +39,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 19 | Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn | 55 | oracle_nom/duration.rs — add Perpetual duration combinator branch |
 | 21 | Token entry flags / keyword / attachment clause dropped | 52 | oracle parser token-description handling — preserve attacking/tapped flags, keyword grants, attach target |
 | 23 | Effect modeled with structurally wrong variant / ability class | 49 | add-engine-effect: select the correct Effect/ability variant for the clause class |
-| 24 | Variable X / where-X count unbound (sentinel or unresolved Variable) | 37 | oracle_cost.rs / oracle_quantity.rs — allow QuantityExpr in count fields and bind trailing 'where X is' clauses |
+| 24 | Variable X / where-X count unbound (sentinel or unresolved Variable) | 36 | oracle_cost.rs / oracle_quantity.rs — allow QuantityExpr in count fields and bind trailing 'where X is' clauses |
 | 25 | Wrong / dropped effect duration | 19 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
 | 26 | Delayed / future-phase trigger flattened to immediate effect | 20 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
 | 27 | Cross-target group / shared-quality constraint dropped | 12 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
@@ -45,7 +47,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2409/4554 ≈ 52.9% of all misparse appearances; the top 10 cover 3392/4554 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped below row 8 as cards were fixed.
+> The top **5** root causes cover 2397/4538 ≈ 52.8% of all misparse appearances; the top 10 cover 3379/4538 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped below row 8 as cards were fixed.
 
 ## Full card lists per root cause
 
@@ -1365,7 +1367,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 3. Anaphor bound to wrong referent  (401 cards)
+### 3. Anaphor bound to wrong referent  (400 cards)
 
 **Signature.** A pronoun/demonstrative ('it', 'that creature/player', 'them', 'they') resolves to the wrong slot (Self/Source/Controller/Any/ParentTarget) instead of the bound parent target, forwarded result, or triggering player (CR 608.2k). Includes the runtime half of the same defect class, where the referent slot is bound correctly but resolves to a STALE prior answer.
 
@@ -2167,7 +2169,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 5. Dropped 'for each' / dynamic count collapsed to Fixed  (327 cards)
+### 5. Dropped 'for each' / dynamic count collapsed to Fixed  (323 cards)
 
 **Signature.** Effect quantity (count/amount/P-T) parses as Fixed(1)/constant instead of a dynamic QuantityExpr::Ref over a 'for each X' / 'that many' / 'equal to' clause; the multiplier is dropped.
 
@@ -2184,7 +2186,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Agrus Kos, Eternal Soldier
 - Aim for the Head
 - Ajani's Presence
-- Alabaster Potion
 - Algorithmic Ferocity
 - Alien Invasion
 - Alisaie Leveilleur
@@ -2272,7 +2273,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Extract Power
 - Fanatic of Rhonas (multiplier)
 - Fated Firepower
-- Festival of the Guildpact
 - Fireball
 - Fists of Flame
 - Flamewar, Streetwise Operative
@@ -2449,7 +2449,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Takeno, Samurai General
 - Taster of Wares
 - Teferi's Puzzle Box
-- Temper
 - Teysa, Opulent Oligarch
 - The Bear Force Pilot
 - The Crowd Goes Wild
@@ -2477,7 +2476,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Uyo, Silent Prophet
 - Valakut Awakening
 - Valiant Changeling
-- Vengeful Archon
 - Vengeful Dreams
 - Vile Redeemer
 - Villainous Wealth
@@ -4757,7 +4755,7 @@ are outside the detector's class.
 
 </details>
 
-### 24. Variable X / where-X count unbound (sentinel or unresolved Variable)  (37 cards)
+### 24. Variable X / where-X count unbound (sentinel or unresolved Variable)  (36 cards)
 
 **Signature.** X-derived cost/count emitted as a u32::MAX sentinel, Fixed, or raw-string Variable with no 'where X is' binding; the X linkage is severed.
 
@@ -4789,7 +4787,6 @@ are outside the detector's class.
 - Mutated Cultist
 - Necron Overlord
 - Night Dealings
-- Panacea
 - Pantlaza, Sun-Favored
 - Petalmane Baku
 - Quillmane Baku
