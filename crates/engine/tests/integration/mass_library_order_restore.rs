@@ -437,9 +437,10 @@ fn ordinary_unmarked_battlefield_library_prompt_is_rejected() {
     );
 }
 
-/// CR 402.3: a Library-scoped arrangement prompt over public battlefield
-/// permanents still hides the member ids from non-choosers; the arranger keeps
-/// the exact ids. This is the restored base redaction for the mass-order path.
+/// CR 401.4: the library arrangement order is not revealed to other players.
+/// This Library-scoped prompt over public battlefield permanents hides the
+/// member ids from non-choosers, matching the base projection; the arranger
+/// keeps the exact ids.
 #[test]
 fn mass_library_order_prompt_redacts_public_ids_from_opponent() {
     let (state, cards) = real_single_owner_mass_library_order_state(

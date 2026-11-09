@@ -11906,9 +11906,12 @@ pub(crate) fn parse_zone_word(i: &str) -> super::oracle_nom::error::OracleResult
 pub(crate) fn peek_zone_boundary(i: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
     match i.chars().next() {
         None | Some(' ' | ',' | '.') => Ok((i, ())),
+        // An ordinary word-boundary miss, not a deliberately declined zone
+        // list. The distinct kind lets `scan_zone_phrase_span` continue past a
+        // non-zone phrase instead of aborting the whole scan.
         _ => Err(nom::Err::Error(nom::error::Error::new(
             i,
-            nom::error::ErrorKind::Fail,
+            nom::error::ErrorKind::Verify,
         ))),
     }
 }
@@ -26153,6 +26156,12 @@ mod zone_list_grammar {
             scan_zone_phrase("this creature in exile and in your graveyard"),
             None,
             "the mixed list declines without noun-phrase ownership",
+        );
+        // An ordinary word-boundary miss is not a declined list; the scanner
+        // must continue and find the later real zone phrase.
+        assert_eq!(
+            scan_zone_phrase("on hand-picked cards in your graveyard").map(|(zone, _, _)| zone),
+            Some(Zone::Graveyard),
         );
     }
 
