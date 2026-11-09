@@ -283,9 +283,11 @@ mod tests {
         Gain::Read(Linear { fixed, per_x: 0 })
     }
 
-    /// CR 104.4a: the AI survives a line while the life it pays stays below
-    /// its life plus the life it gains. At `i32::MAX` life with a gain of
-    /// `u32::MAX` that sum passes `u32::MAX`; it is compared exactly.
+    /// CR 104.3b + CR 104.4a: a player at 0 or less life loses, and both
+    /// players losing together is a draw, so the AI's line wins only while the
+    /// life it pays stays below its life plus the life it gains. At `i32::MAX`
+    /// life with a gain of `u32::MAX` that sum passes `u32::MAX`; it is
+    /// compared exactly.
     #[test]
     fn survival_check_holds_past_u32_life_plus_gain() {
         let combinations =
