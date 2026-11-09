@@ -33,6 +33,10 @@ mana value from your hand or from the command zone onto the battlefield. If \
 you do, return this card to the battlefield attached to that creature at the \
 beginning of the next end step.";
 
+const STORMKELD_CURATOR_ORACLE: &str = "When this creature enters, you may put \
+any number of Aura cards from your graveyard and/or hand onto the battlefield \
+attached to it.";
+
 const LYNDE_ORACLE: &str = "Deathtouch\n\
 Whenever a Curse is put into your graveyard from the battlefield, return it to \
 the battlefield attached to you at the beginning of the next end step.\n\
@@ -1166,9 +1170,9 @@ fn open_next_of_kin_choice(eligible_hand_creatures: usize, lands: usize) -> Game
 }
 
 /// CR 402.3: opponent payloads must not reveal how many hidden hand cards are
-/// eligible. Two equal-sized hands with different eligible counts (2 creatures
-/// vs 1 creature + 1 land) must produce the same opponent view, while the
-/// chooser still sees the exact options.
+/// eligible. Two equal-sized hands with different eligible counts (zero
+/// creatures and two lands vs one creature and one land) must produce the same
+/// opponent view, while the chooser still sees the exact options.
 #[test]
 fn next_of_kin_mixed_choice_redacts_private_eligibility() {
     // Equal hand size (2), zero vs one eligible hidden card, with two public
@@ -1262,6 +1266,135 @@ fn next_of_kin_mixed_choice_redacts_private_eligibility() {
             .all(|id| *id != engine::types::identifiers::ObjectId(0)),
         "the chooser must see exact object ids, not redaction placeholders"
     );
+}
+
+/// A printed public-first mixed scope (Stormkeld Curator's `[Graveyard, Hand]`)
+/// must report Hand in the prompt so a zero-hand-eligible choice is redacted
+/// exactly like a one-hand-eligible one. Equal hand sizes (2) isolate the
+/// hidden eligibility difference.
+#[test]
+fn stormkeld_curator_public_first_scope_redacts_private_eligibility() {
+    let zero_eligible = open_stormkeld_choice(0, 2);
+    let one_eligible = open_stormkeld_choice(1, 1);
+
+    for runner in [&zero_eligible, &one_eligible] {
+        let WaitingFor::EffectZoneChoice { zone, cards, .. } = &runner.state().waiting_for else {
+            panic!("Stormkeld Curator's Aura choice must be open");
+        };
+        assert_eq!(
+            *zone,
+            Zone::Hand,
+            "a mixed Graveyard/Hand scope must report its private leg"
+        );
+        assert!(
+            cards.iter().any(|id| runner
+                .state()
+                .objects
+                .get(id)
+                .is_some_and(|object| object.zone == Zone::Graveyard)),
+            "reach guard: the graveyard Aura must be offered; got {cards:?}"
+        );
+    }
+
+    let opponent_zero = filter_state_for_viewer(zero_eligible.state(), P1);
+    let opponent_one = filter_state_for_viewer(one_eligible.state(), P1);
+    let WaitingFor::EffectZoneChoice {
+        cards: opponent_cards_zero,
+        ..
+    } = &opponent_zero.waiting_for
+    else {
+        panic!("opponent must still see the redacted choice envelope");
+    };
+    let WaitingFor::EffectZoneChoice {
+        cards: opponent_cards_one,
+        ..
+    } = &opponent_one.waiting_for
+    else {
+        panic!("opponent must still see the redacted choice envelope");
+    };
+    assert!(
+        opponent_cards_zero.is_empty() && opponent_cards_one.is_empty(),
+        "public-first mixed scope: equal hands with different eligible counts may not differ; got {opponent_cards_zero:?} and {opponent_cards_one:?}"
+    );
+
+    let chooser_zero = filter_state_for_viewer(zero_eligible.state(), P0);
+    let chooser_one = filter_state_for_viewer(one_eligible.state(), P0);
+    let WaitingFor::EffectZoneChoice {
+        cards: chooser_cards_zero,
+        ..
+    } = &chooser_zero.waiting_for
+    else {
+        panic!("chooser must retain the exact choice");
+    };
+    let WaitingFor::EffectZoneChoice {
+        cards: chooser_cards_one,
+        ..
+    } = &chooser_one.waiting_for
+    else {
+        panic!("chooser must retain the exact choice");
+    };
+    assert_eq!(
+        chooser_cards_zero.len(),
+        1,
+        "chooser sees only the graveyard Aura"
+    );
+    assert_eq!(
+        chooser_cards_one.len(),
+        2,
+        "chooser sees the graveyard and hand Auras"
+    );
+}
+
+/// Drive Stormkeld Curator's ETB to its `EffectZoneChoice` without selecting an
+/// Aura. The parsed target is `InAnyZone [Graveyard, Hand]` — a public-first
+/// mixed scope — so this fixture exercises the producer's private-zone
+/// selection rather than Next of Kin's already-Hand-first order.
+fn open_stormkeld_choice(hand_auras: usize, lands: usize) -> GameRunner {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_to_graveyard(P0, "Grave Aura", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"]);
+    for index in 0..hand_auras {
+        scenario
+            .add_creature_to_hand(P0, &format!("Hand Aura {index}"), 0, 0)
+            .as_enchantment()
+            .with_subtypes(vec!["Aura"]);
+    }
+    for index in 0..lands {
+        scenario.add_land_to_hand(P0, &format!("Hand Land {index}"));
+    }
+    let curator = scenario
+        .add_creature_to_hand(P0, "Stormkeld Curator", 6, 6)
+        .from_oracle_text(STORMKELD_CURATOR_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), curator, Zone::Battlefield, &mut events);
+    process_triggers(runner.state_mut(), &events);
+
+    for _ in 0..64 {
+        match &runner.state().waiting_for {
+            WaitingFor::EffectZoneChoice { .. } => return runner,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority to resolve Stormkeld Curator");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept the you-may prompt");
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
+            }
+            other => panic!("unexpected prompt before Stormkeld Curator's choice: {other:?}"),
+        }
+    }
+    panic!("Stormkeld Curator's Aura choice did not open");
 }
 
 /// Generic mana cost for a staged card's mana value.
