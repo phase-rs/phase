@@ -51,7 +51,6 @@ fn oblation_draw_retains_the_terminal_shuffle_owner_population() {
     assert!(found, "the printed draw instruction must remain present");
 }
 
-
 /// SHAPE: real Technomancer Oracle keeps mill before the direct whole-graveyard
 /// choice, whose immediate continuation moves only the selected parents.
 #[test]
