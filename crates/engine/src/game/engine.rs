@@ -7244,12 +7244,11 @@ fn materialize_fixed_shortcut(
     // priority beat before capturing the boundary. `reset_priority` zeroes
     // `priority_pass_count` and sets `priority_player`; `waiting_for` is set explicitly
     // here (reset_priority does not touch it). `loop_states_equal_modulo_resources` /
-    // `loop_states_cover_modulo_growth` both normalize internally (`project_out_resources`
-    // → `normalize_for_loop`), so the extra `.normalize_for_loop()` here is redundant with
-    // that internal call but harmless (idempotent) — the internal call is now the sample
-    // form (`normalize_for_loop_sample`), which defers identity ranks to confirmation.
-    // Kept for a self-contained boundary value whose `waiting_for`/ring fields are already
-    // canonical at the call sites below.
+    // `loop_states_cover_modulo_growth` both project internally (`project_out_resources`,
+    // which opens with the sample form), so the extra strict `.normalize_for_loop()` here
+    // is redundant with that internal call but harmless (idempotent) — kept for a
+    // self-contained boundary value whose `waiting_for`/ring fields are already canonical
+    // at the call sites below.
     let boundary = take_boundary(&committed);
 
     let cycle_beat_cap = auto_pass_loop_max_iterations(&committed);

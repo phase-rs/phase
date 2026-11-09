@@ -404,11 +404,13 @@ pub struct LoopDetectCost {
     /// The sampler's two clone calls, counted rather than timed.
     pub sampler_normalized_clones: u32,
     pub sampler_live_clones: u32,
-    /// The `normalize_for_loop()` that opens `project_out_resources` — the compare side's
-    /// clone budget, minted twice per comparison.
+    /// The sample-form clone (`normalize_for_loop_sample`) that opens
+    /// `project_out_resources` — the compare side's clone budget, minted twice per
+    /// comparison.
     pub projected_clones: u32,
-    /// One field per production function that calls `project_out_resources`, never one
-    /// aggregate: an aggregate cannot tell four live sites from one live and three dead.
+    /// One field per counted comparison population — strict modulo, scoped cover, object
+    /// growth, fodder growth — never one aggregate: an aggregate cannot tell four live
+    /// sites from one live and three dead.
     pub compares_equal_modulo_resources: u32,
     pub compares_cover_modulo_growth_scoped: u32,
     pub compares_cover_modulo_object_growth: u32,
@@ -528,8 +530,8 @@ impl LoopDetectCost {
         )
     }
 
-    /// Every comparison the four production callers of `project_out_resources` performed.
-    /// Each of them projects both sides as a pair, which is what makes
+    /// Every comparison in the four counted populations, each of which projects both sides
+    /// as a pair. That is what makes
     /// `projected_clones <= 2 * resource_compares()` a bound over this closed population —
     /// a bound and not a parity, because `SharedCurrentFrames::new` projects twice per
     /// ring-walk entry and ticks no compare: the bound needs a ring long enough to pay for
@@ -3618,8 +3620,9 @@ fn cover_projection(state: &GameState) -> CoverProjection<'static> {
 /// (`types::game_state::loop_states_equal`) is the right question for a *mandatory* loop — a
 /// draw only if the game truly repeats with nothing changing. For a *beneficial* loop
 /// (CR 732.2a, the shortcut) the question asked here is identity in **board, zones and
-/// tap-state on the PROJECTED feed**: `normalize_for_loop`, then [`project_out_resources`],
-/// then that same strict comparator — plus the hand conjunct at the end of
+/// tap-state on the PROJECTED feed**: the transient sample normal form, then
+/// [`project_out_resources`], then the rank-free
+/// [`projected_states_equal`] — plus the hand conjunct at the end of
 /// [`loop_states_equal_modulo_resources_side`], where this gate compensates for an axis the
 /// strict comparator leaves out: [`loyalty_activation_counts_match`] over the per-object
 /// CR 606.3 count and per-permanent extra-activation grant (distinct from the per-player
@@ -30597,6 +30600,19 @@ mod tests {
                 None,
             ),
             "accounted, the id leaves BOTH frames' zone collections and the rest compares equal"
+        );
+        // The strip must not become blanket equality: an unrelated live `players` drift is
+        // NOT projected away, and this is the same accounted call above.
+        let mut drifted = prior.clone();
+        drifted.players[0].life -= 1;
+        assert!(
+            !eq_except_growable(
+                &project_out_resources(&drifted),
+                &project_out_resources(&current),
+                &HashSet::from([ObjectId(900)]),
+                None,
+            ),
+            "stripping the id does not excuse an unrelated players drift"
         );
     }
 

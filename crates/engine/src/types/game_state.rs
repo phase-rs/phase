@@ -39306,8 +39306,9 @@ fn _gamestate_partition_is_total(s: &GameState) {
         // GameState` for `loop_detect_ring`'s reason — transient derived state rebuilt
         // from play, and comparing it would split two semantically-identical positions
         // in AI-search dedup. It cannot become a hidden per-cycle accumulator riding a
-        // covering pair: `project_out_resources` opens with `normalize_for_loop`, which
-        // is one of the ring-clear sites this field follows, so the projection clears it.
+        // covering pair: `project_out_resources` opens with
+        // `normalize_for_loop_sample`, which is one of the ring-clear sites this field
+        // follows, so the projection clears it.
         loop_answer_journal: _,
         // A monotone counter: comparing it would split every recurring position.
         loop_decision_tally: _,
