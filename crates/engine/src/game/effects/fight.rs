@@ -158,7 +158,23 @@ fn fight_eligible(state: &GameState, id: ObjectId) -> bool {
 }
 
 /// CR 701.14a: Fight — each creature deals damage equal to its power to the other.
+///
+/// CR 701.14a + CR 608.2f: both directions are one simultaneous damage event, so they
+/// resolve as one batch: a printed "while" guard on a prevention shield is read once and
+/// every portion meets that reading, even one a redirection brings to the guarded host
+/// (Undergrowth Champion behind two Nomads en-Kor, then Pit Fight between the Nomads).
 pub fn resolve(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    crate::game::replacement::with_damage_batch(state, ability, |state| {
+        resolve_fight(state, ability, events)
+    })
+}
+
+/// The body of [`resolve`], run inside the fight's damage batch.
+fn resolve_fight(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
@@ -239,7 +255,7 @@ pub fn resolve(
         return Ok(());
     }
 
-    // CR 701.14a + CR 120.2b: Fight damage is not combat damage.
+    // CR 701.14d + CR 120.2b: Fight damage is not combat damage.
     // Source deals damage to target (power of source → target's damage)
     if source_power > 0 {
         let source_ctx = DamageContext::from_source(state, source_id)
@@ -265,6 +281,12 @@ pub fn resolve(
                     target_power as u32,
                     target_controller,
                 );
+                // CR 701.14a + CR 608.2f + CR 700.1: the second direction is a remaining
+                // portion of the same simultaneous event, so it resumes under the guards
+                // this batch read. Its appended tail is a later instruction and keeps
+                // its own (empty) carrier, so it reads guards live.
+                second.context.settled_damage_guards =
+                    crate::game::replacement::settled_damage_guards(state);
                 if let Some(sub) = ability.sub_ability.as_ref() {
                     append_to_sub_chain(&mut second, sub.as_ref().clone());
                 }

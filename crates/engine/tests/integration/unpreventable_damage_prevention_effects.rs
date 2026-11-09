@@ -211,6 +211,8 @@ const ALPHA_BRAWL: &str = "Target creature an opponent controls deals damage equ
 const KAMAHLS_SLEDGE: &str = "Kamahl's Sledge deals 4 damage to target creature.\nThreshold — If there are seven or more cards in your graveyard, instead Kamahl's Sledge deals 4 damage to that creature and 4 damage to that creature's controller.";
 const CUOMBAJJ_WITCHES: &str = "{T}: This creature deals 1 damage to any target and 1 damage to any target of an opponent's choice.";
 const SEARING_BLAZE: &str = "Searing Blaze deals 1 damage to target player or planeswalker and 1 damage to target creature that player or that planeswalker's controller controls.\nLandfall — If you had a land enter the battlefield under your control this turn, Searing Blaze deals 3 damage to that player or planeswalker and 3 damage to that creature instead.";
+const NOMADS_EN_KOR: &str = "{0}: The next 1 damage that would be dealt to this creature this turn is dealt to target creature you control instead.";
+const PIT_FIGHT: &str = "Target creature you control fights another target creature. (Each deals damage equal to its power to the other.)";
 
 fn main_phase() -> GameScenario {
     let mut scenario = GameScenario::new();
@@ -966,6 +968,93 @@ fn redirected_portions_meet_the_batch_reading() {
     assert_eq!(prevented(&events), 2);
     assert_eq!(runner.state().players[0].life, 18);
     assert_eq!(runner.state().players[1].life, 20);
+}
+
+/// A Nomads en-Kor whose shield ("The next 1 damage that would be dealt to this creature this turn
+/// is dealt to target creature you control instead.") is activated at `champion`.
+fn nomads_shielding(scenario: &mut GameScenario, name: &str) -> ObjectId {
+    scenario
+        .add_creature_from_oracle(P0, name, 1, 1, NOMADS_EN_KOR)
+        .id()
+}
+
+fn activate_shields_at(runner: &mut GameRunner, nomads: &[ObjectId], champion: ObjectId) {
+    for nomad in nomads {
+        runner.activate(*nomad, 0).target_object(champion).resolve();
+    }
+    assert_settled(runner);
+}
+
+/// CR 701.14a + CR 608.2f: the two directions of a fight are one simultaneous damage event, so the
+/// Champion's guard is read once for both. Pit Fight between two Nomads en-Kor, each one's shield
+/// aimed at the Champion: both 1-damage portions are dealt to the Champion instead, and its one
+/// counter prevents them both.
+#[test]
+fn fight_damage_redirected_to_the_host_meets_one_reading() {
+    let mut scenario = main_phase();
+    let champion = undergrowth_champion(&mut scenario, P0, 1);
+    let nomads = [
+        nomads_shielding(&mut scenario, "Nomads en-Kor A"),
+        nomads_shielding(&mut scenario, "Nomads en-Kor B"),
+    ];
+    let pit_fight = spell(&mut scenario, "Pit Fight", PIT_FIGHT, true);
+    let mut runner = scenario.build();
+    activate_shields_at(&mut runner, &nomads, champion);
+
+    let events = cast(
+        &mut runner,
+        pit_fight,
+        nomads.map(TargetRef::Object).to_vec(),
+    );
+
+    assert_settled(&runner);
+    for nomad in nomads {
+        let object = &runner.state().objects[&nomad];
+        assert_eq!(object.zone, Zone::Battlefield);
+        assert_eq!(object.damage_marked, 0);
+        assert!(damage_dealt_to(&events, nomad).is_empty());
+    }
+    assert_eq!(prevented(&events), 2);
+    assert!(damage_dealt_to(&events, champion).is_empty());
+    assert_shielded_once(&runner, champion);
+}
+
+/// CR 701.14a + CR 616.1: a fight whose first direction parks on an order choice resumes its second
+/// direction under the fight's reading. Pit Fight with Nomads en-Kor fighting the Champion under
+/// Furnace of Rath, the Nomads' shield aimed at the Champion. The Nomads' 1 damage to the Champion
+/// meets Furnace of Rath and the Champion's shield and is answered shield first, which takes the
+/// counter; the Champion's damage back is stashed behind that choice, and the 1 of it the Nomads'
+/// shield then deals to the counterless Champion is still prevented.
+#[test]
+fn a_paused_fight_keeps_its_guard_reading() {
+    let mut scenario = main_phase();
+    let champion = undergrowth_champion(&mut scenario, P0, 1);
+    let nomads = nomads_shielding(&mut scenario, "Nomads en-Kor");
+    furnace_of_rath(&mut scenario);
+    let pit_fight = spell(&mut scenario, "Pit Fight", PIT_FIGHT, true);
+    let mut runner = scenario.build();
+    activate_shields_at(&mut runner, &[nomads], champion);
+
+    let mut events = cast(
+        &mut runner,
+        pit_fight,
+        vec![TargetRef::Object(nomads), TargetRef::Object(champion)],
+    );
+    let prompts = answer(&mut runner, &[Pick::From(champion)], champion, &mut events);
+
+    assert_settled(&runner);
+    assert!(
+        !prompts.is_empty(),
+        "the first direction parks on an order choice"
+    );
+    assert_eq!(prompts[0].watched_counters, 1, "{prompts:?}");
+    assert!(prompts[0].sources.contains(&champion), "{prompts:?}");
+    // The rest of the Champion's damage stays on the Nomads, which dies.
+    assert!(!damage_dealt_to(&events, nomads).is_empty());
+    assert_eq!(runner.state().objects[&nomads].zone, Zone::Graveyard);
+    assert_eq!(prevented(&events), 2);
+    assert!(damage_dealt_to(&events, champion).is_empty());
+    assert_shielded_once(&runner, champion);
 }
 
 /// CR 608.2c + CR 700.1: a later instruction is a new event and reads the guard live. Misthios's
