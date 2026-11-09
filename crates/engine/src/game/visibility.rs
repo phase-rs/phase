@@ -3127,10 +3127,39 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         // including a mass library-order prompt whose members still occupy the
         // battlefield. The placement parameters are public, but the offered
         // ids and their identity/origin provenance are not.
-        if !can_view_private_for_player(player) && matches!(zone, Zone::Hand | Zone::Library) {
+        //
+        // CR 402.3: an opponent may count the cards in a hand but may not learn
+        // which of them are eligible. A mixed hand/command choice (Next of Kin)
+        // would leak that subset through the placeholder count: the opponent can
+        // subtract the public command-zone candidates from the number of
+        // offered placeholders. For a mixed private/public set, clear the list
+        // entirely for non-choosers. A pure private set keeps one placeholder per
+        // eligible card (the existing count-only disclosure), and a pure public
+        // set is not redacted at all.
+        let private_zone_choice = matches!(zone, Zone::Hand | Zone::Library);
+        let has_private_card = cards.iter().any(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|object| !object.zone.is_public())
+        });
+        let has_public_card = cards.iter().any(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|object| object.zone.is_public())
+        });
+        let mixed_private_public = has_private_card && has_public_card;
+        if !can_view_private_for_player(player)
+            && (mixed_private_public || (private_zone_choice && has_private_card))
+        {
             filtered.waiting_for = WaitingFor::EffectZoneChoice {
                 player,
-                cards: cards.iter().map(|_| ObjectId(0)).collect(),
+                cards: if mixed_private_public {
+                    Vec::new()
+                } else {
+                    cards.iter().map(|_| ObjectId(0)).collect()
+                },
                 count,
                 min_count,
                 up_to,

@@ -4510,7 +4510,12 @@ fn parse_type_phrase_folding_unbound<'a>(
     }
 
     // Check zone suffix: "card from a graveyard", "card in your graveyard", "from exile", etc.
-    if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
+    if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix_with_ownership(
+        &lower[pos..],
+        properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::Owned { .. })),
+    ) {
         extend_zone_properties(&mut properties, zone_props);
         pos += consumed;
         // Apply zone-derived controller if we don't already have one
@@ -4628,7 +4633,12 @@ fn parse_type_phrase_folding_unbound<'a>(
     // the chosen type" ("target creature card of the chosen type from your
     // graveyard", From the Rubble). The primary `parse_zone_suffix` arm above
     // runs before this suffix.
-    if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
+    if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix_with_ownership(
+        &lower[pos..],
+        properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::Owned { .. })),
+    ) {
         extend_zone_properties(&mut properties, zone_props);
         pos += consumed;
         if controller.is_none() {
@@ -4919,7 +4929,12 @@ fn parse_type_phrase_folding_unbound<'a>(
             let is_locative =
                 alt((tag::<_, _, OracleError<'_>>("in "), tag("on "))).parse(after_named);
             if is_locative.is_ok() {
-                if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
+                if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix_with_ownership(
+                    &lower[pos..],
+                    properties
+                        .iter()
+                        .any(|prop| matches!(prop, FilterProp::Owned { .. })),
+                ) {
                     extend_zone_properties(&mut properties, zone_props);
                     pos += consumed;
                     if controller.is_none() {
@@ -7983,7 +7998,9 @@ pub(crate) fn parse_mana_value_suffix(
             .map(|value| (value, after_punct))
             .or_else(|| {
                 let (phrase, zone_tail) =
-                    nom_primitives::scan_split_at_phrase(raw_phrase, parse_zone_suffix_nom)?;
+                    nom_primitives::scan_split_at_phrase(raw_phrase, |input| {
+                        parse_zone_suffix_nom(input, false)
+                    })?;
                 let offset = raw_phrase.len() - zone_tail.len();
                 parse_value(phrase).map(|value| (value, &after_equal_to[offset..]))
             });
@@ -11375,11 +11392,28 @@ pub(crate) fn scan_zone_phrase_span(
 pub(crate) fn parse_zone_suffix(
     text: &str,
 ) -> Option<(Vec<FilterProp>, Option<ControllerRef>, usize)> {
+    parse_zone_suffix_with_ownership(text, false)
+}
+
+/// CR 400.1 + CR 400.3: `parse_zone_suffix`, with the caller's noun phrase
+/// ownership provenance.
+///
+/// A mixed per-player/shared zone list can carry a possessor only when the
+/// noun phrase already established whose cards the population is ("creature
+/// card you own in exile and in your graveyard"). Without that provenance the
+/// possessor belongs to the qualified leg alone ("in your graveyard or on the
+/// battlefield"), which one flat `InAnyZone` + `Owned` conjunction cannot
+/// express; the grammar declines rather than over-restricting the shared leg.
+fn parse_zone_suffix_with_ownership(
+    text: &str,
+    noun_phrase_has_ownership: bool,
+) -> Option<(Vec<FilterProp>, Option<ControllerRef>, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
     let lower = trimmed.to_lowercase();
 
-    let (rest, (props, ctrl, _qual)) = parse_zone_suffix_nom(&lower).ok()?;
+    let (rest, (props, ctrl, _qual)) =
+        parse_zone_suffix_nom(&lower, noun_phrase_has_ownership).ok()?;
     let consumed = lower.len() - rest.len();
     Some((props, ctrl, leading_ws + consumed))
 }
@@ -11393,7 +11427,7 @@ pub(crate) fn parse_exile_graveyard_source(text: &str) -> Option<(Vec<FilterProp
     peek(tag::<_, _, OracleError<'_>>("from "))
         .parse(lower.as_str())
         .ok()?;
-    let (rest, (mut props, controller, qualifier)) = parse_zone_suffix_nom(&lower).ok()?;
+    let (rest, (mut props, controller, qualifier)) = parse_zone_suffix_nom(&lower, false).ok()?;
     if !props.iter().any(|prop| {
         matches!(
             prop,
@@ -11546,68 +11580,27 @@ fn reduce_zone_quals(entries: &[(ZoneQual, Zone)]) -> Option<ZoneQual> {
 }
 
 /// CR 400.1 + CR 400.3 + CR 108.4a: how a "your" / "the chosen player's"
-/// possessive binds on a MULTI-zone population.
+/// possessive binds on an ALL-PER-PLAYER multi-zone population.
 ///
 /// CR 108.4a makes the OWNER the player axis for a card with no controller, and
-/// CR 400.3 keys membership in a per-player zone to the owner ("if an object
-/// would go to any library, graveyard, or hand other than its owner's, it goes
-/// to its owner's corresponding zone"). The house encoding for a possessive over
-/// such a zone is nevertheless `TypedFilter.controller`, which
-/// `filter::typed_filter_is_owner_scoped` re-reads as ownership — but that
-/// predicate accepts a population only when EVERY zone in it is per-player,
-/// because that is the case CR 400.3 licenses. A list that also names a shared
-/// zone ("in exile and in your graveyard") falls outside it, so the same
-/// encoding there would be left as a plain control comparison rather than the
-/// ownership the card's text states. Such a list carries its possessor as an
-/// explicit `FilterProp::Owned` instead — the encoding
-/// `filter::bind_declaring_owner_authority` binds unconditionally, with no
-/// dependence on the zone set.
-///
-/// KNOWN OVER-RESTRICTION, AND IT IS NOT LOCAL TO THIS FUNCTION. One `Owned`
-/// over the whole `InAnyZone` applies the possessor to the SHARED leg too, which
-/// CR 400.1 does not license: the unpossessed "in exile" half of "cards in exile
-/// and in your graveyard" names every player's exiled cards, not only the
-/// controller's. Expressing that needs a `TargetFilter::Or` of a possessed
-/// per-player leg and a bare shared leg, which this function cannot return — the
-/// zone suffix's contract is a flat `Vec<FilterProp>` read by ~10 call sites, so
-/// widening that contract to an `Or` is the fix.
-///
-/// The `Opponent` / `TargetPlayer` / `Their` arms of the caller's multi-zone
-/// match have the same `Owned + InAnyZone` shape and the same over-restriction,
-/// and `reduce_zone_quals`' absorption of a shared zone's `Plain` is what newly
-/// makes them reachable — so a fix belongs at that match, not only here. No
-/// printed card reaches any of the four arms with a mixed list: 0 cards spell a
-/// mixed-zone list with an opponent/target-player/third-person possessor at all,
-/// and every card in the `your` class states its ownership separately ("… cards
-/// YOU OWN in exile and in your graveyard" — Huskburster Swarm, Sailors' Bane,
-/// Beacon Bolt, Crackling Drake, Ral, Izzet Viceroy, Serpentine Curve, Slime
-/// Against Humanity, Candlekeep Inspiration; "all commanders you own from the
-/// command zone and from your graveyard" — Campfire), which is why
-/// `extend_zone_properties` has to dedupe the resulting identical props.
-///
-/// For the `you own` class the over-restriction is not merely unreachable, it is
-/// VACUOUS: CR 400.3 sends a card to its OWNER's graveyard, so a card you own
-/// cannot sit in another player's graveyard, and `Owned { You } ∧ (Exile ∨
-/// Graveyard)` is exactly the printed population. The defect only bites a card
-/// that spells the mixed list with no separate ownership phrase.
+/// CR 400.3 keys membership in a per-player zone to the owner. The house
+/// encoding for a possessive over such a zone is `TypedFilter.controller`, which
+/// `filter::typed_filter_is_owner_scoped` re-reads as ownership when every zone
+/// in the population is per-player. A mixed per-player/shared list cannot use
+/// that encoding for the whole union; `parse_zone_suffix_nom` accepts it only
+/// when the noun phrase already established ownership and then contributes the
+/// bare `InAnyZone` (the noun phrase's `Owned` prop supplies the owner).
 fn possessive_zone_list_props(
     controller: ControllerRef,
     zones: Vec<Zone>,
 ) -> (Vec<FilterProp>, Option<ControllerRef>) {
-    if zones.iter().copied().all(Zone::is_per_player) {
-        return (vec![FilterProp::InAnyZone { zones }], Some(controller));
-    }
-    (
-        vec![
-            FilterProp::Owned { controller },
-            FilterProp::InAnyZone { zones },
-        ],
-        None,
-    )
+    debug_assert!(zones.iter().copied().all(Zone::is_per_player));
+    (vec![FilterProp::InAnyZone { zones }], Some(controller))
 }
 
 fn parse_zone_suffix_nom(
     i: &str,
+    noun_phrase_has_ownership: bool,
 ) -> super::oracle_nom::error::OracleResult<'_, (Vec<FilterProp>, Option<ControllerRef>, ZoneQual)>
 {
     let (i, _) = opt(alt((tag("cards "), tag("card ")))).parse(i)?;
@@ -11681,40 +11674,64 @@ fn parse_zone_suffix_nom(
     let zones: Vec<Zone> = entries.into_iter().map(|(_, zone)| zone).collect();
 
     let out = if zones.len() > 1 {
-        // Multi-zone disjunction: use InAnyZone
-        match qual {
-            ZoneQual::Opponent => (
-                vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::Opponent,
-                    },
-                    FilterProp::InAnyZone { zones },
-                ],
-                None,
-            ),
-            ZoneQual::You => possessive_zone_list_props(ControllerRef::You, zones),
-            ZoneQual::ChosenPlayer => {
-                possessive_zone_list_props(ControllerRef::SourceChosenPlayer, zones)
+        let all_per_player = zones.iter().all(|zone| zone.is_per_player());
+        let any_per_player = zones.iter().any(|zone| zone.is_per_player());
+        let any_shared = !all_per_player;
+        let mixed_scope = any_per_player && any_shared;
+        // CR 400.1 + CR 400.3: a mixed per-player/shared list cannot carry one
+        // ownership predicate over the whole union — the shared leg has no
+        // owner-qualified population. Accept it only when the noun phrase
+        // already established ownership (`extend_zone_properties` then dedupes
+        // the possessive), and otherwise decline rather than over-restrict the
+        // shared leg. Plain/no-possessor lists stay union-only.
+        if mixed_scope && qual != ZoneQual::Plain && !noun_phrase_has_ownership {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                i,
+                nom::error::ErrorKind::Fail,
+            )));
+        }
+        if mixed_scope || !any_per_player {
+            // Shared-only or mixed list: the possessor, if any, already lives on
+            // the noun phrase, so the zone suffix contributes only the union.
+            (vec![FilterProp::InAnyZone { zones }], None)
+        } else {
+            // Every zone is per-player: the owner-zone encoding is expressible.
+            match qual {
+                ZoneQual::Opponent => (
+                    vec![
+                        FilterProp::Owned {
+                            controller: ControllerRef::Opponent,
+                        },
+                        FilterProp::InAnyZone { zones },
+                    ],
+                    None,
+                ),
+                ZoneQual::You => possessive_zone_list_props(ControllerRef::You, zones),
+                ZoneQual::ChosenPlayer => {
+                    possessive_zone_list_props(ControllerRef::SourceChosenPlayer, zones)
+                }
+                ZoneQual::TargetPlayer => (
+                    vec![
+                        FilterProp::Owned {
+                            controller: ControllerRef::TargetPlayer,
+                        },
+                        FilterProp::InAnyZone { zones },
+                    ],
+                    None,
+                ),
+                ZoneQual::Their => (
+                    vec![
+                        FilterProp::Owned {
+                            controller: ControllerRef::ScopedPlayer,
+                        },
+                        FilterProp::InAnyZone { zones },
+                    ],
+                    None,
+                ),
+                ZoneQual::OtherPoss | ZoneQual::Plain => {
+                    (vec![FilterProp::InAnyZone { zones }], None)
+                }
             }
-            ZoneQual::TargetPlayer => (
-                vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::TargetPlayer,
-                    },
-                    FilterProp::InAnyZone { zones },
-                ],
-                None,
-            ),
-            ZoneQual::Their => (
-                vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::ScopedPlayer,
-                    },
-                    FilterProp::InAnyZone { zones },
-                ],
-                None,
-            ),
-            ZoneQual::OtherPoss | ZoneQual::Plain => (vec![FilterProp::InAnyZone { zones }], None),
         }
     } else {
         // Single zone: use InZone
@@ -25748,108 +25765,129 @@ mod zone_list_grammar {
     /// only be read disjunctively — "in exile and in your graveyard" names the
     /// same population "in your graveyard or in exile" would.
     ///
-    /// CR 400.1 also licenses the possessive asymmetry — "Each player has their
-    /// own library, hand, and graveyard. The other zones are shared by all
-    /// players" — so a shared zone is never written with a possessor and the
-    /// list's one possessive governs it, in either printed order. The possessor
-    /// rides `FilterProp::Owned` here rather than `TypedFilter.controller`
-    /// because every one of these lists names a shared zone; see
-    /// `possessive_zone_list_props`.
+    /// A mixed per-player/shared list carries a possessor only when the noun
+    /// phrase already established ownership ("card you own …"). Without that
+    /// provenance the possessor belongs to the qualified leg alone and the
+    /// grammar declines rather than applying `Owned` to the shared leg. The
+    /// owned rows below therefore go through `parse_type_phrase_folding`, which
+    /// is the production seam that supplies the noun phrase's `Owned` property.
     ///
     /// Every phrase is quoted from the named printed card.
     #[test]
     fn printed_zone_lists_read_as_one_union_with_one_possessor() {
-        for (phrase, card, zones, owner) in [
+        for (phrase, card, zones) in [
             (
                 "in exile and in your graveyard",
                 "Huskburster Swarm / Sailors' Bane / Crackling Drake",
                 vec![Zone::Exile, Zone::Graveyard],
-                Some(ControllerRef::You),
             ),
             (
                 "from the command zone and from your graveyard",
                 "Campfire",
                 vec![Zone::Command, Zone::Graveyard],
-                Some(ControllerRef::You),
             ),
             (
                 "from your hand or from the command zone",
                 "Next of Kin",
                 vec![Zone::Hand, Zone::Command],
-                Some(ControllerRef::You),
             ),
             (
                 "in your graveyard or on the battlefield",
                 "Firemane Angel / Ichor Aberration",
                 vec![Zone::Graveyard, Zone::Battlefield],
-                Some(ControllerRef::You),
             ),
             (
                 // The only printed card with this exact phrase is un-set:
                 // Mzed is `isFunny`, UNK-only, zero format legalities. Kept
-                // because the grammar still has to read it, and flagged so it
-                // is never mistaken for a black-bordered authority. The
-                // black-bordered near-shape — same two zones, no possessor —
-                // is Stinging Study / Imposing Grandeur, pinned in its own row
-                // below.
+                // because a noun phrase that establishes ownership still has
+                // to read it, and flagged so it is never mistaken for a
+                // black-bordered authority. The black-bordered near-shape —
+                // same two zones, no possessor — is Stinging Study / Imposing
+                // Grandeur, pinned in its own row below.
                 "on the battlefield or in your command zone",
                 "Mzed, Mercenary Leader (UNK, un-set)",
                 vec![Zone::Battlefield, Zone::Command],
-                Some(ControllerRef::You),
-            ),
-            (
-                // Black-bordered, and the printed order Edgar Markov's row
-                // reverses: both zones shared, both qualifiers plain.
-                "on the battlefield or in the command zone",
-                "Stinging Study / Imposing Grandeur / Cloudkill",
-                vec![Zone::Battlefield, Zone::Command],
-                None,
             ),
             (
                 "in your library or in the command zone",
                 "Worldknit",
                 vec![Zone::Library, Zone::Command],
-                Some(ControllerRef::You),
             ),
             (
                 "from your graveyard or from exile",
                 "Mister Immortal / Squee, the Immortal / Doc Aurlock, Grizzled Genius",
                 vec![Zone::Graveyard, Zone::Exile],
-                Some(ControllerRef::You),
             ),
+        ] {
+            let phrase_with_owner = format!("card you own {phrase}");
+            let (filter, remainder) = parse_type_phrase_folding(&phrase_with_owner);
+            assert_eq!(remainder.trim(), "", "{card}: {phrase:?}");
+            let TargetFilter::Typed(typed) = filter else {
+                panic!("{card}: expected a Typed filter for {phrase:?}");
+            };
+            assert_eq!(
+                typed.controller, None,
+                "{card}: a mixed list carries its owner as a property"
+            );
+            assert_eq!(
+                typed.properties,
+                vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::You
+                    },
+                    FilterProp::InAnyZone { zones },
+                ],
+                "{card}: {phrase:?}"
+            );
+        }
+
+        // No possessive anywhere: the plural "graveyards" names every player's,
+        // and exile is shared, so no owner is emitted.
+        for (phrase, card, zones) in [
             (
-                // No possessive anywhere: the plural "graveyards" names every
-                // player's, and exile is shared, so no owner is emitted.
                 "from graveyards or from exile",
                 "Aven Interrupter",
                 vec![Zone::Graveyard, Zone::Exile],
-                None,
             ),
             (
-                // Both zones shared, both qualifiers plain — the shape that
-                // already worked; pinned so the reduction cannot regress it.
                 "in the command zone or on the battlefield",
                 "Edgar Markov / Arahbo, Roar of the World",
                 vec![Zone::Command, Zone::Battlefield],
-                None,
             ),
         ] {
             let (props, ctrl, consumed) = props_of(phrase);
+            assert_eq!(consumed, phrase.len(), "{card}: {phrase:?}");
+            assert_eq!(ctrl, None, "{card}: {phrase:?}");
             assert_eq!(
-                consumed,
-                phrase.len(),
-                "{card}: {phrase:?} must consume both zone phrases"
+                props,
+                vec![FilterProp::InAnyZone { zones }],
+                "{card}: {phrase:?}"
             );
+        }
+
+        // Limit the shared grammar: a mixed list whose possessor is not already
+        // established by the noun phrase declines instead of over-restricting
+        // the shared leg. The reach guard below shows the same phrases parse
+        // once the noun phrase supplies ownership.
+        for phrase in [
+            "in your graveyard or on the battlefield",
+            "in your library or in the command zone",
+        ] {
             assert_eq!(
-                ctrl, None,
-                "{card}: a list naming a shared zone carries its possessor as a property"
+                parse_zone_suffix(phrase),
+                None,
+                "a mixed list without noun-phrase ownership must decline: {phrase:?}"
             );
-            let mut expected = Vec::new();
-            if let Some(controller) = owner {
-                expected.push(FilterProp::Owned { controller });
-            }
-            expected.push(FilterProp::InAnyZone { zones });
-            assert_eq!(props, expected, "{card}: {phrase:?}");
+            let phrase_with_owner = format!("card you own {phrase}");
+            let (filter, remainder) = parse_type_phrase_folding(&phrase_with_owner);
+            assert_eq!(remainder.trim(), "", "reach guard: {phrase_with_owner:?}");
+            let TargetFilter::Typed(typed) = filter else {
+                panic!("reach guard: expected Typed for {phrase_with_owner:?}");
+            };
+            assert!(typed
+                .properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::InAnyZone { .. })));
         }
     }
 
@@ -25938,10 +25976,19 @@ mod zone_list_grammar {
         ] {
             assert_eq!(parse_zone_suffix(phrase), None, "{phrase:?}");
         }
-        // Reach-guard: one possessor over the same two zones still parses.
-        let (props, _, _) = props_of("in your graveyard or in exile");
+        // A mixed list with one possessor but no noun-phrase ownership also
+        // declines rather than over-restricting the shared leg.
+        assert_eq!(parse_zone_suffix("in your graveyard or in exile"), None);
+        // Reach-guard: the same two zones parse once the noun phrase supplies
+        // ownership.
+        let (filter, remainder) =
+            parse_type_phrase_folding("card you own in your graveyard or in exile");
+        assert_eq!(remainder.trim(), "");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a Typed filter");
+        };
         assert_eq!(
-            props,
+            typed.properties,
             vec![
                 FilterProp::Owned {
                     controller: ControllerRef::You
@@ -25964,12 +26011,15 @@ mod zone_list_grammar {
     /// `printed_zone_lists_read_as_one_union_with_one_possessor`.
     #[test]
     fn three_zone_list_reduces_once_over_the_whole_list() {
-        let phrase = "in exile and in your graveyard and in your hand";
-        let (props, ctrl, consumed) = props_of(phrase);
-        assert_eq!(consumed, phrase.len());
-        assert_eq!(ctrl, None);
+        let phrase = "card you own in exile and in your graveyard and in your hand";
+        let (filter, remainder) = parse_type_phrase_folding(phrase);
+        assert_eq!(remainder.trim(), "");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a Typed filter");
+        };
+        assert_eq!(typed.controller, None);
         assert_eq!(
-            props,
+            typed.properties,
             vec![
                 FilterProp::Owned {
                     controller: ControllerRef::You
@@ -25984,29 +26034,19 @@ mod zone_list_grammar {
     /// CR 607.2d: "the chosen player's" is linked to an earlier "choose a
     /// player" on the same object ("those abilities are linked. The second
     /// ability refers only to a choice made as a result of the first ability"),
-    /// which is what makes it a possessor at all. It is the other possessor that
-    /// rides `TypedFilter.controller` on an all-per-player list, so it takes the
-    /// same `FilterProp::Owned` switch as `your ` once a shared zone joins the
-    /// list. Pinned because the two share one helper and only `your ` appears in
-    /// the printed two-zone corpus.
+    /// which is what makes it a possessor at all. An all-per-player list keeps
+    /// the controller encoding; a mixed list without noun-phrase ownership
+    /// declines rather than applying that possessor to the shared leg.
     ///
     /// No printed card spells a mixed-zone list with this possessor; the nearest
     /// printed instance of the qualifier itself is Haunting Apparition's "green
     /// creature cards in the chosen player's graveyard" (single zone).
     #[test]
-    fn chosen_player_possessive_takes_the_same_mixed_list_encoding() {
-        let (props, ctrl, _) = props_of("in exile and in the chosen player's graveyard");
-        assert_eq!(ctrl, None);
+    fn chosen_player_possessive_keeps_the_all_per_player_encoding() {
         assert_eq!(
-            props,
-            vec![
-                FilterProp::Owned {
-                    controller: ControllerRef::SourceChosenPlayer
-                },
-                FilterProp::InAnyZone {
-                    zones: vec![Zone::Exile, Zone::Graveyard]
-                },
-            ]
+            parse_zone_suffix("in exile and in the chosen player's graveyard"),
+            None,
+            "mixed list without noun-phrase ownership must decline"
         );
         // All-per-player keeps the controller encoding for this possessor too.
         let (props, ctrl, _) =

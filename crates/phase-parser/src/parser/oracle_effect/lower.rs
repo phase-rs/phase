@@ -2307,12 +2307,13 @@ pub(super) fn change_zone_target_choice_timing(
     has_multi_target: bool,
     fragment_lower: &str,
 ) -> TargetChoiceTiming {
-    // CR 400.1 + CR 400.7: a target filter that names more than one zone is a
-    // multi-origin population (Next of Kin's "from your hand or from the
-    // command zone"). The producer deliberately leaves `origin: None` because
-    // one `Zone` cannot hold the union, so the filter's own zones are the
-    // authority here too; without this the clause falls through to the
-    // battlefield/Stack default and the put card is treated as a stack target.
+    // CR 400.1 + CR 115.10a + CR 608.2d: a target filter that names more than
+    // one zone is a multi-origin population (Next of Kin's "from your hand or
+    // from the command zone"). The producer deliberately leaves `origin: None`
+    // because one `Zone` cannot hold the union, so the filter's own zones are
+    // the authority here too; without this the clause falls through to the
+    // battlefield/Stack default and the put card is treated as a stack target
+    // instead of a choice announced while applying the effect.
     let target_zones = target.extract_zones();
     let off_battlefield_origin = origin.is_some_and(|zone| zone != Zone::Battlefield)
         || (has_multi_target || target_zones.len() > 1)

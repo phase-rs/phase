@@ -689,6 +689,31 @@ pub(crate) fn until_event_already_occurred(
         })
 }
 
+/// CR 400.7 + CR 400.1: the proposed-event origin of a picked object.
+///
+/// A multi-zone origin instruction (Next of Kin's "from your hand or from the
+/// command zone") has no single `origin` to pass to the mover, and the first
+/// entry of the scan set is not necessarily the zone the chosen card is in. The
+/// object itself is the authority once the choice is made; `fallback` covers
+/// only an object that ceased to exist between the scan and the move. The value
+/// feeds the mover's `ProposedEvent::ZoneChange.from`, which is what
+/// `EnteredFromZone` replacements read. A single-zone scan passes the scan zone
+/// through unchanged, so this is the multi-zone seam only.
+fn chosen_object_origin(
+    state: &GameState,
+    chosen: ObjectId,
+    scan_zones: &[Zone],
+    fallback: Zone,
+) -> Zone {
+    if scan_zones.len() == 1 {
+        return fallback;
+    }
+    state
+        .objects
+        .get(&chosen)
+        .map_or(fallback, |object| object.zone)
+}
+
 /// CR 400.7 + CR 603.2: the zone a move expects its object to be in — the
 /// effect's origin, or for an event referent the zone the trigger event put it
 /// in.
@@ -1276,6 +1301,7 @@ pub fn resolve(
                 .draw(RandomDraw::Outcome)
                 .random_range(0..eligible.len());
             let chosen = eligible[index];
+            let chosen_origin = chosen_object_origin(state, chosen, &scan_zones, scan_zone);
             publish_finalized_owner_library_subjects(state, ability, &[chosen]);
             capture_devour_snapshot_before_single_entry(state, chosen, dest_zone);
             // CR 614.12: resolve the chosen object's gated entry counters and
@@ -1287,7 +1313,7 @@ pub fn resolve(
             match crate::game::zone_pipeline::execute_zone_move_with_controller(
                 state,
                 chosen,
-                scan_zone,
+                chosen_origin,
                 dest_zone,
                 ability.source_id,
                 ability.duration.as_ref(),
@@ -1353,6 +1379,7 @@ pub fn resolve(
 
         if eligible.len() == 1 && !choice_up_to && choice_count == 1 {
             let chosen = eligible[0];
+            let chosen_origin = chosen_object_origin(state, chosen, &scan_zones, scan_zone);
             publish_finalized_owner_library_subjects(state, ability, &[chosen]);
             capture_devour_snapshot_before_single_entry(state, chosen, dest_zone);
             // CR 614.12: resolve the chosen object's gated entry counters and
@@ -1364,7 +1391,7 @@ pub fn resolve(
             match crate::game::zone_pipeline::execute_zone_move_with_controller(
                 state,
                 chosen,
-                scan_zone,
+                chosen_origin,
                 dest_zone,
                 ability.source_id,
                 ability.duration.as_ref(),

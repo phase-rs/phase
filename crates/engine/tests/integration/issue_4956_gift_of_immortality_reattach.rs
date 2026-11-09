@@ -7,16 +7,19 @@ use engine::game::effects::attach::{attach_to, attach_to_player};
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::process_triggers;
+use engine::game::visibility::filter_state_for_viewer;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityCondition, DelayedTriggerCondition, Effect, FilterProp, TargetChoiceTiming,
-    TargetFilter, TargetRef, TypedFilter,
+    AbilityCondition, AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, FilterProp,
+    OriginConstraint, QuantityExpr, ReplacementCondition, ReplacementDefinition,
+    TargetChoiceTiming, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 const GIFT_ORACLE: &str = "Enchant creature\n\
@@ -973,6 +976,9 @@ fn next_of_kin_single_command_zone_candidate_moves_without_a_hand_leg() {
         .with_mana_cost(generic_cost(1))
         .id();
     scenario.with_commander(command);
+    scenario
+        .add_creature(P0, "Hand-Entry Watcher", 1, 1)
+        .with_replacement_definition(hand_entry_life_replacement());
     let aura = scenario
         .add_creature(P0, "Next of Kin", 0, 0)
         .as_enchantment()
@@ -1004,6 +1010,12 @@ fn next_of_kin_single_command_zone_candidate_moves_without_a_hand_leg() {
         runner.state().objects[&command].zone,
         Zone::Battlefield,
         "the lone command-zone candidate must move from Command, not the first scan zone"
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        20,
+        "a Command-origin entry must not match the hand-origin replacement; \
+         the proposed event origin is the chosen object's zone"
     );
 
     runner.advance_to_end_step();
@@ -1075,12 +1087,160 @@ fn next_of_kin_ignores_a_creature_outside_hand_and_command() {
     );
 }
 
+/// Drive Next of Kin's dies trigger through the production optional prompt to
+/// the multi-origin `EffectZoneChoice`, without choosing a card. `eligible`
+/// hand creatures are mana value 2; `lands` filler cards keep the hand size
+/// controllable for the visibility comparison.
+fn open_next_of_kin_choice(eligible_hand_creatures: usize, lands: usize) -> GameRunner {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let host = scenario
+        .add_creature(P0, "Hill Giant", 3, 3)
+        .with_mana_cost(generic_cost(3))
+        .id();
+    let command = scenario
+        .add_creature_to_hand(P0, "Elite Vanguard", 2, 1)
+        .with_mana_cost(generic_cost(1))
+        .id();
+    scenario.with_commander(command);
+    for index in 0..eligible_hand_creatures {
+        scenario
+            .add_creature_to_hand(P0, &format!("Hand Bear {index}"), 2, 2)
+            .with_mana_cost(generic_cost(2));
+    }
+    for index in 0..lands {
+        scenario.add_land_to_hand(P0, &format!("Hand Land {index}"));
+    }
+    let aura = scenario
+        .add_creature(P0, "Next of Kin", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(NEXT_OF_KIN_ORACLE)
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )))
+        .id();
+
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), aura, host);
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), host, Zone::Graveyard, &mut events);
+    process_triggers(runner.state_mut(), &events);
+
+    for _ in 0..64 {
+        match &runner.state().waiting_for {
+            WaitingFor::EffectZoneChoice { .. } => return runner,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority to resolve Next of Kin");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept the you-may prompt");
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
+            }
+            other => panic!("unexpected prompt before Next of Kin's choice: {other:?}"),
+        }
+    }
+    panic!("Next of Kin's multi-origin choice did not open");
+}
+
+/// CR 402.3: opponent payloads must not reveal how many hidden hand cards are
+/// eligible. Two equal-sized hands with different eligible counts (2 creatures
+/// vs 1 creature + 1 land) must produce the same opponent view, while the
+/// chooser still sees the exact options.
+#[test]
+fn next_of_kin_mixed_choice_redacts_private_eligibility() {
+    let two_eligible = open_next_of_kin_choice(2, 0);
+    let one_eligible = open_next_of_kin_choice(1, 1);
+
+    let opponent_two = filter_state_for_viewer(two_eligible.state(), P1);
+    let opponent_one = filter_state_for_viewer(one_eligible.state(), P1);
+    let WaitingFor::EffectZoneChoice {
+        cards: opponent_cards_two,
+        ..
+    } = &opponent_two.waiting_for
+    else {
+        panic!("opponent must still see the redacted choice envelope");
+    };
+    let WaitingFor::EffectZoneChoice {
+        cards: opponent_cards_one,
+        ..
+    } = &opponent_one.waiting_for
+    else {
+        panic!("opponent must still see the redacted choice envelope");
+    };
+    assert!(
+        opponent_cards_two.is_empty() && opponent_cards_one.is_empty(),
+        "equal-sized hands with different eligible counts must have identical, empty opponent payloads; got {opponent_cards_two:?} and {opponent_cards_one:?}"
+    );
+
+    let chooser_two = filter_state_for_viewer(two_eligible.state(), P0);
+    let chooser_one = filter_state_for_viewer(one_eligible.state(), P0);
+    let WaitingFor::EffectZoneChoice {
+        cards: chooser_cards_two,
+        ..
+    } = &chooser_two.waiting_for
+    else {
+        panic!("chooser must retain the exact choice");
+    };
+    let WaitingFor::EffectZoneChoice {
+        cards: chooser_cards_one,
+        ..
+    } = &chooser_one.waiting_for
+    else {
+        panic!("chooser must retain the exact choice");
+    };
+    assert_eq!(
+        chooser_cards_two.len(),
+        3,
+        "chooser sees two hand creatures plus the command-zone creature"
+    );
+    assert_eq!(
+        chooser_cards_one.len(),
+        2,
+        "chooser sees one hand creature plus the command-zone creature"
+    );
+    assert!(
+        chooser_cards_two
+            .iter()
+            .chain(chooser_cards_one)
+            .all(|id| *id != engine::types::identifiers::ObjectId(0)),
+        "the chooser must see exact object ids, not redaction placeholders"
+    );
+}
+
 /// Generic mana cost for a staged card's mana value.
 fn generic_cost(generic: u32) -> ManaCost {
     ManaCost::Cost {
         shards: vec![],
         generic,
     }
+}
+
+/// Replacement witness for the proposed-event origin: gain 1 life when a
+/// creature would enter the battlefield from a hand. Used by the lone-command
+/// test to prove the command-zone pick is not proposed as a hand move.
+fn hand_entry_life_replacement() -> ReplacementDefinition {
+    ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+        .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+        .destination_zone(Zone::Battlefield)
+        .condition(ReplacementCondition::EnteredFromZone {
+            origin_constraint: Some(OriginConstraint::Equals(Zone::Hand)),
+            cast_origin: None,
+        })
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        ))
 }
 
 #[test]
