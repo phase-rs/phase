@@ -12,6 +12,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::process_triggers;
 use engine::types::ability::{Effect, LibraryPosition};
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -230,4 +231,59 @@ fn declining_connive_target_preserves_the_owners_selected_library_slot() {
     ));
     assert!(runner.state().stack.is_empty());
     assert!(runner.state().resolution_stack.is_empty());
+}
+
+#[test]
+fn illegal_tuck_target_does_not_stop_the_other_creature_conniving() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P1, &["Owner A", "Owner B", "Owner C"]);
+    let discarded = scenario
+        .add_spell_to_hand_from_oracle(P0, "Opt", true, "Scry 1.\nDraw a card.")
+        .id();
+    let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let conniver = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Trickster's Stratagem", false, TRICKSTERS_STRATAGEM)
+        .id();
+    let response = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, "Destroy target creature.")
+        .id();
+    let mut runner = scenario.build();
+    // Infrastructure: seed a typed nonland in the otherwise-empty library.
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        discarded,
+        Zone::Library,
+        &mut Vec::new(),
+    );
+    let owner_library = library(&runner, P1);
+    runner
+        .cast(spell)
+        .target_objects(&[victim, conniver])
+        .commit();
+    runner
+        .cast(response)
+        .target_object(victim)
+        .commit()
+        .try_resolve()
+        .expect("Murder invalidates the tuck target before the original spell resolves");
+
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(library(&runner, P1), owner_library);
+    assert!(library(&runner, P0).is_empty());
+    assert_eq!(state.objects[&victim].zone, Zone::Graveyard);
+    assert_eq!(state.objects[&conniver].zone, Zone::Battlefield);
+    assert_eq!(
+        state.objects[&conniver]
+            .counters
+            .get(&CounterType::Plus1Plus1),
+        Some(&1)
+    );
+    assert_eq!(state.objects[&discarded].zone, Zone::Graveyard);
+    assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+    assert!(state.players[0].hand.is_empty());
+    assert!(state.stack.is_empty());
+    assert!(state.resolution_stack.is_empty());
 }

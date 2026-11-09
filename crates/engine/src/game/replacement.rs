@@ -14188,8 +14188,9 @@ pub(crate) fn pending_replacement_needs_reconsult(
     changed
 }
 
-/// CR 614.5 + CR 616.1f: consult the current modified event again after a
-/// departure, without answering or applying anything from the obsolete menu.
+/// CR 616.1 + CR 800.4h: consult the current modified event after a departure,
+/// without answering or applying anything from the obsolete menu. CR 614.5
+/// keeps the retained applied set authoritative.
 pub(crate) fn reconsult_pending_replacement(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
