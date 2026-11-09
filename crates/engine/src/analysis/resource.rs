@@ -3512,8 +3512,8 @@ pub(crate) trait CurrentSide<'a>: Copy {
     fn projected(self) -> Cow<'a, ResourceProjectedFrame>;
     /// [`cover_projection`] of it.
     fn cover_projected(self) -> Cow<'a, ResourceProjectedFrame>;
-    /// [`normalized_stack_entries`] of the loop-normalized state, so its ranked
-    /// incarnations meet a normalized prior's.
+    /// [`normalized_stack_entries`] of [`project_out_resources`], before stack clear.
+    /// Retained event pins use the same post-erasure ranks as prior/shared covers.
     fn cover_stack(self) -> Cow<'a, [(StackEntry, Option<TriggerFiring>)]>;
 }
 
@@ -3528,7 +3528,7 @@ impl<'a> CurrentSide<'a> for &'a GameState {
         Cow::Owned(cover_projection(self))
     }
     fn cover_stack(self) -> Cow<'a, [(StackEntry, Option<TriggerFiring>)]> {
-        Cow::Owned(normalized_stack_entries(&self.normalize_for_loop()))
+        Cow::Owned(normalized_stack_entries(&project_out_resources(self)))
     }
 }
 
