@@ -4504,8 +4504,10 @@ mod tests {
         }
     }
 
-    /// The multiplier is parameterized, not hardcoded: "three times" yields
-    /// factor 3 and the colorless tail still parses.
+    /// Synthetic factor-three probe: no printed card uses "three times that
+    /// much" for mana. Fangorn uses "twice that much {G}" and Mana Seism uses
+    /// "add that much {C}".
+    /// This case verifies the same grammar keeps the factor and colorless tail.
     #[test]
     fn parse_add_three_times_that_much_colorless_parameterizes_factor() {
         let effect = try_parse_add_mana_effect("add three times that much {C}")
@@ -4527,8 +4529,10 @@ mod tests {
         }
     }
 
-    /// The arm composes only with "that much/many"; "twice X" must decline
-    /// rather than silently drop a trailing "where X is ..." definition.
+    /// Synthetic rejection probe: no printed card adds "twice X {G}". Fangorn
+    /// multiplies a demonstrative amount, while Brigid, Doun's Mind uses bare
+    /// X with a trailing "where X is" definition. Decline the combined form
+    /// until its nested X can preserve the definition.
     #[test]
     fn parse_mana_count_prefix_declines_multiplier_over_bare_x() {
         assert!(

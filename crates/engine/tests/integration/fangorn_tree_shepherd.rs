@@ -4,12 +4,12 @@
 //!
 //! CR 603.2c: the batched trigger fires once; its event-context amount is the
 //! number of attacking subjects that matched the Treefolk-you-control filter.
-//! CR 608.2h: that amount is determined once, when the trigger resolves.
+//! CR 608.2h: the effect doubles the stored count when it resolves.
 //! CR 106.4: the mana goes into the controller's mana pool.
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::actions::GameAction;
+use engine::types::game_state::{StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaType;
 use engine::types::phase::Phase;
@@ -52,19 +52,36 @@ fn green_mana(runner: &GameRunner) -> usize {
 
 /// Declare the attackers and resolve the attack trigger, stopping before
 /// blockers so the assertion isolates mana production.
-fn declare_and_resolve(runner: &mut GameRunner, attackers: Vec<ObjectId>) {
+fn declare_and_resolve(runner: &mut GameRunner, fangorn: ObjectId, attackers: &[ObjectId]) {
     runner.pass_both_players();
-    let attacks = attackers
-        .into_iter()
-        .map(|id| (id, AttackTarget::Player(P1)))
+    let attacks: Vec<_> = attackers
+        .iter()
+        .map(|&id| (id, AttackTarget::Player(P1)))
         .collect();
     runner
-        .act(GameAction::DeclareAttackers {
-            attacks,
-            bands: vec![],
-        })
+        .declare_attackers(&attacks)
         .expect("DeclareAttackers should succeed");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(
+        runner.state().stack.iter().filter(|entry| {
+            matches!(entry.kind, StackEntryKind::TriggeredAbility { source_id, .. } if source_id == fangorn)
+        }).count(),
+        1,
+        "one Fangorn trigger represents the entire attack declaration"
+    );
+
     runner.advance_until_stack_empty();
+    assert!(
+        runner.state().stack.is_empty(),
+        "Fangorn's trigger must resolve"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }
 
 /// CR 603.2c + CR 608.2h: one attacking Treefolk (Fangorn itself) → 2 green.
@@ -77,7 +94,7 @@ fn fangorn_one_attacking_treefolk_adds_two_green() {
     let mut runner = scenario.build();
     assert_eq!(green_mana(&runner), 0, "precondition: empty mana pool");
 
-    declare_and_resolve(&mut runner, vec![fangorn]);
+    declare_and_resolve(&mut runner, fangorn, &[fangorn]);
 
     assert_eq!(
         green_mana(&runner),
@@ -98,7 +115,7 @@ fn fangorn_three_attacking_treefolk_add_six_green_and_exclude_non_treefolk() {
     let soldier = add_soldier(&mut scenario);
 
     let mut runner = scenario.build();
-    declare_and_resolve(&mut runner, vec![fangorn, t1, t2, soldier]);
+    declare_and_resolve(&mut runner, fangorn, &[fangorn, t1, t2, soldier]);
 
     assert_eq!(
         green_mana(&runner),
