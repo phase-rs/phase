@@ -4126,11 +4126,12 @@ fn try_materialize_reflexive_trigger_step(
     result
 }
 
-/// CR 115.6 + CR 603.3d: true when every declared slot of `reflexive` is
-/// optional and has no legal target, so the target walk auto-skips them all
-/// and there is no choice to announce. Zero targets is then a legal
-/// announcement, not a missing required choice: the ability takes the same
-/// route as one that declares no target slots.
+/// CR 115.6 + CR 603.3d: true when the target walk completes without offering
+/// a choice — every optional slot with no legal target is auto-skipped, and
+/// any per-opponent binder slot the walk auto-binds is not a choice either.
+/// With nothing to announce, the ability takes the same route as one that
+/// declares no target slots; normal dispatch recomputes its targets when it
+/// is put on the stack.
 fn reflexive_target_walk_offers_no_choice(
     state: &GameState,
     reflexive: &ResolvedAbility,
@@ -35832,8 +35833,11 @@ mod tests {
     /// declared slot is optional with no legal target resolves untargeted, the
     /// same `Ok(None)` handoff a slot-less continuation gets. Labelled synthetic
     /// composition: no printed card gates a Fight (or any slot this arm emits
-    /// without legal targets) on a `QuantityCheck`; this pins only the
-    /// materializer's handoff to the chain descent.
+    /// without legal targets) on a `QuantityCheck`. The nearest printed card is
+    /// Clear the Stage ("you may return up to one target creature card from your
+    /// graveyard"), whose gated slot the generic multi-target arm does not
+    /// declare when there is no legal target, so it never reaches this
+    /// predicate. This pins only the materializer's handoff to the chain descent.
     #[test]
     fn choice_free_optional_gated_continuation_resolves_untargeted() {
         let mut reflexive = back_for_more_reflexive_fight();
