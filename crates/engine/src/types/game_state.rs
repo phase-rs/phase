@@ -52040,6 +52040,206 @@ mod tests {
         assert!(normalized_equal(&tapped(3, 3), &tapped(91, 91)));
         // A legacy `None` stamp is not a pin, so it does not equal a ranked one.
         assert!(!normalized_equal(&damage(3, None), &damage(3, Some(3))));
+
+        // CR 400.7 + CR 608.2h: a stale damage pin must still select its FULL
+        // exit snapshot after ranking, not the newer snapshot or the live row.
+        let with_history = |mut state: GameState, named: u64| {
+            let x = state.stack[0].source_id;
+            let mut selected = state.objects[&x].snapshot_public_characteristics();
+            selected.controller = PlayerId(1);
+            selected.power = Some(5);
+            selected.toughness = Some(6);
+            selected.base_power = Some(2);
+            selected.base_toughness = Some(3);
+            selected.mana_value = 4;
+            selected.card_types = vec![CoreType::Creature];
+            selected.colors = vec![ManaColor::Red];
+            selected.tapped = true;
+            selected.is_suspected = true;
+            selected.attachments = vec![AttachmentSnapshot {
+                object_id: ObjectId(500),
+                identity: None,
+                controller: PlayerId(1),
+                kind: crate::types::ability::AttachmentKind::Aura,
+            }];
+            let mut latest = selected.clone();
+            latest.controller = PlayerId(0);
+            latest.power = Some(9);
+            let newer = state.objects[&x].incarnation - 1;
+            assert_ne!(named, newer, "the selected and latest snapshots differ");
+            let history = state.lki_by_incarnation.entry(x).or_default();
+            history.insert(named, selected.clone());
+            history.insert(newer, latest.clone());
+            state.lki_cache.insert(x, latest);
+            (state, x, selected)
+        };
+        let (stale, x, selected) = with_history(damage(4, Some(2)), 2);
+        let (later, _, _) = with_history(damage(92, Some(90)), 90);
+        assert_ne!(
+            stale, later,
+            "reach: stale histories use different minted stamps"
+        );
+        assert!(
+            normalized_equal(&stale, &later),
+            "the same selected snapshot survives later-mint equivalence"
+        );
+        for singular_event in [false, true] {
+            let mut state = stale.clone();
+            if singular_event {
+                let StackEntryKind::TriggeredAbility { trigger_event, .. } =
+                    state.stack.pop_back().unwrap().kind
+                else {
+                    unreachable!("the fixture has one trigger");
+                };
+                state.current_trigger_event = trigger_event;
+            }
+            let normalized = state.normalize_for_loop();
+            let event = if singular_event {
+                normalized.current_trigger_event.as_ref().unwrap()
+            } else {
+                let StackEntryKind::TriggeredAbility { trigger_event, .. } =
+                    &normalized.stack[0].kind
+                else {
+                    unreachable!("the fixture has one trigger");
+                };
+                trigger_event.as_ref().unwrap()
+            };
+            let GameEvent::DamageDealt {
+                source_id,
+                source_incarnation: Some(stamp),
+                ..
+            } = event
+            else {
+                panic!("normalization must preserve the stamped damage event");
+            };
+            assert_eq!(*source_id, x);
+            assert_ne!(*stamp, normalized.objects[&x].incarnation);
+            let history = normalized
+                .lki_by_incarnation
+                .get(&x)
+                .expect("the damage-selected history must survive pruning");
+            assert_eq!(history.len(), 1, "unreferenced newer history is pruned");
+            assert_eq!(
+                history.get(stamp),
+                Some(&selected),
+                "the whole snapshot survives"
+            );
+            assert_eq!(
+                crate::game::targeting::event_referent_controller(&normalized, event),
+                Some(PlayerId(1)),
+                "the rewritten event key still reads the departed controller"
+            );
+            assert!(loop_states_equal(
+                &normalized,
+                &normalized.normalize_for_loop()
+            ));
+        }
+
+        // None and missing exact history do not fabricate an authority. Keep the
+        // existing bare-id fallback; the full-snapshot case above is the positive.
+        for named in [None, Some(2)] {
+            let (mut absent, _, _) = with_history(damage(4, named), 2);
+            if named.is_some() {
+                absent.lki_by_incarnation.get_mut(&x).unwrap().remove(&2);
+            }
+            let normalized = absent.normalize_for_loop();
+            assert!(normalized.lki_by_incarnation.is_empty());
+            let StackEntryKind::TriggeredAbility { trigger_event, .. } = &normalized.stack[0].kind
+            else {
+                unreachable!("the fixture has one trigger");
+            };
+            assert_eq!(
+                crate::game::targeting::event_referent_controller(
+                    &normalized,
+                    trigger_event.as_ref().unwrap()
+                ),
+                Some(PlayerId(0))
+            );
+        }
+
+        // The aggregate sibling carries every explicit source pin. This is
+        // retention coverage, not a claim of direct aggregate controller reads.
+        let multiple_sources = |live: u64, named: u64| {
+            let (mut state, x, first) = with_history(combat(live, named), named);
+            let y = create_object(
+                &mut state,
+                CardId(61),
+                PlayerId(1),
+                "Other Damage Source".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&y).unwrap().incarnation = live;
+            let mut second = first.clone();
+            second.name = "Other Damage Source".to_string();
+            second.controller = PlayerId(0);
+            second.owner = PlayerId(1);
+            second.power = Some(3);
+            state
+                .lki_by_incarnation
+                .entry(y)
+                .or_default()
+                .insert(named, second.clone());
+            let StackEntryKind::TriggeredAbility {
+                trigger_event:
+                    Some(GameEvent::CombatDamageDealtToPlayer {
+                        source_amounts,
+                        total_damage,
+                        source_incarnations,
+                        ..
+                    }),
+                ..
+            } = &mut state.stack[0].kind
+            else {
+                unreachable!("the fixture has one aggregate trigger");
+            };
+            source_amounts.push((y, 3));
+            *total_damage += 3;
+            source_incarnations.push(ObjectIncarnationRef::of(y, named));
+            (state, [(x, first), (y, second)])
+        };
+        let (aggregate, expected) = multiple_sources(4, 2);
+        let normalized = aggregate.normalize_for_loop();
+        let StackEntryKind::TriggeredAbility {
+            trigger_event:
+                Some(GameEvent::CombatDamageDealtToPlayer {
+                    source_incarnations,
+                    ..
+                }),
+            ..
+        } = &normalized.stack[0].kind
+        else {
+            panic!("the aggregate keeps its explicit pins");
+        };
+        assert_eq!(source_incarnations.len(), 2);
+        for (source, snapshot) in expected {
+            let pin = source_incarnations
+                .iter()
+                .find(|pin| pin.object_id == source)
+                .unwrap();
+            assert_eq!(
+                normalized
+                    .lki_by_incarnation
+                    .get(&source)
+                    .and_then(|history| history.get(&pin.incarnation)),
+                Some(&snapshot),
+                "each aggregate source keeps its own exact snapshot"
+            );
+        }
+        assert!(normalized_equal(&aggregate, &multiple_sources(92, 90).0));
+        let mut empty = aggregate.clone();
+        let StackEntryKind::TriggeredAbility {
+            trigger_event:
+                Some(GameEvent::CombatDamageDealtToPlayer {
+                    source_incarnations,
+                    ..
+                }),
+            ..
+        } = &mut empty.stack[0].kind
+        else {
+            unreachable!("the fixture has one aggregate trigger");
+        };
+        source_incarnations.clear();
+        assert!(empty.normalize_for_loop().lki_by_incarnation.is_empty());
     }
 
     /// CR 400.7 + CR 104.4b: zone-change allocation order is history.

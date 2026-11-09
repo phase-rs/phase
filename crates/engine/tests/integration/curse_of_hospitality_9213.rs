@@ -9,6 +9,7 @@
 //!   mana of any color to cast that spell.
 
 use engine::ai_support::legal_actions;
+use engine::analysis::resource::loop_states_equal_modulo_resources;
 use engine::game::effects::attach::attach_to_player;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -16,8 +17,8 @@ use engine::game::trigger_index::reindex_object_triggers;
 use engine::types::ability::Duration;
 use engine::types::ability::{CastingPermission, ManaSpendPermission};
 use engine::types::actions::GameAction;
-use engine::types::game_state::CastPaymentMode;
-use engine::types::game_state::WaitingFor;
+use engine::types::events::GameEvent;
+use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
@@ -349,9 +350,11 @@ fn a_stolen_creature_that_died_names_its_last_controller() {
 
 /// Three players: P0's Curse on P1; P1's creature, stolen by P2's control Aura,
 /// attacks P1. Returns the runner, the creature, the Aura, P1's top card and a
-/// zero-cost instant in P2's hand with `response_text`.
+/// response instant in P2's hand, with two Plains available to pay for it.
 fn stolen_attacker_board(
+    response_name: &str,
     response_text: &str,
+    response_cost: ManaCost,
 ) -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
@@ -374,9 +377,12 @@ fn stolen_attacker_board(
         .with_subtypes(vec!["Aura"])
         .id();
     let response = scenario
-        .add_spell_to_hand_from_oracle(P2, "Response", true, response_text)
-        .with_mana_cost(ManaCost::zero())
+        .add_spell_to_hand_from_oracle(P2, response_name, true, response_text)
+        .with_mana_cost(response_cost)
         .id();
+    for _ in 0..2 {
+        scenario.add_basic_land(P2, ManaColor::White);
+    }
     let top_card = scenario.add_card_to_library_top(P1, "Hill Giant");
     let mut runner = scenario.build();
     attach_to_player(runner.state_mut(), curse, P1);
@@ -414,16 +420,18 @@ fn respond_once(
                 payment_mode: CastPaymentMode::Auto,
             })
             .expect("P2 casts the response");
-        if matches!(
-            runner.state().waiting_for,
-            WaitingFor::TargetSelection { .. }
-        ) {
-            runner
-                .act(GameAction::ChooseTarget {
-                    target: Some(engine::types::ability::TargetRef::Object(target)),
-                })
-                .expect("target the creature");
-        }
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::TargetSelection { player, .. } if player == responder
+            ),
+            "the response requires its target"
+        );
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(engine::types::ability::TargetRef::Object(target)),
+            })
+            .expect("select the response target");
         true
     }
 }
@@ -444,16 +452,78 @@ fn curse_trigger_pending(curse_source: ObjectId) -> impl Fn(&GameRunner) -> bool
 #[test]
 fn a_blinked_damage_dealer_names_the_controller_of_the_object_that_dealt_it() {
     let (mut runner, raider, _control, top_card, response) = stolen_attacker_board(
-        "Exile target creature you control, then return it to the battlefield under its owner's control.",
+        "Flicker of Fate",
+        "Exile target creature or enchantment, then return it to the battlefield under its owner's control.",
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 1,
+        },
     );
     let curse = curse_source(&runner);
+    let mut original_stamp = None;
+    let mut pending_after_blink = None;
+    let mut blink = respond_once(P2, response, raider, curse_trigger_pending(curse));
     attack_with(
         &mut runner,
         raider,
         P2,
         P1,
         |_| panic!("no trigger order expected"),
-        respond_once(P2, response, raider, curse_trigger_pending(curse)),
+        |runner| {
+            let Some(entry) = runner.state().stack.iter().find(|e| e.source_id == curse) else {
+                return false;
+            };
+            // CR 603.3a: the real pending Curse trigger belongs to P0, not the
+            // damage dealer's controller; its event selects the original object.
+            assert_eq!(entry.controller, P0);
+            let StackEntryKind::TriggeredAbility {
+                trigger_event:
+                    Some(GameEvent::DamageDealt {
+                        source_id,
+                        source_incarnation: Some(stamp),
+                        target,
+                        amount: 2,
+                        is_combat: true,
+                        ..
+                    }),
+                ..
+            } = &entry.kind
+            else {
+                panic!("the Curse must carry its stamped combat-damage event");
+            };
+            assert_eq!(*source_id, raider);
+            assert_eq!(*target, engine::types::ability::TargetRef::Player(P1));
+            let stamp = *stamp;
+            if let Some(original) = original_stamp {
+                assert_eq!(stamp, original, "the pending event keeps its original pin");
+            } else {
+                assert_eq!(runner.state().objects[&raider].incarnation, stamp);
+                original_stamp = Some(stamp);
+            }
+            if blink(runner) {
+                return true;
+            }
+            if pending_after_blink.is_none()
+                && runner.state().objects[&response].zone == Zone::Graveyard
+            {
+                let state = runner.state();
+                assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+                assert_eq!(state.stack.len(), 1, "only the real Curse remains pending");
+                assert_eq!(state.players[1].life, 18, "the attack connected");
+                assert_eq!(state.objects[&top_card].zone, Zone::Library);
+                assert!(grants(runner, top_card).is_empty());
+                // CR 400.7: Flicker returned a new object under its owner.
+                assert_eq!(state.objects[&raider].zone, Zone::Battlefield);
+                assert_eq!(state.objects[&raider].controller, P1);
+                assert_ne!(state.objects[&raider].incarnation, stamp);
+                // CR 608.2h: the original exit snapshot, not Flicker's later
+                // exile-exit snapshot or the returned permanent, answers.
+                assert_eq!(state.lki_cache[&raider].controller, P1);
+                assert_eq!(state.lki_by_incarnation[&raider][&stamp].controller, P2);
+                pending_after_blink = Some(runner.state().clone());
+            }
+            false
+        },
     );
     assert_eq!(runner.state().objects[&raider].zone, Zone::Battlefield);
     assert_eq!(
@@ -470,6 +540,63 @@ fn a_blinked_damage_dealer_names_the_controller_of_the_object_that_dealt_it() {
             Some(ManaSpendPermission::AnyColor)
         )]
     );
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+
+    let pending =
+        pending_after_blink.expect("capture Priority after Flicker, before Curse resolves");
+    let stamp = original_stamp.expect("combat emitted a stamped damage event");
+    let mut same_controller = pending.clone();
+    same_controller
+        .lki_by_incarnation
+        .get_mut(&raider)
+        .unwrap()
+        .get_mut(&stamp)
+        .unwrap()
+        .controller = P2;
+    assert!(
+        loop_states_equal_modulo_resources(&pending, &same_controller),
+        "control: an identical selected snapshot is the same position"
+    );
+
+    // Controlled mutation of ONE selected historical field, not a claim of an
+    // independently played history. Resolve this unnormalized clone through
+    // public actions to demonstrate the different future grantee it selects.
+    let mut alternate_controller = pending.clone();
+    alternate_controller
+        .lki_by_incarnation
+        .get_mut(&raider)
+        .unwrap()
+        .get_mut(&stamp)
+        .unwrap()
+        .controller = P0;
+    let mut alternate = GameRunner::from_state(alternate_controller.clone());
+    alternate.advance_until_stack_empty();
+    assert_eq!(alternate.state().objects[&top_card].zone, Zone::Exile);
+    // CR 608.2h + CR 611.2a + CR 609.4b: only the selected historical
+    // controller changes; the printed grant keeps its duration and rider.
+    assert_eq!(
+        grants(&alternate, top_card),
+        vec![(
+            P0,
+            Duration::UntilEndOfTurn,
+            Some(ManaSpendPermission::AnyColor)
+        )]
+    );
+    assert!(alternate.state().stack.is_empty());
+    assert!(matches!(
+        alternate.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    // CR 104.4b: positions granting different players permission cannot be
+    // identified merely because normalization pruned the selected snapshot.
+    assert!(
+        !loop_states_equal_modulo_resources(&pending, &alternate_controller),
+        "different selected damage-source controllers have different futures"
+    );
 }
 
 /// CR 608.2h: while the SAME object stays on the battlefield, its current
@@ -478,7 +605,7 @@ fn a_blinked_damage_dealer_names_the_controller_of_the_object_that_dealt_it() {
 #[test]
 fn a_damage_dealer_that_stayed_names_its_current_controller() {
     let (mut runner, raider, control, top_card, response) =
-        stolen_attacker_board("Destroy target enchantment.");
+        stolen_attacker_board("Response", "Destroy target enchantment.", ManaCost::zero());
     let curse = curse_source(&runner);
     attack_with(
         &mut runner,
