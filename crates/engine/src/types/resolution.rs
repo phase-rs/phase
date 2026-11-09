@@ -5107,7 +5107,9 @@ impl ResolutionStack {
 /// and parked frames, and preserves unavailable announced bindings through coin
 /// outcomes and detached continuations (CR 601.2c + CR 608.2b); coin frames and
 /// unresolved coin abilities from earlier versions are refused.
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 11;
+/// Version 12 separates a parked ChangeZone instruction's recorded performer
+/// from its family/controller-relative duration authority.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 12;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -5148,6 +5150,15 @@ const LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION: u64 = 9;
 /// illegal-announcement absence provenance (#10300's random-result trigger-scope
 /// version).
 const LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION: u64 = 10;
+
+/// Last wire version whose parked ChangeZone instruction actor was recorded
+/// in `controller` rather than an independent `performed_by` field.
+const LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION: u64 = 11;
+
+/// Bound random-result branches identify their v11 format, not unrelated
+/// features added to later full-state resolution versions.
+const RANDOM_RESULT_BINDING_WIRE_VERSION: u64 =
+    LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION + 1;
 
 /// Stable refusal: old coin saves lack the independently announced bindings;
 /// neither today's board nor the old flat target vector can reconstruct them.
@@ -5513,14 +5524,14 @@ struct RandomResultBoundaryStack {
     frames: Vec<RandomResultBoundaryFrame>,
 }
 
-/// Dates an undeclared payload by what its random-result frames carry. Only the
-/// current writer emits `bound_branches`; #10300's v10 writer emits owned
+/// Dates an undeclared payload by what its random-result frames carry. The
+/// v11 writer introduced `bound_branches`; #10300's v10 writer emits owned
 /// trigger scope (including explicit emptiness) on coin and die frames; v9
-/// emits coin branch inheritance alone. A coin frame without bindings can only
-/// come from an earlier writer, so it dates the payload to that writer even
-/// beside current evidence, and the payload is refused with the stable message
-/// rather than decoded as current (CR 601.2c + CR 608.2b). Die scope decodes
-/// identically at v10 and v11, so it dates to current, as #10300 did.
+/// emits coin branch inheritance alone. A coin frame without bindings dates
+/// the payload to that older writer even beside newer evidence, and is refused
+/// with the stable message (CR 601.2c + CR 608.2b). Die scope decodes identically
+/// at v10 and v11, so it retains the v11 binding-era date. Neither marker proves
+/// the independent ChangeZone actor shape introduced in v12.
 fn random_result_context_version(stack: &Value) -> Result<Option<u64>, String> {
     let stack = serde_json::from_value::<RandomResultBoundaryStack>(stack.clone())
         .map_err(|error| format!("typed resolution frame boundary is malformed: {error}"))?;
@@ -5551,7 +5562,7 @@ fn random_result_context_version(stack: &Value) -> Result<Option<u64>, String> {
             RandomResultBoundaryFrame::Other => {}
         }
     }
-    Ok(legacy.or((current && !unbound_coin).then_some(RESOLUTION_STATE_WIRE_VERSION)))
+    Ok(legacy.or((current && !unbound_coin).then_some(RANDOM_RESULT_BINDING_WIRE_VERSION)))
 }
 
 /// Inspect only an active carrier supplied by the persistence boundary.
@@ -5783,7 +5794,7 @@ fn migrate_legacy_change_zone_carrier(carrier: &mut Value) -> Result<(), String>
 /// [`LEGACY_GATED_CHANGE_ZONE_ENTRY_RESTORE_ERROR`]. The v1 top-level carrier
 /// is migrated by the v1 reader arm of `ResolutionStateWire::from_value`
 /// through the same `migrate_legacy_change_zone_carrier`, which stays the
-/// single per-carrier authority. v7 and later decode directly.
+/// single per-carrier authority. v7 and later already carry resolved members.
 fn migrate_legacy_change_zone_member_entries(
     value: &mut Value,
     version: u64,
@@ -5816,6 +5827,55 @@ fn migrate_legacy_change_zone_member_entries(
         }
     }
     Ok(())
+}
+
+/// Preserve the actor encoded by historical ChangeZone carriers. This runs
+/// only at the versioned save boundary; current carriers must supply their
+/// actor explicitly and no live object/controller lookup reconstructs it.
+fn migrate_legacy_change_zone_performers(value: &mut Value, version: u64) {
+    if !(LEGACY_RESOLUTION_STATE_WIRE_VERSION
+        ..=LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION)
+        .contains(&version)
+    {
+        return;
+    }
+
+    fn migrate_carrier(carrier: &mut Value) {
+        let Some(carrier) = carrier.as_object_mut() else {
+            return;
+        };
+        if carrier.contains_key("performed_by") {
+            return;
+        }
+        if let Some(controller) = carrier.get("controller").and_then(Value::as_u64) {
+            carrier.insert("performed_by".to_string(), Value::from(controller));
+        }
+    }
+
+    if version == LEGACY_RESOLUTION_STATE_WIRE_VERSION {
+        if let Some(carrier) = value.get_mut("pending_change_zone_iteration") {
+            migrate_carrier(carrier);
+        }
+        return;
+    }
+    let Some(frames) = value
+        .get_mut("resolution_frames")
+        .and_then(|stack| stack.get_mut("frames"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for frame in frames {
+        if frame.get("type").and_then(Value::as_str) != Some("ChangeZone") {
+            continue;
+        }
+        if let Some(carrier) = frame
+            .get_mut("data")
+            .and_then(|data| data.get_mut("pending"))
+        {
+            migrate_carrier(carrier);
+        }
+    }
 }
 
 /// Declares the resolution-wire shape of an UNVERSIONED raw `GameState`
@@ -6232,12 +6292,13 @@ impl ResolutionStateWire {
     /// Decodes persisted full-game state at the resolution compatibility boundary.
     ///
     /// Version 1 is read only through the legacy migration path below. Versions
-    /// 2 and 3 share the typed-frame reader; versions 4 through 8 use the same
-    /// frame layout with an explicit draw-result-owner presence check, and a
-    /// version-4 draw frame simply has no dealer. A v2–v6 parked ChangeZone
-    /// frame carrier is migrated or refused first by
-    /// `migrate_legacy_change_zone_member_entries`; the v1 top-level carrier,
-    /// by the v1 reader arm before that arm's validation and legacy decodes.
+    /// 2 and 3 share the typed-frame reader; versions 4 and later use its common
+    /// layout after version-specific preparation, including explicit draw-result
+    /// ownership (a version-4 draw frame simply has no dealer). A v2–v6 parked
+    /// ChangeZone carrier is migrated or refused by
+    /// `migrate_legacy_change_zone_member_entries`; the v1 reader handles its
+    /// top-level carrier. Pre-v12 carriers also split their recorded actor
+    /// through `migrate_legacy_change_zone_performers` before typed decoding.
     ///
     /// Every version then passes the onset admission (`admit_entry_onset_record`, CR 611.2e): a
     /// payload written before ability onsets were recorded is admitted only when it holds no
@@ -6274,10 +6335,11 @@ impl ResolutionStateWire {
             | LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION
             | LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION
             | LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION
             | RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV4,
             _ => {
                 return Err(format!(
-                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, {LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
+                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, {LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
                 ));
             }
         };
@@ -6286,6 +6348,7 @@ impl ResolutionStateWire {
         }
         reject_ambiguous_legacy_paused_draw_result(&value, version)?;
         migrate_legacy_change_zone_member_entries(&mut value, version)?;
+        migrate_legacy_change_zone_performers(&mut value, version);
         // `ResolutionStateWire` is a public persistence boundary in its own
         // right. Its historic-shape preparation and raw-state materialization
         // both belong to `GameStateDecode`; no wire branch gets a private
@@ -8448,6 +8511,7 @@ mod tests {
                 remaining: Vec::new(),
                 source_id: ObjectId(group_seed),
                 controller: PlayerId(0),
+                performed_by: PlayerId(0),
                 origin: None,
                 destination: Zone::Battlefield,
                 enter_transformed: false,
@@ -9804,7 +9868,7 @@ mod tests {
     #[test]
     fn resolution_wire_keeps_all_legacy_readers_available() {
         let state = GameState::new_two_player(57);
-        for version in 1..=LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION {
+        for version in 1..=LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION {
             let mut value = if version == LEGACY_RESOLUTION_STATE_WIRE_VERSION {
                 serde_json::to_value(&state).unwrap()
             } else {
@@ -9817,41 +9881,6 @@ mod tests {
             assert_eq!(restored.players, state.players);
             assert!(restored.resolution_stack.is_empty());
         }
-    }
-
-    // Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: pins the
-    // resolution wire writer at v11 and every legacy reader version constant, and that an idle v1
-    // save still loads. It persists no card state.
-    #[test]
-    fn resolution_wire_contract_pins_v11_and_the_legacy_readers() {
-        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 11);
-        assert_eq!(LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION, 10);
-        assert_eq!(
-            LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION,
-            9
-        );
-        assert_eq!(
-            LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION,
-            8
-        );
-        assert_eq!(LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION, 7);
-        assert_eq!(
-            LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION,
-            6
-        );
-        assert_eq!(LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION, 4);
-        assert_eq!(LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION, 3);
-        assert_eq!(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION, 2);
-        assert_eq!(LEGACY_RESOLUTION_STATE_WIRE_VERSION, 1);
-        // The newest legacy reader sits directly below the writer.
-        assert_eq!(
-            LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION + 1,
-            RESOLUTION_STATE_WIRE_VERSION
-        );
-        let mut v1 = serde_json::to_value(GameState::new_two_player(57)).unwrap();
-        v1["resolution_state_version"] = Value::from(1_u64);
-        serde_json::from_value::<ResolutionStateWire>(v1)
-            .expect("the v1 reader remains available for historical saves");
     }
 
     #[test]
@@ -12005,30 +12034,20 @@ mod tests {
         }
     }
 
-    // Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: an
-    // unversioned raw save is dated by its random-result frames (bindings = current, coin trigger
-    // scope = v10, branch_context = v9); unbound coin frames are refused, even beside a die frame.
-    // The in-flight card state it persists: Krark's Thumb ("If you would flip a coin, instead flip
-    // two coins and ignore one.").
-    /// An unversioned raw payload is dated by what its random-result frames
-    /// carry: bound branches only by the current writer, a coin trigger scope
-    /// without bindings by version 10, and a coin `branch_context` alone by
-    /// version 9 (CR 601.2c + CR 608.2b: a coin frame without bindings is
-    /// refused rather than decoded as current).
+    // A raw save's unchanged random-result fields retain their historical era:
+    // bound branches identify v11, coin trigger scope v10, branch inheritance v9.
+    // Krark's Thumb: "If you would flip a coin, instead flip two coins and ignore one."
     #[test]
-    fn unversioned_coin_binding_shape_dates_current_v10_and_v9() {
+    fn unversioned_coin_binding_shape_dates_v11_v10_and_v9() {
         let raw = serde_json::to_value(state_with_parked_coin_flip(non_empty_branch_context(
             &GameState::new_two_player(42),
         )))
         .expect("raw");
 
-        // Current raw: the writer always emits `bound_branches`.
+        // A newer raw writer still emits the same v11 bound-branch shape.
         let mut current = raw.clone();
         declare_raw_resolution_wire(&mut current).expect("current version inferred");
-        assert_eq!(
-            current["resolution_state_version"],
-            Value::from(RESOLUTION_STATE_WIRE_VERSION)
-        );
+        assert_eq!(current["resolution_state_version"], Value::from(11_u64));
         serde_json::from_value::<ResolutionStateWire>(current)
             .expect("positive control: a bare current payload restores");
 
@@ -12218,13 +12237,10 @@ mod tests {
                 }
                 let mut raw = serde_json::to_value(&state).unwrap();
                 declare_raw_resolution_wire(&mut raw).unwrap();
-                // A coin frame always carries `bound_branches`, which dates it
-                // to the current writer; a die frame is dated by its scope alone.
+                // Bound branches and owned die scope retain their v11-era
+                // date; neither implies later, unrelated carrier features.
                 if context.is_some() || !die {
-                    assert_eq!(
-                        raw["resolution_state_version"],
-                        RESOLUTION_STATE_WIRE_VERSION
-                    );
+                    assert_eq!(raw["resolution_state_version"], 11);
                 }
                 let restored = serde_json::from_value::<ResolutionStateWire>(raw)
                     .unwrap()
@@ -12638,13 +12654,9 @@ mod tests {
                 .contains(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR));
             let mut raw = serde_json::to_value(runner.state()).unwrap();
             declare_raw_resolution_wire(&mut raw).unwrap();
-            // CR 601.2c + CR 608.2b: a bare current payload at the keep prompt
-            // carries `bound_branches`, which only the current writer emits, so
-            // it is dated current and finishes rules-correctly.
-            assert_eq!(
-                raw["resolution_state_version"],
-                Value::from(RESOLUTION_STATE_WIRE_VERSION)
-            );
+            // CR 601.2c + CR 608.2b: the v11 bound-branch shape restores its
+            // announced targets even when emitted by a later writer.
+            assert_eq!(raw["resolution_state_version"], Value::from(11_u64));
             let restored_bare = serde_json::from_value::<PersistedGameState>(
                 serde_json::to_value(runner.state()).unwrap(),
             )

@@ -281,6 +281,27 @@ pub(crate) fn eliminate_players(
         )
     });
 
+    // CR 800.4a + CR 608.2c: retain the exact family whose current member is
+    // parked. If that member leaves, only this surviving family may resume
+    // after the departure sweep; a new child or unrelated frame is not ours.
+    let interrupted_change_zone = state
+        .active_change_zone_frame()
+        .and_then(|frame| frame.pending.as_ref())
+        .filter(|pending| {
+            pending.paused_current.as_ref().is_some_and(|paused| {
+                state
+                    .pending_replacement
+                    .as_ref()
+                    .is_some_and(|replacement| replacement.parks_delivery(&paused.expected_event))
+            })
+        })
+        .map(|pending| {
+            (
+                pending.logical_zone_change_group.logical_group_id,
+                pending.controller,
+            )
+        });
+
     let interrupted_ordinary_search = state
         .pending_scoped_library_search
         .is_none()
@@ -718,6 +739,36 @@ pub(crate) fn eliminate_players(
                 let next = players::next_player(state, waiting_pid);
                 state.waiting_for = WaitingFor::Priority { player: next };
             }
+        }
+
+        // CR 800.4a + CR 608.2c: removing a paused member is not abandonment
+        // of its surviving family. Resume through the ordinary resolution
+        // boundary before exposing priority, but only after this exact pause
+        // was canceled and every departure/control-effect sweep has settled.
+        let resume_canceled_change_zone =
+            interrupted_change_zone.is_some_and(|(group, controller)| {
+                players::is_alive(state, controller)
+                    && state
+                        .active_change_zone_frame()
+                        .and_then(|frame| frame.pending.as_ref())
+                        .is_some_and(|pending| {
+                            pending.logical_zone_change_group.logical_group_id == group
+                                && pending.controller == controller
+                                && pending.paused_current.is_none()
+                        })
+            }) && state.pending_replacement.is_none()
+                && matches!(state.waiting_for, WaitingFor::Priority { .. });
+        if resume_canceled_change_zone {
+            // A concession has no post-action event scan. Keep its departure
+            // events outside the resumed instruction's observer-collection span.
+            let mut resumed = Vec::new();
+            super::engine::resume_pending_continuation_if_priority(state, &mut resumed)
+                .expect("a surviving canceled ChangeZone pause resumes at its ordinary boundary");
+            if departure_triggers == DepartureTriggers::CollectedByDeparture {
+                super::triggers::collect_unclaimed_triggers_into_deferred(state, &resumed, 0, None);
+            }
+            events.extend(resumed);
+            drain_or_clear_deferred_triggers_after_elimination(state, departure_triggers, events);
         }
 
         // CR 800.4a + CR 608.2m + CR 608.2n: a paused spell the departure sweeps
@@ -2112,6 +2163,22 @@ fn abandon_change_zone_family_for_controller(
         return;
     }
 
+    // CR 800.4a: the family's out-of-band replacement pause retires with
+    // its controller, even when a surviving player was answering it. Match
+    // the exact delivery boundary so no unrelated/new child pause is cleared.
+    let owns_replacement = pending.paused_current.as_ref().is_some_and(|paused| {
+        state
+            .pending_replacement
+            .as_ref()
+            .is_some_and(|replacement| replacement.parks_delivery(&paused.expected_event))
+    });
+
+    if owns_replacement {
+        state.pending_replacement = None;
+        state.replacement_may_cost_paused = false;
+    }
+    // Retire this owner through its ordinary family authority. Do not clear
+    // a post-replacement parent that becomes exposed only after the pop.
     let _ = state
         .take_active_change_zone_frame()
         .expect("elimination cannot consume a buried ChangeZone frame");
@@ -2586,6 +2653,83 @@ mod tests {
         }
     }
 
+    fn pending_replacement_for(expected_event: ProposedEvent) -> PendingReplacement {
+        PendingReplacement {
+            proposed: expected_event,
+            sacrifice_provenance: None,
+            candidates: Vec::new(),
+            search_found_candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            choice_player: None,
+            library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+            delivery_boundary: None,
+            unrepresentable_life_change: Default::default(),
+        }
+    }
+
+    fn paused_zone_change_delivery(
+        state: &GameState,
+        object_id: ObjectId,
+        source_id: ObjectId,
+    ) -> PendingZoneChangeDelivery {
+        let object = state
+            .objects
+            .get(&object_id)
+            .expect("test paused member exists");
+        PendingZoneChangeDelivery::new(
+            ObjectIncarnationRef::from_object(object),
+            ProposedEvent::zone_change(object_id, object.zone, Zone::Graveyard, Some(source_id)),
+        )
+    }
+
+    fn pending_change_zone_iteration(
+        group: crate::types::game_state::LogicalZoneChangeGroup,
+        paused_current: Option<PendingZoneChangeDelivery>,
+        remaining: Vec<ObjectId>,
+        source_id: ObjectId,
+        controller: PlayerId,
+    ) -> crate::types::game_state::PendingChangeZoneIteration {
+        crate::types::game_state::PendingChangeZoneIteration {
+            pending_return_result_producer: None,
+            logical_zone_change_group: group,
+            paused_current,
+            remaining: remaining
+                .into_iter()
+                .map(
+                    |object_id| crate::types::game_state::ChangeZoneMemberEntry {
+                        object_id,
+                        enter_with_counters: Vec::new(),
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
+                    },
+                )
+                .collect(),
+            source_id,
+            controller,
+            performed_by: controller,
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Graveyard,
+            enter_transformed: false,
+            enters_under_player: None,
+            duration: None,
+            track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+            moved_count: None,
+            face_down_profile: None,
+            library_placement: None,
+            enter_attached_to: None,
+            effect_kind: EffectKind::ChangeZone,
+        }
+    }
+
     /// CR 800.4a: An owner leaving while a heterogeneous batch is parked must
     /// remove only that undelivered exact member. The shared owner retains the
     /// surviving tail, but the original group records no synthetic move for the
@@ -2743,6 +2887,58 @@ mod tests {
         }));
     }
 
+    /// CR 800.4a + CR 616.1: A living controller's paused ChangeZone family
+    /// retains its surviving tail, but must discard an eliminated owner's exact
+    /// paused member and coupled replacement before it resumes.
+    #[test]
+    fn leaving_owner_cancels_paused_change_zone_member_and_drains_surviving_tail() {
+        let mut state = setup_three_player();
+        let leaving = create_object(
+            &mut state,
+            CardId(714),
+            PlayerId(1),
+            "Paused leaving change-zone member".to_string(),
+            Zone::Battlefield,
+        );
+        let surviving = create_object(
+            &mut state,
+            CardId(715),
+            PlayerId(0),
+            "Surviving change-zone tail".to_string(),
+            Zone::Battlefield,
+        );
+        let mut group = state.allocate_logical_zone_change_group(&[leaving, surviving]);
+        group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("parked iteration has its pre-delivery authority");
+        let paused = paused_zone_change_delivery(&state, leaving, ObjectId(901));
+        state.pending_replacement = Some(pending_replacement_for(paused.expected_event.clone()));
+        state.waiting_for = WaitingFor::ReplacementChoice {
+            player: PlayerId(0),
+            candidate_count: 1,
+            candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
+            remember_identity: None,
+        };
+        state.push_change_zone_iteration(pending_change_zone_iteration(
+            group,
+            Some(paused),
+            vec![surviving],
+            ObjectId(901),
+            PlayerId(0),
+        ));
+
+        let mut events = Vec::new();
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+
+        assert!(state.pending_replacement.is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+
+        assert!(state.active_change_zone_frame().is_none());
+        assert_eq!(state.objects[&leaving].zone, Zone::Exile);
+        assert_eq!(state.objects[&surviving].zone, Zone::Graveyard);
+    }
     #[test]
     fn leaving_named_choice_chooser_abandons_the_whole_source_bound_family() {
         let mut state = setup_three_player();

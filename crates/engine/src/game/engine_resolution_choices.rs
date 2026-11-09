@@ -7529,6 +7529,7 @@ pub(super) fn handle_resolution_choice(
                             let ctx = effects::change_zone::ChangeZoneIterationCtx {
                                 source_id,
                                 controller: player,
+                                performed_by: player,
                                 // The request is the delivery authority; the
                                 // selected cards may span zones.
                                 origin: None,
@@ -7599,6 +7600,7 @@ pub(super) fn handle_resolution_choice(
                         let ctx = effects::change_zone::ChangeZoneIterationCtx {
                             source_id,
                             controller: player,
+                            performed_by: player,
                             origin: Some(origin),
                             destination: dest_zone,
                             enter_transformed,
@@ -7679,6 +7681,7 @@ pub(super) fn handle_resolution_choice(
                                         remaining: legacy_members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
+                                        performed_by: ctx.performed_by,
                                         // EffectZoneChoice can select across multiple
                                         // origins (for example, hand and graveyard).
                                         // The paused object's origin must not become
@@ -7756,6 +7759,7 @@ pub(super) fn handle_resolution_choice(
                                         remaining: legacy_members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
+                                        performed_by: ctx.performed_by,
                                         // EffectZoneChoice can select across multiple
                                         // origins (for example, hand and graveyard).
                                         // The paused object's origin must not become
@@ -8109,6 +8113,7 @@ pub(super) fn handle_resolution_choice(
                     let ctx = effects::change_zone::ChangeZoneIterationCtx {
                         source_id,
                         controller: player,
+                        performed_by: player,
                         origin: Some(zone),
                         destination: dest_zone,
                         enter_transformed,
@@ -8200,6 +8205,7 @@ pub(super) fn handle_resolution_choice(
                                         remaining: members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
+                                        performed_by: ctx.performed_by,
                                         origin: ctx.origin,
                                         destination: ctx.destination,
                                         enter_transformed: ctx.enter_transformed,
@@ -8250,6 +8256,7 @@ pub(super) fn handle_resolution_choice(
                                         remaining: members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
+                                        performed_by: ctx.performed_by,
                                         origin: ctx.origin,
                                         destination: ctx.destination,
                                         enter_transformed: ctx.enter_transformed,
