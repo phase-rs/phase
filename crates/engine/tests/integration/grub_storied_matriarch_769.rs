@@ -20,6 +20,9 @@
 //! CR 702.26b + CR 702.26d: a phased-out creature is treated as though it doesn't
 //! exist, so it is neither offered for blight nor a reason blight is possible; a
 //! phased-out "can't" source forbids nothing.
+//! CR 118.12 + CR 118.3 + CR 608.2d: an optional pick from a zone with nothing
+//! eligible is not offered, so an "If you do" rider stays closed and an "If you
+//! don't" branch runs.
 
 use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
@@ -47,6 +50,9 @@ const CONCEALMENT: &str = "Clever Concealment";
 
 const AUNTIE_ORACLE: &str = "Menace\nWhenever Grub attacks, you may blight 1. If you do, create a tapped and attacking token that's a copy of the blighted creature, except it has \"At the beginning of the end step, sacrifice this token.\"\nAt the beginning of your first main phase, you may pay {B}. If you do, transform Grub.";
 const NEXUS_ORACLE: &str = "At the beginning of combat on your turn, draw a card. Then you may exile an artifact or creature card from your hand. If you do, create a token that's a copy of the exiled card, except it's a 3/3 Golem artifact creature in addition to its other types.";
+const HAKBAL_ORACLE: &str = "At the beginning of combat on your turn, each Merfolk creature you control explores. (Reveal the top card of your library. Put that card into your hand if it's a land. Otherwise, put a +1/+1 counter on the exploring creature, then put the card back or put it into your graveyard.)\nWhenever Hakbal attacks, you may put a land card from your hand onto the battlefield. If you don't, draw a card.";
+const GODS_GIFT_ORACLE: &str = "At the beginning of combat on your turn, you may exile a creature card from your graveyard. If you do, create a token that's a copy of that card, except it's a 4/4 black Zombie. It gains haste until end of turn.";
+const AEGIS_ORACLE: &str = "Flying\nWard {2} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {2}.)\nAt the beginning of your upkeep, you may exile two cards from your graveyard. If you do, put a +1/+1 counter on this creature.";
 const KEEPERS_ORACLE: &str = "This creature can't have counters put on it.";
 const GANG_ORACLE: &str = "At the beginning of your first main phase, you may blight 2. If you don't, you lose 3 life. (To blight 2, put two -1/-1 counters on a creature you control.)";
 const SCROUNGER_ORACLE: &str = "At the beginning of your first main phase, you may blight 1. If you do, create a Treasure token. (To blight 1, put a -1/-1 counter on a creature you control. A Treasure token is an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")";
@@ -972,22 +978,211 @@ fn nexus_of_becoming_declined_makes_no_token() {
     assert_eq!(runner.state().objects[&goblin].zone, Zone::Hand);
 }
 
-/// CR 609.3: with no artifact or creature card in hand the exile does nothing,
-/// so "If you do" stays closed and the accept isn't refused.
+/// Asserts the real card's Oracle text is `oracle`, so the fixture parse the
+/// test runs is the card quoted in its doc.
+fn assert_oracle(db: &CardDatabase, name: &str, oracle: &str) {
+    assert_eq!(
+        db.get_face_by_name(name)
+            .unwrap_or_else(|| panic!("{name} is in the fixture"))
+            .oracle_text
+            .as_deref(),
+        Some(oracle)
+    );
+}
+
+fn plus_counters(runner: &GameRunner, id: ObjectId) -> u32 {
+    runner.state().objects[&id]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Nexus of Becoming: "At the beginning of combat on your turn, draw a card.
+/// Then you may exile an artifact or creature card from your hand. If you do,
+/// create a token that's a copy of the exiled card, except it's a 3/3 Golem
+/// artifact creature in addition to its other types."
+///
+/// CR 118.12 + CR 118.3 + CR 608.2d: with no artifact or creature card in hand
+/// after the draw, the exile is impossible, so it is not offered and "If you do"
+/// stays closed.
 #[test]
-fn nexus_accept_with_no_eligible_card_makes_no_token() {
-    let (mut runner, ()) = board(Phase::PreCombatMain, |scenario, _| {
+fn nexus_with_no_eligible_card_offers_no_exile() {
+    let (mut runner, (plains, forest)) = board(Phase::PreCombatMain, |scenario, _| {
         scenario.add_artifact_from_oracle(P0, "Nexus of Becoming", NEXUS_ORACLE);
-        scenario.add_land_to_library_top(P0, "Forest");
-        scenario.add_land_to_hand(P0, "Plains");
+        let forest = scenario.add_land_to_library_top(P0, "Forest").id();
+        let plains = scenario.add_land_to_hand(P0, "Plains").id();
+        (plains, forest)
     });
+
+    runner.advance_to_phase(Phase::BeginCombat);
+    assert_eq!(runner.state().stack.len(), 1, "reach: the Nexus trigger");
+    both_pass(&mut runner);
+
+    assert_settled(&runner);
+    assert!(tokens(&runner).is_empty());
+    assert_eq!(runner.state().objects[&plains].zone, Zone::Hand);
+    assert_eq!(
+        runner.state().objects[&forest].zone,
+        Zone::Hand,
+        "the draw ran, so the trigger resolved"
+    );
+}
+
+/// Nexus of Becoming (Oracle text above): CR 608.2c, "draw a card" happens
+/// before "Then you may exile", so the drawn creature card is in the pool.
+#[test]
+fn nexus_draw_feeds_the_exile_pool() {
+    let (mut runner, (plains, bears)) = board(Phase::PreCombatMain, |scenario, db| {
+        scenario.add_artifact_from_oracle(P0, "Nexus of Becoming", NEXUS_ORACLE);
+        let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Library, db);
+        let plains = scenario.add_land_to_hand(P0, "Plains").id();
+        (plains, bears)
+    });
+    // Setup only: Grizzly Bears is the card the draw takes.
+    {
+        let library = &mut runner.state_mut().players[0].library;
+        library.retain(|id| *id != bears);
+        library.insert(0, bears);
+    }
 
     runner.advance_to_phase(Phase::BeginCombat);
     both_pass(&mut runner);
     decide(&mut runner, true);
 
     assert_settled(&runner);
-    assert!(tokens(&runner).is_empty());
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&plains].zone, Zone::Hand);
+    let created = tokens(&runner);
+    assert_eq!(created.len(), 1, "the exiled card provides one token");
+    let token = &runner.state().objects[&created[0]];
+    assert_eq!(token.name, "Grizzly Bears");
+    assert_eq!((token.power, token.toughness), (Some(3), Some(3)));
+    assert!(token.card_types.core_types.contains(&CoreType::Artifact));
+    assert!(token.card_types.subtypes.iter().any(|s| s == "Golem"));
+}
+
+/// Hakbal of the Surging Soul: "At the beginning of combat on your turn, each
+/// Merfolk creature you control explores. (…) Whenever Hakbal attacks, you may
+/// put a land card from your hand onto the battlefield. If you don't, draw a
+/// card."
+///
+/// CR 118.12 + CR 608.2d: with no land card in hand the put can't be chosen, so
+/// "If you don't" draws without a prompt. With a land card the prompt opens.
+#[test]
+fn hakbal_with_no_land_in_hand_draws_without_a_prompt() {
+    for land_in_hand in [false, true] {
+        let (mut runner, (hakbal, card)) = board(Phase::PreCombatMain, |scenario, db| {
+            assert_oracle(db, "Hakbal of the Surging Soul", HAKBAL_ORACLE);
+            let hakbal =
+                scenario.add_real_card(P0, "Hakbal of the Surging Soul", Zone::Battlefield, db);
+            let card = if land_in_hand {
+                scenario.add_land_to_hand(P0, "Forest").id()
+            } else {
+                scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db)
+            };
+            (hakbal, card)
+        });
+
+        runner.advance_to_phase(Phase::BeginCombat);
+        assert_eq!(runner.state().stack.len(), 1, "reach: the explore trigger");
+        both_pass(&mut runner);
+        let WaitingFor::DigChoice { cards, .. } = runner.state().waiting_for.clone() else {
+            panic!(
+                "the explore asks about the revealed card; got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        runner
+            .act(GameAction::SelectCards { cards })
+            .expect("keeping the revealed card on top must succeed");
+        pass_into(&mut runner, Phase::DeclareAttackers);
+        let hand_before = runner.state().players[0].hand.len();
+        runner
+            .declare_attackers(&[(hakbal, AttackTarget::Player(P1))])
+            .expect("the attack must be legal");
+        assert_eq!(runner.state().stack.len(), 1, "reach: the attack trigger");
+        both_pass(&mut runner);
+
+        if land_in_hand {
+            decide(&mut runner, false);
+        }
+        assert_settled(&runner);
+        assert_eq!(
+            runner.state().players[0].hand.len(),
+            hand_before + 1,
+            "land in hand: {land_in_hand}; \"If you don't\" draws a card"
+        );
+        assert_eq!(runner.state().objects[&card].zone, Zone::Hand);
+    }
+}
+
+/// God-Pharaoh's Gift: "At the beginning of combat on your turn, you may exile a
+/// creature card from your graveyard. If you do, create a token that's a copy of
+/// that card, except it's a 4/4 black Zombie. It gains haste until end of turn."
+///
+/// CR 118.12 + CR 608.2d: an empty graveyard can't supply the exile, so it is
+/// not offered and no token is made. A creature card there opens the prompt.
+#[test]
+fn gods_gift_with_an_empty_graveyard_offers_no_exile() {
+    let (mut empty, ()) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, "God-Pharaoh's Gift", GODS_GIFT_ORACLE);
+        scenario.add_real_card(P0, "God-Pharaoh's Gift", Zone::Battlefield, db);
+    });
+    empty.advance_to_phase(Phase::BeginCombat);
+    assert_eq!(empty.state().stack.len(), 1, "reach: the Gift trigger");
+    both_pass(&mut empty);
+    assert_settled(&empty);
+    assert!(tokens(&empty).is_empty());
+
+    let (mut stocked, ()) = board(Phase::PreCombatMain, |scenario, db| {
+        scenario.add_real_card(P0, "God-Pharaoh's Gift", Zone::Battlefield, db);
+        scenario.add_real_card(P0, "Grizzly Bears", Zone::Graveyard, db);
+    });
+    stocked.advance_to_phase(Phase::BeginCombat);
+    both_pass(&mut stocked);
+    assert_optional_prompt(&stocked);
+}
+
+/// Aegis Sculptor: "Flying / Ward {2} (…) / At the beginning of your upkeep, you
+/// may exile two cards from your graveyard. If you do, put a +1/+1 counter on
+/// this creature."
+///
+/// CR 118.3 + CR 608.2d + CR 118.12: "two cards" needs two whatever the
+/// graveyard holds, so an empty graveyard can't supply the exile: it is not
+/// offered and no counter is put. Two cards there open the prompt.
+#[test]
+fn aegis_sculptor_with_an_empty_graveyard_offers_no_exile() {
+    let (mut empty, aegis) = board(Phase::Untap, |scenario, db| {
+        assert_oracle(db, "Aegis Sculptor", AEGIS_ORACLE);
+        scenario.add_real_card(P0, "Aegis Sculptor", Zone::Battlefield, db)
+    });
+    empty.advance_to_phase(Phase::Upkeep);
+    assert_eq!(empty.state().stack.len(), 1, "reach: the upkeep trigger");
+    assert_eq!(empty.state().stack[0].source_id, aegis);
+    both_pass(&mut empty);
+    assert_settled(&empty);
+    assert_eq!(
+        plus_counters(&empty, aegis),
+        0,
+        "\"If you do\" stays closed"
+    );
+
+    let (mut stocked, (aegis, cards)) = board(Phase::Untap, |scenario, db| {
+        let aegis = scenario.add_real_card(P0, "Aegis Sculptor", Zone::Battlefield, db);
+        let cards: Vec<ObjectId> = (0..2)
+            .map(|_| scenario.add_real_card(P0, "Grizzly Bears", Zone::Graveyard, db))
+            .collect();
+        (aegis, cards)
+    });
+    stocked.advance_to_phase(Phase::Upkeep);
+    both_pass(&mut stocked);
+    decide(&mut stocked, false);
+    assert_settled(&stocked);
+    assert_eq!(plus_counters(&stocked, aegis), 0);
+    for id in cards {
+        assert_eq!(stocked.state().objects[&id].zone, Zone::Graveyard);
+    }
 }
 
 /// The reported "doesn't trigger on cast": casting Grub reaches the enters half

@@ -444,6 +444,18 @@ fn resolution_choice_cardinality(
     }
 }
 
+/// CR 118.3 + CR 608.2d: the fewest objects a resolution-time zone pick must
+/// take, whatever the zone holds ("exile two cards from your graveyard" is 2
+/// over an empty graveyard). `None` while the count waits on an unannounced X.
+fn resolution_pick_required_min(state: &GameState, ability: &ResolvedAbility) -> Option<usize> {
+    let Some(spec) = ability.multi_target.as_ref() else {
+        return Some(1);
+    };
+    crate::game::ability_utils::resolve_multi_target_bounds(state, ability, spec, usize::MAX)
+        .ok()
+        .map(|bounds| bounds.min)
+}
+
 fn resolution_zone_candidates(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -821,6 +833,153 @@ pub(crate) fn optional_triggering_source_move_is_infeasible(
             .all(|id| zone_move_member_cannot_move(state, id, expected_origin))
 }
 
+/// The zones an untargeted resolution-time move chooses from, and its eligible
+/// objects ([`untargeted_zone_pool`]).
+struct UntargetedZonePool {
+    scan_zones: Vec<Zone>,
+    eligible: Vec<ObjectId>,
+}
+
+/// CR 608.2c: the zones an untargeted resolution-time move chooses from, and its
+/// eligible objects. `resolve` and `optional_zone_pick_is_infeasible` both read
+/// it, so the offer and the move can't disagree.
+fn untargeted_zone_pool(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    origin: Option<Zone>,
+    destination: Zone,
+    filter_controller: PlayerId,
+    exile_tracked_set_library_only: bool,
+) -> UntargetedZonePool {
+    // CR 608.2c: A tracked-set filter ("from among the milled cards" / "X
+    // cards revealed this way") scopes the selection to a set of objects
+    // that may live in any zone. The tracked-set membership is the scope —
+    // there is no fixed `InZone` constraint to extract — so derive the scan
+    // zone from the members' actual zone rather than defaulting to the
+    // battlefield.
+    let scan_zones = if exile_tracked_set_library_only {
+        vec![Zone::Library]
+    } else if let Some(origin) = origin {
+        vec![origin]
+    } else {
+        let extracted = target_filter.extract_zones();
+        if !extracted.is_empty() {
+            extracted
+        } else if let Some(zone) = target_filter.extract_in_zone() {
+            vec![zone]
+        } else if let Some(zones) = tracked_set_member_zones(state, target_filter) {
+            zones
+        } else {
+            vec![Zone::Battlefield]
+        }
+    };
+    // Filter-controller override is primary here: when a filter like
+    // "creature you control" needs "you" to resolve to the *target* player
+    // (not the caster), we pass `filter_controller` explicitly. Include the
+    // resolving ability so `Owned { ScopedPlayer }` reads `scoped_player`.
+    let eligible = resolution_zone_candidates(
+        state,
+        ability,
+        target_filter,
+        filter_controller,
+        &scan_zones,
+        destination,
+    );
+    UntargetedZonePool {
+        scan_zones,
+        eligible,
+    }
+}
+
+/// CR 118.12 + CR 118.3 + CR 608.2d: an optional move whose objects the player
+/// picks at resolution from a zone ("Then you may exile an artifact or creature
+/// card from your hand", Nexus of Becoming) is an impossible option when the
+/// pick must take at least one object and the zone holds none that is eligible.
+/// Reads the pool `resolve` chooses from, and the pick's required minimum
+/// whatever the zone holds ("exile two cards" needs two). Bound and referent
+/// subjects keep their own arms, an up-to or zero-count pick is always
+/// possible, and an `optional_for` fan-out is decided
+/// per accepting player (CR 101.4).
+pub(crate) fn optional_zone_pick_is_infeasible(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> bool {
+    // CR 608.2d: an up-to pick may choose zero, so it is never impossible.
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        target,
+        up_to: false,
+        ..
+    } = &ability.effect
+    else {
+        return false;
+    };
+    // CR 608.2d: only a pick made while the effect is applied is decided here;
+    // cast-time targets keep target legality.
+    if ability.target_choice_timing != TargetChoiceTiming::Resolution {
+        return false;
+    }
+    // CR 101.4: an `optional_for` fan-out binds "their" zone to each accepting
+    // player, so the controller's pool would answer for the wrong player.
+    if ability.optional_for.is_some() {
+        return false;
+    }
+    // CR 610.3: the move does not happen once its "until" event occurred, and
+    // `resolve` then completes without failing.
+    if until_event_already_occurred(state, ability, &[]) {
+        return false;
+    }
+    // CR 400.7: a pinned referent that became a new object affects nothing,
+    // and `resolve` then completes without failing.
+    if ability.pinned_object_targets_all_stale(state) {
+        return false;
+    }
+    // CR 608.2h + CR 603.2: a triggered ability's pick may read its trigger event
+    // (Kodama of the East Tree's "equal or lesser mana value"), and that answer
+    // exists only while the effect is applied. Outside its resolution no event is
+    // bound, so impossibility can't be proven here.
+    if ability.trigger_source.is_some() && state.current_trigger_event.is_none() {
+        return false;
+    }
+    let effective = crate::game::targeting::resolve_tracked_set_sentinel(state, target.clone());
+    // Bound and context referents keep their own arms (CR 400.7, CR 608.2b).
+    if matches!(
+        effective,
+        TargetFilter::ParentTarget
+            | TargetFilter::SelfRef
+            | TargetFilter::TriggeringSource
+            | TargetFilter::ParentTargetSlot { .. }
+    ) {
+        return false;
+    }
+    let origin = expected_move_origin(state, *origin, &effective);
+    // CR 701.23b: `Library`/`None` + `Any` is the fail-to-find put-step
+    // continuation, which `resolve` completes as a no-op.
+    if (origin == Some(Zone::Library) || origin.is_none()) && matches!(effective, TargetFilter::Any)
+    {
+        return false;
+    }
+    // CR 608.2c: an announced or inherited object is moved, not picked.
+    if !bound_move_members(state, ability, &effective).is_empty() {
+        return false;
+    }
+    let filter_controller =
+        crate::game::effects::controller_for_relative_filter(state, ability, &effective);
+    let pool = untargeted_zone_pool(
+        state,
+        ability,
+        &effective,
+        origin,
+        *destination,
+        filter_controller,
+        false,
+    );
+    pool.eligible.is_empty()
+        && resolution_pick_required_min(state, ability).is_some_and(|min| min > 0)
+}
+
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -1146,41 +1305,21 @@ pub fn resolve(
             return Ok(completed_result(0));
         }
 
-        // CR 608.2c: A tracked-set filter ("from among the milled cards" / "X
-        // cards revealed this way") scopes the selection to a set of objects
-        // that may live in any zone. The tracked-set membership is the scope —
-        // there is no fixed `InZone` constraint to extract — so derive the scan
-        // zone from the members' actual zone rather than defaulting to the
-        // battlefield.
-        let scan_zones = if exile_tracked_set_library_only {
-            vec![Zone::Library]
-        } else if let Some(origin) = origin {
-            vec![origin]
-        } else {
-            let extracted = target_filter.extract_zones();
-            if !extracted.is_empty() {
-                extracted
-            } else if let Some(zone) = target_filter.extract_in_zone() {
-                vec![zone]
-            } else if let Some(zones) = tracked_set_member_zones(state, target_filter) {
-                zones
-            } else {
-                vec![Zone::Battlefield]
-            }
-        };
-        let scan_zone = scan_zones[0];
-        // Filter-controller override is primary here: when a filter like
-        // "creature you control" needs "you" to resolve to the *target* player
-        // (not the caster), we pass `filter_controller` explicitly. Include the
-        // resolving ability so `Owned { ScopedPlayer }` reads `scoped_player`.
-        let eligible = resolution_zone_candidates(
+        // CR 608.2c: the untargeted pick's scan zones and eligible objects, read
+        // through the same authority the optional-pick feasibility check reads.
+        let UntargetedZonePool {
+            scan_zones,
+            eligible,
+        } = untargeted_zone_pool(
             state,
             ability,
             target_filter,
-            filter_controller,
-            &scan_zones,
+            origin,
             dest_zone,
+            filter_controller,
+            exile_tracked_set_library_only,
         );
+        let scan_zone = scan_zones[0];
         // CR 701.24d-e: retain an explicitly designated typed player even when
         // the source zone supplies zero eligible cards.
         publish_finalized_owner_library_subjects(state, ability, &[]);
@@ -14342,6 +14481,252 @@ mod tests {
                 (Zone::Hand, Zone::Graveyard, Zone::Battlefield)
             );
         }
+    }
+
+    /// Nexus of Becoming's parsed exile node: "Then you may exile an artifact or
+    /// creature card from your hand." — an optional, untargeted
+    /// resolution-time pick from P0's hand.
+    fn nexus_exile_pick() -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Exile,
+                target: TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(
+                            TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You),
+                        ),
+                        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                    ],
+                },
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.optional = true;
+        ability.target_choice_timing = TargetChoiceTiming::Resolution;
+        ability
+    }
+
+    /// Aegis Sculptor's parsed exile node: "you may exile two cards from your
+    /// graveyard" — an optional exact-two resolution-time pick.
+    fn aegis_exile_pick(count: QuantityExpr) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(
+                    TypedFilter::card()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        }]),
+                ),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.optional = true;
+        ability.multi_target = Some(MultiTargetSpec::exact(count));
+        ability.target_choice_timing = TargetChoiceTiming::Resolution;
+        ability
+    }
+
+    /// CR 118.12 + CR 118.3 + CR 608.2d: an optional resolution-time zone pick
+    /// that must take at least one object is impossible exactly when its pool
+    /// holds nothing eligible, and for a single pick that verdict is the
+    /// resolver's own empty-pool failure. Every other shape keeps its owner.
+    ///
+    /// Real cards: no printed optional resolution-time pick has the shapes of
+    /// cases (e), (f) and (k). They are kept because conjuncts 7 and 8 and the
+    /// required minimum mirror `resolve`'s early returns, which complete without
+    /// `cost_payment_failed_flag`. Nearest printed cards: (e) Academy Rector's
+    /// search put-step, "When this creature dies, you may exile it. If you do,
+    /// search your library for an enchantment card, put that card onto the
+    /// battlefield, then shuffle." (CR 701.23b); (f) Goblin Welder's slot
+    /// return, "{T}: Choose target artifact a player controls and target
+    /// artifact card in that player's graveyard. If both targets are still legal
+    /// as this ability resolves, that player simultaneously sacrifices the
+    /// artifact and returns the artifact card to the battlefield." (CR 608.2b);
+    /// (k) Shigeki, Jukai Visionary's channel, "Return X target nonlegendary
+    /// cards from your graveyard to your hand." (CR 107.3 + CR 115.6).
+    #[test]
+    fn optional_zone_pick_is_infeasible_only_for_an_empty_exact_pick() {
+        // (a) P0's hand holds only a land: nothing to exile.
+        let mut state = GameState::new_two_player(42);
+        let land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Plains".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let pick = nexus_exile_pick();
+        assert!(
+            optional_zone_pick_is_infeasible(&state, &pick),
+            "(a) a hand with no artifact or creature card can't supply the exile"
+        );
+        let mut resolved = state.clone();
+        resolve(&mut resolved, &pick, &mut Vec::new()).unwrap();
+        assert!(
+            resolved.cost_payment_failed_flag,
+            "(a) the same board reaches the resolver's empty-pool failure"
+        );
+        assert!(
+            !matches!(resolved.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "(a) the resolver opens no choice over the empty pool"
+        );
+        assert_eq!(resolved.objects[&land].zone, Zone::Hand);
+
+        // Positive control: an artifact card in hand makes the pick possible,
+        // and the resolver moves it (single-eligible branch).
+        let mut with_artifact = state.clone();
+        let artifact = create_object(
+            &mut with_artifact,
+            CardId(2),
+            PlayerId(0),
+            "Artifact Card".to_string(),
+            Zone::Hand,
+        );
+        with_artifact
+            .objects
+            .get_mut(&artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        assert!(
+            !optional_zone_pick_is_infeasible(&with_artifact, &pick),
+            "reach: an artifact card in hand can be exiled"
+        );
+        let mut moved = with_artifact.clone();
+        resolve(&mut moved, &pick, &mut Vec::new()).unwrap();
+        assert_eq!(moved.objects[&artifact].zone, Zone::Exile);
+        assert!(!moved.cost_payment_failed_flag);
+
+        // Each case below changes one input from (a); none is proven impossible.
+        // (b) An up-to pick may choose zero (Journey to the Oracle).
+        let mut up_to = nexus_exile_pick();
+        if let Effect::ChangeZone { up_to: flag, .. } = &mut up_to.effect {
+            *flag = true;
+        }
+        assert!(!optional_zone_pick_is_infeasible(&state, &up_to), "(b)");
+        // (c) "any number" may choose zero (Glorious Protector).
+        let mut any_number = nexus_exile_pick();
+        any_number.multi_target = Some(MultiTargetSpec::unlimited(0));
+        assert!(
+            !optional_zone_pick_is_infeasible(&state, &any_number),
+            "(c)"
+        );
+        // (d) An `optional_for` fan-out is decided per accepting player
+        // (Carrion Rats).
+        let mut fan_out = nexus_exile_pick();
+        fan_out.optional_for = Some(OpponentMayScope::AnyPlayer);
+        assert!(!optional_zone_pick_is_infeasible(&state, &fan_out), "(d)");
+        // (e) The fail-to-find put-step: `Library` + `Any`.
+        let mut put_step = nexus_exile_pick();
+        if let Effect::ChangeZone { origin, target, .. } = &mut put_step.effect {
+            *origin = Some(Zone::Library);
+            *target = TargetFilter::Any;
+        }
+        assert!(!optional_zone_pick_is_infeasible(&state, &put_step), "(e)");
+        // (f) A target-slot anaphor names a declared target, not a pool.
+        let mut slot = nexus_exile_pick();
+        if let Effect::ChangeZone { target, .. } = &mut slot.effect {
+            *target = TargetFilter::ParentTargetSlot { index: 0 };
+        }
+        assert!(!optional_zone_pick_is_infeasible(&state, &slot), "(f)");
+        // (g) A bound object is moved, not picked.
+        let mut bound = nexus_exile_pick();
+        bound.targets = vec![TargetRef::Object(land)];
+        assert!(!optional_zone_pick_is_infeasible(&state, &bound), "(g)");
+        // (h) A triggered ability evaluated with no trigger event bound abstains
+        // (Kodama of the East Tree's pick reads its event)...
+        let mut triggered = nexus_exile_pick();
+        triggered.set_test_trigger_source_recursive(0, CardId(100));
+        assert!(state.current_trigger_event.is_none());
+        assert!(
+            !optional_zone_pick_is_infeasible(&state, &triggered),
+            "(h) no trigger event is bound"
+        );
+        // ...and decides again once its event is bound: the abstention, not
+        // the scan, refused.
+        // The bound event is a creature spell resolving onto the battlefield.
+        let mut with_event = state.clone();
+        with_event.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: ObjectId(100),
+            from: Some(Zone::Stack),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                ObjectId(100),
+                Some(Zone::Stack),
+                Zone::Battlefield,
+            )),
+        });
+        assert!(
+            optional_zone_pick_is_infeasible(&with_event, &triggered),
+            "(h) the bound event lets the scan decide"
+        );
+        // (i) A cast-time target keeps target legality.
+        let mut stack_timed = nexus_exile_pick();
+        stack_timed.target_choice_timing = TargetChoiceTiming::Stack;
+        assert!(
+            !optional_zone_pick_is_infeasible(&state, &stack_timed),
+            "(i)"
+        );
+
+        // (j) Exact N (Aegis Sculptor, "exile two cards from your graveyard"):
+        // the required minimum is two whatever the graveyard holds, so an
+        // empty graveyard can't supply the exile.
+        let empty = GameState::new_two_player(42);
+        assert!(
+            optional_zone_pick_is_infeasible(
+                &empty,
+                &aegis_exile_pick(QuantityExpr::Fixed { value: 2 })
+            ),
+            "(j) two cards can't come from an empty graveyard"
+        );
+        // (k) X = 0 takes nothing: the resolved minimum, not the presence of an
+        // exact count, decides.
+        let mut zero = aegis_exile_pick(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        });
+        zero.chosen_x = Some(0);
+        assert!(
+            !optional_zone_pick_is_infeasible(&empty, &zero),
+            "(k) an X = 0 pick takes nothing and is always possible"
+        );
     }
 }
 

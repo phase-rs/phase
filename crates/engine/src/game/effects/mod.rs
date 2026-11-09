@@ -16665,9 +16665,10 @@ fn optional_pay_cost_affordability_is_decidable(cost: &AbilityCost) -> bool {
 /// typed state: a missing chosen counter kind, no removable matching counter,
 /// an exact `ParentTarget` hand-off that records no produced object, a
 /// self-referent or event-referent move whose object can no longer move, a
-/// reveal of a library top that would reveal no card, a blight with no creature
-/// that can take the counters, or an unbound linked-exile referent ("the exiled
-/// card") with no card in exile. Suppressing the prompt lets the effect resolve
+/// resolution-time zone pick with no eligible object, a reveal of a library top
+/// that would reveal no card, a blight with no creature that can take the
+/// counters, or an unbound linked-exile referent ("the exiled card") with no
+/// card in exile. Suppressing the prompt lets the effect resolve
 /// as its defined no-op instead.
 fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
     match &ability.effect {
@@ -16787,6 +16788,14 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
                 effective.as_ref(),
                 *origin,
             )
+        }
+        // CR 118.12 + CR 118.3 + CR 608.2d: "Then you may exile an artifact or
+        // creature card from your hand. If you do, …" (Nexus of Becoming) is
+        // impossible when the zone it picks from at resolution holds no eligible
+        // card. Hydrate event-context targets first, exactly as resolution does.
+        Effect::ChangeZone { .. } => {
+            let effective = hydrate_event_context_targets(state, ability);
+            change_zone::optional_zone_pick_is_infeasible(state, effective.as_ref())
         }
         // CR 608.2d + CR 701.20a: "you may reveal the top card of your library"
         // (Priority Boarding) is impossible when it would reveal no card. Hydrate
@@ -23064,12 +23073,12 @@ fn resolve_chain_body(
     // sequential siblings and explicit decline branches continue. Other
     // infeasible optional effects retain their established resolver no-op.
     //
-    // CR 118.12: `ChangeZone` covers every referent shape, so an impossible
-    // self- or event-referent move declines and its "If you do" rider stays
-    // gated. `RevealTop` is deliberately absent (CR 608.2c): its resolver's
-    // empty-library no-op publishes the empty reveal and the `Dig` missing
-    // reason that later "it"/revealed-card instructions read, which the decline
-    // path would skip.
+    // CR 118.12: `ChangeZone` covers every referent shape and the
+    // resolution-time zone pick, so an impossible self- or event-referent move
+    // declines and its "If you do" rider stays gated. `RevealTop` is
+    // deliberately absent (CR 608.2c): its resolver's empty-library no-op
+    // publishes the empty reveal and the `Dig` missing reason that later
+    // "it"/revealed-card instructions read, which the decline path would skip.
     let auto_decline_infeasible_optional = matches!(
         &ability.effect,
         Effect::CastFromZone { .. }
@@ -57493,6 +57502,74 @@ mod tests {
         assert!(
             upfront_optional_gate(&state, &reveal, OptionalFeasibility::Probe).is_some(),
             "reach: one library card makes the reveal offerable"
+        );
+    }
+
+    /// CR 118.12 + CR 118.3 + CR 608.2d: the "would it prompt" authority
+    /// (`upfront_optional_gate` with `Probe`) withholds an optional
+    /// resolution-time zone pick whose pool holds nothing eligible ("Then you
+    /// may exile an artifact or creature card from your hand", Nexus of
+    /// Becoming), and offers it once the hand holds an artifact card.
+    #[test]
+    fn upfront_optional_gate_withholds_an_empty_resolution_zone_pick() {
+        let mut state = GameState::new_two_player(42);
+        let land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Plains".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let mut exile_from_hand = optional_referent_move(
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You),
+                    ),
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                ],
+            },
+            Some(Zone::Hand),
+            ObjectId(100),
+        );
+        if let Effect::ChangeZone {
+            destination,
+            enters_under,
+            ..
+        } = &mut exile_from_hand.effect
+        {
+            *destination = Zone::Exile;
+            *enters_under = None;
+        }
+        exile_from_hand.target_choice_timing = TargetChoiceTiming::Resolution;
+        assert!(
+            upfront_optional_gate(&state, &exile_from_hand, OptionalFeasibility::Probe).is_none(),
+            "a hand with no artifact or creature card has nothing to exile"
+        );
+        let artifact = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Artifact Card".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        assert!(
+            upfront_optional_gate(&state, &exile_from_hand, OptionalFeasibility::Probe).is_some(),
+            "reach: an artifact card in hand makes the exile offerable"
         );
     }
 
