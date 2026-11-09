@@ -5292,7 +5292,12 @@ mod tests {
 
         // Reach-guard: a normally place_blocking-blocked attacker also reads true,
         // proving the assertion above is not vacuous.
-        assert!(place_blocking(&mut state, blocker, normally_blocked));
+        assert!(place_blocking(
+            &mut state,
+            blocker,
+            normally_blocked,
+            &mut Vec::new()
+        ));
         assert!(is_source_blocked(&state, normally_blocked));
     }
 

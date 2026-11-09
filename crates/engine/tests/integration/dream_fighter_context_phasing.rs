@@ -12,6 +12,9 @@ use engine::types::zones::Zone;
 
 const DREAM_FIGHTER: &str = "Whenever this creature blocks or becomes blocked by a creature, this creature and that creature phase out. (While they're phased out, they're treated as though they don't exist. Each one phases in before its controller untaps during their next untap step.)";
 const CLOUDSHIFT: &str = "Exile target creature you control, then return that card to the battlefield under your control.";
+// Full Oracle text verified against the local MTGJSON AtomicCards export.
+const MIRROR_MATCH: &str = "Cast this spell only during the declare blockers step.\nFor each creature attacking you or a planeswalker you control, create a token that's a copy of that creature and that's blocking that creature. Exile those tokens at end of combat.";
+const DRELNOCH: &str = "Whenever this creature becomes blocked, you may draw two cards.";
 
 fn priority_to_combat_prompt(runner: &mut GameRunner, blockers: bool) {
     for _ in 0..32 {
@@ -102,6 +105,238 @@ fn dream_fighter_combat_partners_phase_out_without_announced_targets() {
             );
         }
         assert!(runner.state().objects[&bystander].is_phased_in());
+    }
+}
+
+// CR 509.3d + CR 509.4: an entering blocker triggers the attacker's
+// per-creature ability, but never the copy's own "blocks" ability.
+#[test]
+fn dream_fighter_phases_each_mirror_match_copy_without_an_entering_blocks_trigger() {
+    for mirror_count in [1, 2] {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let fighter = scenario
+            .add_creature(P0, "Dream Fighter", 1, 1)
+            .from_oracle_text(DREAM_FIGHTER)
+            .id();
+        let bystander = scenario.add_creature(P1, "Bystander", 2, 2).id();
+        let mirrors: Vec<_> = (0..mirror_count)
+            .map(|_| {
+                scenario
+                    .add_spell_to_hand_from_oracle(P1, "Mirror Match", true, MIRROR_MATCH)
+                    .with_mana_cost(ManaCost::Cost {
+                        shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                        generic: 4,
+                    })
+                    .id()
+            })
+            .collect();
+        let islands: Vec<_> = (0..6 * mirror_count)
+            .map(|_| scenario.add_basic_land(P1, ManaColor::Blue))
+            .collect();
+        let mut runner = scenario.build();
+        priority_to_combat_prompt(&mut runner, false);
+        runner
+            .act(GameAction::DeclareAttackers {
+                attacks: vec![(fighter, AttackTarget::Player(P1))],
+                bands: vec![],
+            })
+            .unwrap();
+        priority_to_combat_prompt(&mut runner, true);
+        runner
+            .act(GameAction::DeclareBlockers {
+                assignments: vec![],
+            })
+            .unwrap();
+
+        let mut copies = Vec::new();
+        let mut pending_trigger_counts = Vec::new();
+        for (index, mirror) in mirrors.into_iter().enumerate() {
+            if matches!(runner.state().waiting_for, WaitingFor::Priority { player, .. } if player != P1)
+            {
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { player: P1, .. }
+            ));
+            for &island in &islands[index * 6..(index + 1) * 6] {
+                runner
+                    .act(GameAction::ActivateAbility {
+                        source_id: island,
+                        ability_index: 0,
+                        payment_mode: CastPaymentMode::Auto,
+                    })
+                    .unwrap();
+            }
+            drop(runner.cast(mirror).commit());
+            let mut events = Vec::new();
+            for _ in 0..8 {
+                if runner.state().objects[&mirror].zone == Zone::Graveyard {
+                    break;
+                }
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+            }
+            assert_eq!(runner.state().objects[&mirror].zone, Zone::Graveyard);
+            let created: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::TokenCreated {
+                        object_id,
+                        source_id,
+                        ..
+                    } if *source_id == mirror => Some(*object_id),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(created.len(), 1, "the printed spell must create its copy");
+            let copy = created[0];
+            copies.push(copy);
+            assert_eq!(runner.state().objects[&copy].name, "Dream Fighter");
+            assert_eq!(runner.state().objects[&copy].controller, P1);
+            assert!(runner.state().objects[&copy].is_token);
+            assert!(runner.state().objects[&copy].is_phased_in());
+            assert_eq!(
+                runner
+                    .state()
+                    .combat
+                    .as_ref()
+                    .unwrap()
+                    .blocker_assignments
+                    .get(&fighter)
+                    .unwrap()
+                    .as_slice(),
+                copies.as_slice(),
+                "each copy must actually enter blocking its own original"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, GameEvent::BlockersDeclared { .. })),
+                "entering blocking is not a blocker declaration"
+            );
+            pending_trigger_counts.push(runner.state().stack.len());
+            for trigger in &runner.state().stack {
+                assert_eq!(
+                    trigger.source_id, fighter,
+                    "the entering copy never blocked for trigger purposes"
+                );
+                assert!(declared_targets_in_chain(trigger.ability().unwrap()).is_empty());
+            }
+        }
+
+        runner.advance_until_stack_empty();
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        for id in std::iter::once(fighter).chain(copies) {
+            assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+            assert!(
+                runner.state().objects[&id].is_phased_out(),
+                "the original and each exact entering partner must phase out: {id:?}"
+            );
+        }
+        assert!(runner.state().objects[&bystander].is_phased_in());
+        assert_eq!(
+            pending_trigger_counts,
+            (1..=mirror_count).collect::<Vec<_>>(),
+            "each entering copy must trigger only the original attacking fighter"
+        );
+    }
+}
+
+// CR 509.3c: the first entering blocker fires the bare form once; neither
+// its paired filtered event nor another entering blocker can fire it again.
+#[test]
+fn mirror_match_fires_bare_becomes_blocked_only_for_the_first_copy() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario
+        .add_creature(P0, "Drelnoch", 3, 3)
+        .from_oracle_text(DRELNOCH)
+        .id();
+    let bystander = scenario.add_creature(P1, "Bystander", 2, 2).id();
+    let mirrors: Vec<_> = (0..2)
+        .map(|_| {
+            scenario
+                .add_spell_to_hand_from_oracle(P1, "Mirror Match", true, MIRROR_MATCH)
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                    generic: 4,
+                })
+                .id()
+        })
+        .collect();
+    let islands: Vec<_> = (0..12)
+        .map(|_| scenario.add_basic_land(P1, ManaColor::Blue))
+        .collect();
+    scenario.with_library_top(
+        P0,
+        &["First reward", "Second reward", "Must stay", "Also stays"],
+    );
+    let mut runner = scenario.build();
+    priority_to_combat_prompt(&mut runner, false);
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .unwrap();
+    priority_to_combat_prompt(&mut runner, true);
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![],
+        })
+        .unwrap();
+
+    for (index, mirror) in mirrors.into_iter().enumerate() {
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { player, .. } if player != P1)
+        {
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P1, .. }
+        ));
+        for &island in &islands[index * 6..(index + 1) * 6] {
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: island,
+                    ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .unwrap();
+        }
+        let outcome = runner.cast(mirror).commit().accept_optional().resolve();
+        outcome.assert_hand_drawn(P0, if index == 0 { 2 } else { 0 });
+        assert_eq!(outcome.state().objects[&mirror].zone, Zone::Graveyard);
+        assert_eq!(
+            outcome
+                .state()
+                .combat
+                .as_ref()
+                .unwrap()
+                .blocker_assignments
+                .get(&attacker)
+                .unwrap()
+                .len(),
+            index + 1,
+            "the second cast must really add a second blocking copy"
+        );
+        assert!(outcome.state().stack.is_empty());
+        assert!(outcome.state().resolution_stack.is_empty());
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        assert!(outcome.state().objects[&bystander].is_phased_in());
     }
 }
 

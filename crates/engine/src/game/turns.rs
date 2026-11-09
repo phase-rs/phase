@@ -14783,7 +14783,12 @@ mod object_sweep_sharing_tests {
             (
                 "placed blocking, attacker removed",
                 |state, attacker, blocker| {
-                    assert!(combat::place_blocking(state, blocker, attacker));
+                    assert!(combat::place_blocking(
+                        state,
+                        blocker,
+                        attacker,
+                        &mut Vec::new()
+                    ));
                     assert!(combat::prune_object_from_combat(state, attacker));
                 },
             ),
