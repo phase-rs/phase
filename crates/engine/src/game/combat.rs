@@ -1401,11 +1401,17 @@ pub fn choose_entry_attack_target_or_enter(
 /// is attacking the blocker's controller (or a planeswalker/battle they control,
 /// captured by `AttackerInfo.defending_player`); otherwise the creature is on
 /// the battlefield but is never considered a blocking creature, so this is a
-/// no-op for the combat bookkeeping. Per CR 509.3a/509.3b, a creature put onto
-/// the battlefield blocking does NOT cause "whenever ~ blocks" abilities to
-/// trigger, so no `BlockersDeclared` event is emitted; combat damage reads the
-/// recorded assignments directly. Returns `true` when the block was established.
-pub fn place_blocking(state: &mut GameState, blocker_id: ObjectId, attacker_id: ObjectId) -> bool {
+/// no-op for the combat bookkeeping. CR 509.3a/509.3b + CR 509.4: entering
+/// blocking never fires blocker-side "blocks" abilities, so no `BlockersDeclared`
+/// event is emitted. CR 509.3c/509.3d: attacker-side events distinguish the first
+/// blocked transition from each entering blocker. Returns `true` when the block
+/// was established.
+pub fn place_blocking(
+    state: &mut GameState,
+    blocker_id: ObjectId,
+    attacker_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
     let Some(blocker) = state.objects.get(&blocker_id) else {
         return false;
     };
@@ -1461,6 +1467,19 @@ pub fn place_blocking(state: &mut GameState, blocker_id: ObjectId, attacker_id: 
             expected_attacker_blocked,
         },
     );
+    // CR 509.3c: only an unblocked attacker becomes blocked for the bare form.
+    if !expected_attacker_blocked {
+        events.push(GameEvent::AttackerBecameBlockedByEffect {
+            attacker: attacker_id,
+        });
+    }
+    // CR 509.3d + CR 509.4: every entering blocker supplies a creature-bound
+    // attacker-side occurrence, without claiming that the entering creature
+    // itself "blocked". Carry the pair directly for event-context pin capture.
+    events.push(GameEvent::AttackerBecameBlockedByFilteredBlocker {
+        attacker: attacker_id,
+        blocker: blocker_id,
+    });
     true
 }
 

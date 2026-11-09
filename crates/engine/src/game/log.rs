@@ -1552,13 +1552,13 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             segs
         }
 
-        // CR 509.1h: an effect made an attacker become blocked (no blockers).
+        // CR 509.1h + CR 509.3c: an effect first made the attacker become blocked.
         GameEvent::AttackerBecameBlockedByEffect { attacker } => {
             vec![card_seg(state, *attacker), text(" becomes blocked")]
         }
 
-        // CR 509.3d: a disambiguated single blocker/attacker pair from a
-        // per-blocker filtered blocks-or-becomes-blocked firing.
+        // CR 509.3d: an attacker-side entering-blocker relationship or a
+        // disambiguated per-blocker filtered firing carries this exact pair.
         GameEvent::AttackerBecameBlockedByFilteredBlocker { attacker, blocker } => {
             vec![
                 card_seg(state, *blocker),

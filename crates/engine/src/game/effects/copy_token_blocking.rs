@@ -78,7 +78,7 @@ pub fn resolve(
         // blocking the attacker it copied. `last_created_token_ids` holds exactly
         // this attacker's single copy at this point in the loop.
         for token_id in state.last_created_token_ids.clone() {
-            combat::place_blocking(state, token_id, attacker_id);
+            combat::place_blocking(state, token_id, attacker_id, events);
             all_created.push(token_id);
         }
     }

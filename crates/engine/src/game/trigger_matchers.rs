@@ -4538,8 +4538,7 @@ pub(super) fn match_leaves_battlefield(
     }
 }
 
-/// BecomesBlocked: fires when the source creature is assigned at least one blocker.
-/// Reuses BlockersDeclared event — the attacker "becomes blocked" when blockers are declared.
+/// BecomesBlocked: fires on blocker declaration or an attacker-side effect event.
 pub(super) fn match_becomes_blocked(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -4557,11 +4556,11 @@ pub(super) fn matching_becomes_blocked_events(
 ) -> Vec<GameEvent> {
     let source_id = source_event_subject_id(source_context);
     if let GameEvent::AttackerBecameBlockedByEffect { attacker } = event {
-        // CR 509.3d: an effect-driven block is NOT "blocked by a creature" — the
-        // "becomes blocked by a creature" form (which carries a genuine blocker
-        // filter) must NOT fire. Only the bare "becomes blocked" form (CR 509.3c)
-        // fires, and only for the matching attacker. `combat_filter` excludes a
-        // spurious `TargetFilter::Player` surfaced by effect-text lowering (e.g.
+        // CR 509.3c/509.3d: this event carries only the first blocked transition,
+        // not a blocker identity. Only the bare form fires here; a real entering
+        // blocker supplies its own per-creature event separately.
+        // `combat_filter` excludes a spurious `TargetFilter::Player` surfaced
+        // by the effect-text lowering (e.g.
         // Goblin Cadets' "target opponent gains control"), which is not a real
         // CR 509 blocker filter and must not suppress this bare-form firing.
         if combat_filter(trigger).is_some() {
@@ -4573,6 +4572,26 @@ pub(super) fn matching_becomes_blocked_events(
             *attacker == source_id
         };
         return if attacker_matches {
+            vec![event.clone()]
+        } else {
+            Vec::new()
+        };
+    }
+    if let GameEvent::AttackerBecameBlockedByFilteredBlocker { attacker, blocker } = event {
+        // CR 509.3d + CR 509.4: an entering blocker triggers only the qualified
+        // attacker-side form. The bare form consumes the first-transition event,
+        // and the entering creature never fires a blocker-side "blocks" trigger.
+        let Some(filter) = combat_filter(trigger) else {
+            return Vec::new();
+        };
+        let attacker_matches = if trigger.valid_card.is_some() {
+            valid_card_matches(trigger, state, *attacker, source_context)
+        } else {
+            *attacker == source_id
+        };
+        return if attacker_matches
+            && target_filter_matches_object(state, *blocker, filter, source_context)
+        {
             vec![event.clone()]
         } else {
             Vec::new()

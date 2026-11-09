@@ -16360,7 +16360,7 @@ fn optional_head_declined_all_object_targets(ability: &ResolvedAbility) -> bool 
 fn phase_out_context_union_requires_parent(effect: &Effect) -> Option<bool> {
     fn requires_parent(filter: &TargetFilter) -> Option<bool> {
         match filter {
-            TargetFilter::ParentTarget => Some(true),
+            TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => Some(true),
             TargetFilter::SelfRef | TargetFilter::TriggeringSource => Some(false),
             TargetFilter::Or { filters } => filters.iter().try_fold(true, |dependent, filter| {
                 requires_parent(filter).map(|child| dependent && child)

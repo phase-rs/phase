@@ -288,6 +288,7 @@ pub(super) fn collect_object_targets(
             // CR 702.26a + CR 702.26h: gather the whole batch before phasing any
             // member, so an attachment selected with its host phases indirectly.
             let mut seen = HashSet::new();
+            let ctx = FilterContext::from_ability(ability);
             return filters
                 .iter()
                 .flat_map(|filter| {
@@ -305,16 +306,14 @@ pub(super) fn collect_object_targets(
                                 Vec::new()
                             }
                         }
-                        // An explicitly empty announced set stays empty. Do not use
-                        // ParentTarget's event/source fallback for this compound leg.
-                        TargetFilter::ParentTarget => ability
-                            .live_object_targets(state)
-                            .iter()
-                            .filter_map(|target| match target {
-                                TargetRef::Object(id) => Some(*id),
-                                TargetRef::Player(_) => None,
-                            })
-                            .collect(),
+                        // Preserve empty parent bindings and declared slot numbers:
+                        // the shared object reader selects a slot before checking its
+                        // legality and incarnation, never after filtering the list.
+                        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => {
+                            crate::game::targeting::resolved_object_ids_for_filter_with_context(
+                                state, ability, filter, &ctx,
+                            )
+                        }
                         // CR 608.2k: the trigger's named combat partner is an
                         // untargeted event referent, not an announced target or a
                         // population filter. CR 702.26b: only phased-in battlefield
@@ -344,6 +343,7 @@ pub(super) fn collect_object_targets(
                                 .into_iter()
                                 .collect()
                         }
+                        TargetFilter::Or { .. } => collect_object_targets(state, ability, filter),
                         TargetFilter::None
                         | TargetFilter::Any
                         | TargetFilter::Player
@@ -355,7 +355,6 @@ pub(super) fn collect_object_targets(
                         | TargetFilter::SourceOrPaired
                         | TargetFilter::Typed(_)
                         | TargetFilter::Not { .. }
-                        | TargetFilter::Or { .. }
                         | TargetFilter::And { .. }
                         | TargetFilter::StackAbility { .. }
                         | TargetFilter::StackSpell
@@ -384,7 +383,6 @@ pub(super) fn collect_object_targets(
                         | TargetFilter::EventTarget
                         | TargetFilter::TriggeringSourceController
                         | TargetFilter::EventTargetController
-                        | TargetFilter::ParentTargetSlot { .. }
                         | TargetFilter::DeclaredPlayer { .. }
                         | TargetFilter::ParentTargetController
                         | TargetFilter::ParentTargetOwner
@@ -401,9 +399,7 @@ pub(super) fn collect_object_targets(
                         | TargetFilter::ChosenDamageSource { .. }
                         | TargetFilter::Named { .. }
                         | TargetFilter::Owner
-                        | TargetFilter::AllPlayers => {
-                            collect_object_targets(state, ability, filter)
-                        }
+                        | TargetFilter::AllPlayers => Vec::new(),
                     }
                 })
                 .filter(|id| seen.insert(*id))
