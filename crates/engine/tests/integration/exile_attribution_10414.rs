@@ -813,9 +813,11 @@ fn mudhole_replacement_fixture(
     if continuation_witness {
         let object = runner.state_mut().objects.get_mut(&mudhole).unwrap();
         for abilities in [&mut object.abilities, &mut object.base_abilities] {
-            let root = &mut Arc::make_mut(abilities)[0];
-            assert!(root.sub_ability.is_none(), "printed Mudhole has no tail");
-            root.sub_ability = Some(Box::new(AbilityDefinition::new(
+            let mut tail = &mut Arc::make_mut(abilities)[0].sub_ability;
+            while let Some(next) = tail {
+                tail = &mut next.sub_ability;
+            }
+            *tail = Some(Box::new(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 3 },
