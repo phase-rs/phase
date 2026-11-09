@@ -11049,23 +11049,38 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         _ => TargetFilter::Controller,
     };
     let tracks_owner_population = matches!(&effect, Effect::ChangeZoneAll { .. });
-    // Owner-library moves can span several owners, while their existing
-    // ParentTargetOwner terminal names one player. Keep that routing unchanged;
-    // only designated-player moves and mass owner-population operations reserve
-    // delivery randomization for this terminal.
-    if let Effect::ChangeZone {
-        destination: Zone::Library,
-        owner_library: false,
-        library_shuffle,
-        ..
-    }
-    | Effect::ChangeZoneAll {
-        destination: Zone::Library,
-        library_shuffle,
-        ..
-    } = &mut effect
-    {
-        *library_shuffle = LibraryShuffleMode::TerminalShuffle;
+    // A selected graveyard population explicitly owned by the caster or the
+    // declared player has one library subject. ParentTarget/SelfRef moves do
+    // not establish that guarantee: their receiving owner may differ from the
+    // terminal actor. Keep those existing routes unchanged. Mass operations
+    // already carry their complete owner-population scope.
+    let single_library_population = matches!(
+        &effect,
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Library,
+            target: TargetFilter::Typed(filter),
+            owner_library: false,
+            ..
+        } if filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::Owned {
+                controller: ControllerRef::You | ControllerRef::TargetPlayer
+            }
+        ))
+    );
+    match &mut effect {
+        Effect::ChangeZone {
+            library_shuffle, ..
+        } if single_library_population => {
+            *library_shuffle = LibraryShuffleMode::TerminalShuffle;
+        }
+        Effect::ChangeZoneAll {
+            destination: Zone::Library,
+            library_shuffle,
+            ..
+        } => *library_shuffle = LibraryShuffleMode::TerminalShuffle,
+        _ => {}
     }
     // CR 701.24c-e + CR 400.3: the terminal shuffle is driven by the owners of
     // the exact prospective subject population. Cause filtering prevents an
