@@ -10190,8 +10190,9 @@ mod tests {
                     let projected = project_out_resources(&frame);
                     assert_eq!(
                         projected.damage_dealt_this_turn.len(),
-                        usize::from(pins.iter().any(Option::is_some)),
-                        "missing/None-only needs no witness; mixed rows need one"
+                        1,
+                        "one bounded witness for the reader's answer, including the legacy \
+                         fallback an absent or all-None row set leaves"
                     );
                     if !accepted {
                         assert_eq!(
@@ -10476,6 +10477,21 @@ mod tests {
         let mut player = unknown.clone();
         player.damage_dealt_this_turn[0].target =
             crate::types::ability::TargetRef::Player(PlayerId(1));
+        let legacy = project_out_resources(&player);
+        assert_eq!(
+            legacy.damage_dealt_this_turn.len(),
+            1,
+            "the retained object reader keeps one legacy answer; a player row does not match it"
+        );
+        assert_eq!(
+            legacy.damage_dealt_this_turn[0].target_incarnation, None,
+            "an unmatched player row leaves the legacy fallback, not a target epoch"
+        );
+        player.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::DamageDealt { target, .. } = event {
+                *target = crate::types::ability::TargetRef::Player(PlayerId(1));
+            }
+        });
         assert!(
             project_out_resources(&player)
                 .damage_dealt_this_turn
