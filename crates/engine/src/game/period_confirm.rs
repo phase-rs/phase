@@ -18,8 +18,8 @@ use crate::analysis::decision_template::{
 use crate::analysis::loop_check::{classify_win_kind, LoopCertificate, WinKind};
 use crate::analysis::resource::{
     certify_instructed_library_departure, driving_resources_non_decreasing_carried, frame_without,
-    CertifiedInstructedDeparture, CleanupPair, CounterClass, CoveredGrowth, ObjectClass,
-    ObjectGrowthVerdict, PredictedDeparture, RecurrenceCover, ResourceVector,
+    survived_repetitions, CertifiedInstructedDeparture, CleanupPair, CounterClass, CoveredGrowth,
+    ObjectClass, ObjectGrowthVerdict, PredictedDeparture, RecurrenceCover, ResourceVector,
 };
 use crate::game::engine::{
     announced_target_pins, apply, certify_object_growth_frames, clear_frame_bookkeeping,
@@ -3325,13 +3325,9 @@ impl Count {
         *ended == CycleEnd::CameRound
     }
 
-    /// The repetitions `holder` is still in the game after: every one, or all but the last when
-    /// `holder` leaves in it.
+    /// The repetitions `holder` is still in the game after, by [`survived_repetitions`]'s rule.
     fn survived(&self, holder: PlayerId) -> u32 {
-        let leaves = self.departures.last().is_some_and(|last| {
-            last.repetition == self.repetitions && last.seats.contains(&holder)
-        });
-        self.repetitions - u32::from(leaves)
+        survived_repetitions(self.repetitions, &self.departures, holder)
     }
 }
 

@@ -2874,6 +2874,20 @@ impl PredictedDeparture {
     }
 }
 
+/// CR 732.2a + CR 704.5a / CR 704.5b / CR 704.5c: the most of `count` repetitions `holder`
+/// survives, because the USER rule is never to suggest a count that eliminates the proposer, and
+/// only the last entry is read because a count stops at the holder's crossing.
+pub(crate) fn survived_repetitions(
+    count: u32,
+    departures: &[PredictedDeparture],
+    holder: PlayerId,
+) -> u32 {
+    match departures.last() {
+        Some(last) if last.seats.contains(&holder) => last.repetition.saturating_sub(1),
+        _ => count,
+    }
+}
+
 /// CR 704.5a + CR 732.2a + CR 800.4a: the ORDERED cascade of CR 704 threshold crossings one
 /// accepted count carries the game through, under ONE declaration — every departure that count
 /// contains, not just the first.
@@ -2910,12 +2924,7 @@ impl EliminationCascade {
     /// CR 104.2a + CR 704.5a / CR 704.5b / CR 704.5c: the most repetitions `proposer` survives,
     /// within `capacity` — the sole producer of every count a bounded offer publishes.
     pub(crate) fn survived_count(&self, proposer: PlayerId, capacity: u32) -> u32 {
-        // The walk stops at the proposer's crossing, so it can only be the last entry.
-        let survived = match self.entries.last() {
-            Some(entry) if entry.seats.contains(&proposer) => entry.repetition.saturating_sub(1),
-            _ => self.count,
-        };
-        survived.min(capacity)
+        survived_repetitions(self.count, &self.entries, proposer).min(capacity)
     }
 
     /// The raw count, which may cost the proposer the game — read only by the offer's ceiling.
@@ -25788,6 +25797,24 @@ mod tests {
             PredictedDeparture::new(1, BTreeSet::new()),
             None,
             "'crosses nobody' is the absence of an entry, never an entry holding nobody"
+        );
+    }
+
+    /// Never a count that eliminates the holder, whichever repetition it leaves in.
+    #[test]
+    fn survived_repetitions_stops_before_the_holders_departure() {
+        let dep = |repetition, seat| {
+            PredictedDeparture::new(repetition, BTreeSet::from([PlayerId(seat)])).unwrap()
+        };
+        let p0 = PlayerId(0);
+        assert_eq!(
+            [
+                survived_repetitions(3, &[dep(3, 0)], p0),
+                survived_repetitions(3, &[dep(3, 1)], p0),
+                survived_repetitions(3, &[dep(2, 0)], p0),
+                survived_repetitions(3, &[], p0),
+            ],
+            [2, 3, 1, 3]
         );
     }
 
