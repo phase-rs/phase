@@ -16,9 +16,11 @@
 //! the direction of the effect while preventing wrap, which is the only
 //! outcome consistent with the CR's intent.
 //!
-//! Life readings that combine `i32` life values — a Two-Headed Giant team's
-//! shared total (CR 810.4), the difference of two totals, a sum of life-change
-//! amounts — are computed exactly in a wider type (`i64`, or a `u32` magnitude
+//! Life readings that combine `i32` life values — a shared life total (a
+//! Two-Headed Giant team's, CR 810.4; the Archenemy Commander heroes',
+//! CR 904.13b; a Horde game's survivors', `topology::has_shared_life`), the
+//! difference of two totals, a sum of life-change amounts — are computed
+//! exactly in a wider type (`i64`, or a `u32` magnitude
 //! via `unsigned_abs` / `abs_diff`, which holds `i32::MIN`'s magnitude) and
 //! converted back once here: [`i64_to_i32_saturating`] for a reading,
 //! [`i64_to_u32_saturating`] for a payable-life budget or an unsigned delta,
@@ -111,7 +113,9 @@ pub enum LifeDirection {
 /// negative; the total is stored as `i32`, so the result stops at the limit
 /// the change moves toward and never moves against the change. This is the one
 /// place a life total is computed. `current` is the total the change adjusts:
-/// the player's own life, or in Two-Headed Giant the team's exact shared total,
+/// the player's own life, or in a shared-life format the exact shared total (a
+/// Two-Headed Giant team's, CR 810.4; the Archenemy Commander heroes',
+/// CR 904.13b; a Horde game's survivors', `topology::has_shared_life`),
 /// which a state this function never wrote may hold outside `i32`.
 #[inline]
 pub fn saturating_life_total(current: i64, delta: i64) -> i64 {

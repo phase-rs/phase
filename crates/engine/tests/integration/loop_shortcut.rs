@@ -11945,9 +11945,12 @@ const EXQUISITE_BLOOD: DrainCard = (
     "Whenever an opponent loses life, you gain that much life.",
 );
 /// Synthetic: a Blight-Priest that drains 2, so one repetition gains its controller 2 and a
-/// controller one life below `i32::MAX` crosses the cap inside a repetition. No printed card
-/// drains each opponent more than 1 whenever its controller gains life; the nearest printed card
-/// is Marauding Blight-Priest ("Whenever you gain life, each opponent loses 1 life.").
+/// controller one life below `i32::MAX` crosses the cap inside a repetition. No printed card has
+/// the triggered ability "Whenever you gain life, each opponent loses N life." with N above 1.
+/// The nearest printed cards are Vizkopa Guildmage ("{1}{W}{B}: Whenever you gain life this
+/// turn, each opponent loses that much life.", an activated ability whose trigger lasts one turn
+/// and drains the amount gained) and Marauding Blight-Priest ("Whenever you gain life, each
+/// opponent loses 1 life.").
 const DRAIN_TWO_PRIEST: DrainCard = (
     "Test Drain-Two Priest",
     "Whenever you gain life, each opponent loses 2 life.",

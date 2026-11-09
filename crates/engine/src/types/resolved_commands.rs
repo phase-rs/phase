@@ -100,8 +100,14 @@ pub enum ResolvedPlayerEdit {
     /// applied after any replacement. `i64` so every settled amount (a
     /// `u32`; a replacement quantity past `u32` lands on `u32::MAX` before it
     /// settles) and every set/exchange difference is recorded exactly; the
-    /// edit authority saturates the total it adjusts (CR 119.3 + CR 107.1b),
-    /// in Two-Headed Giant the team's shared total (CR 810.9).
+    /// edit authority adjusts a life total by the delta (CR 119.3), and a life
+    /// total may be negative (CR 107.1b). The total stops at the `i32` limit
+    /// the change moves toward: an engine storage limit, not a rule
+    /// (`game::arithmetic::saturating_life_total`). The total adjusted is the
+    /// player's own life, or
+    /// in a shared-life format the shared total (CR 810.9) of a Two-Headed
+    /// Giant team (CR 810.4), of the Archenemy Commander heroes (CR 904.13b) or
+    /// of a Horde game's survivors (`game::topology::has_shared_life`).
     Life { delta: i64 },
     /// CR 122.1 + CR 107.14: A final energy-counter delta.
     Energy { delta: i32 },

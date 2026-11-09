@@ -1089,7 +1089,10 @@ mod tests {
     }
 
     /// CR 701.10d: doubling a negative life total loses its magnitude, so the
-    /// new total is twice the old one.
+    /// new total is twice the old one. The printed card is Beacon of
+    /// Immortality ("Double target player's life total. Shuffle Beacon of
+    /// Immortality into its owner's library."); the ability here doubles its
+    /// controller's total.
     #[test]
     fn double_negative_life_total_loses_its_magnitude() {
         let mut state = GameState::default();
@@ -1114,7 +1117,11 @@ mod tests {
 
     /// CR 701.10d: the magnitude of a life total of `i32::MIN` is 2^31, which
     /// does not fit `i32`; doubling takes it as a `u32` instead of overflowing
-    /// on negation, and the effect resolves.
+    /// on negation, and the effect resolves. The printed card is Beacon of
+    /// Immortality ("Double target player's life total. Shuffle Beacon of
+    /// Immortality into its owner's library."), which `life_total_saturation.rs`
+    /// casts on a player at `i32::MIN` in
+    /// `doubling_a_life_total_at_i32_min_reports_the_saturated_loss`.
     #[test]
     fn double_life_total_at_i32_min_takes_the_magnitude_without_overflow() {
         let mut state = GameState::default();

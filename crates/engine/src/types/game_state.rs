@@ -32918,8 +32918,10 @@ impl GameState {
                 // CR 810.4 + CR 810.9: the change adjusts the player's shared
                 // life total (its own life outside a shared-life format).
                 let current = crate::game::players::life_change_total(self, command.player);
-                // CR 119.3 + CR 107.1b: the gain or loss adjusts the total,
-                // which stops at the `i32` limit the change moves toward.
+                // CR 119.3: the gain or loss adjusts the total, which may be
+                // negative (CR 107.1b). It stops at the `i32` limit the change
+                // moves toward: an engine storage limit, not a rule
+                // (`arithmetic::saturating_life_total`).
                 let total = arithmetic::saturating_life_total(current, *delta);
                 debug_assert!(
                     total.abs_diff(current) <= rules,

@@ -12512,8 +12512,10 @@ fn targeted_remove_counter_choice_cost(cost: &AbilityCost) -> Option<AbilityCost
 
 /// CR 107.3a + CR 601.2b + CR 119.4a: The largest X a "pay X life" cast or
 /// activation cost can announce: the cast/activation payable-life budget
-/// (`life_costs::max_payable_life_cast_or_activation`, the exact team total in
-/// Two-Headed Giant), capped at `i32::MAX`.
+/// (`life_costs::max_payable_life_cast_or_activation`: in a shared-life format
+/// the exact shared total of a Two-Headed Giant team, CR 810.4, of the
+/// Archenemy Commander heroes, CR 904.13b, or of a Horde game's survivors,
+/// `topology::has_shared_life`), capped at `i32::MAX`.
 fn max_pay_life_x(state: &GameState, player: PlayerId) -> u32 {
     // Engine capacity limit, not a rule: the announced X is carried into the
     // cost as an `i32` (`concretize_chosen_x_cost`) and read by the spell's
@@ -32421,7 +32423,14 @@ its replicate cost was paid.)\nDraw a card.";
     /// CR 107.3a + CR 601.2b + CR 119.4a: every "pay X life" announcement — a
     /// bare cost, a composite cost (the smallest component bound), and a
     /// per-counter cost — stops at `i32::MAX`, while the cast/activation
-    /// payable-life predicate and budget stay exact.
+    /// payable-life predicate and budget stay exact. The bare row is Toxic
+    /// Deluge's additional cost ("As an additional cost to cast this spell, pay
+    /// X life."), and the composite row is Krumar Initiate's activation cost
+    /// without its mana ("{X}{B}, {T}, Pay X life: This creature endures X.
+    /// Activate only as a sorcery."). No printed card pays X life for each
+    /// counter: every printed per-counter life cost is a fixed amount. The
+    /// nearest printed card, whose cost parses to `PerCounter`, is Inner
+    /// Sanctum ("Cumulative upkeep—Pay 2 life.").
     #[test]
     fn pay_x_life_announcement_cap_stops_at_i32_max_while_affordability_stays_exact() {
         use crate::types::format::FormatConfig;

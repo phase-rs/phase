@@ -1,10 +1,27 @@
-//! CR 119.3 + CR 107.1b: a life total stops at the `i32` limit a gain or loss
-//! moves it toward, and the `LifeChanged` event and the per-turn gained/lost
-//! counters report the rules amount, even when the stored total moved less.
-//! Energy and player counters keep refusing a total past `u32::MAX`. A life
-//! amount past `i32::MAX` is carried exactly, set/exchange/redistribute land
-//! exactly across the whole range, and in Two-Headed Giant a change caps the
-//! team's shared total (CR 810.4 + CR 810.9). A life replacement quantity past
+//! A life total stops at the `i32` limit a gain or loss moves it toward. That
+//! is an engine storage limit (`arithmetic::saturating_life_total`), not a
+//! rule, as is the declared starting-life ceiling `MAX_STARTING_LIFE`, which
+//! `types/format.rs` calls "an engine invariant, not a Comprehensive Rules
+//! limit". A life total may be negative (CR 107.1b). The `LifeChanged` event
+//! and the per-turn gained/lost counters report the rules amount (CR 119.3),
+//! even when the stored total moved less; the event's `i32` field clamps a
+//! gain past `i32::MAX` to `i32::MAX` and a loss past it to `i32::MIN`. Energy
+//! and player counters keep refusing a total past `u32::MAX`. A life amount
+//! past `i32::MAX` moves the total by the whole amount, up to the `i32` limit,
+//! but an effect amount is an `i32` quantity (`quantity::resolve_quantity`), so
+//! a "that much" or "that many" reader of it (such as
+//! `targeting::extract_amount_from_event`,
+//! `effects::previous_effect_amount_from_events` or a substitute's
+//! `last_effect_count` stamp) sees at most `i32::MAX`. Exquisite Blood
+//! ("Whenever an opponent loses life, you gain that much life.") reads a loss
+//! past it as `i32::MAX`, and so does Tainted Remedy ("If an opponent would
+//! gain life, that player loses that much life instead.") for a gain past it,
+//! which `engine_debug.rs`'s
+//! `a_loss_past_i32_reports_i32_min_and_that_much_reads_its_magnitude` and
+//! `a_gain_past_i32_substituted_by_tainted_remedy_reads_the_saturated_stamp`
+//! pin. Set/exchange/redistribute land exactly across the whole range, and in
+//! Two-Headed Giant a change caps the team's shared total (CR 810.4 + CR 810.9).
+//! A life replacement quantity past
 //! `u32` lands on `u32::MAX`. A mandatory life-gain loop at the cap is drawn
 //! (CR 104.4b + CR 732.4), as are a mandatory loop that drains a seat held at
 //! `i32::MIN` and one whose life changes leave a team at the cap where it stood;

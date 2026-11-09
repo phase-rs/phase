@@ -7174,8 +7174,10 @@ impl PeriodGrowth {
     /// says (`analysis::resource::life_not_stored_as_gains`). True when either holds:
     ///
     /// - (a) The lump. This take's `Life` items' `n·δ`, summed against the total each item
-    ///   player's life changes adjust (`players::life_change_total`; in Two-Headed Giant both
-    ///   teammates' items count against their one shared total, CR 810.9a, keyed by
+    ///   player's life changes adjust (`players::life_change_total`; in a shared-life format every
+    ///   member's items count against their one shared total, CR 810.9a: both teammates' in a
+    ///   Two-Headed Giant team, CR 810.4, every hero's in Archenemy Commander, CR 904.13b, and
+    ///   every survivor's in a Horde game, `topology::has_shared_life`; keyed by
     ///   `topology::shared_life_dedup_key`) and against each item player's own field, which
     ///   the spread (`players::spread_life_change`) fills first, does not move that total or
     ///   field by its whole sum. This covers an item whose player no event of the cycle names (a
@@ -8739,7 +8741,8 @@ pub(crate) fn counted_offer(
 /// mutation: the finite untapped reals stay as-is, and the pre-existing tapped fodder ARE the ∞
 /// pile (the HUD / battlefield render the marked axis as `∞`), and the ∞ counter pills are a
 /// display projection of the batched `Counters` item. For a mana engine the axes are `Mana(_)`,
-/// feeding the existing infinite-mana pool reseed. The one board change is the batched life:
+/// feeding the existing infinite-mana pool reseed. Besides any representative fodder it seeds
+/// (`seed_representative_fodder`), the take's one board change is the batched life:
 /// each `Life` item lands at the take, at the accepted count `n` (CR 732.2c: the shortcut is
 /// taken once the last player accepts), so no `Life(_)` axis is marked and none waits for the
 /// CR 500.5 boundary; the `Tokens` and `Counters` items are registered for that boundary. Every

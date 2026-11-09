@@ -102,8 +102,10 @@ pub fn max_phyrexian_life_payments(state: &GameState, player: PlayerId) -> u32 {
 
 /// CR 118.3 + CR 119.4 + CR 119.4a + CR 119.8: The largest amount of life
 /// `player` can pay as a cost — the budget [`can_pay_life_cost`] tests every
-/// payment against. It is the exact life total that pays (the team's shared
-/// total in Two-Headed Giant, CR 810.9a; the player's own life otherwise),
+/// payment against. It is the exact life total that pays (in a shared-life
+/// format the shared total, CR 810.9a, of a Two-Headed Giant team, CR 810.4,
+/// of the Archenemy Commander heroes, CR 904.13b, or of a Horde game's
+/// survivors, `topology::has_shared_life`; the player's own life otherwise),
 /// clamped into `u32`: a total of 0 or less affords no positive payment, and
 /// under a can't-lose-life lock only 0 is payable (CR 119.4b).
 pub fn max_payable_life(state: &GameState, player: PlayerId) -> u32 {

@@ -694,6 +694,10 @@ mod tests {
     /// CR 119.4a + CR 810.9a: the "pay any amount of life" prompt offers the
     /// team's EXACT total even when it exceeds `i32::MAX`: two members at
     /// `i32::MAX` offer 4,294,967,294, not a saturated or wrapped reading.
+    /// The hand-built `PayCost` is the payment Plunge into Darkness's second
+    /// mode parses to ("Pay any amount of life, then look at that many cards
+    /// from the top of your library. Put one of those cards into your hand and
+    /// exile the rest.").
     #[test]
     fn pay_any_amount_life_max_is_the_exact_team_total_at_the_cap() {
         let mut state =
