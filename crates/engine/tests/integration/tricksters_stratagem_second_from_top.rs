@@ -287,3 +287,68 @@ fn illegal_tuck_target_does_not_stop_the_other_creature_conniving() {
     assert!(state.stack.is_empty());
     assert!(state.resolution_stack.is_empty());
 }
+
+#[test]
+fn illegal_connive_target_does_not_replace_the_missing_creature_with_the_spell() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P1, &["Owner A", "Owner B", "Owner C"]);
+    let not_discarded = scenario
+        .add_spell_to_hand_from_oracle(P0, "Opt", true, "Scry 1.\nDraw a card.")
+        .id();
+    let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let conniver = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Trickster's Stratagem", false, TRICKSTERS_STRATAGEM)
+        .id();
+    let response = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, "Destroy target creature.")
+        .id();
+    let mut runner = scenario.build();
+    // Infrastructure: seed a typed nonland in the otherwise-empty library.
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        not_discarded,
+        Zone::Library,
+        &mut Vec::new(),
+    );
+    let owner_library = library(&runner, P1);
+    runner
+        .cast(spell)
+        .target_objects(&[victim, conniver])
+        .commit();
+    runner
+        .cast(response)
+        .target_object(conniver)
+        .commit()
+        .try_resolve()
+        .expect("Murder invalidates the connive target before the original spell resolves");
+    match &runner.state().waiting_for {
+        WaitingFor::TopOrBottomChoice {
+            player, object_id, ..
+        } => {
+            assert_eq!(*player, P1);
+            assert_eq!(*object_id, victim);
+        }
+        other => panic!("the surviving tuck target still requires its owner's choice: {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseTopOrBottom { top: true })
+        .expect("the owner chooses second from the top");
+
+    let state = runner.state();
+    assert_eq!(
+        library(&runner, P1),
+        vec![owner_library[0], victim, owner_library[1], owner_library[2]]
+    );
+    assert_eq!(library(&runner, P0), vec![not_discarded]);
+    assert_eq!(state.objects[&conniver].zone, Zone::Graveyard);
+    assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+    assert!(state.players[0].hand.is_empty());
+    assert!(state.players[1].hand.is_empty());
+    assert!(state.graveyard_of(P1).is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.pending_replacement.is_none());
+    assert!(state.stack.is_empty());
+    assert!(state.resolution_stack.is_empty());
+}
