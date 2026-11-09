@@ -123,6 +123,18 @@ const BEARS_NAME: &str = "Grizzly Bears";
 // Fixtures
 // ---------------------------------------------------------------------------
 
+/// One `{cost}` artifact card in P0's hand, created the way the pool's own
+/// witnesses create objects: real card types and the printed mana cost, so the cast
+/// under test is a real one-mana payment rather than a card retuned to fit the board.
+fn hand_artifact(state: &mut GameState, card_id: u64, name: &str, cost: ManaCost) -> ObjectId {
+    let id = create_object(state, CardId(card_id), P0, name.to_string(), Zone::Hand);
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Artifact);
+    obj.base_card_types = obj.card_types.clone();
+    obj.mana_cost = cost;
+    id
+}
+
 /// One battlefield permanent, created the way the engine creates a predefined
 /// token: real card types plus the registry's own ability list
 /// (`predefined_token_abilities`), so its mana ability is the printed one and
@@ -1130,6 +1142,138 @@ fn the_loop_comparison_drops_a_spent_pips_row_with_no_phase_boundary() {
     );
 }
 
+/// CR 106.3 + CR 106.4 + CR 732.2a: BEFORE the first step/phase boundary, a
+/// floating unit's producer fact lives ONLY in the step-scoped exit last-known
+/// information, and the loop comparison must treat it as position.
+///
+/// The board is Minimus Containment's: the Aura makes its enchanted permanent a
+/// Treasure, so its granted "{T}, Sacrifice this artifact: Add one mana of any
+/// color" produces the mana AND moves the source to the graveyard — CR 400.7 makes
+/// the graveyard card a new object, so the only record of who made the mana is the
+/// exit LKI that departure wrote. Nothing has crossed a step or phase boundary, so
+/// `pooled_mana_producer_snapshots` is EMPTY: the ledger that answers after a
+/// boundary
+/// (`mana_payment::retain_pooled_mana_producer_snapshots`) does not exist yet, and
+/// the payment reads the exit record instead
+/// (`game::casting::mana_spent_source_snapshot`).
+///
+/// Two positions with IDENTICAL pools differ only in that one record — the live
+/// board, and the same board with the record removed. They pay differently: the
+/// first spends the unit with its producer recorded, so Rain of Riches grants the
+/// cast cascade; the second cannot name a producer at all, so it records no
+/// source and grants nothing. CR 732.2a's "predictable results" forbid the
+/// comparator to call those two positions the same one, and that is what this
+/// witnesses: the prune that keeps before/after LKI
+/// (`GameState::retain_carrier_referenced_lki`) only retains exit records a
+/// trigger-event carrier names, so the comparison used to delete the live side's
+/// record, see two identical pools and two empty record sets, and equate a payable
+/// position with an unpayable one.
+///
+/// REVERT-FAIL: drop the floating-pin arm from `retain_carrier_referenced_lki` and
+/// the comparison equates the pair, because normalization deletes the live side's
+/// exit record too.
+#[test]
+fn a_floating_pin_references_its_exit_fact_before_the_carry_ledger_exists() {
+    let (mut runner, bears, _aura, sciences) = minimus_board();
+    let incarnation = runner.state().objects[&bears].incarnation;
+    let _ = sciences;
+    // A `{1}` artifact in hand, so the ONE minted unit is the whole payment and its
+    // producer fact is what decides whether the cast's cascade arrives.
+    let bauble = hand_artifact(
+        runner.state_mut(),
+        9201,
+        "Wayfarer's Bauble",
+        ManaCost::generic(1),
+    );
+
+    // The Aura's granted ability is the ONLY mana on this board: it makes the one
+    // unit the payment below spends.
+    assert!(
+        pool_units(&runner).is_empty(),
+        "reach-guard: the board starts with an empty pool"
+    );
+    activate_mana_ability(&mut runner, bears, ManaType::Green);
+
+    let units = pool_units(&runner);
+    assert_eq!(units.len(), 1, "reach-guard: one unit was produced");
+    assert_eq!(
+        units[0].source_id, bears,
+        "reach-guard: produced by the Treasures' granted ability"
+    );
+    assert_eq!(
+        units[0].source_incarnation,
+        Some(incarnation),
+        "reach-guard: pinned to the epoch that produced it"
+    );
+    assert!(
+        runner
+            .state()
+            .lki_by_incarnation
+            .get(&bears)
+            .is_some_and(|history| history.contains_key(&incarnation)),
+        "reach-guard: the sacrifice wrote the producer's exit record"
+    );
+    assert!(
+        runner.state().pooled_mana_producer_snapshots.is_empty(),
+        "reach-guard: this is BEFORE the first boundary, so the carry ledger is empty and the \
+         exit record is the only evidence"
+    );
+
+    // The same board with that ONE record removed. The pools are identical, so this
+    // is a difference in what the position can still PROVE, not in what it holds.
+    let mut without_fact = runner.state().clone();
+    without_fact.lki_by_incarnation.remove(&bears);
+    assert_eq!(
+        without_fact.players[P0.0 as usize]
+            .mana_pool
+            .units()
+            .collect::<Vec<_>>(),
+        units,
+        "reach-guard: the two positions hold IDENTICAL pools"
+    );
+    assert!(
+        without_fact.pooled_mana_producer_snapshots.is_empty(),
+        "reach-guard: and neither holds a ledger row"
+    );
+
+    // CR 732.2a: they pay differently. WHICH comparison sees that is a second question,
+    // and it is answered by the normalize-level witness
+    // (`GameState`'s `a_floating_pin_references_its_exit_record_only_while_the_mana_is_compared`):
+    // the strict comparison holds the mana and must see the difference, while
+    // `loop_states_equal_modulo_resources` projects the pools away
+    // (`project_out_player_consumables`) and compares no price at all — so it equates
+    // the pair deliberately, which is what keeps a legitimate mana loop (Kitten +
+    // Blazing Firesinger) certifiable.
+    assert!(
+        loop_states_equal_modulo_resources(runner.state(), &without_fact),
+        "control: the resource projection clears every pool, so no floating unit survives it \
+         and this record is history there — a pair one exit record apart is the same position \
+         for a comparison that compares no mana"
+    );
+
+    // The difference the comparator must see, stated as the payment's own answer: the
+    // first position spends the unit WITH its producer recorded, the second records
+    // nothing and so grants nothing.
+    let (granted, recorded) = cast_after_restore_and_read_cascade(runner.state().clone(), bauble);
+    assert_eq!(
+        recorded, 1,
+        "the qualifying cast records the Treasure's producer fact"
+    );
+    assert!(
+        granted,
+        "CR 106.3: Rain of Riches grants cascade to the cast this Treasure's mana paid for"
+    );
+    let (without_grant, without_record) = cast_after_restore_and_read_cascade(without_fact, bauble);
+    assert_eq!(
+        without_record, 0,
+        "the position without the exit record cannot name a producer, so the cast records none"
+    );
+    assert!(
+        !without_grant,
+        "and Rain of Riches grants nothing: 'mana from a Treasure was spent' is not provable there"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 2 — a legacy pin-less pool is refused; a pinned pool is admitted and pays
 // ---------------------------------------------------------------------------
@@ -1138,6 +1282,16 @@ fn the_loop_comparison_drops_a_spent_pips_row_with_no_phase_boundary() {
 /// Aura, so the Bears is a Treasure artifact with exactly the granted mana
 /// ability. Returns the runner and the ids the assertions need.
 fn minimus_board() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let (mut runner, bears, aura, sciences) = minimus_board_before_the_aura();
+    attach_minimus_containment(&mut runner, bears, aura);
+    (runner, bears, aura, sciences)
+}
+
+/// [`minimus_board`] up to the point where the Aura's static is installed: Rain of
+/// Riches, the Bears, the Aura object and a `{2}` spell in hand. Split out so a
+/// witness can add its OWN payment card to the same board without the Aura wiring
+/// being copied.
+fn minimus_board_before_the_aura() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
@@ -1145,8 +1299,13 @@ fn minimus_board() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     let bears = scenario.add_creature(P0, BEARS_NAME, 2, 2).id();
     let aura = scenario.add_creature(P0, "Minimus Containment", 0, 0).id();
     let sciences = sciences_in_hand(&mut scenario);
+    (scenario.build(), bears, aura, sciences)
+}
 
-    let mut runner = scenario.build();
+/// CR 303.4a: attach the parsed Minimus Containment static to `aura`, enchanting
+/// `bears` — which makes the Bears a Treasure artifact whose only ability is the
+/// granted "{T}, Sacrifice this artifact: Add one mana of any color."
+fn attach_minimus_containment(runner: &mut GameRunner, bears: ObjectId, aura: ObjectId) {
     let type_change = parse_oracle_text(
         MINIMUS_TYPE_CHANGE,
         "Minimus Containment",
@@ -1181,7 +1340,6 @@ fn minimus_board() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
         state.layers_dirty.mark_full();
     }
     evaluate_layers(runner.state_mut());
-    (runner, bears, aura, sciences)
 }
 
 /// Remove the resolved-rules journal from a save, reproducing one written before

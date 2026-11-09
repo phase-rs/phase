@@ -481,31 +481,13 @@ pub(crate) fn retain_pooled_mana_producer_snapshots(state: &mut GameState) {
     // as long as the mana floats (CR 106.4 with Upwelling's "Players don't lose unspent
     // mana as steps and phases end.").
     let carried = std::mem::take(&mut state.pooled_mana_producer_snapshots);
-    let mut carried_by_pip: std::collections::HashMap<
-        crate::types::mana::ManaPipId,
-        Vec<&PooledManaProducerSnapshot>,
-    > = std::collections::HashMap::new();
-    for snapshot in &carried {
-        carried_by_pip
-            .entry(snapshot.pip_id)
-            .or_default()
-            .push(snapshot);
-    }
     // CR 118.3a + CR 400.7: the carried fact is read for ONE unit, by the same key the
-    // ledger is written with and the restore boundary validates with — the pip.
-    let carried_lki = |unit: &crate::types::mana::ManaUnit| {
-        carried_by_pip
-            .get(&unit.pip_id)
-            .into_iter()
-            .flatten()
-            .find(|snapshot| {
-                #[cfg(feature = "test-support")]
-                crate::game::perf_counters::record_pooled_producer_row_probed();
-                snapshot.source_id == unit.source_id
-                    && Some(snapshot.source_incarnation) == unit.source_incarnation
-            })
-            .map(|snapshot| snapshot.lki.clone())
-    };
+    // ledger is written with and the restore boundary validates with — the pip. The
+    // index is the SAME one the spend and admission paths build
+    // ([`PooledProducerLedgerIndex`]), so one unit's fact is looked up the same way
+    // wherever it is read.
+    let carried_index = PooledProducerLedgerIndex::new(&carried);
+    let carried_lki = |unit: &crate::types::mana::ManaUnit| carried_index.lki_for(unit).cloned();
 
     let mut retained: Vec<PooledManaProducerSnapshot> = Vec::new();
     for player in &state.players {
@@ -626,17 +608,43 @@ mod pooled_producer_ledger_index_tests {
         (state, source, incarnation)
     }
 
-    #[test]
-    fn retained_producer_facts_are_indexed_once_at_the_boundary() {
-        const UNITS: u64 = 12;
-        let (mut state, source, incarnation) = carried_ledger(UNITS);
+    /// CR 118.3a + CR 400.7: ONE index of the carried ledger serves the WHOLE batch
+    /// on every path that reads it, not only the boundary that rebuilds it.
+    ///
+    /// Three paths ask the ledger the same question — the step/phase boundary
+    /// (`retain_pooled_mana_producer_snapshots`), the payment that spends a
+    /// floating unit (`game::casting::mana_spent_source_snapshots`), and the restore
+    /// admission that admits a save (`GameState::pip_recorded_producer_epochs`) — and
+    /// each asks it inside a LOOP over that batch's units. The witnesses measure the
+    /// rows each path examined rather than a wall clock: an indexed read charges one
+    /// row per unit (the pip's own), while a search of the whole ledger per unit
+    /// charges `UNITS` rows per unit.
+    ///
+    /// The three legs are one claim, so they share one board
+    /// ([`carried_ledger`]): a departed producer's tenure floating as `UNITS` units,
+    /// each with its own ledger row, and the exit cache it could have been answered
+    /// from already gone.
+    const PROBE_UNITS: u64 = 12;
+    /// What an unindexed search of the whole ledger charges for one such batch — the
+    /// upper bound of the two shapes such a search takes: a `find` that stops at the
+    /// unit's own row (the triangular sum, 78 here) and a filtered walk that sees
+    /// every row (the full product, 144 here).
+    const PROBE_SCAN: u64 = PROBE_UNITS * PROBE_UNITS;
+
+    fn probe_board() -> GameState {
+        let (state, source, incarnation) = carried_ledger(PROBE_UNITS);
         // CR 400.7: the carried ledger is the ONLY source of the fact here, so every
         // unit below must be answered from it.
         assert!(
             crate::game::filter::exit_lki_for_incarnation(&state, source, incarnation).is_none(),
             "reach-guard: the exit cache that could answer instead is gone"
         );
+        state
+    }
 
+    #[test]
+    fn retained_producer_facts_are_indexed_once_at_the_boundary() {
+        let mut state = probe_board();
         perf_counters::reset();
         let before = perf_counters::take_cost_snapshot();
         retain_pooled_mana_producer_snapshots(&mut state);
@@ -646,53 +654,188 @@ mod pooled_producer_ledger_index_tests {
 
         assert_eq!(
             state.pooled_mana_producer_snapshots.len(),
-            UNITS as usize,
+            PROBE_UNITS as usize,
             "reach-guard: every floating unit of the departed tenure keeps its fact — carried \
              from the ledger, since the exit cache is gone"
         );
         assert!(
-            probes <= UNITS,
+            probes <= PROBE_UNITS,
             "CR 118.3a: one index of the carried rows serves every surviving unit, so the \
-             boundary examines at most one row per unit — it examined {probes} rows for {UNITS} \
-             units, which is the signature of a search of the whole ledger per unit \
-             ({})",
-            UNITS * (UNITS + 1) / 2
+             boundary examines at most one row per unit — it examined {probes} rows for \
+             {PROBE_UNITS} units, which is the signature of a search of the whole ledger per \
+             unit (up to {PROBE_SCAN} rows)"
+        );
+    }
+
+    /// CR 118.3a + CR 106.3 + CR 400.7: the PAYMENT batch reads the ledger once per
+    /// spent unit, not once per unit times ledger width.
+    ///
+    /// The batch here is the payment's own unit list — the authority a completed
+    /// payment hands every unit it spent to (`game::casting::mana_spent_source_snapshots`)
+    /// — and every one of those units must still be answered from the carried ledger,
+    /// because the exit cache is gone and the storage id now holds a later object
+    /// (CR 400.7). Both halves matter: a fast path that dropped the fact would pass
+    /// a probe bound with zero probes.
+    #[test]
+    fn the_payment_that_spends_floating_units_indexes_the_ledger_once() {
+        let state = probe_board();
+        let units: Vec<crate::types::mana::ManaUnit> = state.players[PlayerId(0).0 as usize]
+            .mana_pool
+            .units()
+            .collect();
+        assert_eq!(
+            units.len(),
+            PROBE_UNITS as usize,
+            "reach-guard: the payment batch is every floating unit"
+        );
+
+        perf_counters::reset();
+        let before = perf_counters::take_cost_snapshot();
+        let facts = crate::game::casting::mana_spent_source_snapshots(&state, &units);
+        let probes = perf_counters::take_cost_snapshot()
+            .since(before)
+            .pooled_producer_rows_probed;
+
+        assert_eq!(
+            facts.len(),
+            PROBE_UNITS as usize,
+            "reach-guard: every spent unit's producer is answered from the carried ledger — the \
+             exit cache is gone and the storage id now holds a later object (CR 400.7)"
+        );
+        assert!(
+            probes <= PROBE_UNITS,
+            "CR 118.3a: one index of the carried rows serves the whole PAYMENT batch, so the \
+             spend examines at most one row per spent unit — it examined {probes} rows for \
+             {PROBE_UNITS} units, which is the signature of a search of the whole ledger per \
+             unit (up to {PROBE_SCAN} rows)"
+        );
+    }
+
+    /// CR 118.3a + CR 400.7: the restore ADMISSION validates every floating unit's pin
+    /// against the ledger rows, in the same loop shape — one index for the batch.
+    #[test]
+    fn admission_indexes_the_ledger_once_for_every_live_pip() {
+        let mut state = probe_board();
+        perf_counters::reset();
+        let before = perf_counters::take_cost_snapshot();
+        state
+            .bind_or_reject_floating_mana_provenance()
+            .expect("the carried facts agree with the pins this save's units carry");
+        let probes = perf_counters::take_cost_snapshot()
+            .since(before)
+            .pooled_producer_rows_probed;
+
+        assert!(
+            probes <= PROBE_UNITS,
+            "CR 118.3a: one index of the carried rows serves the whole ADMISSION batch, so \
+             admission examines at most the pip's own rows for each unit — it examined \
+             {probes} rows for {PROBE_UNITS} units, which is the signature of a search of the \
+             whole ledger per unit (up to {PROBE_SCAN} rows)"
         );
     }
 }
 
-/// CR 106.3 + CR 400.7: the producer fact retained for ONE floating unit while a
-/// pool still holds it — the read side of
-/// [`retain_pooled_mana_producer_snapshots`].
+/// CR 118.3a + CR 400.7: ONE index of the retained producer ledger
+/// ([`GameState::pooled_mana_producer_snapshots`]), built once per BATCH of reads.
 ///
-/// The key is the unit's PIP, and it is the same key the restore boundary
-/// validates with ([`GameState::pip_recorded_producer_epochs`] filters the ledger
-/// by `unit.pip_id`). Keying this read by `(source, incarnation)` instead was a
-/// second, weaker identity for the same record: one storage id can carry several
-/// floating units of ONE producing tenure at once — a Treasure that made two
-/// units is a single `(source, incarnation)` pair — so a read that took the first
-/// entry naming that pair would answer for whichever unit was recorded first,
-/// including a row keyed to a pip that is not the unit being spent. The validator
-/// would ignore such a row (it is keyed to another unit) and the payment would
-/// still spend the fact it holds, which is exactly the mismatch this read closes:
-/// a row the validator ignores must not be usable at payment.
+/// The ledger answers a question about ONE floating unit — "what were the
+/// characteristics of the object epoch that produced this mana" — and the key that
+/// makes the answer a fact about that unit is its PIP. Every reader therefore asks
+/// the same question by the same key: the step/phase boundary that rebuilds the
+/// ledger ([`retain_pooled_mana_producer_snapshots`]), the payment that spends a
+/// unit ([`pooled_mana_producer_snapshot`]), and the restore boundary that admits
+/// a save ([`GameState::pip_recorded_producer_epochs`]). Indexing the rows by that
+/// key ONCE and reusing the index across the batch is what keeps each of those
+/// paths linear in the number of units rather than quadratic: an unindexed scan
+/// charges every unit a walk of the whole ledger, and each path visits its units
+/// in a loop.
 ///
-/// `None` when the ledger holds no entry for THIS unit: its producing source's
-/// characteristics are then unprovable from the ledger, and the caller must fall
-/// through to its other evidence rather than borrow another unit's fact.
+/// The key is the PIP alone — the ownership key — and the exact-source and epoch
+/// checks stay inside the bucket, because one pip can own rows of several shapes
+/// and only the unit's own `(source, incarnation)` pair is its fact. Keying the
+/// bucket by `(source, incarnation)` instead would be a second, weaker identity for
+/// the same record: one storage id can carry several floating units of ONE
+/// producing tenure at once — a Treasure that made two units is a single
+/// `(source, incarnation)` pair — so a lookup that took the first entry naming that
+/// pair would answer for whichever unit was recorded first, including a row keyed
+/// to a pip that is not the unit being spent. A validator ignores such a row (it
+/// is keyed to another unit), so the payment would spend a fact the validator had
+/// already discounted; keeping the pip's own rows together closes exactly that
+/// mismatch, and the remaining conjuncts are a handful of comparisons instead of a
+/// scan of the whole ledger.
+pub(crate) struct PooledProducerLedgerIndex<'a> {
+    by_pip: std::collections::HashMap<
+        crate::types::mana::ManaPipId,
+        Vec<&'a crate::types::game_state::PooledManaProducerSnapshot>,
+    >,
+}
+
+impl<'a> PooledProducerLedgerIndex<'a> {
+    /// Index every row of `rows` under the pip it describes — one pass, once.
+    pub(crate) fn new(rows: &'a [crate::types::game_state::PooledManaProducerSnapshot]) -> Self {
+        let mut by_pip: std::collections::HashMap<
+            crate::types::mana::ManaPipId,
+            Vec<&'a crate::types::game_state::PooledManaProducerSnapshot>,
+        > = std::collections::HashMap::new();
+        for row in rows {
+            by_pip.entry(row.pip_id).or_default().push(row);
+        }
+        Self { by_pip }
+    }
+
+    /// Every row this ledger holds for `pip`, in ledger order.
+    ///
+    /// The restore boundary reads the rows THIS way rather than through
+    /// [`Self::lki_for`]: it asks how many epochs the save states for one unit, so a
+    /// second row is a contradiction it must see, not a miss it can skip past.
+    pub(crate) fn rows_for(
+        &self,
+        pip: crate::types::mana::ManaPipId,
+    ) -> impl Iterator<Item = &'a crate::types::game_state::PooledManaProducerSnapshot> + '_ {
+        self.by_pip
+            .get(&pip)
+            .into_iter()
+            .flatten()
+            .copied()
+            .inspect(|_row| {
+                #[cfg(feature = "test-support")]
+                crate::game::perf_counters::record_pooled_producer_row_probed();
+            })
+    }
+
+    /// CR 106.3 + CR 400.7: the producer fact retained for ONE floating unit while
+    /// a pool still holds it — the read side of
+    /// [`retain_pooled_mana_producer_snapshots`].
+    ///
+    /// `None` when the ledger holds no entry for THIS unit: its producing source's
+    /// characteristics are then unprovable from the ledger, and the caller must fall
+    /// through to its other evidence rather than borrow another unit's fact.
+    pub(crate) fn lki_for(
+        &self,
+        unit: &crate::types::mana::ManaUnit,
+    ) -> Option<&'a crate::types::game_state::LKISnapshot> {
+        self.by_pip
+            .get(&unit.pip_id)
+            .into_iter()
+            .flatten()
+            .find(|snapshot| {
+                #[cfg(feature = "test-support")]
+                crate::game::perf_counters::record_pooled_producer_row_probed();
+                snapshot.source_id == unit.source_id
+                    && Some(snapshot.source_incarnation) == unit.source_incarnation
+            })
+            .map(|snapshot| &snapshot.lki)
+    }
+}
+
+/// CR 106.3 + CR 400.7: the producer fact the retained ledger holds for `unit`,
+/// read through an index the caller built ONCE for its whole batch (see
+/// [`PooledProducerLedgerIndex`]). The single spend-side read authority.
 pub(crate) fn pooled_mana_producer_snapshot<'a>(
-    state: &'a GameState,
+    index: &PooledProducerLedgerIndex<'a>,
     unit: &crate::types::mana::ManaUnit,
 ) -> Option<&'a crate::types::game_state::LKISnapshot> {
-    state
-        .pooled_mana_producer_snapshots
-        .iter()
-        .find(|snapshot| {
-            snapshot.pip_id == unit.pip_id
-                && snapshot.source_id == unit.source_id
-                && Some(snapshot.source_incarnation) == unit.source_incarnation
-        })
-        .map(|snapshot| &snapshot.lki)
+    index.lki_for(unit)
 }
 
 /// CR 106.3 + CR 113.7 + CR 400.7: `source_incarnation` is the object epoch the

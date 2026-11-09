@@ -37,6 +37,26 @@ Each entry MUST include:
 - **Source:** `crates/engine/src/types/resolved_commands.rs:4126` (tripwire const);
   the shimmed arm is at `crates/engine/src/types/resolved_commands.rs:2658`.
 
+### `LEGACY_ASSIST_CONTRIBUTION_ABSENT_2026Q4` — ACTIVE
+
+- **Covers:** a parked `PendingCast` payload written before
+  `assist_contributed_units` existed. Such a save carries no record of the units its
+  Assist helper spent, so the cast's payment snapshot
+  (`GameObject::mana_spent_to_cast_amount`, `colors_spent_to_cast`,
+  `mana_spent_source_snapshots`) is completed from the units the payload does have —
+  the caster's own — and the helper's contribution is missing. That under-records
+  rather than mis-records: the payment happened, and the only honest repair would be
+  the pips themselves, which the payload does not carry.
+- **Added in:** 0.121.0.
+- **Removal trigger:** the tripwire `assert!` fires once a release above 0.121.14
+  ships (`+14` patch releases from the landing version). Removing the shim means
+  requiring the record on every parked Assist cast past its payment boundary, so a
+  payload that omits it becomes a refused contradiction instead of the legacy shape.
+- **Source:** `crates/engine/src/types/game_state.rs:528` (tripwire const); the
+  shimmed reading is `PendingCast::assist_contributed_units`' empty serde default,
+  consumed by `crates/engine/src/game/casting_costs.rs` (the capture at the spend
+  boundary) and `crates/engine/src/game/casting.rs` (both payment finalizers).
+
 ### `LEGACY_PARKED_ACTIVATION_OCCURRENCE_ABSENT_2026Q4` — ACTIVE
 
 - **Covers:** a parked `PendingManaAbility` payload written before

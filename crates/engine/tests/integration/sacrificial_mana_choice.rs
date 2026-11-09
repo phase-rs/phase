@@ -1946,6 +1946,170 @@ fn parked_activation_pointing_at_an_earlier_activation_s_node_is_refused() {
     );
 }
 
+/// CR 605.2 + CR 605.3b: a settlement node that STATES it has not resolved cannot
+/// be carrying a produced pip.
+///
+/// [`ParkedActivationConflict`] refuses a parked activation that points at a
+/// FINISHED node, and it reads "finished" from
+/// `ResolvedRulesJournal::node_settled` — the node's own `settled` record. The writer
+/// emits only `true` (at settlement, before any pip can exist) or nothing (a node a
+/// live activation still holds), so a payload stating `false` BESIDE a produced pip
+/// is two records contradicting each other: the pip is the residue of a resolution
+/// the flag denies. Answering from the flag alone made such a save read as OPEN, so
+/// nothing refused a parked activation pointing at it, restore admitted it, and the
+/// resume wrote this activation's mana into a node CR 605.3b had already finished.
+///
+/// The board is the two-Prismite witness: activation 1 settled with its own pip
+/// under `first_node`, activation 2 parks with a node of its own. The save is leg 1's
+/// — activation 2 repointed at `first_node` WITH that node's matching occurrence —
+/// plus the one field this test is about, `settled: false` on `first_node`. The pip
+/// SURVIVES that edit, so nothing about the tampering removes evidence: the
+/// contradiction is between two records the same payload carries at once, and the
+/// refusal must therefore come from the journal decoder, the one authority that
+/// compares a payload's records against each other — before admission, before any
+/// resume.
+///
+/// Two controls, because a rule that refused every stated `false` would break the
+/// honest one: the untouched save restores and denies nothing, and the same stated
+/// `false` on a node that produced NO pip decodes and admits, because there it
+/// contradicts nothing.
+#[test]
+fn a_node_stating_it_has_not_resolved_beside_a_produced_pip_never_decodes() {
+    let (runner, _source, first_node) = prismite_second_activation_parked();
+    assert_eq!(
+        node_produced_pips(runner.state(), first_node).len(),
+        1,
+        "reach-guard: activation 1's node settled the pip it produced"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .resolved_rules_journal
+            .node_settlement(first_node),
+        Some(engine::types::resolved_commands::NodeSettlement::Resolved),
+        "reach-guard: this build records the settlement it wrote"
+    );
+
+    let mut json = persisted_json(runner.state());
+    let stale_occurrence = ManaActivationOccurrence::of_node(first_node)
+        .expect("reach-guard: activation 1's node is an activated-mana node");
+    {
+        let pending = saved_pending_mut(&mut json);
+        pending.insert(
+            "rules_execution_node".to_string(),
+            serde_json::to_value(first_node).expect("the node identity serializes"),
+        );
+        pending.insert(
+            "activated_mana_occurrence".to_string(),
+            serde_json::to_value(stale_occurrence).expect("the occurrence serializes"),
+        );
+    }
+
+    // The tampering this test is about: state that ACTIVATION 1'S node — the one whose
+    // settlement produced a pip — has NOT resolved. The pip stays exactly where it is.
+    {
+        let first_identity =
+            serde_json::to_value(first_node).expect("the node identity serializes");
+        let nodes = json["state"]["resolved_rules_journal"]["nodes"]
+            .as_array_mut()
+            .expect("the journal serializes its nodes");
+        let settled_node = nodes
+            .iter_mut()
+            .find(|node| node["identity"] == first_identity)
+            .expect("the journal retains activation 1's node");
+        assert_eq!(
+            settled_node["settled"],
+            serde_json::json!(true),
+            "reach-guard: this build wrote the settlement record for it"
+        );
+        assert!(
+            settled_node["produced_pips"]
+                .as_array()
+                .is_some_and(|pips| pips.len() == 1),
+            "reach-guard: and the settlement recorded the pip it produced"
+        );
+        settled_node["settled"] = serde_json::json!(false);
+        assert!(
+            settled_node["produced_pips"]
+                .as_array()
+                .is_some_and(|pips| pips.len() == 1),
+            "the pip survives the tampering — the payload now states both, which is the \
+             contradiction"
+        );
+    }
+
+    match serde_json::from_value::<PersistedGameState>(json) {
+        Ok(_) => panic!(
+            "CR 605.2 + CR 605.3b: a save whose node states it has NOT resolved beside the pip \
+             that resolution produced must not decode. Reading the flag alone makes the node \
+             look open, so a parked activation pointing at it is admitted, the pip survives as \
+             evidence of a resolution the payload denies, and the resume writes this \
+             activation's mana into a node the earlier activation already finished"
+        ),
+        Err(error) => assert!(
+            error
+                .to_string()
+                .contains("has not resolved beside a produced mana pip"),
+            "the refusal must come from the journal's own settlement/pip comparison, got {error}"
+        ),
+    }
+
+    // Control 1 — the untouched save still restores. Without it, the refusal above
+    // would be satisfied by a journal that rejects every parked prompt.
+    let (runner, _source, first_node) = prismite_second_activation_parked();
+    let mut runner = GameRunner::from_state(
+        admitted(persisted_json(runner.state())).expect("the untouched save restores"),
+    );
+    runner = choose_blue(runner);
+    assert_eq!(
+        node_produced_pips(runner.state(), first_node).len(),
+        1,
+        "the untouched save settles activation 2 under its OWN node and leaves activation 1's \
+         finished node exactly as it was"
+    );
+
+    // Control 2 — a stated `false` on a node that produced NOTHING contradicts
+    // nothing, so it decodes and admits: the rule is about the pair, not about the
+    // flag. Activation 2's own node is that shape — parked, nothing produced under it.
+    let (runner, _source, first_node) = prismite_second_activation_parked();
+    let own_node = parked_colour_pending(runner.state())
+        .rules_execution_node
+        .expect("activation 2 carries its own node");
+    let mut json = persisted_json(runner.state());
+    {
+        let nodes = json["state"]["resolved_rules_journal"]["nodes"]
+            .as_array_mut()
+            .expect("the journal serializes its nodes");
+        let mut stated = 0;
+        for node in nodes.iter_mut() {
+            let empty = node["produced_pips"]
+                .as_array()
+                .is_none_or(|pips| pips.is_empty());
+            if empty {
+                node["settled"] = serde_json::json!(false);
+                stated += 1;
+            }
+        }
+        assert!(
+            stated >= 1,
+            "reach-guard: the parked node states no settlement"
+        );
+    }
+    let restored = admitted(json).expect(
+        "a stated `false` on a node that produced nothing is an open node, not a \
+         contradiction",
+    );
+    assert!(
+        !restored.resolved_rules_journal.node_settled(own_node),
+        "and it still reads as open"
+    );
+    assert_eq!(
+        node_produced_pips(&restored, first_node).len(),
+        1,
+        "while activation 1's settled node keeps its pip and its (untouched) record"
+    );
+}
+
 /// The intact control for the refusal above: the save this build wrote restores,
 /// produces ONE pip under activation 2's own node, and leaves activation 1's node
 /// with the one pip it already had.

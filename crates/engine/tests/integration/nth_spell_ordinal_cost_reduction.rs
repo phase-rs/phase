@@ -19,6 +19,7 @@
 //! actually spent per cast. On the pre-fix behavior the first cast is discounted
 //! and this test fails (spent1 == 1, not 2).
 
+use engine::analysis::loop_states_equal_modulo_resources;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -261,4 +262,75 @@ fn head_of_the_class_discount_survives_a_prior_nontargeting_spell() {
             "a prior TARGETING spell does spend the discount: the second one pays full {{1}}{{B}}"
         );
     }
+}
+
+/// CR 601.2f + CR 732.2a: the LOOP comparator must see the cast a price gate counts.
+///
+/// Head of the Class prices "The first spell you cast during each of your turns that
+/// targets a creature". The gate CR 601.2f resolves against the turn's cast journal
+/// (`QuantityRef::SpellsCastThisTurn` with the discount's own filter), and the loop
+/// projection used to clear that journal wholesale — so a position that had SPENT the
+/// discount and one that had not compared EQUAL, and a recurrence whose next price
+/// differs could be certified as constant. CR 732.2a is exactly what that violates:
+/// the results of the proposed sequence must be predictable, and a price that moves
+/// is not.
+///
+/// The pair compared here is one cast apart and identical in every other respect: the
+/// second position is the first with the turn's cast journal removed, so the
+/// comparison is asked precisely the question the projection decides.
+///
+/// The control is the same pair with the recorded cast re-stated as one that declared
+/// NO target. That cast is real history, but it is not a cast the gate counts, so a
+/// projection that kept every row would refuse an ordinary loop; this one keeps only
+/// the rows a gate reads, and the pair compares EQUAL.
+///
+/// REVERT-FAIL: clear `spells_cast_this_turn_by_player` in `project_out_resources`
+/// again AND take the condition arm out of the price veto; the first assertion below
+/// then compares the pair EQUAL.
+#[test]
+fn the_loop_comparison_sees_the_cast_that_spends_the_first_spell_gate() {
+    let mut board = head_of_the_class_board();
+    fill_pool(&mut board.runner, 2, 4);
+    let spent = cast_and_measure(&mut board.runner, board.blade_a, board.victim_a);
+    assert_eq!(
+        spent, 1,
+        "reach-guard: this cast is the turn's FIRST creature-targeting spell, so it spends the \
+         discount"
+    );
+    let after_the_gate_is_spent = board.runner.state().clone();
+    assert_eq!(
+        after_the_gate_is_spent.spells_cast_this_turn_by_player[&P0].len(),
+        1,
+        "reach-guard: the turn journal holds the one cast"
+    );
+
+    // The same position before that cast, in every respect the comparator can see.
+    let mut without_the_cast = after_the_gate_is_spent.clone();
+    without_the_cast.spells_cast_this_turn_by_player.clear();
+
+    assert!(
+        !loop_states_equal_modulo_resources(&after_the_gate_is_spent, &without_the_cast),
+        "CR 601.2f + CR 732.2a: the positions are one qualifying cast apart, and the NEXT \
+         creature-targeting spell pays {{1}} in one and {{1}}{{B}} in the other. A projection \
+         that clears the turn's cast journal equates them, which certifies a recurrence whose \
+         next price is not the one it extrapolated"
+    );
+
+    // Control: the same cast, re-stated as one that declared no target. It is real
+    // history and it is NOT a cast the gate counts, so the pair must compare EQUAL —
+    // keeping every journal row instead would refuse an ordinary loop.
+    let mut nonqualifying_cast = after_the_gate_is_spent.clone();
+    if let Some(records) = nonqualifying_cast
+        .spells_cast_this_turn_by_player
+        .get_mut(&P0)
+    {
+        for record in records.iter_mut() {
+            record.targets = Some(Vec::new());
+        }
+    }
+    assert!(
+        loop_states_equal_modulo_resources(&nonqualifying_cast, &without_the_cast),
+        "control: a cast that declared no target is not one this gate counts, so the two \
+         positions price the next spell identically and must compare EQUAL"
+    );
 }

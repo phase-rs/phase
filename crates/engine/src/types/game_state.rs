@@ -506,6 +506,47 @@ pub enum AssistState {
     Paid { helper: PlayerId, generic: u32 },
 }
 
+/// Legacy on-disk compatibility for [`PendingCast::assist_contributed_units`].
+///
+/// A parked Assist cast written before the field existed carries no record of the
+/// units its helper spent, so the cast's snapshot is completed from the units it does
+/// have — the caster's own — and the helper's contribution is simply missing from
+/// `GameObject::mana_spent_to_cast_amount`, `colors_spent_to_cast` and
+/// `mana_spent_source_snapshots`. That under-records rather than mis-records: the
+/// payment really did happen, so the only honest repair would be the pips themselves,
+/// which such a save does not carry. It is a SHIM, not the rule — this build writes
+/// the units at the spend boundary, before any later pause can save the cast.
+///
+/// The tripwire below fails to COMPILE once the workspace version crosses the removal
+/// boundary. Removing it means requiring the record on every parked Assist cast past
+/// its payment boundary, so a payload that omits it becomes a refused contradiction
+/// instead of the legacy shape.
+///
+/// Grep token: `LEGACY_ASSIST_CONTRIBUTION_ABSENT_2026Q4`. See
+/// `docs/LEGACY-COMPAT.md`.
+#[allow(dead_code)]
+const _LEGACY_ASSIST_CONTRIBUTION_ABSENT_2026Q4: () = {
+    // Added in 0.121.0; the `+14` patch window closes after 0.121.14.
+    const LANDED: (u32, u32, u32) = (0, 121, 0);
+    const BOUNDARY: (u32, u32, u32) = (
+        LANDED.0,
+        LANDED.1,
+        LANDED.2 + crate::types::legacy_compat::LEGACY_REMOVAL_WINDOW_PATCH,
+    );
+    let now = (
+        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_MAJOR")),
+        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_MINOR")),
+        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_PATCH")),
+    );
+    assert!(
+        crate::types::legacy_compat::within_legacy_window(BOUNDARY, now),
+        "LEGACY_ASSIST_CONTRIBUTION_ABSENT_2026Q4: stop admitting a parked Assist cast \
+         whose `assist_contributed_units` the payload omits (the empty default the \
+         recording path reads as \"the helper spent nothing\") and this tripwire once we \
+         ship past 0.121.14. See docs/LEGACY-COMPAT.md."
+    );
+};
+
 /// CR 500.11 + CR 614.10a: One pending "[player] skips their next combat phase"
 /// (Revenant Patriarch, Stonehorn Dignitary, Blinding Angel, Moment of Silence).
 /// It is a virtual replacement of that player's combat phase beginning, used up
@@ -1742,6 +1783,14 @@ pub struct SpellCastRecord {
     /// a payload written before the field existed says nothing — which is exactly
     /// the distinction `PersistedRestoreError::UnknownCastHistoryProvenance`
     /// acts on.
+    ///
+    /// Absence is also produced outside legacy saves: the LIVE per-spell projection
+    /// states nothing, because CR 601.2f runs before CR 601.2h and the spell it
+    /// describes has therefore paid nothing yet — that projection is never
+    /// persisted, and the filter seam borrows the live object's own facts instead
+    /// (`restrictions::CastPaymentFacts`). `None` keeps meaning "this record states
+    /// no answer" for both shapes; only a persisted `None` is refused, because only
+    /// a persisted record has outlived the objects that could still answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mana_spent_source_snapshots: Option<Vec<ManaSpentSourceSnapshot>>,
     /// CR 115.1 + CR 601.2c: the spell's declared targets as the cast committed
@@ -9275,6 +9324,25 @@ pub struct PendingCast {
     /// stays in the pool and is consumed by the normal finalize spend.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pinned_pool_units: Vec<ManaPipId>,
+    /// CR 702.132a: the EXACT units a committed Assist helper spent on this cast,
+    /// captured at the spend boundary
+    /// (`casting_costs::apply_committed_assist`) so the completed payment records
+    /// them beside the caster's.
+    ///
+    /// The helper "may pay for any amount of the generic mana in the spell's total
+    /// cost", and paying a cost removes that mana from their pool (CR 118.3a) — so the
+    /// units it removes are mana spent to cast THIS spell, and the cast's snapshot
+    /// (`GameObject::mana_spent_to_cast_amount`, `colors_spent_to_cast`,
+    /// `mana_spent_source_snapshots`) owes them exactly as much as the caster's.
+    /// Keeping only the paid GENERIC AMOUNT (what `AssistState::Paid` records) lost the
+    /// pips: a Treasure the helper sacrificed contributes a unit whose producer a
+    /// `FilterProp::ManaSpentFromSource` predicate (Rain of Riches' cascade) reads.
+    ///
+    /// Held on the root rather than only in a transient because a replacement pause
+    /// between the helper's spend and the caster's final payment saves and restores
+    /// this cast: the units must still be there when the recording happens.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assist_contributed_units: Vec<ManaUnit>,
     /// CR 601.2i + CR 722.3c: Optional source permanent to re-mark as
     /// prepared if this cast is cancelled and rolled back. Used by the
     /// prepared-copy special action to restore pre-cast state.
@@ -10192,6 +10260,7 @@ impl PendingCast {
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
+            assist_contributed_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -17537,13 +17606,28 @@ impl GameState {
     /// a unit naming none has no source to bind — and, because that id answers for
     /// no object and for no last-known information, no later read can attribute it
     /// to anything either, so admission adds no guess.
-    fn bind_or_reject_floating_mana_provenance(&mut self) -> Result<(), PersistedRestoreError> {
+    /// `pub(crate)` so the batch-cost witness can drive the admission pass directly
+    /// instead of round-tripping a save through serde to measure it
+    /// (`mana_payment::pooled_producer_ledger_index_tests`).
+    pub(crate) fn bind_or_reject_floating_mana_provenance(
+        &mut self,
+    ) -> Result<(), PersistedRestoreError> {
         let mut binding: Vec<(PlayerId, Vec<(usize, u64)>)> = Vec::new();
         // Every binding the journal's own copies of an admitted unit still owe —
         // recovered from the save, or completed from an epoch the save proves.
         // Deferred like `binding` so the read pass above runs on an unmodified state.
         let mut journal_binding: Vec<(ManaPipId, u64)> = Vec::new();
         let mut refusal: Option<PersistedRestoreError> = None;
+        // CR 118.3a: the pool's producer ledger is read once per admitted unit, so it
+        // is INDEXED once here for the whole save — the same index the payment path
+        // builds for its batch (`mana_payment::PooledProducerLedgerIndex`). An
+        // unindexed read charges every floating unit a walk of the whole ledger,
+        // which a save holding many carried units makes quadratic on every load.
+        // The index borrows the ledger immutably and is dropped before any binding is
+        // written below.
+        let ledger_index = crate::game::mana_payment::PooledProducerLedgerIndex::new(
+            &self.pooled_mana_producer_snapshots,
+        );
         for player in &self.players {
             let mut stamped: Vec<(usize, u64)> = Vec::new();
             // Pool position, not pip: `ManaPipId(0)` is the unstamped sentinel, so
@@ -17567,7 +17651,7 @@ impl GameState {
                     // the only repair available is to overwrite one record with the
                     // other and BOTH are evidence the game itself wrote; the save is
                     // refused instead (`ContradictoryFloatingManaProvenance`).
-                    Some(pinned) => match self.pip_recorded_producer_epochs(&unit) {
+                    Some(pinned) => match self.pip_recorded_producer_epochs(&ledger_index, &unit) {
                         Some(recorded) => {
                             if recorded.iter().any(|epoch| *epoch != pinned) {
                                 refusal = Some(
@@ -17612,7 +17696,7 @@ impl GameState {
                             break;
                         }
                     },
-                    None => match self.saved_producer_epoch(&unit) {
+                    None => match self.saved_producer_epoch(&ledger_index, &unit) {
                         // CR 106.3 + CR 400.7: the save names this unit's epoch, so
                         // admission BINDS it. An admitted unit left pin-less would
                         // re-derive its source from the live board at every later
@@ -17724,8 +17808,15 @@ impl GameState {
     /// of a pin.
     ///
     /// An empty `Vec` means the save names no per-pip producer for this unit at all.
+    ///
+    /// `ledger_index` is the caller's ONE index of
+    /// [`Self::pooled_mana_producer_snapshots`], built for the whole admission batch
+    /// (`mana_payment::PooledProducerLedgerIndex`): every unit this boundary admits
+    /// asks the ledger the same question, so indexing it once keeps admission linear
+    /// in the save's floating units instead of quadratic.
     fn pip_recorded_producer_epochs(
         &self,
+        ledger_index: &crate::game::mana_payment::PooledProducerLedgerIndex<'_>,
         unit: &crate::types::mana::ManaUnit,
     ) -> Option<Vec<u64>> {
         fn push_distinct(epochs: &mut Vec<u64>, epoch: u64) {
@@ -17760,11 +17851,9 @@ impl GameState {
                 push_distinct(&mut recorded, note.incarnation);
             }
         }
-        // CR 118.3a: the ledger entry keyed by this unit's own pip.
-        let mut ledger = self
-            .pooled_mana_producer_snapshots
-            .iter()
-            .filter(|snapshot| snapshot.pip_id == pip);
+        // CR 118.3a: the ledger rows keyed by this unit's own pip, read through the
+        // caller's batch index rather than by a scan of the whole ledger.
+        let mut ledger = ledger_index.rows_for(pip);
         if let Some(snapshot) = ledger.next() {
             if snapshot.source_id != source_id {
                 return None;
@@ -17993,12 +18082,16 @@ impl GameState {
     /// the tenure that produced it. A guard that read the live object anyway would
     /// price a copy's retained trigger mana as the Treasure Cloudshift returned in
     /// its place, and grant cascade for mana a Treasure never made.
-    fn saved_producer_epoch(&self, unit: &crate::types::mana::ManaUnit) -> Option<u64> {
+    fn saved_producer_epoch(
+        &self,
+        ledger_index: &crate::game::mana_payment::PooledProducerLedgerIndex<'_>,
+        unit: &crate::types::mana::ManaUnit,
+    ) -> Option<u64> {
         let source_id = unit.source_id;
         // CR 118.3a: a per-pip record naming a different object than the unit does is
         // a save contradicting itself about who produced the mana, so it answers
         // nothing here rather than answering something weaker.
-        let recorded = self.pip_recorded_producer_epochs(unit)?;
+        let recorded = self.pip_recorded_producer_epochs(ledger_index, unit)?;
         if let Some((first, rest)) = recorded.split_first() {
             // CR 400.7: two epochs recorded for this unit are two tenures, and the
             // save does not say which produced it.
@@ -25758,6 +25851,16 @@ declare_game_state! {
     /// state equality — it is empty outside the synchronous finalize window.
     #[serde(skip)]
     pub active_payment_pins: Vec<ManaPipId>,
+    /// CR 702.132a: transient carrier for a committed Assist helper's spent units
+    /// during a single finalize spend. `finalize_mana_payment` owns the `PendingCast`
+    /// by value, so the units it captured at the spend boundary
+    /// (`PendingCast::assist_contributed_units`) are moved here for the duration of the
+    /// payment and cleared immediately after — the same handoff, for the same reason,
+    /// as `active_payment_pins`. A PAUSE re-establishes it from the restored root, so a
+    /// replacement choice between the helper's spend and the recording loses nothing.
+    /// Never serialized and never part of state equality.
+    #[serde(skip)]
+    pub active_assist_contributed_units: Vec<ManaUnit>,
     /// The synchronous rules-execution scope receiving newly produced mana.
     /// It is empty outside an activation or inline trigger and is never wire
     /// authority on its own.
@@ -32202,6 +32305,28 @@ fn annotate_paused_exile_event(
     Some(occurrence)
 }
 
+/// CR 106.3 + CR 106.4 + CR 732.2a: whether a loop comparison still HOLDS the
+/// position's mana — which decides whether a floating unit's producer pin references
+/// that producer's exit record.
+///
+/// The record is what `game::casting::mana_spent_source_snapshot` reads while no
+/// step/phase boundary has carried the fact into the pool's per-unit ledger. A
+/// comparison that still holds the mana must keep it: two positions with identical
+/// pools that differ only in that record pay differently for the next spell, and
+/// CR 732.2a forbids the comparator to equate them.
+///
+/// A comparison that projects the pools AWAY — `project_out_resources` clears every
+/// pool — has no floating unit left and no price to compare, so the record is history
+/// there. Keeping it made each cycle's fresh producer a per-cycle difference and
+/// refused legitimate mana loops (Kitten + Blazing Firesinger).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FloatingProducerReferences {
+    /// The comparison still holds the mana: the pin references its exit record.
+    Kept,
+    /// The comparison projects the mana away: nothing is referenced.
+    ProjectedOut,
+}
+
 impl GameState {
     /// CR 608.2n: the final part the resolving instant or sorcery still owes, if any.
     pub fn owed_spell_final_part(&self) -> Option<&OwedSpellFinalPart> {
@@ -35920,6 +36045,7 @@ impl GameState {
             resolved_rules_journal: ResolvedRulesJournal::default(),
             ability_onset_record: AbilityOnsetRecord::Recorded,
             active_payment_pins: Vec::new(),
+            active_assist_contributed_units: Vec::new(),
             active_rules_execution_node: None,
             active_casting_permission_index: None,
             active_graveyard_permission_latch: None,
@@ -37378,6 +37504,18 @@ impl GameState {
     /// impl compares zeroed/canonicalized, so two states reached at different
     /// times can compare equal on everything a mandatory action could change.
     pub(crate) fn normalize_for_loop(&self) -> GameState {
+        self.normalize_for_loop_with(FloatingProducerReferences::Kept)
+    }
+
+    /// [`Self::normalize_for_loop`], stating whether the caller still COMPARES the mana
+    /// the position holds — see [`FloatingProducerReferences`]. The order matters: the
+    /// pin arm of `retain_carrier_referenced_lki` reads the pools, which the resource
+    /// projection clears only afterwards, and the prune it feeds is what
+    /// `canonicalize_floating_pip_identities` then re-keys.
+    pub(crate) fn normalize_for_loop_with(
+        &self,
+        floating_producer_references: FloatingProducerReferences,
+    ) -> GameState {
         let mut clone = self.clone();
         // apply() resets these at the start of every player action, so a position compares as
         // the next action starts from it.
@@ -37704,7 +37842,7 @@ impl GameState {
         // keeps apart; entries are append-only and immutable, so two samples
         // of one game hold equal entries at every common position anyway.
 
-        clone.retain_carrier_referenced_lki();
+        clone.retain_carrier_referenced_lki(floating_producer_references);
         // CR 106.3 + CR 118.3a + CR 104.4b: the producer ledger's facts are keyed by
         // pip, and `PooledManaProducerSnapshot`'s equality compares that key — it is
         // what keeps a fact attached to the unit that owns it, so two positions
@@ -37803,13 +37941,37 @@ impl GameState {
         self.next_pip_id = 0;
     }
 
-    pub(crate) fn retain_carrier_referenced_lki(&mut self) {
+    /// CR 104.4b + CR 732.2a: retain only the incarnation-keyed LKI something can
+    /// still READ, then prune the pool's producer ledger to the units still pooled.
+    ///
+    /// The readers are the trigger-event carriers this function walks, the frame
+    /// anaphors below, and the producer pins of the mana that is still FLOATING.
+    ///
+    /// CR 106.3 + CR 106.4: a floating unit's pin references its producer's exit
+    /// record, because that record is what the payment reads while no step/phase
+    /// boundary has carried the fact into `pooled_mana_producer_snapshots`
+    /// (`game::casting::mana_spent_source_snapshot`). Two positions holding the same
+    /// pools but differing in it price the next spell differently, which CR 732.2a's
+    /// "predictable results" forbid the comparator to equate.
+    ///
+    /// A projection that clears the pools references nothing — there is no floating
+    /// unit left and no price to compare — and says so by calling
+    /// [`Self::project_out_floating_producer_references`] after this. Keeping the
+    /// records there made every cycle's fresh producer a per-cycle difference and
+    /// refused legitimate mana loops (Kitten + Blazing Firesinger).
+    pub(crate) fn retain_carrier_referenced_lki(
+        &mut self,
+        floating_producer_references: FloatingProducerReferences,
+    ) {
         // CR 104.4b + CR 732.2a: incarnation-versioned LKI is historical support
         // state, not independently loop-material state. Retain only snapshots
-        // reachable from trigger-event carriers that can still resume or resolve
+        // reachable from something that can still READ them: trigger-event carriers
+        // that can still resume or resolve
         // (`for_each_trigger_event_carrier_mut`: stack/resolving entries,
         // pending/deferred/ordering triggers, current and batched trigger events,
-        // every parked resolution frame, and a paused triggered mana ability).
+        // every parked resolution frame, and a paused triggered mana ability), the
+        // frame anaphors below, and — the third reader — the producer pins of the
+        // mana that is still FLOATING (see the block after this one).
         // WaitingFor copies are intentionally not a separate authority: every
         // trigger-event-bearing prompt has one of those pending/continuation
         // carriers, and loop samples are taken at the post-pipeline Priority frame.
@@ -37837,6 +37999,37 @@ impl GameState {
 
         // CR 104.4b: the same traversal identity canonicalization uses.
         self.for_each_trigger_event_carrier_mut(&mut |event| record_event(event));
+
+        // CR 106.3 + CR 106.4 + CR 732.2a: mana that is still FLOATING names its
+        // producer by the epoch it pinned at production, and the payment that spends
+        // it reads that epoch's exit last-known information while the carry ledger
+        // does not yet exist ([`Self::retain_pooled_mana_producer_snapshots`] writes
+        // that ledger at a step or phase boundary, and a unit produced and spent in
+        // ONE step never reaches one). So a floating unit's pin IS a reference:
+        // dropping the snapshot it names would leave the same pools paying
+        // differently on the two compared positions, which is exactly the difference
+        // CR 732.2a's "predictable results" forbids the comparator to ignore. It is
+        // also what a step-scoped record can lose first — Minimus Containment makes
+        // its enchanted permanent a Treasure, its `{T}, Sacrifice` ability is a
+        // departure (CR 400.7), and the LKI written there is the only record of who
+        // made that mana until a boundary carries it into the ledger.
+        //
+        // A unit with no pin (`pip_id` unstamped, `source_incarnation` absent) names
+        // no epoch, and a unit naming no producing object has none to name: neither
+        // adds a reference, so nothing is retained for them here.
+        if floating_producer_references == FloatingProducerReferences::Kept {
+            for player in &self.players {
+                for unit in player.mana_pool.units() {
+                    if unit.pip_id.0 == 0 || unit.source_id == NO_PRODUCING_OBJECT {
+                        continue;
+                    }
+                    if let Some(incarnation) = unit.source_incarnation {
+                        referenced_lki
+                            .insert(ObjectIncarnationRef::of(unit.source_id, incarnation));
+                    }
+                }
+            }
+        }
 
         // CR 608.2c: the departure snapshots the frame's live tracked-set
         // anaphor reads — the resolved set's origins
@@ -39928,6 +40121,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolved_rules_journal: _,
         ability_onset_record: _,
         active_payment_pins: _,
+        active_assist_contributed_units: _,
         active_rules_execution_node: _,
         active_casting_permission_index: _,
         active_graveyard_permission_latch: _,
@@ -51392,6 +51586,113 @@ mod tests {
         );
     }
 
+    /// CR 106.3 + CR 106.4 + CR 732.2a: a FLOATING unit's producer pin references
+    /// its producer's exit record — before any step/phase boundary has carried the
+    /// fact into the pool's per-unit ledger.
+    ///
+    /// The board is Minimus Containment's in shape: a Treasure whose
+    /// "{T}, Sacrifice this artifact: Add one mana of any color" produced the mana AND
+    /// moved its source to the graveyard, so CR 400.7 makes the graveyard card a new
+    /// object and the exit record that departure wrote is the ONLY account of who made
+    /// the mana. No boundary has run, so `pooled_mana_producer_snapshots` is empty and
+    /// `game::casting::mana_spent_source_snapshot` reads that record.
+    ///
+    /// Two positions with the same pools that differ only in the record pay
+    /// differently for the next spell — one can prove "mana from a Treasure was spent
+    /// to cast" (Rain of Riches' cascade) and the other cannot — so the strict
+    /// comparison must see the difference, and the projection that CLEARS the pools
+    /// must not: there the price is not compared at all, and keeping the record made
+    /// each cycle's fresh producer a per-cycle difference that refused a real mana
+    /// loop (Kitten + Blazing Firesinger).
+    #[test]
+    fn a_floating_pin_references_its_exit_record_only_while_the_mana_is_compared() {
+        fn snapshot(name: &str) -> LKISnapshot {
+            let mut snapshot = LKISnapshot {
+                name: name.to_string(),
+                token_image_ref: None,
+                power: None,
+                toughness: None,
+                base_power: None,
+                base_toughness: None,
+                mana_value: 0,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Artifact],
+                subtypes: vec!["Treasure".to_string()],
+                supertypes: Vec::new(),
+                keywords: Vec::new(),
+                colors: Vec::new(),
+                chosen_attributes: Vec::new(),
+                counters: HashMap::new(),
+                tapped: false,
+                is_suspected: false,
+                was_prepared: false,
+                attachments: Vec::new(),
+                intensity: 0,
+            };
+            snapshot.name = name.to_string();
+            snapshot
+        }
+
+        let treasure = ObjectId(80);
+        let producing_incarnation = 4;
+        let mut with_the_fact = GameState::new_two_player(7);
+        // CR 400.7: the producer departed, so no live object answers for the unit.
+        with_the_fact
+            .lki_by_incarnation
+            .entry(treasure)
+            .or_default()
+            .insert(producing_incarnation, snapshot("Treasure"));
+        let mut unit = ManaUnit::new(ManaType::Red, treasure, false, vec![]);
+        unit.pip_id = ManaPipId(1);
+        unit.source_incarnation = Some(producing_incarnation);
+        with_the_fact.players[PlayerId(0).0 as usize]
+            .mana_pool
+            .add(unit);
+        assert!(
+            with_the_fact.pooled_mana_producer_snapshots.is_empty(),
+            "reach-guard: no step/phase boundary has written the ledger, so the exit \
+             record is the only account of this unit's producer"
+        );
+
+        // The same position with that ONE record removed: the pools are identical.
+        let mut without_the_fact = with_the_fact.clone();
+        without_the_fact.lki_by_incarnation.remove(&treasure);
+        assert_eq!(
+            without_the_fact.players[PlayerId(0).0 as usize]
+                .mana_pool
+                .units()
+                .collect::<Vec<_>>(),
+            with_the_fact.players[PlayerId(0).0 as usize]
+                .mana_pool
+                .units()
+                .collect::<Vec<_>>(),
+            "reach-guard: the two positions hold IDENTICAL pools"
+        );
+
+        assert!(
+            !loop_states_equal(
+                &with_the_fact.normalize_for_loop(),
+                &without_the_fact.normalize_for_loop()
+            ),
+            "CR 106.3 + CR 732.2a: the pin references the record, so a position that still \
+             proves the producer and one that does not are DIFFERENT positions — the next \
+             spell's price reads it"
+        );
+
+        // The projection that CLEARS the pools compares no price, so there the record is
+        // history and the two positions are the same one. Keeping it there refused a
+        // real mana loop whose every cycle mints a fresh producer.
+        assert!(
+            loop_states_equal(
+                &with_the_fact.normalize_for_loop_with(FloatingProducerReferences::ProjectedOut),
+                &without_the_fact.normalize_for_loop_with(FloatingProducerReferences::ProjectedOut)
+            ),
+            "control: with the pools projected away the record is not position, so a \
+             legitimate mana loop is not refused"
+        );
+    }
+
     /// CR 104.4b: a replacement-paused counted cost move keeps its earlier
     /// action fragments' events in `PendingCostMoveResume::Cast`. Those events
     /// can name an LKI incarnation, so the loop-state normalization must visit
@@ -55310,6 +55611,7 @@ mod tests {
                 delved_cards: Vec::new(),
                 deferred_sacrificed_permanents: Vec::new(),
                 pinned_pool_units: Vec::new(),
+                assist_contributed_units: Vec::new(),
                 cancel_restore_prepared_source: None,
                 payment_mode: CastPaymentMode::Auto,
                 assist_state: AssistState::NotOffered,
@@ -55863,6 +56165,7 @@ mod tests {
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
+            assist_contributed_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -62332,7 +62635,9 @@ mod pooled_producer_ledger_key_tests {
         };
         state.pooled_mana_producer_snapshots = vec![row(1), row(2)];
 
-        state.retain_carrier_referenced_lki();
+        state.retain_carrier_referenced_lki(
+            crate::types::game_state::FloatingProducerReferences::Kept,
+        );
 
         assert_eq!(
             state

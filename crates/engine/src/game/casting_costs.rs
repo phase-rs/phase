@@ -18197,6 +18197,14 @@ pub(super) fn apply_committed_assist(
         if mana_payment::has_unspent_mana_continuous_effects(state) {
             state.layers_dirty.mark_full();
         }
+        // CR 702.132a + CR 118.3a + CR 106.3: the units that spend removed are mana
+        // spent to cast THIS spell, so they are captured here — at the one boundary
+        // that knows which units the helper actually paid with — and the final
+        // recording adds them to the caster's. The generic AMOUNT alone cannot stand
+        // in for them: a Treasure the helper sacrificed contributes a specific unit
+        // whose producer (`mana_spent_source_snapshots`) and color
+        // (`colors_spent_to_cast`) a source-qualified cast predicate reads.
+        pending.assist_contributed_units = spent;
     }
     // CR 702.132a + CR 118.10: A committed Assist contribution pays this
     // cast's generic portion once. Persist that fact before any later caster
@@ -18342,6 +18350,13 @@ fn finalize_mana_payment_with_resume(
         // helper resources begin changing only inside this final payment step.
         apply_committed_assist(state, &mut pending, Some(&mana_resume), events)?;
         pending_for_restore = pending.clone();
+        // CR 702.132a + CR 118.3a: the units the helper spent are part of THIS spell's
+        // payment, and the payment below records them. `pending_cast` is owned here, so
+        // the units it captured at the spend boundary are handed to the finalizers on
+        // the same transient channel the caster's pin hints use — re-established from
+        // the restored root on every re-entry, so a pause between the helper's spend and
+        // the recording loses nothing.
+        state.active_assist_contributed_units = pending.assist_contributed_units.clone();
 
         if let Some(ability_index) = pending.activation_ability_index {
             super::casting::require_locked_activation_cost(
@@ -18673,6 +18688,7 @@ fn finalize_mana_payment_with_resume(
     })();
     // CR 118.3a: the transient is self-contained — cleared on Ok and Err alike.
     state.active_payment_pins.clear();
+    state.active_assist_contributed_units.clear();
     state.active_casting_permission_index = None;
     state.active_graveyard_permission_latch = None;
     state.active_spend_only_on_x_count = None;
@@ -18794,6 +18810,13 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         // helper resources begin changing only inside this final payment step.
         apply_committed_assist(state, &mut pending, Some(&mana_resume), events)?;
         pending_for_restore = pending.clone();
+        // CR 702.132a + CR 118.3a: the units the helper spent are part of THIS spell's
+        // payment, and the payment below records them. `pending_cast` is owned here, so
+        // the units it captured at the spend boundary are handed to the finalizers on
+        // the same transient channel the caster's pin hints use — re-established from
+        // the restored root on every re-entry, so a pause between the helper's spend and
+        // the recording loses nothing.
+        state.active_assist_contributed_units = pending.assist_contributed_units.clone();
 
         if let Some(ability_index) = pending.activation_ability_index {
             super::casting::require_locked_activation_cost(
@@ -19136,6 +19159,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
     })();
     // CR 118.3a: the transient is self-contained — cleared on Ok and Err alike.
     state.active_payment_pins.clear();
+    state.active_assist_contributed_units.clear();
     state.active_casting_permission_index = None;
     state.active_graveyard_permission_latch = None;
     state.active_spend_only_on_x_count = None;
@@ -21148,6 +21172,7 @@ mod tests {
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
+            assist_contributed_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -27665,6 +27690,7 @@ mod tests {
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
+            assist_contributed_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -27814,6 +27840,7 @@ mod tests {
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
+            assist_contributed_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -27932,6 +27959,7 @@ mod tests {
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
+            assist_contributed_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -28039,6 +28067,7 @@ mod tests {
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
+            assist_contributed_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -28179,6 +28208,7 @@ mod tests {
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
+            assist_contributed_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,

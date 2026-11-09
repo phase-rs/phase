@@ -9033,6 +9033,34 @@ fn spell_object_matches_property(
         // state-free entry-point family is what lets the delegation answer instead.
         // `FilterContext::neutral()` is the honest context for the `None` branch: no
         // ability, trigger or source object is in scope at that entry point.
+        // CR 106.3 + CR 601.2h: a record that STATES its payment facts (a completed
+        // cast in the turn history) answers from them, as before — the objects that
+        // paid may be gone (CR 400.7). A record that states NONE is a live
+        // pre-payment projection (`restrictions::CastPaymentFacts::LivePrePayment`):
+        // CR 601.2f runs before CR 601.2h, so the spell being filtered has paid
+        // nothing, and the object that will pay is still in hand — the live object's
+        // own facts are BORROWED here, and only when a filter actually asks. Copying
+        // them into the record instead charged every live projection a deep clone of
+        // a payment snapshot no filter on that seam reads. A record stating none with
+        // no live object left (a legacy payload) still answers from `&[]`: an empty
+        // vector cannot prove a source-qualified payment.
+        FilterProp::ManaSpentFromSource { source_filter }
+            if record.mana_spent_source_snapshots.is_none() =>
+        {
+            let borrowed: &[crate::types::game_state::ManaSpentSourceSnapshot] = context
+                .and_then(|ctx| ctx.spell_object_id)
+                .and_then(|spell_id| state.objects.get(&spell_id))
+                .map(|spell| spell.mana_spent_source_snapshots.as_slice())
+                .unwrap_or(&[]);
+            mana_spent_from_source(
+                state,
+                borrowed,
+                source_filter,
+                &context.map_or_else(FilterContext::neutral, |c| {
+                    FilterContext::from_source_with_controller(c.source_id, c.source_controller)
+                }),
+            )
+        }
         _ => spell_record_matches_property(
             record,
             prop,

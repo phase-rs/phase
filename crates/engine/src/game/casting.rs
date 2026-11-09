@@ -13429,7 +13429,7 @@ pub(super) fn apply_battlefield_cost_modifiers_with_selected_targets(
 /// `DuringYourTurn` binds to the source permanent's controller (Paladin Class),
 /// while `SpellsCastThisTurn` / first-spell quantity gates bind to the spell
 /// caster (Heartwood Storyteller Avatar's opponent-first tax).
-fn evaluate_cost_mod_static_condition(
+pub(crate) fn evaluate_cost_mod_static_condition(
     state: &GameState,
     condition: &crate::types::ability::StaticCondition,
     caster: PlayerId,
@@ -24571,11 +24571,16 @@ pub(super) fn pay_mana_cost_with_choices_and_resume(
     // CR 702.51a + CR 702.126a + CR 701.67a: Convoke, improvise and waterbend
     // taps are consumed by the payment algorithm but are not mana spent to cast
     // the spell.
-    let mana_spent_units = spent_units
+    let mut mana_spent_units = spent_units
         .iter()
         .filter(|unit| !unit.is_convoke_payment())
         .cloned()
         .collect::<Vec<_>>();
+    // CR 702.132a + CR 118.3a: a committed Assist helper's units are mana spent to cast
+    // THIS spell. CR 702.132a has the helper pay "before you begin to pay the total
+    // cost", so their units come FIRST in payment order, and recording only the
+    // caster's would drop the pips a source-qualified predicate reads.
+    mana_spent_units.splice(0..0, state.active_assist_contributed_units.iter().cloned());
 
     // CR 106.6: Apply mana spell grants to the spell being cast.
     apply_mana_spell_grants(state, source_id, &mana_spent_units);
@@ -24700,11 +24705,14 @@ pub(super) fn pay_mana_cost_from_pool_with_choices(
         .collect::<HashSet<_>>();
     cleanup_unused_convoke_payments(state, player, source_id, &spent_convoke_sources);
 
-    let mana_spent_units = spent_units
+    let mut mana_spent_units = spent_units
         .iter()
         .filter(|unit| !unit.is_convoke_payment())
         .cloned()
         .collect::<Vec<_>>();
+    // CR 702.132a + CR 118.3a: the committed Assist helper's units are mana spent to
+    // cast this spell, beside the caster's (see the sibling finalizer).
+    mana_spent_units.splice(0..0, state.active_assist_contributed_units.iter().cloned());
 
     apply_mana_spell_grants(state, source_id, &mana_spent_units);
 
@@ -24793,13 +24801,21 @@ fn cleanup_unused_convoke_payments(
 /// The single capture authority for both payment paths (`pay_mana_cost…` with
 /// and without pre-chosen Phyrexian payments): each unit records the source that
 /// PRODUCED its mana, resolved by the epoch production pinned on the unit.
-fn mana_spent_source_snapshots(
+pub(crate) fn mana_spent_source_snapshots(
     state: &GameState,
     units: &[crate::types::mana::ManaUnit],
 ) -> Vec<crate::types::game_state::ManaSpentSourceSnapshot> {
+    // CR 118.3a: the retained producer ledger answers for ONE unit at a time, and a
+    // payment asks it for EVERY unit it spends — so the ledger is indexed once for
+    // the batch rather than searched once per unit (which is quadratic in the pool a
+    // single payment can drain). The index is built even when no unit needs it: an
+    // empty ledger indexes to an empty map, and the alternative is a second
+    // reachability rule about when the fact can be owed.
+    let pooled_index =
+        super::mana_payment::PooledProducerLedgerIndex::new(&state.pooled_mana_producer_snapshots);
     units
         .iter()
-        .filter_map(|unit| mana_spent_source_snapshot(state, unit))
+        .filter_map(|unit| mana_spent_source_snapshot(state, &pooled_index, unit))
         .collect()
 }
 
@@ -24817,12 +24833,13 @@ fn mana_spent_source_snapshots(
 /// still IS the pinned incarnation, otherwise the epoch's exit last-known
 /// information (`exit_lki_for_incarnation`) does, then the producer fact a
 /// floating unit carries across a step/phase boundary
-/// (`mana_payment::pooled_mana_producer_snapshot`), and only then is the fact
-/// unprovable. A unit that predates the pin (legacy payload, synthetic pool
-/// fixture) keeps the historical live-then-`lki_cache` read, so no answer that
-/// was already reachable changes.
+/// (`mana_payment::pooled_mana_producer_snapshot`, read through the batch index
+/// the caller built), and only then is the fact unprovable. A unit that predates
+/// the pin (legacy payload, synthetic pool fixture) keeps the historical
+/// live-then-`lki_cache` read, so no answer that was already reachable changes.
 fn mana_spent_source_snapshot(
     state: &GameState,
+    pooled_index: &super::mana_payment::PooledProducerLedgerIndex<'_>,
     unit: &crate::types::mana::ManaUnit,
 ) -> Option<crate::types::game_state::ManaSpentSourceSnapshot> {
     use crate::game::game_object::ObjectIncarnationRefExt as _;
@@ -24836,7 +24853,8 @@ fn mana_spent_source_snapshot(
                 super::filter::exit_lki_for_incarnation(state, pinned.object_id, pinned.incarnation)
                     .cloned()
                     .or_else(|| {
-                        super::mana_payment::pooled_mana_producer_snapshot(state, unit).cloned()
+                        super::mana_payment::pooled_mana_producer_snapshot(pooled_index, unit)
+                            .cloned()
                     })?
             }
         },
@@ -35404,6 +35422,170 @@ pub(crate) fn cost_observable_activation_journal(
         }
     }
     journal
+}
+
+/// CR 104.4b + CR 732.2a + CR 601.2f: the part of the per-turn CAST journal a
+/// cost can observe, for a loop-equivalence projection.
+///
+/// CR 601.2f prices a spell against the turn's cast history ("The first spell you
+/// cast during each of your turns that targets a creature costs {W}{B} less to
+/// cast" — Head of the Class), and CR 732.2a's "predictable results" forbid the
+/// comparator to equate two positions the next price reads differently. The rest of
+/// the journal is pumped history — it grows on every cycle of an ordinary cast loop
+/// and clearing it is what lets such a loop compare equal — so the projection cannot
+/// keep the whole journal either.
+///
+/// The line is the same one the activation journal's projection draws: a
+/// "the Nth … each turn" gate reads exactly one fact — WHICH row it would count
+/// against, or that it counts none. So the projection keeps, for every such gate a
+/// cost modifier carries, the gate's first `N` qualifying rows for every living
+/// player as its hypothetical controller (CR 109.5: control can later pass to
+/// anyone), and drops every other row.
+///
+/// Keeping the first `N` is what makes an exact-ordinal gate (`count == N - 1`)
+/// comparable at all: a period that SPENDS the one-time discount moves a row into
+/// the kept prefix and compares UNEQUAL, while later periods keep the same prefix —
+/// the gate answers "no" on both — and still compare equal. Keeping fewer would
+/// equate the position that has spent it with one that has not.
+///
+/// A gate shape this recognizer does not parse keeps no row here; the price veto
+/// ([`crate::analysis::resource::cost_modifier_reads_changed_projected_resource`])
+/// is the exhaustive half — it classifies every `StaticCondition` variant through
+/// `ability_scan` — so a shape missed here is still vetoed there.
+pub(crate) fn cost_observable_cast_journal(
+    state: &GameState,
+) -> HashMap<PlayerId, im::Vector<crate::types::game_state::SpellCastRecord>> {
+    if state.spells_cast_this_turn_by_player.is_empty() {
+        return HashMap::new();
+    }
+    // One gate per (filter, ordinal), each anchored to the static that carries it:
+    // the filter is evaluated with that static's controller and source in scope.
+    let mut gates: Vec<(ObjectId, TargetFilter, u32)> = Vec::new();
+    let mut collect = |condition: Option<&StaticCondition>, source_id: ObjectId| {
+        let Some(condition) = condition else {
+            return;
+        };
+        for (filter, ordinal) in cost_gate_cast_filters(condition) {
+            gates.push((source_id, filter, ordinal));
+        }
+    };
+    for (id, obj) in state.objects.iter() {
+        let definitions = obj
+            .static_definitions
+            .iter_all()
+            .chain(obj.base_static_definitions.iter())
+            .chain(
+                obj.back_face
+                    .iter()
+                    .flat_map(|face| face.static_definitions.iter_all()),
+            )
+            .filter(|def| is_cost_modifier_mode(&def.mode));
+        for def in definitions {
+            collect(def.condition.as_ref(), *id);
+        }
+    }
+    let mut kept: HashSet<(PlayerId, usize)> = HashSet::new();
+    for (source_id, filter, ordinal) in &gates {
+        for player in state.players.iter().filter(|p| !p.is_eliminated) {
+            let Some(rows) = state.spells_cast_this_turn_by_player.get(&player.id) else {
+                continue;
+            };
+            let ctx =
+                super::filter::FilterContext::from_source_with_controller(*source_id, player.id);
+            let mut counted = 0u32;
+            for (index, record) in rows.iter().enumerate() {
+                if counted >= *ordinal {
+                    break;
+                }
+                if super::filter::spell_record_matches_filter(
+                    record, filter, player.id, state, &ctx,
+                ) {
+                    kept.insert((player.id, index));
+                    counted += 1;
+                }
+            }
+        }
+    }
+    let mut journal: HashMap<PlayerId, im::Vector<crate::types::game_state::SpellCastRecord>> =
+        HashMap::new();
+    for (player, rows) in state.spells_cast_this_turn_by_player.iter() {
+        let observable: im::Vector<_> = rows
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| kept.contains(&(*player, *index)))
+            .map(|(_, record)| record.clone())
+            .collect();
+        if !observable.is_empty() {
+            journal.insert(*player, observable);
+        }
+    }
+    journal
+}
+
+/// CR 601.2f: whether `mode` is a mode that can price a spell — the family whose
+/// printed condition may gate a price on the turn's cast journal.
+fn is_cost_modifier_mode(mode: &StaticMode) -> bool {
+    matches!(
+        mode,
+        StaticMode::ModifyCost { .. } | StaticMode::ReduceAbilityCost { .. }
+    )
+}
+
+/// CR 601.2f + CR 117.1: every "the Nth spell … each turn" cast gate `condition`
+/// carries, as `(filter, N)` — the population the gate counts and the ordinal it
+/// compares against.
+///
+/// The parser lowers "the first spell you cast each turn that targets a creature"
+/// to `And[DuringYourTurn, QuantityComparison { SpellsCastThisTurn(you, filter),
+/// ==, ordinal - 1 }]`, so the ordinal is the right-hand constant plus one. A shape
+/// this recognizer does not produce keeps every matching row (the conservative
+/// direction), and a gate whose shape it cannot parse at all is still priced by the
+/// exhaustive veto.
+fn cost_gate_cast_filters(condition: &StaticCondition) -> Vec<(TargetFilter, u32)> {
+    let mut gates = Vec::new();
+    collect_cost_gate_cast_filters(condition, &mut gates);
+    gates
+}
+
+fn collect_cost_gate_cast_filters(
+    condition: &StaticCondition,
+    gates: &mut Vec<(TargetFilter, u32)>,
+) {
+    match condition {
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            for condition in conditions {
+                collect_cost_gate_cast_filters(condition, gates);
+            }
+        }
+        StaticCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } => {
+            let QuantityExpr::Ref {
+                qty:
+                    QuantityRef::SpellsCastThisTurn {
+                        filter: Some(filter),
+                        ..
+                    },
+            } = lhs
+            else {
+                return;
+            };
+            let ordinal = match (comparator, rhs) {
+                (crate::types::ability::Comparator::EQ, QuantityExpr::Fixed { value })
+                    if *value >= 0 =>
+                {
+                    u32::try_from(*value).unwrap_or(u32::MAX).saturating_add(1)
+                }
+                // A gate this recognizer cannot bound is kept whole: over-keeping
+                // can only make two positions compare unequal, never equal.
+                _ => u32::MAX,
+            };
+            gates.push((filter.clone(), ordinal));
+        }
+        _ => {}
+    }
 }
 
 /// CR 611.3a: a "first activated ability … each turn" cost modifier, the one

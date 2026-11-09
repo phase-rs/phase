@@ -320,6 +320,27 @@ pub fn record_spell_cast(
     )
 }
 
+/// CR 106.3 + CR 601.2h: where a projected [`SpellCastRecord`] gets the
+/// per-mana-unit payment facts it states.
+///
+/// A record that outlives the cast must OWN those facts: the objects that paid are
+/// gone by the time a turn-history predicate reads the record (CR 400.7), so the
+/// projection copies them. A record projected for a LIVE filter seam must not: the
+/// spell being filtered has not paid anything yet (CR 601.2f precedes CR 601.2h),
+/// the seam is not persisted, and the paying object is still in hand — so the
+/// record states nothing and the filter reads the object's own facts by
+/// BORROWING them at match time (`filter::spell_object_matches_filter_inner`).
+/// Copying them there charged every live projection a deep clone of a payment
+/// snapshot it would never be asked about.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum CastPaymentFacts<'a> {
+    /// A completed cast the record must describe on its own: the facts are copied.
+    Recorded(&'a [crate::types::game_state::ManaSpentSourceSnapshot]),
+    /// A live pre-payment seam: no facts are copied, and the filter borrows the
+    /// live spell object's own.
+    LivePrePayment,
+}
+
 /// CR 708.4: Project a spell-cast record for a LIVE per-spell filter seam, which
 /// has no announced cast variant to record.
 ///
@@ -347,7 +368,14 @@ pub(crate) fn live_spell_cast_record_for(
     // the targets' current state), which is the single answer on that path;
     // giving this projection facts would create a second, divergent answer from
     // the same record.
-    spell_cast_record_for(obj, from_zone, cast_variant, fused_hint, &[])
+    spell_cast_record_for(
+        obj,
+        from_zone,
+        cast_variant,
+        fused_hint,
+        &[],
+        CastPaymentFacts::LivePrePayment,
+    )
 }
 
 /// The single fuse-aware authority for spell-cast record projection. `fused_hint` is the caller's
@@ -364,6 +392,7 @@ pub(crate) fn spell_cast_record_for(
     cast_variant: crate::types::game_state::CastingVariant,
     fused_hint: bool,
     targets: &[ActivationTargetFact],
+    payment: CastPaymentFacts<'_>,
 ) -> SpellCastRecord {
     let fused = fused_hint || obj.fused_split_spell;
     SpellCastRecord {
@@ -401,12 +430,18 @@ pub(crate) fn spell_cast_record_for(
         // live candidate seam projects the linked copy while it still waits in
         // exile, and that object can only be cast as a prepare spell.
         prepared_copy_source: obj.prepared_copy_source,
-        // CR 106.3 + CR 601.2h: persist the payment-time source snapshots so a
-        // source-qualified cast predicate survives resolution (CR 400.7d) and the
-        // source's departure (CR 400.7). `Some` — this projection is built from a
-        // live cast, so the provenance is known; only a legacy payload decodes to
-        // `None`.
-        mana_spent_source_snapshots: Some(obj.mana_spent_source_snapshots.clone()),
+        // CR 106.3 + CR 601.2h: the payment-time source snapshots are stated by the
+        // projection that can prove them. A LIVE seam cannot — CR 601.2f runs before
+        // CR 601.2h, so the spell being filtered has paid nothing, and the object
+        // that will pay is still in hand: the record states `None` and the filter
+        // borrows the object's own facts. A completed cast must state them, so a
+        // source-qualified cast predicate survives resolution and the source's
+        // departure (CR 400.7d, CR 400.7), and those ARE copied — the record outlives
+        // the objects that paid. Only a legacy payload decodes to `None`.
+        mana_spent_source_snapshots: match payment {
+            CastPaymentFacts::Recorded(facts) => Some(facts.to_vec()),
+            CastPaymentFacts::LivePrePayment => None,
+        },
         // CR 115.1 + CR 601.2c: the committed declared targets, captured by the
         // caller that holds them. The pure projection never reaches for ambient
         // state: a caller with no committed list must pass an empty slice and say why.
@@ -432,7 +467,14 @@ pub fn record_spell_cast_from_zone(
 ) -> Result<CastOccurrence, crate::types::resolved_commands::ResolvedLedgerEditReplayInvariantError>
 {
     // CR 117.1: Record spell characteristics for general-purpose filtered counting.
-    let record = spell_cast_record_for(obj, from_zone, cast_variant, false, committed_targets);
+    let record = spell_cast_record_for(
+        obj,
+        from_zone,
+        cast_variant,
+        false,
+        committed_targets,
+        CastPaymentFacts::Recorded(&obj.mana_spent_source_snapshots),
+    );
     crate::game::ledger::record_spell_cast(state, player, record)
 }
 

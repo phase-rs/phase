@@ -3694,45 +3694,131 @@ pub(crate) fn cost_modifier_reads_changed_projected_resource(
         .keys()
         .chain(current.objects.keys())
         .any(|id| {
-            let multipliers = projected_cost_multipliers(*id, prior, current);
-            if multipliers.is_empty() {
+            let observables = projected_cost_observables(*id, prior, current);
+            if observables.is_empty() {
                 return false;
             }
             let (Some(before), Some(after)) = (prior.objects.get(id), current.objects.get(id))
             else {
                 return true;
             };
-            multipliers.into_iter().any(|qty| {
-                resolve_cost_multiplier(prior, before.controller, *id, qty)
-                    != resolve_cost_multiplier(current, after.controller, *id, qty)
+            observables.into_iter().any(|observable| {
+                resolve_cost_observable(prior, before.controller, *id, observable)
+                    != resolve_cost_observable(current, after.controller, *id, observable)
             })
         })
 }
 
-/// CR 601.2f + CR 113.6: the projected-journal multipliers of the LIVE cost-modifier statics
-/// `id` carries on EITHER compared frame. `object_content_eq` omits static definitions, so a
-/// modifier installed only on the current frame is invisible to a prior-only scan while the
-/// journal it reads still moves.
-fn projected_cost_multipliers<'a>(
+/// CR 601.2f: ONE thing a live cost modifier's static reads on a compared frame.
+///
+/// The two shapes differ in what "a different value" means, which is why they are
+/// not one question:
+///
+/// * [`Count`](Self::Count) is a `dynamic_count` the modifier MULTIPLIES by ("{1}
+///   less for each …"), so the frame's resolved NUMBER is the price input.
+/// * [`Gate`](Self::Gate) is a printed CONDITION the price is subject to ("the first
+///   spell you cast each turn …", costed only while the gate holds), so the frame's
+///   TRUTH is the price input. Comparing its population instead would refuse a
+///   recurrence whose gate answers the same on both frames — a count of 2 growing to
+///   3 behind `count == 0` prices exactly the same nothing.
+///
+/// Reading only the first shape is what let a conditional reducer price a short-cut
+/// the comparator could not see: the modifier's `dynamic_count` was `None`, so the
+/// veto found nothing to compare even though the gate it is subject to had moved.
+#[derive(Debug, Clone, Copy)]
+enum CostObservable<'a> {
+    Count(&'a crate::types::ability::QuantityRef),
+    Gate(&'a crate::types::ability::StaticCondition),
+}
+
+/// CR 601.2f + CR 732.2a: every observable a live cost modifier's static reads on
+/// `state`, gathered from EITHER compared frame.
+fn projected_cost_observables<'a>(
     id: ObjectId,
     prior: &'a GameState,
     current: &'a GameState,
-) -> Vec<&'a QuantityRef> {
-    let mut multipliers = Vec::new();
+) -> Vec<CostObservable<'a>> {
+    let mut observables = Vec::new();
     for state in [prior, current] {
         let Some(object) = state.objects.get(&id) else {
             continue;
         };
-        multipliers.extend(object.static_definitions.iter_all().filter_map(|def| {
-            // CR 113.6: a static that does not function in its source's zone modifies no
-            // cost, so an inert copy (a graveyard it does not function from) is not a live
-            // cost dependency.
-            crate::game::functioning_abilities::static_functions_in_zone(object, def)
-                .then(|| static_mode_projected_count(&def.mode))
-                .flatten()
-        }));
+        // CR 113.6: a static that does not function in its source's zone modifies no
+        // cost, so an inert copy (a graveyard it does not function from) is not a live
+        // cost dependency.
+        observables.extend(
+            object
+                .static_definitions
+                .iter_all()
+                .filter(|def| {
+                    crate::game::functioning_abilities::static_functions_in_zone(object, def)
+                })
+                .flat_map(static_mode_observables),
+        );
     }
-    multipliers
+    observables
+}
+
+/// CR 601.2f: the observables ONE cost-modifier static definition reads — its
+/// `dynamic_count` when that reads a projected journal, and its printed CONDITION
+/// whenever that condition reads one too.
+///
+/// The condition arm is the exhaustive half: [`static_condition_reads_projected`]
+/// classifies every `StaticCondition` variant through `ability_scan`, so a gate
+/// shape the row-projection recognizer does not parse
+/// (`casting::cost_observable_cast_journal`) is still priced here.
+fn static_mode_observables(
+    def: &crate::types::ability::StaticDefinition,
+) -> Vec<CostObservable<'_>> {
+    let mut observables = Vec::new();
+    if let Some(count) = static_mode_projected_count(&def.mode) {
+        observables.push(CostObservable::Count(count));
+    }
+    // Only a cost modifier's condition GATES a price; the same condition on any other
+    // static changes no cost, and including it would refuse recurrences for a reason
+    // CR 601.2f does not have.
+    if matches!(
+        def.mode,
+        crate::types::statics::StaticMode::ModifyCost { .. }
+            | crate::types::statics::StaticMode::ReduceAbilityCost { .. }
+    ) {
+        if let Some(condition) = def
+            .condition
+            .as_ref()
+            .filter(|condition| static_condition_reads_projected(condition))
+        {
+            observables.push(CostObservable::Gate(condition));
+        }
+    }
+    observables
+}
+
+/// CR 601.2f: whether `condition` reads any per-turn value the projection removes —
+/// the same classification the `dynamic_count` half uses, applied to a condition.
+fn static_condition_reads_projected(condition: &crate::types::ability::StaticCondition) -> bool {
+    crate::game::ability_scan::static_condition_reads_projected_resource(condition)
+}
+
+/// CR 601.2f: one observable's value on `state`, read exactly as cost determination
+/// reads it — the source's controller is the payer the modifier prices for.
+fn resolve_cost_observable(
+    state: &GameState,
+    controller: PlayerId,
+    source: ObjectId,
+    observable: CostObservable<'_>,
+) -> i32 {
+    match observable {
+        CostObservable::Count(qty) => resolve_cost_multiplier(state, controller, source, qty),
+        // CR 109.5: "you" in a cost static is its controller, and a cost static's
+        // condition is judged for that player whichever spell is being cast.
+        // CR 109.5: a cost static's condition is judged with its own controller as
+        // the payer ("you"), for the spell it would price.
+        CostObservable::Gate(condition) => {
+            i32::from(crate::game::casting::evaluate_cost_mod_static_condition(
+                state, condition, controller, controller, source, None,
+            ))
+        }
+    }
 }
 
 /// CR 601.2f: one cost modifier's multiplier, priced on `state` exactly as cost determination
@@ -6878,8 +6964,14 @@ fn eq_except_growable(pa: &GameState, pb: &GameState, grown: &HashSet<ObjectId>)
     // LKI then.
     crate::game::stack::clear_stack_with_entry_tables(&mut a);
     crate::game::stack::clear_stack_with_entry_tables(&mut b);
-    a.retain_carrier_referenced_lki();
-    b.retain_carrier_referenced_lki();
+    // This cover path compares the position's RESOURCES, and its pools are not
+    // projected away here, so a floating unit's pin still references its producer's
+    // exit record (CR 106.3 + CR 732.2a).
+    // This cover path compares the position's RESOURCES and does not project its pools
+    // away, so a floating unit's pin still references its producer's exit record
+    // (CR 106.3 + CR 732.2a).
+    a.retain_carrier_referenced_lki(crate::types::game_state::FloatingProducerReferences::Kept);
+    b.retain_carrier_referenced_lki(crate::types::game_state::FloatingProducerReferences::Kept);
     a.retain_trigger_referenced_departed_stack_records();
     b.retain_trigger_referenced_departed_stack_records();
     a.canonicalize_loop_identities();
@@ -8679,7 +8771,14 @@ fn project_out_resources(state: &GameState) -> GameState {
     // Read from the unprojected state: the cost gates judge recorded facts
     // against the live statics, before any object is projected below.
     let observable_journal = crate::game::casting::cost_observable_activation_journal(state);
-    let mut s = state.normalize_for_loop();
+    // CR 601.2f: read from the UNPROJECTED state for the same reason — a cost gate
+    // judges the rows the cast history actually recorded.
+    let observable_cast_journal = crate::game::casting::cost_observable_cast_journal(state);
+    // CR 106.3 + CR 732.2a: this projection clears every pool below, so no floating
+    // unit survives it and a producer pin references no exit record here.
+    let mut s = state.normalize_for_loop_with(
+        crate::types::game_state::FloatingProducerReferences::ProjectedOut,
+    );
 
     for player in &mut s.players {
         // Single authority for the projected player-consumable set, shared with the
@@ -8788,8 +8887,19 @@ fn project_out_resources(state: &GameState) -> GameState {
     // CR 120: who has dealt damage + the per-turn damage event log.
     s.objects_that_dealt_damage.clear();
     s.damage_dealt_this_turn.clear();
-    // CR 601: per-turn / per-game cast journals.
-    s.spells_cast_this_turn_by_player.clear();
+    // CR 601 + CR 601.2f: the per-turn cast journal is pumped history for every
+    // reader EXCEPT a "the first spell you cast each turn that targets a creature
+    // costs …" price (Head of the Class), which CR 601.2f resolves against it. So the
+    // journal is REPLACED by the part a price can observe
+    // (`casting::cost_observable_cast_journal`: each cost gate's first N qualifying
+    // rows, and nothing else). Clearing it wholesale made a period that spends a
+    // one-time cast discount compare EQUAL to one that has not spent it, so a
+    // recurrence whose next price differs could be certified as constant — the exact
+    // reading CR 732.2a's "predictable results" refuses. As with the activation
+    // journal below, periods AFTER the discount keep the same kept prefix and still
+    // compare equal, so an ordinary cast loop is not refused. The per-game journals
+    // have no price reader and stay cleared.
+    s.spells_cast_this_turn_by_player = observable_cast_journal;
     s.spells_cast_this_game.clear();
     s.spells_cast_this_game_by_player.clear();
     // CR 602.2 + CR 611.3a: the per-turn activation journal is the activation

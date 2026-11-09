@@ -8453,6 +8453,280 @@ fn two_source_assist_replacement_witness(
     (scenario.build(), spell, helper_sources)
 }
 
+/// Head of the Class — the printed reducer whose ordinal gate this witness drives.
+/// "The first spell you cast during each of your turns that targets a creature costs
+/// {W}{B} less to cast."
+const HEAD_OF_THE_CLASS: &str = "The first spell you cast during each of your turns that targets a creature costs {W}{B} less to cast. This effect reduces only the amount of colored mana you pay.";
+
+/// The printed Assist spell this witness casts: Cascade plus a creature target, so one
+/// cast exercises the whole pipeline — the helper's payment, the cast snapshot it owes,
+/// the printed cascade trigger, and the CR 601.2f ordinal gate the cast spends.
+const ASSIST_CASCADE_SPELL: &str = "Assist\nCascade\nDestroy target creature.";
+
+/// One `{1}{B}` artifact-free spell that costs BUNDLED_MANA and targets a creature.
+fn assist_cascade_cost() -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![ManaCostShard::Black],
+        generic: 1,
+    }
+}
+
+/// A Treasure token owned by `player`, created the way the engine creates it: real
+/// card types plus the registry's own ability list, so its
+/// "{T}, Sacrifice this artifact: Add one mana of any color" is the printed one.
+fn treasure_for(
+    state: &mut engine::types::game_state::GameState,
+    player: engine::types::player::PlayerId,
+    card_id: u64,
+) -> engine::types::identifiers::ObjectId {
+    let id = engine::game::zones::create_object(
+        state,
+        engine::types::identifiers::CardId(card_id),
+        player,
+        "Treasure".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Artifact);
+    obj.card_types.subtypes.push("Treasure".to_string());
+    obj.base_card_types = obj.card_types.clone();
+    let abilities = engine::game::effects::token::predefined_token_abilities("Treasure");
+    *std::sync::Arc::make_mut(&mut obj.abilities) = abilities.clone();
+    *std::sync::Arc::make_mut(&mut obj.base_abilities) = abilities;
+    id
+}
+
+/// CR 702.132a + CR 118.3a + CR 106.3 + CR 601.2f: a committed Assist helper's units
+/// are mana spent to cast the spell, and the cast records them.
+///
+/// The board is a printed `Assist` + `Cascade` spell with a creature target, Head of
+/// the Class on the battlefield, and a Treasure owned by the OTHER player. The spell
+/// costs `{1}{B}`; Head of the Class's first-spell discount takes the `{B}`, so the
+/// total is `{1}` generic and the helper pays ALL of it — the whole cast is paid with
+/// the helper's Treasure. Asserting on the amount alone would be enough to see the
+/// generic, so the assertion is on the pips: the cast's
+/// `mana_spent_source_snapshots` names the Treasure the helper sacrificed, its
+/// `colors_spent_to_cast` counts the color that unit was, and
+/// `mana_spent_to_cast_amount` is the helper's unit. Keeping only the paid generic
+/// AMOUNT (what `AssistState::Paid` records) recorded nothing at all here.
+///
+/// The rest of the cast is asserted too, because the threaded pips must not disturb it:
+/// the printed cascade triggers, and the CR 601.2f ordinal gate is CONSUMED — a second
+/// creature-targeting spell pays full `{1}{B}`.
+#[test]
+fn a_committed_assist_records_the_helpers_units_on_the_cast() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Head of the Class", 2, 2, HEAD_OF_THE_CLASS);
+    let victim_a = scenario.add_vanilla(P0, 1, 1);
+    let victim_b = scenario.add_vanilla(P0, 1, 1);
+    let assisted = scenario
+        .add_spell_to_hand(P0, "Assisted Cascade Witness", false)
+        .from_oracle_text_with_keywords(&["Assist", "Cascade"], ASSIST_CASCADE_SPELL)
+        .with_mana_cost(assist_cascade_cost())
+        .id();
+    let later = scenario
+        .add_spell_to_hand(P0, "Later Targeting Witness", false)
+        .from_oracle_text("Destroy target creature.")
+        .with_mana_cost(assist_cascade_cost())
+        .id();
+    // Four: two for the SECOND cast's full {1}{B}, and two spare so the first cast's
+    // affordability never depends on the pool (the helper pays it all).
+    scenario.with_mana_pool(
+        P0,
+        (0..2)
+            .map(|_| {
+                engine::types::mana::ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![])
+            })
+            .chain((0..2).map(|_| {
+                engine::types::mana::ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![])
+            }))
+            .collect(),
+    );
+    scenario.with_library_top(P0, &["Card A", "Card B"]);
+    let mut runner = scenario.build();
+    let treasure = treasure_for(runner.state_mut(), P1, 9401);
+    assert!(
+        runner.state().objects[&assisted]
+            .keywords
+            .contains(&Keyword::Assist),
+        "reach-guard: the fixture spell carries the printed Assist ability"
+    );
+    assert!(
+        runner.state().objects[&assisted]
+            .keywords
+            .contains(&Keyword::Cascade),
+        "reach-guard: and the printed cascade"
+    );
+
+    let card_id = runner.state().objects[&assisted].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: assisted,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the Assist spell is announced");
+    // The cast's own prompts, in the order the rules put them: target declaration
+    // (CR 601.2c), the Assist offer (CR 702.132a), the helper's committed amount, then
+    // the caster's confirmation of the payment (CR 601.2h).
+    let mut max_generic = None;
+    for _ in 0..8 {
+        if runner.state().objects[&assisted].zone == Zone::Stack
+            && !matches!(runner.state().waiting_for, WaitingFor::AssistPayment { .. })
+        {
+            break;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(victim_a)),
+                    })
+                    .expect("declare the creature target");
+            }
+            WaitingFor::AssistChoosePlayer { .. } => {
+                runner
+                    .act(GameAction::ChooseAssistPlayer { player: Some(P1) })
+                    .expect("choose the helper");
+            }
+            WaitingFor::AssistPayment {
+                max_generic: bound, ..
+            } => {
+                max_generic = Some(bound);
+                runner
+                    .act(GameAction::CommitAssistPayment { generic: 1 })
+                    .expect("commit the whole generic to the helper");
+            }
+            WaitingFor::ManaPayment { .. } | WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("the caster confirms payment");
+            }
+            other => panic!("unexpected prompt while casting the assisted spell: {other:?}"),
+        }
+    }
+    assert_eq!(
+        max_generic,
+        Some(1),
+        "reach-guard: Head of the Class took the {{B}}, leaving the one generic the helper can pay"
+    );
+    assert_eq!(
+        runner.state().objects[&assisted].zone,
+        Zone::Stack,
+        "reach-guard: the spell is on the stack"
+    );
+    assert_eq!(
+        runner.state().objects[&treasure].zone,
+        Zone::Graveyard,
+        "reach-guard: the helper's Treasure was sacrificed to pay it"
+    );
+
+    let spell = &runner.state().objects[&assisted];
+    // The cast's payment stamps — `mana_spent_to_cast_amount`, the color tally and the
+    // per-unit producer snapshots — are what the CR 106.3 / CR 601.2h readers consume
+    // (`GameObject::clear_post_collection_transients` clears the boolean flag after
+    // trigger collection and deliberately keeps these).
+    assert!(
+        spell.has_cast_payment_stamps(),
+        "CR 702.132a + CR 118.3a: mana WAS spent to cast this spell — the helper's — so the \
+         cast records a payment"
+    );
+    assert_eq!(
+        spell.mana_spent_to_cast_amount, 1,
+        "and the amount is the helper's one unit: the caster paid nothing, because the \
+         discount left a single generic that the helper covered"
+    );
+    assert_eq!(
+        spell.mana_spent_source_snapshots.len(),
+        1,
+        "CR 106.3: the cast records the PRODUCER of the unit the helper spent, not just the \
+         amount — that is the fact a `ManaSpentFromSource` predicate reads"
+    );
+    assert_eq!(
+        spell.mana_spent_source_snapshots[0].source_id, treasure,
+        "and the producer it names is the Treasure the helper sacrificed"
+    );
+    assert!(
+        spell.colors_spent_to_cast.distinct_colors() > 0,
+        "CR 106.3: the helper's unit was a colored Treasure pip, so the cast's color tally \
+         counts it"
+    );
+
+    // CR 702.85a: the printed cascade still triggers on this cast.
+    assert!(
+        runner.state().stack.iter().any(|entry| {
+            matches!(
+                &entry.kind,
+                engine::types::game_state::StackEntryKind::TriggeredAbility {
+                    source_id,
+                    ability,
+                    ..
+                } if *source_id == assisted
+                    && matches!(
+                        ability.effect,
+                        engine::types::ability::Effect::Cascade
+                    )
+            )
+        }),
+        "CR 702.85a: the printed cascade trigger is on the stack above the spell"
+    );
+
+    // CR 601.2f: and the cast CONSUMED Head of the Class's once-a-turn gate. Empty the
+    // stack first (the spell and its cascade trigger), then price the next
+    // creature-targeting spell: it pays full `{1}{B}` because the gate is spent.
+    for _ in 0..64 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority on the resolving stack");
+            }
+            WaitingFor::CastOffer { .. } => {
+                runner
+                    .act(GameAction::CascadeChoice {
+                        choice: engine::types::actions::CastChoice::Decline,
+                    })
+                    .expect("decline the cascade's free cast");
+            }
+            WaitingFor::DeclareAttackers { .. } => {
+                runner
+                    .act(GameAction::DeclareAttackers {
+                        attacks: Vec::new(),
+                        bands: Vec::new(),
+                    })
+                    .expect("declare no attackers");
+            }
+            WaitingFor::DeclareBlockers { .. } => {
+                runner
+                    .act(GameAction::DeclareBlockers {
+                        assignments: Vec::new(),
+                    })
+                    .expect("declare no blockers");
+            }
+            other => panic!("unexpected prompt while emptying the stack: {other:?}"),
+        }
+    }
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach-guard: the assisted cast and its cascade trigger resolved"
+    );
+    let before = runner.state().players[P0.0 as usize].mana_pool.total();
+    runner.cast(later).target_objects(&[victim_b]).resolve();
+    assert_eq!(
+        before - runner.state().players[P0.0 as usize].mana_pool.total(),
+        2,
+        "the SECOND creature-targeting spell pays full {{1}}{{B}}: the assisted cast spent the \
+         once-a-turn gate"
+    );
+}
+
 #[test]
 fn committed_assist_retries_remaining_sources_after_serialized_ordinary_pause() {
     let (mut runner, spell, helper_sources) =
