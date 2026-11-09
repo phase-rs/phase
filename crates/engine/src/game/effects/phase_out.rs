@@ -492,10 +492,17 @@ fn collect_phase_in_targets(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::combat::AttackTarget;
+    use crate::game::scenario::{GameScenario, P0, P1};
     use crate::game::zones::create_object;
     use crate::types::ability::{ControllerRef, TypedFilter};
+    use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
-    use crate::types::identifiers::CardId;
+    use crate::types::game_state::{
+        PendingContinuation, PersistedGameState, StackEntryKind, WaitingFor,
+    };
+    use crate::types::identifiers::{CardId, LEGACY_INCARNATION};
+    use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -919,5 +926,128 @@ mod tests {
             state.objects[&target].is_phased_in(),
             "the held permanent must re-enter on the untap that fires the trigger"
         );
+    }
+
+    fn queued_combat_phase_state() -> (GameState, ObjectId, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let fighter = scenario
+            .add_creature(P1, "Dream Fighter", 1, 1)
+            .from_oracle_text("Whenever this creature blocks or becomes blocked by a creature, this creature and that creature phase out. (While they're phased out, they're treated as though they don't exist. Each one phases in before its controller untaps during their next untap step.)")
+            .id();
+        let partner = scenario.add_creature(P0, "Combat partner", 2, 2).id();
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(partner, AttackTarget::Player(P1))])
+            .unwrap();
+        for _ in 0..32 {
+            if matches!(
+                runner.state().waiting_for,
+                WaitingFor::DeclareBlockers { .. }
+            ) {
+                break;
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        runner.declare_blockers(&[(fighter, partner)]).unwrap();
+        (runner.state().clone(), fighter, partner)
+    }
+
+    fn restore_phase_state(state: &GameState, trusted: bool) -> Result<GameState, String> {
+        let saved = if trusted {
+            PersistedGameState::capture(state.clone())
+        } else {
+            PersistedGameState::Raw(Box::new(state.clone()))
+        };
+        let bytes = serde_json::to_vec(&saved).map_err(|error| error.to_string())?;
+        serde_json::from_slice::<PersistedGameState>(&bytes)
+            .map_err(|error| error.to_string())?
+            .into_game_state()
+            .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn parked_phase_context_cannot_borrow_the_resolving_entrys_pins() {
+        let (mut state, fighter, partner) = queued_combat_phase_state();
+        let entry = state.stack.pop_back().unwrap();
+        let chain = Box::new(entry.ability().unwrap().clone());
+        let event = match &entry.kind {
+            StackEntryKind::TriggeredAbility { trigger_event, .. } => trigger_event.clone(),
+            _ => panic!("actual combat must produce a triggered ability"),
+        };
+        // Infrastructure: park the actual instruction in the existing typed
+        // continuation carrier; the resolving entry retains its independent copy.
+        state.resolving_trigger_firing = state.stack_trigger_firings.remove(&entry.id);
+        state.current_trigger_events = state
+            .stack_trigger_event_batches
+            .remove(&entry.id)
+            .unwrap_or_default();
+        state.current_trigger_event = event;
+        state.resolving_stack_entry = Some(entry);
+        let pending = PendingContinuation::new(chain, &state);
+        state.park_ability_continuation(pending);
+        state.current_trigger_event = None;
+        state.current_trigger_events.clear();
+        let mut unbound = state.clone();
+        unbound
+            .active_ability_continuation_frame_mut()
+            .unwrap()
+            .pending
+            .chain
+            .set_target_incarnations_recursive(Vec::new());
+        for trusted in [false, true] {
+            let mut restored = restore_phase_state(&state, trusted)
+                .expect("the parked chain owns its captured trigger context");
+            crate::game::engine::resume_pending_continuation_if_priority(
+                &mut restored,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert!(restored.objects[&fighter].is_phased_out());
+            assert!(restored.objects[&partner].is_phased_out());
+            assert!(restored.resolution_stack.is_empty());
+            assert!(
+                restore_phase_state(&unbound, trusted).is_err(),
+                "the entry's pin cannot repair a different resumed ability copy"
+            );
+        }
+    }
+
+    #[test]
+    fn stack_push_repairs_legacy_keys_without_rebinding_known_event_objects() {
+        for known_departed_pin in [false, true] {
+            let (mut state, fighter, partner) = queued_combat_phase_state();
+            let entry = state.stack.back().unwrap();
+            let mut ability = entry.ability().unwrap().clone();
+            let event = match &entry.kind {
+                StackEntryKind::TriggeredAbility { trigger_event, .. } => {
+                    trigger_event.clone().unwrap()
+                }
+                _ => panic!("actual combat must produce a triggered ability"),
+            };
+            let original = ObjectIncarnationRef::from_object(&state.objects[&partner]);
+            let mut pins = vec![ObjectIncarnationRef::of(partner, LEGACY_INCARNATION)];
+            if known_departed_pin {
+                crate::game::zones::move_to_zone(&mut state, partner, Zone::Exile, &mut Vec::new());
+                crate::game::zones::move_to_zone(
+                    &mut state,
+                    partner,
+                    Zone::Battlefield,
+                    &mut Vec::new(),
+                );
+                pins.push(original);
+            }
+            ability.set_target_incarnations_recursive(pins);
+            seed_event_context_pins(&state, &mut ability, &event);
+            state.current_trigger_event = Some(event);
+            resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+            assert!(state.objects[&fighter].is_phased_out());
+            assert_eq!(state.objects[&partner].is_phased_out(), !known_departed_pin);
+        }
     }
 }

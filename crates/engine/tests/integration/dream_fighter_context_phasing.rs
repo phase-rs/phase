@@ -5,6 +5,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, GameState, PersistedGameState, WaitingFor};
+use engine::types::identifiers::{ObjectIncarnationRef, LEGACY_INCARNATION};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -301,14 +302,17 @@ fn dream_fighter_restore_refuses_an_unbound_live_combat_partner() {
                 &mut Vec::new(),
             );
         }
-        let mut legacy = captured.clone();
-        legacy
+        let captured_pin = *captured
             .stack
-            .back_mut()
+            .back()
             .unwrap()
-            .ability_mut()
+            .ability()
             .unwrap()
-            .set_target_incarnations_recursive(Vec::new());
+            .target_incarnations
+            .iter()
+            .find(|pin| pin.object_id == partner)
+            .unwrap();
+        let legacy_pin = ObjectIncarnationRef::of(partner, LEGACY_INCARNATION);
         for trusted in [false, true] {
             let restored = restore_combat_state(captured.clone(), trusted)
                 .expect("captured current or stale pins remain valid authority");
@@ -327,25 +331,44 @@ fn dream_fighter_restore_refuses_an_unbound_live_combat_partner() {
                 assert_eq!(control.state().objects[&partner].zone, Zone::Exile);
             }
 
-            let restored_legacy = restore_combat_state(legacy.clone(), trusted);
-            if partner_zone == Zone::Battlefield {
-                assert!(
-                    restored_legacy.is_err(),
-                    "a live raw id cannot establish the original combat partner"
-                );
-            } else {
-                let mut restored = GameRunner::from_state(
-                    restored_legacy.expect("an already-departed partner cannot alias a live one"),
-                );
-                restored.advance_until_stack_empty();
-                assert!(restored.state().objects[&fighter].is_phased_out());
-                assert_eq!(restored.state().objects[&partner].zone, Zone::Exile);
-                assert!(restored.state().stack.is_empty());
-                assert!(restored.state().resolution_stack.is_empty());
-                assert!(matches!(
-                    restored.state().waiting_for,
-                    WaitingFor::Priority { .. }
-                ));
+            for (pins, exact_first) in [
+                (Vec::new(), false),
+                (vec![legacy_pin], false),
+                (vec![legacy_pin, captured_pin], false),
+                (vec![captured_pin, legacy_pin], true),
+            ] {
+                let mut legacy = captured.clone();
+                legacy
+                    .stack
+                    .back_mut()
+                    .unwrap()
+                    .ability_mut()
+                    .unwrap()
+                    .set_target_incarnations_recursive(pins);
+                let restored_legacy = restore_combat_state(legacy, trusted);
+                if partner_zone == Zone::Battlefield && !exact_first {
+                    assert!(
+                        restored_legacy.is_err(),
+                        "a live raw id cannot establish the original combat partner"
+                    );
+                } else {
+                    let mut restored = GameRunner::from_state(
+                        restored_legacy.expect("the referent has exact or departed authority"),
+                    );
+                    restored.advance_until_stack_empty();
+                    assert!(restored.state().objects[&fighter].is_phased_out());
+                    if partner_zone == Zone::Battlefield {
+                        assert!(restored.state().objects[&partner].is_phased_out());
+                    } else {
+                        assert_eq!(restored.state().objects[&partner].zone, Zone::Exile);
+                    }
+                    assert!(restored.state().stack.is_empty());
+                    assert!(restored.state().resolution_stack.is_empty());
+                    assert!(matches!(
+                        restored.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                }
             }
         }
     }
