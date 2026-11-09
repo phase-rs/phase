@@ -29087,6 +29087,170 @@ mod tests {
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 
+    /// Composed error/context fixture, not printed-card ancestry. The nearest
+    /// printed die payloads are Box of Free-Range Goblins and Boing! above.
+    #[test]
+    fn continuation_drain_errors_restore_caller_channels_and_entry_publication() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let gain = || {
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                    )
+                };
+                for links in [2, 22] {
+                    let mut branch = gain();
+                    for _ in 0..links {
+                        let mut parent = gain();
+                        parent.sub_ability = Some(Box::new(branch));
+                        branch = parent;
+                    }
+                    let die = Effect::RollDie {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        sides: 1,
+                        modifier: None,
+                        results: vec![DieResultBranch {
+                            min: 1,
+                            max: 1,
+                            effect: Box::new(branch),
+                        }],
+                    };
+                    if links == 22 {
+                        // The drain intentionally swallows its resolver error. Prove
+                        // the exact parked die body produces that error independently.
+                        let (mut exact, _, _) = continuation_die_context_fixture(die.clone());
+                        let frame = exact
+                            .take_active_ability_continuation()
+                            .unwrap()
+                            .unwrap();
+                        crate::game::triggers::push_resolving_trigger_context(
+                            &mut exact,
+                            frame.pending.trigger_context.as_ref().unwrap(),
+                        );
+                        assert_eq!(
+                            resolve_ability_chain_step(
+                                &mut exact,
+                                &frame.pending.chain,
+                                &mut vec![],
+                                1,
+                            ),
+                            Err(EffectError::ChainTooDeep)
+                        );
+                    }
+                    for site in ["body", "pruned-body", "detached-tail"] {
+                        for entry_publication in [None, Some(None), Some(Some(83))] {
+                            let (mut state, source, ambient) =
+                                continuation_die_context_fixture(die.clone());
+                            let pending = &mut state
+                                .active_ability_continuation_frame_mut()
+                                .unwrap()
+                                .pending;
+                            match site {
+                                "body" => {}
+                                "pruned-body" => {
+                                    let mut independent = (*pending.chain).clone();
+                                    independent.sub_link = SubAbilityLink::SequentialSibling;
+                                    pending.chain = Box::new(
+                                        ResolvedAbility::new(
+                                            Effect::Fight {
+                                                target: TargetFilter::Typed(TypedFilter::creature()),
+                                                subject: TargetFilter::ParentTarget,
+                                            },
+                                            vec![],
+                                            source,
+                                            P0,
+                                        )
+                                        .sub_ability(independent),
+                                    );
+                                    pending.chain.context.forwarded_result_context =
+                                        Some(Box::new(ForwardedResultContext {
+                                            targets: vec![],
+                                            object_incarnations: vec![],
+                                        }));
+                                }
+                                "detached-tail" => {
+                                    let after_scope = std::mem::replace(
+                                        &mut pending.chain,
+                                        Box::new(ResolvedAbility::new(
+                                            Effect::GainLife {
+                                                amount: QuantityExpr::Fixed { value: 2 },
+                                                player: TargetFilter::Controller,
+                                            },
+                                            vec![],
+                                            source,
+                                            P0,
+                                        )),
+                                    );
+                                    pending.player_scope_tail = Some(PendingPlayerScopeTail {
+                                        source_id: source,
+                                        after_scope,
+                                        linked_exile_batch: vec![],
+                                        created_tokens: None,
+                                    });
+                                }
+                                _ => unreachable!(),
+                            }
+                            state.die_result_publication = entry_publication;
+                            let before = state.players[0].life;
+                            let mut events = vec![];
+                            drain_pending_continuation(&mut state, &mut events);
+
+                            assert!(events.iter().any(|event| matches!(
+                                event,
+                                GameEvent::DieRolled {
+                                    player_id: P0,
+                                    sides: 1,
+                                    result: Some(1),
+                                }
+                            )), "{site}, links={links}: the die must publish before its branch");
+                            let branch_gains = if links == 22 { 21 } else { 3 };
+                            let body_gain = if site == "detached-tail" { 2 } else { 0 };
+                            assert_eq!(
+                                state.players[0].life,
+                                before + body_gain + branch_gains,
+                                "{site}, links={links}: branch effects precede the depth error"
+                            );
+                            let completed = events.iter().any(|event| matches!(
+                                event,
+                                GameEvent::EffectResolved { kind: EffectKind::RollDie, source_id, .. }
+                                    if *source_id == source
+                            ));
+                            assert_eq!(completed, links == 2, "{site}, links={links}");
+                            assert!(!events.iter().any(|event| matches!(
+                                event,
+                                GameEvent::EffectResolved { kind: EffectKind::Fight, .. }
+                            )));
+                            assert_eq!(state.current_trigger_event, Some(ambient.clone()));
+                            assert_eq!(state.current_trigger_events, vec![ambient]);
+                            assert_eq!(state.current_trigger_match_count, Some(17));
+                            assert_eq!(
+                                state.die_result_this_resolution,
+                                if links == 22 { Some(11) } else { Some(1) },
+                                "{site}, links={links}, entry={entry_publication:?}"
+                            );
+                            assert_eq!(
+                                state.die_result_publication,
+                                if links == 22 { entry_publication } else { Some(Some(1)) },
+                                "{site}, links={links}, entry={entry_publication:?}"
+                            );
+                            assert!(state.resolving_player_scope_tail.is_none());
+                            assert!(state.resolution_stack.is_empty());
+                            assert!(matches!(state.waiting_for, WaitingFor::Priority { player: P0 }));
+                            state.resolution_stack.validate(&state.waiting_for).unwrap();
+                        }
+                    }
+                }
+            })
+            .expect("spawn 256 MiB continuation-error thread")
+            .join()
+            .expect("continuation-error fixture thread must not panic");
+    }
+
     /// Composed control for the die fixture above; no die instruction runs in this drain.
     #[test]
     fn continuation_drain_without_a_die_restores_the_callers_context() {
