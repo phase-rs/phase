@@ -270,6 +270,13 @@ fn parse_single_inner_condition(input: &str) -> OracleResult<'_, StaticCondition
         // single-leaf `ManaSpentToCast == 0` gate the enters-with-only-if pipeline
         // (`replacement_condition_from_static`) needs into an unmappable `Or`.
         parse_it_wasnt_cast_or_no_mana_spent,
+        // CR 608.2c + CR 109.4: "<subject> controls no [other] <type>" and
+        // "you control more <type> than <subject>" trail an instruction whose
+        // single declared object target supplies the subject's controller
+        // (Skulking Killer, Unified Will). The recognizer lives here, once;
+        // the effect parser keeps only its antecedent guard and the typed
+        // bridge.
+        parse_target_controller_count_condition_static,
         parse_state_presence_conditions,
         parse_event_history_conditions,
         parse_resolution_context_conditions,
@@ -4714,6 +4721,149 @@ fn parse_parent_target_referent(input: &str) -> OracleResult<'_, ParentTargetRef
         )),
     )
     .parse(input)
+}
+
+/// The player a trailing condition names as the controller of the instruction's
+/// declared object target (CR 608.2c).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TargetControllerReferent {
+    /// "that opponent" — bound only when the target's own type phrase
+    /// introduced the opponent ("target creature an opponent controls").
+    IntroducedOpponent,
+    /// "its controller" / "that spell's | creature's | permanent's controller".
+    ObjectController,
+}
+
+/// CR 608.2c: the subject of a trailing condition that names the controller of
+/// the instruction's declared object target.
+pub(crate) fn parse_target_controller_referent(
+    input: &str,
+) -> OracleResult<'_, TargetControllerReferent> {
+    alt((
+        value(
+            TargetControllerReferent::IntroducedOpponent,
+            tag("that opponent"),
+        ),
+        value(
+            TargetControllerReferent::ObjectController,
+            terminated(
+                alt((
+                    tag("its"),
+                    recognize((
+                        tag("that "),
+                        alt((tag("spell"), tag("creature"), tag("permanent"))),
+                        parse_apostrophe_s,
+                    )),
+                )),
+                tag(" controller"),
+            ),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 109.4: the permanents the declared target's controller controls.
+fn target_controller_population(filter: TargetFilter) -> TargetFilter {
+    inject_controller(filter, ControllerRef::ParentTargetController)
+}
+
+/// A non-empty typed type phrase consuming the whole input ("creatures").
+///
+/// CR 109.4 + CR 608.2c: a population that already carries a controller
+/// declines here. `inject_controller` would overwrite that qualifier, so
+/// "creatures you control" must not silently become "creatures the target's
+/// controller controls".
+fn parse_counted_type_phrase(input: &str) -> OracleResult<'_, TypedFilter> {
+    let (filter, rest) = parse_type_phrase_folding(input);
+    match filter {
+        TargetFilter::Typed(tf)
+            if tf.controller.is_none() && !tf.type_filters.is_empty() && rest.is_empty() =>
+        {
+            Ok((rest, tf))
+        }
+        _ => Err(oracle_err(input)),
+    }
+}
+
+/// CR 608.2c + CR 608.2h + CR 109.4: a trailing condition comparing what the
+/// controller of the instruction's declared object target controls, checked
+/// as the instruction resolves:
+/// - "<subject> controls no [other] <type>" (Skulking Killer) → that player's
+///   count is zero; "other" excludes the target itself.
+/// - "you control more <type> than <subject>" (Unified Will) → your count
+///   exceeds that player's count.
+///
+/// This is the single recognition authority. The effect parser calls it
+/// directly and applies its own antecedent guard to the returned referent;
+/// `parse_inner_condition` exposes the static half as a normal game-state
+/// condition.
+pub(crate) fn parse_target_controller_count_condition(
+    input: &str,
+) -> OracleResult<'_, (TargetControllerReferent, StaticCondition)> {
+    alt((
+        parse_target_controller_controls_no,
+        parse_you_control_more_than_target_controller,
+    ))
+    .parse(input)
+}
+
+fn parse_target_controller_controls_no(
+    input: &str,
+) -> OracleResult<'_, (TargetControllerReferent, StaticCondition)> {
+    let (rest, referent) =
+        terminated(parse_target_controller_referent, tag(" controls no ")).parse(input)?;
+    let (rest, other) = opt(value(
+        FilterProp::DistinctFrom {
+            reference: Box::new(TargetFilter::ParentTarget),
+        },
+        tag("other "),
+    ))
+    .parse(rest)?;
+    let (rest, mut tf) = parse_counted_type_phrase(rest)?;
+    tf.properties.extend(other);
+    let condition = StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: target_controller_population(TargetFilter::Typed(tf)),
+            },
+        },
+        comparator: Comparator::EQ,
+        rhs: QuantityExpr::Fixed { value: 0 },
+    };
+    Ok((rest, (referent, condition)))
+}
+
+fn parse_you_control_more_than_target_controller(
+    input: &str,
+) -> OracleResult<'_, (TargetControllerReferent, StaticCondition)> {
+    let (rest, type_text) =
+        preceded(tag("you control more "), take_until(" than ")).parse(input)?;
+    let (rest, referent) = preceded(tag(" than "), parse_target_controller_referent).parse(rest)?;
+    let (_, tf) = nom::combinator::all_consuming(parse_counted_type_phrase).parse(type_text)?;
+    let filter = TargetFilter::Typed(tf);
+    let condition = StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: inject_controller_you(filter.clone()),
+            },
+        },
+        comparator: Comparator::GT,
+        rhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: target_controller_population(filter),
+            },
+        },
+    };
+    Ok((rest, (referent, condition)))
+}
+
+/// The `parse_inner_condition` leaf: the same grammar with the referent
+/// discarded. The effect-side antecedent guard still applies at its own seam.
+fn parse_target_controller_count_condition_static(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, (_referent, condition)) = parse_target_controller_count_condition(input)?;
+    Ok((rest, condition))
 }
 
 /// CR 119 + CR 603.4: The " or less life" / " or more life" suffix shared by every
@@ -27814,5 +27964,21 @@ mod intervening_if_state_condition_tests {
         assert!(properties
             .iter()
             .any(|prop| matches!(prop, FilterProp::InZone { .. })));
+    }
+
+    /// CR 608.2c + CR 109.4: the target-controller count grammar is recognized
+    /// by the single condition authority, not only by the effect-side strip.
+    #[test]
+    fn target_controller_count_conditions_parse_through_the_shared_authority() {
+        for condition in [
+            "that opponent controls no other creatures",
+            "its controller controls no creatures",
+            "you control more creatures than that spell's controller",
+        ] {
+            let (rest, parsed) = parse_inner_condition(condition)
+                .unwrap_or_else(|_| panic!("must parse: {condition}"));
+            assert_eq!(rest, "", "{condition}");
+            assert!(matches!(parsed, StaticCondition::QuantityComparison { .. }));
+        }
     }
 }

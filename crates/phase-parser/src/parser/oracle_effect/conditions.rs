@@ -41,9 +41,9 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AbilityUseTally, AdditionalCostOrigin,
     AttachCardinality, AttachSelection, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
     CoinFlipResult, Comparator, ControllerRef, CostCategory, CountScope, DamageChannel, DigSource,
-    Duration, Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, LibraryPosition, MultiTargetSpec, ObjectScope,
-    ParsedCondition, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
-    SpentColor, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    Duration, Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, LibraryPosition,
+    MultiTargetSpec, ObjectScope, ParsedCondition, PlayerScope, PtStat, PtValueScope, QuantityExpr,
+    QuantityRef, SharedQuality, SpentColor, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -4859,10 +4859,40 @@ pub(super) fn strip_routed_suffix_conditional(
     // CR 608.2c + CR 608.2h: a condition on the declared object target's
     // controller gates its own instruction as it resolves (Skulking Killer,
     // Unified Will) — never an intervening-if (CR 603.4).
-    if let Some(cond) =
-        parse_target_controller_control_condition_text(condition_core, effect_prefix, ctx)
+    //
+    // Once the shared grammar recognizes the text, an unbound referent must
+    // return the original clause here: falling through would reach the generic
+    // `parse_inner_condition` route below and re-home the same condition with
+    // an unbound `ParentTargetController`.
+    if let Some((referent, condition)) =
+        parse_target_controller_control_condition_parts(condition_core)
     {
-        return (general(cond), effect_text);
+        let target = declared_single_object_target(effect_prefix, ctx);
+        if !target
+            .as_ref()
+            .is_some_and(|target| referent_is_bound(referent, target))
+        {
+            return (None, text.to_string());
+        }
+        let mut bridge_ctx = ctx.clone();
+        let Some(condition) = static_condition_to_ability_condition(&condition, &mut bridge_ctx)
+        else {
+            return (None, text.to_string());
+        };
+        return (general(condition), effect_text);
+    } else if let Some(referent) = parse_target_controller_control_condition_prefix(condition_core)
+    {
+        // The grammar is only a prefix here (a trailing " and " / " or "
+        // connector), so the generic route parses the whole conjunction. When
+        // the referent cannot bind, fail closed before that route can re-home
+        // the left operand with an unbound `ParentTargetController`.
+        let target = declared_single_object_target(effect_prefix, ctx);
+        if !target
+            .as_ref()
+            .is_some_and(|target| referent_is_bound(referent, target))
+        {
+            return (None, text.to_string());
+        }
     }
 
     if let Some(cond) = parse_no_mana_spent_to_cast_target_condition_text(condition_core) {
@@ -5158,43 +5188,6 @@ fn parse_target_controller_poison_threshold(input: &str) -> OracleResult<'_, i32
     .parse(input)
 }
 
-/// The player a trailing condition names as the controller of the gated
-/// instruction's declared object target.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TargetControllerReferent {
-    /// "that opponent" — bound only when the target's own type phrase
-    /// introduced the opponent ("target creature an opponent controls").
-    IntroducedOpponent,
-    /// "its controller" / "that spell's | creature's | permanent's controller".
-    ObjectController,
-}
-
-/// CR 608.2c: the subject of a trailing condition that names the controller of
-/// the instruction's declared object target.
-fn parse_target_controller_referent(input: &str) -> OracleResult<'_, TargetControllerReferent> {
-    alt((
-        value(
-            TargetControllerReferent::IntroducedOpponent,
-            tag("that opponent"),
-        ),
-        value(
-            TargetControllerReferent::ObjectController,
-            terminated(
-                alt((
-                    tag("its"),
-                    recognize((
-                        tag("that "),
-                        alt((tag("spell"), tag("creature"), tag("permanent"))),
-                        nom_condition::parse_apostrophe_s,
-                    )),
-                )),
-                tag(" controller"),
-            ),
-        ),
-    ))
-    .parse(input)
-}
-
 /// The single declared object target of an instruction, with the controller
 /// its own type phrase introduced ("… an opponent controls").
 struct DeclaredObjectTarget {
@@ -5229,111 +5222,64 @@ fn declared_single_object_target(
 /// instruction. "that opponent" refers back only to an opponent the target's
 /// type phrase introduced; "its controller" always names the target's
 /// controller.
-fn referent_is_bound(referent: TargetControllerReferent, target: &DeclaredObjectTarget) -> bool {
+fn referent_is_bound(
+    referent: nom_condition::TargetControllerReferent,
+    target: &DeclaredObjectTarget,
+) -> bool {
     match referent {
-        TargetControllerReferent::IntroducedOpponent => {
+        nom_condition::TargetControllerReferent::IntroducedOpponent => {
             target.introduced_controller == Some(ControllerRef::Opponent)
         }
-        TargetControllerReferent::ObjectController => true,
+        nom_condition::TargetControllerReferent::ObjectController => true,
     }
 }
 
-/// CR 109.4: the permanents the declared target's controller controls.
-fn target_controller_population(filter: TargetFilter) -> TargetFilter {
-    nom_condition::inject_controller(filter, ControllerRef::ParentTargetController)
+/// CR 608.2c: the shared target-controller grammar, parsed as a typed
+/// `StaticCondition`. `None` means the text is not this grammar at all; the
+/// antecedent guard belongs to the effect-side callers.
+fn parse_target_controller_control_condition_parts(
+    condition_text: &str,
+) -> Option<(nom_condition::TargetControllerReferent, StaticCondition)> {
+    let lower = condition_text.to_lowercase();
+    nom_parse_lower(&lower, |input| {
+        all_consuming(nom_condition::parse_target_controller_count_condition).parse(input)
+    })
 }
 
-/// A non-empty typed type phrase consuming the whole input ("creatures").
-fn parse_counted_type_phrase(input: &str) -> OracleResult<'_, TypedFilter> {
-    let (filter, rest) = parse_type_phrase_folding(input);
-    match filter {
-        TargetFilter::Typed(tf) if !tf.type_filters.is_empty() && rest.is_empty() => Ok((rest, tf)),
-        _ => Err(oracle_err(input)),
-    }
-}
-
-/// CR 608.2c + CR 608.2h + CR 109.4: a trailing condition comparing what the
-/// controller of the instruction's declared object target controls, checked
-/// as the instruction resolves:
-/// - "<subject> controls no [other] <type>" (Skulking Killer) → that player's
-///   count is zero; "other" excludes the target itself.
-/// - "you control more <type> than <subject>" (Unified Will) → your count
-///   exceeds that player's count.
-fn parse_target_controller_control_condition(
-    input: &str,
-) -> OracleResult<'_, (TargetControllerReferent, AbilityCondition)> {
-    alt((
-        parse_target_controller_controls_no,
-        parse_you_control_more_than_target_controller,
-    ))
-    .parse(input)
-}
-
-fn parse_target_controller_controls_no(
-    input: &str,
-) -> OracleResult<'_, (TargetControllerReferent, AbilityCondition)> {
-    let (rest, referent) =
-        terminated(parse_target_controller_referent, tag(" controls no ")).parse(input)?;
-    let (rest, other) = opt(value(
-        FilterProp::DistinctFrom {
-            reference: Box::new(TargetFilter::ParentTarget),
-        },
-        tag("other "),
-    ))
-    .parse(rest)?;
-    let (rest, mut tf) = parse_counted_type_phrase(rest)?;
-    tf.properties.extend(other);
-    let condition = AbilityCondition::QuantityCheck {
-        lhs: QuantityExpr::Ref {
-            qty: QuantityRef::ObjectCount {
-                filter: target_controller_population(TargetFilter::Typed(tf)),
-            },
-        },
-        comparator: Comparator::EQ,
-        rhs: QuantityExpr::Fixed { value: 0 },
-    };
-    Ok((rest, (referent, condition)))
-}
-
-fn parse_you_control_more_than_target_controller(
-    input: &str,
-) -> OracleResult<'_, (TargetControllerReferent, AbilityCondition)> {
-    let (rest, type_text) =
-        preceded(tag("you control more "), take_until(" than ")).parse(input)?;
-    let (rest, referent) = preceded(tag(" than "), parse_target_controller_referent).parse(rest)?;
-    let (_, tf) = all_consuming(parse_counted_type_phrase).parse(type_text)?;
-    let filter = TargetFilter::Typed(tf);
-    let condition = AbilityCondition::QuantityCheck {
-        lhs: QuantityExpr::Ref {
-            qty: QuantityRef::ObjectCount {
-                filter: inject_controller_you(filter.clone()),
-            },
-        },
-        comparator: Comparator::GT,
-        rhs: QuantityExpr::Ref {
-            qty: QuantityRef::ObjectCount {
-                filter: target_controller_population(filter),
-            },
-        },
-    };
-    Ok((rest, (referent, condition)))
+/// CR 608.2c: the shared target-controller grammar as a prefix, so a trailing
+/// connector ("… and <condition>") cannot smuggle the unbound referent past the
+/// guard by failing the whole-text parse.
+fn parse_target_controller_control_condition_prefix(
+    condition_text: &str,
+) -> Option<nom_condition::TargetControllerReferent> {
+    let lower = condition_text.to_lowercase();
+    nom_parse_lower(&lower, |input| {
+        nom_condition::parse_target_controller_count_condition(input)
+    })
+    .map(|(referent, _condition)| referent)
 }
 
 /// CR 608.2c: a trailing condition on the controller of the gated
 /// instruction's single declared object target, returned only when its
 /// subject has an antecedent in that instruction (Skulking Killer, Unified
 /// Will).
+///
+/// The grammar itself lives in the single condition authority,
+/// `oracle_nom::condition::parse_inner_condition`; this seam keeps only the
+/// effect-side antecedent guard and the typed bridge.
+#[cfg(test)]
 fn parse_target_controller_control_condition_text(
     condition_text: &str,
     effect_text: &str,
     ctx: &ParseContext,
 ) -> Option<AbilityCondition> {
-    let lower = condition_text.to_lowercase();
-    let (referent, condition) = nom_parse_lower(&lower, |input| {
-        all_consuming(parse_target_controller_control_condition).parse(input)
-    })?;
+    let (referent, condition) = parse_target_controller_control_condition_parts(condition_text)?;
     let target = declared_single_object_target(effect_text, ctx)?;
-    referent_is_bound(referent, &target).then_some(condition)
+    if !referent_is_bound(referent, &target) {
+        return None;
+    }
+    let mut bridge_ctx = ctx.clone();
+    static_condition_to_ability_condition(&condition, &mut bridge_ctx)
 }
 
 /// CR 601.2 + CR 608.2c: `parse_condition_text` for a clause in a known parse
@@ -11073,8 +11019,15 @@ mod tests {
         assert_eq!(cond, Some(expected));
     }
 
-    /// Combinator shape: the "its controller" subject with no "other" counts
-    /// every creature the target's controller controls.
+    /// Grammar-only discriminator for the optional `other` axis. The phrase is a
+    /// synthetic exception to the real-card test contract: the checked
+    /// AtomicCards corpus has no printed "controls no creatures" destroy-artifact
+    /// instruction of this shape, so this test isolates the combinator and makes
+    /// no printed-support claim. Skulking Killer is the nearest printed analogue
+    /// ("When this creature enters, target creature an opponent controls gets
+    /// -2/-2 until end of turn. That creature ... if that opponent controls no
+    /// other creatures"), which is why the shared grammar must keep `other`
+    /// optional rather than requiring the exclusion.
     #[test]
     fn its_controller_controls_no_condition_omits_distinct_from() {
         let (cond, text) = strip_suffix_conditional(
@@ -11091,41 +11044,142 @@ mod tests {
     }
 
     /// Fail-closed: the subject must have an antecedent in a single declared
-    /// object target. Each condition still parses as a combinator (reach
-    /// guard), but the full strip declines.
+    /// object target. Each condition still parses in the shared grammar (reach
+    /// guard), and each effect probe reaches the guard it is meant to exercise:
+    /// the creature row is a declared single object target with no introduced
+    /// opponent, the player row is player-scoped, and the multi-target row
+    /// carries `multi_target`. Only then does the full strip decline.
     #[test]
     fn target_controller_control_condition_declines_without_antecedent() {
         let ctx = ParseContext {
             in_trigger: true,
             ..Default::default()
         };
+
+        // Single declared object target, no opponent introduced by its own type
+        // phrase: the probe resolves and the antecedent guard is what declines.
+        let effect = "Target creature gets -2/-2 until end of turn";
+        let probe = probe_effect_target(effect, &ctx).expect("creature effect probe");
+        assert!(is_declared_target_filter(&probe.filter));
+        assert!(probe.multi_target.is_none());
+        let target =
+            declared_single_object_target(effect, &ctx).expect("a single declared object target");
+        assert_eq!(target.introduced_controller, None);
+        let condition = "that opponent controls no other creatures";
+        assert!(
+            nom_condition::parse_target_controller_count_condition(condition).is_ok(),
+            "reach guard: {condition}"
+        );
+        assert_eq!(
+            parse_target_controller_control_condition_text(condition, effect, &ctx),
+            None,
+            "{effect} if {condition}"
+        );
+
+        // Player target: the probe resolves to a player scope, not an object.
+        let effect = "Target opponent loses 2 life";
+        let probe = probe_effect_target(effect, &ctx).expect("player effect probe");
+        assert!(crate::parser::oracle_effect::is_player_scoped_filter(
+            &probe.filter
+        ));
+        let condition = "that opponent controls no creatures";
+        assert!(
+            nom_condition::parse_target_controller_count_condition(condition).is_ok(),
+            "reach guard: {condition}"
+        );
+        assert_eq!(
+            parse_target_controller_control_condition_text(condition, effect, &ctx),
+            None,
+            "{effect} if {condition}"
+        );
+
+        // Multi-target slot: the probe keeps its multi-target metadata, so no
+        // single target controller exists.
+        let effect = "Up to two target creatures an opponent controls get -2/-2 until end of turn";
+        let probe = probe_effect_target(effect, &ctx).expect("multi-target effect probe");
+        assert!(probe.multi_target.is_some());
+        let condition = "that opponent controls no other creatures";
+        assert!(
+            nom_condition::parse_target_controller_count_condition(condition).is_ok(),
+            "reach guard: {condition}"
+        );
+        assert_eq!(
+            parse_target_controller_control_condition_text(condition, effect, &ctx),
+            None,
+            "{effect} if {condition}"
+        );
+    }
+
+    /// CR 109.4 + CR 608.2c: a counted population that already carries a
+    /// controller must decline instead of having that qualifier overwritten by
+    /// the target-controller injection. Both arms are paired with their
+    /// unqualified positive.
+    #[test]
+    fn target_controller_count_declines_controller_qualified_population() {
+        for condition in [
+            "its controller controls no creatures you control",
+            "you control more creatures you control than its controller",
+        ] {
+            assert!(
+                nom_condition::parse_target_controller_count_condition(condition).is_err(),
+                "a controller-qualified population must decline: {condition}"
+            );
+        }
+        for condition in [
+            "its controller controls no creatures",
+            "you control more creatures than its controller",
+        ] {
+            assert!(
+                nom_condition::parse_target_controller_count_condition(condition).is_ok(),
+                "reach guard: {condition}"
+            );
+        }
+    }
+
+    /// CR 608.2c: the antecedent guard must hold at the full suffix-strip seam,
+    /// not only inside the helper. Without the early fail-closed return the
+    /// generic `parse_inner_condition` fall-through re-homes the same text
+    /// without an antecedent and emits an unbound `ParentTargetController` gate.
+    #[test]
+    fn target_controller_control_condition_full_strip_declines_without_antecedent() {
+        let mut ctx = ParseContext {
+            in_trigger: true,
+            ..Default::default()
+        };
         for (effect, condition) in [
-            // No opponent introduced by the target's type phrase.
             (
                 "Target creature gets -2/-2 until end of turn",
                 "that opponent controls no other creatures",
             ),
-            // A player target is not an object target.
             (
                 "Target opponent loses 2 life",
                 "that opponent controls no creatures",
             ),
-            // A multi-target slot has no single target controller.
             (
                 "Up to two target creatures an opponent controls get -2/-2 until end of turn",
                 "that opponent controls no other creatures",
             ),
+            // A trailing connector makes the whole-text parse fail; the prefix
+            // guard must still decline the unbound referent before the
+            // connective route can re-home it.
+            (
+                "Target opponent loses 2 life",
+                "you control more creatures than that spell's controller and you control a Swamp",
+            ),
         ] {
-            assert!(
-                parse_target_controller_control_condition(condition).is_ok(),
-                "reach guard: {condition}"
-            );
-            assert_eq!(
-                parse_target_controller_control_condition_text(condition, effect, &ctx),
-                None,
-                "{effect} if {condition}"
-            );
+            let text = format!("{effect} if {condition}");
+            let (cond, body) = strip_suffix_conditional(&text, &mut ctx);
+            assert_eq!(cond, None, "the full strip must decline: {text}");
+            assert_eq!(body, text, "the declined text must be unchanged");
         }
+
+        // The same conjunctive shape keeps parsing when the referent binds.
+        let (cond, body) = strip_suffix_conditional(
+            "Counter target spell if you control more creatures than that spell's controller and you control a Swamp",
+            &mut ctx,
+        );
+        assert!(cond.is_some(), "a bound conjunctive condition must parse");
+        assert_eq!(body, "Counter target spell");
     }
 
     /// CR 608.2d + CR 107.4 + CR 202.1: Omnath, Locus of All — "you may reveal
