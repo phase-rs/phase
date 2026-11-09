@@ -18,14 +18,22 @@ use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActionResult, GameState, ResolutionPaymentOrigin, ResolutionPaymentTransaction,
-    ResolutionPaymentTranscriptEntry, ResolvingTriggerContext,
+    ResolutionPaymentTranscriptEntry, ResolvingTriggerContext, WaitingFor,
 };
 use crate::types::log::GameLogEntry;
+use crate::types::player::PlayerId;
+use crate::types::proposed_event::ReplacementId;
 
 #[derive(Debug)]
 enum ReplayOutcome {
     Paused {
         shadow: GameState,
+        /// Events emitted by the accepted prefix. Discarded on an ordinary
+        /// re-materialization (the next replay regenerates them), but published
+        /// when an outside action turns this paused prefix into the committed
+        /// base (CR 614.17a + CR 118.12).
+        events: Vec<GameEvent>,
+        log_entries: Vec<GameLogEntry>,
     },
     Completed {
         shadow: GameState,
@@ -236,7 +244,11 @@ fn replay(
             log_entries: buffered_log_entries,
         })
     } else {
-        Ok(ReplayOutcome::Paused { shadow })
+        Ok(ReplayOutcome::Paused {
+            shadow,
+            events: buffered_events,
+            log_entries: buffered_log_entries,
+        })
     }
 }
 
@@ -454,10 +466,26 @@ fn settle_replay_outcome(
 /// the existing descriptor.
 pub(crate) fn settle_after_outside_action(
     state: &mut GameState,
+    pre_action: Option<&GameState>,
+    departing: PlayerId,
 ) -> Result<Option<ActionResult>, EngineError> {
     let Some(transaction) = state.payment_transaction.as_deref().cloned() else {
         return Ok(None);
     };
+    // CR 104.3a + CR 800.4a + CR 614.17a + CR 118.12: once a transcript answer
+    // was accepted, replaying the whole root on the departure-adjusted base
+    // would re-execute the accepted prefix under the departure's new
+    // prohibition — undoing a payment the player already chose. Re-materialize
+    // the accepted prefix on the pre-action base instead, mirror the departure
+    // there, and resume its outstanding cursor. Without a transcript the
+    // prefix is empty and the ordinary departure-adjusted replay is correct.
+    if let Some(pre_action) = pre_action.filter(|_| !transaction.transcript.is_empty()) {
+        if let Some(settled) =
+            settle_accepted_prefix_after_departure(state, pre_action, &transaction, departing)?
+        {
+            return Ok(Some(settled));
+        }
+    }
     let outcome = match replay(state, &transaction) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -468,12 +496,159 @@ pub(crate) fn settle_after_outside_action(
             return Ok(None);
         }
     };
-    if let ReplayOutcome::Paused { shadow } = &outcome {
+    if let ReplayOutcome::Paused { shadow, .. } = &outcome {
         if shadow.waiting_for == state.waiting_for {
             return Ok(None);
         }
     }
     settle_replay_outcome(state, transaction, outcome).map(Some)
+}
+
+/// CR 104.3a + CR 800.4a + CR 614.17a + CR 118.12: settle a staged payment whose
+/// accepted prefix would otherwise be re-executed on the departure-adjusted
+/// base. The prefix is re-materialized on the pre-action base, the departure is
+/// mirrored onto it, and an already-offered optional replacement whose event the
+/// departure made impossible is declined — the only legal answer left
+/// (CR 614.17c). A prefix that now reaches the base commits through the ordinary
+/// settlement, publishing its buffered events once; anything still paused falls
+/// back to the departure-adjusted replay.
+fn settle_accepted_prefix_after_departure(
+    state: &mut GameState,
+    pre_action: &GameState,
+    transaction: &ResolutionPaymentTransaction,
+    departing: PlayerId,
+) -> Result<Option<ActionResult>, EngineError> {
+    let Ok(ReplayOutcome::Paused {
+        mut shadow,
+        mut events,
+        mut log_entries,
+    }) = replay(pre_action, transaction)
+    else {
+        return Ok(None);
+    };
+    // CR 616.1 + CR 614.17c: remember whether the outstanding optional prompt's
+    // own candidate was applicable BEFORE the departure. Only a candidate the
+    // departure made inapplicable is declined; a prompt whose candidate list was
+    // never derived from live definitions (SearchFound, EmptyManaPool) keeps its
+    // real answer.
+    let outstanding = outstanding_optional_candidate(&shadow);
+    // CR 800.4a: the canonical departure already happened; mirror it on the
+    // re-materialized prefix so the outstanding cursor sees the same base. The
+    // mirrored departure's own events were published by the canonical action.
+    let mut mirrored_departure = Vec::new();
+    crate::game::elimination::concede(&mut shadow, departing, &mut mirrored_departure);
+    if let Some((actor, candidate)) = outstanding {
+        // A recovery that cannot settle the outstanding prompt falls back to the
+        // ordinary departure-adjusted replay instead of failing the concession
+        // itself: the concession is a separate, always-legal action.
+        restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
+        let declined = decline_made_impossible_replacement(
+            &mut shadow,
+            actor,
+            candidate,
+            &mut events,
+            &mut log_entries,
+        );
+        restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
+        match declined {
+            Ok(()) if !shadow.cost_payment_failed_flag => {}
+            Ok(()) => {
+                // The decline let the latched payment reach a part that failed.
+                // Let the ordinary departure-adjusted replay judge the abort
+                // instead of committing it as paid.
+                return Ok(None);
+            }
+            Err(error) => {
+                tracing::debug!(
+                    ?error,
+                    "a staged payment's accepted prefix no longer resumes after an outside action"
+                );
+                return Ok(None);
+            }
+        }
+    }
+    if !returned_to_base_waiting(&shadow, &transaction.base_waiting_for) {
+        return Ok(None);
+    }
+    settle_replay_outcome(
+        state,
+        transaction.clone(),
+        ReplayOutcome::Completed {
+            shadow,
+            events,
+            log_entries,
+        },
+    )
+    .map(Some)
+}
+
+/// CR 616.1: the chooser of the outstanding optional replacement prompt, when
+/// that prompt's frozen candidate was applicable on the pre-departure prefix.
+fn outstanding_optional_candidate(state: &GameState) -> Option<(PlayerId, ReplacementId)> {
+    if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+        return None;
+    }
+    let pending = state.pending_replacement.as_ref()?;
+    if !pending.is_optional || pending.candidates.is_empty() {
+        return None;
+    }
+    if !crate::game::replacement::find_applicable_replacements(
+        state,
+        &pending.proposed,
+        crate::game::replacement::replacement_registry(),
+    )
+    .contains(&pending.candidates[0])
+    {
+        return None;
+    }
+    let actor = state.waiting_for.acting_players().first().copied()?;
+    Some((actor, pending.candidates[0]))
+}
+
+/// CR 614.17c: an optional replacement offered for a parked event that the
+/// outside action made impossible cannot be accepted any more. Decline it
+/// through the ordinary recorded-action boundary so its events are scanned for
+/// triggers exactly like a live answer, and resume the continuation.
+fn decline_made_impossible_replacement(
+    state: &mut GameState,
+    actor: PlayerId,
+    expected_candidate: ReplacementId,
+    events: &mut Vec<GameEvent>,
+    log_entries: &mut Vec<GameLogEntry>,
+) -> Result<(), EngineError> {
+    if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+        return Ok(());
+    }
+    let Some(pending) = state.pending_replacement.as_ref() else {
+        return Ok(());
+    };
+    // The departure must not have replaced the prompt with a different question.
+    if !pending.is_optional || pending.candidates.first() != Some(&expected_candidate) {
+        return Ok(());
+    }
+    if !crate::game::replacement::find_applicable_replacements(
+        state,
+        &pending.proposed,
+        crate::game::replacement::replacement_registry(),
+    )
+    .is_empty()
+    {
+        return Ok(());
+    }
+    // Optional prompts expose accept at index 0 and decline at index 1.
+    state.payment_transaction_replay = true;
+    let result = crate::game::engine::apply_admitted_recorded_action(
+        state,
+        actor,
+        actor,
+        GameAction::ChooseReplacement { index: 1 },
+    );
+    state.payment_transaction_replay = false;
+    let result = result?;
+    events.extend(result.events);
+    log_entries.extend(result.log_entries);
+    state.waiting_for = result.waiting_for;
+    Ok(())
 }
 
 /// Materialize the public shadow used by viewer projections, client wires, and

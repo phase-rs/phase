@@ -30457,6 +30457,7 @@ impl GameState {
                 | PendingCostMoveResume::ActivationMillPayment { .. }
                 | PendingCostMoveResume::WardSacrificePayment { .. }
                 | PendingCostMoveResume::ReplacementMayCost { .. }
+                | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
                 | PendingCostMoveResume::Foretell { .. }
                 | PendingCostMoveResume::UnlessBouncePayment { .. }
                 | PendingCostMoveResume::LoyaltyActivation { .. }

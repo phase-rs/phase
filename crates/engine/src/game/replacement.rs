@@ -27,11 +27,11 @@ use super::filter::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     DrainStatus, GameState, LiminalEntry, LiminalEntryKind, NamedChoiceSource,
-    NamedChoiceSourceBinding, PayableResource, PendingReplacement, PostReplacementDrain,
-    ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey,
-    ReplacementAutoChoiceRecord, ReplacementAutoChoiceTail, ReplacementCandidateSummary,
-    ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy, ResolutionPaymentOrigin,
-    WaitingFor,
+    NamedChoiceSourceBinding, PayableResource, PendingCostMoveResume, PendingReplacement,
+    PostReplacementDrain, ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity,
+    ReplacementAutoChoiceKey, ReplacementAutoChoiceRecord, ReplacementAutoChoiceTail,
+    ReplacementCandidateSummary, ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy,
+    ResolutionPaymentOrigin, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
@@ -13744,7 +13744,6 @@ fn continue_replacement_impl(
                     // unchanged).
                     unrepresentable_life_change: reparked_unrepresentable_life_change,
                 };
-                use crate::types::game_state::PendingCostMoveResume;
                 match state.pending_cost_move_resume.as_mut() {
                     // CR 614.12a + CR 616.1: an inner cost move already owns
                     // `pending_replacement` for its Moved replacement choice.
@@ -14148,6 +14147,7 @@ mod tests {
     use super::*;
     use crate::game::effects::token::apply_create_token_after_replacement;
     use crate::game::game_object::{AttachTarget, GameObject};
+    use crate::game::scenario::{GameScenario, P0, P1};
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, CastManaObjectScope, CastManaSpentMetric,
         ChooseOneOfKind, ChosenAttribute, Comparator, ContinuousModification, ControllerRef,
@@ -27638,7 +27638,6 @@ mod tests {
     /// A board with P0's library staged and, optionally, a draw-restricting permanent under P1. Returns the
     /// state and the MayCost source.
     fn may_cost_draw_board(restriction: Option<(&str, &str)>) -> (GameState, ObjectId) {
-        use crate::game::scenario::{GameScenario, P0, P1};
         let mut scenario = GameScenario::new();
         scenario.with_library_top(P0, &["L1", "L2", "L3", "L4"]);
         let source = scenario.add_creature(P0, "May Cost Source", 1, 1).id();
@@ -27655,7 +27654,6 @@ mod tests {
     /// Revert probe: hardcoding `FreshChoice` into the `_` arm's authority call makes the latched row `Unpaid`.
     #[test]
     fn may_cost_draw_leg_is_refused_fresh_and_paid_latched() {
-        use crate::game::scenario::P0;
         // Reach guard: no restriction, the fresh leg pays and draws.
         let (mut state, source) = may_cost_draw_board(None);
         let hand_before = state.players[0].hand.len();
@@ -27714,7 +27712,6 @@ mod tests {
     /// Revert probe: dropping the `Composite` fresh gate lets leg 1 draw (hand +1).
     #[test]
     fn may_cost_composite_is_judged_whole_before_any_leg() {
-        use crate::game::scenario::P0;
         let two_draws = AbilityCost::Composite {
             costs: vec![may_cost_draw(1), may_cost_draw(1)],
         };

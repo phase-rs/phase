@@ -17,6 +17,7 @@ use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{AbilityCost, Effect, QuantityExpr, ResolvedAbility, TargetFilter};
 use engine::types::actions::GameAction;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -478,5 +479,140 @@ fn another_players_concession_does_not_unpay_a_three_leg_draw_cost() {
         pay_staged_draw_cost_around_a_concession(3, true),
         (0, 3, false),
         "every nested remainder stays latched"
+    );
+}
+
+/// CR 104.3a + CR 800.4a + CR 614.17a + CR 614.17c + CR 118.12: P0 already answered leg 1's Dredge
+/// prompt (declined it, so the first draw happened and leg 2 opened) when P2 concedes. Humility leaves
+/// with P2, so Maralen's can't-draw applies again for the outstanding leg. The accepted prefix must
+/// survive the outside action: the performed first draw is retained, no later draw is proposed and no
+/// Dredge is offered for it, the payment stays paid, the rider runs once, and the descriptor retires
+/// with the canonical and projected waits agreeing.
+///
+/// Revert probes: (A) replaying the whole root on the departure-adjusted base re-executes the accepted
+/// leg under the new prohibition, so the first draw is lost; (B) leaving the replay error in
+/// `settle_after_outside_action` keeps the stale descriptor and the pre-concession replacement prompt.
+#[test]
+fn a_concession_after_one_declined_replacement_keeps_the_performed_draw() {
+    let (mut runner, source) = concession_board();
+    let mut root = ResolvedAbility::new(pay_cost(draw_legs(2)), vec![], source, P0);
+    root.sub_ability = Some(Box::new(ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    )));
+    let life_before = runner.life(P0);
+    let (hand_before, library_before) = hand_and_library(&runner, P0);
+    let state = runner.state_mut();
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+
+    // Reach guard: Humility mutes Maralen, so the fresh gate admitted the choice and staged it.
+    assert!(state.payment_transaction.is_some(), "the payment is staged");
+    assert!(
+        is_dredge_prompt_for_p0(state),
+        "leg 1 raised its Dredge prompt"
+    );
+
+    // Accept the first draw by declining Dredge. The recorded answer opens leg 2's prompt.
+    apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+        .expect("declining leg 1's Dredge accepts the draw");
+    assert!(
+        is_dredge_prompt_for_p0(state),
+        "leg 2 raised its Dredge prompt"
+    );
+    assert_eq!(
+        state
+            .payment_transaction
+            .as_ref()
+            .expect("the descriptor survives the first answer")
+            .transcript
+            .len(),
+        1,
+        "the accepted answer is recorded"
+    );
+
+    // CR 104.3a: P2 leaves and takes Humility with them; Maralen applies again for the outstanding leg.
+    let concession = apply(
+        state,
+        PlayerId(2),
+        GameAction::Concede {
+            player_id: PlayerId(2),
+        },
+    )
+    .expect("a player can concede at any time");
+
+    let state = runner.state();
+    assert!(
+        state.payment_transaction.is_none(),
+        "the accepted prefix settles and the descriptor retires"
+    );
+    assert!(state.active_ability_continuation().is_none());
+    assert!(!is_dredge_prompt_for_p0(state), "no Dredge survives");
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
+    assert!(!state.cost_payment_failed_flag, "the payment stays paid");
+
+    let graveyard = &state.players[P0.0 as usize].graveyard;
+    assert_eq!(graveyard.len(), 1, "nothing was milled");
+    assert_eq!(
+        state.objects[&graveyard[0]].name, "Stinkweed Imp",
+        "the Imp was not returned"
+    );
+    let (hand_after, library_after) = hand_and_library(&runner, P0);
+    assert_eq!(
+        hand_after - hand_before,
+        1,
+        "the performed first draw is retained and the prohibited second draw is clamped"
+    );
+    assert_eq!(
+        library_after,
+        library_before - 1,
+        "only the performed draw left P0's library"
+    );
+    assert_eq!(runner.life(P0) - life_before, 3, "the rider ran once");
+
+    // The committed board is the departure-adjusted one, and the published
+    // events describe that same board: P2 is gone with Humility, and the prefix
+    // draw and rider each appear exactly once (CR 118.12 + CR 614.17a).
+    assert!(state.eliminated_players.contains(&PlayerId(2)));
+    assert!(
+        !state
+            .battlefield
+            .iter()
+            .any(|id| state.objects[id].name == "Humility"),
+        "the conceding player's Humility left the battlefield"
+    );
+    assert!(concession.events.iter().any(|event| matches!(
+        event,
+        GameEvent::PlayerEliminated { player_id } if *player_id == PlayerId(2)
+    )));
+    let p0_draws: u32 = concession
+        .events
+        .iter()
+        .map(|event| match event {
+            GameEvent::CardDrawn { player_id, .. } if *player_id == P0 => 1,
+            GameEvent::CardsDrawn { player_id, count } if *player_id == P0 => *count,
+            _ => 0,
+        })
+        .sum();
+    assert_eq!(
+        p0_draws, 1,
+        "the performed prefix draw is published exactly once"
+    );
+    assert_eq!(
+        concession
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::LifeChanged { player_id, amount, .. }
+                    if *player_id == P0 && *amount == 3
+            ))
+            .count(),
+        1,
+        "the rider's life gain is published exactly once"
     );
 }

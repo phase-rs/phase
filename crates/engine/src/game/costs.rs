@@ -45,9 +45,9 @@ use std::collections::HashSet;
 use crate::game::cost_payability::AbilityCostPayability;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
-    is_direct_resolution_optional_payment_branch, supported_at_resolution, AbilityCost, EffectKind,
-    PlayerScope, QuantityExpr, QuantityRef, TargetFilter, TurnUpCostSource, TypedFilter,
-    REMOVE_COUNTER_COST_ALL,
+    is_direct_resolution_optional_payment_branch, supported_at_resolution, AbilityCost, Effect,
+    EffectKind, PlayerScope, QuantityExpr, QuantityRef, TargetFilter, TurnUpCostSource,
+    TypedFilter, REMOVE_COUNTER_COST_ALL,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -3759,7 +3759,6 @@ fn accumulate_draw_leg_totals(
     frame: DrawLegFrame,
     totals: &mut Vec<(PlayerId, u32)>,
 ) {
-    use crate::types::ability::Effect;
     let effect = match cost {
         AbilityCost::Composite { costs } => {
             for leg in costs {
@@ -4213,11 +4212,12 @@ mod tests {
     use crate::game::scenario::GameScenario;
     use crate::types::ability::{
         BeholdCostAction, CardSelectionMode, CostObjectCount, DiscardSelfScope, Effect,
-        NinjutsuVariant, QuantityExpr, SacrificeCost, TapCreaturesRequirement,
-        TapCreaturesSelectionMode,
+        ManaContribution, ManaProduction, NinjutsuVariant, QuantityExpr, SacrificeCost,
+        TapCreaturesRequirement, TapCreaturesSelectionMode,
     };
     use crate::types::counter::{CounterMatch, CounterType};
-    use crate::types::mana::{ManaCost, ManaCostShard};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
+    use crate::types::player::PlayerCounterKind;
 
     const P0: PlayerId = PlayerId(0);
     const P1: PlayerId = PlayerId(1);
@@ -5264,7 +5264,6 @@ mod tests {
         TypedFilter,
     };
     use crate::types::statics::StaticMode;
-    use crate::types::ManaProduction;
 
     /// `QuantityExpr::Ref(ObjectCount(artifacts you control))`.
     fn artifacts_you_control() -> QuantityExpr {
@@ -6429,10 +6428,6 @@ mod tests {
     /// `LatchedSuffix` turns every Solemnity + latched row `Failed` with no red mana.
     #[test]
     fn a_latched_resume_completes_a_prevented_counter_event() {
-        use crate::types::ability::{ManaContribution, ManaProduction};
-        use crate::types::mana::{ManaColor, ManaType};
-        use crate::types::player::PlayerCounterKind;
-
         let probe_counter = CounterType::Generic("probe".to_string());
         let red_mana_leg = AbilityCost::EffectCost {
             effect: Box::new(Effect::Mana {

@@ -12594,11 +12594,21 @@ fn apply_action(
     // owned it (see `elimination::concede`), and queues what the departure triggered
     // (CR 603.6c), since no pipeline scans this action's events.
     if let GameAction::Concede { player_id } = action {
+        // CR 614.17a + CR 118.12: keep the pre-departure base so a staged
+        // payment's already-accepted prefix is not re-executed under the
+        // departure's new prohibitions (`settle_after_outside_action`).
+        let pre_action = state
+            .payment_transaction
+            .as_ref()
+            .is_some_and(|transaction| !transaction.transcript.is_empty())
+            .then(|| state.clone());
         let mut events = Vec::new();
         super::elimination::concede(state, player_id, &mut events);
         // CR 800.4a + CR 118.12: a surviving staged payment re-materializes on
         // the base the departure changed (`settle_after_outside_action`).
-        if let Some(settled) = payment_transaction::settle_after_outside_action(state)? {
+        if let Some(settled) =
+            payment_transaction::settle_after_outside_action(state, pre_action.as_ref(), player_id)?
+        {
             events.extend(settled.events);
             return Ok(ActionResult::applied(events, state.waiting_for.clone())
                 .with_log_entries(settled.log_entries));

@@ -3447,6 +3447,7 @@ fn an_exile_may_cost_entry_finishes_before_the_effects_next_instruction() {
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
             enters_modified_if: None,
+            library_shuffle: Default::default(),
         },
         vec![],
         ObjectId(9000),
