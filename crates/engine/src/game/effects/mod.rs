@@ -23090,6 +23090,9 @@ fn resolve_chain_body(
             // The resolver would discard the cards it has (`count = min(num,
             // eligible)`) and run the "If you do" rider on a cost never paid in full.
             | Effect::Discard { .. }
+            // CR 701.68b + CR 118.12: a blight the player can't choose is a declined
+            // option, so a nested blight can't inherit an earlier accepted "you may".
+            | Effect::BlightEffect { .. }
     );
     if optional_is_infeasible && auto_decline_infeasible_optional {
         return resolve_optional_effect_decision_step(

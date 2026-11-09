@@ -632,6 +632,39 @@ fn scuzzback_scrounger_that_cannot_blight_makes_no_treasure() {
     assert!(tokens(&unable).is_empty(), "no blight, no Treasure");
 }
 
+/// CR 701.68b + CR 118.12: a blight nested under another accepted "you may"
+/// still can't be chosen when no creature can take the counter, so its own
+/// "If you do" stays closed. No printed card nests an optional blight this way
+/// (every printed optional blight starts its ability, as Scuzzback Scrounger's
+/// does), so this line is synthetic. It guards the inherited "performed" flag
+/// from the accepted draw.
+#[test]
+fn nested_blight_that_cannot_happen_keeps_its_rider_closed() {
+    const NESTED_ORACLE: &str = "At the beginning of your first main phase, you may draw a card. \
+If you do, you may blight 1. If you do, create a Treasure token.";
+    let (mut runner, _) = board(Phase::Upkeep, |scenario, _| {
+        scenario
+            .add_artifact_from_oracle(P0, "Nested Blight Test Artifact", NESTED_ORACLE)
+            .id()
+    });
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach-guard: the first-main trigger is on the stack"
+    );
+    both_pass(&mut runner);
+    // The draw is the only choice: no creature is on the battlefield, so the
+    // nested blight is never offered.
+    decide(&mut runner, true);
+
+    assert_settled(&runner);
+    assert!(
+        tokens(&runner).is_empty(),
+        "the blight never happened, so its rider makes no Treasure"
+    );
+}
+
 /// CR 603.12: Warren Torchmaster reads "you may blight 1. When you do, target
 /// creature gains haste until end of turn." The paired board is the same line
 /// with the blight available.
