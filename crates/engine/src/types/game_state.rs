@@ -34607,6 +34607,11 @@ impl GameState {
     /// CR 605.3b: Begin the distinct, immediate execution node for one
     /// activated mana ability. A nested activation records its active parent as
     /// the causal dependency without changing activation behavior.
+    ///
+    /// This is the LIVE-announcement form: it names the object standing at
+    /// `source_id` now, which is the right answer at the moment an ability is
+    /// announced. A parked activation being RESUMED cannot use it — see
+    /// [`Self::begin_activated_mana_journal_node_for_source`].
     pub(crate) fn begin_activated_mana_journal_node(
         &mut self,
         source_id: ObjectId,
@@ -34616,6 +34621,22 @@ impl GameState {
             .get(&source_id)
             .map(ObjectIncarnationRef::from_object)
             .expect("mana ability activation source must exist");
+        self.begin_activated_mana_journal_node_for_source(source)
+    }
+
+    /// CR 605.3b + CR 400.7: Begin the execution node for one activated mana
+    /// ability from an EXPLICIT `(object, incarnation)` identity.
+    ///
+    /// A mana ability's cost is paid after it is announced (CR 602.2b routes it
+    /// through CR 601.2h), and a self-sacrificing or self-exiling cost moves the
+    /// source, so by the time a parked activation resumes, `source_id` names a
+    /// DIFFERENT object than the one that generated the ability (CR 400.7). The
+    /// node this function opens names the epoch the caller resolved, so the
+    /// journal's production record and the mana it produces describe one object.
+    pub(crate) fn begin_activated_mana_journal_node_for_source(
+        &mut self,
+        source: ObjectIncarnationRef,
+    ) -> RulesExecutionNodeRef {
         let parent = self.live_active_rules_execution_node();
         self.resolved_rules_journal
             .begin_activated_mana(source, parent)

@@ -25,6 +25,7 @@ use crate::types::mana::{ManaColor, ManaCost, ManaPool, ManaType, PaymentContext
 #[cfg(test)]
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
+use crate::types::resolved_commands::RulesExecutionNodeRef;
 use crate::types::statics::StaticModeKind;
 use crate::types::zones::Zone;
 use std::collections::HashSet;
@@ -1375,6 +1376,113 @@ pub(crate) fn mana_choice_prompt(
     }
 }
 
+/// CR 106.3 + CR 113.7 + CR 400.7 + CR 605.3b: the ONE producer identity a
+/// parked mana activation resumes under.
+///
+/// A mana ability resolves inline, but its cost is paid after it is announced
+/// (CR 602.2b routes the cost through CR 601.2h), so a self-sacrificing or
+/// self-exiling cost moves the source before the activation finishes. By the time
+/// a colour choice or a paused cost leg resumes, `source_id` names the moved
+/// object (CR 400.7), while CR 106.3 + CR 113.7 make the mana's producer the
+/// object that GENERATED the ability.
+///
+/// Two records can carry that epoch, and which of them a save holds depends on
+/// when the save was written — the activation's execution node
+/// (`PendingManaAbility::rules_execution_node`, whose mana node names the source
+/// as an [`ObjectIncarnationRef`]) and the announcement epoch
+/// (`PendingManaAbility::announced_source_incarnation`). They are two statements
+/// about ONE activation, so resolving them independently is exactly how the two
+/// writers could disagree: a node-only save produced from the moved object while
+/// the journal recorded the original one, and an announcement-only save stamped
+/// the pip with the announcement while the re-opened node named the moved object.
+/// Either way the save the activation then wrote was one its own next load refuses
+/// with `PersistedRestoreError::ContradictoryFloatingManaProvenance`.
+///
+/// This function is the single authority. It answers the epoch AND the node that
+/// must be used with it, ONCE, so both writers consume one value: the pip's
+/// recorded producer (what [`produce_mana_from_ability`] stamps on the unit) and
+/// the journal's production record (the node the activation runs under).
+///
+/// Resolution:
+/// * the node resolves to a source carrying THIS activation's storage id → that
+///   epoch is exact, and the node itself is reused when the journal still holds
+///   it;
+/// * the announcement epoch is exact by construction (captured before any cost);
+/// * both present must agree — two epochs for one activation is a save
+///   contradicting itself, and neither side is preferred;
+/// * neither present: an activation this engine built names its producer twice,
+///   so a save carrying neither field predates both and proves nothing — refusing
+///   is the only answer that does not price the mana from the live occupant of the
+///   storage id. A pending carrying no announcement snapshot at all was not built
+///   by the activation entry (a direct prompt/production call on a live state, not
+///   a resume of a saved one), so it resolves from the live object and BOTH writers
+///   then use that one value.
+struct ParkedActivationProducer {
+    /// The producing epoch every fact written for this activation is stamped with.
+    source: ObjectIncarnationRef,
+    /// The execution node the activation's facts are attributed to.
+    node: RulesExecutionNodeRef,
+}
+
+fn resolve_parked_activation_producer(
+    state: &mut GameState,
+    pending: &PendingManaAbility,
+) -> Result<ParkedActivationProducer, EngineError> {
+    // CR 113.7: the node names the object that generated the ability — the exact
+    // epoch, and the half of the evidence that predates
+    // `announced_source_incarnation`. A node naming another object, or one the
+    // journal no longer retains, proves nothing about this activation.
+    let recorded_source = pending.rules_execution_node.and_then(|node| {
+        state
+            .resolved_rules_journal
+            .node_source_epoch(node)
+            .filter(|source| source.object_id == pending.source_id)
+    });
+    let usable_node = pending
+        .rules_execution_node
+        .filter(|node| state.resolved_rules_journal.contains_node(*node));
+    let announced = pending.announced_source_incarnation;
+
+    let source = match (recorded_source, announced) {
+        (Some(recorded), Some(announced)) if recorded.incarnation != announced => {
+            return Err(EngineError::InvalidAction(format!(
+                "Parked mana activation for {:?} contradicts itself: its execution node names \
+                 incarnation {} and its announcement epoch names {announced}",
+                pending.source_id, recorded.incarnation
+            )));
+        }
+        (Some(recorded), _) => recorded,
+        (None, Some(announced)) => ObjectIncarnationRef::of(pending.source_id, announced),
+        // CR 400.7: an activation this engine built names its producer twice, so a
+        // save carrying neither field predates both and proves nothing. Refusing is
+        // the only answer that does not price the mana from the live occupant of the
+        // storage id. A pending with no announcement snapshot at all was not built
+        // by the activation entry — it is a direct prompt/production call on a live
+        // state, not a resume of a saved one — so the live object IS the announcement
+        // there, and both writers use that one resolved value.
+        (None, None) if pending.ability_snapshot.is_some() => {
+            return Err(EngineError::InvalidAction(format!(
+                "Parked mana activation for {:?} names no producer epoch; refusing to price its \
+                 mana from whatever object holds that storage id now (CR 400.7)",
+                pending.source_id
+            )));
+        }
+        (None, None) => mana_payment::live_source_incarnation(state, pending.source_id)
+            .map(|incarnation| ObjectIncarnationRef::of(pending.source_id, incarnation))
+            .ok_or_else(|| {
+                EngineError::InvalidAction("Mana ability source no longer exists".to_string())
+            })?,
+    };
+
+    // CR 605.3b: reuse the activation's own node when the journal still retains
+    // it; otherwise open one that names the resolved epoch, never the live object.
+    let node = match usable_node {
+        Some(node) if recorded_source.is_some() => node,
+        _ => state.begin_activated_mana_journal_node_for_source(source),
+    };
+    Ok(ParkedActivationProducer { source, node })
+}
+
 /// CR 605.3b: Complete the mana color/combination choice. Cost was already
 /// paid before the prompt (either in `activate_mana_ability` or
 /// `handle_tap_creatures_for_mana_ability`), so this only produces mana.
@@ -1423,14 +1531,14 @@ pub fn handle_choose_mana_color(
     // activation event used before the prompt.
     let ability_def = mana_ability_definition(state, pending)?;
 
-    let node = pending
-        .rules_execution_node
-        .unwrap_or_else(|| state.begin_activated_mana_journal_node(pending.source_id));
+    // CR 106.3 + CR 113.7 + CR 400.7: resolve the activation's surviving producer
+    // evidence ONCE, here, and run the journal and production under that one value.
+    let producer = resolve_parked_activation_producer(state, pending)?;
     // CR 605.4a: the choice action's own live-collection start. The already-paid
     // cost range was collected by the frame that returned this prompt; this
     // action owns only what production/completion emits from here.
     let choice_action_start = events.len();
-    state.with_rules_execution_node(node, |state| {
+    state.with_rules_execution_node(producer.node, |state| {
         produce_mana_from_ability(
             state,
             pending.source_id,
@@ -1440,7 +1548,7 @@ pub fn handle_choose_mana_color(
             Some(override_value),
             pending.chosen_x,
             pending.cost_paid_object.clone(),
-            pending.announced_source_incarnation,
+            Some(producer.source.incarnation),
             pending.cost_removed_counters,
         );
         complete_mana_ability_activation(
@@ -4312,15 +4420,19 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
 
 fn continue_mana_ability_cost_payment(
     state: &mut GameState,
-    pending: PendingManaAbility,
+    mut pending: PendingManaAbility,
     cursor: ManaAbilityCostCursor,
     events: &mut Vec<GameEvent>,
     cost_event_start: usize,
 ) -> Result<WaitingFor, EngineError> {
-    let node = pending
-        .rules_execution_node
-        .unwrap_or_else(|| state.begin_activated_mana_journal_node(pending.source_id));
-    state.with_rules_execution_node(node, |state| {
+    // CR 106.3 + CR 113.7 + CR 400.7: the other half of the shared resume
+    // boundary. Resolve the activation's surviving producer evidence ONCE, bind it
+    // onto the pending so every later stage of this activation — the colour prompt,
+    // production, the activation's own sub-chain — reads the same value, and run
+    // the whole cost walk under the node that names it.
+    let producer = resolve_parked_activation_producer(state, &pending)?;
+    pending.announced_source_incarnation = Some(producer.source.incarnation);
+    state.with_rules_execution_node(producer.node, |state| {
         continue_mana_ability_cost_payment_in_node(state, pending, cursor, events, cost_event_start)
     })
 }

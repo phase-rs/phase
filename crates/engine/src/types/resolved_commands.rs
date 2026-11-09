@@ -2466,10 +2466,29 @@ impl ResolvedRulesJournal {
     /// answers nothing rather than guessing one.
     pub fn produced_source_epoch(&self, pip: ManaPipId) -> Option<ObjectIncarnationRef> {
         let position = *self.index.produced.get(&pip)?;
-        let node = self
-            .node_index(self.produced_mana[position].producer)
-            .ok()?;
-        match &self.nodes[node].kind {
+        self.node_source_epoch(self.produced_mana[position].producer)
+    }
+
+    /// CR 113.7 + CR 400.7: the exact object epoch `node` names as the source of
+    /// the mana ability it settles — for an activated mana node the epoch the
+    /// ability was activated against, and for a triggered mana node the trigger's
+    /// own latched source (CR 603.2).
+    ///
+    /// This is the JOURNAL-side half of one activation's producer identity, and it
+    /// is exactly what [`Self::produced_source_epoch`] reads for a produced unit.
+    /// It is also what a PARKED activation carries when its save retains the node
+    /// but predates `PendingManaAbility::announced_source_incarnation`: the node
+    /// names the object that generated the ability, so a resume that reads it here
+    /// does not have to re-derive the producer from whatever occupies the storage
+    /// id now (CR 400.7), which is what made the node and the pip's stamp disagree
+    /// in the first place.
+    ///
+    /// A node that is not a mana node (a proposal, a payment, a player leave) names
+    /// no source, and an unknown node names nothing at all: both answer `None`
+    /// rather than guessing one.
+    pub fn node_source_epoch(&self, node: RulesExecutionNodeRef) -> Option<ObjectIncarnationRef> {
+        let position = self.node_index(node).ok()?;
+        match &self.nodes[position].kind {
             RulesExecutionNodeKind::ActivatedMana { source }
             | RulesExecutionNodeKind::TriggeredMana { source, .. } => Some(*source),
             _ => None,

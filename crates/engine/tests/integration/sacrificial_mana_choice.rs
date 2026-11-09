@@ -7,7 +7,8 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
-    CastPaymentMode, ManaChoice, ManaChoicePrompt, PayCostKind, WaitingFor,
+    CastPaymentMode, GameState, ManaChoice, ManaChoicePrompt, PayCostKind, PersistedGameState,
+    WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{
@@ -807,4 +808,263 @@ fn stale_sacrificial_mana_selection_is_rejected_without_mutating_payment() {
     assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
     assert_eq!(runner.state().objects[&source].controller, PlayerId(1));
     assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// CR 106.3 + CR 113.7 + CR 400.7 + CR 605.3b: ONE producer identity for a
+// parked activation — the journal's production record and the mana the colour
+// choice produces are stamped from the same resolved value.
+// ---------------------------------------------------------------------------
+
+/// The persisted JSON a save of `state` produces.
+fn persisted_json(state: &GameState) -> serde_json::Value {
+    serde_json::to_value(PersistedGameState::capture(state.clone())).expect("the save serializes")
+}
+
+/// Decode a save through the engine's own restore chokepoint, keeping the
+/// failure as a value: a save the engine wrote must decode AND be admitted, so a
+/// witness that only checked admission would miss a save its own journal rejects
+/// at the decoder.
+fn admitted(json: serde_json::Value) -> Result<GameState, String> {
+    let persisted = serde_json::from_value::<PersistedGameState>(json)
+        .map_err(|error| format!("the save must decode: {error}"))?;
+    persisted
+        .into_game_state()
+        .map_err(|error| format!("the save must be admitted: {error:?}"))
+}
+
+/// The parked activation's `PendingManaAbility`, exactly as the save wrote it.
+fn saved_pending_mut(
+    json: &mut serde_json::Value,
+) -> &mut serde_json::Map<String, serde_json::Value> {
+    json.get_mut("state")
+        .and_then(|state| state.get_mut("waiting_for"))
+        .and_then(|waiting| waiting.get_mut("data"))
+        .and_then(|waiting| waiting.get_mut("context"))
+        .and_then(|context| context.get_mut("data"))
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("the parked colour choice carries its pending mana ability")
+}
+
+/// Real Lotus Petal parked at its post-sacrifice colour prompt: the `{T},
+/// Sacrifice` cost is paid, the artifact is a graveyard card (CR 400.7 makes
+/// that a new object at the same storage id), and the activation waits on its
+/// colour. Returns the announcement epoch — the incarnation of the object that
+/// generated the ability.
+fn petal_at_the_colour_prompt() -> (GameRunner, ObjectId, u64) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = generic_spell(&mut scenario);
+    let petal = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Lotus Petal",
+            "{T}, Sacrifice this artifact: Add one mana of any color.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    let announced = runner.state().objects[&petal].incarnation;
+    begin_sacrificial_payment(&mut runner, spell);
+    let selection = offered_selection(&runner, petal);
+    runner
+        .act(GameAction::ActivateManaSource { selection })
+        .expect("the real Petal activates");
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::ChooseManaColor {
+                choice: ManaChoicePrompt::SingleColor { options },
+                ..
+            } if options.contains(&ManaType::Blue)
+        ),
+        "the sacrificed Petal parks at its colour prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.state().objects[&petal].zone, Zone::Graveyard);
+    assert_ne!(
+        runner.state().objects[&petal].incarnation,
+        announced,
+        "CR 400.7: the graveyard card is a new object, so a live read names the wrong one"
+    );
+    (runner, petal, announced)
+}
+
+/// The pool's single blue pip: the producer epoch stamped on the unit, and the
+/// epoch the journal's own production record for that pip names.
+fn blue_pip_producer_epochs(state: &GameState) -> (Option<u64>, Option<u64>) {
+    let units: Vec<_> = state.players[P0.0 as usize]
+        .mana_pool
+        .units()
+        .filter(|unit| unit.color == ManaType::Blue)
+        .collect();
+    assert_eq!(units.len(), 1, "the choice produced exactly one blue mana");
+    let unit = &units[0];
+    let from_node = state
+        .resolved_rules_journal
+        .produced_source_epoch(unit.pip_id)
+        .map(|source| {
+            assert_eq!(
+                source.object_id, unit.source_id,
+                "the journal's production record belongs to this pip's source"
+            );
+            source.incarnation
+        });
+    (unit.source_incarnation, from_node)
+}
+
+/// Answer the parked colour prompt. What the answer WROTE is asserted separately,
+/// so a witness that fails on the second load shows the refusal itself.
+fn choose_blue(mut runner: GameRunner) -> GameRunner {
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Blue),
+            count: 1,
+        })
+        .expect("the restored activation's colour choice produces its mana");
+    runner
+}
+
+/// Both records of the floating pip must name `announced` — the ONE value the
+/// resume boundary resolves, consumed by the pip's stamp and by the journal's
+/// production record alike.
+fn assert_one_producer(state: &GameState, announced: u64, when: &str) {
+    let (pinned, from_node) = blue_pip_producer_epochs(state);
+    assert_eq!(
+        pinned,
+        Some(announced),
+        "{when}: CR 106.3 + CR 113.7: the pip's producer is the object that generated the ability"
+    );
+    assert_eq!(
+        from_node,
+        Some(announced),
+        "{when}: CR 400.7: the journal's production record names the same producer"
+    );
+}
+
+/// CR 106.3 + CR 400.7: the July-22 save shape — `rules_execution_node` survived
+/// (commit `d247cee56b8`), `announced_source_incarnation` did not (it arrived in
+/// `ba8d407ddaf`). The restored activation must produce its mana from the object
+/// that generated the ability, record the SAME epoch beside it in the journal,
+/// and then survive a second save/restore.
+#[test]
+fn node_only_petal_prompt_round_trips_twice_with_one_producer_identity() {
+    let (runner, petal, announced) = petal_at_the_colour_prompt();
+    let mut json = persisted_json(runner.state());
+    let pending = saved_pending_mut(&mut json);
+    assert!(
+        pending.contains_key("rules_execution_node"),
+        "reach-guard: the historical save carries the activation's execution node"
+    );
+    assert!(
+        pending.remove("announced_source_incarnation").is_some(),
+        "reach-guard: the historical save carries no announcement epoch"
+    );
+
+    let runner = GameRunner::from_state(admitted(json).expect("the historical save restores"));
+    let runner = choose_blue(runner);
+    assert_one_producer(runner.state(), announced, "the restored activation wrote");
+    let state = admitted(persisted_json(runner.state())).unwrap_or_else(|error| {
+        panic!("the save written after the colour choice must restore again: {error}")
+    });
+    assert_one_producer(&state, announced, "the second load read");
+    assert_eq!(state.objects[&petal].zone, Zone::Graveyard);
+    assert_ne!(
+        state.objects[&petal].incarnation, announced,
+        "CR 400.7: the graveyard card that holds the id now is not the producer"
+    );
+}
+
+/// CR 106.3 + CR 400.7: the converse save shape — the announcement epoch
+/// survived but `rules_execution_node` did not. The resumed activation must not
+/// re-open a node naming the live object at the storage id: that record would
+/// disagree with the epoch production stamps, and the next load would reject the
+/// save.
+#[test]
+fn announcement_only_petal_prompt_round_trips_twice_with_one_producer_identity() {
+    let (runner, petal, announced) = petal_at_the_colour_prompt();
+    let mut json = persisted_json(runner.state());
+    let pending = saved_pending_mut(&mut json);
+    assert_eq!(
+        pending.get("announced_source_incarnation"),
+        Some(&serde_json::json!(announced)),
+        "reach-guard: the converse save carries the announcement epoch"
+    );
+    assert!(
+        pending.remove("rules_execution_node").is_some(),
+        "reach-guard: the converse save carries no execution node"
+    );
+
+    let runner = GameRunner::from_state(admitted(json).expect("the converse save restores"));
+    let runner = choose_blue(runner);
+    assert_one_producer(runner.state(), announced, "the resumed activation wrote");
+    let state = admitted(persisted_json(runner.state())).unwrap_or_else(|error| {
+        panic!("the save written after the colour choice must restore again: {error}")
+    });
+    assert_one_producer(&state, announced, "the second load read");
+    assert_eq!(state.objects[&petal].zone, Zone::Graveyard);
+    assert_ne!(
+        state.objects[&petal].incarnation, announced,
+        "CR 400.7: the graveyard card that holds the id now is not the producer"
+    );
+}
+
+/// The intact control: a save carrying BOTH fields still restores and pays
+/// exactly as it did before this change.
+#[test]
+fn intact_petal_prompt_restores_and_pays_from_the_announcement_epoch() {
+    let (runner, petal, announced) = petal_at_the_colour_prompt();
+    let mut json = persisted_json(runner.state());
+    let pending = saved_pending_mut(&mut json);
+    assert!(
+        pending.contains_key("rules_execution_node"),
+        "the intact save carries the execution node"
+    );
+    assert_eq!(
+        pending.get("announced_source_incarnation"),
+        Some(&serde_json::json!(announced)),
+        "the intact save carries the announcement epoch"
+    );
+
+    let runner = GameRunner::from_state(admitted(json).expect("the intact save restores"));
+    let mut runner = choose_blue(runner);
+    assert_one_producer(runner.state(), announced, "the restored activation wrote");
+    let state = admitted(persisted_json(runner.state())).expect("the second load restores");
+    assert_one_producer(&state, announced, "the second load read");
+
+    // CR 601.2h + CR 605.3: the control still finishes the cast it was funding.
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the chosen mana pays the spell");
+    assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 0);
+    assert_eq!(runner.state().objects[&petal].zone, Zone::Graveyard);
+}
+
+/// CR 106.3 + CR 400.7: a pending activation that names NO producer evidence at
+/// all — neither the execution node nor the announcement epoch — is refused
+/// rather than priced from whatever occupies the storage id now.
+#[test]
+fn petal_prompt_with_no_producer_evidence_is_refused() {
+    let (runner, petal, announced) = petal_at_the_colour_prompt();
+    let mut json = persisted_json(runner.state());
+    let pending = saved_pending_mut(&mut json);
+    assert!(pending.remove("rules_execution_node").is_some());
+    assert!(pending.remove("announced_source_incarnation").is_some());
+
+    let mut runner = GameRunner::from_state(admitted(json).expect("the stripped save restores"));
+    assert!(
+        runner
+            .act(GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Blue),
+                count: 1,
+            })
+            .is_err(),
+        "a producer that no surviving record names must be refused, not guessed"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].mana_pool.total(),
+        0,
+        "the refusal produces no mana"
+    );
+    assert_eq!(runner.state().objects[&petal].zone, Zone::Graveyard);
+    assert_ne!(runner.state().objects[&petal].incarnation, announced);
 }
