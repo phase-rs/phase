@@ -3304,7 +3304,6 @@ fn bounded_offer_tail(
     // handed here may EXCEED the engine's repetition budget, since nothing above clamps them; the
     // constructor is the single site that applies that budget, and it narrows the suggestion to
     // the capacity it derives, so `deliverable_capacity >= iteration_count` survives the clamp.
-    // Every published count is `EliminationCascade::survived_count`'s, clamped to that capacity.
     let mut schema = build_shortcut_schema_within(
         points,
         IterationCount::Fixed(measured_bound),

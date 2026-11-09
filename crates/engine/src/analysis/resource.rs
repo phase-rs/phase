@@ -2874,9 +2874,9 @@ impl PredictedDeparture {
     }
 }
 
-/// CR 732.2a + CR 704.5a / CR 704.5b / CR 704.5c: the most of `count` repetitions `holder`
-/// survives, because the USER rule is never to suggest a count that eliminates the proposer, and
-/// only the last entry is read because a count stops at the holder's crossing.
+/// CR 732.2a: the most of `count` repetitions `holder` survives, so a suggested count never
+/// eliminates the proposer; only the last entry is read because a count stops at the holder's
+/// crossing.
 pub(crate) fn survived_repetitions(
     count: u32,
     departures: &[PredictedDeparture],
@@ -2921,8 +2921,8 @@ pub(crate) struct EliminationCascade {
 }
 
 impl EliminationCascade {
-    /// CR 104.2a + CR 704.5a / CR 704.5b / CR 704.5c: the most repetitions `proposer` survives,
-    /// within `capacity` — the sole producer of every count a bounded offer publishes.
+    /// CR 704.5a / CR 704.5b / CR 704.5c: the most repetitions `proposer` survives, within
+    /// `capacity`.
     pub(crate) fn survived_count(&self, proposer: PlayerId, capacity: u32) -> u32 {
         survived_repetitions(self.count, &self.entries, proposer).min(capacity)
     }
