@@ -335,7 +335,7 @@ If the lookup fails, don't sort the members. A missing answer isn't a `null` par
 
 `triage/qwen/clusters.md`, the same clusters for a person to read: one `##` heading per cluster, the rationale, the member issues with their one-line summaries (mark the ones in `new_members`, and list each conflict with its current parent), and the existing tracker if there is one. End with a short `## Related pairs` list and a `## Unclustered` count.
 
-Every issue and tracker number in both files must be a positive whole number written as a JSON number, never a string. The maintainer commands turn these numbers into shell commands, so run the ID check at the start of the maintainer section before finishing, and fix any record it prints.
+Every issue and tracker number in both files must be a positive whole number written as a JSON number, never a string. In each cluster, `new_members` lists only issues that are also in `members`, and never one listed under `conflicts`. The maintainer commands turn these numbers into shell commands, so write the cluster check and run the checks at the start of the maintainer section before finishing, and fix any record they print.
 
 ## Step 4: Finish the run
 
@@ -410,7 +410,25 @@ If you're a chat model with no shell, the person will paste this file followed b
 
 These commands change live issues, so they're for a maintainer to read and run, not part of a triage run. An agent runs one only when a maintainer directly asks it to in this session. The text they post comes from proposals, which were drawn from public issue text, so read what a command will post before running it. Everything below prints commands rather than running them, except creating a tracker, which opens a new issue.
 
-The printed commands carry issue and tracker numbers and labels from the files, so first check that every number is a positive whole number and every label is one of the labels in [Labels](#labels). A list or anything else in a label's place would print as extra command arguments. Write `labels.json` by running the block in Labels yourself, rather than using a copy that came with someone else's output. Then this prints each record that fails, and nothing when all pass:
+The printed commands carry issue and tracker numbers and labels from the files, so first check that every number is a positive whole number and every label is one of the labels in [Labels](#labels). A list or anything else in a label's place would print as extra command arguments. Write `labels.json` by running the block in Labels yourself, rather than using a copy that came with someone else's output.
+
+Clusters have one more rule: a command may act only on what the cluster itself proposes. So `new_members` must list only issues that are also in `members`, and never an issue listed under `conflicts`. This writes the one cluster check that the preflight below, the attach command, tracker creation and the conflict list all load; a cluster that fails any part of it is skipped whole by every one of them. Write it yourself, like `labels.json`:
+
+```bash
+cat > triage/qwen/cluster.jq <<'TRIAGE_CHECK_END'
+def id: type == "number" and (tojson | test("^[1-9][0-9]{0,9}$"));
+def valid_cluster:
+  type == "object"
+  and (.existing_tracker == null or (.existing_tracker | id))
+  and all(.members, .new_members, .conflicts; type == "array")
+  and all(.members[], .new_members[]; id)
+  and all(.conflicts[]; type == "object" and (.number | id) and (.current_parent | id))
+  and (.new_members - .members == [])
+  and (.new_members - [.conflicts[].number] == .new_members);
+TRIAGE_CHECK_END
+```
+
+Then this prints each record that fails, and nothing when all pass:
 
 ```bash
 jq -r 'def id: type == "number" and (tojson | test("^[1-9][0-9]{0,9}$"));
@@ -418,11 +436,10 @@ jq -r 'def id: type == "number" and (tojson | test("^[1-9][0-9]{0,9}$"));
 jq -r --slurpfile ok triage/qwen/labels.json 'def permitted: type == "string" and IN($ok[0][]);
   select(all(.labels_add, .labels_remove; type == "array" and all(.[]; permitted)) | not)
   | "proposals.jsonl: #\(.number | tojson) has a label that is not in labels.json"' triage/qwen/proposals.jsonl
-jq -r 'def id: type == "number" and (tojson | test("^[1-9][0-9]{0,9}$"));
-  .[] | select(((.existing_tracker == null or (.existing_tracker | id))
-                and all(.members, .new_members, .conflicts; type == "array")
-                and all(.members[], .new_members[], (.conflicts[] | .number, .current_parent); id)) | not)
-  | "clusters.json: \(.title | tojson) has a member list that is not a list, or a number that is not an issue number"' triage/qwen/clusters.json
+jq -r -L triage/qwen 'include "cluster";
+  if type == "array" then .[] | select(valid_cluster | not)
+    | "clusters.json: \(.title? | tojson) breaks the cluster check: a list that is not a list, a number that is not an issue number, or new_members outside members or overlapping conflicts"
+  else "clusters.json is not a list of clusters" end' triage/qwen/clusters.json
 ```
 
 Fix or remove what it prints before going on. The commands below also skip any record that fails the check, so a malformed record is left out rather than rendered.
@@ -440,11 +457,11 @@ jq -rs --slurpfile ok triage/qwen/labels.json 'def id: type == "number" and (toj
     + ([.labels_remove[] | " --remove-label \(@sh)"] | add // "")' triage/qwen/proposals.jsonl
 ```
 
-Attaching members to a tracker uses the sub-issues API, which takes the issue's REST id rather than its number. This looks up each id (a read) and prints the attach commands for every `new_members` entry of clusters that target an existing tracker. `jq` passes the numbers to the shell as data, one tab-separated pair per line, never as command text (`tr` drops the carriage returns that Windows builds of `jq` add):
+Attaching members to a tracker uses the sub-issues API, which takes the issue's REST id rather than its number. This looks up each id (a read) and prints the attach commands for every `new_members` entry of clusters that target an existing tracker and pass the cluster check. `jq` passes the numbers to the shell as data, one tab-separated pair per line, never as command text (`tr` drops the carriage returns that Windows builds of `jq` add):
 
 ```bash
-jq -r 'def id: type == "number" and (tojson | test("^[1-9][0-9]{0,9}$"));
-  .[] | select(.existing_tracker | id) | .existing_tracker as $t | .new_members[]? | select(id) | "\($t)\t\(.)"' triage/qwen/clusters.json \
+jq -r -L triage/qwen 'include "cluster";
+  .[] | select(valid_cluster and .existing_tracker != null) | .existing_tracker as $t | .new_members[] | "\($t)\t\(.)"' triage/qwen/clusters.json \
 | tr -d '\r' | while IFS=$'\t' read -r t m; do
     if rest_id=$(gh api "repos/phase-rs/phase/issues/$m" --jq .id); then
       printf 'gh api -X POST repos/phase-rs/phase/issues/%s/sub_issues -F sub_issue_id=%s\n' "$t" "$rest_id"
@@ -466,9 +483,10 @@ Set `I` to the position of the one to create, then run the rest. The title and b
 I=0
 case "$I" in
   ''|*[!0-9]*) echo "I must be a cluster position from the list above, such as 0" >&2 ;;
-  *) if ! jq -e --argjson i "$I" '.[$i] | select(.existing_tracker == null and (.title | type == "string"))' \
+  *) if ! jq -e -L triage/qwen --argjson i "$I" 'include "cluster";
+           .[$i] | select(valid_cluster and .existing_tracker == null and (.title | type == "string"))' \
          triage/qwen/clusters.json > triage/qwen/cluster.json; then
-       echo "position $I isn't a cluster that needs a tracker; nothing created" >&2
+       echo "position $I isn't a cluster that needs a tracker and passes the cluster check; nothing created" >&2
      else
        TITLE=$(jq -r .title triage/qwen/cluster.json)
        T=$(jq -r '"## Rationale\n\n\(.rationale)\n\n## Ordering\n\n\(.order)\n"' triage/qwen/cluster.json \
@@ -490,10 +508,10 @@ Never rerun this for a cluster until you know its tracker wasn't created: a seco
 
 Then rerun the attach command; it now prints the new tracker's `new_members`.
 
-Members listed under `conflicts` are never in `new_members`, so these commands don't touch them. This prints them for review:
+The cluster check keeps members listed under `conflicts` out of `new_members`, so these commands never touch them. This prints them for review:
 
 ```bash
-jq -r 'def id: type == "number" and (tojson | test("^[1-9][0-9]{0,9}$"));
-  .[] | (.existing_tracker // "new: \(.title)") as $t | .conflicts[]? | select((.number | id) and (.current_parent | id))
+jq -r -L triage/qwen 'include "cluster";
+  .[] | select(valid_cluster) | (.existing_tracker // "new: \(.title)") as $t | .conflicts[]
   | "#\(.number) is under #\(.current_parent); proposed for \($t): \(.why)"' triage/qwen/clusters.json
 ```
