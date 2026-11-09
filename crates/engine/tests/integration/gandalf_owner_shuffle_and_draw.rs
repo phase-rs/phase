@@ -10,7 +10,8 @@ use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 const GANDALF: &str = "Ward {3} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {3}.)\n{6}: Gandalf's owner shuffles him into their library and draws three cards.";
-const COSI: &str = "Whenever an opponent shuffles their library, you may put a +1/+1 counter on this creature.";
+const COSI: &str =
+    "Whenever an opponent shuffles their library, you may put a +1/+1 counter on this creature.";
 
 fn gandalf_owner_shuffle_and_draw(owner: PlayerId) {
     let mut scenario = GameScenario::new();
@@ -84,7 +85,9 @@ fn gandalf_owner_shuffle_and_draw(owner: PlayerId) {
     let first_draw = outcome
         .events()
         .iter()
-        .position(|event| matches!(event, GameEvent::CardDrawn { player_id, .. } if *player_id == owner))
+        .position(
+            |event| matches!(event, GameEvent::CardDrawn { player_id, .. } if *player_id == owner),
+        )
         .expect("the owner draws after the shuffle");
     for (index, player) in shuffles {
         assert_eq!(player, owner, "only the owner's library is shuffled");
@@ -197,7 +200,10 @@ fn unavailable_stolen_gandalf_still_shuffles_once_before_its_owner_draws() {
         event,
         GameEvent::ZoneChanged { object_id, to: Zone::Library, .. } if *object_id == gandalf
     )));
-    assert!(matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }));
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
     assert!(outcome.state().stack.is_empty());
     assert!(outcome.state().resolution_stack.is_empty());
 }
