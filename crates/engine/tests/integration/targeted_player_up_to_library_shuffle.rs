@@ -23,6 +23,7 @@ const DWELL_ORACLE: &str =
 const WAND_ORACLE: &str = "{T}: Mill a card.\n{2}, {T}, Exile this artifact: Shuffle up to five target cards from your graveyard into your library.";
 const LOAMING_ORACLE: &str = "When this creature enters, target player shuffles any number of target cards from their graveyard into their library.";
 const RITE_ORACLE: &str = "Return up to two target permanent cards from your graveyard to your hand. Target player shuffles up to four target cards from their graveyard into their library. Exile Rite of Renewal.";
+const QUANDRIX_ORACLE: &str = "Choose two —\n• Return target creature or planeswalker to its owner's hand.\n• Counter target artifact or enchantment spell.\n• Put two +1/+1 counters on target creature.\n• Target player shuffles up to three target cards from their graveyard into their library.";
 
 /// Ordered projection of who actually shuffled a library.
 fn shuffled_players(outcome: &CastOutcome) -> Vec<PlayerId> {
@@ -339,5 +340,58 @@ fn rite_of_renewal_keeps_the_shuffle_player_after_an_earlier_object_target() {
         &outcome,
         P1,
         "the earlier object target must not replace the announced shuffle player",
+    );
+}
+
+/// CR 700.2 + CR 601.2c + CR 701.24a: selecting an earlier targeted mode
+/// must not make its creature target the actor of the later shuffle mode.
+#[test]
+fn quandrix_command_keeps_the_shuffle_player_after_an_earlier_targeted_mode() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let command = scenario
+        .add_spell_to_hand_from_oracle(P0, "Quandrix Command", true, QUANDRIX_ORACLE)
+        .id();
+    let bounce_card = scenario.add_creature(P0, "Earlier Modal Target", 2, 2).id();
+    let p0_graveyard = scenario
+        .add_creature_to_graveyard(P0, "Caster Graveyard Card", 1, 1)
+        .id();
+    let shuffle_card = scenario
+        .add_creature_to_graveyard(P1, "Later Modal Target", 1, 1)
+        .id();
+    let untouched_shuffle_card = scenario
+        .add_creature_to_graveyard(P1, "Unchosen Shuffle Card", 1, 1)
+        .id();
+    let p0_library = scenario.add_card_to_library_top(P0, "Caster Library Card");
+    let p1_library = scenario.add_card_to_library_top(P1, "Target Library Card");
+
+    let mut runner = scenario.build();
+    let outcome = runner
+        .cast(command)
+        .modes(&[0, 3])
+        .target_objects(&[bounce_card, shuffle_card])
+        .target_player(P1)
+        .resolve();
+
+    assert_completed(&outcome);
+    assert_eq!(
+        shuffle_resolutions(&outcome),
+        1,
+        "the selected shuffle mode must resolve after the bounce mode"
+    );
+    outcome.assert_zone(&[bounce_card], Zone::Hand);
+    outcome.assert_zone(&[shuffle_card], Zone::Library);
+    outcome.assert_zone(&[p0_graveyard, untouched_shuffle_card], Zone::Graveyard);
+    outcome.assert_zone(&[command], Zone::Graveyard);
+    let p0_state = &outcome.state().players[P0.0 as usize];
+    let p1_state = &outcome.state().players[P1.0 as usize];
+    assert!(p0_state.hand.contains(&bounce_card));
+    assert!(p0_state.library.contains(&p0_library));
+    assert!(p1_state.library.contains(&shuffle_card));
+    assert!(p1_state.library.contains(&p1_library));
+    assert_only_player_shuffled(
+        &outcome,
+        P1,
+        "an earlier mode's creature target must not replace the shuffle player",
     );
 }
