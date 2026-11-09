@@ -5252,12 +5252,17 @@ describe("WebSocketAdapter — production codec provider default", () => {
     );
     try {
       const init = adapter.initialize();
+      // Observe teardown rejection immediately; awaiting the original still exposes init failures.
+      void init.catch(() => undefined);
+      // Hold capability discovery until the default lease and its handshake observer are ready.
+      await vi.waitFor(() => expect(open).toHaveBeenCalledOnce());
+      await open.mock.results[0]!.value;
+      await Promise.resolve();
       const raw = await codecHandshake("JoinGameWithPassword", null);
       const hello = raw.send.mock.calls
         .map(([text]) => JSON.parse(text as string) as { type?: string; data?: { state_codecs?: unknown } })
         .find((frame) => frame.type === "ClientHello");
       expect(hello?.data?.state_codecs).toEqual(["StateCodecV1"]);
-      expect(open).toHaveBeenCalledOnce();
 
       deliverCodec(raw, "Full", codecGameStarted(1, 1));
       await init;
@@ -5839,21 +5844,31 @@ describe("WebSocketAdapter — codec degradation policy", () => {
       MockWebSocket.last = null;
       const first = create();
       const firstInit = first.initialize();
-      const trapped = await codecHandshake("JoinGameWithPassword", null);
-      expect(offeredCodec(trapped)).toBe(true);
-      script.trapNext = true;
-      deliverCodec(trapped, "Full", codecGameStarted(1, 1));
-      await vi.waitFor(() => expect(runtime.state).toEqual({ kind: "poisoned", reason: "wasmTrap" }));
-      // The first adapter finishes its own join on a snapshot-only fallback.
-      const firstFallback = await snapshotOnlyHandshake("Reconnect", trapped);
-      expect(offeredCodec(firstFallback)).toBe(false);
-      firstFallback.dispatchSynthetic("message", JSON.stringify(codecGameStarted(1, 1, { player_token: undefined })));
-      await firstInit;
-      first.dispose();
+      void firstInit.catch(() => undefined);
+      let firstFallback: MockWebSocket;
+      try {
+        // The shared default races discovery, so send the hello only after its lease is ready.
+        await vi.waitFor(() => expect(provider).toHaveBeenCalledOnce());
+        await provider.mock.results[0]!.value;
+        await Promise.resolve();
+        const trapped = await codecHandshake("JoinGameWithPassword", null);
+        expect(offeredCodec(trapped)).toBe(true);
+        script.trapNext = true;
+        deliverCodec(trapped, "Full", codecGameStarted(1, 1));
+        await vi.waitFor(() => expect(runtime.state).toEqual({ kind: "poisoned", reason: "wasmTrap" }));
+        // The first adapter finishes its own join on a snapshot-only fallback.
+        firstFallback = await snapshotOnlyHandshake("Reconnect", trapped);
+        expect(offeredCodec(firstFallback)).toBe(false);
+        firstFallback.dispatchSynthetic("message", JSON.stringify(codecGameStarted(1, 1, { player_token: undefined })));
+        await firstInit;
+      } finally {
+        first.dispose();
+      }
 
       const second = create();
       try {
         const init = second.initialize();
+        void init.catch(() => undefined);
         const plain = await snapshotOnlyHandshake("JoinGameWithPassword", firstFallback);
         // The default route consulted the shared facade; the runtime itself refused the lease.
         expect(provider).toHaveBeenCalledTimes(2);
@@ -5862,6 +5877,7 @@ describe("WebSocketAdapter — codec degradation policy", () => {
         await init;
 
         const completion = second.submitAction(action, 0);
+        void completion.catch(() => undefined);
         await vi.waitFor(() => expect(submissionTypes(plain)).toHaveLength(1));
         plain.dispatchSynthetic("message", JSON.stringify(
           codecStateUpdate(2, 2, { command_id: lastSubmissionCommandId(plain) }),

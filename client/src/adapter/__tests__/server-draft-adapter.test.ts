@@ -3963,29 +3963,39 @@ describe("ServerDraftAdapter — codec degradation policy", () => {
     const firstEvents: unknown[] = [];
     first.onEvent((event) => firstEvents.push(event));
     const creating = first.createDraft(settings);
-    await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
-    const trapped = MockWebSocket.last!;
-    trapped.dispatchSynthetic("message", CODEC_SERVER_HELLO);
-    await vi.waitFor(() => expect(trapped.send).toHaveBeenCalledWith(
-      expect.stringContaining('"type":"CreateDraftWithSettings"')));
-    expect(offeredCodec(trapped)).toBe(true);
-    trapped.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
-    receive(trapped, "DraftCreated", { draft_code: "ABCD12", player_token: "tok123", seat_index: 0 });
-    await creating;
-    receive(trapped, "DraftMatchStart", { match_id: "r1-t0", round: 1, game_code: FULL_KEY.game_code,
-      full_key: FULL_KEY, player_token: "match-token", your_player: 0, opponent_name: "Bob" });
-    script.trapNext = true;
-    trapped.dispatchSynthetic("message", draftFrame("Full", { type: "GameStarted",
-      data: { state: matchState("trap"), your_player: 0, full_key: FULL_KEY } }));
-    await vi.waitFor(() => expect(firstEvents).toContainEqual({ type: "disconnected" }));
-    expect(runtime.state).toEqual({ kind: "poisoned", reason: "wasmTrap" });
-    first.dispose();
+    void creating.catch(() => undefined);
+    let trapped: MockWebSocket;
+    try {
+      // The shared default races discovery, so send the hello only after its lease is ready.
+      await vi.waitFor(() => expect(provider).toHaveBeenCalledOnce());
+      await provider.mock.results[0]!.value;
+      await Promise.resolve();
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+      trapped = MockWebSocket.last!;
+      trapped.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+      await vi.waitFor(() => expect(trapped.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"CreateDraftWithSettings"')));
+      expect(offeredCodec(trapped)).toBe(true);
+      trapped.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+      receive(trapped, "DraftCreated", { draft_code: "ABCD12", player_token: "tok123", seat_index: 0 });
+      await creating;
+      receive(trapped, "DraftMatchStart", { match_id: "r1-t0", round: 1, game_code: FULL_KEY.game_code,
+        full_key: FULL_KEY, player_token: "match-token", your_player: 0, opponent_name: "Bob" });
+      script.trapNext = true;
+      trapped.dispatchSynthetic("message", draftFrame("Full", { type: "GameStarted",
+        data: { state: matchState("trap"), your_player: 0, full_key: FULL_KEY } }));
+      await vi.waitFor(() => expect(firstEvents).toContainEqual({ type: "disconnected" }));
+      expect(runtime.state).toEqual({ kind: "poisoned", reason: "wasmTrap" });
+    } finally {
+      first.dispose();
+    }
 
     const second = new ServerDraftAdapter("ws://localhost:9374/ws");
     const events: unknown[] = [];
     second.onEvent((event) => events.push(event));
     try {
       const creatingNext = second.createDraft(settings);
+      void creatingNext.catch(() => undefined);
       await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(trapped));
       const plain = MockWebSocket.last!;
       plain.dispatchSynthetic("message", CODEC_SERVER_HELLO);
@@ -4635,6 +4645,12 @@ describe("ServerDraftAdapter — production codec provider default", () => {
         podPolicy: "Competitive",
         podSize: 8,
       });
+      // Observe teardown rejection immediately; awaiting the original still exposes init failures.
+      void createPromise.catch(() => undefined);
+      // Hold capability discovery until the default lease and its handshake observer are ready.
+      await vi.waitFor(() => expect(open).toHaveBeenCalledOnce());
+      await open.mock.results[0]!.value;
+      await Promise.resolve();
       await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
       const ws = MockWebSocket.last!;
       ws.dispatchSynthetic("message", CODEC_SERVER_HELLO);
@@ -4645,7 +4661,6 @@ describe("ServerDraftAdapter — production codec provider default", () => {
         .map(([text]) => JSON.parse(text as string) as { type?: string; data?: { state_codecs?: unknown } })
         .find((frame) => frame.type === "ClientHello");
       expect(hello?.data?.state_codecs).toEqual(["StateCodecV1"]);
-      expect(open).toHaveBeenCalledOnce();
 
       ws.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
       receive(ws, "DraftCreated", { draft_code: "ABCD12", player_token: "tok123", seat_index: 0 });
