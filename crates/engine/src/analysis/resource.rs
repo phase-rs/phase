@@ -3678,7 +3678,10 @@ pub(crate) fn loop_states_equal_modulo_resources_side<'a, C: CurrentSide<'a>>(
     // widen the strict comparator, do NOT zero the fields) so a loop that
     // re-activates a loyalty ability (count k -> k+1) compares UNEQUAL and is not
     // falsely certified.
-    loop_states_equal(&pa, &pb) && loyalty_activation_counts_match(&pa, &pb)
+    // Projected frames are already identity-ranked with their stale class masked, so this
+    // comparison must not rank again.
+    crate::types::game_state::projected_states_equal(&pa, &pb)
+        && loyalty_activation_counts_match(&pa, &pb)
 }
 
 /// CR 606.3: per-object loyalty-activation equality across two projected
@@ -4765,7 +4768,7 @@ pub(crate) fn loop_states_cover_modulo_growth_scoped<'a, C: CurrentSide<'a>>(
         projected: pa,
         stack: prior_stack_source,
     } = cover_projection(prior);
-    if !(loop_states_equal(&pa, &pb)
+    if !(crate::types::game_state::projected_states_equal(&pa, &pb)
         && loyalty_activation_counts_match(&pa, &pb)
         && object_resource_axes_match(prior, current)
         // CR 601.2f + CR 732.2a: a live cost modifier whose projected journal MOVED between
@@ -10424,7 +10427,7 @@ mod tests {
             bounded.damage_dealt_this_turn,
             projected.damage_dealt_this_turn
         );
-        assert!(loop_states_equal(
+        assert!(crate::types::game_state::projected_states_equal(
             &bounded,
             &project_out_resources(&bounded)
         ));
@@ -10471,7 +10474,10 @@ mod tests {
         relational_projection_feeds(&zero_live, &raw_zero, false);
         let projected = project_out_resources(&raw_zero);
         assert!(
-            loop_states_equal(&projected, &project_out_resources(&projected)),
+            crate::types::game_state::projected_states_equal(
+                &projected,
+                &project_out_resources(&projected),
+            ),
             "P(P(raw0)) keeps stale read-class rather than interpreting a raw sentinel"
         );
         let mut player = unknown.clone();
@@ -16254,7 +16260,7 @@ mod tests {
         pa.0.stack.clear();
         pb.0.stack.clear();
         assert!(
-            loop_states_equal(&pa, &pb),
+            crate::types::game_state::projected_states_equal(&pa, &pb),
             "fixture: the -1/-1 counter drift is projection-invisible (isolates B1)"
         );
         assert!(!loop_states_cover_modulo_growth(&prior, &current));
@@ -22944,8 +22950,8 @@ mod tests {
             for &life in lives {
                 let mut frame = GameState::new_two_player(0);
                 frame.players[1].life = life;
-                // Both halves built exactly as `record_loop_detect_sample` builds them, so
-                // the fixture cannot diverge from production's construction.
+                // Ring content captured in the strict form; production records the sample
+                // form and the deferred confirmation path has its own regression.
                 state.loop_detect_ring.push_back(std::sync::Arc::new(
                     crate::types::LoopDetectSample {
                         normalized: frame.normalize_for_loop(),
@@ -26398,11 +26404,10 @@ mod tests {
     /// Certification is basis A's EQUALITY disjunct, and that is a construction property
     /// rather than a hope: `setup` runs BEFORE any frame is snapshotted, so `ring[1]`
     /// (the certifying prior at `span == 1`) and `current` agree on everything, and only
-    /// `ring[2]` — which the equality disjunct never compares — is widened. Both halves of
-    /// every sample are built exactly as `record_loop_detect_sample` builds them, so the
-    /// fixture cannot diverge from production's construction; in particular the `.normalized`
-    /// half really is `normalize_for_loop`d, which is what the instrument-liveness controls
-    /// below depend on.
+    /// `ring[2]` — which the equality disjunct never compares — is widened. These samples
+    /// are captured in the STRICT form; production records the sample form
+    /// (`normalize_for_loop_sample`), which defers identity ranks to confirmation, and that
+    /// path is covered directly by `loop_relational_sample_confirmation_ranks_pins`.
     ///
     /// The per-frame life step is `game::engine`'s `drain_ring` orientation — frame `i` sits
     /// `FRAMES - i` life above the live board — so the certified period moves a real CR 704.5a

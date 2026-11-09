@@ -38168,8 +38168,10 @@ impl GameState {
 
     /// PR-3 (Option C): push one NORMALIZED post-resolution snapshot onto the
     /// CR 732.2a loop-detection ring, evicting the oldest at `LOOP_DETECT_RING_CAP`.
-    /// The snapshot is `normalize_for_loop`d (its own ring cleared, see above) and
-    /// `Arc`-shared so storage is O(1) per element.
+    /// The snapshot is `normalize_for_loop_sample`d (its own ring cleared, see above),
+    /// so allocator-derived identity ranks are deferred to
+    /// [`loop_states_equal`]'s candidate confirmation, and `Arc`-shared so storage is
+    /// O(1) per element.
     ///
     /// TWO production call sites, both in `game::engine` and both on the frame AFTER
     /// `run_post_action_pipeline` has placed refilling triggers (CR 603.3):
@@ -38901,36 +38903,49 @@ const LOOP_DETECT_RING_CAP: usize = 16;
 /// differ; a spent shield is not part of the position).
 ///
 /// `normalize_for_loop_sample` defers the allocator-derived identity rank because it walks
-/// the row-unbounded damage journal. This authority supplies that rank for a candidate pair
-/// and then applies the SAME conjuncts, so the deferred sample never weakens strict
-/// equality: ranking is a deterministic function run on both sides alike.
+/// the row-unbounded damage journal. This authority supplies that rank for the candidate
+/// pair and then applies the SAME conjuncts, so the deferred sample never weakens strict
+/// equality: ranking is a deterministic function run on both sides alike. Ranking is
+/// required even when the raw states compare EQUAL — `PartialEq` and
+/// [`objects_content_eq`] both ignore an object's live incarnation, so a pair that differs
+/// only in whether a pin (LKI key, attachment identity, journal stamp) is live or stale is
+/// raw-equal and would otherwise confirm a false draw.
 pub(crate) fn loop_states_equal(a: &GameState, b: &GameState) -> bool {
     if !a.is_loop_comparable() || !b.is_loop_comparable() {
         return false;
     }
-    // The full journal is compared in both views, so a growing history is excluded here
-    // before either candidate clone or any identity work.
-    if a.damage_dealt_this_turn.len() != b.damage_dealt_this_turn.len() {
+    // Ranking cannot change any of these, so a difference rejects before the candidate
+    // clones. The full journal is compared in both views, so a growing history is
+    // excluded here too.
+    if a.turn_number != b.turn_number
+        || a.phase != b.phase
+        || a.active_player != b.active_player
+        || a.stack.len() != b.stack.len()
+        || a.damage_dealt_this_turn.len() != b.damage_dealt_this_turn.len()
+    {
         return false;
     }
-    let conjuncts = |a: &GameState, b: &GameState| {
-        a == b
-            && a.stack_trigger_firings == b.stack_trigger_firings
-            && objects_content_eq(&a.objects, &b.objects)
-            && pending_shields_loop_eq(a, b)
-    };
-    // Exact equality is strictly stronger than canonical equality, so the already-ranked
-    // common case pays no copies.
-    if conjuncts(a, b) {
-        return true;
-    }
-    // Otherwise rank the candidate clones here: `canonicalize_loop_identities` is
-    // idempotent, so an already-ranked side is unchanged and a deferred side catches up.
+    // Rank the candidate clones: `canonicalize_loop_identities` is idempotent, so an
+    // already-ranked side is unchanged and a deferred side catches up.
     let mut ranked_a = a.clone();
     ranked_a.canonicalize_loop_identities();
     let mut ranked_b = b.clone();
     ranked_b.canonicalize_loop_identities();
-    conjuncts(&ranked_a, &ranked_b)
+    projected_states_equal(&ranked_a, &ranked_b)
+}
+
+/// The conjunct-only comparison for frames that are ALREADY identity-ranked and carry
+/// their projection-only stale class masked by
+/// `analysis::resource::project_out_resources` and its growth-cover callbacks. It must
+/// never rank: re-ranking a projected frame would turn the stale `Some(0)` marker into a
+/// real occurrence and could collide with a live witness whose recipient was removed.
+pub(crate) fn projected_states_equal(a: &GameState, b: &GameState) -> bool {
+    a.is_loop_comparable()
+        && b.is_loop_comparable()
+        && a == b
+        && a.stack_trigger_firings == b.stack_trigger_firings
+        && objects_content_eq(&a.objects, &b.objects)
+        && pending_shields_loop_eq(a, b)
 }
 
 /// CR 615.3 + CR 614.3: the LIVE floating shields in `state`, in registry order — the
@@ -54141,6 +54156,35 @@ mod tests {
             );
         }
         assert_relational_remembered_damage_retained(&live, true);
+    }
+
+    /// CR 104.4b + CR 732.2a: the sample form defers identity ranks, so confirmation MUST
+    /// rank before deciding. Raw equality is insufficient: `PartialEq` compares
+    /// `objects.len()` only and [`objects_content_eq`] ignores a live incarnation, so a
+    /// remembered-card pin that is live in one frame and stale in the other is otherwise
+    /// byte-identical — accepting it would confirm a false mandatory draw.
+    #[test]
+    fn loop_relational_sample_confirmation_ranks_pins() {
+        let live = relational_remembered_damage_frame(0, 7, Some(7));
+        let stale = relational_remembered_damage_frame(0, 9, Some(7));
+        let early = relational_remembered_damage_frame(0, 8, Some(6));
+        let late = relational_remembered_damage_frame(88, 96, Some(94));
+        let sample = |frame: &(GameState, ObjectId, ObjectId, LKISnapshot)| {
+            frame.0.normalize_for_loop_sample()
+        };
+        assert_eq!(
+            sample(&live),
+            sample(&stale),
+            "reach: the raw sample forms are equal, so an exact-first accept would be wrong"
+        );
+        assert!(
+            !loop_states_equal(&sample(&live), &sample(&stale)),
+            "confirmation must rank the deferred pins and reject live versus stale"
+        );
+        assert!(
+            loop_states_equal(&sample(&early), &sample(&late)),
+            "consistent renumbering must still confirm as one position"
+        );
     }
 
     /// CR 400.7 + CR 104.4b: zone-change allocation order is history.

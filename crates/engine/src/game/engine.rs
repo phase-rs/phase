@@ -7246,8 +7246,10 @@ fn materialize_fixed_shortcut(
     // here (reset_priority does not touch it). `loop_states_equal_modulo_resources` /
     // `loop_states_cover_modulo_growth` both normalize internally (`project_out_resources`
     // → `normalize_for_loop`), so the extra `.normalize_for_loop()` here is redundant with
-    // that internal call but harmless (idempotent) — kept for a self-contained boundary
-    // value whose `waiting_for`/ring fields are already canonical at the call sites below.
+    // that internal call but harmless (idempotent) — the internal call is now the sample
+    // form (`normalize_for_loop_sample`), which defers identity ranks to confirmation.
+    // Kept for a self-contained boundary value whose `waiting_for`/ring fields are already
+    // canonical at the call sites below.
     let boundary = take_boundary(&committed);
 
     let cycle_beat_cap = auto_pass_loop_max_iterations(&committed);
@@ -26793,7 +26795,8 @@ mod bounded_offer_conjunct_tests {
         for i in 0..frames {
             let mut frame = state.clone();
             shape(&mut frame, i);
-            // Both halves built exactly as `record_loop_detect_sample` builds them.
+            // The ring content is captured in the strict form; production records the
+            // sample form, and the deferred confirmation path has its own regression.
             state
                 .loop_detect_ring
                 .push_back(std::sync::Arc::new(crate::types::LoopDetectSample {
