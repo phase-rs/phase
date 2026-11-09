@@ -7104,12 +7104,12 @@ fn matches_zone_card_filter(
 /// CR 608.2 + CR 109.5: Resolve which player a `CountScope` variant binds to,
 /// then return an iterator over matching players.
 ///
-/// `Controller` always means the printed ability's controller (caster) — this
-/// is the "you" axis. `ScopedPlayer` (Issue #310) means the currently iterated
-/// player when a surrounding `player_scope` is active, falling back to
-/// `Controller` outside iteration. `Opponents` and `All` are computed
-/// relative to `Controller` (the caster), preserving CR 109.5's "you" semantics
-/// for unscoped opponent/all counts.
+/// `Controller` means the ability's controller — this is the "you" axis
+/// (the source object's current controller for a static ability, CR 109.5).
+/// `ScopedPlayer` (Issue #310) means the currently iterated player when a
+/// surrounding `player_scope` is active, falling back to `Controller` outside
+/// iteration. `Opponents` and `All` are computed relative to `Controller`,
+/// preserving CR 109.5's "you" semantics for unscoped opponent/all counts.
 fn scoped_players<'a>(
     state: &'a GameState,
     scope: &'a CountScope,
@@ -7142,7 +7142,10 @@ fn scoped_players<'a>(
         // `SourceChosenPlayer` to the empty set would read 0 instead of that
         // player's actual value.
         CountScope::All => !p.is_eliminated,
-        CountScope::Opponents => p.id != controller && !p.is_eliminated,
+        // CR 102.3: teammates are not opponents; retain the live-population filter.
+        CountScope::Opponents => {
+            crate::game::players::is_opponent(state, controller, p.id) && !p.is_eliminated
+        }
     })
 }
 
@@ -7224,7 +7227,11 @@ fn count_scope_owner_matches(
         // Single-player scopes above keep no filter, for the same reason as in
         // `scoped_players`: they name one player rather than a population.
         CountScope::All => !player_has_left(state, owner),
-        CountScope::Opponents => owner != controller && !player_has_left(state, owner),
+        // CR 102.3: global-zone owners use the same team relation as live players.
+        CountScope::Opponents => {
+            crate::game::players::is_opponent(state, controller, owner)
+                && !player_has_left(state, owner)
+        }
     }
 }
 
@@ -13977,6 +13984,101 @@ mod tests {
             2,
             "an 'each opponent' poison total must read only the SURVIVING opponent (2): the \
              controller's 1 is not an opponent and the departed 40 is not in the game"
+        );
+    }
+
+    /// CR 102.3 + CR 109.5: live opponent counters exclude the current
+    /// controller's teammate, regardless of which team controls the ability.
+    #[test]
+    fn player_counter_opponents_scope_excludes_two_headed_giant_teammate() {
+        let mut state =
+            GameState::new(crate::types::format::FormatConfig::two_headed_giant(), 4, 0);
+        for (player, poison) in state.players.iter_mut().zip([1, 8, 2, 3]) {
+            player.poison_counters = poison;
+        }
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCounter {
+                kind: crate::types::player::PlayerCounterKind::Poison,
+                scope: CountScope::Opponents,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            5,
+            "P2 and P3 contribute; P0 and teammate P1 do not"
+        );
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(2), ObjectId(0)),
+            9,
+            "the current controller changes which team supplies the opponents"
+        );
+
+        let mut events = Vec::new();
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        assert!(state.players[2].is_eliminated && state.players[3].is_eliminated);
+        assert_eq!(state.players[2].poison_counters, 2);
+        assert_eq!(state.players[3].poison_counters, 3);
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            0,
+            "departed opponents' retained counters and the living teammate are excluded"
+        );
+    }
+
+    /// CR 102.3 + CR 800.4a: global exile counts use the owner's team and
+    /// exclude departed owners even when their cards remain in engine exile.
+    #[test]
+    fn exile_zone_count_opponents_scope_excludes_two_headed_giant_teammate() {
+        let mut state =
+            GameState::new(crate::types::format::FormatConfig::two_headed_giant(), 4, 0);
+        let mut opponent_cards = Vec::new();
+        for (seat, count) in [(0, 1), (1, 8), (2, 2), (3, 3)] {
+            for _ in 0..count {
+                let card = create_object(
+                    &mut state,
+                    CardId(1),
+                    PlayerId(seat),
+                    "Exiled Card".to_string(),
+                    Zone::Exile,
+                );
+                if seat >= 2 {
+                    opponent_cards.push(card);
+                }
+            }
+        }
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Exile,
+                card_types: Vec::new(),
+                filter: None,
+                scope: CountScope::Opponents,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            5,
+            "both opposing owners contribute, but the controller and teammate do not"
+        );
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(2), ObjectId(0)),
+            9,
+            "owner membership is relative to the current controller's team"
+        );
+
+        let mut events = Vec::new();
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        assert!(state.players[2].is_eliminated && state.players[3].is_eliminated);
+        for card in opponent_cards {
+            assert!(state.exile.contains(&card));
+            assert!(matches!(
+                state.objects.get(&card).map(|object| object.owner),
+                Some(PlayerId(2) | PlayerId(3))
+            ));
+        }
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            0,
+            "neither departed opposing owners nor the living teammate contribute"
         );
     }
 

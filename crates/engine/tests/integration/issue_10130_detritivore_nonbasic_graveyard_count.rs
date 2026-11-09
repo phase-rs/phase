@@ -8,8 +8,11 @@ use engine::parser::parse_oracle_text;
 use engine::types::ability::{ContinuousModification, Effect};
 use engine::types::card::CardFace;
 use engine::types::card_type::Supertype;
+use engine::types::format::FormatConfig;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
 
 // Verbatim Scryfall Oracle text, including the deliberately unsupported Suspend X line.
 const DETRITIVORE: &str = "Detritivore's power and toughness are each equal to the number of nonbasic land cards in your opponents' graveyards.\nSuspend X—{X}{3}{R}. X can't be 0. (Rather than cast this card from your hand, you may pay {X}{3}{R} and exile it with X time counters on it. At the beginning of your upkeep, remove a time counter. When the last is removed, you may cast it without paying its mana cost. It has haste.)\nWhenever a time counter is removed from this card while it's exiled, destroy target nonbasic land.";
@@ -66,6 +69,75 @@ fn issue_10130_detritivore_counts_only_opponents_nonbasic_land_cards() {
     assert_eq!(pt(aberration), (Some(3), Some(3)));
     assert_eq!(pt(detritivore), (Some(2), Some(2)));
     assert!(has_dynamic_pt_static(&runner, detritivore));
+}
+
+/// CR 102.3 + CR 810.1: P0 and P1 are teammates; P2 and P3 are opponents.
+/// CR 109.5: Detritivore's static reads opponents of its current controller, P0.
+#[test]
+fn issue_10130_detritivore_two_headed_giant_counts_settled_opponent_graveyards() {
+    const P2: PlayerId = PlayerId(2);
+    const WASTELAND: &str =
+        "{T}: Add {C}.\n{T}, Sacrifice this land: Destroy target nonbasic land.";
+    const COMMAND_TOWER: &str =
+        "{T}: Add one mana of any color in your commander's color identity.";
+
+    let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    // Keep the CDA at 1/1 before any action so normal state-based actions
+    // cannot put a legitimate 0/0 Detritivore into the graveyard.
+    let initial_opponent_land = scenario.add_land_to_graveyard(P2, "Command Tower").id();
+    let teammate_land = scenario
+        .add_land_from_oracle(P1, "Command Tower", COMMAND_TOWER)
+        .id();
+    let opponent_land = scenario
+        .add_land_from_oracle(P2, "Command Tower", COMMAND_TOWER)
+        .id();
+    let first_wasteland = scenario
+        .add_land_from_oracle(P0, "Wasteland", WASTELAND)
+        .id();
+    let second_wasteland = scenario
+        .add_land_from_oracle(P0, "Wasteland", WASTELAND)
+        .id();
+    let detritivore = scenario
+        .add_creature_from_oracle(P0, "Detritivore", 0, 0, DETRITIVORE)
+        .id();
+    let mut runner = scenario.build();
+
+    // Both printed activated abilities occupy the normal ability vector:
+    // index 0 adds mana; index 1 sacrifices Wasteland and destroys the target.
+    // These actions pay costs, choose targets, and pass priority through the
+    // production reducer, including its normal layer/SBA settlement.
+    let teammate_outcome = runner
+        .activate(first_wasteland, 1)
+        .target_object(teammate_land)
+        .resolve();
+    assert_eq!(teammate_outcome.zone_of(first_wasteland), Zone::Graveyard);
+    assert_eq!(teammate_outcome.zone_of(teammate_land), Zone::Graveyard);
+    assert_eq!(teammate_outcome.zone_of(opponent_land), Zone::Battlefield);
+    assert_eq!(
+        teammate_outcome.zone_of(initial_opponent_land),
+        Zone::Graveyard
+    );
+    assert_eq!(teammate_outcome.zone_of(detritivore), Zone::Battlefield);
+    assert_eq!(
+        teammate_outcome.power_toughness(detritivore),
+        (1, 1),
+        "a teammate's nonbasic land must not contribute to Detritivore's CDA"
+    );
+
+    let opponent_outcome = runner
+        .activate(second_wasteland, 1)
+        .target_object(opponent_land)
+        .resolve();
+    assert_eq!(opponent_outcome.zone_of(second_wasteland), Zone::Graveyard);
+    assert_eq!(opponent_outcome.zone_of(teammate_land), Zone::Graveyard);
+    assert_eq!(opponent_outcome.zone_of(opponent_land), Zone::Graveyard);
+    assert_eq!(opponent_outcome.zone_of(detritivore), Zone::Battlefield);
+    assert_eq!(
+        opponent_outcome.power_toughness(detritivore),
+        (2, 2),
+        "an opponent's nonbasic land must increase the settled CDA"
+    );
 }
 
 /// Synthetic grammar fixture: no printed singular qualified zone-count quantity
