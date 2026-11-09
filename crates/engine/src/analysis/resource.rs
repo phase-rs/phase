@@ -3498,6 +3498,32 @@ impl std::ops::Deref for ResourceProjectedFrame {
     }
 }
 
+/// The two cover forms share one post-erasure identity pool. Direct callers
+/// move the projected stack out; shared callers borrow its cached normal form.
+pub(crate) struct CoverProjection<'a> {
+    projected: Cow<'a, ResourceProjectedFrame>,
+    stack: CoverStackSource<'a>,
+}
+
+enum CoverStackSource<'a> {
+    Cached(&'a [(StackEntry, Option<TriggerFiring>)]),
+    Projected {
+        entries: im::Vector<StackEntry>,
+        firings: HashMap<ObjectId, TriggerFiring>,
+    },
+}
+
+impl<'a> CoverStackSource<'a> {
+    fn into_normalized(self) -> Cow<'a, [(StackEntry, Option<TriggerFiring>)]> {
+        match self {
+            Self::Cached(entries) => Cow::Borrowed(entries),
+            Self::Projected { entries, firings } => {
+                Cow::Owned(normalized_stack_entries(&entries, &firings))
+            }
+        }
+    }
+}
+
 /// The current side of a loop comparison: either a raw state, whose projections the
 /// comparison derives itself, or a [`SharedCurrentFrames`] a caller already derived once for a
 /// whole ring walk. The two are distinct TYPES rather than two `&GameState`s, because a
@@ -3510,11 +3536,9 @@ pub(crate) trait CurrentSide<'a>: Copy {
     fn state(self) -> &'a GameState;
     /// [`project_out_resources`] of [`CurrentSide::state`].
     fn projected(self) -> Cow<'a, ResourceProjectedFrame>;
-    /// [`cover_projection`] of it.
-    fn cover_projected(self) -> Cow<'a, ResourceProjectedFrame>;
-    /// [`normalized_stack_entries`] of [`project_out_resources`], before stack clear.
-    /// Retained event pins use the same post-erasure ranks as prior/shared covers.
-    fn cover_stack(self) -> Cow<'a, [(StackEntry, Option<TriggerFiring>)]>;
+    /// Coherent stack-cleared and retained-stack forms of one resource projection.
+    /// Stack normalization stays deferred until the board gate accepts.
+    fn cover(self) -> CoverProjection<'a>;
 }
 
 impl<'a> CurrentSide<'a> for &'a GameState {
@@ -3524,11 +3548,8 @@ impl<'a> CurrentSide<'a> for &'a GameState {
     fn projected(self) -> Cow<'a, ResourceProjectedFrame> {
         Cow::Owned(project_out_resources(self))
     }
-    fn cover_projected(self) -> Cow<'a, ResourceProjectedFrame> {
-        Cow::Owned(cover_projection(self))
-    }
-    fn cover_stack(self) -> Cow<'a, [(StackEntry, Option<TriggerFiring>)]> {
-        Cow::Owned(normalized_stack_entries(&project_out_resources(self)))
+    fn cover(self) -> CoverProjection<'a> {
+        cover_projection(self)
     }
 }
 
@@ -3549,11 +3570,12 @@ pub(crate) struct SharedCurrentFrames<'a> {
 impl<'a> SharedCurrentFrames<'a> {
     pub(crate) fn new(current: &'a GameState) -> Self {
         let projected = project_out_resources(current);
-        let cover_stack = normalized_stack_entries(&projected);
+        let cover_stack =
+            normalized_stack_entries(&projected.stack, &projected.stack_trigger_firings);
         Self {
             current,
             projected,
-            cover: cover_projection(current),
+            cover: cover_projection(current).projected.into_owned(),
             cover_stack,
         }
     }
@@ -3572,23 +3594,25 @@ impl<'a> CurrentSide<'a> for &'a SharedCurrentFrames<'a> {
     fn projected(self) -> Cow<'a, ResourceProjectedFrame> {
         Cow::Borrowed(&self.projected)
     }
-    fn cover_projected(self) -> Cow<'a, ResourceProjectedFrame> {
-        Cow::Borrowed(&self.cover)
-    }
-    fn cover_stack(self) -> Cow<'a, [(StackEntry, Option<TriggerFiring>)]> {
-        Cow::Borrowed(&self.cover_stack)
+    fn cover(self) -> CoverProjection<'a> {
+        CoverProjection {
+            projected: Cow::Borrowed(&self.cover),
+            stack: CoverStackSource::Cached(&self.cover_stack),
+        }
     }
 }
 
-/// [`project_out_resources`] with the stack and its stack-entry-indexed firing sidecar
-/// cleared — the single authority for the comparand
-/// [`loop_states_cover_modulo_growth_scoped`]'s gate (1) needs, whose gate (2) compares the
-/// stack separately.
-fn cover_projection(state: &GameState) -> ResourceProjectedFrame {
+/// Split both cover forms from the SAME [`project_out_resources`] result.
+/// Moving the stack and its firing sidecar neither clones the state nor allocates
+/// normalized entries for a board rejection. Retained witnesses are not reselected.
+fn cover_projection(state: &GameState) -> CoverProjection<'static> {
     let mut projected = project_out_resources(state);
-    projected.0.stack.clear();
-    projected.0.stack_trigger_firings.clear();
-    projected
+    let entries = std::mem::take(&mut projected.0.stack);
+    let firings = std::mem::take(&mut projected.0.stack_trigger_firings);
+    CoverProjection {
+        projected: Cow::Owned(projected),
+        stack: CoverStackSource::Projected { entries, firings },
+    }
 }
 
 /// CR 732.2a vs CR 104.4b: the RELAXED loop equality. The strict comparator
@@ -4733,13 +4757,15 @@ pub(crate) fn loop_states_cover_modulo_growth_scoped<'a, C: CurrentSide<'a>>(
     // require full board equality plus loyalty-activation parity plus strict object
     // damage/counter equality. The prior's is cut from the one projection whose stack (2)
     // reads, so both stacks carry the same ranked incarnations as the current side's.
-    let pb = current.cover_projected();
-    let side = current;
+    let CoverProjection {
+        projected: pb,
+        stack: current_stack_source,
+    } = current.cover();
     let current = current.state();
-    let mut pa = project_out_resources(prior);
-    let prior_stack = normalized_stack_entries(&pa);
-    pa.0.stack.clear();
-    pa.0.stack_trigger_firings.clear();
+    let CoverProjection {
+        projected: pa,
+        stack: prior_stack_source,
+    } = cover_projection(prior);
     if !(loop_states_equal(&pa, &pb)
         && loyalty_activation_counts_match(&pa, &pb)
         && object_resource_axes_match(prior, current)
@@ -4753,7 +4779,8 @@ pub(crate) fn loop_states_cover_modulo_growth_scoped<'a, C: CurrentSide<'a>>(
 
     // (2) Stack coverability: order-preserving bottom-up embedding + strict growth
     // confined to places already occupied in `prior` (CR 608.1 / CR 405.5 LIFO freeze).
-    let cur_stack = side.cover_stack();
+    let prior_stack = prior_stack_source.into_normalized();
+    let cur_stack = current_stack_source.into_normalized();
     if !stack_covers(&prior_stack, &cur_stack) {
         return false;
     }
@@ -7550,13 +7577,14 @@ pub(crate) fn unmeasured_resource_axes_match(prior: &GameState, current: &GameSt
 /// `subject_match_count`, `die_result`, `description`, `source_name`) — a residual
 /// content difference only SUPPRESSES a match (fail-safe). Two same-controller
 /// entries differing only in `source_id` (two Blight-Priest copies) normalize to one kind.
-fn normalized_stack_entries(state: &GameState) -> Vec<(StackEntry, Option<TriggerFiring>)> {
-    state
-        .stack
+fn normalized_stack_entries(
+    entries: &im::Vector<StackEntry>,
+    trigger_firings: &HashMap<ObjectId, TriggerFiring>,
+) -> Vec<(StackEntry, Option<TriggerFiring>)> {
+    entries
         .iter()
         .map(|entry| {
-            let firing = state
-                .stack_trigger_firings
+            let firing = trigger_firings
                 .get(&entry.id)
                 .copied()
                 .map(|firing| match firing {
@@ -10076,8 +10104,8 @@ mod tests {
         relational_projection_feeds(&a, &relational_recipient_frame(Some(7), true, false), false);
         assert!(
             eq_except_growable(
-                &cover_projection(&a),
-                &cover_projection(&b),
+                &cover_projection(&a).projected,
+                &cover_projection(&b).projected,
                 &HashSet::new()
             ),
             "cover's post-stack rekey preserves the same stale class beside Curse pin4/live7"
