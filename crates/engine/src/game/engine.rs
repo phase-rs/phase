@@ -8737,12 +8737,15 @@ pub(crate) fn counted_offer(
 /// determinate crown uses (`mark_unbounded_loop`; see the reconcile seam above). The offer's
 /// cover admitted the growing class as inert and unobserved, and `board_covers_modulo_fodder`'s
 /// tapped split kept the UNTAPPED remainder finite while the total grows — so the TAPPED
-/// members are the unbounded pile. The pile therefore needs NO
-/// mutation: the finite untapped reals stay as-is, and the pre-existing tapped fodder ARE the ∞
-/// pile (the HUD / battlefield render the marked axis as `∞`), and the ∞ counter pills are a
-/// display projection of the batched `Counters` item. For a mana engine the axes are `Mana(_)`,
-/// feeding the existing infinite-mana pool reseed. Besides any representative fodder it seeds
-/// (`seed_representative_fodder`), the take's one board change is the batched life:
+/// members are the unbounded pile. When the proposer already has tapped fodder, the pile needs
+/// NO mutation: the finite untapped reals stay as-is, and the pre-existing tapped fodder ARE the
+/// ∞ pile (the HUD / battlefield render the marked axis as `∞`). When the period taps a fodder
+/// each cycle and the proposer has none tapped yet, the take mints one tapped token, which is
+/// the pile's anchor, and one untapped token (`seed_representative_fodder`); the untapped reals
+/// already there stay as-is. The ∞ counter pills are a display projection of the batched
+/// `Counters` item. For a mana engine the axes are `Mana(_)`, feeding the existing infinite-mana
+/// pool reseed. Besides any representative fodder it seeds, the take's one board change is the
+/// batched life:
 /// each `Life` item lands at the take, at the accepted count `n` (CR 732.2c: the shortcut is
 /// taken once the last player accepts), so no `Life(_)` axis is marked and none waits for the
 /// CR 500.5 boundary; the `Tokens` and `Counters` items are registered for that boundary. Every

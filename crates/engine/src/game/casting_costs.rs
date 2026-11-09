@@ -12513,9 +12513,9 @@ fn targeted_remove_counter_choice_cost(cost: &AbilityCost) -> Option<AbilityCost
 /// CR 107.3a + CR 601.2b + CR 119.4a: The largest X a "pay X life" cast or
 /// activation cost can announce: the cast/activation payable-life budget
 /// (`life_costs::max_payable_life_cast_or_activation`: in a shared-life format
-/// the exact shared total of a Two-Headed Giant team, CR 810.4, of the
-/// Archenemy Commander heroes, CR 904.13b, or of a Horde game's survivors,
-/// `topology::has_shared_life`), capped at `i32::MAX`.
+/// the shared total of a Two-Headed Giant team, CR 810.4, of the Archenemy
+/// Commander heroes, CR 904.13b, or of a Horde game's survivors,
+/// `topology::has_shared_life`, clamped into `u32`), capped at `i32::MAX`.
 fn max_pay_life_x(state: &GameState, player: PlayerId) -> u32 {
     // Engine capacity limit, not a rule: the announced X is carried into the
     // cost as an `i32` (`concretize_chosen_x_cost`) and read by the spell's
