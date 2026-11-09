@@ -17046,7 +17046,10 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
 
     let filter = build_reveal_until_filter(filter_text);
     // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
-    let count = apply_where_x_quantity_expression(raw_count, where_x_expression.as_deref())?;
+    let count = apply_where_x_quantity_expression(
+        raw_count,
+        WhereXBinding::bare(where_x_expression.as_deref()),
+    )?;
 
     // CR 406.2: Consume the remainder after " is revealed" / " are revealed".
     // The only recognized trailing suffix on a passive reveal-until clause is an optional
