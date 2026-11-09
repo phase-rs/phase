@@ -2228,7 +2228,7 @@ fn drain_active_repeat_until(state: &mut GameState, events: &mut Vec<GameEvent>)
     } = pending;
     // CR 104.1: the game ended while the iteration was paused; no prompt or
     // next iteration may follow.
-    if repeat_has_game_ended(state) {
+    if game_has_ended(state) {
         return;
     }
     match &ability.repeat_until {
@@ -2236,7 +2236,7 @@ fn drain_active_repeat_until(state: &mut GameState, events: &mut Vec<GameEvent>)
         // controller whether to repeat the process.
         Some(RepeatContinuation::ControllerChoice) => {
             // CR 104.1: no repeat prompt after a recorded game end.
-            if repeat_has_game_ended(state) {
+            if game_has_ended(state) {
                 return;
             }
             state.waiting_for = WaitingFor::RepeatDecision {
@@ -2249,7 +2249,7 @@ fn drain_active_repeat_until(state: &mut GameState, events: &mut Vec<GameEvent>)
             stop_on_duplicate_exiled_names,
         }) => {
             // CR 104.1: never judge a repeat that ended the game as a loop.
-            if repeat_has_game_ended(state) {
+            if game_has_ended(state) {
                 return;
             }
             // CR 104.4b: `stop_progress` is the pre-iteration baseline stashed
@@ -2310,7 +2310,7 @@ fn drain_active_repeat_until(state: &mut GameState, events: &mut Vec<GameEvent>)
             max_iterations,
         }) => {
             // CR 104.1: no resumed pass after a recorded game end.
-            if repeat_has_game_ended(state) {
+            if game_has_ended(state) {
                 return;
             }
             let mut remaining = *max_iterations;
@@ -2465,7 +2465,7 @@ impl RepeatIterationMovement {
 /// effect-based win; the chained body then no-ops, so without this check the
 /// while-driver could spin and the until-driver could overwrite the win with a
 /// CR 104.4b mandatory-loop draw.
-fn repeat_has_game_ended(state: &GameState) -> bool {
+fn game_has_ended(state: &GameState) -> bool {
     state.game_end.is_some()
 }
 
@@ -2510,7 +2510,7 @@ fn repeat_until_verdict(
 ) -> RepeatUntilVerdict {
     // CR 104.1: never turn a repeat that already ended the game into the
     // mandatory-loop draw below; the recorded result stands.
-    if repeat_has_game_ended(state) {
+    if game_has_ended(state) {
         return RepeatUntilVerdict::Stop;
     }
     if should_stop_repeat_until(
@@ -2951,12 +2951,12 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
         let mut iteration = next_iteration;
         let mut paused = false;
         // CR 104.1: the game ended before this frame resumed; drop the rest.
-        if repeat_has_game_ended(state) {
+        if game_has_ended(state) {
             return;
         }
         while iteration < total_iterations {
             // CR 104.1: stop the resumed counted loop before another iteration.
-            if repeat_has_game_ended(state) {
+            if game_has_ended(state) {
                 return;
             }
             if open_spell_copy_order_choice(
@@ -3023,7 +3023,7 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     Err(_) => return,
                 };
             // CR 104.1: the resumed iteration ended the game; do not park another.
-            if repeat_has_game_ended(state) {
+            if game_has_ended(state) {
                 return;
             }
             if progress.is_pending() {
@@ -17763,7 +17763,7 @@ fn drive_repeat_for_outermost(
     let mut iteration = 0usize;
     while iteration < base_iterations {
         // CR 104.1: a prior iteration ended the game; stop the counted loop.
-        if repeat_has_game_ended(state) {
+        if game_has_ended(state) {
             return Ok(ResolutionProgress::Complete);
         }
         let mut iter_ability = effective.clone();
@@ -17773,7 +17773,7 @@ fn drive_repeat_for_outermost(
             resolve_chain_body(state, &iter_ability, events, depth, payment_choice.take())
         })?;
         // CR 104.1: do not park or run another iteration after the game ended.
-        if repeat_has_game_ended(state) {
+        if game_has_ended(state) {
             return Ok(ResolutionProgress::Complete);
         }
         if progress.is_pending() {
@@ -21696,7 +21696,7 @@ fn resolve_ability_chain_with_root_result(
                     resolve_chain_body(state, ability, events, depth, payment_choice.take())
                 })?;
                 // CR 104.1: the iteration ended the game; no repeat prompt.
-                if repeat_has_game_ended(state) {
+                if game_has_ended(state) {
                     return Ok(ResolutionProgress::Complete);
                 }
                 if progress.is_pending() {
@@ -21731,7 +21731,7 @@ fn resolve_ability_chain_with_root_result(
             }) => loop {
                 // CR 104.1: a prior iteration ended the game; stop before the
                 // next iteration can re-enter the (now terminal) chain body.
-                if repeat_has_game_ended(state) {
+                if game_has_ended(state) {
                     return Ok(ResolutionProgress::Complete);
                 }
                 // CR 104.4b: pre-iteration baseline. Captured INSIDE the loop so
@@ -21756,7 +21756,7 @@ fn resolve_ability_chain_with_root_result(
                 })?;
                 // CR 104.1: the iteration ended the game; do not park or judge
                 // it as a loop.
-                if repeat_has_game_ended(state) {
+                if game_has_ended(state) {
                     return Ok(ResolutionProgress::Complete);
                 }
                 if progress.is_pending() {
@@ -21818,7 +21818,7 @@ fn resolve_ability_chain_with_root_result(
                 loop {
                     // CR 104.1: a prior pass ended the game; the chain body is
                     // terminal, so stop instead of spinning on the condition.
-                    if repeat_has_game_ended(state) {
+                    if game_has_ended(state) {
                         return Ok(ResolutionProgress::Complete);
                     }
                     // CR 608.2c: each repeated process is a FRESH execution of the
@@ -21857,7 +21857,7 @@ fn resolve_ability_chain_with_root_result(
                         })?;
                     // CR 104.1: the pass ended the game; do not park or evaluate
                     // another pass.
-                    if repeat_has_game_ended(state) {
+                    if game_has_ended(state) {
                         return Ok(ResolutionProgress::Complete);
                     }
                     if progress.is_pending() {
@@ -22316,7 +22316,7 @@ fn resolve_chain_body(
     // CR 104.1: a game that ended earlier in this resolution is terminal — no
     // player receives priority again, so no later instruction resolves. This
     // is the shared boundary every chained instruction enters through.
-    if state.game_end.is_some() {
+    if game_has_ended(state) {
         return Ok(ResolutionProgress::Complete);
     }
 
@@ -24403,7 +24403,7 @@ fn resolve_chain_body(
             while iteration < iterations {
                 // CR 104.1: a prior iteration ended the game; the counted loop
                 // must not resolve its effect again.
-                if repeat_has_game_ended(state) {
+                if game_has_ended(state) {
                     break;
                 }
                 if open_spell_copy_order_choice(
@@ -24590,7 +24590,7 @@ fn resolve_chain_body(
                 }
                 // CR 104.1: the iteration ended the game; stop before parking
                 // another iteration or advancing the counter.
-                if repeat_has_game_ended(state) {
+                if game_has_ended(state) {
                     break;
                 }
                 // CR 608.2c + CR 109.5: When the inner effect enters an
@@ -25179,7 +25179,7 @@ fn resolve_chain_body(
     // him after its conditional "you win the game" has ended the game. The
     // per-instruction entry guard in `resolve_chain_body` catches every
     // recursive step; this guard stops the tail of the CURRENT instruction.
-    if state.game_end.is_some() {
+    if game_has_ended(state) {
         return Ok(ResolutionProgress::Complete);
     }
 
