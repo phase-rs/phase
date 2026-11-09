@@ -622,8 +622,8 @@ fn any_typed_leg<F: Fn(&TypedFilter) -> bool>(filter: &TargetFilter, pred: &F) -
 }
 
 /// A scoped library leg names whose library is used, not who performs the
-/// instruction. Its own inline zone constraints intersect the effective
-/// origins; a broader inline union cannot widen an explicit Library origin.
+/// instruction. Its own inline constraints intersect the resolver's selected
+/// scan zones; a sibling leg's zone cannot supply this leg's ownership meaning.
 fn filter_names_library_owner(filter: &TargetFilter, origin_zones: &[Zone]) -> bool {
     any_typed_leg(filter, &|leg| {
         if !leg_names_player(leg, &ControllerRef::ScopedPlayer) {
@@ -13666,27 +13666,65 @@ mod tests {
         assert_eq!(without_inline, with_inline);
     }
 
+    // Typed representation contract. Picks prioritize their explicit origin;
+    // mass moves retain the inline union scan. A same-leg Library constraint
+    // narrows either path without promoting a genuinely mixed-zone subject.
     #[test]
-    fn effective_library_origin_intersects_broad_leg_zone_constraints() {
-        let broad = card_leg(
-            None,
-            vec![
+    fn effective_scan_zones_preserve_union_and_leg_intersection() {
+        for library_only in [false, true] {
+            let mut mass = GameState::new_two_player(42);
+            let library = create_object(
+                &mut mass,
+                CardId(9792),
+                PlayerId(1),
+                "Scoped library member".to_string(),
+                Zone::Library,
+            );
+            let hand = create_object(
+                &mut mass,
+                CardId(9793),
+                PlayerId(1),
+                "Scoped hand member".to_string(),
+                Zone::Hand,
+            );
+            let mut pick = mass.clone();
+            let mut properties = vec![
                 FilterProp::Owned {
                     controller: ControllerRef::ScopedPlayer,
                 },
                 FilterProp::InAnyZone {
                     zones: vec![Zone::Hand, Zone::Library],
                 },
-            ],
-        );
-        assert_eq!(
-            mass_library_exile_outcome(broad.clone()),
-            vec![(Zone::Exile, Some(PlayerId(0))); 2]
-        );
-        assert_eq!(
-            pick_library_exile_outcome(broad),
-            (Zone::Exile, Some(PlayerId(0)), false)
-        );
+            ];
+            if library_only {
+                properties.push(FilterProp::InZone {
+                    zone: Zone::Library,
+                });
+            }
+            let filter = card_leg(None, properties);
+            let mut pick_ability =
+                performer_test_pick_exile(Some(Zone::Library), filter.clone(), PlayerId(0));
+            pick_ability.scoped_player = Some(PlayerId(1));
+            resolve(&mut pick, &pick_ability, &mut Vec::new()).expect("the pick resolves");
+            assert_eq!(pick.objects[&library].zone, Zone::Exile);
+            assert_eq!(pick.objects[&library].exiled_by, Some(PlayerId(0)));
+            assert_eq!(pick.objects[&hand].zone, Zone::Hand);
+
+            let mut mass_ability =
+                performer_test_mass_exile(Some(Zone::Library), filter, PlayerId(0));
+            mass_ability.scoped_player = Some(PlayerId(1));
+            resolve_all(&mut mass, &mass_ability, &mut Vec::new()).expect("the mass move resolves");
+            assert_eq!(mass.objects[&library].zone, Zone::Exile);
+            if library_only {
+                assert_eq!(mass.objects[&library].exiled_by, Some(PlayerId(0)));
+                assert_eq!(mass.objects[&hand].zone, Zone::Hand);
+                assert_eq!(mass.objects[&hand].exiled_by, None);
+            } else {
+                assert_eq!(mass.objects[&hand].zone, Zone::Exile);
+                assert_eq!(mass.objects[&hand].exiled_by, Some(PlayerId(1)));
+                assert_eq!(mass.objects[&library].exiled_by, Some(PlayerId(1)));
+            }
+        }
     }
 
     // Synthetic mixed-zone contract: retain the hand subject's meaning when a
