@@ -1570,6 +1570,7 @@ fn redirect_own_hand_move_to(destination: Zone) -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 destination,
                 origin: None,
                 target: TargetFilter::SelfRef,
@@ -2021,6 +2022,7 @@ fn nested_post_effect_repause_and_reload_preserve_outer_result() {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
+                chooser: engine::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::Labeled {
                     options: vec!["first".to_string(), "second".to_string()],
                 },

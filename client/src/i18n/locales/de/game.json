@@ -1,5 +1,10 @@
 {
-  "playerLatency": {"host":"Host","waiting":"Warten","value":"{{ms}} ms","description":"Hin- und Rücklaufzeit zum Host. Eine fehlende Antwort trennt das Spiel nicht."},
+  "playerLatency": {
+    "host": "Host",
+    "waiting": "Warten",
+    "value": "{{ms}} ms",
+    "description": "Hin- und Rücklaufzeit zum Host. Eine fehlende Antwort trennt das Spiel nicht."
+  },
   "abilityBlock": {
     "badge": "Blockiert",
     "cantBeActivated": "Diese Fähigkeit kann nicht aktiviert werden",
@@ -27,6 +32,7 @@
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
+    "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
@@ -443,7 +449,9 @@
     "done": "Fertig"
   },
   "lifeTotal": {
-    "playerLabel": "S{{seat}}"
+    "playerLabel": "S{{seat}}",
+    "libraryLabel": "KARTEN",
+    "libraryTooltip": "Die Horde hat keine Lebenspunkte. Schaden und Lebensverlust lassen sie stattdessen Karten von ihrer Bibliothek auf den Friedhof legen – sie ist besiegt, wenn ihre Bibliothek leer ist. Diese Zahl ist ihre echte Uhr."
   },
   "phaseStop": {
     "untapLabel": "Enttappschritt",
@@ -534,12 +542,17 @@
     }
   },
   "badges": {
+    "hordeRulesAriaLabel": "Horde-Deck-Regeln",
     "monarch": "Monarch",
     "monarchTooltip": "Der Monarch — zieht am Zugende eine zusätzliche Karte",
     "initiative": "Initiative",
     "initiativeTooltip": "Hat die Initiative — wagt sich zu Beginn der Versorgung in die Unterstadt vor",
     "cityBlessing": "Segen der Stadt",
     "cityBlessingTooltip": "Segen der Stadt — kontrolliert zehn oder mehr bleibende Karten (Aufstieg)",
+    "day": "Tag",
+    "dayTooltip": "Es ist Tag — bleibende Karten kommen taggebunden ins Spiel; wirkt ein Spieler in seinem Zug keine Zaubersprüche, wird es im nächsten Zug Nacht",
+    "night": "Nacht",
+    "nightTooltip": "Es ist Nacht — bleibende Karten kommen nachtgebunden ins Spiel; wirkt ein Spieler in seinem Zug zwei oder mehr Zaubersprüche, wird es im nächsten Zug Tag",
     "enduringStory": "Bleibende Geschichte",
     "enduringStoryTooltip": "Bleibende Geschichte — erhalten, wenn du eine Storied bleibende Karte und drei oder mehr Artefakte, legendäre bleibende Karten und/oder Sagen kontrollierst; bleibt für den Rest der Partie bestehen",
     "dungeonAriaLabel": "Wagt sich in {{name}} vor, {{roomName}}, Raum {{room}} von {{total}}",
@@ -638,6 +651,9 @@
   },
   "zone": {
     "commandZone": "Kommandozone",
+    "conspiracy": "Verschwörung",
+    "conspiracyTitle": "Verschwörung: {{name}}",
+    "turnFaceUp": "{{name}} aufdecken",
     "emblem": "Emblem",
     "emblemFallback": "Emblem",
     "commander": "Kommandeur",
@@ -836,7 +852,7 @@
     "targetingLabel": "Visiert {{label}} an",
     "titleTargets": "Ziele: {{targets}}",
     "titlePaid": "Bezahlt: {{paid}}",
-    "titleContext": "Kontext: {{context}}",
+    "titleContext": "Kontext: {{items}}",
     "revealedCards": "Aufgedeckt: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} Mana",
@@ -873,6 +889,8 @@
     "chooseCreatureTokenToPopulate": "Wähle einen Kreaturspielstein zum Populieren",
     "chooseReturnAsAuraTarget": "Wähle eine bleibende Karte zum Verzaubern",
     "chooseTokenHost": "Wähle, woran der Spielstein angelegt wird",
+    "chooseOneHighlighted": "Wähle eine der hervorgehobenen Optionen",
+    "chooseUpToOneHighlighted": "Wähle bis zu eine der hervorgehobenen Optionen",
     "tapUntappedCreatures_one": "Tappe {{count}} ungetappte Kreatur",
     "tapUntappedCreatures_other": "Tappe {{count}} ungetappte Kreaturen",
     "chooseTargetOf": "Wähle Ziel {{current}} von {{total}}",
@@ -1329,7 +1347,8 @@
     "passwordPrompt": "Dieser Raum erfordert ein Passwort:",
     "toasts": {
       "connectionFailed": "Verbindung fehlgeschlagen. Versuche es erneut oder ändere den Server in den Einstellungen.",
-      "eliminatedSpectating": "Du bist ausgeschieden. Du schaust jetzt zu."
+      "eliminatedSpectating": "Du bist ausgeschieden. Du schaust jetzt zu.",
+      "retainedTerminalUnreadable": "Die gespeicherte Zustellung des Endergebnisses konnte nicht gelesen werden"
     },
     "resumeReset": {
       "appUpdated": "Die App wurde aktualisiert und dein gespeichertes Spiel ist mit der neuen Version inkompatibel.",
@@ -1393,6 +1412,11 @@
     "noLegalAiDecks": {
       "withFormat": "Füge ein in {{format}} legales Deck hinzu oder importiere es, damit die KI es nutzen kann.",
       "generic": "Füge ein in diesem Format legales Deck hinzu oder importiere es, damit die KI es nutzen kann."
+    },
+    "hordeDeck": {
+      "title": "Horde-Deck",
+      "subtitle": "Das selbstspielende Deck, dem euer Team gegenübersteht. Die Engine stellt es bereit – du brauchst kein KI-Deck.",
+      "selected": "Ausgewählt"
     }
   },
   "cardChoice": {
@@ -1426,7 +1450,8 @@
       "cast": "Wirken",
       "crew": "Bemannen ({{power}})",
       "saddle": "Satteln ({{power}})",
-      "station": "Stationieren (+{{power}})"
+      "station": "Stationieren (+{{power}})",
+      "destroy": "Destroy"
     },
     "buttons": {
       "confirm": "Bestätigen",
@@ -1545,6 +1570,7 @@
     "effectZone": {
       "titleSacrifice": "Opfern",
       "titleTopdeck": "Auf die Bibliothek legen",
+      "titleBottomdeck": "Auf die Bibliothek legen",
       "titleBattlefield": "Auf das Schlachtfeld legen",
       "titleHand": "Zurückgeben",
       "titleExile": "Ins Exil schicken",
@@ -1564,6 +1590,12 @@
       "subtitleTopdeckUpTo_other": "Wähle bis zu {{count}} Karten, um sie oben auf deine Bibliothek zu legen",
       "subtitleTopdeckRange_one": "Wähle {{min}}-{{count}} Karte, um sie oben auf deine Bibliothek zu legen",
       "subtitleTopdeckRange_other": "Wähle {{min}}-{{count}} Karten, um sie oben auf deine Bibliothek zu legen",
+      "subtitleBottomdeckExact_one": "Wähle {{count}} Karte, um sie unter deine Bibliothek zu legen",
+      "subtitleBottomdeckExact_other": "Wähle {{count}} Karten, um sie unter deine Bibliothek zu legen",
+      "subtitleBottomdeckUpTo_one": "Wähle bis zu {{count}} Karte, um sie unter deine Bibliothek zu legen",
+      "subtitleBottomdeckUpTo_other": "Wähle bis zu {{count}} Karten, um sie unter deine Bibliothek zu legen",
+      "subtitleBottomdeckRange_one": "Wähle {{min}}-{{count}} Karte, um sie unter deine Bibliothek zu legen",
+      "subtitleBottomdeckRange_other": "Wähle {{min}}-{{count}} Karten, um sie unter deine Bibliothek zu legen",
       "subtitleBattlefieldExact_one": "Wähle {{count}} Karte, um sie auf das Schlachtfeld zu legen",
       "subtitleBattlefieldExact_other": "Wähle {{count}} Karten, um sie auf das Schlachtfeld zu legen",
       "subtitleBattlefieldUpTo_one": "Wähle bis zu {{count}} Karte, um sie auf das Schlachtfeld zu legen",
@@ -1609,14 +1641,17 @@
       "labelSkip": "Überspringen",
       "labelDecline": "Ablehnen",
       "labelPutOnTop": "Oben drauflegen ({{order}})",
+      "labelPutOnBottom": "Nach unten legen ({{order}})",
       "labelConfirm": "Bestätigen ({{selected}}/{{count}})",
       "labelTop": "Oben ({{selected}}/{{count}})",
+      "labelBottom": "Unten ({{selected}}/{{count}})",
       "labelPut": "Legen ({{selected}}/{{count}})",
       "labelReturn": "Zurückgeben ({{selected}}/{{count}})",
       "labelExile": "Ins Exil ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
       "labelCast": "Wirken ({{selected}}/{{count}})",
       "orderTop": "Oben",
+      "orderBottom": "Unten",
       "orderSecond": "2.",
       "orderThird": "3.",
       "orderFourth": "4.",
@@ -1770,7 +1805,8 @@
       "counterDiscard": "{{selected}} von {{cap}} abwerfen",
       "counterKeep": "{{selected}} von {{cap}} behalten",
       "keepInstead": "Stattdessen behalten",
-      "discardInstead": "Stattdessen abwerfen"
+      "discardInstead": "Stattdessen abwerfen",
+      "counterChoose": "Choose {{selected}} of {{cap}}"
     },
     "discard": {
       "title": "Abwerfen",
@@ -1869,6 +1905,42 @@
       "hint": "Ziehen zum Neuordnen · Position 1 landet oben auf diesem Stapel",
       "moveLeft": "Nach links verschieben",
       "moveRight": "Nach rechts verschieben"
+    },
+    "heroEvent": {
+      "chromeOverload": {
+        "title": "Chrome Dome's Overload",
+        "subtitle": "Choose a tapped creature you control to sacrifice"
+      },
+      "krangStratagem": {
+        "title": "Krang's Stratagem",
+        "subtitleUpTo_one": "Choose up to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleUpTo_other": "Choose up to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleMin_one": "Choose {{min}} to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleMin_other": "Choose {{min}} to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleExact_one": "Choose {{count}} card to discard",
+        "subtitleExact_other": "Choose {{count}} cards to discard"
+      },
+      "smackdown": {
+        "title": "Leatherhead's Smackdown",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "ratKingRevolution": {
+        "title": "Rat King's Revolution",
+        "subtitle": "Choose a creature you control to tap and stun"
+      },
+      "savantiCurse": {
+        "title": "Savanti Romero's Curse",
+        "subtitle_one": "Choose {{count}} creature you control to return to its owner's hand",
+        "subtitle_other": "Choose {{count}} creatures you control to return to their owners' hands"
+      },
+      "infiltration": {
+        "title": "Villain Infiltration",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "villainMayhem": {
+        "title": "Villain Mayhem!",
+        "subtitle": "As a team, choose {{count}} creatures to spare — every other creature is destroyed"
+      }
     }
   },
   "specializeColor": {
@@ -2109,13 +2181,18 @@
   "freeCastWindow": {
     "eyebrow": "Kostenlos wirken",
     "title": "Wirke einen Zauberspruch kostenlos",
+    "titlePlay": "Karten kostenlos spielen",
     "subtitle": "Wähle einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig). Verbleibender Gesamtmanawert: {{budget}}.",
     "subtitleNoBudget": "Wähle einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig).",
+    "subtitlePlay": "Wähle ein Land zum Spielen oder einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig). Verbleibender Gesamtmanawert: {{budget}}.",
+    "subtitleNoBudgetPlay": "Wähle ein Land zum Spielen oder einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig).",
     "remainingAny": "beliebig viele",
     "castNamed": "{{name}} wirken",
+    "playNamed": "{{name}} spielen",
     "castSuffix": "(ohne seine Manakosten zu bezahlen)",
     "done": "Fertig",
-    "doneSuffix": "(keine weiteren Zaubersprüche auf diese Weise wirken)"
+    "doneSuffix": "(keine weiteren Zaubersprüche auf diese Weise wirken)",
+    "doneSuffixPlay": "(keine weiteren Karten auf diese Weise spielen)"
   },
   "castingVariant": {
     "eyebrow": "Wirken",
@@ -2198,7 +2275,8 @@
     "unitDamage": "Schaden",
     "unitLife": "Leben",
     "title": "{{total}} {{unit}} verteilen",
-    "subtitle": "Teile jedem Ziel mindestens 1 {{unit}} zu. Verbleibend: {{remaining}}"
+    "subtitle": "Teile jedem Ziel mindestens 1 {{unit}} zu. Verbleibend: {{remaining}}",
+    "subtitleAnyNumber": "Teile jedem gewählten Ziel mindestens 1 {{unit}} zu, beliebig viele davon. Verbleibend: {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Wähle einen Dungeon",
@@ -2284,6 +2362,8 @@
       "fallback": "Triff eine Wahl"
     },
     "searchSubtitle": "Tippe, um alle Karten zu durchsuchen",
+    "secretAgendaTitle": "Nenne heimlich eine Karte ({{current}} von {{total}})",
+    "secretAgendaSubtitle": "Verborgen, bis du diese Verschwörung aufdeckst",
     "searchPlaceholder": "Nach Name suchen...",
     "noCardsFound": "Keine Karten gefunden",
     "buttonSubtitle": "Wähle eine Option",
@@ -2332,6 +2412,22 @@
     "selfManaValue": "sein Manawert",
     "manaCostReduced": "seine Manakosten, verringert um {{reduction}}",
     "spliceOnto": "auf {{subtype}} {{cost}}",
+    "sacrificeArtifact_few": "{{count}} Artefakte opfern",
+    "sacrificeArtifact_many": "{{count}} Artefakte opfern",
+    "sacrificeArtifact_one": "Ein Artefakt opfern",
+    "sacrificeArtifact_other": "{{count}} Artefakte opfern",
+    "sacrificeCreature_few": "{{count}} Kreaturen opfern",
+    "sacrificeCreature_many": "{{count}} Kreaturen opfern",
+    "sacrificeCreature_one": "Eine Kreatur opfern",
+    "sacrificeCreature_other": "{{count}} Kreaturen opfern",
+    "sacrificeLand_few": "{{count}} Länder opfern",
+    "sacrificeLand_many": "{{count}} Länder opfern",
+    "sacrificeLand_one": "Ein Land opfern",
+    "sacrificeLand_other": "{{count}} Länder opfern",
+    "sacrificePermanent_few": "{{count}} bleibende Karten opfern",
+    "sacrificePermanent_many": "{{count}} bleibende Karten opfern",
+    "sacrificePermanent_one": "Eine bleibende Karte opfern",
+    "sacrificePermanent_other": "{{count}} bleibende Karten opfern",
     "wardDiscardAtRandom_few": "{{count}} Karten nach Zufallsprinzip abwerfen",
     "wardDiscardAtRandom_many": "{{count}} Karten nach Zufallsprinzip abwerfen",
     "wardDiscardAtRandom_one": "eine Karte nach Zufallsprinzip abwerfen",
@@ -2366,6 +2462,7 @@
     "cardFallback": "Card",
     "title": "Put {{name}} on top or bottom of library",
     "top": "Top of library",
+    "nthFromTop": "Position {{n}} from the top of library",
     "bottom": "Bottom of library"
   },
   "mutateMerge": {
@@ -2478,6 +2575,7 @@
     "triggerFallback": "Trigger {{number}}"
   },
   "costReductionOrder": {
+    "announcedHybrids": "Angekündigte Hybrid-Zahlungen",
     "eyebrow": "Reihenfolge der Kostenreduzierungen",
     "title": "Ordne deine Kostenreduzierungen",
     "subtitle": "Je nach Reihenfolge, in der du diese Reduzierungen anwendest, werden andere Gesamtkosten festgelegt (CR 601.2f). Das oberste dieser Liste wird zuerst angewendet.",
@@ -2706,6 +2804,9 @@
     "player": "Player",
     "life": "Life",
     "setLife": "Set Life",
+    "gainLife": "Gain Life",
+    "loseLife": "Lose Life",
+    "amount": "Amount",
     "count": "Count",
     "drawCards": "Draw Cards",
     "mill": "Mill",
@@ -2721,6 +2822,8 @@
     "delta": "Delta",
     "modifyCounters": "Modify Counters",
     "modifyEnergy": "Modify Energy",
+    "givePlayerCounters": "Give Counters",
+    "giveEnergy": "Give Energy",
     "browseDescription": "Opens a modal of your library in randomized order. Click a card to move it to any zone, or use the quick Battlefield / Hand buttons.",
     "browseLibrary": "Browse Library",
     "infiniteMana": "Infinite Mana",
@@ -2873,6 +2976,36 @@
       "winner": "{{name}} hat den Wettbewerb gewonnen.",
       "tie": "Unentschieden – nichts passiert.",
       "cancelled": "Der Wettbewerb wurde abgebrochen – nichts passiert."
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
     }
   }
 }

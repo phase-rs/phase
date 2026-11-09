@@ -6,6 +6,7 @@
 //! layer (CR 614.1 / 614.6 replacement consult, CR 616.1 choices, CR 614.1c
 //! enters-with seeding) plus the CR 303.4f aura-host choice.
 
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
@@ -106,7 +107,9 @@ impl ZoneChangeCause {
     ///   bottom-of-library returns happen before any effect exists to replace.
     /// - `PlayerLeftGame` (CR 800.4a): "This is not a state-based action"; all
     ///   objects the player owns leave the game as a single rules action.
-    /// - `DebugCommand`: operator intent is "force the state".
+    /// - `DebugCommand`: operator intent is "force the state" (no replacement
+    ///   consult; the CR 306.5b / CR 310.4b characteristic counters are still
+    ///   installed on a battlefield arrival).
     ///
     /// The unconditional primitive guards (CR 111.8 token, CR 614.1d ETB block,
     /// CR 400.7 cleanup) still run in `zones.rs` delivery for every cause — the
@@ -776,6 +779,40 @@ pub fn move_object_for_test(
     )
 }
 
+/// Whether `zones::move_to_zone` will reject moving `object` to `to` as one of
+/// its two object-level no-ops (below); its other rejections — CR 304.4 /
+/// CR 307.4 instants and sorceries, CR 712.14a a card with no back face put
+/// onto the battlefield transformed, CR 614.17 "can't enter" statics — are
+/// decided at delivery. Its callers (below) run it before they build a
+/// proposal, so no replacement is consulted, consumed (`last_effect_count`,
+/// CR 616.1 choices) or prompted for a move that never happens.
+/// CR 111.8: a token that has left the battlefield can't move to another zone
+/// or come back onto the battlefield; it remains in its current zone and ceases
+/// to exist at the next SBA check (CR 704.5d). An exact CR 601.2a pending spell
+/// plus its announcement placeholder makes the retained-origin representation
+/// stack-resident until its delivery.
+/// CR 400.6 + CR 603.6d + CR 614.12: a Battlefield -> Battlefield move is not a
+/// zone change, so no event puts the permanent onto the battlefield for an
+/// "enters with" / "as enters" replacement — including the CR 306.5b /
+/// CR 310.4b intrinsic counters — to modify. CR 603.2g + CR 603.6a: and no
+/// enters-the-battlefield trigger event occurs.
+/// Callers: `move_object_with_terminal` (THE zone-change entry point),
+/// `execute_zone_move_with_applied_terminal` (the effect-driven funnel every
+/// `execute_zone_move*` wrapper reaches) and
+/// `engine_debug::enter_battlefield_with_etb` (the sandbox consulting entry).
+pub(crate) fn zone_move_is_primitive_noop(
+    state: &GameState,
+    object: &GameObject,
+    to: Zone,
+) -> bool {
+    // CR 111.8: a token outside the battlefield (and not stack-resident) stays
+    // put — except a Horde-deck token, which moves by design in boss-deck
+    // games (see `zones::token_cannot_change_zones`).
+    zones::token_cannot_change_zones(state, object)
+        // CR 400.6 + CR 603.6d: Battlefield -> Battlefield is no entry event.
+        || (object.zone == Zone::Battlefield && to == Zone::Battlefield)
+}
+
 pub(crate) fn move_object_with_terminal(
     state: &mut GameState,
     req: ZoneMoveRequest,
@@ -797,26 +834,8 @@ pub(crate) fn move_object_with_terminal(
     // rejects as a no-op. These two are pure object-level reads with no game
     // effect, so testing them up front cannot change observable behavior — it
     // only avoids spending a one-shot replacement on a move that never happens.
-    {
-        let obj = state
-            .objects
-            .get(&req.object_id)
-            .expect("object exists (zone read above)");
-        // CR 111.8: A token that has left the battlefield can't change zones; it
-        // remains in place and ceases to exist at the next SBA (CR 111.7). An
-        // exact CR 601.2a pending spell plus its announcement placeholder makes
-        // the retained-origin representation stack-resident until this delivery.
-        if zones::token_is_outside_battlefield_and_stack(state, obj) {
-            return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
-        }
-        // CR 603.2g + CR 603.6a: A Battlefield -> Battlefield move does not put a
-        // permanent onto the battlefield — no entry event occurs, so no
-        // would-style replacement should be consulted (and the primitive would
-        // reject it as a no-op regardless), mirroring the `zones::move_to_zone`
-        // no-op guard.
-        if from_zone == Zone::Battlefield && req.to == Zone::Battlefield {
-            return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
-        }
+    if zone_move_is_primitive_noop(state, object, req.to) {
+        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
     }
 
     // Library-placement arm (W3). A `Some(placement)` request lands the object at
@@ -1036,16 +1055,23 @@ pub(crate) fn move_object_with_terminal(
     // the same delivery tail as a post-replacement event, so the unconditional
     // primitive guards (CR 111.8 / 614.1d / 400.7) still apply. Exempt callers
     // carry default `EntryMods` today; seed any they DO carry so the contract is
-    // uniform with the consulting path. The intrinsic enters-with-counters
-    // seeding (CR 614.1c) is part of the "would" layer and is deliberately NOT
-    // applied — matching the raw `move_to_zone` behavior these callers replace.
+    // uniform with the consulting path. The CR 614.1c replacement consult —
+    // including the intrinsic enters-with seeding on the proposal — is not
+    // applied; the non-debug exempt causes never reach the battlefield, and
+    // `DebugCommand` installs only the CR 306.5b / CR 310.4b characteristic
+    // counters below.
     if req.cause.is_exempt() {
-        // DebugCommand is FULLY inert: operator intent is "force the state" for
-        // scenario setup, so the delivery tail's battlefield arms must not fire
-        // either — CR 614.1c "enters with an additional counter" statics
-        // (Kalain class) must not mint counters onto a debug-staged creature,
-        // `pending_etb_counters` from delayed triggers must not be consumed,
-        // and the CR 614.12a devour snapshot must not be captured. Route
+        // DebugCommand skips the replacement consult and the delivery tail:
+        // operator intent is "force the state" for scenario setup, so the
+        // delivery tail's battlefield arms must not fire either — CR 614.1c
+        // "enters with an additional counter" statics (Kalain class) must not
+        // mint counters onto a debug-staged creature, `pending_etb_counters`
+        // from delayed triggers must not be consumed, and the CR 614.12a
+        // devour snapshot must not be captured. A battlefield arrival still
+        // receives its CR 306.5b / CR 310.4b loyalty / defense counters
+        // (`install_intrinsic_characteristic_counters`): CR 306.5c / CR 310.4c
+        // make them the permanent's loyalty / defense, so omitting them leaves
+        // a planeswalker whose loyalty field contradicts its counters. Route
         // through the no-tail primitive, which keeps every unconditional guard
         // (CR 111.8 token, CR 614.1d ETB block, CR 400.7 cleanup, ZoneChanged
         // emission) because those live in `zones::move_to_zone` itself. This
@@ -1070,11 +1096,19 @@ pub(crate) fn move_object_with_terminal(
             // the blast radius of a subtle divergence here is the whole test
             // suite. Unconditional, regardless of what move_to_zone's own
             // (now axis-gated) internal decision would otherwise have been.
+            let completion = zone_move_completion_from_delivery(member, &events[delivery_start..]);
+            // CR 306.5b + CR 306.5c / CR 310.4b + CR 310.4c: a planeswalker or
+            // battle that actually arrived on the battlefield gets its printed
+            // loyalty / defense counters. An arrival `move_to_zone` refuses (a
+            // CR 614.17d "can't enter the battlefield" static, or a CR 304.4 /
+            // CR 307.4 instant or sorcery) is not `Moved` and gets nothing; the
+            // CR 111.8 and same-zone no-ops already returned above. The completion
+            // is computed first, so the added `CounterAdded` events cannot change it.
+            if req.to == Zone::Battlefield && completion == ZoneMoveCompletion::Moved {
+                install_intrinsic_characteristic_counters(state, req.object_id, events);
+            }
             crate::game::layers::mark_layers_full(state);
-            return ZoneMoveTerminalResult::Completed(zone_move_completion_from_delivery(
-                member,
-                &events[delivery_start..],
-            ));
+            return ZoneMoveTerminalResult::Completed(completion);
         }
         let mut proposed = ProposedEvent::zone_change(req.object_id, from_zone, req.to, source_id);
         if let ProposedEvent::ZoneChange {
@@ -1153,6 +1187,44 @@ pub(crate) fn move_object_with_terminal(
         req.replacement_applied,
         events,
     )
+}
+
+/// CR 306.5b + CR 310.4b: a planeswalker / battle has the intrinsic "enters
+/// with" loyalty / defense counters; CR 306.5c + CR 310.4c: on the battlefield
+/// its loyalty / defense IS that counter count, so a forced placement installs
+/// the printed number (CR 122.6 + CR 122.6a: the controller puts them).
+/// Installed as an accepted addition — no CR 614 consult, so the DebugCommand
+/// arm never parks a CR 616.1 choice. Face counters only: CR 306.5b / CR 310.4b
+/// are themselves replacement effects (CR 614.1c), installed here only because
+/// CR 306.5c / CR 310.4c make their counter count the permanent's loyalty /
+/// defense; the other intrinsic enters-with replacements — Ravenous
+/// (CR 702.156a) and Saga lore (CR 714.3a) — set no characteristic and stay
+/// skipped with the rest of the CR 614 consult.
+fn install_intrinsic_characteristic_counters(
+    state: &mut GameState,
+    object_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return;
+    };
+    let controller = obj.controller;
+    let counters = crate::game::printed_cards::intrinsic_face_entry_counters(
+        obj.printed_loyalty,
+        obj.loyalty,
+        None,
+        obj.defense,
+    );
+    for (counter_type, count) in counters {
+        crate::game::effects::counters::apply_counter_addition(
+            state,
+            controller,
+            object_id,
+            counter_type,
+            count,
+            events,
+        );
+    }
 }
 
 /// Result of a batch zone-move (`move_objects_simultaneously`).
@@ -1570,6 +1642,14 @@ fn anticipated_zone_change_delivery(
 /// `mill_double_redirect_choice_continuation` (two sequential parks, no
 /// completion) and `surveil_rest_pile_redirect_continuation` (two sequential
 /// parks WITH a completion that must fire once after the second park drains).
+///
+/// CLASSIFICATION CONTRACT (issue #10431): the resumed segment's
+/// `terminal_completion` is recorded by the resume seam
+/// (`engine_replacement::handle_replacement_choice_inner`) before either
+/// terminal, so a delivery that parks again in its own tail (ETB counter
+/// ordering, entering-attacker choice) is still classified `Moved` here. `None`
+/// at this point means the delivery never reached a terminal decision and is a
+/// contract violation, not a state this function may paper over.
 pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if let Some(pending) = state.active_batch_delivery().cloned() {
         let PendingBatchDeliveries {
@@ -1622,9 +1702,24 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 &paused_current.delivery_events,
             )
             .expect("resumed batch retains its exact paused delivery");
-            let terminal_completion = paused_current
-                .terminal_completion
-                .expect("resumed batch delivery records its exact terminal completion");
+            // CR 616.1 + CR 603.10a: a resumed batch member must be classified
+            // before its owner can be drained. The resume seam records it whether
+            // the delivery returns `Done` or parks again
+            // (`engine_replacement::handle_replacement_choice_inner`), so `None`
+            // here means a delivery that never reached a terminal decision — a
+            // contract violation, never a fallback (settlement would leave the
+            // member `Pending`).
+            let terminal_completion =
+                paused_current
+                    .terminal_completion
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "resumed batch member {} (incarnation {}) has no terminal completion ({} retained delivery events)",
+                            paused_current.member.object_id.0,
+                            paused_current.member.incarnation,
+                            paused_current.delivery_events.len()
+                        )
+                    });
             logical_zone_change_group
                 .record_delivery_completion(paused_current.member.object_id, terminal_completion)
                 .expect("resumed batch member records its exact terminal outcome");
@@ -1839,6 +1934,7 @@ mod paused_search_audience_tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            unrepresentable_life_change: Default::default(),
         });
 
         // The owner parks on the unanswered event.
@@ -3122,6 +3218,7 @@ mod entering_aura_attachment_tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::SelfRef,
@@ -3193,6 +3290,7 @@ mod entering_aura_attachment_tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::SelfRef,
@@ -3859,6 +3957,10 @@ pub(crate) fn deliver_replaced_zone_change(
         if face_down_preflight {
             if let Some(obj) = state.objects.get_mut(&object_id) {
                 obj.face_down = true;
+                // CR 708.3: turned face down before it enters, so the origin-exit LKI and the
+                // zone-change record `move_to_zone` captures next carry no printing. A rejected
+                // entry rolls back only the flag.
+                obj.conceal_printing();
             }
         }
         // pod-lab loop-3 Q5: tracks whether this delivery took the plain,
@@ -3945,7 +4047,7 @@ pub(crate) fn deliver_replaced_zone_change(
                 crate::game::exile_links::record_exiling_player(state, object_id, player);
             }
         }
-        // CR 614.1d: determine whether the object actually entered the battlefield.
+        // CR 614.17d: determine whether the object actually entered the battlefield.
         // `move_to_zone` rejects a battlefield entry without moving the object when
         // a `CantEnterBattlefieldFrom` static (e.g. Grafdigger's Cage) matches, so
         // a `to == Battlefield` request can leave the object in its origin zone.
@@ -4133,11 +4235,11 @@ pub(crate) fn deliver_replaced_zone_change(
                 );
             }
         }
-        // CR 712.14a: Apply transformation if entering the battlefield transformed.
+        // CR 712.14a: A permanent put onto the battlefield transformed enters back face up.
         if should_transform && to == Zone::Battlefield {
             if let Some(obj) = state.objects.get(&object_id) {
                 if obj.back_face.is_some() && !obj.transformed {
-                    let _ = crate::game::transform::transform_permanent(state, object_id, events);
+                    let _ = crate::game::transform::enter_back_face_up(state, object_id);
                 }
             }
         }
@@ -4207,7 +4309,14 @@ pub(crate) fn deliver_replaced_zone_change(
         }
         // CR 614.1c: Apply counters from replacement pipeline (e.g., saga lore counters,
         // planeswalker intrinsic loyalty, battle intrinsic defense).
-        if to == Zone::Battlefield {
+        // CR 614.17c + CR 614.17d + CR 122.6: gated on `entered_battlefield`,
+        // not `to == Battlefield`. When `move_to_zone` refused the entry (a
+        // "can't enter the battlefield" static of the Grafdigger's Cage class,
+        // or any other rejection that leaves the object in its origin zone), no
+        // event put it onto the battlefield for an enters-with replacement to
+        // modify: the object gets none of these counters, and its
+        // `pending_etb_counters` are not consumed.
+        if entered_battlefield {
             let mut counters_to_apply = enter_with_counters;
             // CR 614.1c + CR 122.1: Apply additional counters from continuous
             // "[scope] creatures you control enter with an additional [counter]
@@ -4264,7 +4373,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     .pending_etb_counters
                     .retain(|(oid, _, _)| *oid != object_id);
             }
-        } else if !enter_with_counters.is_empty() {
+        } else if to != Zone::Battlefield && !enter_with_counters.is_empty() {
             // CR 122.1: Effect-driven counters for non-battlefield
             // destinations — e.g., "exile it with three egg counters
             // on it" (Darigaaz Reincarnated), Delay's three time
@@ -4527,6 +4636,76 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
     )
 }
 
+/// CR 306.5b + CR 310.4b + CR 614.1c: Seed the intrinsic "enters with N
+/// counters" replacement onto a proposed non-cast battlefield `ZoneChange`
+/// when a planeswalker or battle enters the battlefield (effect-driven entry
+/// — bounce-return, reanimate, blink, etc. — and the sandbox entry). The
+/// counters ride the proposal, so `replacement::replace_event` sees them (an
+/// enters-as-copy replacement retargets them) and the delivery tail's
+/// `apply_etb_counters` applies Doubling Season class replacements
+/// (CR 614.1a) and any CR 616.1 order choice to them.
+///
+/// Called before `replacement::replace_event` by the effect-driven pipeline
+/// (`execute_zone_move_with_applied_terminal`) and the sandbox entry
+/// (`engine_debug::enter_battlefield_with_etb`). Spell resolution
+/// (`stack::resolve_top`) and land play (`engine::commit_land_play`) seed
+/// their own proposals; the former binds the resolving spell's X (CR 107.3m).
+///
+/// CR 708.2a + CR 708.3: the INTRINSIC seeding is skipped for a face-down
+/// entry — the object enters as the profile's body (a 2/2 creature) with no
+/// loyalty/defense characteristic, so a manifested planeswalker card must not
+/// enter with loyalty counters (issue #7822). Only the intrinsic half is
+/// gated: an effect explicitly instructing entry counters on a face-down
+/// entrant is a separate instruction whose counters are markers on the
+/// resulting object (CR 122.1) and must survive; callers add those after this
+/// seeding. The gate reads the proposal, so the caller must stamp
+/// `face_down_profile` (and `enter_transformed`) on it first.
+///
+/// CR 712.14a + CR 712.18: A permanent entering transformed (e.g. a
+/// double-faced card exiled and returned with its back face up, like a
+/// creature-front // planeswalker-back DFC) will have its back face's
+/// characteristics on the battlefield. The physical face swap happens later in
+/// `deliver_replaced_zone_change`, so the entrant still shows its front face
+/// here — read the back face's printed loyalty/defense directly so
+/// CR 306.5b/310.4b seeds the counter map (the source of truth per CR 306.5c).
+/// Without this a transforming planeswalker enters with 0 loyalty counters and
+/// dies immediately to CR 704.5i. Ravenous (front-face cast-time) does not
+/// apply to an effect-driven transformed entry, so only face counters are
+/// seeded. CR 714.3a: a back-face Saga's lore counter comes from its own
+/// replacement via the CR 614.12 projection
+/// (`replacement::stage_transformed_entry_projection`), not from this seeding.
+pub(crate) fn seed_intrinsic_entry_counters(state: &GameState, proposed: &mut ProposedEvent) {
+    let ProposedEvent::ZoneChange {
+        object_id,
+        to: Zone::Battlefield,
+        enter_transformed,
+        face_down_profile: None,
+        enter_with_counters,
+        ..
+    } = proposed
+    else {
+        return;
+    };
+    let Some(obj) = state
+        .liminal_entries
+        .get(object_id)
+        .map(|entry| entry.object.projected())
+        .or_else(|| state.objects.get(object_id))
+    else {
+        return;
+    };
+    let intrinsic = match (*enter_transformed, obj.back_face.as_ref()) {
+        (true, Some(back)) => crate::game::printed_cards::intrinsic_face_entry_counters(
+            back.printed_loyalty,
+            back.loyalty,
+            None,
+            back.defense,
+        ),
+        _ => crate::game::printed_cards::intrinsic_etb_counters(obj, None),
+    };
+    enter_with_counters.extend(intrinsic);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_zone_move_with_applied_terminal(
     state: &mut GameState,
@@ -4556,13 +4735,25 @@ fn execute_zone_move_with_applied_terminal(
     replacement_applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveTerminalResult {
-    let Some(member) = state
-        .objects
-        .get(&obj_id)
-        .map(ObjectIncarnationRef::from_object)
-    else {
+    let Some(object) = state.objects.get(&obj_id) else {
         return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
     };
+    let member = ObjectIncarnationRef::from_object(object);
+    // CR 111.8 + CR 400.6 + CR 603.6d + CR 614.12: the shared object-level
+    // no-op guard (`zone_move_is_primitive_noop`). `move_object_with_terminal`
+    // runs it before ITS replacement consult; this funnel — the one every
+    // `execute_zone_move*` wrapper, and therefore every effect-driven
+    // `ChangeZone` / `ChangeZoneAll` member, reaches — must run it too. Without
+    // it the funnel seeds entry counters and calls `replace_event` for a move
+    // `zones::move_to_zone` then refuses: a replacement is consulted, and can
+    // be consumed (CR 616.1, `last_effect_count`) or reported applied
+    // (`GameEvent::ReplacementApplied`), for a move that never happens; and a
+    // Battlefield -> Battlefield proposal re-applies every enters-with
+    // replacement for an object that never left. Remaining in place with no
+    // event is exactly what CR 111.8 and CR 400.6/CR 603.6d say.
+    if zone_move_is_primitive_noop(&*state, object, dest_zone) {
+        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+    }
     // CR 712.14a: A single-faced object instructed to enter transformed
     // cannot enter the battlefield. A single-faced copy of a transforming
     // Saga therefore remains in exile after its final chapter resolves.
@@ -4580,6 +4771,23 @@ fn execute_zone_move_with_applied_terminal(
     if from_zone == Zone::Library && dest_zone == Zone::Library && library_placement.is_none() {
         return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
     }
+    // Boss-stage Horde (Turtle Team-Up booklet, printed p. 7): Boss-owned
+    // cards bound for hand go to their graveyard "instead". Normalize the
+    // PROPOSED destination — before `replace_event` consults — so
+    // graveyard-scoped replacements (Rest in Peace) observe the real
+    // destination and survive CR 616.1 ordering pauses on the parked event.
+    // CR 400.6 applies replacements before the move happens; CR 616.1f
+    // repeats the process for effects that would now be applicable. The
+    // classic top-of-library redirect stays a mover-level mapping in
+    // `zones::move_to_zone` (unchanged); that mover also keeps this mapping
+    // as a backstop for consult-bypassing paths. The object exists (the
+    // missing-object arm returned above), so the owner read is total.
+    let dest_zone = {
+        let owner = state.objects.get(&obj_id).map(|obj| obj.owner);
+        owner.map_or(dest_zone, |owner| {
+            zones::boss_hand_redirect_destination(state, owner, dest_zone)
+        })
+    };
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
     if let ProposedEvent::ZoneChange {
         applied,
@@ -4668,69 +4876,11 @@ fn execute_zone_move_with_applied_terminal(
         }
     }
 
-    // CR 306.5b + CR 310.4b + CR 614.1c: Seed the intrinsic "enters with N
-    // counters" replacement when a planeswalker or battle enters the
-    // battlefield from any source (effect-driven entry — bounce-return,
-    // reanimate, blink, etc.). Spell-cast entry is handled in stack.rs.
-    //
-    // CR 708.2a + CR 708.3: the INTRINSIC seeding below is skipped for a
-    // face-down entry — the object enters as the profile's body (a 2/2
-    // creature) with no loyalty/defense characteristic, so a manifested
-    // planeswalker card must not enter with loyalty counters (issue #7822).
-    // Only the intrinsic half is gated: an effect explicitly instructing entry
-    // counters on a face-down entrant (`effect_enter_with_counters` below) is
-    // a separate instruction whose counters are markers on the resulting
-    // object (CR 122.1) and must survive. The gate reads the proposed event,
-    // on which the profile was just stamped above.
-    let enters_face_down = matches!(
-        &proposed,
-        ProposedEvent::ZoneChange {
-            face_down_profile: Some(_),
-            ..
-        }
-    );
-    if dest_zone == Zone::Battlefield && !enters_face_down {
-        if let Some(obj) = state
-            .liminal_entries
-            .get(&obj_id)
-            .map(|entry| entry.object.projected())
-            .or_else(|| state.objects.get(&obj_id))
-        {
-            // CR 712.14a + CR 712.18: A permanent entering transformed (e.g. a
-            // double-faced card exiled and returned with its back face up, like
-            // a creature-front // planeswalker-back DFC) will have its back
-            // face's characteristics on the battlefield. The physical face swap
-            // happens later in `deliver_replaced_zone_change`, so `obj` still
-            // shows its front face here — read the back face's printed
-            // loyalty/defense directly so CR 306.5b/310.4b seeds the counter map
-            // (the source of truth per CR 306.5c). Without this a transforming
-            // planeswalker enters with 0 loyalty counters and dies immediately
-            // to CR 704.5i. Ravenous (front-face cast-time) does not apply to an
-            // effect-driven transformed entry, so only face counters are seeded.
-            // CR 714.3a: a back-face Saga's lore counter comes from its own
-            // replacement via the CR 614.12 projection
-            // (`replacement::stage_transformed_entry_projection`), not from
-            // this seeding.
-            let intrinsic = match (enter_transformed, obj.back_face.as_ref()) {
-                (true, Some(back)) => crate::game::printed_cards::intrinsic_face_entry_counters(
-                    back.printed_loyalty,
-                    back.loyalty,
-                    None,
-                    back.defense,
-                ),
-                _ => crate::game::printed_cards::intrinsic_etb_counters(obj, None),
-            };
-            if !intrinsic.is_empty() {
-                if let ProposedEvent::ZoneChange {
-                    enter_with_counters,
-                    ..
-                } = &mut proposed
-                {
-                    enter_with_counters.extend(intrinsic);
-                }
-            }
-        }
-    }
+    // CR 306.5b + CR 310.4b + CR 614.1c: seed the intrinsic loyalty/defense
+    // counters onto the proposal; `enter_transformed` and `face_down_profile`
+    // were stamped on it above, so the helper's back-face and face-down gates
+    // read the same values the replacement pipeline will see.
+    seed_intrinsic_entry_counters(state, &mut proposed);
     // CR 122.1 + CR 614.1c: effect-driven enter-with-counters apply to EVERY
     // battlefield entry, face-down included — the explicit instruction is
     // independent of the intrinsic loyalty/defense seeding gated above.
@@ -5085,6 +5235,7 @@ mod w3_library_placement_tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination: Zone::Exile,
                         target: TargetFilter::Any,
@@ -5111,6 +5262,7 @@ mod w3_library_placement_tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: to,
                     target: TargetFilter::Any,
@@ -5132,6 +5284,7 @@ mod w3_library_placement_tests {
     fn face_down_self_search(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
         let mut exile_step = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -5702,6 +5855,7 @@ mod w3_library_placement_tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Any,
@@ -5816,6 +5970,7 @@ mod w3_library_placement_tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Any,
@@ -5958,6 +6113,7 @@ mod w3_library_placement_tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination: Zone::Exile,
                         target: TargetFilter::Any,
@@ -6764,6 +6920,7 @@ mod layers_incremental_flush_tests {
         assert!(
             crate::game::layers::static_layer_dependency_for_zone_transition(
                 &state,
+                reanimated,
                 Zone::Graveyard,
                 Zone::Battlefield
             ),
@@ -6870,6 +7027,7 @@ mod layers_incremental_flush_tests {
         assert!(
             !crate::game::layers::static_layer_dependency_for_zone_transition(
                 &state,
+                entering_watcher,
                 Zone::Graveyard,
                 Zone::Battlefield
             ),
@@ -6906,6 +7064,13 @@ mod layers_incremental_flush_tests {
     /// test pins that handoff end-to-end — cheap mark at the seam, escalation
     /// plus full evaluation at the flush — so neither half of the contract can
     /// silently regress.
+    ///
+    /// #10400 note: the per-object zone-of-function term in
+    /// `static_layer_dependency_for_zone_transition` reads `state.objects`
+    /// directly, so it too bypasses the stale-by-design index for the MOVED
+    /// SOURCE's own statics. This test's assertions are unchanged because its
+    /// fixture's definitions carry empty `active_zones`, which the term
+    /// deliberately does not match.
     #[test]
     fn populated_index_entry_defers_zone_reading_static_to_flush_escalation() {
         let mut state = GameState::new_two_player(42);
@@ -6976,6 +7141,7 @@ mod layers_incremental_flush_tests {
         assert!(
             !crate::game::layers::static_layer_dependency_for_zone_transition(
                 &state,
+                entering_watcher,
                 Zone::Graveyard,
                 Zone::Battlefield
             ),
@@ -7018,9 +7184,15 @@ mod layers_incremental_flush_tests {
 #[cfg(test)]
 mod effect_driven_transformed_entry_tests {
     use super::*;
+    use crate::game::layers::{evaluate_layers, flush_layers, mark_layers_full};
     use crate::game::zones::create_object;
+    use crate::types::ability::{
+        ContinuousModification, ControllerRef, FilterProp, StaticCondition, TypeFilter, TypedFilter,
+    };
     use crate::types::card_type::{CardType, CoreType};
+    use crate::types::game_state::LayersDirty;
     use crate::types::identifiers::CardId;
+    use crate::types::keywords::Keyword;
 
     /// CR 712.14a (2nd sentence) regression guard: a SINGLE-FACED object
     /// instructed to enter transformed cannot enter the battlefield — it remains
@@ -7085,7 +7257,7 @@ mod effect_driven_transformed_entry_tests {
     /// CR 712.14a CONTROL: a DFC with a PERMANENT front face (Creature) and a
     /// PERMANENT back face (Land) instructed to enter transformed still lands in
     /// Battlefield and ends up transformed. Passes before and after the fix — the
-    /// entry-face rewrite must not be front-regressive, and `transform_permanent`
+    /// entry-face rewrite must not be front-regressive, and `enter_back_face_up`
     /// must still fire after the guarded entry.
     #[test]
     fn mdfc_permanent_front_transformed_entry_still_lands() {
@@ -7172,6 +7344,132 @@ mod effect_driven_transformed_entry_tests {
         assert!(
             obj.transformed,
             "CR 712.14a: the DFC must be transformed (back face) after this entry"
+        );
+    }
+
+    /// CR 113.6b + CR 400.7 + CR 611.3a: reanimating a source whose static
+    /// functions from the graveyard stops that static, so recipients' cached
+    /// characteristics must be re-derived through the production pipeline.
+    ///
+    /// Reach guard, not a revert probe: with the printed Anger parse the
+    /// `IsPresent(Mountain you control)` filter carries
+    /// `FilterProp::InZone { zone: Zone::Battlefield }`, which
+    /// `static_condition_reads_zone_membership` reads, so for a move whose
+    /// destination is the battlefield the pre-existing board-wide term already
+    /// proposes `Full` at base. What this row guards is the reach end: the
+    /// recipient's applied Haste must lapse after the flush. The revert probes
+    /// for the new per-object term are the mill (V2/V7/V8), exile (V5/V10) and
+    /// library-placement (V11/V11b/V12) rows, whose source zones the condition
+    /// does not read.
+    #[test]
+    fn reanimated_incarnation_marks_full_and_drops_graveyard_grant() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(80071),
+            PlayerId(0),
+            "Effect Source".to_string(),
+            Zone::Battlefield,
+        );
+        let mountain = create_object(
+            &mut state,
+            CardId(80072),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&mountain).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Mountain".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+        let bear = create_object(
+            &mut state,
+            CardId(80073),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&bear).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+        }
+        let anger = create_object(
+            &mut state,
+            CardId(80074),
+            PlayerId(0),
+            "Anger".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&anger).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ))
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }])
+                    .condition(StaticCondition::And {
+                        conditions: vec![
+                            StaticCondition::SourceInZone {
+                                zone: Zone::Graveyard,
+                            },
+                            StaticCondition::IsPresent {
+                                filter: Some(TargetFilter::Typed(TypedFilter {
+                                    type_filters: vec![TypeFilter::Subtype("Mountain".to_string())],
+                                    controller: Some(ControllerRef::You),
+                                    properties: vec![FilterProp::InZone {
+                                        zone: Zone::Battlefield,
+                                    }],
+                                })),
+                            },
+                        ],
+                    })
+                    .active_zones(vec![Zone::Graveyard]),
+            );
+            assert_eq!(
+                obj.static_definitions.iter_all().count(),
+                1,
+                "fixture premise: the milled source carries exactly the Anger static"
+            );
+        }
+
+        mark_layers_full(&mut state);
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects[&bear].has_keyword(&Keyword::Haste),
+            "precondition: Anger in the graveyard with a Mountain grants Haste"
+        );
+        assert!(!state.layers_dirty.is_dirty());
+
+        let mut events = Vec::new();
+        let _ = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(anger, Zone::Battlefield, source),
+            &mut events,
+        );
+
+        assert_eq!(state.objects[&anger].zone, Zone::Battlefield);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Full),
+            "reanimating a graveyard-functioning static's source must force a full \
+             re-evaluation via the per-object zone-of-function term, got {:?}",
+            state.layers_dirty
+        );
+        flush_layers(&mut state);
+        assert!(
+            !state.objects[&bear].has_keyword(&Keyword::Haste),
+            "once Anger leaves the graveyard its grant must lapse for pre-existing recipients"
         );
     }
 }
@@ -7283,6 +7581,7 @@ mod exiling_player_record_tests {
         let card = card_p1_exiled(&mut state);
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Exile),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -7493,6 +7792,7 @@ mod hand_entry_receiver_tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Any,
@@ -7558,5 +7858,207 @@ mod hand_entry_receiver_tests {
         assert!(state.players[1].hand.contains(&first));
         assert!(state.players[1].hand.contains(&second));
         assert_eq!(rebound_owners(&state), vec![Some(P0), Some(P0)]);
+    }
+}
+
+/// CR 111.8 + CR 400.6: the effect-driven funnel
+/// (`execute_zone_move_with_applied_terminal`) must refuse the same
+/// object-level no-ops the pipeline entry (`move_object_with_terminal`) and the
+/// zone primitive already refuse, before it seeds entry counters or consults a
+/// replacement. These are the seam tests; the production entry (Ephemerate on a
+/// Spike Feeder token) is pinned in
+/// `tests/integration/ephemerate_token_no_entry.rs`.
+#[cfg(test)]
+mod effect_driven_entry_noop_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::identifiers::CardId;
+
+    const SPIKE_FEEDER_ENTER: &str = "Spike Feeder enters with two +1/+1 counters on it.";
+
+    /// A Spike Feeder-shaped object: `zone` is where the move starts, and its
+    /// parsed "enters with two +1/+1 counters" definition is installed so the
+    /// funnel would seed those counters on an unguarded Battlefield proposal.
+    fn spike_feeder(state: &mut GameState, zone: Zone, is_token: bool) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(1),
+            PlayerId(0),
+            "Spike Feeder".to_string(),
+            zone,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.is_token = is_token;
+        object.replacement_definitions.push(
+            crate::parser::oracle_replacement::parse_replacement_line(
+                SPIKE_FEEDER_ENTER,
+                "Spike Feeder",
+            )
+            .expect("the enters-with line parses to a replacement"),
+        );
+        id
+    }
+
+    fn move_to(
+        state: &mut GameState,
+        id: ObjectId,
+        from: Zone,
+        to: Zone,
+    ) -> (ZoneMoveResult, Vec<GameEvent>) {
+        let mut events = Vec::new();
+        let result = execute_zone_move(
+            state,
+            id,
+            from,
+            to,
+            ObjectId(100),
+            None,
+            false,
+            EtbTapState::Unspecified,
+            false,
+            None,
+            &[],
+            None,
+            false,
+            None,
+            None,
+            &mut events,
+        );
+        (result, events)
+    }
+
+    fn counters(state: &GameState, id: ObjectId) -> u32 {
+        state.objects[&id]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Red at base: the funnel consulted the exiled token's own `Moved`
+    /// definition and emitted `ReplacementApplied` for a return CR 111.8
+    /// refuses.
+    #[test]
+    fn r4_exiled_token_return_consults_nothing() {
+        let mut state = GameState::new_two_player(42);
+        let id = spike_feeder(&mut state, Zone::Exile, true);
+
+        let (result, events) = move_to(&mut state, id, Zone::Exile, Zone::Battlefield);
+
+        assert!(matches!(result, ZoneMoveResult::Done), "the move completed");
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Exile,
+            "CR 111.8: the token stays in exile"
+        );
+        assert!(events.is_empty(), "no replacement is consulted: {events:?}");
+        assert_eq!(counters(&state, id), 0);
+    }
+
+    /// Positive reach-guard for R4: the same fixture and call with a card does
+    /// reach the replacement and the entry.
+    #[test]
+    fn r4_positive_card_enters_with_counters_from_exile() {
+        let mut state = GameState::new_two_player(42);
+        let id = spike_feeder(&mut state, Zone::Exile, false);
+
+        let (result, events) = move_to(&mut state, id, Zone::Exile, Zone::Battlefield);
+
+        assert!(matches!(result, ZoneMoveResult::Done), "the move completed");
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+        assert_eq!(counters(&state, id), 2, "CR 614.1c: enters with two");
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CounterAdded { .. })));
+    }
+
+    /// Red at base: Battlefield -> Battlefield is not a zone change (CR 400.6),
+    /// yet the funnel re-applied the enters-with counters.
+    #[test]
+    fn r5_battlefield_to_battlefield_token_adds_no_counters() {
+        let mut state = GameState::new_two_player(42);
+        let id = spike_feeder(&mut state, Zone::Battlefield, true);
+        // Seed what the def placed on entry, so "stays 2" is distinguishable
+        // from the base's 4.
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 2);
+        let incarnation = state.objects[&id].incarnation;
+
+        let (result, events) = move_to(&mut state, id, Zone::Battlefield, Zone::Battlefield);
+
+        assert!(matches!(result, ZoneMoveResult::Done), "the move completed");
+        assert_eq!(counters(&state, id), 2, "CR 400.6: no second entry");
+        assert!(events.is_empty(), "no entry happens: {events:?}");
+        assert_eq!(
+            state.objects[&id].incarnation, incarnation,
+            "the object never became a new object (CR 400.7)"
+        );
+    }
+
+    /// Positive reach-guard for R5: the same object and definition still apply
+    /// on a real entry from hand.
+    #[test]
+    fn r5_positive_same_fixture_hand_to_battlefield() {
+        let mut state = GameState::new_two_player(42);
+        // A card, not a token: CR 111.8 keeps a token outside the battlefield
+        // from entering, which is R4's half, not this reach guard's.
+        let id = spike_feeder(&mut state, Zone::Hand, false);
+
+        let (result, events) = move_to(&mut state, id, Zone::Hand, Zone::Battlefield);
+
+        assert!(matches!(result, ZoneMoveResult::Done), "the move completed");
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+        assert_eq!(counters(&state, id), 2);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CounterAdded { .. })));
+    }
+
+    /// Preservation row (green at base): the CR 111.7 stack carve-out still
+    /// lets a stack-resident token move.
+    #[test]
+    fn r6_token_with_stack_residency_still_moves() {
+        let mut state = GameState::new_two_player(42);
+        let id = spike_feeder(&mut state, Zone::Stack, true);
+
+        let (result, events) = move_to(&mut state, id, Zone::Stack, Zone::Exile);
+
+        assert!(matches!(result, ZoneMoveResult::Done), "the move completed");
+        assert_eq!(state.objects[&id].zone, Zone::Exile);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ZoneChanged { .. })));
+    }
+
+    /// Preservation row (green at base): a copy of a card off the battlefield is
+    /// not a token, so the guard leaves it alone (CR 707.10a is an SBA).
+    #[test]
+    fn r7_copy_of_card_off_battlefield_still_moves() {
+        let mut state = GameState::new_two_player(42);
+        let id = spike_feeder(&mut state, Zone::Graveyard, false);
+        state.objects.get_mut(&id).unwrap().is_copy = true;
+
+        let (result, events) = move_to(&mut state, id, Zone::Graveyard, Zone::Battlefield);
+
+        assert!(matches!(result, ZoneMoveResult::Done), "the move completed");
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ZoneChanged { .. })));
+    }
+
+    /// The absent-object early return is unchanged.
+    #[test]
+    fn r8_absent_object_stays_remained() {
+        let mut state = GameState::new_two_player(42);
+
+        let (result, events) = move_to(&mut state, ObjectId(999), Zone::Exile, Zone::Battlefield);
+
+        assert!(matches!(result, ZoneMoveResult::Done), "the move completed");
+        assert!(events.is_empty());
     }
 }

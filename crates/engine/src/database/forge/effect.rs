@@ -320,6 +320,7 @@ fn translate_token(
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
     })
 }
 
@@ -374,6 +375,7 @@ fn translate_change_zone(params: &ForgeParams) -> Result<Effect, ForgeTranslateE
         resolve_target(params, "ValidTgts").or_filter(resolve_target(params, "ChangeType"));
 
     Ok(Effect::ChangeZone {
+        library_shuffle: Default::default(),
         origin,
         destination,
         target,
@@ -522,6 +524,7 @@ fn translate_counter(params: &ForgeParams) -> Result<Effect, ForgeTranslateError
 fn translate_bounce(params: &ForgeParams) -> Result<Effect, ForgeTranslateError> {
     let target = resolve_target(params, "ValidTgts");
     Ok(Effect::ChangeZone {
+        library_shuffle: Default::default(),
         origin: Some(Zone::Battlefield),
         destination: Zone::Hand,
         target,

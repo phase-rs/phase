@@ -24,7 +24,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
+use engine::types::game_state::{ActionResult, GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, ProtectionTarget};
 use engine::types::mana::ManaColor;
@@ -55,6 +55,14 @@ const RECIPIENT_RELIC: &str = "{T}: Probe Relic deals 3 damage to a creature or 
 
 /// The targeted form of the same class: "target" announces the recipient.
 const TARGETED_WALKER: &str = "[0]: Probe Walker deals 2 damage to target creature or player.";
+
+/// Verbatim Waterfall Aerialist (reminder text included), the committed fixture
+/// form of `becomes_target_paused_cast_triggers.rs`: a live ward trigger.
+const WATERFALL_AERIALIST: &str = "Flying\nWard {2} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {2}.)";
+
+/// Verbatim Frost Walker: a "becomes the target" trigger with no controller clause.
+const FROST_WALKER: &str =
+    "When this creature becomes the target of a spell or ability, sacrifice it.";
 
 /// Verbatim Oracle text of the printed class member.
 const WICKED_GUARDIAN: &str = "When this creature enters, you may have it deal 2 damage to another creature you control. If you do, draw a card.";
@@ -152,6 +160,15 @@ fn pick(runner: &mut GameRunner, target: TargetRef) -> Vec<GameEvent> {
         })
         .unwrap_or_else(|error| panic!("the pick must be accepted: {error:?}"))
         .events
+}
+
+/// Answer the single-pick recipient prompt the way the board does: one
+/// `ChooseTarget` click (`None` = choose nothing).
+fn click_recipient(
+    runner: &mut GameRunner,
+    target: Option<TargetRef>,
+) -> Result<ActionResult, EngineError> {
+    runner.act(GameAction::ChooseTarget { target })
 }
 
 fn is_priority_for(runner: &GameRunner, player: PlayerId) -> bool {
@@ -1350,5 +1367,433 @@ fn ai_candidates_cover_every_eligible_entry_including_players() {
             TargetRef::Object(id) => assert_eq!(marked_damage(&b.runner, id), 5),
             TargetRef::Player(player) => assert_eq!(life(&b.runner, player), 15),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The board click: one `ChooseTarget` answers a single-pick recipient prompt
+// ---------------------------------------------------------------------------
+
+/// A plain walker for P0 and one observer for P1 staged by `add_observer`.
+fn walker_and(
+    walker_oracle: &str,
+    add_observer: impl FnOnce(&mut GameScenario) -> ObjectId,
+) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = scenario();
+    let walker = scenario
+        .add_planeswalker_from_oracle(P0, "Probe Walker", "Probe", 5, walker_oracle)
+        .id();
+    let observer = add_observer(&mut scenario);
+    (scenario.build(), walker, observer)
+}
+
+/// Waterfall Aerialist for P1. Its toughness is raised to 9 so the walker's 5
+/// damage leaves it alive: "countered or sacrificed by a trigger" stays apart from
+/// "died to lethal damage" (CR 704.5g).
+fn aerialist(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature(P1, "Waterfall Aerialist", 3, 9)
+        .from_oracle_text_with_keywords(&["Flying", "Ward"], WATERFALL_AERIALIST)
+        .id()
+}
+
+/// Frost Walker for P1, toughness raised to 9 for the same reason as `aerialist`.
+fn frost_walker(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_from_oracle(P1, "Frost Walker", 4, 9, FROST_WALKER)
+        .id()
+}
+
+fn triggers_from(runner: &GameRunner, source: ObjectId) -> usize {
+    runner
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| {
+            matches!(&entry.kind, StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == source)
+        })
+        .count()
+}
+
+fn becomes_target_event(events: &[GameEvent]) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event, GameEvent::BecomesTarget { .. }))
+}
+
+/// The paired positive of the trigger negatives: the targeted form of the class
+/// announces `observer` as its target (CR 115.1), so the observer's "becomes the
+/// target" trigger is put on the stack.
+fn target_with_the_targeted_walker(
+    add_observer: impl FnOnce(&mut GameScenario) -> ObjectId,
+) -> (GameRunner, ObjectId) {
+    let (mut runner, walker, observer) = walker_and(TARGETED_WALKER, add_observer);
+    let index = loyalty_index(&runner, walker);
+    activate(&mut runner, walker, index);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "reach-guard: the targeted form asks for its target, got {}",
+        short(&runner.state().waiting_for)
+    );
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(observer)],
+        })
+        .expect("the target is announced");
+    (runner, observer)
+}
+
+/// The click keeps the full acceptance test: a non-member and an empty click
+/// (`min == 1`) are each rejected with the prompt and the parked instruction
+/// intact, and a valid click afterwards still succeeds.
+#[test]
+fn a_board_click_accepts_exactly_one_eligible_member() {
+    let mut b = board_at_prompt(PLAIN_WALKER);
+    let before = b.runner.state().waiting_for.clone();
+    let p = prompt(&b.runner);
+    assert_eq!((p.min, p.max), (1, Some(1)), "reach-guard: a single pick");
+    let rejected = [
+        Some(TargetRef::Object(b.own_artifact)),
+        Some(TargetRef::Object(b.opposing_walker)),
+        Some(TargetRef::Object(b.walker)),
+        None,
+    ];
+    for target in rejected {
+        let result = click_recipient(&mut b.runner, target.clone());
+        assert!(result.is_err(), "{target:?} must be rejected");
+        assert_eq!(
+            b.runner.state().waiting_for,
+            before,
+            "{target:?}: the prompt is unchanged"
+        );
+        assert!(
+            b.runner.state().active_ability_continuation().is_some(),
+            "{target:?}: the parked instruction is unchanged"
+        );
+    }
+    click_recipient(&mut b.runner, Some(TargetRef::Player(P1)))
+        .unwrap_or_else(|error| panic!("the click must be accepted: {error:?}"));
+    assert_eq!(
+        life(&b.runner, P1),
+        15,
+        "paired positive: a valid click works"
+    );
+    assert_eq!(loyalty_counters(&b.runner, b.walker), 3);
+    assert_priority_for(&b.runner, P0);
+}
+
+/// CR 115.10a + CR 702.21a: a clicked ward permanent is chosen, not targeted, so
+/// ward does not trigger. The targeted form is the paired positive: it proves the
+/// fixture's ward is live.
+#[test]
+fn a_board_click_does_not_trigger_ward() {
+    let (mut runner, walker, aerialist_id) = walker_and(PLAIN_WALKER, aerialist);
+    let index = loyalty_index(&runner, walker);
+    activate(&mut runner, walker, index);
+    runner.advance_until_stack_empty();
+    assert!(
+        prompt(&runner)
+            .eligible
+            .contains(&TargetRef::Object(aerialist_id)),
+        "reach-guard: the ward creature is offered"
+    );
+
+    let events = click_recipient(&mut runner, Some(TargetRef::Object(aerialist_id)))
+        .unwrap_or_else(|error| panic!("the click must be accepted: {error:?}"))
+        .events;
+    assert_eq!(marked_damage(&runner, aerialist_id), 5, "the damage landed");
+    assert!(
+        runner.state().stack.is_empty(),
+        "no ward trigger is waiting"
+    );
+    assert_priority_for(&runner, P0);
+    assert!(!becomes_target_event(&events), "nothing became a target");
+
+    let (runner, aerialist_id) = target_with_the_targeted_walker(aerialist);
+    assert_eq!(
+        triggers_from(&runner, aerialist_id),
+        1,
+        "paired positive: targeting the Aerialist triggers its ward"
+    );
+}
+
+/// CR 115.10a: a "becomes the target" trigger does not see a clicked choice. The
+/// targeted form is the paired positive: Frost Walker's trigger is live and
+/// sacrifices it.
+#[test]
+fn a_board_click_does_not_trigger_becomes_the_target() {
+    let (mut runner, walker, frost) = walker_and(PLAIN_WALKER, frost_walker);
+    let index = loyalty_index(&runner, walker);
+    activate(&mut runner, walker, index);
+    runner.advance_until_stack_empty();
+    assert!(
+        prompt(&runner).eligible.contains(&TargetRef::Object(frost)),
+        "reach-guard: Frost Walker is offered"
+    );
+
+    let events = click_recipient(&mut runner, Some(TargetRef::Object(frost)))
+        .unwrap_or_else(|error| panic!("the click must be accepted: {error:?}"))
+        .events;
+    assert_eq!(runner.state().objects[&frost].zone, Zone::Battlefield);
+    assert_eq!(marked_damage(&runner, frost), 5, "the damage landed");
+    assert!(runner.state().stack.is_empty(), "no trigger is waiting");
+    assert_priority_for(&runner, P0);
+    assert!(!becomes_target_event(&events), "nothing became a target");
+
+    let (mut runner, frost) = target_with_the_targeted_walker(frost_walker);
+    assert_eq!(
+        triggers_from(&runner, frost),
+        1,
+        "paired positive: targeting Frost Walker triggers it"
+    );
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&frost].zone, Zone::Graveyard);
+}
+
+/// Only the chooser clicks: the opponent's click is rejected as the wrong player
+/// with the prompt unchanged, and the controller's click then succeeds.
+#[test]
+fn only_the_controller_may_answer_by_board_click() {
+    let mut b = board_at_prompt(PLAIN_WALKER);
+    let before = b.runner.state().waiting_for.clone();
+    let rejected = apply(
+        b.runner.state_mut(),
+        P1,
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P0)),
+        },
+    );
+    assert!(
+        matches!(rejected, Err(EngineError::WrongPlayer)),
+        "{rejected:?}"
+    );
+    assert_eq!(b.runner.state().waiting_for, before);
+    apply(
+        b.runner.state_mut(),
+        P0,
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P1)),
+        },
+    )
+    .expect("the controller's click answers");
+    assert_eq!(life(&b.runner, P1), 15);
+}
+
+/// CR 608.2d: the click comes from the ability's controller even when that player
+/// is not the active player.
+#[test]
+fn a_board_click_comes_from_the_controller_when_not_active() {
+    let mut scenario = scenario();
+    let relic = scenario
+        .add_artifact_from_oracle(P0, "Probe Relic", OBJECT_RELIC)
+        .id();
+    let first = scenario.add_creature(P0, "First Bear", 2, 9).id();
+    let second = scenario.add_creature(P0, "Second Bear", 2, 9).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+    let index = tap_index(&runner, relic);
+    activate(&mut runner, relic, index);
+    runner.advance_until_stack_empty();
+
+    let p = prompt(&runner);
+    assert_eq!(
+        p.player, P0,
+        "reach-guard: the controller, not the active player"
+    );
+    assert_eq!(runner.state().active_player, P1);
+    click_recipient(&mut runner, Some(TargetRef::Object(first)))
+        .unwrap_or_else(|error| panic!("the click must be accepted: {error:?}"));
+    assert_eq!(marked_damage(&runner, first), 2);
+    assert_eq!(marked_damage(&runner, second), 0);
+    assert_eq!(
+        life(&runner, P0),
+        21,
+        "reach-guard: the following clause ran"
+    );
+}
+
+/// The producer/recipient discrimination holds for clicks: with two identical
+/// pools, the first click answers the tracked-set producer (it publishes and binds
+/// nothing) and the second click binds the damage (it publishes nothing).
+#[test]
+fn board_clicks_keep_the_tracked_set_producer_and_the_recipient_apart() {
+    let mut scenario = scenario();
+    let source = scenario
+        .add_artifact_from_oracle(P0, "Probe Relic", "")
+        .id();
+    let first = scenario.add_creature(P0, "First Bear", 2, 9).id();
+    let second = scenario.add_creature(P0, "Second Bear", 2, 9).id();
+    let mut runner = scenario.build();
+
+    let creatures_you_control =
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+    let mut damage = ResolvedAbility::new(
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 2 },
+            target: creatures_you_control.clone(),
+            damage_source: None,
+            excess: None,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    damage.target_choice_timing = TargetChoiceTiming::Resolution;
+    let mut producer = ResolvedAbility::new(
+        Effect::ChooseObjectsIntoTrackedSet {
+            chooser: TargetFilter::Controller,
+            filter: creatures_you_control,
+            min: 1,
+            max: Some(1),
+            cardinality: None,
+            eligibility: None,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    producer.sub_ability = Some(Box::new(damage));
+
+    let sets_before = runner.state().tracked_object_sets.len();
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &producer, &mut events, 0).expect("chain resolves");
+    let producer_prompt = prompt(&runner);
+    assert_eq!(
+        (producer_prompt.min, producer_prompt.max),
+        (1, Some(1)),
+        "reach-guard: the producer's prompt is a single pick"
+    );
+    assert_eq!(
+        producer_prompt.eligible,
+        vec![TargetRef::Object(first), TargetRef::Object(second)]
+    );
+
+    // First click: the producer's. It publishes a set and binds nothing.
+    let events = click_recipient(&mut runner, Some(TargetRef::Object(first)))
+        .unwrap_or_else(|error| panic!("the producer click must be accepted: {error:?}"))
+        .events;
+    assert!(tracked_set_event(&events), "the producer publishes");
+    assert_eq!(runner.state().tracked_object_sets.len(), sets_before + 1);
+    assert_eq!(
+        marked_damage(&runner, first),
+        0,
+        "the producer's answer is not a damage recipient"
+    );
+    let recipient_prompt = prompt(&runner);
+    assert_eq!(
+        recipient_prompt.eligible,
+        vec![TargetRef::Object(first), TargetRef::Object(second)],
+        "the damage raised its own prompt"
+    );
+
+    // Second click: the recipient. It binds the damage and publishes nothing.
+    let events = click_recipient(&mut runner, Some(TargetRef::Object(second)))
+        .unwrap_or_else(|error| panic!("the recipient click must be accepted: {error:?}"))
+        .events;
+    assert!(!tracked_set_event(&events));
+    assert_eq!(runner.state().tracked_object_sets.len(), sets_before + 1);
+    assert_eq!(marked_damage(&runner, second), 2);
+    assert_eq!(marked_damage(&runner, first), 0);
+}
+
+/// `SelectTargets` stays the only published answer, and each published one-item
+/// candidate has a `ChooseTarget` click twin that reaches the same state.
+#[test]
+fn published_answers_stay_select_targets_and_each_has_a_click_twin() {
+    let b = board_at_prompt(PLAIN_WALKER);
+    let eligible = prompt(&b.runner).eligible;
+    let actions = engine::ai_support::legal_actions(b.runner.state());
+    assert!(!actions.is_empty(), "reach-guard: candidates are published");
+    assert!(
+        !actions
+            .iter()
+            .any(|action| matches!(action, GameAction::ChooseTarget { .. })),
+        "no ChooseTarget is published: {actions:?}"
+    );
+    let candidates: Vec<TargetRef> = actions
+        .iter()
+        .filter_map(|action| match action {
+            GameAction::SelectTargets { targets } => {
+                assert_eq!(targets.len(), 1, "one recipient per candidate: {targets:?}");
+                Some(targets[0].clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        candidates.len(),
+        eligible.len(),
+        "reach-guard: one candidate per eligible entry"
+    );
+
+    let creatures = [b.own_creature, b.opposing_creature, b.hexproof_creature];
+    for target in candidates {
+        let mut select = b.runner.state().clone();
+        apply(
+            &mut select,
+            P0,
+            GameAction::SelectTargets {
+                targets: vec![target.clone()],
+            },
+        )
+        .unwrap_or_else(|error| panic!("{target:?}: the candidate applies: {error:?}"));
+        let mut click = b.runner.state().clone();
+        apply(
+            &mut click,
+            P0,
+            GameAction::ChooseTarget {
+                target: Some(target.clone()),
+            },
+        )
+        .unwrap_or_else(|error| panic!("{target:?}: the click twin applies: {error:?}"));
+
+        let life_of = |state: &GameState, player: PlayerId| {
+            state
+                .players
+                .iter()
+                .find(|p| p.id == player)
+                .expect("player exists")
+                .life
+        };
+        for player in [P0, P1] {
+            assert_eq!(
+                life_of(&select, player),
+                life_of(&click, player),
+                "{target:?}: {player:?} life"
+            );
+        }
+        for id in creatures {
+            assert_eq!(
+                select.objects[&id].damage_marked, click.objects[&id].damage_marked,
+                "{target:?}: damage on {id:?}"
+            );
+        }
+        assert_eq!(
+            select.objects[&b.walker]
+                .counters
+                .get(&CounterType::Loyalty),
+            click.objects[&b.walker].counters.get(&CounterType::Loyalty),
+            "{target:?}: walker loyalty"
+        );
+        assert_eq!(
+            select.objects[&b.walker]
+                .counters
+                .get(&CounterType::Loyalty),
+            Some(&3),
+            "{target:?}: reach-guard: the chain ran past the damage"
+        );
+        assert_eq!(select.waiting_for, click.waiting_for, "{target:?}");
+        assert_eq!(
+            select.tracked_object_sets, click.tracked_object_sets,
+            "{target:?}"
+        );
     }
 }

@@ -16,6 +16,10 @@ use engine::types::zones::Zone;
 
 const DESTROY_REST_ORACLE: &str = "Choose up to two creatures, then destroy the rest.";
 
+/// Verbatim Duneblast Oracle text: the single-pick ("up to one") member of the
+/// destroy-the-rest class.
+const DUNEBLAST: &str = "Choose up to one creature. Destroy the rest.";
+
 struct MountDoomPrompt {
     runner: GameRunner,
     creatures: [ObjectId; 4],
@@ -23,6 +27,13 @@ struct MountDoomPrompt {
 }
 
 fn mount_doom_prompt() -> MountDoomPrompt {
+    destroy_rest_prompt(DESTROY_REST_ORACLE, "Mount Doom Test", (0, Some(2)))
+}
+
+/// Cast a destroy-the-rest spell with `oracle` over a board of four creatures and
+/// an artifact, and resolve it up to its survivor choice, which must publish the
+/// `expected` `(min, max)` over the four creatures.
+fn destroy_rest_prompt(oracle: &str, name: &str, expected: (u32, Option<u32>)) -> MountDoomPrompt {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -34,7 +45,7 @@ fn mount_doom_prompt() -> MountDoomPrompt {
         .add_artifact_from_oracle(P0, "Unaffected Artifact", "")
         .id();
     let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Mount Doom Test", false, DESTROY_REST_ORACLE)
+        .add_spell_to_hand_from_oracle(P0, name, false, oracle)
         .id();
 
     let mut runner = scenario.build();
@@ -55,7 +66,7 @@ fn mount_doom_prompt() -> MountDoomPrompt {
     else {
         panic!("resolution must pause for the untargeted survivor choice");
     };
-    assert_eq!((*min, *max), (0, Some(2)));
+    assert_eq!((*min, *max), expected);
     assert_eq!(eligible.len(), 4);
 
     MountDoomPrompt {
@@ -210,4 +221,98 @@ fn choose_objects_runtime_rejects_fewer_than_required_minimum() {
             .is_err(),
         "an empty selection must be rejected when min is one"
     );
+}
+
+fn zone_of(runner: &GameRunner, id: ObjectId) -> Option<Zone> {
+    runner.state().objects.get(&id).map(|object| object.zone)
+}
+
+/// A multi-pick selection (`max Some(2)`) is not answered by a single board
+/// click: the click is rejected with the prompt unchanged, and the published
+/// `SelectTargets` answer still works.
+#[test]
+fn multi_pick_selection_refuses_a_board_click() {
+    let MountDoomPrompt {
+        mut runner,
+        creatures: [spared_own, destroyed_own, spared_opponent, destroyed_opponent],
+        noncreature,
+    } = mount_doom_prompt();
+    let before = runner.state().waiting_for.clone();
+
+    let click = runner.act(GameAction::ChooseTarget {
+        target: Some(TargetRef::Object(spared_own)),
+    });
+    assert!(click.is_err(), "a multi-pick prompt keeps SelectTargets");
+    assert_eq!(
+        runner.state().waiting_for,
+        before,
+        "the prompt is unchanged"
+    );
+
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![
+                TargetRef::Object(spared_own),
+                TargetRef::Object(spared_opponent),
+            ],
+        })
+        .expect("paired positive: the published answer works");
+    runner.advance_until_stack_empty();
+    for id in [spared_own, spared_opponent, noncreature] {
+        assert_eq!(zone_of(&runner, id), Some(Zone::Battlefield));
+    }
+    for id in [destroyed_own, destroyed_opponent] {
+        assert_eq!(zone_of(&runner, id), Some(Zone::Graveyard));
+    }
+}
+
+/// CR 608.2d + CR 701.8a: Duneblast's "up to one" is a single pick, so a board
+/// click answers it. A `None` click chooses nothing (zero is legal), and then
+/// every creature is destroyed; a click on one creature spares only it. The
+/// artifact is not a creature, so it is never in "the rest".
+#[test]
+fn duneblast_takes_a_board_click_or_a_skip() {
+    let MountDoomPrompt {
+        mut runner,
+        creatures,
+        noncreature,
+    } = destroy_rest_prompt(DUNEBLAST, "Duneblast", (0, Some(1)));
+    runner
+        .act(GameAction::ChooseTarget { target: None })
+        .expect("choosing nothing is legal for an up-to-one choice");
+    runner.advance_until_stack_empty();
+    for id in creatures {
+        assert_eq!(
+            zone_of(&runner, id),
+            Some(Zone::Graveyard),
+            "choosing nothing destroys every creature"
+        );
+    }
+    assert_eq!(zone_of(&runner, noncreature), Some(Zone::Battlefield));
+
+    let MountDoomPrompt {
+        mut runner,
+        creatures: [spared, own_other, opposing, opposing_other],
+        noncreature,
+    } = destroy_rest_prompt(DUNEBLAST, "Duneblast", (0, Some(1)));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(spared)),
+        })
+        .expect("the board click must be accepted");
+    runner.advance_until_stack_empty();
+    for id in [spared, noncreature] {
+        assert_eq!(
+            zone_of(&runner, id),
+            Some(Zone::Battlefield),
+            "the clicked creature and the artifact survive"
+        );
+    }
+    for id in [own_other, opposing, opposing_other] {
+        assert_eq!(
+            zone_of(&runner, id),
+            Some(Zone::Graveyard),
+            "every other creature is destroyed"
+        );
+    }
 }

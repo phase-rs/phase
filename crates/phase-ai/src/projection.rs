@@ -554,6 +554,7 @@ fn resolve_choice(
         | WaitingFor::OpponentMayChoice { .. }
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::TributeChoice { .. }
+        | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. } => {
             // For the actor: pick the "no" option (decline) unless it's the
             // opponent and there's a clearly growth-maximizing yes.
@@ -1260,6 +1261,7 @@ mod tests {
             predicted_winner: Some(PlayerId(1)),
             certificate: engine::analysis::loop_check::LoopCertificate {
                 unbounded: vec![],
+                rising: vec![],
                 win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
                 win_kind_at: None,
                 mandatory: false,
@@ -1269,6 +1271,7 @@ mod tests {
             schema: engine::analysis::decision_template::ShortcutDecisionSchema::default(),
             declaration: None,
             road: engine::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         };
 

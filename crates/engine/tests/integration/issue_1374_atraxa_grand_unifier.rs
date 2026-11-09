@@ -142,6 +142,7 @@ fn atraxa_choice_fixture() -> (GameState, Vec<ObjectId>, ObjectId, ObjectId) {
     let categories = distinct_card_type_categories();
     let change_zone = Box::new(ResolvedAbility::new(
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Hand,
             target: TargetFilter::Any,
@@ -172,6 +173,7 @@ fn atraxa_choice_fixture() -> (GameState, Vec<ObjectId>, ObjectId, ObjectId) {
                 chooser: Chooser::Controller.into(),
                 candidate_source: ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: true,
                 selection: CardSelectionMode::Chosen,
                 constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes { categories }),

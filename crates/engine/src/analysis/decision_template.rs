@@ -2,8 +2,7 @@
 //! be legally taken based on the current game state and the predictable results."
 //! A [`DecisionTemplate`] captures that sequence so it can be replayed verbatim when a
 //! simultaneous-trigger group recurs (CR 603.3b ordering) or driven across loop
-//! iterations as a predictable shortcut (CR 732.2a). PURELY ADDITIVE / offline —
-//! never called from the reducer in this phase.
+//! iterations as a predictable shortcut (CR 732.2a).
 
 use crate::types::game_state::{GameState, WaitingFor, YieldTarget};
 use crate::types::identifiers::ObjectId;
@@ -11,6 +10,7 @@ use crate::types::mana::{ManaColor, ManaType};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 // NOTE: `matches_target_filter`/`FilterContext`/`TargetFilter` are NOT imported — their
 // only consumer, `TargetSchedule::IndexedClass`, is deferred to Phase 4/B3 (RULED
 // Deferral 2). `ResourceAxis` is likewise not imported — its only consumer,
@@ -39,12 +39,7 @@ pub type IterationIndex = u32;
 /// `LoopChoice` entry in `GameState::decision_templates` survives the CR 603.3b batch
 /// boundary — `GameState::clear_ephemeral_trigger_order_templates`' retain predicate is
 /// scoped to `TriggerOrdering` — so it is the vehicle a later episode's declaration can
-/// ride, and it is still POPULATED BY PHASE 4 AND BY NOTHING TODAY. PINNED BY A SHIPPED
-/// ROW: `fantastic_four_bounded_loop::r3b_driven_a_loop_choice_carrier_survives_a_whole_
-/// accepted_f4_drive` plants the `(kind × ephemerality)` cells on the real 4-player board
-/// and drives a whole accepted CR 732.2a shortcut through `apply()` — the `LoopChoice`
-/// cell survives (`3 → 2`) while the `TriggerOrdering` ephemeral cell beside it does not.
-/// `loop_shortcut_ranking::r3b_*` is the seam-level statement of the same predicate.
+/// ride, and nothing populates one today.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum DecisionKind {
     TriggerOrdering,
@@ -153,6 +148,48 @@ impl DecisionTemplate {
                 }
             }
         }
+    }
+
+    /// CR 732.2a: the iteration indices at which [`resolve`] may answer differently than at the
+    /// index before, on one unchanged board, or `None` where no finite list holds them. A pin
+    /// reads the index only through a [`TargetSchedule`]: a constant never changes, a piecewise
+    /// schedule changes at its declared starts (before its first start it has no entry, which is
+    /// a change too), and a round robin of two or more changes at every index.
+    ///
+    /// WILDCARD-FREE over [`PinnedDecision`], [`TargetPin`] and [`TargetSchedule`], so a decision
+    /// kind, a pin kind or a schedule that reads the index some other way fails to build here.
+    pub(crate) fn resolution_change_points(&self) -> Option<BTreeSet<IterationIndex>> {
+        let mut points = BTreeSet::new();
+        for decision in &self.decisions {
+            match decision {
+                PinnedDecision::Targets { targets, .. } => {
+                    for target in targets {
+                        match target {
+                            // `resolve_target` hands neither of these the iteration index.
+                            TargetPin::ByIdentity(_) | TargetPin::Player(_) => {}
+                            TargetPin::Scheduled(schedule) => match schedule {
+                                TargetSchedule::Constant(_) => {}
+                                TargetSchedule::RoundRobin(schedule) => {
+                                    if schedule.len() > 1 {
+                                        return None;
+                                    }
+                                }
+                                TargetSchedule::Piecewise(schedule) => {
+                                    points.extend(schedule.iter().map(|(start, _)| *start));
+                                }
+                            },
+                        }
+                    }
+                }
+                PinnedDecision::Order { .. }
+                | PinnedDecision::Mode { .. }
+                | PinnedDecision::MayChoice { .. }
+                | PinnedDecision::UnlessBreak { .. }
+                | PinnedDecision::ManaColor { .. }
+                | PinnedDecision::ConvokeTaps { .. } => {}
+            }
+        }
+        Some(points)
     }
 }
 
@@ -390,7 +427,7 @@ pub struct ShortcutDecisionSchema {
     /// taken" quantifies existentially over declarations, so the maximum is the reduction that
     /// answers it. `None` means the producer measured none: no axis of the period consumes any
     /// living seat, so the board licenses no threshold rather than one that happens to be
-    /// large. This is what the rules say about the loop; it wears no implementation ceiling.
+    /// large. It wears no implementation ceiling.
     ///
     /// Read by [`ShortcutDecisionSchema::is_bounded`] — the one question it answers — and by
     /// nothing that publishes or enforces a count, which
@@ -408,11 +445,9 @@ pub struct ShortcutDecisionSchema {
     /// runs to a million), so this budget is ours, not the game's — the same labelling ground
     /// the declare handler's budget arm states.
     ///
-    /// The single authority for how HIGH a count may go, and only for that: a proposal
-    /// exceeding it contains a conditional action (an in-proposal CR 704.5a / CR 704.5c /
-    /// CR 104.3c / CR 121.4 elimination would decide what happens next), which CR 732.2a
-    /// forbids — so the declared-count check in `game::engine` rejects a `Fixed(n)` above it,
-    /// and `game::interaction` publishes it as the count picker's ceiling. Whether a given
+    /// The single authority for how HIGH a count may go, and only for that: the declared-count
+    /// check in `game::engine` rejects a `Fixed(n)` above it, and `game::interaction` publishes
+    /// it as the count picker's ceiling. Whether a given
     /// declaration may legally specify a count at or below it is [`declaration_conforms`]'
     /// question, not this field's. `IterationCount` above is the *suggestion*; this is the
     /// *ceiling*, and they are deliberately separate fields.
@@ -596,7 +631,8 @@ impl std::fmt::Display for RankingError {
 /// entry because a game event removed the head would be the conditional action CR 732.2a bars.
 /// CR 732.2c therefore makes a longer ranking a proposal certifying a choice nobody takes, and
 /// `validate_pins` refuses one at DECLARE time. The type still admits one — a save written
-/// before that rule can carry it — so the defensive walks over the whole list stay correct.
+/// before that rule can carry it — so the redaction walk and the wire length bound read the
+/// whole list.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "Vec<AnnouncementSubject>")]
 pub struct Ranking(Vec<AnnouncementSubject>);
@@ -702,14 +738,8 @@ pub enum ReplayMode {
     Scheduled { count: IterationCount },
 }
 
-/// CR 732.2a "a loop that repeats a specified number of times". **Phase 1 ships ONLY
-/// `Fixed`** (reviewer G7): nothing in Phase 1 reads the count — [`resolve`] takes an
-/// explicit `iteration` index, and the count-driven loop that consumes it is Phase 3 /
-/// Part A. The count-terminated variants (`UntilLethal` → CR 704.5a "a player with 0 or
-/// less life loses"; `UntilResource(ResourceAxis, i64)`) are deferred to the phase that
-/// adds their driver, so the shipped surface stays minimal and fully tested. The enum is
-/// kept (rather than a bare `u32` field on `Scheduled`) so Phase 3 adds those variants
-/// without a field-type change at any `Scheduled` construction site.
+/// CR 732.2a "a loop that repeats a specified number of times": the repetitions a shortcut
+/// proposal names — a count, until a player is at 0 or less life, or without end.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum IterationCount {
     Fixed(u32),
@@ -718,6 +748,9 @@ pub enum IterationCount {
     /// The terminating condition is the SBA, not a caller-supplied count. (`UntilResource`
     /// stays deferred to Phase 4/B5.)
     UntilLethal,
+    /// CR 104.4b + CR 732.4: repeat a loop whose in-loop actions are all mandatory with no
+    /// ending point; once every player accepts, the game is a draw.
+    WithoutEnd,
 }
 
 /// CR 732.2a "predictable results / no conditional actions": deterministic,
@@ -1172,16 +1205,14 @@ fn evaluate_schedule(
             .ok_or_else(|| ReplayFailure::ScheduleExhausted { slot: slot.clone() })?,
     };
     match ranking.head() {
-        // CR 608.2b: a pinned TARGET object must still be a live battlefield object — this
-        // is exactly the pre-parameterization `Constant` behaviour, unchanged.
+        // CR 608.2b: a pinned TARGET object must still be a live battlefield object.
         AnnouncementSubject::Object(src) => resolve_source(src, state).map(ConcreteTarget::Object),
         // CR 601.2c + CR 115.1: a ranked seat is a TARGET, so it is judged by
         // `targeting::player_is_legal_target` (existence + CR 702.11c hexproof /
         // CR 702.18a shroud / CR 702.16b protection) rather than by existence alone. Its two
         // trailing arguments describe THE ABILITY INSTANCE that would name the seat, not a
         // target object — hence `resolve_ability_instance` (which admits the command zone —
-        // CR 114.4 / CR 113.6p) and NOT `resolve_source` (battlefield-only, and correctly so
-        // for a pin).
+        // CR 114.4 / CR 113.6p) and NOT `resolve_source` (battlefield-only).
         //
         // A `None` ANYWHERE in this chain falls through to the `ok_or_else` below: with no
         // live ability instance the engine cannot certify that the object it would ask the
@@ -1191,8 +1222,7 @@ fn evaluate_schedule(
         // just means the table plays the loop out manually. (CR 732.2b is the RESPONDER rule
         // — each OTHER player accepting or shortening a proposal that already exists — so it
         // cannot govern a proposer that publishes nothing.) Announcing a target we cannot
-        // certify is not
-        // free. This is the fail-closed branch, not an oversight.
+        // certify is not free.
         AnnouncementSubject::Seat(p) => resolve_ability_instance(&slot.source, state)
             .and_then(|src_id| state.objects.get(&src_id).map(|o| (src_id, o.controller)))
             .filter(|(src_id, ctrl)| {
@@ -1243,8 +1273,7 @@ fn schedule_announces_every_declared_subject(schedule: &TargetSchedule) -> bool 
 /// CR 732.2a firewall: a `Scheduled` template may auto-drive a shortcut only if every
 /// free choice in the cycle is pinned (TOTAL COVERAGE).
 ///
-/// THIS IS WHERE THE NO-CONDITIONAL-ACTIONS CLAUSE IS SATISFIED, AND IT IS SATISFIED BY
-/// CONSTRUCTION. CR 732.2a requires a proposal describe "the predictable results of the sequence of
+/// CR 732.2a requires a proposal describe "the predictable results of the sequence of
 /// choices" and says it "can't include conditional actions, where the outcome of a game event
 /// determines the next action a player takes". Pins fix every free choice BEFORE the offer is made,
 /// so the sequence the table accepts is the sequence that runs. The two companion gates are
@@ -1888,6 +1917,127 @@ mod tests {
 
     fn seat_rank(player: PlayerId) -> Ranking {
         Ranking::one(AnnouncementSubject::Seat(player))
+    }
+
+    /// CR 732.2a: on one board a template's resolution changes with the iteration index only
+    /// where [`DecisionTemplate::resolution_change_points`] says it may. Each row resolves its
+    /// template at twelve successive indices through [`resolve`] itself: between two listed
+    /// points every index answers as the one before it, a piecewise schedule answers differently
+    /// across each of its starts, and a round robin of two, which has no finite list, answers
+    /// differently at successive indices.
+    #[test]
+    fn a_resolution_changes_only_at_its_change_points() {
+        let mut state = GameState::new_two_player(7);
+        bf_object(&mut state, 10, 100, 0);
+        bf_object(&mut state, 11, 101, 0);
+        let ten = || obj_rank(this_obj(10, None));
+        let eleven = || obj_rank(this_obj(11, None));
+        let targets = |source: u64, pin: TargetPin| PinnedDecision::Targets {
+            slot: DecisionSlot::first(this_obj(source, None), ChoicePoint::AnnouncedTarget),
+            targets: vec![pin],
+        };
+        let template = |decisions: Vec<PinnedDecision>| DecisionTemplate {
+            owner: PlayerId(0),
+            decisions,
+            replay: ReplayMode::Static,
+            key: tri_key(),
+        };
+        let scheduled = |schedule: TargetSchedule| TargetPin::Scheduled(schedule);
+        // (name, template, its change points)
+        let rows: Vec<(&str, DecisionTemplate, Option<Vec<IterationIndex>>)> = vec![
+            (
+                "no scheduled pin",
+                template(vec![
+                    targets(10, TargetPin::ByIdentity(this_obj(10, None))),
+                    targets(11, TargetPin::Player(PlayerId(1))),
+                    PinnedDecision::Order {
+                        slot: DecisionSlot::first(this_obj(11, None), ChoicePoint::TriggerOrder),
+                        pos: 0,
+                    },
+                ]),
+                Some(vec![]),
+            ),
+            (
+                "a constant schedule",
+                template(vec![targets(
+                    10,
+                    scheduled(TargetSchedule::Constant(ten())),
+                )]),
+                Some(vec![]),
+            ),
+            (
+                "a round robin of one",
+                template(vec![targets(
+                    10,
+                    scheduled(TargetSchedule::RoundRobin(vec![ten()])),
+                )]),
+                Some(vec![]),
+            ),
+            (
+                "a piecewise schedule",
+                template(vec![targets(
+                    10,
+                    scheduled(TargetSchedule::Piecewise(vec![(2, ten()), (5, eleven())])),
+                )]),
+                Some(vec![2, 5]),
+            ),
+            (
+                "two piecewise schedules",
+                template(vec![
+                    targets(
+                        10,
+                        scheduled(TargetSchedule::Piecewise(vec![(0, ten()), (3, eleven())])),
+                    ),
+                    targets(
+                        11,
+                        scheduled(TargetSchedule::Piecewise(vec![(0, eleven()), (7, ten())])),
+                    ),
+                ]),
+                Some(vec![0, 3, 7]),
+            ),
+            (
+                "a round robin of two",
+                template(vec![targets(
+                    10,
+                    scheduled(TargetSchedule::RoundRobin(vec![ten(), eleven()])),
+                )]),
+                None,
+            ),
+        ];
+        for (name, template, expected) in rows {
+            let points = template.resolution_change_points();
+            assert_eq!(
+                points
+                    .as_ref()
+                    .map(|points| points.iter().copied().collect::<Vec<_>>()),
+                expected,
+                "{name}: the change points"
+            );
+            let resolved: Vec<_> = (0..12)
+                .map(|index| resolve(&template, index, &state))
+                .collect();
+            assert!(
+                resolved.iter().any(Result::is_ok),
+                "REACH-GUARD {name}: some index resolves to a live target"
+            );
+            match points {
+                Some(points) => {
+                    for index in 1..12usize {
+                        let listed = points.contains(&(index as IterationIndex));
+                        assert_eq!(
+                            resolved[index] != resolved[index - 1],
+                            listed,
+                            "{name}: index {index} answers differently than the one before it \
+                             exactly where a change point is listed"
+                        );
+                    }
+                }
+                None => assert_ne!(
+                    resolved[0], resolved[1],
+                    "{name}: successive indices answer differently"
+                ),
+            }
+        }
     }
 
     /// T6: `DecisionPointKind` serializes externally tagged (`{"ConvokeTaps":{...}}`) — the

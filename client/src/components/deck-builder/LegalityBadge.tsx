@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { useTranslation } from "react-i18next";
 
 import type { GameFormat } from "../../adapter/types";
@@ -15,12 +16,12 @@ const STATUS_STYLES: Record<string, string> = {
   not_legal: "bg-gray-700/60 text-gray-400",
 };
 
-const STATUS_LABEL_KEYS: Record<string, string> = {
-  legal: "legality.legal",
-  banned: "legality.banned",
-  restricted: "legality.restricted",
-  not_legal: "legality.notLegal",
-};
+const STATUS_LABEL_KEYS: ReadonlyMap<string, ParseKeys<"deck-builder">> = new Map([
+  ["legal", "legality.legal"],
+  ["banned", "legality.banned"],
+  ["restricted", "legality.restricted"],
+  ["not_legal", "legality.notLegal"],
+]);
 
 export function LegalityBadge({ legalities, format }: LegalityBadgeProps) {
   const { t } = useTranslation("deck-builder");
@@ -29,7 +30,7 @@ export function LegalityBadge({ legalities, format }: LegalityBadgeProps) {
 
   const status = (legalities[legalityKey] ?? "not_legal").toLowerCase();
   const style = STATUS_STYLES[status] ?? STATUS_STYLES.not_legal;
-  const label = t(STATUS_LABEL_KEYS[status] ?? "legality.notLegal");
+  const label = t(STATUS_LABEL_KEYS.get(status) ?? "legality.notLegal");
 
   return (
     <span

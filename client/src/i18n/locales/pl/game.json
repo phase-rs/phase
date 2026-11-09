@@ -1,5 +1,10 @@
 {
-  "playerLatency": {"host":"Host","waiting":"Oczekiwanie","value":"{{ms}} ms","description":"Opóźnienie w obie strony do hosta. Brak odpowiedzi nie rozłącza gry."},
+  "playerLatency": {
+    "host": "Host",
+    "waiting": "Oczekiwanie",
+    "value": "{{ms}} ms",
+    "description": "Opóźnienie w obie strony do hosta. Brak odpowiedzi nie rozłącza gry."
+  },
   "abilityBlock": {
     "badge": "Zablokowana",
     "cantBeActivated": "Tej zdolności nie można aktywować",
@@ -27,6 +32,7 @@
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
+    "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
@@ -443,7 +449,9 @@
     "done": "Gotowe"
   },
   "lifeTotal": {
-    "playerLabel": "G{{seat}}"
+    "playerLabel": "G{{seat}}",
+    "libraryLabel": "KARTY",
+    "libraryTooltip": "Horda nie ma punktów życia. Obrażenia i utrata życia zamiast tego mielą jej bibliotekę — zostaje pokonana, gdy skończą się jej karty, więc ta liczba to jej prawdziwy zegar."
   },
   "phaseStop": {
     "untapLabel": "Krok odwracania",
@@ -534,12 +542,17 @@
     }
   },
   "badges": {
+    "hordeRulesAriaLabel": "Zasady talii Hordy",
     "monarch": "Monarcha",
     "monarchTooltip": "Monarcha — dobiera dodatkową kartę na końcu tury",
     "initiative": "Inicjatywa",
     "initiativeTooltip": "Ma Inicjatywę — wyprawia się do Podmiasta na początku utrzymania",
     "cityBlessing": "Błogosławieństwo miasta",
     "cityBlessingTooltip": "Błogosławieństwo miasta — kontroluje dziesięć lub więcej trwałych (Ascend)",
+    "day": "Dzień",
+    "dayTooltip": "Jest dzień — permanenty wchodzą związane z dniem; jeśli gracz nie rzuci żadnych zaklęć w swojej turze, w następnej turze nastanie noc",
+    "night": "Noc",
+    "nightTooltip": "Jest noc — permanenty wchodzą związane z nocą; jeśli gracz rzuci dwa lub więcej zaklęć w swojej turze, w następnej turze nastanie dzień",
     "enduringStory": "Trwała historia",
     "enduringStoryTooltip": "Trwała historia — zdobyta za kontrolowanie permanenta ze Storied i co najmniej trzech artefaktów, legendarnych permanentów i/lub Sag; trwa do końca gry",
     "dungeonAriaLabel": "Wyprawa w {{name}}, {{roomName}}, pokój {{room}} z {{total}}",
@@ -638,6 +651,9 @@
   },
   "zone": {
     "commandZone": "Strefa dowodzenia",
+    "conspiracy": "Spisek",
+    "conspiracyTitle": "Spisek: {{name}}",
+    "turnFaceUp": "Obróć {{name}} odkrytą stroną do góry",
     "emblem": "Emblemat",
     "emblemFallback": "Emblemat",
     "commander": "Dowódca",
@@ -836,7 +852,7 @@
     "targetingLabel": "Obiera za cel {{label}}",
     "titleTargets": "Cele: {{targets}}",
     "titlePaid": "Zapłacono: {{paid}}",
-    "titleContext": "Kontekst: {{context}}",
+    "titleContext": "Kontekst: {{items}}",
     "revealedCards": "Odkryta: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} many",
@@ -875,6 +891,8 @@
     "chooseCreatureTokenToPopulate": "Wybierz żeton stwora do populacji",
     "chooseReturnAsAuraTarget": "Wybierz permanent do zaczarowania",
     "chooseTokenHost": "Wybierz gospodarza dla żetonu",
+    "chooseOneHighlighted": "Wybierz jedną z podświetlonych opcji",
+    "chooseUpToOneHighlighted": "Wybierz maksymalnie jedną z podświetlonych opcji",
     "tapUntappedCreatures_one": "Obróć {{count}} nieobróconego stwora",
     "tapUntappedCreatures_other": "Obróć {{count}} nieobróconych stworów",
     "chooseTargetOf": "Wybierz cel {{current}} z {{total}}",
@@ -1329,7 +1347,8 @@
     "passwordPrompt": "Ten pokój wymaga hasła:",
     "toasts": {
       "connectionFailed": "Połączenie nie powiodło się. Spróbuj ponownie lub zmień serwer w Ustawieniach.",
-      "eliminatedSpectating": "Zostałeś wyeliminowany. Teraz obserwujesz."
+      "eliminatedSpectating": "Zostałeś wyeliminowany. Teraz obserwujesz.",
+      "retainedTerminalUnreadable": "Nie udało się odczytać zachowanego dostarczenia wyniku końcowego"
     },
     "resumeReset": {
       "appUpdated": "Aplikacja została zaktualizowana, a zapisana gra jest niezgodna z nową wersją.",
@@ -1393,6 +1412,11 @@
     "noLegalAiDecks": {
       "withFormat": "Dodaj lub zaimportuj talię dozwoloną w formacie {{format}}, aby AI mogło jej użyć.",
       "generic": "Dodaj lub zaimportuj talię dozwoloną w tym formacie, aby AI mogło jej użyć."
+    },
+    "hordeDeck": {
+      "title": "Talia Hordy",
+      "subtitle": "Samogrająca talia, z którą mierzy się twoja drużyna. Dostarcza ją silnik — nie potrzebujesz talii SI.",
+      "selected": "Wybrano"
     }
   },
   "cardChoice": {
@@ -1426,7 +1450,8 @@
       "cast": "Rzuć",
       "crew": "Crew ({{power}})",
       "saddle": "Saddle ({{power}})",
-      "station": "Station (+{{power}})"
+      "station": "Station (+{{power}})",
+      "destroy": "Destroy"
     },
     "buttons": {
       "confirm": "Potwierdź",
@@ -1545,6 +1570,7 @@
     "effectZone": {
       "titleSacrifice": "Poświęć",
       "titleTopdeck": "Połóż na bibliotekę",
+      "titleBottomdeck": "Połóż na bibliotekę",
       "titleBattlefield": "Połóż na pole bitwy",
       "titleHand": "Zwróć",
       "titleExile": "Wygnaj",
@@ -1564,6 +1590,12 @@
       "subtitleTopdeckUpTo_other": "Wybierz do {{count}} kart, aby położyć na wierzchu swojej biblioteki",
       "subtitleTopdeckRange_one": "Wybierz {{min}}-{{count}} kartę, aby położyć na wierzchu swojej biblioteki",
       "subtitleTopdeckRange_other": "Wybierz {{min}}-{{count}} kart, aby położyć na wierzchu swojej biblioteki",
+      "subtitleBottomdeckExact_one": "Wybierz {{count}} kartę, aby położyć na spodzie swojej biblioteki",
+      "subtitleBottomdeckExact_other": "Wybierz {{count}} kart, aby położyć na spodzie swojej biblioteki",
+      "subtitleBottomdeckUpTo_one": "Wybierz do {{count}} karty, aby położyć na spodzie swojej biblioteki",
+      "subtitleBottomdeckUpTo_other": "Wybierz do {{count}} kart, aby położyć na spodzie swojej biblioteki",
+      "subtitleBottomdeckRange_one": "Wybierz {{min}}-{{count}} kartę, aby położyć na spodzie swojej biblioteki",
+      "subtitleBottomdeckRange_other": "Wybierz {{min}}-{{count}} kart, aby położyć na spodzie swojej biblioteki",
       "subtitleBattlefieldExact_one": "Wybierz {{count}} kartę, aby położyć na pole bitwy",
       "subtitleBattlefieldExact_other": "Wybierz {{count}} kart, aby położyć na pole bitwy",
       "subtitleBattlefieldUpTo_one": "Wybierz do {{count}} karty, aby położyć na pole bitwy",
@@ -1609,14 +1641,17 @@
       "labelSkip": "Pomiń",
       "labelDecline": "Odmów",
       "labelPutOnTop": "Połóż na wierzch ({{order}})",
+      "labelPutOnBottom": "Połóż na spodzie ({{order}})",
       "labelConfirm": "Potwierdź ({{selected}}/{{count}})",
       "labelTop": "Wierzch ({{selected}}/{{count}})",
+      "labelBottom": "Spód ({{selected}}/{{count}})",
       "labelPut": "Połóż ({{selected}}/{{count}})",
       "labelReturn": "Zwróć ({{selected}}/{{count}})",
       "labelExile": "Wygnaj ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
       "labelCast": "Rzuć ({{selected}}/{{count}})",
       "orderTop": "Wierzch",
+      "orderBottom": "Spód",
       "orderSecond": "2.",
       "orderThird": "3.",
       "orderFourth": "4.",
@@ -1770,7 +1805,8 @@
       "counterDiscard": "Odrzuć {{selected}} z {{cap}}",
       "counterKeep": "Zatrzymaj {{selected}} z {{cap}}",
       "keepInstead": "Zatrzymaj zamiast tego",
-      "discardInstead": "Odrzuć zamiast tego"
+      "discardInstead": "Odrzuć zamiast tego",
+      "counterChoose": "Choose {{selected}} of {{cap}}"
     },
     "discard": {
       "title": "Odrzuć",
@@ -1869,6 +1905,42 @@
       "hint": "Przeciągnij, aby zmienić kolejność · pozycja 1 trafi na wierzch tego stosu",
       "moveLeft": "Przesuń w lewo",
       "moveRight": "Przesuń w prawo"
+    },
+    "heroEvent": {
+      "chromeOverload": {
+        "title": "Chrome Dome's Overload",
+        "subtitle": "Choose a tapped creature you control to sacrifice"
+      },
+      "krangStratagem": {
+        "title": "Krang's Stratagem",
+        "subtitleUpTo_one": "Choose up to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleUpTo_other": "Choose up to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleMin_one": "Choose {{min}} to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleMin_other": "Choose {{min}} to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleExact_one": "Choose {{count}} card to discard",
+        "subtitleExact_other": "Choose {{count}} cards to discard"
+      },
+      "smackdown": {
+        "title": "Leatherhead's Smackdown",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "ratKingRevolution": {
+        "title": "Rat King's Revolution",
+        "subtitle": "Choose a creature you control to tap and stun"
+      },
+      "savantiCurse": {
+        "title": "Savanti Romero's Curse",
+        "subtitle_one": "Choose {{count}} creature you control to return to its owner's hand",
+        "subtitle_other": "Choose {{count}} creatures you control to return to their owners' hands"
+      },
+      "infiltration": {
+        "title": "Villain Infiltration",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "villainMayhem": {
+        "title": "Villain Mayhem!",
+        "subtitle": "As a team, choose {{count}} creatures to spare — every other creature is destroyed"
+      }
     }
   },
   "specializeColor": {
@@ -2109,13 +2181,18 @@
   "freeCastWindow": {
     "eyebrow": "Darmowe rzucenie",
     "title": "Rzuć czar za darmo",
+    "titlePlay": "Zagraj karty za darmo",
     "subtitle": "Wybierz czar do rzucenia bez płacenia jego kosztu many (pozostało: {{remaining}}). Pozostała łączna wartość many: {{budget}}.",
     "subtitleNoBudget": "Wybierz czar do rzucenia bez płacenia jego kosztu many (pozostało: {{remaining}}).",
+    "subtitlePlay": "Wybierz ląd do zagrania lub czar do rzucenia bez płacenia jego kosztu many (pozostało: {{remaining}}). Pozostała łączna wartość many: {{budget}}.",
+    "subtitleNoBudgetPlay": "Wybierz ląd do zagrania lub czar do rzucenia bez płacenia jego kosztu many (pozostało: {{remaining}}).",
     "remainingAny": "dowolna liczba",
     "castNamed": "Rzuć {{name}}",
+    "playNamed": "Zagraj {{name}}",
     "castSuffix": "(bez płacenia jego kosztu many)",
     "done": "Gotowe",
-    "doneSuffix": "(przestań rzucać czary w ten sposób)"
+    "doneSuffix": "(przestań rzucać czary w ten sposób)",
+    "doneSuffixPlay": "(przestań zagrywać karty w ten sposób)"
   },
   "castingVariant": {
     "eyebrow": "Rzuć",
@@ -2198,7 +2275,8 @@
     "unitDamage": "obrażeń",
     "unitLife": "życia",
     "title": "Rozdziel {{total}} {{unit}}",
-    "subtitle": "Przydziel co najmniej 1 {{unit}} każdemu celowi. Pozostało: {{remaining}}"
+    "subtitle": "Przydziel co najmniej 1 {{unit}} każdemu celowi. Pozostało: {{remaining}}",
+    "subtitleAnyNumber": "Przydziel co najmniej 1 {{unit}} każdemu wybranemu, spośród dowolnej ich liczby. Pozostało: {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Wybierz loch",
@@ -2284,6 +2362,8 @@
       "fallback": "Dokonaj wyboru"
     },
     "searchSubtitle": "Pisz, aby przeszukać wszystkie karty",
+    "secretAgendaTitle": "Potajemnie nazwij kartę ({{current}} z {{total}})",
+    "secretAgendaSubtitle": "Ukryte, dopóki nie odwrócisz tego spisku awersem do góry",
     "searchPlaceholder": "Szukaj po nazwie...",
     "noCardsFound": "Nie znaleziono kart",
     "buttonSubtitle": "Wybierz jedną opcję",
@@ -2332,6 +2412,22 @@
     "selfManaValue": "jego wartość many",
     "manaCostReduced": "jego koszt many zmniejszony o {{reduction}}",
     "spliceOnto": "do {{subtype}} {{cost}}",
+    "sacrificeArtifact_few": "Poświęć {{count}} artefakty",
+    "sacrificeArtifact_many": "Poświęć {{count}} artefaktów",
+    "sacrificeArtifact_one": "Poświęć artefakt",
+    "sacrificeArtifact_other": "Poświęć {{count}} artefaktów",
+    "sacrificeCreature_few": "Poświęć {{count}} stwory",
+    "sacrificeCreature_many": "Poświęć {{count}} stworów",
+    "sacrificeCreature_one": "Poświęć stwora",
+    "sacrificeCreature_other": "Poświęć {{count}} stworów",
+    "sacrificeLand_few": "Poświęć {{count}} lądy",
+    "sacrificeLand_many": "Poświęć {{count}} lądów",
+    "sacrificeLand_one": "Poświęć ląd",
+    "sacrificeLand_other": "Poświęć {{count}} lądów",
+    "sacrificePermanent_few": "Poświęć {{count}} stałe",
+    "sacrificePermanent_many": "Poświęć {{count}} stałych",
+    "sacrificePermanent_one": "Poświęć stały",
+    "sacrificePermanent_other": "Poświęć {{count}} stałych",
     "wardDiscardAtRandom_few": "odrzuć losowo {{count}} karty",
     "wardDiscardAtRandom_many": "odrzuć losowo {{count}} kart",
     "wardDiscardAtRandom_one": "odrzuć losowo kartę",
@@ -2366,6 +2462,7 @@
     "cardFallback": "Karta",
     "title": "Umieść {{name}} na wierzchu lub spodzie biblioteki",
     "top": "Wierzch biblioteki",
+    "nthFromTop": "Position {{n}} from the top of library",
     "bottom": "Spód biblioteki"
   },
   "mutateMerge": {
@@ -2478,6 +2575,7 @@
     "triggerFallback": "Wyzwalacz {{number}}"
   },
   "costReductionOrder": {
+    "announcedHybrids": "Zapowiedziane płatności hybrydowe",
     "eyebrow": "Kolejność obniżek kosztu",
     "title": "Ustal kolejność swoich obniżek kosztu",
     "subtitle": "Te obniżki ustalają inny koszt całkowity w zależności od kolejności, w jakiej je zastosujesz (CR 601.2f). Wierzch tej listy stosowany jest jako pierwszy.",
@@ -2706,6 +2804,9 @@
     "player": "Player",
     "life": "Life",
     "setLife": "Set Life",
+    "gainLife": "Gain Life",
+    "loseLife": "Lose Life",
+    "amount": "Amount",
     "count": "Count",
     "drawCards": "Draw Cards",
     "mill": "Mill",
@@ -2721,6 +2822,8 @@
     "delta": "Delta",
     "modifyCounters": "Modify Counters",
     "modifyEnergy": "Modify Energy",
+    "givePlayerCounters": "Give Counters",
+    "giveEnergy": "Give Energy",
     "browseDescription": "Opens a modal of your library in randomized order. Click a card to move it to any zone, or use the quick Battlefield / Hand buttons.",
     "browseLibrary": "Browse Library",
     "infiniteMana": "Infinite Mana",
@@ -2873,6 +2976,36 @@
       "winner": "{{name}} wygrywa zawody.",
       "tie": "Remis – nic się nie dzieje.",
       "cancelled": "Zawody anulowano – nic się nie dzieje."
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
     }
   }
 }

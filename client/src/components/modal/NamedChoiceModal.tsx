@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
@@ -19,25 +20,25 @@ type OptionChoice = Extract<
   { type: "NamedChoice" | "OpponentGuess" }
 >;
 
-/** Maps a ChoiceType key to its i18n leaf under `namedChoice.title.*`. */
-const CHOICE_TYPE_TITLE_KEYS: Record<string, string> = {
-  CreatureType: "creatureType",
-  Color: "color",
-  OddOrEven: "oddOrEven",
-  BasicLandType: "basicLandType",
-  CardType: "cardType",
-  CardName: "cardName",
-  LandType: "landType",
-  Opponent: "opponent",
-  Player: "player",
-  TwoColors: "twoColors",
-  NumberRange: "numberRange",
-  Labeled: "labeled",
-  CardPredicate: "cardPredicate",
-  CardPredicateGuess: "cardPredicateGuess",
-  Keyword: "keyword",
-  CounterKind: "counterKind",
-};
+/** Maps a ChoiceType key to its `namedChoice.title.*` key. */
+const CHOICE_TYPE_TITLE_KEYS: ReadonlyMap<string, ParseKeys<"game">> = new Map([
+  ["CreatureType", "namedChoice.title.creatureType"],
+  ["Color", "namedChoice.title.color"],
+  ["OddOrEven", "namedChoice.title.oddOrEven"],
+  ["BasicLandType", "namedChoice.title.basicLandType"],
+  ["CardType", "namedChoice.title.cardType"],
+  ["CardName", "namedChoice.title.cardName"],
+  ["LandType", "namedChoice.title.landType"],
+  ["Opponent", "namedChoice.title.opponent"],
+  ["Player", "namedChoice.title.player"],
+  ["TwoColors", "namedChoice.title.twoColors"],
+  ["NumberRange", "namedChoice.title.numberRange"],
+  ["Labeled", "namedChoice.title.labeled"],
+  ["CardPredicate", "namedChoice.title.cardPredicate"],
+  ["CardPredicateGuess", "namedChoice.title.cardPredicateGuess"],
+  ["Keyword", "namedChoice.title.keyword"],
+  ["CounterKind", "namedChoice.title.counterKind"],
+]);
 
 /** Extract the string key from a ChoiceType value.
  * Unit variants serialize as strings; data variants serialize as
@@ -49,6 +50,39 @@ function getChoiceTypeKey(choiceType: string | Record<string, unknown>): string 
 }
 
 const MAX_RESULTS = 10;
+
+type SecretAgendaChoice = Extract<WaitingFor, { type: "SecretAgendaChoice" }>;
+
+/** CR 702.106a / CR 702.106f: collects every name the engine asks for and sends
+ *  them as one answer, so a double agenda looks like any other agenda to the
+ *  table. The engine validates the answer; a rejected one simply starts over. */
+export function SecretAgendaModal({ data }: { data: SecretAgendaChoice["data"] }) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const [names, setNames] = useState<string[]>([]);
+
+  const handleName = (name: string) => {
+    const next = [...names, name];
+    if (next.length < data.name_count) {
+      setNames(next);
+      return;
+    }
+    setNames([]);
+    dispatch({ type: "ChooseSecretAgendaNames", data: { names: next } });
+  };
+
+  return (
+    <CardNameSearch
+      key={names.length}
+      title={t("namedChoice.secretAgendaTitle", {
+        current: names.length + 1,
+        total: data.name_count,
+      })}
+      subtitle={t("namedChoice.secretAgendaSubtitle")}
+      onConfirm={handleName}
+    />
+  );
+}
 
 export function NamedChoiceModal({ data }: { data: OptionChoice["data"] }) {
   const typeKey = getChoiceTypeKey(data.choice_type);
@@ -124,7 +158,13 @@ function NumberEntry({ contract }: { contract: FreeEntry }) {
   );
 }
 
-function CardNameSearch() {
+interface CardNameSearchProps {
+  title?: string;
+  subtitle?: string;
+  onConfirm?: (name: string) => void;
+}
+
+function CardNameSearch({ title, subtitle, onConfirm }: CardNameSearchProps) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const [query, setQuery] = useState("");
@@ -164,10 +204,13 @@ function CardNameSearch() {
   }, [matches]);
 
   const handleConfirm = useCallback(() => {
-    if (selected) {
+    if (!selected) return;
+    if (onConfirm) {
+      onConfirm(selected);
+    } else {
       dispatch({ type: "ChooseOption", data: { choice: selected } });
     }
-  }, [dispatch, selected]);
+  }, [dispatch, onConfirm, selected]);
 
   const handleSelect = useCallback((name: string) => {
     setSelected(name);
@@ -194,7 +237,7 @@ function CardNameSearch() {
   const showResults = matches.length > 0 && !selected;
 
   return (
-    <ChoiceOverlay title={t("namedChoice.title.cardName")} subtitle={t("namedChoice.searchSubtitle")} footer={<ConfirmButton onClick={handleConfirm} disabled={!selected} />}>
+    <ChoiceOverlay title={title ?? t("namedChoice.title.cardName")} subtitle={subtitle ?? t("namedChoice.searchSubtitle")} footer={<ConfirmButton onClick={handleConfirm} disabled={!selected} />}>
       <div className="flex w-full max-w-md flex-col items-center gap-3">
         <div className="relative w-full">
           <input
@@ -299,10 +342,7 @@ function ButtonGrid({ data, typeKey }: { data: OptionChoice["data"]; typeKey: st
     }
   }, [dispatch, selected]);
 
-  const titleKey = CHOICE_TYPE_TITLE_KEYS[typeKey];
-  const title = titleKey
-    ? t(`namedChoice.title.${titleKey}`)
-    : t("namedChoice.title.fallback");
+  const title = t(CHOICE_TYPE_TITLE_KEYS.get(typeKey) ?? "namedChoice.title.fallback");
   const isPlayerChoice = typeKey === "Player" || typeKey === "Opponent";
   const showFilter = !isPlayerChoice && data.options.length > FILTERABLE_OPTION_THRESHOLD;
 

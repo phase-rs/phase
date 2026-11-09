@@ -12,6 +12,7 @@ import type {
   ObjectId,
   PlayerId,
   SubmitResult,
+  WithheldFrame,
 } from "./types";
 import type {
   InteractionPreview,
@@ -27,6 +28,7 @@ import {
   type PhaseSocketTransport,
 } from "../services/openPhaseSocket";
 import { isValidWebSocketUrl } from "../services/serverDetection";
+import { captureSubmissionArtPreferences, submitDeckList } from "../services/deckSubmission";
 import type {
   DraftPlayerView,
   StandingEntry,
@@ -35,6 +37,7 @@ import type {
   DraftKind,
   SharedStackPileDecision,
 } from "./draft-adapter";
+import { draftViewPresentation } from "./draft-adapter";
 import { SubmissionSlot } from "./submissionSlot";
 import type { FullSessionKey, ServerInfo } from "./ws-adapter";
 
@@ -43,6 +46,7 @@ import type { FullSessionKey, ServerInfo } from "./ws-adapter";
 export type DraftPhase =
   | "lobby"
   | "drafting"
+  | "review"
   | "deckbuilding"
   | "match"
   | "between_rounds"
@@ -106,6 +110,25 @@ export type ServerDraftAdapterEvent =
 
 type ServerDraftAdapterEventListener = (event: ServerDraftAdapterEvent) => void;
 
+interface DraftInit {
+  kind: "create" | "reconnect";
+  resolve: () => void;
+  reject: (error: Error) => void;
+}
+
+type AttachmentOwner =
+  | { type: "init"; init: DraftInit }
+  | {
+    type: "join";
+    resolve: (view: DraftPlayerView) => void;
+    reject: (error: Error) => void;
+  };
+
+interface DraftAttachment {
+  controller: AbortController;
+  owner: AttachmentOwner;
+}
+
 function fullSessionKeysEqual(
   left: FullSessionKey | null | undefined,
   right: FullSessionKey | null | undefined,
@@ -134,6 +157,14 @@ function fullSessionKeysEqual(
  * Per D-05: single adapter, single socket, full lifecycle.
  * Per T-59-09: does NOT send ReportMatchResult on GameOver — server
  * handles match result reporting automatically.
+ *
+ * Creation completes on DraftCreated; reconnect completes on DraftStateUpdate
+ * after installing the authoritative view/phase, not on match progress frames.
+ * A new attachment supersedes pending initialization and cancels an attachment
+ * whose setup has not been sent; setup-sent draft actions retain their replies.
+ * DraftActionRejected rejects initialization without retiring the transport:
+ * the seat may already be reattached and a later state update remains valid.
+ * No setup-response deadline is imposed; a silent server can leave it pending.
  */
 export class ServerDraftAdapter implements EngineAdapter {
   // ── Draft-phase state ──────────────────────────────────────────────
@@ -172,8 +203,10 @@ export class ServerDraftAdapter implements EngineAdapter {
   >();
   private draftResolve: ((view: DraftPlayerView) => void) | null = null;
   private draftReject: ((error: Error) => void) | null = null;
-  private initResolve: (() => void) | null = null;
-  private initReject: ((error: Error) => void) | null = null;
+  // Meaningful only while the callback pair owns an action.
+  private draftActionStage: "PreparingDeck" | "AwaitingReply" = "AwaitingReply";
+  private pendingInit: DraftInit | null = null;
+  private unfinishedAttachment: DraftAttachment | null = null;
   private listeners: ServerDraftAdapterEventListener[] = [];
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
@@ -382,18 +415,11 @@ export class ServerDraftAdapter implements EngineAdapter {
   // ── Draft lifecycle methods ────────────────────────────────────────
 
   async createDraft(settings: CreateDraftSettings): Promise<void> {
+    if (!isValidWebSocketUrl(this.serverUrl)) {
+      throw new AdapterError("WS_ERROR", "Invalid WebSocket URL", false);
+    }
     return new Promise<void>((resolve, reject) => {
-      this.initResolve = resolve;
-      this.initReject = reject;
-
-      if (!isValidWebSocketUrl(this.serverUrl)) {
-        reject(new AdapterError("WS_ERROR", "Invalid WebSocket URL", false));
-        this.initResolve = null;
-        this.initReject = null;
-        return;
-      }
-
-      this.attachSocket({
+      this.beginAttachment({ type: "init", init: { kind: "create", resolve, reject } }, {
         type: "CreateDraftWithSettings",
         data: {
           display_name: settings.displayName,
@@ -406,8 +432,6 @@ export class ServerDraftAdapter implements EngineAdapter {
           pod_policy: settings.podPolicy,
           pod_size: settings.podSize,
         },
-      }).catch(() => {
-        // attachSocket handles rejection via initReject; swallow here.
       });
     });
   }
@@ -438,6 +462,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     action: string,
     resolve: (view: DraftPlayerView) => void,
     reject: (error: Error) => void,
+    stage: "PreparingDeck" | "AwaitingReply" = "AwaitingReply",
   ): boolean {
     if (this.draftResolve !== null || this.draftReject !== null) {
       reject(new AdapterError(
@@ -449,6 +474,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     }
     this.draftResolve = resolve;
     this.draftReject = reject;
+    this.draftActionStage = stage;
     return true;
   }
 
@@ -467,15 +493,13 @@ export class ServerDraftAdapter implements EngineAdapter {
         return;
       }
 
-      this.attachSocket({
+      this.beginAttachment({ type: "join", resolve, reject }, {
         type: "JoinDraftWithPassword",
         data: {
           draft_code: draftCode,
           display_name: displayName,
           password: password ?? null,
         },
-      }).catch(() => {
-        // attachSocket handles rejection via draftReject; swallow here.
       });
     });
   }
@@ -543,159 +567,237 @@ export class ServerDraftAdapter implements EngineAdapter {
     });
   }
 
+  /**
+   * Submit names with optional owner printings selected from one snapshot of
+   * the submitter's pins/chain. Only main-deck cards are decorated, including
+   * commander-labelled main cards; pool art is not an entry source. Empty or
+   * timed-out decoration omits the sidecar, replacing previous submission art.
+   * Preparation reserves the action slot and cannot be acknowledged by a
+   * broadcast. After sending, acknowledgements remain uncorrelated as before.
+   */
   async submitDeck(mainDeck: string[], commanders: string[]): Promise<DraftPlayerView> {
     if (this.seatIndex === null || this.draftCode === null) {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
     return new Promise<DraftPlayerView>((resolve, reject) => {
-      if (!this.claimDraftAction("SubmitDeck", resolve, reject)) return;
-      const sent = this.send({
-        type: "DraftAction",
-        data: {
-          draft_code: this.draftCode,
-          action: {
-            type: "SubmitDeck",
-            // Key order mirrors the Rust struct's field order (`seat`,
-            // `main_deck`, `commanders`). `private send(msg: unknown)` means
-            // no typechecker sees this payload, so the byte-exact
-            // `JSON.stringify` assertion in the suite is what pins it.
-            data: { seat: this.seatIndex, main_deck: mainDeck, commanders },
+      if (!this.claimDraftAction("SubmitDeck", resolve, reject, "PreparingDeck")) return;
+      const ws = this.ws;
+      const draftCode = this.draftCode;
+      const draftToken = this.draftToken;
+      const seat = this.seatIndex;
+      const prepare = async () => {
+        const capturedMain = [...mainDeck];
+        const capturedCommanders = [...commanders];
+        const snapshot = captureSubmissionArtPreferences();
+        const deck = await submitDeckList({ main_deck: capturedMain, sideboard: [] }, snapshot);
+        if (this.draftResolve !== resolve || this.draftReject !== reject) return;
+        if (this.disposed || this.ws !== ws || !ws || ws.readyState !== WebSocket.OPEN
+            || this.draftCode !== draftCode || this.draftToken !== draftToken || this.seatIndex !== seat) {
+          throw new AdapterError("WS_CLOSED", "Draft session changed during deck preparation", true);
+        }
+        this.draftActionStage = "AwaitingReply";
+        const sent = this.send({
+          type: "DraftAction",
+          data: {
+            draft_code: draftCode,
+            action: {
+              type: "SubmitDeck",
+              // Key order matches the Rust carrier; absent art keeps old bytes.
+              data: {
+                seat, main_deck: deck.main_deck, commanders: capturedCommanders,
+                ...(deck.printings?.length ? { printings: deck.printings } : {}),
+              },
+            },
           },
-        },
-      });
-      if (!sent) {
+        });
+        if (!sent) throw new AdapterError("WS_CLOSED", "Failed to send draft action", true);
+      };
+      void prepare().catch((error: unknown) => {
+        if (this.draftResolve !== resolve || this.draftReject !== reject) return;
         this.draftResolve = null;
         this.draftReject = null;
-        reject(new AdapterError("WS_CLOSED", "Failed to send draft action", true));
-      }
+        reject(error instanceof Error ? error : new Error(String(error)));
+      });
     });
   }
 
   // ── Socket management ──────────────────────────────────────────────
 
-  /**
-   * Opens a PhaseSocket via the shared handshake helper, caches the
-   * ServerInfo, wires the post-handshake message/close handlers, and
-   * sends setupFrame. Mirrors WebSocketAdapter.attachSocket.
-   */
-  private async attachSocket(setupFrame: unknown): Promise<void> {
-    let socket: PhaseSocket;
-    try {
-      socket = await openPhaseSocket(this.serverUrl);
-    } catch (err) {
-      if (err instanceof HandshakeError) {
-        const retryable = err.kind !== "protocol_mismatch" && err.kind !== "invalid_url";
-        const adapterErr = new AdapterError("WS_ERROR", err.message, retryable);
-        if (this.initReject) {
-          this.initReject(adapterErr);
-          this.initResolve = null;
-          this.initReject = null;
-        }
-        if (this.draftReject) {
-          this.draftReject(adapterErr);
+  private settleInit(expected: DraftInit | null, error?: Error): boolean {
+    if (expected === null || this.pendingInit !== expected) return false;
+    this.pendingInit = null;
+    if (error) expected.reject(error);
+    else expected.resolve();
+    return true;
+  }
+
+  private rejectAttachment(owner: AttachmentOwner, error: Error): void {
+    switch (owner.type) {
+      case "init":
+        this.settleInit(owner.init, error);
+        break;
+      case "join":
+        if (this.draftResolve === owner.resolve && this.draftReject === owner.reject) {
           this.draftResolve = null;
           this.draftReject = null;
+          owner.reject(error);
         }
-        if (err.kind === "protocol_mismatch" && err.serverInfo) {
-          this._serverInfo = err.serverInfo;
-          this.emit({
-            type: "serverHello",
-            info: err.serverInfo,
-            compatible: false,
-          });
-        }
-        return;
-      }
-      const adapterErr = new AdapterError("WS_ERROR", String(err), true);
-      if (this.initReject) {
-        this.initReject(adapterErr);
-        this.initResolve = null;
-        this.initReject = null;
-      }
-      if (this.draftReject) {
-        this.draftReject(adapterErr);
-        this.draftResolve = null;
-        this.draftReject = null;
-      }
-      return;
+        break;
     }
+  }
 
-    this.ws = socket.ws;
-    this._serverInfo = socket.serverInfo;
-    this.emit({ type: "serverHello", info: socket.serverInfo, compatible: true });
-    this.startPing();
+  private cancelAttachment(error: Error): void {
+    const attachment = this.unfinishedAttachment;
+    if (!attachment) return;
+    this.unfinishedAttachment = null;
+    this.rejectAttachment(attachment.owner, error);
+    attachment.controller.abort(error);
+  }
 
-    socket.ws.onmessage = (event) => {
-      this.handleMessage(JSON.parse(event.data as string));
-    };
+  private beginAttachment(owner: AttachmentOwner, setupFrame: unknown): void {
+    const superseded = new AdapterError("WS_CLOSED", "Draft attachment superseded by a new operation", true);
+    this.settleInit(this.pendingInit, superseded);
+    this.cancelAttachment(superseded);
+    if (owner.type === "init") this.pendingInit = owner.init;
+    const attachment = { owner, controller: new AbortController() };
+    this.unfinishedAttachment = attachment;
+    // attachSocket settles the owner for transport/listener failures; this
+    // final catch only keeps an exception thrown after settlement (e.g. by a
+    // protocol-mismatch diagnostic listener) from becoming an unhandled
+    // rejection.
+    void this.attachSocket(attachment, setupFrame).catch((error: unknown) => {
+      this.rejectAttachment(owner, error instanceof Error ? error : new Error(String(error)));
+    });
+  }
 
-    socket.ws.onerror = () => {
-      const err = new AdapterError("WS_ERROR", "WebSocket connection failed", true);
-      if (this.initReject) {
-        this.initReject(err);
-        this.initResolve = null;
-        this.initReject = null;
-      }
-      if (this.draftReject) {
-        this.draftReject(err);
-        this.draftResolve = null;
-        this.draftReject = null;
-      }
-    };
+  private ownsAttachment(attachment: DraftAttachment): boolean {
+    return this.unfinishedAttachment === attachment
+      && !attachment.controller.signal.aborted
+      // Draft replies are uncorrelated: another socket can release a join's
+      // pair before its handshake resumes. It still must send the claimed join.
+      && (attachment.owner.type === "join" || this.pendingInit === attachment.owner.init);
+  }
 
-    socket.ws.onclose = () => {
+  private abandonSocket(socket: PhaseSocket): void {
+    // An incomplete socket's close must not reject an established draft action.
+    socket.ws.onmessage = null;
+    socket.ws.onerror = null;
+    socket.ws.onclose = null;
+    if (this.ws === socket.ws) {
+      this.ws = null;
       if (this.pingInterval) {
         clearInterval(this.pingInterval);
         this.pingInterval = null;
       }
-      const dropped = this.submission.drop();
-      if (dropped) {
-        dropped.reject(new AdapterError("WS_CLOSED", "Connection closed during action", true));
-        this.emit({ type: "actionPendingChanged", pending: false });
-      }
-      this.rejectPendingManaPaymentPreviews(
-        new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
-      );
-      this.rejectPendingInteractionPreviews(
-        new AdapterError("WS_CLOSED", "Connection closed during interaction preview", true),
-      );
-      if (this.draftReject) {
-        this.draftReject(
-          new AdapterError("WS_CLOSED", "Connection closed during draft operation", true),
-        );
-        this.draftResolve = null;
-        this.draftReject = null;
-      }
-      if (this.initReject) {
-        this.initReject(
-          new AdapterError("WS_CLOSED", "Connection closed before draft started", true),
-        );
-        this.initResolve = null;
-        this.initReject = null;
-      } else if (this.draftToken && !this.disposed) {
-        this.emit({ type: "disconnected" });
-      }
-    };
+    }
+    socket.close();
+  }
 
-    if (!this.send(setupFrame)) {
-      socket.close();
-      const err = new AdapterError("WS_CLOSED", "Failed to send setup frame", true);
-      if (this.initReject) {
-        this.initReject(err);
-        this.initResolve = null;
-        this.initReject = null;
+  /**
+   * One await only: ownership spans handshake completion, synchronous hello
+   * listeners and setup send. Established sockets are not retired here.
+   */
+  private async attachSocket(attachment: DraftAttachment, setupFrame: unknown): Promise<void> {
+    let socket: PhaseSocket | null = null;
+    const initOwner = attachment.owner.type === "init" ? attachment.owner.init : null;
+    try {
+      socket = await openPhaseSocket(this.serverUrl, { signal: attachment.controller.signal });
+      if (!this.ownsAttachment(attachment)) {
+        this.abandonSocket(socket);
+        return;
       }
-      if (this.draftReject) {
-        this.draftReject(err);
-        this.draftResolve = null;
-        this.draftReject = null;
+      const sourceSocket = socket.ws;
+      this.ws = sourceSocket;
+      this._serverInfo = socket.serverInfo;
+      this.emit({ type: "serverHello", info: socket.serverInfo, compatible: true });
+      // Listeners can dispose or start another attachment synchronously.
+      if (!this.ownsAttachment(attachment) || this.ws !== sourceSocket) {
+        this.abandonSocket(socket);
+        return;
       }
+      this.startPing();
+
+      sourceSocket.onmessage = (event) => {
+        this.handleMessage(JSON.parse(event.data as string), initOwner, sourceSocket);
+      };
+      sourceSocket.onerror = () => {
+        const err = new AdapterError("WS_ERROR", "WebSocket connection failed", true);
+        if (this.ws === sourceSocket) this.settleInit(initOwner, err);
+        if (this.draftReject) {
+          this.draftReject(err);
+          this.draftResolve = null;
+          this.draftReject = null;
+        }
+      };
+      sourceSocket.onclose = () => {
+        if (this.pingInterval) {
+          clearInterval(this.pingInterval);
+          this.pingInterval = null;
+        }
+        // Settle this socket's own init before any notification below: `emit`
+        // runs listeners synchronously, so a throwing close listener must not
+        // strand the operation's promise.
+        // A close that settles this socket's own init is the failure signal for
+        // that operation; it must not also surface as a lost established
+        // connection (the pre-fix behavior emitted only with no init pending).
+        const settledOwn = this.ws === sourceSocket
+          && this.settleInit(initOwner, new AdapterError("WS_CLOSED", "Connection closed before draft started", true));
+        const dropped = this.submission.drop();
+        if (dropped) {
+          dropped.reject(new AdapterError("WS_CLOSED", "Connection closed during action", true));
+          this.emit({ type: "actionPendingChanged", pending: false });
+        }
+        this.rejectPendingManaPaymentPreviews(
+          new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
+        );
+        this.rejectPendingInteractionPreviews(
+          new AdapterError("WS_CLOSED", "Connection closed during interaction preview", true),
+        );
+        if (this.draftReject) {
+          this.draftReject(
+            new AdapterError("WS_CLOSED", "Connection closed during draft operation", true),
+          );
+          this.draftResolve = null;
+          this.draftReject = null;
+        }
+        if (!settledOwn && this.pendingInit === null && this.draftToken && !this.disposed) {
+          this.emit({ type: "disconnected" });
+        }
+      };
+
+      if (!this.send(setupFrame)) {
+        throw new AdapterError("WS_CLOSED", "Failed to send setup frame", true);
+      }
+    } catch (error) {
+      const failure = error instanceof HandshakeError
+        ? new AdapterError("WS_ERROR", error.message, error.kind !== "protocol_mismatch" && error.kind !== "invalid_url")
+        // Before a socket exists the failure is an acquisition failure, and the
+        // caller gets the normalized WS_ERROR the base adapter produced.
+        // After acquisition it is a listener/setup failure and keeps its
+        // identity (the setup-send path already throws an AdapterError).
+        : socket === null
+          ? new AdapterError("WS_ERROR", String(error), true)
+          : error instanceof Error ? error : new Error(String(error));
+      this.rejectAttachment(attachment.owner, failure);
+      if (socket) this.abandonSocket(socket);
+      if (error instanceof HandshakeError
+        && error.kind === "protocol_mismatch" && error.serverInfo
+        && this.unfinishedAttachment === attachment && !attachment.controller.signal.aborted) {
+        this._serverInfo = error.serverInfo;
+        this.emit({ type: "serverHello", info: error.serverInfo, compatible: false });
+      }
+    } finally {
+      if (this.unfinishedAttachment === attachment) this.unfinishedAttachment = null;
     }
   }
 
   // ── Message handling ───────────────────────────────────────────────
 
-  private handleMessage(msg: { type: string; data?: unknown; command_id?: unknown }): void {
+  private handleMessage(
+    msg: { type: string; data?: unknown; command_id?: unknown },
+    initOwner: DraftInit | null,
+    sourceSocket: PhaseSocketTransport,
+  ): void {
     switch (msg.type) {
       // ── Draft-phase messages ──────────────────────────────────────
       case "DraftCreated": {
@@ -707,12 +809,8 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.draftCode = data.draft_code;
         this.draftToken = data.player_token;
         this.seatIndex = data.seat_index;
+        if (initOwner?.kind === "create" && this.ws === sourceSocket) this.settleInit(initOwner);
         this.emit({ type: "waitingForPlayers" });
-        if (this.initResolve) {
-          this.initResolve();
-          this.initResolve = null;
-          this.initReject = null;
-        }
         break;
       }
 
@@ -728,7 +826,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.seatIndex = data.seat_index;
         this.draftView = data.view;
         this.updatePhaseFromView(data.view);
-        if (this.draftResolve) {
+        if (this.draftResolve && this.draftActionStage === "AwaitingReply") {
           this.draftResolve(data.view);
           this.draftResolve = null;
           this.draftReject = null;
@@ -740,8 +838,9 @@ export class ServerDraftAdapter implements EngineAdapter {
         const data = msg.data as { view: DraftPlayerView };
         this.draftView = data.view;
         this.updatePhaseFromView(data.view);
+        if (initOwner?.kind === "reconnect" && this.ws === sourceSocket) this.settleInit(initOwner);
         this.emit({ type: "draftViewUpdated", view: data.view });
-        if (this.draftResolve) {
+        if (this.draftResolve && this.draftActionStage === "AwaitingReply") {
           this.draftResolve(data.view);
           this.draftResolve = null;
           this.draftReject = null;
@@ -819,8 +918,15 @@ export class ServerDraftAdapter implements EngineAdapter {
 
       case "DraftActionRejected": {
         const data = msg.data as { reason: string };
+        if (this.ws === sourceSocket) {
+          this.settleInit(initOwner, new AdapterError("ACTION_REJECTED", data.reason, true));
+        }
         this.emit({ type: "draftActionRejected", reason: data.reason });
-        if (this.draftReject) {
+        // The wire carries no correlation id, and preparation has not sent a
+        // frame yet: while SubmitDeck is still `PreparingDeck`, a rejection can
+        // only answer an EARLIER action, so it must not abort this submission
+        // with another action's reason.
+        if (this.draftReject && this.draftActionStage === "AwaitingReply") {
           this.draftReject(
             new AdapterError("ACTION_REJECTED", data.reason, true),
           );
@@ -967,11 +1073,30 @@ export class ServerDraftAdapter implements EngineAdapter {
         const data = msg.data as { message: string };
         const pending = this.submission.take(msg.command_id);
         if (pending) {
-          pending.reject(new AdapterError("WS_ERROR", data.message, false));
+          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
           this.emit({ type: "actionPendingChanged", pending: false });
         } else if (this.submission.unmatched(msg.command_id).surfaces) {
           this.emit({ type: "error", message: data.message });
         }
+        break;
+      }
+
+      case "StateWithheld": {
+        const data = msg.data as {
+          full_key?: FullSessionKey;
+          withheld: WithheldFrame;
+          reason: string;
+        };
+        if (data.withheld.type === "StateUpdate" && fullSessionKeysEqual(data.full_key, this.acceptedFullKey)) {
+          const pending = this.submission.take(msg.command_id);
+          if (pending) {
+            pending.resolve({ events: [], log_entries: [] });
+            this.emit({ type: "actionPendingChanged", pending: false });
+          } else if (this.submission.unmatched(msg.command_id).releasesIndicator) {
+            this.emit({ type: "actionPendingChanged", pending: false });
+          }
+        }
+        this.emit({ type: "error", message: data.reason });
         break;
       }
 
@@ -1022,7 +1147,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         const pending = this.pendingManaPaymentPreviews.get(data.request_id);
         if (pending) {
           this.pendingManaPaymentPreviews.delete(data.request_id);
-          pending.reject(new AdapterError("WS_ERROR", data.message, false));
+          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
         }
         break;
       }
@@ -1042,7 +1167,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         const pending = this.pendingInteractionPreviews.get(data.request_id);
         if (pending) {
           this.pendingInteractionPreviews.delete(data.request_id);
-          pending.reject(new AdapterError("WS_ERROR", data.message, false));
+          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
         }
         break;
       }
@@ -1096,6 +1221,9 @@ export class ServerDraftAdapter implements EngineAdapter {
 
       case "Error": {
         const data = msg.data as { message: string };
+        if (this.ws === sourceSocket) {
+          this.settleInit(initOwner, new AdapterError("WS_ERROR", data.message, true));
+        }
         this.emit({ type: "error", message: data.message });
         break;
       }
@@ -1107,32 +1235,32 @@ export class ServerDraftAdapter implements EngineAdapter {
    * Called after receiving DraftJoined and DraftStateUpdate.
    */
   private updatePhaseFromView(view: DraftPlayerView): void {
-    switch (view.status) {
-      case "Lobby":
+    switch (draftViewPresentation(view).podPhase) {
+      case "lobby":
         this.phase = "lobby";
         break;
-      case "Drafting":
+      case "drafting":
         this.phase = "drafting";
         break;
-      case "Deckbuilding":
+      case "review":
+        this.phase = "review";
+        break;
+      case "deckbuilding":
         this.phase = "deckbuilding";
         break;
-      case "Pairing":
-      case "RoundComplete":
+      case "pairing":
+      case "roundComplete":
         this.phase = "between_rounds";
         break;
-      case "MatchInProgress":
+      case "matchInProgress":
         // Don't override "match" — DraftMatchStart sets it with game details.
         if (this.phase !== "match") {
           this.phase = "between_rounds";
         }
         break;
-      case "Complete":
-      case "Abandoned":
+      case "complete":
+      case "error":
         this.phase = "complete";
-        break;
-      case "Paused":
-        // Keep current phase during pause.
         break;
     }
   }
@@ -1145,16 +1273,12 @@ export class ServerDraftAdapter implements EngineAdapter {
     }
 
     return new Promise<void>((resolve, reject) => {
-      this.initResolve = resolve;
-      this.initReject = reject;
-      this.attachSocket({
+      this.beginAttachment({ type: "init", init: { kind: "reconnect", resolve, reject } }, {
         type: "ReconnectDraft",
         data: {
           draft_code: this.draftCode,
           player_token: this.draftToken,
         },
-      }).catch(() => {
-        // attachSocket handles rejection via initReject.
       });
     });
   }
@@ -1243,13 +1367,9 @@ export class ServerDraftAdapter implements EngineAdapter {
       this.draftResolve = null;
       this.draftReject = null;
     }
-    if (this.initReject) {
-      this.initReject(
-        new AdapterError("WS_CLOSED", "Adapter disposed before draft started", true),
-      );
-      this.initResolve = null;
-      this.initReject = null;
-    }
+    const disposed = new AdapterError("WS_CLOSED", "Adapter disposed before draft started", true);
+    this.settleInit(this.pendingInit, disposed);
+    this.cancelAttachment(disposed);
     this._serverInfo = null;
     this.emit({ type: "actionPendingChanged", pending: false });
     this.listeners = [];

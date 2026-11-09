@@ -1,3 +1,4 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     AbilityDefinition, DelayedTriggerCondition, DelayedTriggerKind, Effect, EffectError,
     EffectKind, ManaProduction, PtValue, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter,
@@ -52,6 +53,23 @@ pub(crate) fn delayed_source_context(
         }
     }
     Some(source_context)
+}
+
+/// CR 608.2c + CR 603.7c: Does this delayed payload's HEAD name the tracked set
+/// the creating resolution published?
+///
+/// The plural anaphor is emitted as a `TrackedSet`/`TrackedSetFiltered` head
+/// target (Golden Argosy's "Return them"), so that population is the referent
+/// even when it is empty. Checking only the head is deliberate: a nested
+/// continuation leg can carry a tracked-set reference while the head still
+/// inherits its single referent — Fortune, Loyal Steed's "exile it …, then
+/// return those cards" — and such payloads keep the latest-nonempty preference
+/// in [`resolve`]. `ParentTarget` and `Any` heads are the inherited-referent
+/// shapes and keep it too.
+fn payload_names_tracked_set(effect: &Effect) -> bool {
+    effect
+        .target_filter()
+        .is_some_and(super::filter_references_tracked_set)
 }
 
 /// CR 603.7: Create a delayed triggered ability during resolution.
@@ -126,6 +144,14 @@ pub fn resolve(
     // CR 603.7: Prefer the active nonempty resolution-chain set, then the latest
     // nonempty published set. An empty chain id (stale pre-choice publish) must
     // not shadow a later nonempty set (Storm Herald delayed exile).
+    // CR 608.2c + CR 603.7c: a payload that NAMES the published set (a plural
+    // anaphor such as Golden Argosy's "Return them", emitted by the parser as a
+    // `TrackedSet` reference) binds the creating resolution's OWN publication,
+    // empty included. An empty publication is a real referent — a population
+    // with no members — so falling back to an older nonempty set would move
+    // unrelated objects once the delayed trigger resolves. The nonempty
+    // preference above stays for payloads that merely inherit a referent
+    // (`ParentTarget`) instead of naming the set.
     let tracked_set_id = if uses_tracked_set {
         if matches!(
             &*effect_def.effect,
@@ -136,6 +162,14 @@ pub fn resolve(
         ) {
             // CR 400.7j: a payload naming the source finds only what this ability's own move moved, so it binds that publication as is, empty included.
             state.chain_tracked_set_id
+        } else if payload_names_tracked_set(&effect_def.effect) {
+            // CR 608.2c: the set is named, so a chain publication IS the
+            // referent — empty included. With no chain publication at all
+            // (a manually built ability, or a publisher that ran in an earlier
+            // resolution) keep the established latest-nonempty fallback.
+            state
+                .chain_tracked_set_id
+                .or_else(|| crate::game::targeting::latest_tracked_set_id(state))
         } else {
             state
                 .chain_tracked_set_id
@@ -212,6 +246,14 @@ pub fn resolve(
             crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, index)
         });
     }
+    // CR 608.2b: an unavailable announcement cannot become an unrestricted
+    // event condition. Check before contextual binding erases ParentTarget;
+    // genuinely unassigned empty bindings keep their existing behavior.
+    let references_unavailable_parent = ability.has_authoritative_empty_binding()
+        && filter_groups
+            .iter()
+            .flatten()
+            .any(|filter| reaches_bare_parent_target_bind(filter));
     let no_alternative_can_match = condition_cannot_match(&filter_groups);
     let over_fire_prone_triggers: Vec<&crate::types::ability::TriggerDefinition> = match &condition
     {
@@ -227,17 +269,9 @@ pub fn resolve(
         // `match` over fallback defaults"), so a future variant must make this
         // decision instead of inheriting a silent skip.
         //
-        // These return nothing because this guard reads `TriggerDefinition`
-        // filter slots and they carry none — NOT because they are safe. Said
-        // plainly, because an earlier version of this comment claimed they were:
-        // the four `filter: TargetFilter` variants below go through the SAME
-        // `bind_parent_target_filter` call and degrade a bare `ParentTarget` to
-        // `TargetFilter::Any` identically. MEASURED over the corpus, 79 such
-        // filters exist across 76 cards (29 `WhenDies`, 38 `WhenDiesOrExiled`,
-        // 10 `WhenLeavesPlayFiltered`, 2 `WhenEntersBattlefield`). Whether any of
-        // them can reach this call with an empty `ability.targets` is UNMEASURED.
-        // It is not a regression — these arms skip the guard on main too — and it
-        // is out of scope for #8721, which is why they stay `Vec::new()` here.
+        // These conditions carry no TriggerDefinition filter slots. Their
+        // authoritative-empty references are guarded above through the shared
+        // condition-filter enumeration; unassigned-empty behavior is unchanged.
         DelayedTriggerCondition::AtNextPhase { .. }
         | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
         | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
@@ -258,7 +292,7 @@ pub fn resolve(
             .iter()
             .any(|filter| filter.as_ref().is_some_and(reaches_bare_parent_target_bind))
         });
-    if references_empty_parent || no_alternative_can_match {
+    if references_unavailable_parent || references_empty_parent || no_alternative_can_match {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CreateDelayedTrigger,
             source_id: ability.source_id,
@@ -431,6 +465,15 @@ pub fn resolve(
     // single-target contextual bind. This operates on the built `delayed_ability`
     // (not the condition), so it must stay after the ability chain is built.
     if let Some(real_id) = tracked_set_id {
+        // CR 608.2c + CR 603.7c: which referent a payload's `ParentTarget`
+        // names is decided by the PARSER, not inferred here. A plural anaphor
+        // to a published set is emitted as the `TrackedSet` sentinel (Golden
+        // Argosy's "Return them"); a singular creation-source reference stays
+        // `ParentTarget` (Fortune, Loyal Steed's "exile it") and must keep the
+        // parent/event-source binding below rather than absorb the whole set.
+        // Neither the absence of a declared target slot nor the fall back to
+        // `latest_tracked_set_id` proves a plural referent, so no rewrite is
+        // applied here.
         bind_tracked_set_to_ability_chain(&mut delayed_ability, real_id);
     }
 
@@ -668,14 +711,33 @@ pub fn resolve(
     // declared players no longer exist; carry them while that chain does.
     delayed_ability.context.outer_declared_players =
         crate::game::targeting::live_declared_players(state, ability);
+    // CR 400.7 + CR 603.7c: a delayed move of a tracked set's exiled members
+    // ("When that token leaves the battlefield, put the exiled card into your
+    // hand") affects only the objects exiled by the creating effect. A member
+    // that left exile and came back is a new object and is not affected, so pin
+    // each member to the incarnation it has now.
+    let target_pins = if target_pins.is_empty() {
+        tracked_set_id
+            .map(|real_id| tracked_exile_member_pins(state, &delayed_ability, real_id))
+            .unwrap_or_default()
+    } else {
+        target_pins
+    };
     delayed_ability.set_target_incarnations_recursive(target_pins);
     delayed_ability.set_unpinned_targets(snapshot_targets);
+    // CR 608.2b + CR 603.7c: retain an unavailable creation-time announcement
+    // on reference-only payloads so firing cannot invent a new antecedent.
+    if ability.has_authoritative_empty_binding()
+        && ability.context.forwarded_result_context.is_none()
+    {
+        super::inherit_missing_parent_referent(&mut delayed_ability, ability);
+    }
     // CR 608.2k: Give each clause that names an event-subject anaphor its own
     // referent, so a chain naming both the event's subject and its object slot
     // does not hand one clause the other's object.
     //
-    // MUST run after `set_target_incarnations_recursive` (which overwrites every
-    // node's pins with the root's) and after the root `targets` assignment —
+    // MUST run after `set_target_incarnations_recursive` (which stamps the
+    // inherited-reference scope) and after the root `targets` assignment —
     // either would otherwise clobber the per-node bindings.
     //
     // Gated on the same creation-time-provenance test as the root snapshot:
@@ -712,7 +774,7 @@ pub fn resolve(
                 .iter()
                 .flatten()
                 .any(|filter| {
-                    crate::game::filter::filter_contains_filter_prop(filter, &|prop| {
+                    crate::types::ability::filter_contains_filter_prop(filter, &|prop| {
                         matches!(prop, crate::types::ability::FilterProp::IsChosenColor)
                     })
                 });
@@ -771,6 +833,36 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 400.7 + CR 603.7c: Incarnation pins for the members of the bound tracked
+/// set that currently sit in exile, when the delayed payload moves exactly that
+/// set out of exile. Empty for every other payload shape.
+fn tracked_exile_member_pins(
+    state: &GameState,
+    delayed_ability: &ResolvedAbility,
+    real_id: TrackedSetId,
+) -> Vec<crate::types::identifiers::ObjectIncarnationRef> {
+    let moves_bound_set_from_exile = matches!(
+        &delayed_ability.effect,
+        Effect::ChangeZoneAll {
+            origin: None | Some(Zone::Exile),
+            target: TargetFilter::TrackedSet { id },
+            ..
+        } if *id == real_id
+    );
+    if !moves_bound_set_from_exile {
+        return Vec::new();
+    }
+    state
+        .tracked_object_sets
+        .get(&real_id)
+        .into_iter()
+        .flatten()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|object| object.zone == Zone::Exile)
+        .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+        .collect()
 }
 
 /// CR 603.7c + CR 608.2k + CR 400.7: Resolve one event-subject anaphor against
@@ -864,11 +956,8 @@ fn bind_event_subject_nodes(
             ability.target_incarnations = pins;
         }
     }
-    if let Some(sub) = ability.sub_ability.as_deref_mut() {
-        bind_event_subject_nodes(sub, state, source_id);
-    }
-    if let Some(alt) = ability.else_ability.as_deref_mut() {
-        bind_event_subject_nodes(alt, state, source_id);
+    for (_, child) in ability.child_links_mut() {
+        bind_event_subject_nodes(child, state, source_id);
     }
 }
 
@@ -1038,11 +1127,8 @@ fn triggering_source_destination_zone(state: &GameState) -> Option<Zone> {
 /// enforce that creation-event binding at delayed-trigger resolution.
 fn stamp_triggering_source_origins_in_ability_chain(ability: &mut ResolvedAbility, expected: Zone) {
     stamp_triggering_source_origins(&mut ability.effect, expected);
-    if let Some(sub_ability) = ability.sub_ability.as_deref_mut() {
-        stamp_triggering_source_origins_in_ability_chain(sub_ability, expected);
-    }
-    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
-        stamp_triggering_source_origins_in_ability_chain(else_ability, expected);
+    for (_, child) in ability.child_links_mut() {
+        stamp_triggering_source_origins_in_ability_chain(child, expected);
     }
 }
 
@@ -1347,8 +1433,8 @@ pub(crate) fn concrete_parent_target_filter(
 ///
 /// This mirrors the binder's recursion SHAPE — `And` / `Or` / `Not` and nothing
 /// else — not its decision set. The nearest existing walkers,
-/// `effects::filter_refs_parent_target` and
-/// `effects::filter_requires_parent_target_object`, answer a different question
+/// `types::ability::filter_refs_parent_target` and
+/// `types::ability::filter_requires_parent_target_object`, answer a different question
 /// (does this tree reference a parent, for target inheritance and snapshotting)
 /// and also descend into `TrackedSetFiltered` and `DistinctFrom`, which the
 /// binder never rewrites; reusing either would refuse installs that bind fine.
@@ -1536,20 +1622,14 @@ fn snapshot_parent_dependent_quantities_in_ability_chain(
         parent,
         first_instruction_amount,
     );
-    // CR 608.2c: "Otherwise" runs in place of this instruction — same position in the payload.
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        snapshot_parent_dependent_quantities_in_ability_chain(
-            else_ability,
-            state,
-            parent,
-            first_instruction_amount,
-        );
-    }
-    // CR 608.2c: a later instruction's "that many" stays live (pre-existing behavior); a
-    // later-instruction anaphor to the creation amount needs its own design. Parent-target-
-    // dependent leaves still freeze here (None only withholds EventContextAmount).
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        snapshot_parent_dependent_quantities_in_ability_chain(sub_ability, state, parent, None);
+    // CR 608.2c: Else replaces this instruction; sub and coin outcomes follow it.
+    for (edge, child) in ability.child_links_mut() {
+        let amount = match edge {
+            crate::types::game_state::ChainStep::ElseAbility => first_instruction_amount,
+            crate::types::game_state::ChainStep::SubAbility
+            | crate::types::game_state::ChainStep::CoinFlipBranch { .. } => None,
+        };
+        snapshot_parent_dependent_quantities_in_ability_chain(child, state, parent, amount);
     }
 }
 
@@ -1871,11 +1951,8 @@ fn bind_tracked_set_to_ability_chain(ability: &mut ResolvedAbility, real_id: Tra
     if let Effect::CreateDelayedTrigger { effect, .. } = &mut ability.effect {
         bind_tracked_set_to_ability_definition(effect, real_id);
     }
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        bind_tracked_set_to_ability_chain(sub_ability, real_id);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        bind_tracked_set_to_ability_chain(else_ability, real_id);
+    for (_, child) in ability.child_links_mut() {
+        bind_tracked_set_to_ability_chain(child, real_id);
     }
     for mode in &mut ability.mode_abilities {
         bind_tracked_set_to_ability_definition(mode, real_id);
@@ -1886,7 +1963,7 @@ fn bind_tracked_set_to_ability_chain(ability: &mut ResolvedAbility, real_id: Tra
 /// parent's chosen OBJECT, and is therefore a referent an incarnation pin can
 /// govern.
 ///
-/// Deliberately NARROWER than `effects::filter_refs_parent_target`, which also
+/// Deliberately NARROWER than `types::ability::filter_refs_parent_target`, which also
 /// admits `ParentTargetController` / `ParentTargetOwner`. Those derive a
 /// `TargetRef::Player`, not an object: under CR 608.2h they are built to
 /// survive the referent's departure (`ability_utils::parent_target_controller`
@@ -2102,7 +2179,8 @@ mod tests {
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, BounceSelection, ControllerRef, DamageKindFilter,
         DelayedTriggerCondition, Effect, ExtraPhaseAnchor, ExtraPhaseRecipient, ManaProduction,
-        ObjectScope, PtValue, QuantityExpr, QuantityRef, TriggerDefinition, TypedFilter,
+        ObjectScope, ParentTargetMissingReason, PtValue, QuantityExpr, QuantityRef,
+        TargetReadOrigin, TriggerDefinition, TypedFilter,
     };
     use crate::types::identifiers::{CardId, ExtraPhaseId, ObjectId, TrackedSetId};
     use crate::types::mana::ManaCost;
@@ -3008,6 +3086,7 @@ mod tests {
         let effect = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::TriggeringSource,
@@ -3147,6 +3226,7 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
@@ -3249,6 +3329,7 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::TriggeringSource,
@@ -3308,6 +3389,7 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::TriggeringSource,
@@ -3386,6 +3468,7 @@ mod tests {
         effect_def.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::TriggeringSource,
@@ -3456,6 +3539,7 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::TriggeringSource,
@@ -3989,6 +4073,7 @@ mod tests {
         effect_def.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::TrackedSetFiltered {
@@ -4233,6 +4318,7 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::TrackedSetFiltered {
@@ -4314,6 +4400,7 @@ mod tests {
         let effect = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,
@@ -4369,6 +4456,85 @@ mod tests {
             Zone::Battlefield,
             "a later incarnation must not be matched through the tracked set"
         );
+    }
+
+    // Real cards: Devouring Tendrils ("Target creature you control deals damage equal to its power
+    // to target creature or planeswalker you don't control. When the permanent you don't control
+    // dies this turn, you gain 2 life.") exhibits part of this shape (Devouring Tendrils parses to
+    // exactly TargetOnly -> DealDamage -> CreateDelayedTrigger WhenDies{ParentTarget} -> GainLife;
+    // its second target can be illegal while the first keeps the spell resolving. It covers only
+    // the WhenDies arm; the test also sweeps leaves/enters/dies-or-exiled at unit level). Shape: A
+    // delayed 'when that creature dies/leaves/enters/dies-or-is-exiled, gain 3 life' keyed on the
+    // parent target is not created when that announcement is illegal, only when unassigned.
+    #[test]
+    fn zone_conditions_distinguish_unavailable_and_unassigned_parent_bindings() {
+        for condition in [
+            DelayedTriggerCondition::WhenDies {
+                filter: TargetFilter::ParentTarget,
+            },
+            DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                filter: TargetFilter::ParentTarget,
+            },
+            DelayedTriggerCondition::WhenEntersBattlefield {
+                filter: TargetFilter::ParentTarget,
+            },
+            DelayedTriggerCondition::WhenDiesOrExiled {
+                filter: TargetFilter::ParentTarget,
+            },
+        ] {
+            for reason in [
+                None,
+                Some(ParentTargetMissingReason::IllegalAnnouncement {
+                    origin: TargetReadOrigin::OwnAnnouncement,
+                }),
+                Some(ParentTargetMissingReason::IllegalAnnouncement {
+                    origin: TargetReadOrigin::ParentAnnouncement,
+                }),
+            ] {
+                let mut state = GameState::new_two_player(42);
+                let mut ability = ResolvedAbility::new(
+                    Effect::CreateDelayedTrigger {
+                        condition: condition.clone(),
+                        effect: Box::new(AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::GainLife {
+                                amount: QuantityExpr::Fixed { value: 3 },
+                                player: TargetFilter::Controller,
+                            },
+                        )),
+                        uses_tracked_set: false,
+                    },
+                    vec![],
+                    ObjectId(5),
+                    PlayerId(0),
+                );
+                ability.parent_target_missing_reason = reason;
+                let mut events = Vec::new();
+                resolve(&mut state, &ability, &mut events).unwrap();
+                assert_eq!(
+                    state.delayed_triggers.len(),
+                    usize::from(reason.is_none()),
+                    "condition={condition:?}, provenance={reason:?}"
+                );
+                assert!(events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::CreateDelayedTrigger,
+                        ..
+                    }
+                )));
+                if reason.is_none() {
+                    let groups = condition_filter_groups(&mut state.delayed_triggers[0].condition);
+                    assert!(
+                        groups
+                            .into_iter()
+                            .flatten()
+                            .all(|filter| *filter == TargetFilter::Any),
+                        "ordinary unassigned-empty binding keeps its existing wildcard"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -5502,6 +5668,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
 
@@ -5536,6 +5703,7 @@ mod tests {
         let delayed_inner = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
@@ -5879,6 +6047,7 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::TrackedSet {
@@ -6044,7 +6213,7 @@ mod tests {
     /// `filter_refs_parent_target` is a hard non-goal, and this is its guard.
     #[test]
     fn t_u4_parent_object_anaphor_is_narrower_than_parent_target() {
-        use crate::game::effects::filter_refs_parent_target;
+        use crate::types::ability::filter_refs_parent_target;
 
         // The two OBJECT anaphors ⇒ true.
         assert!(filter_refs_parent_object_anaphor(
@@ -6738,5 +6907,195 @@ mod attached_set_delayed_tests {
         );
         bind_event_subject_nodes(&mut ability, &state, attacker);
         assert!(ability.targets.is_empty());
+    }
+
+    /// CR 608.2c + CR 603.7c: a delayed payload's SINGULAR creation-source
+    /// anaphor ("exile it", Fortune, Loyal Steed) keeps its own referent even
+    /// when an unrelated tracked set is the most recently published one. The
+    /// source-filtered binding must not be widened to that whole set: only a
+    /// payload that NAMES the published set (a plural anaphor, which the parser
+    /// emits as `TrackedSet`) reads it.
+    ///
+    /// Revert probe: reinstate a creation-time "no declared referent ⇒ whole
+    /// set" rewrite here and the payload becomes a bare `TrackedSet`, so the
+    /// `TrackedSetFiltered { filter: ParentTarget }` assertion flips.
+    #[test]
+    fn singular_source_anaphor_does_not_absorb_an_unrelated_tracked_set() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "When Fortune enters, scry 2.\nWhenever Fortune attacks while saddled, at end of combat, exile it and up to one creature that saddled it this turn, then return those cards to the battlefield under their owner's control.\nSaddle 1",
+            "Fortune, Loyal Steed",
+            &[],
+            &["Creature".to_string()],
+            &["Horse".to_string(), "Mount".to_string()],
+        );
+        let execute = parsed.triggers[1]
+            .execute
+            .as_ref()
+            .expect("Fortune's attack trigger");
+        let Effect::CreateDelayedTrigger {
+            effect: payload, ..
+        } = &*execute.effect
+        else {
+            panic!(
+                "expected the end-of-combat delayed trigger, got {:?}",
+                execute.effect
+            );
+        };
+        assert!(
+            matches!(
+                &*payload.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "reach: the payload head is the singular source exile: {:?}",
+            payload.effect
+        );
+
+        let mut state = GameState::new_two_player(42);
+        let foreign = crate::game::zones::create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(1),
+            "Unrelated card".to_string(),
+            Zone::Exile,
+        );
+        let foreign_set = TrackedSetId(1);
+        state.tracked_object_sets.insert(foreign_set, vec![foreign]);
+        state.next_tracked_set_id = 2;
+        // The creating resolution published nothing: the foreign set is only
+        // the globally latest one, never a publisher of this resolution.
+        state.chain_tracked_set_id = None;
+
+        let ability = ResolvedAbility::new(
+            (*execute.effect).clone(),
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("the delayed trigger installs");
+
+        let delayed = state.delayed_triggers[0].ability.clone();
+        let Effect::ChangeZoneAll {
+            destination,
+            target,
+            ..
+        } = &delayed.effect
+        else {
+            panic!(
+                "expected the payload's zone-move head, got {:?}",
+                delayed.effect
+            );
+        };
+        assert_eq!(*destination, Zone::Exile);
+        assert!(
+            matches!(
+                target,
+                TargetFilter::TrackedSetFiltered { id, filter, .. }
+                    if *id == foreign_set
+                        && matches!(filter.as_ref(), TargetFilter::ParentTarget)
+            ),
+            "the singular source anaphor keeps its source filter; it must not \
+             become the whole unrelated set: {target:?}"
+        );
+    }
+
+    /// CR 608.2c + CR 603.7c: a delayed payload that NAMES the published set
+    /// ("Return them", Golden Argosy) binds the creating resolution's OWN
+    /// publication even when that publication is EMPTY. An empty population is
+    /// still the referent the card text names; falling back to an older
+    /// nonempty set would return unrelated exiled cards at the end step.
+    ///
+    /// Revert probe: drop the `payload_names_tracked_set` branch in `resolve`
+    /// and the installed trigger binds `foreign_set` (the latest nonempty set)
+    /// instead of the fresh empty chain set.
+    #[test]
+    fn plural_tracked_set_payload_binds_a_fresh_empty_chain_set() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Whenever Golden Argosy attacks, exile each creature that crewed it this turn. Return them to the battlefield tapped under their owner's control at the beginning of the next end step.\nCrew 1",
+            "Golden Argosy",
+            &[],
+            &["Artifact".to_string()],
+            &["Vehicle".to_string()],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_ref()
+            .expect("Golden Argosy's attack trigger");
+        let delayed_def = execute
+            .sub_ability
+            .as_deref()
+            .expect("the end-step delayed return follows the exile");
+        let Effect::CreateDelayedTrigger {
+            uses_tracked_set, ..
+        } = &*delayed_def.effect
+        else {
+            panic!(
+                "expected the end-step delayed trigger, got {:?}",
+                delayed_def.effect
+            );
+        };
+        assert!(*uses_tracked_set, "the payload reads the published set");
+
+        let mut state = GameState::new_two_player(42);
+        let unrelated = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(1),
+            "Unrelated card".to_string(),
+            Zone::Exile,
+        );
+        let foreign_set = TrackedSetId(1);
+        state
+            .tracked_object_sets
+            .insert(foreign_set, vec![unrelated]);
+        // The creating resolution exiled no crewing creatures this turn: a
+        // FRESH EMPTY set is its publication.
+        let empty_chain_set = TrackedSetId(2);
+        state
+            .tracked_object_sets
+            .insert(empty_chain_set, Vec::new());
+        state.next_tracked_set_id = 3;
+        state.chain_tracked_set_id = Some(empty_chain_set);
+        // Reach guard: the latest-nonempty fallback would pick this set, so the
+        // binding assertion below is not vacuous.
+        assert_eq!(
+            crate::game::targeting::latest_tracked_set_id(&state),
+            Some(foreign_set)
+        );
+
+        let ability = ResolvedAbility::new(
+            (*delayed_def.effect).clone(),
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("the delayed trigger installs");
+
+        let delayed = state.delayed_triggers[0].ability.clone();
+        let Effect::ChangeZoneAll { target, .. } = &delayed.effect else {
+            panic!(
+                "expected the payload's mass return, got {:?}",
+                delayed.effect
+            );
+        };
+        assert!(
+            matches!(target, TargetFilter::TrackedSet { id } if *id == empty_chain_set),
+            "the plural anaphor must bind the creating resolution's empty set, \
+             not an unrelated earlier set: {target:?}"
+        );
+
+        let mut later_events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &delayed, &mut later_events, 0)
+            .expect("the delayed return resolves");
+        assert_eq!(
+            state.objects[&unrelated].zone,
+            Zone::Exile,
+            "an empty publication returns nothing, so the unrelated exiled card stays put"
+        );
     }
 }

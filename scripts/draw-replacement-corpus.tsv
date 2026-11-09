@@ -50,6 +50,7 @@ life from the loam	Draw	Optional	none	Mill	-	IndividualDraw
 living conundrum	Draw	Mandatory	Prevent	none	-	IndividualDraw
 magus of the chains	Draw	Mandatory	none	Discard	nested-draw	IndividualDraw
 moldervine cloak	Draw	Optional	none	Mill	-	IndividualDraw
+mr. spock, science officer	Draw	Mandatory	none	Draw	nested-draw	IndividualDraw
 necroplasm	Draw	Optional	none	Mill	-	IndividualDraw
 nightmare void	Draw	Optional	none	Mill	-	IndividualDraw
 notion thief	Draw	Mandatory	none	Draw	nested-draw	IndividualDraw
@@ -57,6 +58,7 @@ obstinate familiar	Draw	Optional	Prevent	none	-	IndividualDraw
 ormos, archive keeper	Draw	Mandatory	none	PutCounter	-	IndividualDraw
 out of the tombs	Draw	Mandatory	none	ChangeZone	-	IndividualDraw
 parallel thoughts	Draw	Optional	none	ChangeZone	-	IndividualDraw
+pavel chekov, first posting	Draw	Optional	none	Choose	-	IndividualDraw
 phial of galadriel	Draw	Mandatory	none	Draw	nested-draw	IndividualDraw
 plagiarize	Draw	Mandatory	none	Unimplemented	nested-draw	IndividualDraw
 possessed portal	Draw	Mandatory	Prevent	none	-	IndividualDraw

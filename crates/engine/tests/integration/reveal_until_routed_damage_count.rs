@@ -41,6 +41,7 @@ fn stage(redirect_battlefield_entry_to_exile: bool) -> (GameRunner, ObjectId, Ob
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             destination: Zone::Exile,
                             origin: None,
                             target: TargetFilter::SelfRef,

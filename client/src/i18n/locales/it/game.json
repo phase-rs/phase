@@ -1,5 +1,10 @@
 {
-  "playerLatency": {"host":"Host","waiting":"In attesa","value":"{{ms}} ms","description":"Latenza di andata e ritorno verso l’host. Una risposta mancante non disconnette la partita."},
+  "playerLatency": {
+    "host": "Host",
+    "waiting": "In attesa",
+    "value": "{{ms}} ms",
+    "description": "Latenza di andata e ritorno verso l’host. Una risposta mancante non disconnette la partita."
+  },
   "abilityBlock": {
     "badge": "Bloccata",
     "cantBeActivated": "Questa abilità non può essere attivata",
@@ -27,6 +32,7 @@
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
+    "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
@@ -443,7 +449,9 @@
     "done": "Fatto"
   },
   "lifeTotal": {
-    "playerLabel": "G{{seat}}"
+    "playerLabel": "G{{seat}}",
+    "libraryLabel": "CARTE",
+    "libraryTooltip": "L'Orda non ha punti vita. I danni e la perdita di punti vita le fanno invece macinare carte dal grimorio: è sconfitta quando il suo grimorio finisce, quindi questo numero è il suo vero orologio."
   },
   "phaseStop": {
     "untapLabel": "Passo di STAP",
@@ -534,12 +542,17 @@
     }
   },
   "badges": {
+    "hordeRulesAriaLabel": "Regole del mazzo dell'Orda",
     "monarch": "Monarca",
     "monarchTooltip": "Il Monarca — pesca una carta extra a fine turno",
     "initiative": "Iniziativa",
     "initiativeTooltip": "Ha l'Iniziativa — si avventura nella Città Bassa all'inizio del mantenimento",
     "cityBlessing": "Benedizione della Città",
     "cityBlessingTooltip": "Benedizione della Città — controlla dieci o più permanenti (Ascendere)",
+    "day": "Giorno",
+    "dayTooltip": "È giorno — i permanenti entrano vincolati al giorno; se un giocatore non lancia magie durante il proprio turno, al turno successivo diventa notte",
+    "night": "Notte",
+    "nightTooltip": "È notte — i permanenti entrano vincolati alla notte; se un giocatore lancia due o più magie durante il proprio turno, al turno successivo diventa giorno",
     "enduringStory": "Storia duratura",
     "enduringStoryTooltip": "Storia duratura — ottenuta controllando un permanente con Storied e tre o più artefatti, permanenti leggendari e/o saghe; dura per il resto della partita",
     "dungeonAriaLabel": "Avventura in {{name}}, {{roomName}}, stanza {{room}} di {{total}}",
@@ -638,6 +651,9 @@
   },
   "zone": {
     "commandZone": "Zona di comando",
+    "conspiracy": "Cospirazione",
+    "conspiracyTitle": "Cospirazione: {{name}}",
+    "turnFaceUp": "Gira {{name}} a faccia in su",
     "emblem": "Emblema",
     "emblemFallback": "Emblema",
     "commander": "Comandante",
@@ -836,7 +852,7 @@
     "targetingLabel": "Bersaglia {{label}}",
     "titleTargets": "Bersagli: {{targets}}",
     "titlePaid": "Pagato: {{paid}}",
-    "titleContext": "Contesto: {{context}}",
+    "titleContext": "Contesto: {{items}}",
     "revealedCards": "Rivelata: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} mana",
@@ -873,6 +889,8 @@
     "chooseCreatureTokenToPopulate": "Scegli una pedina creatura da popolare",
     "chooseReturnAsAuraTarget": "Scegli un permanente da incantare",
     "chooseTokenHost": "Scegli un ospite per la pedina",
+    "chooseOneHighlighted": "Scegli una delle opzioni evidenziate",
+    "chooseUpToOneHighlighted": "Scegli fino a una delle opzioni evidenziate",
     "tapUntappedCreatures_one": "TAPpa {{count}} creatura STAPpata",
     "tapUntappedCreatures_other": "TAPpa {{count}} creature STAPpate",
     "chooseTargetOf": "Scegli il bersaglio {{current}} di {{total}}",
@@ -1329,7 +1347,8 @@
     "passwordPrompt": "Questa stanza richiede una password:",
     "toasts": {
       "connectionFailed": "Connessione fallita. Riprova o cambia server nelle Impostazioni.",
-      "eliminatedSpectating": "Sei stato eliminato. Ora sei in modalità spettatore."
+      "eliminatedSpectating": "Sei stato eliminato. Ora sei in modalità spettatore.",
+      "retainedTerminalUnreadable": "Impossibile leggere la consegna conservata del risultato finale"
     },
     "resumeReset": {
       "appUpdated": "L'app è stata aggiornata e la tua partita salvata è incompatibile con la nuova versione.",
@@ -1393,6 +1412,11 @@
     "noLegalAiDecks": {
       "withFormat": "Aggiungi o importa un mazzo legale in {{format}} che l'IA possa usare.",
       "generic": "Aggiungi o importa un mazzo legale in questo formato che l'IA possa usare."
+    },
+    "hordeDeck": {
+      "title": "Mazzo dell'Orda",
+      "subtitle": "Il mazzo automatico che la tua squadra affronta. Lo fornisce il motore: non ti serve un mazzo IA.",
+      "selected": "Selezionato"
     }
   },
   "cardChoice": {
@@ -1426,7 +1450,8 @@
       "cast": "Lancia",
       "crew": "Equipaggio ({{power}})",
       "saddle": "Sella ({{power}})",
-      "station": "Stazione (+{{power}})"
+      "station": "Stazione (+{{power}})",
+      "destroy": "Destroy"
     },
     "buttons": {
       "confirm": "Conferma",
@@ -1545,6 +1570,7 @@
     "effectZone": {
       "titleSacrifice": "Sacrifica",
       "titleTopdeck": "Metti nel grimorio",
+      "titleBottomdeck": "Metti nel grimorio",
       "titleBattlefield": "Metti sul campo di battaglia",
       "titleHand": "Restituisci",
       "titleExile": "Esilia",
@@ -1564,6 +1590,12 @@
       "subtitleTopdeckUpTo_other": "Scegli fino a {{count}} carte da mettere in cima al tuo grimorio",
       "subtitleTopdeckRange_one": "Scegli {{min}}-{{count}} carta da mettere in cima al tuo grimorio",
       "subtitleTopdeckRange_other": "Scegli {{min}}-{{count}} carte da mettere in cima al tuo grimorio",
+      "subtitleBottomdeckExact_one": "Scegli {{count}} carta da mettere in fondo al tuo grimorio",
+      "subtitleBottomdeckExact_other": "Scegli {{count}} carte da mettere in fondo al tuo grimorio",
+      "subtitleBottomdeckUpTo_one": "Scegli fino a {{count}} carta da mettere in fondo al tuo grimorio",
+      "subtitleBottomdeckUpTo_other": "Scegli fino a {{count}} carte da mettere in fondo al tuo grimorio",
+      "subtitleBottomdeckRange_one": "Scegli {{min}}-{{count}} carta da mettere in fondo al tuo grimorio",
+      "subtitleBottomdeckRange_other": "Scegli {{min}}-{{count}} carte da mettere in fondo al tuo grimorio",
       "subtitleBattlefieldExact_one": "Scegli {{count}} carta da mettere sul campo di battaglia",
       "subtitleBattlefieldExact_other": "Scegli {{count}} carte da mettere sul campo di battaglia",
       "subtitleBattlefieldUpTo_one": "Scegli fino a {{count}} carta da mettere sul campo di battaglia",
@@ -1609,14 +1641,17 @@
       "labelSkip": "Salta",
       "labelDecline": "Rifiuta",
       "labelPutOnTop": "Metti in cima ({{order}})",
+      "labelPutOnBottom": "Metti in fondo ({{order}})",
       "labelConfirm": "Conferma ({{selected}}/{{count}})",
       "labelTop": "Cima ({{selected}}/{{count}})",
+      "labelBottom": "In fondo ({{selected}}/{{count}})",
       "labelPut": "Metti ({{selected}}/{{count}})",
       "labelReturn": "Restituisci ({{selected}}/{{count}})",
       "labelExile": "Esilia ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
       "labelCast": "Lancia ({{selected}}/{{count}})",
       "orderTop": "Cima",
+      "orderBottom": "In fondo",
       "orderSecond": "2º",
       "orderThird": "3º",
       "orderFourth": "4º",
@@ -1770,7 +1805,8 @@
       "counterDiscard": "Scarta {{selected}} di {{cap}}",
       "counterKeep": "Tieni {{selected}} di {{cap}}",
       "keepInstead": "Tieni invece",
-      "discardInstead": "Scarta invece"
+      "discardInstead": "Scarta invece",
+      "counterChoose": "Choose {{selected}} of {{cap}}"
     },
     "discard": {
       "title": "Scarta",
@@ -1869,6 +1905,42 @@
       "hint": "Trascina per riordinare · la posizione 1 va in cima a questa pila",
       "moveLeft": "Sposta a sinistra",
       "moveRight": "Sposta a destra"
+    },
+    "heroEvent": {
+      "chromeOverload": {
+        "title": "Chrome Dome's Overload",
+        "subtitle": "Choose a tapped creature you control to sacrifice"
+      },
+      "krangStratagem": {
+        "title": "Krang's Stratagem",
+        "subtitleUpTo_one": "Choose up to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleUpTo_other": "Choose up to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleMin_one": "Choose {{min}} to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleMin_other": "Choose {{min}} to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleExact_one": "Choose {{count}} card to discard",
+        "subtitleExact_other": "Choose {{count}} cards to discard"
+      },
+      "smackdown": {
+        "title": "Leatherhead's Smackdown",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "ratKingRevolution": {
+        "title": "Rat King's Revolution",
+        "subtitle": "Choose a creature you control to tap and stun"
+      },
+      "savantiCurse": {
+        "title": "Savanti Romero's Curse",
+        "subtitle_one": "Choose {{count}} creature you control to return to its owner's hand",
+        "subtitle_other": "Choose {{count}} creatures you control to return to their owners' hands"
+      },
+      "infiltration": {
+        "title": "Villain Infiltration",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "villainMayhem": {
+        "title": "Villain Mayhem!",
+        "subtitle": "As a team, choose {{count}} creatures to spare — every other creature is destroyed"
+      }
     }
   },
   "specializeColor": {
@@ -2109,13 +2181,18 @@
   "freeCastWindow": {
     "eyebrow": "Lancio gratuito",
     "title": "Lancia una magia gratuitamente",
+    "titlePlay": "Gioca carte gratuitamente",
     "subtitle": "Scegli una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i). Valore di mana totale rimanente: {{budget}}.",
     "subtitleNoBudget": "Scegli una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i).",
+    "subtitlePlay": "Scegli una terra da giocare o una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i). Valore di mana totale rimanente: {{budget}}.",
+    "subtitleNoBudgetPlay": "Scegli una terra da giocare o una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i).",
     "remainingAny": "un numero qualsiasi",
     "castNamed": "Lancia {{name}}",
+    "playNamed": "Gioca {{name}}",
     "castSuffix": "(senza pagare il suo costo di mana)",
     "done": "Fatto",
-    "doneSuffix": "(smetti di lanciare magie in questo modo)"
+    "doneSuffix": "(smetti di lanciare magie in questo modo)",
+    "doneSuffixPlay": "(smetti di giocare carte in questo modo)"
   },
   "castingVariant": {
     "eyebrow": "Lancia",
@@ -2198,7 +2275,8 @@
     "unitDamage": "danno",
     "unitLife": "vita",
     "title": "Distribuisci {{total}} {{unit}}",
-    "subtitle": "Assegna almeno 1 {{unit}} a ogni bersaglio. Rimanente: {{remaining}}"
+    "subtitle": "Assegna almeno 1 {{unit}} a ogni bersaglio. Rimanente: {{remaining}}",
+    "subtitleAnyNumber": "Assegna almeno 1 {{unit}} a ciascuno di quelli che scegli, tra un numero qualsiasi di essi. Rimanente: {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Scegli un sotterraneo",
@@ -2284,6 +2362,8 @@
       "fallback": "Fai una scelta"
     },
     "searchSubtitle": "Digita per cercare tra tutte le carte",
+    "secretAgendaTitle": "Nomina segretamente una carta ({{current}} di {{total}})",
+    "secretAgendaSubtitle": "Nascosto finché non giri a faccia in su questa cospirazione",
     "searchPlaceholder": "Cerca per nome...",
     "noCardsFound": "Nessuna carta trovata",
     "buttonSubtitle": "Seleziona un'opzione",
@@ -2332,6 +2412,22 @@
     "selfManaValue": "il suo valore di mana",
     "manaCostReduced": "il suo costo di mana ridotto di {{reduction}}",
     "spliceOnto": "su {{subtype}} {{cost}}",
+    "sacrificeArtifact_few": "Sacrifica {{count}} artefatti",
+    "sacrificeArtifact_many": "Sacrifica {{count}} artefatti",
+    "sacrificeArtifact_one": "Sacrifica un artefatto",
+    "sacrificeArtifact_other": "Sacrifica {{count}} artefatti",
+    "sacrificeCreature_few": "Sacrifica {{count}} creature",
+    "sacrificeCreature_many": "Sacrifica {{count}} creature",
+    "sacrificeCreature_one": "Sacrifica una creatura",
+    "sacrificeCreature_other": "Sacrifica {{count}} creature",
+    "sacrificeLand_few": "Sacrifica {{count}} terre",
+    "sacrificeLand_many": "Sacrifica {{count}} terre",
+    "sacrificeLand_one": "Sacrifica una terra",
+    "sacrificeLand_other": "Sacrifica {{count}} terre",
+    "sacrificePermanent_few": "Sacrifica {{count}} permanenti",
+    "sacrificePermanent_many": "Sacrifica {{count}} permanenti",
+    "sacrificePermanent_one": "Sacrifica un permanente",
+    "sacrificePermanent_other": "Sacrifica {{count}} permanenti",
     "wardDiscardAtRandom_few": "scarta {{count}} carte a caso",
     "wardDiscardAtRandom_many": "scarta {{count}} carte a caso",
     "wardDiscardAtRandom_one": "scarta una carta a caso",
@@ -2366,6 +2462,7 @@
     "cardFallback": "Card",
     "title": "Put {{name}} on top or bottom of library",
     "top": "Top of library",
+    "nthFromTop": "Position {{n}} from the top of library",
     "bottom": "Bottom of library"
   },
   "mutateMerge": {
@@ -2478,6 +2575,7 @@
     "triggerFallback": "Innesco {{number}}"
   },
   "costReductionOrder": {
+    "announcedHybrids": "Pagamenti ibridi annunciati",
     "eyebrow": "Ordine delle riduzioni di costo",
     "title": "Ordina le tue riduzioni di costo",
     "subtitle": "Queste riduzioni fissano un costo totale diverso a seconda dell'ordine in cui le applichi (CR 601.2f). La cima di questo elenco viene applicata per prima.",
@@ -2706,6 +2804,9 @@
     "player": "Player",
     "life": "Life",
     "setLife": "Set Life",
+    "gainLife": "Gain Life",
+    "loseLife": "Lose Life",
+    "amount": "Amount",
     "count": "Count",
     "drawCards": "Draw Cards",
     "mill": "Mill",
@@ -2721,6 +2822,8 @@
     "delta": "Delta",
     "modifyCounters": "Modify Counters",
     "modifyEnergy": "Modify Energy",
+    "givePlayerCounters": "Give Counters",
+    "giveEnergy": "Give Energy",
     "browseDescription": "Opens a modal of your library in randomized order. Click a card to move it to any zone, or use the quick Battlefield / Hand buttons.",
     "browseLibrary": "Browse Library",
     "infiniteMana": "Infinite Mana",
@@ -2873,6 +2976,36 @@
       "winner": "{{name}} ha vinto la gara.",
       "tie": "Pareggio: non succede nulla.",
       "cancelled": "La gara è stata annullata: non succede nulla."
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
     }
   }
 }

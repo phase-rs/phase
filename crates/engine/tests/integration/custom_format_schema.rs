@@ -830,9 +830,18 @@ fn commander_eligibility_rule_from_source_format_covers_every_builtin() {
         (GameFormat::HistoricBrawl, Some(BrawlColorIdentity)),
         (GameFormat::FreeForAll, None),
         (GameFormat::TwoHeadedGiant, None),
+        // CR 903.3, unchanged by CR 810 seating.
+        (GameFormat::TwoHeadedGiantCommander, Some(Standard)),
         (GameFormat::Archenemy, None),
+        // CR 904.13a + CR 903.3.
+        (GameFormat::ArchenemyCommander, Some(Standard)),
         (GameFormat::Planechase, None),
+        // CR 903.3, unchanged by CR 901 planar seating.
+        (GameFormat::PlanechaseCommander, Some(Standard)),
         (GameFormat::Momir, None),
+        // Horde holds an engine emblem in the command zone, not a decklist
+        // commander — `from_source_format` answers `Ok(None)` like Momir.
+        (GameFormat::Horde, None),
         // CR 903.13g: Commander Draft games follow Commander's rules, and
         // CR 903.13f routes deck construction through CR 903.5, so CR 903.3's
         // eligibility test applies unchanged — the value `from_source_format`
@@ -898,9 +907,16 @@ fn game_format_serialization_is_byte_identical_to_old_derive_for_builtins() {
         (GameFormat::HistoricBrawl, "HistoricBrawl"),
         (GameFormat::FreeForAll, "FreeForAll"),
         (GameFormat::TwoHeadedGiant, "TwoHeadedGiant"),
+        (
+            GameFormat::TwoHeadedGiantCommander,
+            "TwoHeadedGiantCommander",
+        ),
         (GameFormat::Archenemy, "Archenemy"),
+        (GameFormat::ArchenemyCommander, "ArchenemyCommander"),
         (GameFormat::Planechase, "Planechase"),
+        (GameFormat::PlanechaseCommander, "PlanechaseCommander"),
         (GameFormat::Momir, "Momir"),
+        (GameFormat::Horde, "Horde"),
         (GameFormat::CommanderDraft, "CommanderDraft"),
         (GameFormat::Freeform, "Freeform"),
         (GameFormat::FreeformCommander, "FreeformCommander"),

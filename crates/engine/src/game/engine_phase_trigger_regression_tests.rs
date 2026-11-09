@@ -67,6 +67,7 @@ fn hand_to_battlefield_choice_ability(
 ) -> ResolvedAbility {
     ResolvedAbility::new(
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Hand),
             destination: Zone::Battlefield,
             target: TargetFilter::Any,
@@ -3377,6 +3378,7 @@ fn choose_one_of_controller_token_branch_ignores_faced_opponent() {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -3505,6 +3507,7 @@ fn post_replacement_choose_sets_named_choice_waiting_for() {
     let effect_def = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: crate::types::ability::ChoiceType::BasicLandType,
             persist: false,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -4579,6 +4582,7 @@ fn superior_spider_man_full_copy_flow_copies_graveyard_card_and_exiles_it() {
         let reflexive = crate::types::ability::AbilityDefinition::new(
             crate::types::ability::AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,
@@ -4774,6 +4778,7 @@ fn reflexive_when_you_do_fires_after_become_copy_replacement() {
             ..crate::types::ability::AbilityDefinition::new(
                 crate::types::ability::AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::ParentTarget,

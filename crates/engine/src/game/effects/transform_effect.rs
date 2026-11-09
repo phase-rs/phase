@@ -301,6 +301,7 @@ fn resolve_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::zones::create_object;
     use crate::types::ability::{AbilityDefinition, AbilityKind, EffectScope, TargetFilter};
     use crate::types::card_type::{CardType, CoreType};

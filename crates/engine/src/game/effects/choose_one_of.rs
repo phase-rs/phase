@@ -314,20 +314,22 @@ fn choosing_players(
 
     let apnap = players::apnap_order(state);
 
-    // CR 608.2c + CR 108.3 + CR 109.4: Three chooser filters are anchored to
+    // CR 608.2c + CR 108.3 + CR 109.4: Four chooser filters are anchored to
     // resolution-scoped state that `matches_player_scope` cannot see (it carries
     // no `ResolvedAbility`): `ChosenPlayer` reads the player chosen earlier this
     // resolution from `ability.chosen_players`; `ParentObjectTargetOwner` reads
-    // the owner of the ability's first object target (CR 108.3); and
+    // the owner of the ability's first object target (CR 108.3);
     // `ParentObjectTargetController` reads its controller (CR 109.4) — the chooser
     // for "that creature's controller faces a villainous choice" (Hunted by The
     // Family), where the targeted creature's controller (not owner) makes the
-    // choice and the two differ for a stolen creature. Resolve them here — this
-    // is the one caller that has the ability in scope — and order the result in
-    // APNAP (CR 701.55d). All filter out eliminated players (CR 104.3a — a player
-    // who loses leaves the game and can no longer be a chooser) and yield a
-    // single chooser, which is correct for the villainous-choice patterns these
-    // power (The Master, This Is How It Ends, Hunted by The Family).
+    // choice and the two differ for a stolen creature; and `ParentPlayerTarget`
+    // reads the ability's first player target directly (CR 115.1). Resolve them
+    // here — this is the one caller that has the ability in scope — and order
+    // the result in APNAP (CR 701.55d). All filter out eliminated players
+    // (CR 104.3a — a player who loses leaves the game and can no longer be a
+    // chooser) and yield a single chooser, which is correct for the
+    // villainous-choice patterns these power (The Master, This Is How It Ends,
+    // Hunted by The Family).
     let anchored: Option<PlayerId> = match chooser {
         PlayerFilter::ChosenPlayer { index } => {
             ability.chosen_players.get(*index as usize).copied()
@@ -337,6 +339,9 @@ fn choosing_players(
         }
         PlayerFilter::ParentObjectTargetController => {
             crate::game::ability_utils::parent_target_controller(ability, state)
+        }
+        PlayerFilter::TargetPlayer => {
+            crate::game::filter::target_player_from_ability_or_root(state, Some(ability))
         }
         _ => None,
     };
@@ -552,6 +557,7 @@ mod tests {
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 constraint: None,
                 selection: CardSelectionMode::Chosen,
@@ -717,6 +723,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -736,6 +744,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],

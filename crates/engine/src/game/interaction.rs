@@ -19,8 +19,8 @@ use crate::analysis::decision_template::{
 };
 use crate::types::ability::{
     AggregateFunction, ChoiceType, ChooseFromZoneConstraint, Comparator, CounterCostSelection,
-    DoorLockOp, EffectKind, ObjectProperty, SearchSelectionConstraint, TapCreaturesAggregateStat,
-    TapCreaturesSelectionMode, TargetRef,
+    DoorLockOp, EffectKind, LibraryPosition, ObjectProperty, SearchSelectionConstraint,
+    TapCreaturesAggregateStat, TapCreaturesSelectionMode, TargetRef,
 };
 use crate::types::action_rejection::{ActionRejection, ActionRejectionCode};
 use crate::types::actions::{
@@ -235,6 +235,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::ScryChoice { .. }
         | WaitingFor::RippleBottomOrder { .. }
         | WaitingFor::RevealUntilBottomOrder { .. }
+        | WaitingFor::DigBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::DigChoice { .. }
         | WaitingFor::DigRestSplitChoice { .. }
@@ -248,7 +249,8 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::WardDiscardChoice { .. }
         | WaitingFor::CollectEvidenceChoice { .. }
         | WaitingFor::SeparatePilesPartition { .. }
-        | WaitingFor::DiscardChoice { .. } => HumanResponseModel::Select,
+        | WaitingFor::DiscardChoice { .. }
+        | WaitingFor::HeroEventChoice { .. } => HumanResponseModel::Select,
         WaitingFor::DeclareAttackers { .. } => {
             HumanResponseModel::CombatRelations(CombatRelationAction::Attackers)
         }
@@ -277,7 +279,9 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
             HumanResponseModel::ModeSequence
         }
         WaitingFor::OutsideGameChoice { .. } => HumanResponseModel::OutsideSelection,
-        WaitingFor::NamedChoice { .. } => HumanResponseModel::TextChoice,
+        WaitingFor::NamedChoice { .. } | WaitingFor::SecretAgendaChoice { .. } => {
+            HumanResponseModel::TextChoice
+        }
         WaitingFor::RespondToShortcut { .. } => HumanResponseModel::ShortcutReply,
         // Resolve All consent has a finite, engine-authored Grant/Decline or
         // Revoke domain. It is not a CR 732 shortcut-reply protocol.
@@ -449,7 +453,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
             None,
             Some(InteractionSlotKind::Single),
         ),
-        WaitingFor::NamedChoice { .. } => (
+        WaitingFor::NamedChoice { .. } | WaitingFor::SecretAgendaChoice { .. } => (
             InteractionWaitingForCode::Text,
             None,
             Some(InteractionSlotKind::Single),
@@ -534,6 +538,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::ScryChoice { .. }
         | WaitingFor::RippleBottomOrder { .. }
         | WaitingFor::RevealUntilBottomOrder { .. }
+        | WaitingFor::DigBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::DigChoice { .. }
         | WaitingFor::DigRestSplitChoice { .. }
@@ -550,7 +555,8 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::DiscardToHandSize { .. }
         | WaitingFor::WardDiscardChoice { .. }
         | WaitingFor::CollectEvidenceChoice { .. }
-        | WaitingFor::SeparatePilesPartition { .. } => (
+        | WaitingFor::SeparatePilesPartition { .. }
+        | WaitingFor::HeroEventChoice { .. } => (
             InteractionWaitingForCode::Select,
             None,
             Some(InteractionSlotKind::Single),
@@ -936,6 +942,10 @@ pub(crate) fn action_preserves_interaction(action: &GameAction) -> bool {
             | GameAction::SetPriorityYield { .. }
             | GameAction::SetMayTriggerAutoChoice { .. }
             | GameAction::SetReplacementAutoChoice { .. }
+            | GameAction::UnAction {
+                action: crate::types::un_actions::UnAction::SetEnabled { .. }
+                    | crate::types::un_actions::UnAction::PerformTell { .. },
+            }
             | GameAction::SetTriggerOrderTemplate { .. }
             | GameAction::CancelAutoPass
             | GameAction::GrantDebugPermission { .. }
@@ -1057,6 +1067,16 @@ struct SelectionProjection {
     intent: InteractionIntentCode,
     action: SelectionAction,
     source_id: Option<ObjectId>,
+}
+
+impl SelectionProjection {
+    /// One pick is this decision's whole answer only when the decision admits
+    /// exactly one. A count above one is the player's to fill — "Tap X untapped
+    /// artifacts" lets the controller choose X (CR 107.3a) — and an aggregate
+    /// admits any number, so neither may be finalized by a single pick.
+    fn admits_single_pick(&self) -> bool {
+        selection_max_count(&self.constraint) == Some(1)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1198,6 +1218,15 @@ struct TargetSequenceProjection {
     intent: InteractionIntentCode,
 }
 
+impl TargetSequenceProjection {
+    /// As [`SelectionProjection::admits_single_pick`]: a per-slot target
+    /// announcement (`max == 1`, CR 601.2c) is one step; "choose any number"
+    /// shapes such as proliferate (CR 701.34a) are not.
+    fn admits_single_pick(&self) -> bool {
+        self.max == 1
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CategorySelectionCandidate {
     group: usize,
@@ -1281,7 +1310,16 @@ struct OutsideSelectionProjection {
 struct TextChoiceProjection {
     options: Vec<String>,
     allow_arbitrary: bool,
+    count: u32,
+    action: TextChoiceAction,
     source_name: Option<String>,
+}
+
+/// Which `GameAction` a complete text answer becomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextChoiceAction {
+    ChooseOption,
+    ChooseSecretAgendaNames,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1295,9 +1333,9 @@ struct ShortcutReplyProjection {
 /// second copy of them.
 ///
 /// `segments` is positionally aligned with `projection.points`: the two come out of ONE `unzip`
-/// of one accumulator at a single site, so they are built in lockstep. That is
-/// correct-by-construction, not a type-level guarantee — this struct can be built with a
-/// mismatched pair, which is why `declared_sequence_preview` length-checks the entry it reads.
+/// of one accumulator at a single site, so they are built in lockstep. The type does not
+/// enforce it — this struct can be built with a mismatched pair, which is why
+/// `declared_sequence_preview` length-checks the entry it reads.
 /// The entry for a point that declares no partition is EMPTY; otherwise it is aligned with that
 /// point's own candidates and sums to the declared count, because a piecewise schedule's starts
 /// are that partition's own prefix sums. WHICH entry an element is minted from is decided by
@@ -2061,7 +2099,35 @@ fn outside_selection_projection(
 
 fn text_choice_projection(
     waiting_for: &WaitingFor,
+    filtered_state: &GameState,
 ) -> Result<Option<TextChoiceProjection>, InteractionReasonCode> {
+    // CR 702.106a / CR 702.106f: an agenda may name any card, so its names are
+    // typed and arrive as one answer. Publishing a finite list would limit the
+    // chooser to it; the reducer validates what they submit.
+    if let WaitingFor::SecretAgendaChoice {
+        object_id,
+        name_count,
+        ..
+    } = waiting_for
+    {
+        let source_name = filtered_state
+            .objects
+            .get(object_id)
+            .map(|object| object.name.clone());
+        if source_name
+            .as_ref()
+            .is_some_and(|name| name.len() > MAX_INTERACTION_STRING_LEN)
+        {
+            return Err(InteractionReasonCode::PayloadTooLarge);
+        }
+        return Ok(Some(TextChoiceProjection {
+            options: Vec::new(),
+            allow_arbitrary: true,
+            count: u32::from(*name_count),
+            action: TextChoiceAction::ChooseSecretAgendaNames,
+            source_name,
+        }));
+    }
     let WaitingFor::NamedChoice {
         choice_type,
         options,
@@ -2084,6 +2150,8 @@ fn text_choice_projection(
     Ok(Some(TextChoiceProjection {
         options: options.clone(),
         allow_arbitrary: matches!(choice_type, ChoiceType::CardName),
+        count: 1,
+        action: TextChoiceAction::ChooseOption,
         source_name: source
             .as_ref()
             .map(|source| source.prompt.display_name.clone()),
@@ -2096,10 +2164,9 @@ fn shortcut_reply_projection(waiting_for: &WaitingFor) -> Option<ShortcutReplyPr
     };
     // CR 732.2b: the proposal states which places it admits; this publishes that range's two
     // ends verbatim, never a second derivation of them. The engine stays the authority inside
-    // that range: a place it cannot drive is refused at the responder's seam even though the
-    // published range admits it, so published and honored part company above the budget --
-    // `the_published_range_and_the_reducer_agree_below_the_budget_and_part_above_it` pins both
-    // sides. An empty range therefore arrives with its floor above its ceiling, which the
+    // that range: a place above the budget it drives is refused at the responder's seam though
+    // the published range admits it; `the_published_range_and_the_reducer_agree_below_the_budget_and_part_above_it`
+    // pins both sides. An empty range therefore arrives with its floor above its ceiling, which the
     // submission guard reads as admitting no place at all.
     let places = proposal.shortening_places();
     Some(ShortcutReplyProjection {
@@ -2236,6 +2303,10 @@ fn mana_payment_direct_actions(
                     | ManaCost::SelfManaValue
                     | ManaCost::SelfManaCostReduced { .. } => None,
                 });
+            let waterbend_taps_remaining = match mode {
+                ConvokeMode::Waterbend => super::casting::waterbend_taps_remaining(state, player),
+                ConvokeMode::Convoke | ConvokeMode::Improvise | ConvokeMode::Delve => 0,
+            };
             for object_id in &state.battlefield {
                 let Some(object) = state.objects.get(object_id) else {
                     continue;
@@ -2262,7 +2333,10 @@ fn mana_payment_direct_actions(
                             }
                         }));
                     }
-                    ConvokeMode::Waterbend if object.is_waterbend_eligible(player) => {
+                    // CR 701.67a: no tap past the waterbend cost's generic count.
+                    ConvokeMode::Waterbend
+                        if object.is_waterbend_eligible(player) && waterbend_taps_remaining > 0 =>
+                    {
                         actions.push(GameAction::TapForConvoke {
                             object_id: *object_id,
                             mana_type: ManaType::Colorless,
@@ -2511,7 +2585,12 @@ fn amount_assignment_projection(
             require_all: false,
             action: AmountAssignmentAction::BlockerDamage,
         },
-        WaitingFor::DistributeAmong { total, targets, .. } => AmountAssignmentProjection {
+        WaitingFor::DistributeAmong {
+            total,
+            targets,
+            scope,
+            ..
+        } => AmountAssignmentProjection {
             candidates: targets
                 .iter()
                 .cloned()
@@ -2523,7 +2602,12 @@ fn amount_assignment_projection(
             min_total: *total,
             max_total: *total,
             exact_total: Some(*total),
-            require_all: true,
+            // CR 601.2d: every announced target receives at least one; CR 608.2d:
+            // a resolution-time division is among any number of the candidates.
+            require_all: match scope {
+                crate::types::game_state::DistributionScope::AnnouncedTargets => true,
+                crate::types::game_state::DistributionScope::ResolutionCandidates { .. } => false,
+            },
             action: AmountAssignmentAction::DistributeAmong,
         },
         WaitingFor::MoveCountersDistribution {
@@ -2874,7 +2958,9 @@ fn shortcut_preview_entries(
 /// number to multiply a period by, so it yields no sample and the caller publishes nothing.
 fn shortcut_preview_counts(count: &InteractionShortcutCountSpec) -> Vec<u32> {
     match count {
-        InteractionShortcutCountSpec::UntilLethal => Vec::new(),
+        InteractionShortcutCountSpec::UntilLethal | InteractionShortcutCountSpec::WithoutEnd => {
+            Vec::new()
+        }
         InteractionShortcutCountSpec::Fixed {
             min,
             max,
@@ -3365,10 +3451,10 @@ fn completed_shortcut_declaration(
         ) => iterations,
         (InteractionShortcutDecision::Decline, _)
         | (
-            InteractionShortcutDecision::AcceptSuggested,
-            InteractionShortcutCountSpec::UntilLethal,
-        )
-        | (InteractionShortcutDecision::Fixed { .. }, InteractionShortcutCountSpec::UntilLethal) => {
+            InteractionShortcutDecision::AcceptSuggested
+            | InteractionShortcutDecision::Fixed { .. },
+            InteractionShortcutCountSpec::UntilLethal | InteractionShortcutCountSpec::WithoutEnd,
+        ) => {
             return None;
         }
     };
@@ -3453,12 +3539,10 @@ fn declared_shortcut_preview(
         ) => iterations,
         (InteractionShortcutDecision::Decline, _)
         | (
-            InteractionShortcutDecision::AcceptSuggested,
-            InteractionShortcutCountSpec::UntilLethal,
-        )
-        | (InteractionShortcutDecision::Fixed { .. }, InteractionShortcutCountSpec::UntilLethal) => {
-            return None
-        }
+            InteractionShortcutDecision::AcceptSuggested
+            | InteractionShortcutDecision::Fixed { .. },
+            InteractionShortcutCountSpec::UntilLethal | InteractionShortcutCountSpec::WithoutEnd,
+        ) => return None,
     };
     let basis = shortcut_preview_basis(interaction_id, &projection)?;
     let group = basis.group?;
@@ -3644,12 +3728,13 @@ fn declared_shortcut_projection(waiting_for: &WaitingFor) -> Option<DeclaredSequ
             suggested: iterations,
         },
         IterationCount::UntilLethal => InteractionShortcutCountSpec::UntilLethal,
+        IterationCount::WithoutEnd => InteractionShortcutCountSpec::WithoutEnd,
     };
     let declared_count = match proposal.count {
         IterationCount::Fixed(iterations) => Some(iterations),
-        // CR 732.1b: an until-lethal proposal names no count to partition, so every arm below
-        // declares an ORDER and no segment.
-        IterationCount::UntilLethal => None,
+        // CR 732.1b: an until-lethal or endless proposal names no count to partition, so every
+        // arm below declares an ORDER and no segment.
+        IterationCount::UntilLethal | IterationCount::WithoutEnd => None,
     };
 
     let mut candidates: Vec<LoopShortcutCandidateValue> = Vec::new();
@@ -3820,8 +3905,7 @@ fn declared_sequence_preview(
     // and a per-period loss no negation can state. Only the THIRD is about this call site's
     // narrower domain — `basis.seats` here is the declaration's announced subjects, a subset of
     // the offer's candidate domain. On the other three the offer's own element refuses in
-    // exactly the same way, so both sides fold the period's seat keys and stating the
-    // magnitudes is correct.
+    // exactly the same way, so both sides fold the period's seat keys.
     //
     // So re-ask the SAME landed rule over the life map's OWN KEYS. That domain satisfies the
     // third conjunct by construction (the seat it tests is drawn from that very map), leaving the
@@ -3832,7 +3916,7 @@ fn declared_sequence_preview(
     //
     // The `basis.seats` wrapper covers the remaining case: a declaration whose announced subjects
     // are OBJECTS has no seat domain at all, so nothing narrowed and the offer's own fold over
-    // the period's seat keys is right for it too.
+    // the period's seat keys applies to it unchanged.
     //
     // The `per_cycle` conjunct re-reads a value `shortcut_preview_basis` already required, so it
     // is `Some` on every basis that resolved; were it not, the zip would drop the magnitudes,
@@ -3922,25 +4006,8 @@ fn loop_shortcut_projection(
             // offer. With the lower clamp replaced by `.min(MAX_SHORTCUT_CYCLES)` below,
             // a `0` authority yields `max == 0`, and `suggested.clamp(1, max)` is then
             // `Ord::clamp(1, 0)`, whose `assert!(min <= max)` is a PLAIN assert that
-            // survives release (measured: an `-O` build of `5u32.clamp(1, 0)` panics with
-            // `min > max. min = 1, max = 0`). Removing this guard turns a malformed
-            // restored dump into an engine panic.
-            //
-            // LATENT, NOT LIVE (measured at this head): no in-tree producer can reach this
-            // arm with `0`. `build_shortcut_schema` (`game/engine.rs`) has four call sites and
-            // derives every capacity itself: `interactive_loop_bridge` and the unbounded
-            // recorded offer measure no threshold, so theirs is
-            // `MAX_SHORTCUT_CYCLES`, while `bounded_offer_tail` hands it a measured
-            // threshold that cannot be `0` — that producer refuses outright unless the reduction
-            // measured one of at least 1 — and `counted_offer` the repetitions the counting
-            // replay performed, at least one. The per-viewer projection in
-            // `game/visibility.rs` only re-projects an existing schema's pair; and
-            // `ShortcutDecisionSchema::default()` seeds the capacity at `MAX_SHORTCUT_CYCLES`
-            // (`analysis/decision_template.rs`), which is also its `#[serde(default)]` for a save
-            // carrying no capacity key. The only way `0`
-            // arrives is a LOADED/PERSISTED authority that explicitly serializes it. This
-            // guard is therefore the fail-closed twin of item E: a latent hole shut before
-            // it opens.
+            // survives release. Removing this guard turns a malformed restored dump into an
+            // engine panic.
             if schema.deliverable_capacity == 0 {
                 return Err(InteractionReasonCode::InvalidAuthorityState);
             }
@@ -3953,6 +4020,9 @@ fn loop_shortcut_projection(
         }
         crate::analysis::decision_template::IterationCount::UntilLethal => {
             InteractionShortcutCountSpec::UntilLethal
+        }
+        crate::analysis::decision_template::IterationCount::WithoutEnd => {
+            InteractionShortcutCountSpec::WithoutEnd
         }
     };
     // CR 732.2a: carry the measured per-period signature forward so the picker's numbers can
@@ -4149,6 +4219,18 @@ fn count_constraint(min: usize, max: usize) -> SelectionConstraint {
     }
 }
 
+/// The most objects a selection admits, or `None` when an aggregate bounds it
+/// by a property total rather than by a count. The read-side counterpart of
+/// [`count_constraint`]; [`selection_progress`] publishes it as
+/// `InteractionProgress::maximum`, and the attachment fan gates on it.
+fn selection_max_count(constraint: &SelectionConstraint) -> Option<u32> {
+    match constraint {
+        SelectionConstraint::Count { max, .. }
+        | SelectionConstraint::EngineValidatedCount { max, .. } => Some(*max),
+        SelectionConstraint::Aggregate { .. } => None,
+    }
+}
+
 fn effect_zone_intent(effect_kind: EffectKind, destination: Option<Zone>) -> InteractionIntentCode {
     if effect_kind == EffectKind::Sacrifice && destination.is_none() {
         InteractionIntentCode::Sacrifice
@@ -4289,9 +4371,9 @@ fn target_intent(effect_kind: EffectKind, detail: TargetEffectDetail) -> Interac
 
 fn pay_cost_intent(kind: &PayCostKind) -> InteractionIntentCode {
     match kind {
-        PayCostKind::Discard | PayCostKind::Reveal | PayCostKind::Behold { .. } => {
-            InteractionIntentCode::Pay
-        }
+        PayCostKind::Discard
+        | PayCostKind::Reveal { shared_quality: _ }
+        | PayCostKind::Behold { .. } => InteractionIntentCode::Pay,
         PayCostKind::Sacrifice => InteractionIntentCode::Sacrifice,
         PayCostKind::ReturnToHand => InteractionIntentCode::Return,
         PayCostKind::ExileFromZone { .. }
@@ -4356,6 +4438,7 @@ fn selection_projection(
         | WaitingFor::ChooseFromZoneChoice { cards, .. }
         | WaitingFor::ConniveDiscard { cards, .. }
         | WaitingFor::DiscardChoice { cards, .. }
+        | WaitingFor::HeroEventChoice { cards, .. }
         | WaitingFor::DrawnThisTurnTopdeckChoice { cards, .. }
         | WaitingFor::DiscardToHandSize { cards, .. }
         | WaitingFor::WardDiscardChoice { cards, .. }
@@ -4366,7 +4449,8 @@ fn selection_projection(
         WaitingFor::DigRestSplitChoice { cards, .. } => cards.len(),
         WaitingFor::SeparatePilesPartition { eligible, .. } => eligible.len(),
         WaitingFor::RippleBottomOrder { cards, .. }
-        | WaitingFor::RevealUntilBottomOrder { cards, .. } => cards.len(),
+        | WaitingFor::RevealUntilBottomOrder { cards, .. }
+        | WaitingFor::DigBottomOrder { cards, .. } => cards.len(),
         _ => 0,
     };
     if candidate_count > MAX_INTERACTION_LIST_LEN {
@@ -4522,7 +4606,7 @@ fn selection_projection(
                     mode: TapCreaturesSelectionMode::Fixed | TapCreaturesSelectionMode::VariableX,
                 }
                 | PayCostKind::Discard
-                | PayCostKind::Reveal
+                | PayCostKind::Reveal { shared_quality: _ }
                 | PayCostKind::Sacrifice
                 | PayCostKind::ReturnToHand
                 | PayCostKind::ExileFromZone { .. }
@@ -4685,6 +4769,9 @@ fn selection_projection(
         }
         | WaitingFor::RevealUntilBottomOrder {
             cards, source_id, ..
+        }
+        | WaitingFor::DigBottomOrder {
+            cards, source_id, ..
         } => Some(SelectionProjection {
             object_ids: cards.clone(),
             constraint: count_constraint(cards.len(), cards.len()),
@@ -4755,7 +4842,7 @@ fn selection_projection(
                         amount: *value,
                     }
                 }
-                SearchSelectionConstraint::DistinctQualities { .. }
+                SearchSelectionConstraint::SharesQualities { .. }
                 | SearchSelectionConstraint::MatchEachFilter { .. } => {
                     SelectionConstraint::EngineValidatedCount {
                         min: bounds.0.min(u32::MAX as usize) as u32,
@@ -4854,6 +4941,37 @@ fn selection_projection(
             intent: InteractionIntentCode::Choose,
             action: SelectionAction::SelectCards,
             source_id: Some(*source_id),
+        }),
+        // Turtle Team-Up hero-choice: the same SelectCards projection as a
+        // discard, sourced from the resolving Event. No unless-filter shape.
+        WaitingFor::HeroEventChoice {
+            cards,
+            count,
+            event_id,
+            up_to: false,
+            ..
+        } => Some(SelectionProjection {
+            object_ids: cards.clone(),
+            constraint: count_constraint(*count, *count),
+            confirm: ConfirmSemantics::Explicit,
+            intent: InteractionIntentCode::Choose,
+            action: SelectionAction::SelectCards,
+            source_id: Some(*event_id),
+        }),
+        WaitingFor::HeroEventChoice {
+            cards,
+            count,
+            event_id,
+            up_to: true,
+            min,
+            ..
+        } => Some(SelectionProjection {
+            object_ids: cards.clone(),
+            constraint: count_constraint(*min, *count),
+            confirm: ConfirmSemantics::Explicit,
+            intent: InteractionIntentCode::Choose,
+            action: SelectionAction::SelectCards,
+            source_id: Some(*event_id),
         }),
         WaitingFor::DiscardChoice {
             cards,
@@ -5027,6 +5145,7 @@ fn selection_projection(
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesChoice { .. }
+        | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
         | WaitingFor::CommanderZoneChoice { .. }
@@ -5324,6 +5443,7 @@ fn interaction_mana_special_action(action: SpecialAction) -> InteractionManaSpec
         SpecialAction::TurnFaceUp => InteractionManaSpecialAction::TurnFaceUp,
         SpecialAction::RollPlanarDie => InteractionManaSpecialAction::RollPlanarDie,
         SpecialAction::EndContinuousEffect => InteractionManaSpecialAction::EndContinuousEffect,
+        SpecialAction::Foretell => InteractionManaSpecialAction::Foretell,
     }
 }
 
@@ -5515,6 +5635,8 @@ fn core_type_code(core_type: CoreType) -> &'static str {
         CoreType::Phenomenon => "phenomenon",
         CoreType::Scheme => "scheme",
         CoreType::Conspiracy => "conspiracy",
+        CoreType::Boss => "boss",
+        CoreType::Event => "event",
     }
 }
 
@@ -6309,6 +6431,8 @@ fn project_action_payload(
                 push_value_surface(surfaces, InteractionRoleCode::Harmonize, "decline");
             }
         }
+        // CR 702.106a: the names are secret, so they publish no surface.
+        GameAction::ChooseSecretAgendaNames { .. } => {}
         GameAction::DeclareCompanion { choice } => match choice {
             crate::types::game_state::CompanionDeclaration::Reveal(reveal) => {
                 push_value_surface(surfaces, InteractionRoleCode::Companion, &reveal.name)
@@ -6332,11 +6456,22 @@ fn project_action_payload(
                 push_value_surface(surfaces, InteractionRoleCode::CastChoice, "decline");
             }
         }
-        GameAction::ChooseTopOrBottom { top } => push_value_surface(
-            surfaces,
-            InteractionRoleCode::Placement,
-            if *top { "top" } else { "bottom" },
-        ),
+        GameAction::ChooseTopOrBottom { top } => {
+            // CR 401.7: the "top" branch of "second from the top or on the
+            // bottom" is an Nth-from-the-top slot; the label must say so.
+            let top_label = match &state.waiting_for {
+                WaitingFor::TopOrBottomChoice {
+                    top_position: LibraryPosition::NthFromTop { n },
+                    ..
+                } => format!("position {n} from the top"),
+                _ => "top".to_string(),
+            };
+            push_value_surface(
+                surfaces,
+                InteractionRoleCode::Placement,
+                if *top { top_label.as_str() } else { "bottom" },
+            )
+        }
         GameAction::ChooseMutateMergeSide { side } => push_value_surface(
             surfaces,
             InteractionRoleCode::MergeSide,
@@ -6364,6 +6499,7 @@ fn project_action_payload(
         | GameAction::SetPriorityYield { .. }
         | GameAction::SetMayTriggerAutoChoice { .. }
         | GameAction::SetReplacementAutoChoice { .. }
+        | GameAction::UnAction { .. }
         | GameAction::SetTriggerOrderTemplate { .. } => {}
         GameAction::AssignCombatDamage {
             assignments,
@@ -6820,6 +6956,9 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
         GameAction::ChooseRoomDoor { .. } => InteractionActionCode::ChooseRoomDoor,
         GameAction::TapForConvoke { .. } => InteractionActionCode::TapForConvoke,
         GameAction::HarmonizeTap { .. } => InteractionActionCode::HarmonizeTap,
+        GameAction::ChooseSecretAgendaNames { .. } => {
+            InteractionActionCode::ChooseSecretAgendaNames
+        }
         GameAction::DeclareCompanion { .. } => InteractionActionCode::DeclareCompanion,
         GameAction::CompanionToHand => InteractionActionCode::CompanionToHand,
         GameAction::EndContinuousEffect { .. } => InteractionActionCode::EndContinuousEffect,
@@ -6843,6 +6982,7 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
         GameAction::SetMayTriggerAutoChoice { .. } => {
             InteractionActionCode::SetMayTriggerAutoChoice
         }
+        GameAction::UnAction { .. } => InteractionActionCode::UnAction,
         GameAction::SetTriggerOrderTemplate { .. } => {
             InteractionActionCode::SetTriggerOrderTemplate
         }
@@ -7756,13 +7896,10 @@ fn selection_progress(
         .iter()
         .all(|object_id| candidate_ids.contains(object_id));
     let selected_count = selected.len().min(u32::MAX as usize) as u32;
-    let (minimum, maximum, aggregate, constraint_satisfied) = match &selection.constraint {
-        SelectionConstraint::Count { min, max } => (
-            *min,
-            Some(*max),
-            None,
-            selected_count >= *min && selected_count <= *max,
-        ),
+    let (minimum, aggregate, constraint_satisfied) = match &selection.constraint {
+        SelectionConstraint::Count { min, max } => {
+            (*min, None, selected_count >= *min && selected_count <= *max)
+        }
         SelectionConstraint::Aggregate {
             function,
             property,
@@ -7808,22 +7945,18 @@ fn selection_progress(
             ));
             (
                 minimum,
-                None,
                 Some(total),
                 selected_count >= minimum && compare_aggregate(*comparator, total, *amount),
             )
         }
-        SelectionConstraint::EngineValidatedCount { min, max } => (
-            *min,
-            Some(*max),
-            None,
-            selected_count >= *min && selected_count <= *max,
-        ),
+        SelectionConstraint::EngineValidatedCount { min, max } => {
+            (*min, None, selected_count >= *min && selected_count <= *max)
+        }
     };
     InteractionProgress {
         selected: selected_count,
         minimum,
-        maximum,
+        maximum: selection_max_count(&selection.constraint),
         aggregate,
         confirmable: unique.len() == selected.len() && all_candidates && constraint_satisfied,
     }
@@ -8490,17 +8623,19 @@ fn opportunity_for_slot(
             )
         }
         HumanResponseModel::TextChoice => {
-            let projection = match text_choice_projection(&filtered_state.waiting_for) {
-                Ok(Some(projection)) => projection,
-                Ok(None) => unreachable!("text model requires text projection"),
-                Err(_) => return payload_too_large_opportunity(&slot.interaction_id),
-            };
+            let projection =
+                match text_choice_projection(&filtered_state.waiting_for, filtered_state) {
+                    Ok(Some(projection)) => projection,
+                    Ok(None) => unreachable!("text model requires text projection"),
+                    Err(_) => return payload_too_large_opportunity(&slot.interaction_id),
+                };
             (
                 InteractionOpportunity {
                     interaction_id: slot.interaction_id.clone(),
                     response: InteractionOpportunityResponse::Schema {
                         spec: InteractionResponseSpec::Text {
                             allow_arbitrary: projection.allow_arbitrary,
+                            count: projection.count,
                             max_len: MAX_INTERACTION_STRING_LEN as u32,
                             confirm: ConfirmSemantics::Explicit,
                         },
@@ -8519,8 +8654,8 @@ fn opportunity_for_slot(
                     .collect(),
                     progress: InteractionProgress {
                         selected: 0,
-                        minimum: 1,
-                        maximum: Some(1),
+                        minimum: projection.count,
+                        maximum: Some(projection.count),
                         aggregate: None,
                         confirmable: false,
                     },
@@ -9263,11 +9398,15 @@ fn attachment_fans_for_slot(
 ) -> BTreeMap<u64, InteractionAttachmentFan> {
     let semantic_owner = PlayerId(slot.semantic_owner);
     let model = human_response_model(&filtered_state.waiting_for, semantic_owner);
+    // A fan pick submits ONE choice as the decision's entire answer, so a
+    // multi-pick decision publishes no fan pick; its attached candidates stay
+    // on the normal interaction surface, where the player keeps choosing.
     let object_choices = match model {
         HumanResponseModel::TargetSequence => {
             target_sequence_projection(&filtered_state.waiting_for)
                 .ok()
                 .flatten()
+                .filter(TargetSequenceProjection::admits_single_pick)
                 .into_iter()
                 .flat_map(|projection| {
                     projection
@@ -9289,6 +9428,7 @@ fn attachment_fans_for_slot(
             selection_projection(&filtered_state.waiting_for, filtered_state, semantic_owner)
                 .ok()
                 .flatten()
+                .filter(SelectionProjection::admits_single_pick)
                 .into_iter()
                 .flat_map(|projection| {
                     projection
@@ -9402,9 +9542,11 @@ fn attachment_fans_for_object_choices(
         .collect()
 }
 
-/// Only publish one-step attachment picks. Multi-choice objects and response
-/// families that require the UI to synthesize a payload stay in the normal
-/// interaction surface until the engine exposes a dedicated picker model.
+/// Map one published object choice to the response that answers its decision
+/// in one step. Reached only for exact candidates and for decisions that admit
+/// a single pick — `attachment_fans_for_slot` withholds multi-pick projections,
+/// so a fan never finalizes a choice the player is still making. Response
+/// families that require the UI to synthesize a payload publish nothing.
 fn attachment_fan_submission(
     interaction_id: &InteractionId,
     model: HumanResponseModel,
@@ -9860,7 +10002,12 @@ fn bound_outbound_response(
                 }
             }
         }
-        InteractionResponse::Text { value } => budget.string(value)?,
+        InteractionResponse::Text { values } => {
+            budget.list(values.len())?;
+            for value in values {
+                budget.string(value)?;
+            }
+        }
         InteractionResponse::Number { .. } | InteractionResponse::ShortcutReply { .. } => {}
     }
     Ok(())
@@ -9964,7 +10111,12 @@ fn validate_response_bounds(response: &InteractionResponse) -> Result<(), Intera
             }
             Ok(())
         }
-        InteractionResponse::Text { value } => bound_string(value),
+        InteractionResponse::Text { values } => {
+            if values.len() > MAX_INTERACTION_LIST_LEN {
+                return Err(InteractionReasonCode::PayloadTooLarge);
+            }
+            values.iter().try_for_each(|value| bound_string(value))
+        }
         InteractionResponse::Shortcut { pins, .. } => {
             let mut budget = OutboundBudget::default();
             budget.list(pins.len())?;
@@ -10579,20 +10731,34 @@ fn materialize_text_choice_response(
     projection: &TextChoiceProjection,
     response: &InteractionResponse,
 ) -> Result<(GameAction, InteractionProgress), InteractionReasonCode> {
-    let InteractionResponse::Text { value } = response else {
+    let InteractionResponse::Text { values } = response else {
         return Err(InteractionReasonCode::MalformedResponse);
     };
-    if !projection.allow_arbitrary && !projection.options.contains(value) {
+    if values.len() != projection.count as usize
+        || !projection.allow_arbitrary
+            && values
+                .iter()
+                .any(|value| !projection.options.contains(value))
+    {
         return Err(InteractionReasonCode::ConstraintUnsatisfied);
     }
-    Ok((
-        GameAction::ChooseOption {
+    let action = match (projection.action, values.as_slice()) {
+        (TextChoiceAction::ChooseOption, [value]) => GameAction::ChooseOption {
             choice: value.clone(),
         },
+        (TextChoiceAction::ChooseOption, _) => {
+            return Err(InteractionReasonCode::ConstraintUnsatisfied)
+        }
+        (TextChoiceAction::ChooseSecretAgendaNames, names) => GameAction::ChooseSecretAgendaNames {
+            names: names.to_vec(),
+        },
+    };
+    Ok((
+        action,
         InteractionProgress {
-            selected: 1,
-            minimum: 1,
-            maximum: Some(1),
+            selected: projection.count,
+            minimum: projection.count,
+            maximum: Some(projection.count),
             aggregate: None,
             confirmable: true,
         },
@@ -10793,6 +10959,10 @@ fn materialize_loop_shortcut_response(
             InteractionShortcutDecision::AcceptSuggested,
             InteractionShortcutCountSpec::UntilLethal,
         ) => IterationCount::UntilLethal,
+        (
+            InteractionShortcutDecision::AcceptSuggested,
+            InteractionShortcutCountSpec::WithoutEnd,
+        ) => IterationCount::WithoutEnd,
         (
             InteractionShortcutDecision::AcceptSuggested,
             InteractionShortcutCountSpec::Fixed { suggested, .. },
@@ -11433,7 +11603,7 @@ fn materialize_response(
             return materialize_outside_selection_response(interaction_id, &projection, response);
         }
         HumanResponseModel::TextChoice => {
-            let projection = text_choice_projection(&filtered_state.waiting_for)?
+            let projection = text_choice_projection(&filtered_state.waiting_for, filtered_state)?
                 .ok_or(InteractionReasonCode::UnsupportedResponse)?;
             return materialize_text_choice_response(&projection, response);
         }
@@ -11765,6 +11935,71 @@ pub fn submit_interaction_with_rejection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
+    use crate::types::game_state::{DistributionScope, DistributionUnit};
+
+    /// V5i: CR 608.2d — a resolution-time division is among ANY number of its
+    /// candidates, so a response assigning the whole total to a strict subset
+    /// materializes; CR 601.2d — the announce-time sibling still requires every
+    /// announced target to receive a share.
+    #[test]
+    fn distribute_among_projection_admits_subsets_only_for_resolution_candidates() {
+        let targets = vec![
+            TargetRef::Object(ObjectId(31)),
+            TargetRef::Object(ObjectId(32)),
+        ];
+        let wait = |scope: DistributionScope| WaitingFor::DistributeAmong {
+            player: PlayerId(1),
+            total: 3,
+            targets: targets.clone(),
+            unit: DistributionUnit::Damage,
+            scope,
+        };
+        let pending = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            ObjectId(30),
+            PlayerId(0),
+        );
+        let interaction_id = InteractionId("t.0.0".to_string());
+        let subset = InteractionResponse::AssignAmounts {
+            assignments: vec![AmountAssignment {
+                choice_id: interaction_choice_id(&interaction_id, 'a', 0),
+                amount: 3,
+            }],
+        };
+
+        let resolution =
+            amount_assignment_projection(&wait(DistributionScope::ResolutionCandidates {
+                pending_effect: Box::new(pending),
+            }))
+            .expect("projection")
+            .expect("DistributeAmong projects amount assignments");
+        let (action, _) =
+            materialize_amount_assignment_response(&interaction_id, &resolution, &subset)
+                .expect("a subset is a legal resolution-time division");
+        assert_eq!(
+            action,
+            GameAction::DistributeAmong {
+                distribution: vec![(targets[0].clone(), 3)],
+            }
+        );
+
+        let announced = amount_assignment_projection(&wait(DistributionScope::AnnouncedTargets))
+            .expect("projection")
+            .expect("DistributeAmong projects amount assignments");
+        assert_eq!(
+            materialize_amount_assignment_response(&interaction_id, &announced, &subset)
+                .map(|(action, _)| action),
+            Err(InteractionReasonCode::ConstraintUnsatisfied),
+            "every announced target must receive a share"
+        );
+    }
 
     /// The exact printed return clauses exercise the shared choice protocol;
     /// Spree payment/mode selection is outside this test's scope.
@@ -12192,6 +12427,7 @@ mod tests {
                 predicted_winner: Some(viewer),
                 certificate: LoopCertificate {
                     unbounded: Vec::new(),
+                    rising: Vec::new(),
                     win_kind: Some(WinKind::LethalDamage),
                     win_kind_at: None,
                     mandatory: false,
@@ -12206,6 +12442,7 @@ mod tests {
                 },
                 declaration: None,
                 road: OfferRoad::Ring,
+                counted_take: Default::default(),
                 period: Default::default(),
             };
             bind_interaction_authority(&mut state, InteractionSessionId("picker-ceiling".into()))
@@ -12271,6 +12508,38 @@ mod tests {
             offer_at(IterationCount::UntilLethal, Some(12), 12),
             InteractionShortcutCountSpec::UntilLethal,
             "CR 732.2a: `UntilLethal` names no count, so there is no ceiling to publish"
+        );
+    }
+
+    /// The selection maximum is read from the constraint itself: a counted
+    /// shape publishes its declared ceiling, and an aggregate — bounded by a
+    /// property total rather than a count — publishes none.
+    #[test]
+    fn selection_max_count_reads_every_constraint_shape() {
+        assert_eq!(
+            selection_max_count(&SelectionConstraint::Count { min: 0, max: 1 }),
+            Some(1)
+        );
+        assert_eq!(
+            selection_max_count(&SelectionConstraint::Count { min: 0, max: 3 }),
+            Some(3)
+        );
+        assert_eq!(
+            selection_max_count(&SelectionConstraint::EngineValidatedCount { min: 0, max: 1 }),
+            Some(1)
+        );
+        assert_eq!(
+            selection_max_count(&SelectionConstraint::EngineValidatedCount { min: 1, max: 2 }),
+            Some(2)
+        );
+        assert_eq!(
+            selection_max_count(&SelectionConstraint::Aggregate {
+                function: InteractionAggregateFunction::Sum,
+                property: InteractionObjectProperty::Power,
+                comparator: AggregateComparator::AtLeast,
+                amount: 3,
+            }),
+            None
         );
     }
 }

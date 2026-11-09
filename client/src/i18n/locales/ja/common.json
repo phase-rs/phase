@@ -13,7 +13,8 @@
   "quantityRef": {
     "highestNumber": "最大の数",
     "lowestNumber": "最小の数",
-    "chosenNumber": "選ばれた数"
+    "chosenNumber": "選ばれた数",
+    "energyPaidOrLostThisTurn": "このターンに支払ったまたは失ったエネルギー"
   },
   "scryOutcome": {
     "title": "占術完了",
@@ -179,6 +180,7 @@
       "exportedTo": "{{path}}にエクスポートしました。",
       "exportRequested": "エクスポートを要求しました — {{filename}}。",
       "exportFailed": "ゲーム状態をエクスポートできませんでした。",
+      "exportFailedDetail": "ゲーム状態をエクスポートできませんでした。{{detail}}",
       "replayExported": "リプレイを{{filename}}として保存しました。",
       "replayExportUnavailable": "このゲームのリプレイ記録はありません。",
       "replayExportFailed": "リプレイをエクスポートできませんでした。"

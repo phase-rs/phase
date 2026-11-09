@@ -51,6 +51,19 @@ export function booster_pack_pool_for_game(): any;
 export function buildLlmDraftPickRequests(endpoint_json: string, set_names_json: string): any;
 
 /**
+ * Check a saved draft session against the draft engine's legacy admission
+ * without restoring it.
+ *
+ * Returns `{ type: "Admitted" }` when the session deserializes and the
+ * admission accepts it, `{ type: "Incompatible" }` when it deserializes and
+ * the admission refuses it, and `{ type: "Unreadable" }` when it does not
+ * deserialize as a draft session. It never throws, and it reads and writes no
+ * installed session, random state, pack generator, difficulty or card
+ * database.
+ */
+export function check_restorable_draft_session(json: string): any;
+
+/**
  * Create a multiplayer draft session. Used by the P2P host to initialize a
  * multiplayer draft of any `DraftKind` with a wire number, with human + bot
  * seats from a Set pool, host-local Chaos candidate pools, or a custom Cube
@@ -195,6 +208,13 @@ export function pool_filter_options(pool_json: string): any;
  * renders what comes back, and computes nothing.
  */
 export function resolve_shared_stack_bot_turns(): any;
+
+/**
+ * Opt bots and auto-pick in or out of the built-in draft-guide pick
+ * enhancements. Independent of difficulty; the frontend sets it from the
+ * player's setting before starting or resuming a draft.
+ */
+export function set_draft_pick_enhancements(enabled: boolean): void;
 
 /**
  * Mark a human seat as connected or disconnected. The host adapter calls
@@ -371,6 +391,7 @@ export interface InitOutput {
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly pool_filter_options: (a: number, b: number) => [number, number, number];
     readonly resolve_shared_stack_bot_turns: () => [number, number, number];
+    readonly set_draft_pick_enhancements: (a: number) => void;
     readonly set_seat_connected: (a: number, b: number) => [number, number, number];
     readonly shared_stack_forced_decision: (a: number) => [number, number, number];
     readonly start_quick_cube_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
@@ -386,6 +407,7 @@ export interface InitOutput {
     readonly suggest_deck: () => [number, number, number];
     readonly suggest_lands: (a: number, b: number) => [number, number, number];
     readonly suggest_lands_for_seat: (a: number, b: number, c: number) => [number, number, number];
+    readonly check_restorable_draft_session: (a: number, b: number) => any;
     readonly init_panic_hook: () => void;
     readonly llmProviderCatalog: () => any;
     readonly __wbindgen_malloc: (a: number, b: number) => number;

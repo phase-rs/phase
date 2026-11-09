@@ -14,11 +14,13 @@ use crate::types::ability::{
     TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerOccurrenceState, TriggerPrintedOrigin,
 };
 use crate::types::card::{
-    LayoutKind, PrintedCardRef, PrintedLoyalty, TokenArtDescriptor, TokenImageRef,
+    LayoutKind, PrintedCardRef, PrintedLoyalty, Rarity, TokenArtDescriptor, TokenImageRef,
 };
+use crate::types::card_printing::SharedPrinting;
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::{counter_map_serde, CounterType};
 use crate::types::definitions::Definitions;
+use crate::types::display_only::DisplayOnly;
 use crate::types::game_state::{
     AttackDeclarationRecord, CastOccurrence, GameState, LKISnapshot, TriggerSourceContext,
 };
@@ -29,74 +31,63 @@ use crate::types::player::PlayerId;
 use crate::types::stickers::AppliedSticker;
 use crate::types::zones::Zone;
 
-/// Image-lookup routing hint for the display layer.
-///
-/// The frontend uses this to decide whether a `GameObject`'s art should be
-/// fetched from the real-card database (Scryfall/MTGJSON entry keyed by name)
-/// or from Scryfall's generic-token database. The two are disjoint: a
-/// real-card name like "Lightning Bolt" never appears in the token database,
-/// and a generic-token name like "Treasure" never appears in the card
-/// database. Without this hint the frontend would have to infer routing from
-/// `card_id == 0`, conflating "object has no card-database entry" with "art
-/// should be looked up as a token" — which is wrong for token-copies of real
-/// cards (Twinflame, Helm of the Host, Mirage Mirror, Vaultborn Tyrant LTB,
-/// etc.) where `is_token = true` but the art belongs to a real card.
-///
-/// Independent of `is_token` (which is the CR 111.1 game-rules concept). A
-/// token-copy of Bahamut has `is_token = true` AND
-/// `display_source = DisplaySource::Card`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum DisplaySource {
-    /// Image lives in the real-card database (looked up by name).
-    /// Default for fresh `GameObject`s including token-copies of real cards.
-    #[default]
-    Card,
-    /// Image lives in Scryfall's generic-token database (Treasure, Spirit
-    /// 1/1, Soldier 1/1, Saproling, Incubator, Army, etc.). Set explicitly
-    /// at the few token-construction sites that fabricate a token from a
-    /// `TokenSpec` rather than copying an existing object.
-    Token,
+pub use crate::types::object_data::{
+    AttachTarget, BackFaceData, DisplayIdentity, DisplaySource, RoomDoor,
+};
+
+/// The [`ObjectIncarnationRef`] constructor and check that read a live
+/// [`GameObject`] or [`GameState`], defined here beside the object they read.
+pub trait ObjectIncarnationRefExt {
+    /// Convenience: capture the current incarnation of a live object.
+    fn from_object(obj: &GameObject) -> Self;
+
+    /// CR 400.7: True when this pinned reference still names the live object it
+    /// was captured from. An object that changed zones became a new object and
+    /// bumped its incarnation (`GameObject::bump_incarnation`), so a stale pin
+    /// matches nothing even though the engine reuses the `ObjectId` as storage
+    /// identity.
+    fn is_current(&self, state: &crate::types::game_state::GameState) -> bool;
 }
 
-/// Image-routing identity of a copy source, bundled so every carrier of it
-/// (`ContinuousModification::CopyValues`, `LatchedCopiableSnapshot`,
-/// `PrecomputedCopyValues`, `CopyTokenSpec`, the merge layer effect) moves the
-/// same four fields together and cannot drop one.
-///
-/// NONE of these fields are CR 707.2 copiable values (status/art are not copied
-/// per CR 707.2) — they are display routing only, deliberately kept off
-/// `CopiableValues`, and mirror the flat `GameObject` storage (`display_source`
-/// discriminates: `Card` => read `printed_ref`; `Token` => read
-/// `token_image_ref`).
-///
-/// CR 111.1 + CR 707.2: a permanent that becomes a copy of a *token* stays a
-/// nontoken (token-ness is created by a token-making effect per CR 111.1, and
-/// is not among the CR 707.2 copiable values), but its name is the token's,
-/// which only resolves in the token art database — so the source's
-/// `display_source = Token` and `token_image_ref` must ride along, not just
-/// `printed_ref`.
-///
-/// Serialized with `#[serde(flatten)]` by every carrier; every field defaults,
-/// so payloads that predate any of the keys still deserialize.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct DisplayIdentity {
-    #[serde(default)]
-    pub display_source: DisplaySource,
-    /// Scryfall oracle-id pointer of the source when it is a printed card.
-    /// `None` when the source is a true token (then `token_image_ref` carries
-    /// the routing).
-    #[serde(default)]
-    pub printed_ref: Option<PrintedCardRef>,
-    /// Exact token-art pointer of the source when it is a true token.
-    /// `None` for printed-card sources.
-    #[serde(default)]
-    pub token_image_ref: Option<TokenImageRef>,
-    /// Intrinsic token-art body of the source, carried so a copy of a token
-    /// without an exact ref still renders from the source's shape rather than
-    /// the recipient's stale descriptor. `None` for printed-card sources and
-    /// pre-descriptor snapshots.
-    #[serde(default)]
-    pub token_art: Option<TokenArtDescriptor>,
+impl ObjectIncarnationRefExt for ObjectIncarnationRef {
+    fn from_object(obj: &GameObject) -> Self {
+        Self {
+            object_id: obj.id,
+            incarnation: obj.incarnation,
+        }
+    }
+
+    fn is_current(&self, state: &crate::types::game_state::GameState) -> bool {
+        state
+            .objects
+            .get(&self.object_id)
+            .is_some_and(|object| Self::from_object(object) == *self)
+    }
+}
+
+/// The [`ObjectIdentityBinding`] constructor and check that read a live
+/// [`GameObject`] or [`GameState`].
+pub trait ObjectIdentityBindingExt {
+    /// Convenience: capture the current incarnation and zone of a live object.
+    fn from_object(obj: &GameObject) -> Self;
+
+    /// CR 400.7: whether this binding still matches the live object — the same
+    /// incarnation still in its expected zone.
+    fn is_current(&self, state: &crate::types::game_state::GameState) -> bool;
+}
+
+impl ObjectIdentityBindingExt for ObjectIdentityBinding {
+    fn from_object(obj: &GameObject) -> Self {
+        Self::new(ObjectIncarnationRef::from_object(obj), obj.zone)
+    }
+
+    fn is_current(&self, state: &crate::types::game_state::GameState) -> bool {
+        self.reference.is_current(state)
+            && state
+                .objects
+                .get(&self.reference.object_id)
+                .is_some_and(|object| object.zone == self.expected_zone)
+    }
 }
 
 impl GameObject {
@@ -354,134 +345,11 @@ pub enum PhaseOutCause {
     Indirectly,
 }
 
-/// Stored back-face data for double-faced cards (DFCs).
-/// Populated when a Transform-layout card enters the game.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackFaceData {
-    pub name: String,
-    pub power: Option<i32>,
-    pub toughness: Option<i32>,
-    pub loyalty: Option<u32>,
-    /// CR 306.5b: The face's printed loyalty determines loyalty counters on entry.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub printed_loyalty: Option<PrintedLoyalty>,
-    /// CR 310.4: Defense of a battle (printed number while off the battlefield).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub defense: Option<u32>,
-    pub card_types: CardType,
-    pub mana_cost: ManaCost,
-    pub keywords: Vec<Keyword>,
-    pub abilities: Vec<AbilityDefinition>,
-    /// Stored card-face payload. Live object definitions are materialized with
-    /// recipient-local occurrence provenance when this face is installed.
-    pub trigger_definitions: Definitions<TriggerDefinition>,
-    /// Semantic printed identity for each trigger slot when this face is a
-    /// snapshot of copied values. Empty means derive identity from `printed_ref`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub trigger_printed_origins: Vec<Option<TriggerPrintedOrigin>>,
-    pub replacement_definitions: Definitions<ReplacementDefinition>,
-    pub static_definitions: Definitions<StaticDefinition>,
-    pub color: Vec<ManaColor>,
-    pub printed_ref: Option<PrintedCardRef>,
-    pub modal: Option<ModalChoice>,
-    pub additional_cost: Option<AdditionalCost>,
-    pub strive_cost: Option<ManaCost>,
-    pub casting_restrictions: Vec<CastingRestriction>,
-    pub casting_options: Vec<SpellCastingOption>,
-    /// Parser diagnostics for THIS face — the `BackFaceData` half of
-    /// [`GameObject::parse_warnings`], and per-face for the same reason `abilities`
-    /// is: the two faces are parsed independently, so a card whose front reads
-    /// cleanly and whose back does not is the normal case rather than a corner one.
-    ///
-    /// Without this field the diagnostic was not a per-face fact at all. Face
-    /// application copies field by field, so a transform kept the FRONT face's
-    /// diagnostics on the object while displaying the back face's rules text: a
-    /// front-clean card looked clean after transforming into a back face the parser
-    /// could not fully read, and a front-dirty one kept a diagnostic that no longer
-    /// described anything. `ai_support::shortcut_efficacy` reads the object field as
-    /// evidence that the printed rules text is fully modelled, so the stale answer
-    /// was load-bearing in both directions.
-    ///
-    /// `serde(default)` keeps every persisted dump loadable — an older
-    /// `BackFaceData` simply carries no diagnostics — and `skip_serializing_if`
-    /// keeps a clean parse byte-identical on the way out.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub parse_warnings: Vec<crate::parser::oracle_ir::diagnostic::OracleDiagnostic>,
-    /// Source layout kind — distinguishes Modal DFCs from Transform DFCs
-    /// so the engine can offer face-choice for MDFCs (CR 712.12).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub layout_kind: Option<LayoutKind>,
-    /// #7565: set when this stored face is a swap SNAPSHOT of the object's
-    /// other half (the live face is currently the alternative). Replaces the
-    /// old implicit contract "snapshot => layout_kind erased", which muted the
-    /// layout for every other consumer (cast-face prompt, MDFC land checks).
-    /// `false` for a still-unswapped printed back face.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_swap_snapshot: bool,
-}
-
 /// CR 719.3b: Tracks the solve state of a Case enchantment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaseState {
     pub is_solved: bool,
     pub solve_condition: SolveCondition,
-}
-
-/// CR 303.4 + CR 301.5: The host an attachment (Aura, Equipment, Fortification)
-/// is attached to. Equipment and Fortification can attach only to objects
-/// (CR 301.5 / CR 301.6); Auras can attach to objects OR players, depending on
-/// the Aura's `Enchant <type>` keyword (CR 303.4 / CR 702.5).
-///
-/// Storing the host as a typed enum (rather than `Option<ObjectId>` plus a
-/// parallel `Option<PlayerId>`) keeps "attached to whom" a single source of
-/// truth and lets exhaustive `match` arms force every consumer to handle both
-/// variants. Equipment-only call sites use `as_object()` with a CR-cited
-/// `expect` to assert the rules invariant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
-pub enum AttachTarget {
-    /// CR 301.5 / CR 303.4f: attached to a permanent.
-    Object(ObjectId),
-    /// CR 303.4 + CR 702.5: attached to a player (Curse cycle, Faith's
-    /// Fetters-class). Equipment can never be in this variant — CR 301.5
-    /// restricts Equipment hosts to creatures.
-    Player(PlayerId),
-}
-
-impl AttachTarget {
-    /// Returns `Some(ObjectId)` for `Object`, `None` for `Player`. Use this at
-    /// call sites that have a CR-grounded reason to expect an object host
-    /// (e.g., Equipment per CR 301.5) — pair with `.expect("CR …")` to make
-    /// the invariant explicit.
-    pub fn as_object(&self) -> Option<ObjectId> {
-        match self {
-            AttachTarget::Object(id) => Some(*id),
-            AttachTarget::Player(_) => None,
-        }
-    }
-
-    /// Returns `Some(PlayerId)` for `Player`, `None` for `Object`. Mirror of
-    /// `as_object`; used by player-aura code paths (Curse cycle, SBA CR 704.5n).
-    pub fn as_player(&self) -> Option<PlayerId> {
-        match self {
-            AttachTarget::Player(pid) => Some(*pid),
-            AttachTarget::Object(_) => None,
-        }
-    }
-}
-
-impl From<ObjectId> for AttachTarget {
-    fn from(id: ObjectId) -> Self {
-        AttachTarget::Object(id)
-    }
-}
-
-/// CR 709.5c: Which half, or door, of a shared-type-line split permanent is
-/// being locked or unlocked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum RoomDoor {
-    Left,
-    Right,
 }
 
 /// CR 709.5c: Unlocked designations carried by a Room permanent.
@@ -548,6 +416,11 @@ pub struct EmblemSource {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub printed_ref: Option<PrintedCardRef>,
+    /// The source card's printing, rendered on the emblem chip. Display-only: CR 203.1 +
+    /// CR 206.1, a printing has no effect on game play, so no rules or AI path reads it.
+    /// Absent from the wire when empty.
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printing: DisplayOnly<Option<SharedPrinting>>,
 }
 
 /// CR 607.1d + CR 607.5 + CR 400.7: an emblem's pairing identity — the exact
@@ -808,6 +681,26 @@ pub fn token_art_derivation_count() -> usize {
     TOKEN_ART_DERIVATION_COUNT.with(std::cell::Cell::get)
 }
 
+/// CR 601.2a + CR 400.1: the zone a cast starts from, together with that
+/// zone's owner. Each player has their own library, hand and graveyard
+/// (CR 400.1), and an object there is in its owner's zone (CR 400.3), so an
+/// origin restriction scoped to "your graveyard" (CR 109.5) needs both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CastOrigin {
+    pub zone: Zone,
+    pub zone_owner: PlayerId,
+}
+
+impl CastOrigin {
+    /// The origin of a cast of `obj` from where it is now.
+    pub fn of(obj: &GameObject) -> Self {
+        Self {
+            zone: obj.zone,
+            zone_owner: obj.owner,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameObject {
     pub id: ObjectId,
@@ -970,6 +863,35 @@ pub struct GameObject {
     /// (command zone), tracked via `Player::contraption_deck`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub in_contraption_deck: bool,
+    /// Horde enemy-deck token instance (casual Horde Magic variant): a token
+    /// that IS a Horde deck card, so it lives outside the battlefield by
+    /// design — library placeholders, the Boss pile, the command zone, and
+    /// (in boss-deck games) graveyard instances awaiting recursion. While
+    /// flagged it is exempt from the CR 704.5d cease-to-exist sweep
+    /// (`check_token_cease_to_exist`) AND from the CR 111.8 "can't change
+    /// zones" movement freeze (`token_cannot_change_zones`): boss-deck loops
+    /// move these tokens by design (Events library↔graveyard, Shredder's
+    /// Challenge returns, stage-clear exiles). Classic decks never move
+    /// theirs, so the freeze carve-out is inert there. Not a CR-sanctioned
+    /// rule; Horde Magic is casual, so the flag names the mechanism.
+    /// (Renamed from `in_horde_library` when boss decks widened it past the
+    /// library; the alias keeps old saves loading.) Skipped on the wire when
+    /// false so hidden stubs of ordinary objects carry no horde marker.
+    #[serde(
+        default,
+        alias = "in_horde_library",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub is_horde_deck_token: bool,
+    /// The card's rarity while it sits in the Horde library, consulted by
+    /// `WaveTermination::UntilRarityAtLeast` to decide when a reveal-and-resolve
+    /// wave ends (the D&D Horde: a wave ends when an uncommon-or-better card is
+    /// revealed). Set from the resolved card face's lowest printing rarity when
+    /// the library is seeded; `None` for every non-Horde object and for library
+    /// tokens (which have no rarity and never end a rarity wave). Not a CR
+    /// concept — Horde Magic is a casual community format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horde_library_rarity: Option<Rarity>,
     /// Unstable Contraptions: the sprocket this Contraption occupies on the
     /// battlefield. `None` when it is not assembled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -999,6 +921,11 @@ pub struct GameObject {
     pub color: Vec<ManaColor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub printed_ref: Option<PrintedCardRef>,
+    /// The printing of the physical card this object represents, as its owner chose it.
+    /// Display-only: CR 203.1 + CR 206.1, a printing has no effect on game play, so no rules or
+    /// AI path reads it. Absent from the wire when empty.
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printing: DisplayOnly<Option<SharedPrinting>>,
     /// Exact token-art lookup metadata, populated only when the engine can
     /// identify one printed token catalog entry without guessing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1141,6 +1068,17 @@ pub struct GameObject {
     /// `base_name`/`name` pair so a temporary copy's art reverts on expiry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_printed_ref: Option<PrintedCardRef>,
+    /// The physical card's submitted printing; transform, flip, control change and zone changes
+    /// leave it unchanged. Paired with `printing` as `base_printed_ref` is with `printed_ref`,
+    /// but card-level: no face install or copy changes it. Both printings are cleared by
+    /// `conceal_printing` when the object becomes able to hide its name (turned face down, or
+    /// merged) and no later face write returns them; the one authority that replays recorded
+    /// values, the cast reversal (CR 733.1), can return the printing held before a cast. Deck
+    /// loading never stamps a token; a token that is a resolved copy of a permanent spell
+    /// (CR 707.10f) carries the printing cloned from the spell it copies. Display-only: CR 203.1 + CR 206.1, a printing has no effect on game
+    /// play, so no rules or AI path reads it. Absent from the wire when empty.
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub base_printing: DisplayOnly<Option<SharedPrinting>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub base_characteristics_initialized: bool,
 
@@ -1349,14 +1287,17 @@ pub struct GameObject {
 
     /// CR 730.3c: When a merged permanent leaves the battlefield it "becomes"
     /// multiple new objects (CR 730.3 / CR 400.7). Each absorbed component records
-    /// the surviving object's id here, so that an effect which finds the object
-    /// the merged permanent became — a flicker/blink referencing "it" — returns
-    /// ALL of the components, not just the survivor (see
+    /// the incarnation the surviving object holds after its leave move (CR 400.7)
+    /// here, so that an effect which finds the object the merged permanent
+    /// became — a flicker/blink referencing "it" — returns ALL of the
+    /// components, not just the survivor (see
     /// `merge::expand_returned_merge_components`). Set when the component is split
     /// out on battlefield exit; cleared on any battlefield (re-)entry. `None` for
-    /// objects that were never split out of a merged permanent this way.
+    /// objects that were never split out of a merged permanent this way. A
+    /// survivor that changes zones again no longer matches, so the component is
+    /// not collected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub split_from_merge_survivor: Option<ObjectId>,
+    pub split_from_merge_survivor: Option<ObjectIncarnationRef>,
 
     /// CR 702.148a-b + CR 612: `Some(_)` while this object's cleave
     /// text-changing effect is live (the spell was cast for its cleave cost).
@@ -1460,6 +1401,22 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_emblem: bool,
 
+    /// CR 905: True when this game object represents a conspiracy card in the
+    /// command zone. Stamped at creation so the object's identity as a conspiracy
+    /// is preserved even while face down (CR 905.4a), when all rules characteristics
+    /// (name, card types, abilities) are blanked (CR 315.5b). Not a characteristic:
+    /// it is the public display classification, since a face-down card in the
+    /// command zone is visibly a conspiracy without revealing which one.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_conspiracy: bool,
+
+    /// CR 702.106a / CR 702.106f: How many card names this conspiracy's agenda
+    /// secretly chooses (1 for hidden agenda, 2 for double agenda, 0 otherwise).
+    /// Stamped at creation because a face-down conspiracy has no text to read.
+    /// Private until revealed: CR 702.106f hides that more than one name exists.
+    #[serde(default, skip_serializing_if = "is_zero_u8_field")]
+    pub agenda_name_count: u8,
+
     /// CR 114: Display-only provenance of the source that created this emblem
     /// (planeswalker, spell, etc.). Populated at creation in `create_emblem`;
     /// `None` for every non-emblem object. See [`EmblemSource`].
@@ -1537,6 +1494,14 @@ pub struct GameObject {
     /// Persists for the object's lifetime on the battlefield.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_attributes: Vec<ChosenAttribute>,
+
+    /// CR 702.106a / CR 702.106f: Secretly chosen card names for face-down
+    /// hidden-agenda / double-agenda conspiracies in the command zone.
+    /// Kept secret from observers until the conspiracy is turned face up,
+    /// at which point they are revealed and transferred to `chosen_attributes`
+    /// as `ChosenAttribute::CardName` (CR 702.106c).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_chosen_names: Vec<String>,
 
     /// CR 701.15c: Which players have goaded this creature. A goaded creature must attack
     /// each combat if able and must attack a player other than the goading player(s) if able.
@@ -1698,6 +1663,17 @@ pub struct GameObject {
     /// to evaluate conditions like "if you cast it from your hand".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_from_zone: Option<Zone>,
+
+    /// CR 707.12 + CR 400.1: where the object this copy was made from was when
+    /// the copy was created: its zone and that zone's owner (the original's
+    /// owner, CR 400.3). A copy of a card is created in that zone and, if cast,
+    /// is cast from there, so the copy's own origin restrictions
+    /// (`CastingRestriction::OnlyFromZones`, including whose graveyard) are
+    /// checked against it. Written once by the copy-creating effects
+    /// (`CopySpell`, `CastCopyOfCard`); `None` on every object that isn't such
+    /// a copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copied_from_zone: Option<CastOrigin>,
 
     /// CR 601.2i + CR 707.10: Exact turn-journal coordinate of this cast while
     /// it remains a spell on the stack. Cleared on every Stack exit.
@@ -1910,6 +1886,9 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         cleave_variant: _,
         color: _,
         printed_ref: _,
+        // OMITTED, DISPLAY-ONLY: CR 203.1 + CR 206.1, a printing has no effect on game play, and
+        // `DisplayOnly` is always equal, so no comparator could tell two printings apart.
+        printing: _,
         token_image_ref: _,
         token_art: _,
         source_related_token_ids: _,
@@ -1947,6 +1926,8 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         base_static_definitions: _,
         base_color: _,
         base_printed_ref: _,
+        // OMITTED, DISPLAY-ONLY (see `printing`).
+        base_printing: _,
         base_characteristics_initialized: _,
         timestamp: _,
         incarnation: _,
@@ -1992,6 +1973,8 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         commander_tax: _,
         is_renowned: _,
         is_emblem: _,
+        is_conspiracy: _,
+        agenda_name_count: _,
         emblem_source: _,
         // omitted-safe-by-write-site: written once at emblem creation, immutable after.
         linked_ability_source: _,
@@ -2007,6 +1990,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         foretold: _,
         exiled_by: _,
         chosen_attributes: _,
+        secret_chosen_names: _,
         goaded_by: _,
         detained_by: _,
         is_suspected: _,
@@ -2029,6 +2013,8 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         base_name_origin: _,
         class_level: _,
         cast_from_zone: _,
+        // omitted-safe-by-write-site: written once when a copy is created.
+        copied_from_zone: _,
         // COMPARED: finalized-cast provenance can affect resolution semantics while
         // this object remains a spell on the stack (types/game_state.rs).
         cast_occurrence: _,
@@ -2052,6 +2038,11 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         // synchronously by `push_ability_entry` into the resolving
         // `ResolvedAbility`'s own `noted_mana_payment` snapshot (§5.2c).
         mana_spent_to_activate: _,
+        // Horde-deck-token provenance: compared in `object_content_eq`
+        // (fail-closed — the flag flips alongside the zone change on reveal,
+        // and rarity is immutable display info).
+        is_horde_deck_token: _,
+        horde_library_rarity: _,
     } = o;
 }
 
@@ -2864,6 +2855,22 @@ impl GameObject {
         }
     }
 
+    /// CR 601.2a + CR 202.3e: The mana value of the spell this object represents
+    /// once its caster has announced `x` for the `{X}` in its mana cost. A spell
+    /// being cast is on the stack (CR 601.2a), so its announced X counts — even
+    /// though the engine keeps the card in its origin zone until the cast is
+    /// finalized and only stamps `cost_x_paid` after payment. Casting-legality
+    /// checks that read the spell's qualities after the X announcement project
+    /// the mana value through here rather than through the zone-gated
+    /// [`spell_mana_value_for`](Self::spell_mana_value_for).
+    pub fn spell_mana_value_with_announced_x(&self, fused: bool, x: u32) -> u32 {
+        match self.fused_split_half_for(fused) {
+            // Fuse cards carry no {X} in either half (see `spell_mana_value_for`).
+            Some(bf) => self.mana_cost.mana_value() + bf.mana_cost.mana_value(),
+            None => self.mana_cost.mana_value_with_x(Zone::Stack, Some(x)),
+        }
+    }
+
     /// CR 202.3d + CR 709.4d + CR 702.102b: The colors of the SPELL this object
     /// represents while being cast / on the stack — the COMBINED colors of both
     /// halves for a fused split spell, otherwise the object's own colors. See
@@ -2972,6 +2979,7 @@ impl GameObject {
                 lki: self.snapshot_public_characteristics(),
                 card_id: self.card_id,
                 printed_ref: self.printed_ref.clone(),
+                printing: self.printing.clone(),
                 is_token: self.is_token,
                 face_down: self.face_down,
                 mana_cost: self.mana_cost.clone(),
@@ -3053,6 +3061,9 @@ impl GameObject {
             // "whenever a creature token dies").
             is_token: self.is_token,
             combat_status: Default::default(),
+            // CR 509.1g: filled in by the zone-change authority from live combat
+            // (`combat::live_block_pairs_of`); the object alone cannot answer it.
+            block_pairs: Vec::new(),
             co_departed: Vec::new(),
             attached_to: self.attached_to,
             // CR 400.7: filled in by `move_to_zone` from the live object AFTER the
@@ -3069,6 +3080,9 @@ impl GameObject {
             // departed source's intervening-if recheck ("isn't prepared")
             // reads the exit-time value through the LKI record.
             was_prepared: self.prepared.is_some(),
+            // CR 800.4a: stamped by the player-leaves-game procedure, which owns
+            // that fact; every other move is an ordinary move.
+            departure: crate::types::game_state::ZoneDeparture::Moved,
         }
     }
 
@@ -3213,6 +3227,8 @@ impl GameObject {
             attraction_lights: Vec::new(),
             in_attraction_deck: false,
             in_contraption_deck: false,
+            is_horde_deck_token: false,
+            horde_library_rarity: None,
             contraption_sprocket: None,
             stickers: Vec::new(),
             mana_cost: ManaCost::default(),
@@ -3223,7 +3239,9 @@ impl GameObject {
             static_definitions: Definitions::default(),
             color: Vec::new(),
             printed_ref: None,
+            printing: DisplayOnly::default(),
             base_printed_ref: None,
+            base_printing: DisplayOnly::default(),
             token_image_ref: None,
             token_art: None,
             source_related_token_ids: Vec::new(),
@@ -3293,6 +3311,8 @@ impl GameObject {
             commander_tax: None,
             is_renowned: false,
             is_emblem: false,
+            is_conspiracy: false,
+            agenda_name_count: 0,
             emblem_source: None,
             linked_ability_source: None,
             is_token: false,
@@ -3307,6 +3327,7 @@ impl GameObject {
             foretold: false,
             exiled_by: None,
             chosen_attributes: Vec::new(),
+            secret_chosen_names: Vec::new(),
             goaded_by: std::collections::HashSet::new(),
             detained_by: std::collections::HashSet::new(),
             is_suspected: false,
@@ -3329,6 +3350,7 @@ impl GameObject {
             base_name_origin: None,
             class_level: None,
             cast_from_zone: None,
+            copied_from_zone: None,
             cast_occurrence: None,
             spell_announcement: None,
             cast_controller: None,
@@ -3345,6 +3367,16 @@ impl GameObject {
             phase_status: PhaseStatus::PhasedIn,
             mana_spent_to_activate: Vec::new(),
         }
+    }
+
+    /// CR 708.2 + CR 708.5: forget the physical card's printing on the authoritative object at the
+    /// moment the object becomes able to hide its name (turned face down, or merged). Nothing writes a
+    /// printing after an object is created except a clone of an existing object, so a concealed
+    /// printing stays concealed through every later face rewrite (turn up, flip, specialize,
+    /// transform, reload) and every capture of the object carries none.
+    pub(crate) fn conceal_printing(&mut self) {
+        self.printing = DisplayOnly::default();
+        self.base_printing = DisplayOnly::default();
     }
 
     /// Capture public object characteristics for event-time look-back queries.
@@ -3393,6 +3425,9 @@ impl GameObject {
             // snapshots that use this method never ask an attachment predicate, so an
             // empty set here is the same fail-closed answer they got before.
             attachments: Vec::new(),
+            // CR 608.2h: the trigger-time copy a latched source falls back to
+            // when no exit record survives for its incarnation.
+            intensity: self.intensity,
         }
     }
 
@@ -3431,6 +3466,7 @@ impl GameObject {
         self.counters = lki.counters.clone();
         self.tapped = lki.tapped;
         self.is_suspected = lki.is_suspected;
+        self.intensity = lki.intensity;
         // Relationships.
         self.attachments = context
             .attachments
@@ -4066,6 +4102,16 @@ impl GameObject {
         self.zone == Zone::Battlefield && self.is_phased_out()
     }
 
+    /// CR 110.1 + CR 702.26b: Whether this object is a permanent that exists:
+    /// on the battlefield and phased in. Phasing does not move a permanent
+    /// (CR 702.26d), so on the battlefield this is exactly the negation of
+    /// [`Self::is_phased_out_permanent`], and in any other zone neither holds.
+    /// `pub` so `phase-ai` asks the engine which objects are phased-in
+    /// permanents instead of re-deriving it.
+    pub fn is_phased_in_permanent(&self) -> bool {
+        self.zone == Zone::Battlefield && self.is_phased_in()
+    }
+
     pub fn has_keyword_kind(&self, kind: KeywordKind) -> bool {
         super::keywords::has_keyword_kind(self, kind)
     }
@@ -4150,10 +4196,10 @@ impl GameObject {
     /// with `chosen_card_name` so a same-clause read of "the last chosen name and
     /// creature type" (Psychic Paper) reports both halves from the same choice.
     pub fn chosen_creature_type(&self) -> Option<&str> {
-        self.chosen_attributes.iter().rev().find_map(|a| match a {
-            ChosenAttribute::CreatureType(s) => Some(s.as_str()),
-            _ => None,
-        })
+        self.chosen_attributes
+            .iter()
+            .rev()
+            .find_map(ChosenAttribute::creature_type)
     }
 
     /// CR 612.8 + CR 613.7: The most recently chosen card name (Psychic Paper's
@@ -4428,6 +4474,10 @@ impl GameObject {
 }
 
 /// Serde helper: skip serialization when a `u32` field is zero.
+fn is_zero_u8_field(n: &u8) -> bool {
+    *n == 0
+}
+
 fn is_zero_u32_field(n: &u32) -> bool {
     *n == 0
 }
@@ -5313,6 +5363,51 @@ mod tests {
 
         let deserialized: GameObject = serde_json::from_value(json).unwrap();
         assert!(deserialized.is_phased_out());
+    }
+
+    /// CR 110.1 + CR 702.26b + CR 702.26d: an object is a phased-in permanent
+    /// exactly when it is on the battlefield and phased in. On the battlefield
+    /// that is the negation of `is_phased_out_permanent`; in every other zone
+    /// neither holds.
+    #[test]
+    fn is_phased_in_permanent_is_a_phased_in_object_on_the_battlefield() {
+        let statuses = [
+            PhaseStatus::PhasedIn,
+            PhaseStatus::PhasedOut {
+                cause: PhaseOutCause::Directly,
+            },
+            PhaseStatus::PhasedOut {
+                cause: PhaseOutCause::Indirectly,
+            },
+        ];
+        let mut permanents = 0;
+        for zone in Zone::ALL {
+            for status in statuses {
+                let mut obj = GameObject::new(
+                    ObjectId(1),
+                    CardId(1),
+                    PlayerId(0),
+                    "Phaser".to_string(),
+                    zone,
+                );
+                obj.phase_status = status;
+                let answer = obj.is_phased_in_permanent();
+                if zone == Zone::Battlefield {
+                    assert_eq!(answer, status == PhaseStatus::PhasedIn, "{status:?}");
+                    assert_eq!(answer, !obj.is_phased_out_permanent(), "{status:?}");
+                } else {
+                    assert!(
+                        !answer && !obj.is_phased_out_permanent(),
+                        "{zone:?} {status:?}"
+                    );
+                }
+                permanents += usize::from(answer);
+            }
+        }
+        assert_eq!(
+            permanents, 1,
+            "reach guard: the phased-in battlefield object is one"
+        );
     }
 
     #[test]

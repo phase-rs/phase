@@ -1284,6 +1284,9 @@ fn play_land_from_graveyard_with_permission() {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Land),
@@ -1354,6 +1357,9 @@ fn play_land_from_graveyard_respects_land_drop_limit() {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Land),
@@ -1425,6 +1431,9 @@ fn muldrotha_per_permanent_type_blocks_second_land_from_graveyard() {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Permanent),
@@ -1507,6 +1516,9 @@ fn muldrotha_per_permanent_type_resets_at_turn_start() {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Permanent),

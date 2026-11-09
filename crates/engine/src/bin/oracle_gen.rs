@@ -920,7 +920,7 @@ fn write_oracle_subtypes(
     let list: Vec<String> = build_creature_subtype_vocabulary(card_types, atomic)
         .into_iter()
         .collect();
-    let out_path = PathBuf::from("crates/engine/data/oracle-subtypes.json");
+    let out_path = PathBuf::from("crates/phase-ast/data/oracle-subtypes.json");
     // `serde_json::to_string_pretty` does not emit a trailing newline; append one
     // so the committed generated file stays POSIX-compliant (no "\ No newline at
     // end of file" diff churn on every regeneration).
@@ -1344,7 +1344,7 @@ fn main() {
                 eprintln!("  --output <path>  Write the export to a file instead of stdout");
                 eprintln!(
                     "  --write-subtypes Regenerate the committed creature-subtype vocabulary\n\
-                     \x20                 (crates/engine/data/oracle-subtypes.json). Requires\n\
+                     \x20                 (crates/phase-ast/data/oracle-subtypes.json). Requires\n\
                      \x20                 CardTypes.json alongside AtomicCards.json. Without this\n\
                      \x20                 flag the export never writes to the tracked tree."
                 );
@@ -1356,8 +1356,11 @@ fn main() {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "oracle_gen=info,engine=info".parse().unwrap()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "oracle_gen=info,engine=info,phase_parser=info"
+                    .parse()
+                    .unwrap()
+            }),
         )
         .init();
 
@@ -1375,7 +1378,7 @@ fn main() {
     };
 
     // The creature-subtype vocabulary is a COMMITTED parser input: the engine
-    // pulls `crates/engine/data/oracle-subtypes.json` in with `include_str!`.
+    // pulls `crates/phase-ast/data/oracle-subtypes.json` in with `include_str!`.
     // Regenerating it is therefore a deliberate data-pipeline act, not a side
     // effect of exporting cards, and it happens only under `--write-subtypes`
     // (passed by `scripts/gen-card-data.sh`, the one caller that fetches the
@@ -1590,6 +1593,24 @@ fn main() {
         );
     }
 
+    let misparses = engine::types::confirmed_misparse::ConfirmedMisparses::committed();
+    let stamped = misparses.stamp_all(
+        face_index
+            .iter_mut()
+            .map(|(key, entry)| (key.as_str(), &mut entry.face)),
+    );
+    eprintln!(
+        "Confirmed misparses: marked {} exported face(s)",
+        stamped.marked
+    );
+    if filter_names.is_empty() && !stamped.unmatched_keys.is_empty() {
+        eprintln!(
+            "Confirmed misparses: {} listed key(s) absent from export; sample: {:?}",
+            stamped.unmatched_keys.len(),
+            &stamped.unmatched_keys[..stamped.unmatched_keys.len().min(10)]
+        );
+    }
+
     let json = serde_json::to_string(&face_index).expect("Failed to serialize card data");
     if let (Some(trace), Some(manifest)) = (&trace_args, trace_manifest) {
         if output.as_ref() == Some(&trace.output) {
@@ -1671,8 +1692,11 @@ fn run_semantic_audit(remaining_args: &[String]) {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "oracle_gen=info,engine=info".parse().unwrap()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "oracle_gen=info,engine=info,phase_parser=info"
+                    .parse()
+                    .unwrap()
+            }),
         )
         .init();
 

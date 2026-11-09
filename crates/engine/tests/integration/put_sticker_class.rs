@@ -16,6 +16,7 @@
 //! lowercase letter and its uppercase equivalent are the same letter (CR
 //! 123.6e; letter occurrences, CR 123.6d).
 
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::stickers::set_player_sticker_sheets;
 use engine::game::zones::move_to_zone;

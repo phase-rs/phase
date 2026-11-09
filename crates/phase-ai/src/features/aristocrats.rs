@@ -3,9 +3,9 @@
 //! Parser AST verification (pre-verified against codebase) — VERIFIED:
 //! - `TriggerMode::ChangesZone` with `origin = Some(Battlefield)`,
 //!   `destination = Some(Graveyard)` is the dies-trigger shape
-//!   (`crates/engine/src/types/triggers.rs:26-27`, CR 603.6c).
+//!   (`crates/phase-ast/src/types/triggers.rs`, CR 603.6c).
 //! - `CostCategory::SacrificesPermanent` is the sacrifice-cost gate
-//!   (`crates/engine/src/types/ability.rs:1858`, CR 701.21).
+//!   (`crates/phase-ast/src/types/ability.rs`, CR 701.21).
 //! - Anti-fetchland disambiguator: rejects abilities that match the canonical
 //!   fetchland shape (`SearchLibrary` for Land + `ChangeZone` to Battlefield).
 //!   Delegates to `features::landfall::ability_searches_library_for_land` —
@@ -525,6 +525,7 @@ mod tests {
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::land()),
@@ -566,6 +567,7 @@ mod tests {
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
                 target: TargetFilter::Any,
@@ -648,6 +650,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    engine::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: Vec::new(),
                 static_abilities: Vec::new(),
                 enter_with_counters: Vec::new(),
@@ -670,6 +674,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    engine::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: Vec::new(),
                 static_abilities: Vec::new(),
                 enter_with_counters: Vec::new(),
@@ -681,6 +687,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::creature()),
@@ -705,6 +712,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::creature().properties(vec![

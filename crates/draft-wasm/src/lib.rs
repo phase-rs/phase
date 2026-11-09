@@ -23,6 +23,10 @@ mod suggest;
 thread_local! {
     static PACK_GEN: Cell<Option<PackGenerator>> = const { Cell::new(None) };
     static DIFFICULTY: Cell<AiDifficulty> = const { Cell::new(AiDifficulty::Medium) };
+    /// Whether bots (and auto-pick) apply the built-in draft guides. Opt-in and
+    /// set by the caller via [`set_draft_pick_enhancements`]; defaults off.
+    static PICK_ENHANCEMENT: Cell<bot_ai::PickEnhancement> =
+        const { Cell::new(bot_ai::PickEnhancement::Off) };
     static RNG: Cell<Option<ChaCha20Rng>> = const { Cell::new(None) };
     /// Per RESEARCH Pitfall 2: draft-wasm has its own CardDatabase, separate
     /// from engine-wasm's thread-local. The frontend loads card-data.json into
@@ -85,6 +89,19 @@ fn deck_submission_message(error: DraftError) -> String {
             .join("; "),
         error => error.to_string(),
     }
+}
+
+/// Opt bots and auto-pick in or out of the built-in draft-guide pick
+/// enhancements. Independent of difficulty; the frontend sets it from the
+/// player's setting before starting or resuming a draft.
+#[wasm_bindgen]
+pub fn set_draft_pick_enhancements(enabled: bool) {
+    let enhancement = if enabled {
+        bot_ai::PickEnhancement::DraftGuides
+    } else {
+        bot_ai::PickEnhancement::Off
+    };
+    PICK_ENHANCEMENT.with(|cell| cell.set(enhancement));
 }
 
 /// Map a u8 difficulty value to AiDifficulty.
@@ -670,6 +687,7 @@ fn apply_human_pick_and_resolve_bots_with_overrides(
             // rather than by coincidence.
             let cards_per_pick =
                 usize::from(draft_session.config.kind.procedure().cards_per_pick).min(pack.0.len());
+            let pack_shape = bot_ai::PackShape::current(draft_session);
             let chosen = overrides
                 .get(&seat)
                 .filter(|ids| {
@@ -688,6 +706,8 @@ fn apply_human_pick_and_resolve_bots_with_overrides(
                     difficulty,
                     &draft_session.pools[seat as usize],
                     card_db,
+                    PICK_ENHANCEMENT.with(|cell| cell.get()),
+                    pack_shape,
                     &mut rng,
                 );
                 // Map indices to ids BEFORE applying — the apply mutates the pack
@@ -773,6 +793,7 @@ pub fn auto_pick() -> Result<JsValue, JsValue> {
         let mut rng = RNG
             .with(|cell| cell.take())
             .ok_or_else(|| JsValue::from_str("RNG not initialized"))?;
+        let pack_shape = bot_ai::PackShape::current(draft_session);
         let card_id = CARD_DB.with(|cell| {
             let db_borrow = cell.borrow();
             let pick_idx = bot_ai::bot_pick(
@@ -780,6 +801,8 @@ pub fn auto_pick() -> Result<JsValue, JsValue> {
                 difficulty,
                 &draft_session.pools[0],
                 db_borrow.as_ref(),
+                PICK_ENHANCEMENT.with(|cell| cell.get()),
+                pack_shape,
                 &mut rng,
             );
             pack.0[pick_idx].instance_id.clone()
@@ -1128,6 +1151,8 @@ fn submit_deck_inner(
                 seat: 0,
                 main_deck,
                 commanders,
+                // Dedicated local/P2P wrappers remain name-only.
+                printings: Vec::new(),
             },
             None,
         )
@@ -1361,6 +1386,7 @@ fn submit_deck_for_seat_inner(
                 seat,
                 main_deck,
                 commanders,
+                printings: Vec::new(),
             },
             None,
         )
@@ -1390,20 +1416,80 @@ pub fn export_draft_session() -> Result<String, JsValue> {
     })?
 }
 
+/// Why a saved session cannot be restored under the legacy admission.
+enum RestoreRefusal {
+    /// The text does not deserialize as a draft session.
+    Unreadable(serde_json::Error),
+    /// The session deserializes and the legacy admission refuses it, with the
+    /// admission's own message.
+    Incompatible(String),
+}
+
+/// The first two steps of restoring a saved session, shared by the restore and
+/// the check: deserialize the text as a draft session, then apply the legacy
+/// admission.
+fn admitted_session_from_json(json: &str) -> Result<DraftSession, RestoreRefusal> {
+    let session: DraftSession = serde_json::from_str(json).map_err(RestoreRefusal::Unreadable)?;
+    admit_legacy_runtime(&session).map_err(RestoreRefusal::Incompatible)?;
+    Ok(session)
+}
+
 /// Decode only snapshot shapes this client can safely present after a restore.
 ///
 /// Player and spectator projections own the privacy boundary for a Chaos
 /// layout: the persisted snapshot remains host-local, while all ordinary views
 /// expose only `DraftSourceView`'s redacted metadata.
 fn restorable_draft_session_from_json(json: &str) -> Result<DraftSession, String> {
-    let mut session: DraftSession = serde_json::from_str(json)
-        .map_err(|error| format!("Failed to deserialize draft session: {error}"))?;
-    admit_legacy_runtime(&session)?;
+    let mut session = admitted_session_from_json(json).map_err(|refusal| match refusal {
+        RestoreRefusal::Unreadable(error) => {
+            format!("Failed to deserialize draft session: {error}")
+        }
+        RestoreRefusal::Incompatible(error) => error,
+    })?;
     session.config = enforce_procedure_minimum_deck_size(session.config);
     session
         .validate_persisted_snapshot()
         .map_err(|error| format!("Invalid draft snapshot: {error}"))?;
     Ok(session)
+}
+
+/// The draft engine's answer to whether a saved session could be restored
+/// under its legacy admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "type")]
+enum RestorableDraftSessionVerdict {
+    /// The session deserializes and the legacy admission accepts it.
+    Admitted,
+    /// The session deserializes and the legacy admission refuses it.
+    Incompatible,
+    /// The text does not deserialize as a draft session.
+    Unreadable,
+}
+
+/// Pure-Rust core for `check_restorable_draft_session`, so the verdict is
+/// reachable from `cargo test` without `js_sys::JSON::parse`. It takes the
+/// restore's first two steps from `admitted_session_from_json` and nothing
+/// else: the procedure minimum and the snapshot validation stay the import's.
+fn restorable_draft_session_verdict(json: &str) -> RestorableDraftSessionVerdict {
+    match admitted_session_from_json(json) {
+        Ok(_) => RestorableDraftSessionVerdict::Admitted,
+        Err(RestoreRefusal::Incompatible(_)) => RestorableDraftSessionVerdict::Incompatible,
+        Err(RestoreRefusal::Unreadable(_)) => RestorableDraftSessionVerdict::Unreadable,
+    }
+}
+
+/// Check a saved draft session against the draft engine's legacy admission
+/// without restoring it.
+///
+/// Returns `{ type: "Admitted" }` when the session deserializes and the
+/// admission accepts it, `{ type: "Incompatible" }` when it deserializes and
+/// the admission refuses it, and `{ type: "Unreadable" }` when it does not
+/// deserialize as a draft session. It never throws, and it reads and writes no
+/// installed session, random state, pack generator, difficulty or card
+/// database.
+#[wasm_bindgen]
+pub fn check_restorable_draft_session(json: &str) -> JsValue {
+    to_js(&restorable_draft_session_verdict(json))
 }
 
 /// Restore a DraftSession from a persisted JSON snapshot.
@@ -2818,6 +2904,146 @@ mod llm_draft_resolution_tests {
         });
         session_cell::clear();
     }
+
+    struct MixedBoosterPackSource;
+
+    impl draft_core::pack_source::PackSource for MixedBoosterPackSource {
+        fn generate_pack(
+            &self,
+            _rng: &mut dyn rand::RngCore,
+            seat: u8,
+            pack_number: u8,
+        ) -> draft_core::types::DraftPack {
+            let size = match pack_number {
+                0 => 2,
+                1 => 3,
+                _ => 2,
+            };
+            let cards = (0..size)
+                .map(|i| DraftCardInstance {
+                    instance_id: format!("card-{seat}-{pack_number}-{i}"),
+                    name: format!("Card {i}"),
+                    set_code: "TST".to_string(),
+                    collector_number: format!("{i}"),
+                    rarity: "common".to_string(),
+                    colors: Vec::new(),
+                    cmc: 1,
+                    type_line: String::new(),
+                    draft_effect: None,
+                })
+                .collect();
+            draft_core::types::DraftPack(cards)
+        }
+    }
+
+    #[test]
+    fn session_with_mixed_booster_sizes_wires_cards_in_pack_through_bot_resolution() {
+        let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
+            source: DraftSource::single_set("TST".to_string()),
+            set_code: "TST".to_string(),
+            kind: DraftKind::Quick,
+            pod_size: 8,
+            cards_per_pack: 15, // uniform default overridden by pack source
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 20_261_004,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let seats: Vec<DraftSeat> = (0..8)
+            .map(|i| {
+                if i == 0 {
+                    DraftSeat::Human {
+                        player_id: PlayerId(0),
+                        display_name: "Player".to_string(),
+                    }
+                } else {
+                    DraftSeat::Bot {
+                        name: format!("Bot {i}"),
+                    }
+                }
+            })
+            .collect();
+        let mut session = DraftSession::new(config, seats, "MIXED-SIZES".to_string());
+        session::apply(
+            &mut session,
+            DraftAction::StartDraft,
+            Some(&MixedBoosterPackSource),
+        )
+        .expect("mixed-size Quick pod starts");
+
+        assert_eq!(session.pack_sizes, vec![2, 3, 2]);
+        assert_eq!(session.current_pack_number, 0);
+        assert_eq!(session.cards_in_pack(0), 2);
+
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(42))));
+
+        // The shape every pick site builds, and the pick-in-pack it yields for
+        // the pack seat 0 is holding. The uniform `cards_per_pack` (15) would put
+        // these picks deep in the late stage; the recorded sizes must win.
+        let shape_and_pick = |session: &DraftSession| {
+            let shape = bot_ai::PackShape::current(session);
+            let remaining = session.current_pack[0].as_ref().unwrap().0.len();
+            (shape, shape.position(remaining))
+        };
+        let expect = |pack_number: u8, cards_in_pack: u8, pick_in_pack: usize| {
+            (
+                bot_ai::PackShape {
+                    pack_number,
+                    cards_in_pack,
+                },
+                phase_ai::draft_profile::PackPosition {
+                    pack_number: usize::from(pack_number),
+                    pick_in_pack,
+                },
+            )
+        };
+
+        // Pack 0, pick 1 of 2.
+        assert_eq!(shape_and_pick(&session), expect(0, 2, 1));
+        let human_card_0 = session.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
+        apply_human_pick_and_resolve_bots(&mut session, human_card_0).unwrap();
+        assert_eq!(session.current_pack_number, 0);
+        assert_eq!(session.current_pack[0].as_ref().unwrap().0.len(), 1);
+        assert_eq!(shape_and_pick(&session), expect(0, 2, 2));
+
+        // Pack 0, pick 2 of 2. Exhausts pack 0 and transitions to pack 1.
+        let human_card_1 = session.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
+        apply_human_pick_and_resolve_bots(&mut session, human_card_1).unwrap();
+
+        // Now in pack 1: size is 3, cards_in_pack(1) is 3.
+        assert_eq!(session.current_pack_number, 1);
+        assert_eq!(session.cards_in_pack(session.current_pack_number), 3);
+        assert_eq!(session.current_pack[0].as_ref().unwrap().0.len(), 3);
+        assert_eq!(shape_and_pick(&session), expect(1, 3, 1));
+
+        // Pack 1, pick 1 of 3: bots resolve using PackShape with cards_in_pack = 3.
+        let human_card_2 = session.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
+        apply_human_pick_and_resolve_bots(&mut session, human_card_2).unwrap();
+
+        for seat in 0..8 {
+            assert_eq!(
+                session.pools[seat].len(),
+                3,
+                "seat {seat} took 2 cards from pack 0 and 1 from pack 1"
+            );
+        }
+        assert_eq!(session.current_pack[0].as_ref().unwrap().0.len(), 2);
+        assert_eq!(shape_and_pick(&session), expect(1, 3, 2));
+    }
 }
 
 #[cfg(test)]
@@ -3880,6 +4106,216 @@ mod create_multiplayer_draft_tests {
         DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
     }
 
+    /// A legacy session, as draft-core serializes it, passes the check.
+    #[test]
+    fn restorable_session_check_admits_a_legacy_session() {
+        let legacy = dormant_fixture(DraftFlow::LegacyBarrier, DraftStatus::Drafting);
+        let json = serde_json::to_string(&legacy).unwrap();
+        // Reach: the text deserializes to the same session, which the legacy
+        // admission itself accepts.
+        assert_eq!(serde_json::from_str::<DraftSession>(&json).unwrap(), legacy);
+        assert!(legacy.validate_legacy_admission().is_ok());
+        assert_eq!(
+            restorable_draft_session_verdict(&json),
+            RestorableDraftSessionVerdict::Admitted
+        );
+    }
+
+    /// Every session the legacy admission refuses, as draft-core serializes
+    /// it, is reported incompatible rather than unreadable.
+    #[test]
+    fn restorable_session_check_refuses_what_the_legacy_admission_refuses() {
+        let legacy = dormant_fixture(DraftFlow::LegacyBarrier, DraftStatus::Drafting);
+        let mut legacy_review = legacy.clone();
+        legacy_review.status = DraftStatus::Review;
+        let mut burn_policy = legacy.clone();
+        burn_policy.config.selection_policy = DraftSelectionPolicy {
+            burns_per_pick: 1,
+            discard_threshold: 0,
+        };
+        let mut pick_clock = legacy.clone();
+        pick_clock.config.clock_policy = DraftClockPolicy {
+            pick: PickClockPolicy::Fixed { duration_ms: 1000 },
+            review_duration_ms: 0,
+        };
+        let mut review_duration = legacy;
+        review_duration.config.clock_policy = DraftClockPolicy {
+            pick: PickClockPolicy::Off,
+            review_duration_ms: 1000,
+        };
+        let refused = [
+            dormant_fixture(DraftFlow::FifoAsync, DraftStatus::Drafting),
+            dormant_fixture(DraftFlow::FifoAsync, DraftStatus::Review),
+            legacy_review,
+            burn_policy,
+            pick_clock,
+            review_duration,
+        ];
+        let verdicts: Vec<_> = refused
+            .iter()
+            .map(|session| {
+                let json = serde_json::to_string(session).unwrap();
+                // Reach: the text deserializes to the same session, which the
+                // legacy admission itself refuses.
+                assert_eq!(
+                    &serde_json::from_str::<DraftSession>(&json).unwrap(),
+                    session
+                );
+                assert!(session.validate_legacy_admission().is_err());
+                restorable_draft_session_verdict(&json)
+            })
+            .collect();
+        assert_eq!(verdicts, [RestorableDraftSessionVerdict::Incompatible; 6]);
+    }
+
+    /// Text that does not deserialize as a draft session is unreadable, not a
+    /// refusal.
+    #[test]
+    fn restorable_session_check_reports_text_that_is_not_a_session_as_unreadable() {
+        let legacy = serde_json::to_value(dormant_fixture(
+            DraftFlow::LegacyBarrier,
+            DraftStatus::Drafting,
+        ))
+        .unwrap();
+        // Paired positive: the unedited session deserializes, so the refusal
+        // below is about the unknown flow.
+        assert!(serde_json::from_value::<DraftSession>(legacy.clone()).is_ok());
+        let mut unknown_flow = legacy;
+        unknown_flow["config"]["flow"] = "FutureFlow".into();
+        let unreadable = ["{".to_string(), "[]".to_string(), unknown_flow.to_string()];
+        let verdicts: Vec<_> = unreadable
+            .iter()
+            .map(|json| {
+                assert!(serde_json::from_str::<DraftSession>(json).is_err());
+                restorable_draft_session_verdict(json)
+            })
+            .collect();
+        assert_eq!(verdicts, [RestorableDraftSessionVerdict::Unreadable; 3]);
+    }
+
+    #[test]
+    fn restorable_session_check_verdicts_are_type_tagged_objects() {
+        for (verdict, tag) in [
+            (RestorableDraftSessionVerdict::Admitted, "Admitted"),
+            (RestorableDraftSessionVerdict::Incompatible, "Incompatible"),
+            (RestorableDraftSessionVerdict::Unreadable, "Unreadable"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(verdict).unwrap(),
+                serde_json::json!({ "type": tag })
+            );
+        }
+    }
+
+    /// The check installs nothing, and leaves an installed session, the random
+    /// state, the pack generator, the difficulty and the card database as they
+    /// were.
+    #[test]
+    fn restorable_session_check_reads_and_writes_no_thread_local() {
+        let installed = dormant_fixture(DraftFlow::LegacyBarrier, DraftStatus::Drafting);
+        let mut checked = installed.clone();
+        checked.draft_code = "checked-draft".into();
+        let inputs = [
+            serde_json::to_string(&checked).unwrap(),
+            serde_json::to_string(&dormant_fixture(
+                DraftFlow::FifoAsync,
+                DraftStatus::Drafting,
+            ))
+            .unwrap(),
+            "{".to_string(),
+        ];
+        let check_inputs = || {
+            let verdicts: Vec<_> = inputs
+                .iter()
+                .map(String::as_str)
+                .map(restorable_draft_session_verdict)
+                .collect();
+            // Reach: the legacy text is admitted, the FIFO text reaches the
+            // admission, and the malformed text is unreadable.
+            assert_eq!(verdicts[0], RestorableDraftSessionVerdict::Admitted);
+            assert_ne!(verdicts[1], RestorableDraftSessionVerdict::Unreadable);
+            assert_eq!(verdicts[2], RestorableDraftSessionVerdict::Unreadable);
+        };
+
+        clear_state();
+        let empty = guard_cells_snapshot();
+        check_inputs();
+        assert!(!session_cell::is_installed());
+        assert_eq!(guard_cells_snapshot(), empty);
+
+        install_guard_cells(installed);
+        let export = session_cell::with_installed(|draft| serde_json::to_string(draft).unwrap());
+        let before = guard_cells_snapshot();
+        check_inputs();
+        assert_eq!(
+            session_cell::with_installed(|draft| serde_json::to_string(draft).unwrap()),
+            export
+        );
+        assert_eq!(guard_cells_snapshot(), before);
+        clear_state();
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+    }
+
+    /// The shared fixture's saved sessions, which the client's saved-host tests
+    /// read with the draft engine's recorded answers.
+    fn shared_saved_sessions() -> serde_json::Value {
+        let shared: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/draft-contract/fifo_legacy_admission.json"
+        ))
+        .unwrap();
+        shared["saved_sessions"].clone()
+    }
+
+    /// Each saved session in the shared fixture is draft-core's serialization of
+    /// a session built here, or of one with a field set to a value draft-core
+    /// cannot read, and the check gives it the verdict the fixture records.
+    #[test]
+    fn shared_fixture_saved_sessions_are_draft_core_sessions_with_their_verdicts() {
+        let legacy = dormant_fixture(DraftFlow::LegacyBarrier, DraftStatus::Drafting);
+        let fifo = dormant_fixture(DraftFlow::FifoAsync, DraftStatus::Drafting);
+        let mut legacy_review = legacy.clone();
+        legacy_review.status = DraftStatus::Review;
+        let mut legacy_carrying_fifo = legacy;
+        legacy_carrying_fifo.fifo = fifo.fifo.clone();
+        let mut fifo_complete = fifo.clone();
+        fifo_complete.status = DraftStatus::Complete;
+        let mut fifo_abandoned = fifo.clone();
+        fifo_abandoned.status = DraftStatus::Abandoned;
+        let value = |session: &DraftSession| serde_json::to_value(session).unwrap();
+        let mut legacy_review_unknown_flow = value(&legacy_review);
+        legacy_review_unknown_flow["config"]["flow"] = "FutureFlow".into();
+        let built = [
+            ("fifo_drafting", value(&fifo)),
+            ("legacy_review", value(&legacy_review)),
+            ("legacy_carrying_fifo", value(&legacy_carrying_fifo)),
+            ("fifo_complete", value(&fifo_complete)),
+            ("fifo_abandoned", value(&fifo_abandoned)),
+            ("legacy_review_unknown_flow", legacy_review_unknown_flow),
+        ];
+        let shared = shared_saved_sessions();
+        // Reach: the fixture holds exactly these saved sessions.
+        let mut names: Vec<&str> = shared
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        names.sort_unstable();
+        let mut expected: Vec<&str> = built.iter().map(|(name, _)| *name).collect();
+        expected.sort_unstable();
+        assert_eq!(names, expected);
+        for (name, session) in &built {
+            let saved = &shared[*name];
+            assert_eq!(&saved["session"], session, "{name}");
+            let verdict = restorable_draft_session_verdict(&saved["session"].to_string());
+            assert_eq!(
+                serde_json::to_value(verdict).unwrap(),
+                saved["verdict"],
+                "{name}"
+            );
+        }
+    }
+
     /// V26. A public backup strips `shared_stack` at the trust boundary, and
     /// the result is DELIBERATELY not a restorable Winston snapshot -- the same
     /// discipline `import_rejects_redacted_chaos_snapshot_that_claims_a_uniform_layout`
@@ -4204,6 +4640,125 @@ mod create_multiplayer_draft_tests {
             .expect("sealed pack boundaries")
             .iter()
             .all(|pack| pack.len() == 3));
+
+        clear_state();
+    }
+
+    #[test]
+    fn unglued_set_pool_loads_ten_cards_per_pack_for_draft_and_sealed() {
+        let set_pool_json = r#"{
+            "code": "UGL",
+            "name": "Unglued",
+            "release_date": null,
+            "pack_variants": [
+                {
+                    "contents": [
+                        { "slot": "basic", "count": 1, "choices": [{ "sheet": "basic", "weight": 1 }] },
+                        { "slot": "common", "count": 6, "choices": [{ "sheet": "common", "weight": 1 }] },
+                        { "slot": "rare", "count": 1, "choices": [{ "sheet": "rare", "weight": 1 }] },
+                        { "slot": "uncommon", "count": 2, "choices": [{ "sheet": "uncommon", "weight": 1 }] }
+                    ],
+                    "weight": 3
+                },
+                {
+                    "contents": [
+                        { "slot": "basic", "count": 1, "choices": [{ "sheet": "basic", "weight": 1 }] },
+                        { "slot": "common", "count": 6, "choices": [{ "sheet": "common", "weight": 1 }] },
+                        { "slot": "rare", "count": 1, "choices": [{ "sheet": "rare", "weight": 1 }] },
+                        { "slot": "uncommon", "count": 1, "choices": [{ "sheet": "uncommon", "weight": 1 }] }
+                    ],
+                    "weight": 2
+                }
+            ],
+            "pack_variants_total_weight": 5,
+            "sheets": {
+                "basic": {
+                    "cards": [
+                        { "name": "Forest", "set_code": "UGL", "collector_number": "1", "rarity": "common", "weight": 1 }
+                    ],
+                    "total_weight": 1,
+                    "foil": false,
+                    "balance_colors": false
+                },
+                "common": {
+                    "cards": [
+                        { "name": "C1", "set_code": "UGL", "collector_number": "2", "rarity": "common", "weight": 1 },
+                        { "name": "C2", "set_code": "UGL", "collector_number": "3", "rarity": "common", "weight": 1 },
+                        { "name": "C3", "set_code": "UGL", "collector_number": "4", "rarity": "common", "weight": 1 },
+                        { "name": "C4", "set_code": "UGL", "collector_number": "5", "rarity": "common", "weight": 1 },
+                        { "name": "C5", "set_code": "UGL", "collector_number": "6", "rarity": "common", "weight": 1 },
+                        { "name": "C6", "set_code": "UGL", "collector_number": "7", "rarity": "common", "weight": 1 }
+                    ],
+                    "total_weight": 6,
+                    "foil": false,
+                    "balance_colors": false
+                },
+                "uncommon": {
+                    "cards": [
+                        { "name": "U1", "set_code": "UGL", "collector_number": "8", "rarity": "uncommon", "weight": 1 },
+                        { "name": "U2", "set_code": "UGL", "collector_number": "9", "rarity": "uncommon", "weight": 1 }
+                    ],
+                    "total_weight": 2,
+                    "foil": false,
+                    "balance_colors": false
+                },
+                "rare": {
+                    "cards": [
+                        { "name": "R1", "set_code": "UGL", "collector_number": "10", "rarity": "rare", "weight": 1 }
+                    ],
+                    "total_weight": 1,
+                    "foil": false,
+                    "balance_colors": false
+                }
+            },
+            "prints": [],
+            "basic_lands": ["Forest"]
+        }"#;
+
+        let pool_input_json = serde_json::json!({
+            "type": "Set",
+            "data": { "set_pool_json": set_pool_json }
+        })
+        .to_string();
+        let seats_json = r#"[
+            { "type": "Human", "player_id": 0, "display_name": "Host" },
+            { "type": "Human", "player_id": 1, "display_name": "Guest" }
+        ]"#;
+
+        clear_state();
+        let draft_view = create_multiplayer_draft_inner(
+            &pool_input_json,
+            seats_json,
+            1,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2,
+        )
+        .expect("Unglued draft should start");
+        assert_eq!(draft_view.cards_per_pack, 10);
+        assert_eq!(draft_view.current_pack.expect("current pack").len(), 10);
+
+        clear_state();
+        let sealed_view = create_multiplayer_draft_inner(
+            &pool_input_json,
+            seats_json,
+            3,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2,
+        )
+        .expect("Unglued sealed should start");
+        assert_eq!(sealed_view.cards_per_pack, 10);
+        assert_eq!(sealed_view.pool.len(), 60);
+        assert!(sealed_view
+            .sealed_packs
+            .expect("sealed pack boundaries")
+            .iter()
+            .all(|pack| pack.len() == 10));
 
         clear_state();
     }
@@ -5015,6 +5570,11 @@ mod create_multiplayer_draft_tests {
                 submission.commanders, commanders,
                 "CR 903.3: the designation arrives verbatim and in order"
             );
+            assert!(submission.printings.is_empty());
+            assert!(serde_json::to_value(submission)
+                .unwrap()
+                .get("printings")
+                .is_none());
         });
 
         clear_state();
@@ -5285,6 +5845,11 @@ mod create_multiplayer_draft_tests {
                 .expect("seat 2's submission is keyed by its own player id");
             assert_eq!(seat2.seat, 2);
             assert_eq!(seat2.commanders, seat2_commanders);
+            assert!(seat2.printings.is_empty());
+            assert!(serde_json::to_value(seat2)
+                .unwrap()
+                .get("printings")
+                .is_none());
 
             let seat0 = session
                 .submitted_decks
@@ -5295,6 +5860,11 @@ mod create_multiplayer_draft_tests {
                 seat0.commanders, seat0_commanders,
                 "a later seat's designation must not be attributed to an earlier one"
             );
+            assert!(seat0.printings.is_empty());
+            assert!(serde_json::to_value(seat0)
+                .unwrap()
+                .get("printings")
+                .is_none());
         });
 
         clear_state();

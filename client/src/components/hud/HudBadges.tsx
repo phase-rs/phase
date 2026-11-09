@@ -1,6 +1,8 @@
+import type { ParseKeys, TFunction } from "i18next";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
+import { HordeRulesPopover } from "./HordeRulesPopover.tsx";
 import { DungeonMapPopover } from "./DungeonMapPopover.tsx";
 import { RingBenefitsPopover } from "./RingBenefitsPopover.tsx";
 import { ManaFontIcon } from "../icons/ManaFontIcon.tsx";
@@ -15,10 +17,15 @@ import type {
   PlayerStatusView,
   ResourceAxis,
   ResourceAxisTag,
+  RuleSummaryLine,
   UnboundedFamily,
 } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useBoundedLoopRepetitions } from "../../hooks/usePlayerDesignations.ts";
+import {
+  useDesignationTokenArt,
+  type DesignationArtKind,
+} from "../../hooks/useDesignationTokenArt.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSpectatorMode } from "../../hooks/useSpectatorMode.ts";
 import { getKeywordDisplayText } from "../../viewmodel/keywordProps.ts";
@@ -48,6 +55,47 @@ export function StatusBadge({
   );
 }
 
+/**
+ * Official token art inside a designation badge, or the caller's glyph
+ * fallback while loading / when art is unavailable. The image is always
+ * decorative (`alt=""`, `aria-hidden`) — the badge's accessible name lives
+ * on the wrapping `role="img"` element, so art loading, failing, or being
+ * absent never changes what assistive tech announces.
+ */
+export function DesignationArt({
+  art,
+  fallback,
+  className = "absolute inset-0 h-full w-full rounded-full object-cover",
+}: {
+  art: DesignationArtKind;
+  fallback: ReactNode;
+  className?: string;
+}) {
+  const src = useDesignationTokenArt(art);
+  // The hook resolves when the URL is known, not when the bytes arrive — and
+  // a failed download never recovers. Keep the glyph until `onLoad` confirms
+  // the CURRENT src, so a slow or broken image degrades to the fallback
+  // instead of an empty shell. No `onError` handler: the fallback simply
+  // stays when a load never succeeds.
+  const [loadedSrc, setLoadedSrc] = useState<string | null>(null);
+  const artReady = src !== null && loadedSrc === src;
+  return (
+    <>
+      {artReady ? null : fallback}
+      {src && (
+        <img
+          src={src}
+          alt=""
+          aria-hidden
+          draggable={false}
+          className={artReady ? className : "hidden"}
+          onLoad={() => setLoadedSrc(src)}
+        />
+      )}
+    </>
+  );
+}
+
 export function MonarchBadge() {
   const { t } = useTranslation("game");
   return (
@@ -65,7 +113,12 @@ export function MonarchBadge() {
           aria-hidden
           className="absolute -bottom-1 left-1/2 h-3 w-5 -translate-x-1/2 rounded-[45%] bg-amber-950/30 blur-[1px]"
         />
-        <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.45)]">👑</span>
+        <DesignationArt
+          art="monarch"
+          fallback={
+            <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.45)]">👑</span>
+          }
+        />
       </span>
     </BadgeTip>
   );
@@ -88,7 +141,12 @@ export function InitiativeBadge() {
           aria-hidden
           className="absolute -bottom-1 left-1/2 h-3 w-5 -translate-x-1/2 rounded-[45%] bg-cyan-950/30 blur-[1px]"
         />
-        <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">🛡</span>
+        <DesignationArt
+          art="initiative"
+          fallback={
+            <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">🛡</span>
+          }
+        />
       </span>
     </BadgeTip>
   );
@@ -107,7 +165,58 @@ export function CityBlessingBadge() {
           aria-hidden
           className="absolute inset-0 rounded-full bg-[radial-gradient(circle_at_50%_40%,rgba(255,255,255,0.95)_0_18%,transparent_22%),radial-gradient(circle_at_50%_50%,rgba(254,240,138,0.85)_0_36%,transparent_42%),linear-gradient(135deg,#fefce8_0%,#fde047_36%,#ca8a04_72%,#422006_100%)]"
         />
-        <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.4)]">☀</span>
+        <DesignationArt
+          art="cityBlessing"
+          fallback={
+            <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.4)]">☀</span>
+          }
+        />
+      </span>
+    </BadgeTip>
+  );
+}
+
+/**
+ * Game-global day/night indicator (CR 731). Unlike the per-player badges
+ * above, this reads `gameState.day_night` directly — day/night is a shared
+ * designation, so it mounts once in the action rail, not per HUD. Self-hides
+ * when neither is in effect. Art is the matching face of the MID Day //
+ * Night token; the sun/moon glyph covers loading and offline.
+ */
+export function DayNightBadge() {
+  const { t } = useTranslation("game");
+  const dayNight = useGameStore((s) => s.gameState?.day_night ?? null);
+  if (dayNight == null) return null;
+  const isDay = dayNight === "Day";
+  return (
+    <BadgeTip text={isDay ? t("badges.dayTooltip") : t("badges.nightTooltip")}>
+      <span
+        role="img"
+        aria-label={isDay ? t("badges.day") : t("badges.night")}
+        className={`relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center overflow-hidden rounded-full px-1 text-[12px] leading-none ring-1 ${
+          isDay
+            ? "bg-amber-300 ring-amber-100 shadow-[0_0_14px_rgba(252,211,77,0.6)]"
+            : "bg-slate-800 ring-slate-400/60 shadow-[0_0_14px_rgba(148,163,184,0.45)]"
+        }`}
+      >
+        <span
+          aria-hidden
+          className={`absolute inset-0 rounded-full ${
+            isDay
+              ? "bg-[radial-gradient(circle_at_50%_40%,rgba(255,255,255,0.95)_0_18%,transparent_22%),linear-gradient(135deg,#fefce8_0%,#fbbf24_42%,#92400e_100%)]"
+              : "bg-[radial-gradient(circle_at_68%_28%,rgba(226,232,240,0.9)_0_8%,transparent_10%),radial-gradient(circle_at_30%_70%,rgba(148,163,184,0.5)_0_6%,transparent_8%),linear-gradient(135deg,#1e293b_0%,#020617_100%)]"
+          }`}
+        />
+        <DesignationArt
+          art={isDay ? "day" : "night"}
+          fallback={
+            <span
+              className={`relative drop-shadow-[0_1px_1px_rgba(0,0,0,${isDay ? "0.4" : "0.6"})]`}
+            >
+              {isDay ? "☀" : "🌙"}
+            </span>
+          }
+        />
       </span>
     </BadgeTip>
   );
@@ -339,7 +448,11 @@ export function CounterBadge({ kind, value, ringBearerName }: CounterBadgeProps)
             className="absolute -bottom-1 left-1/2 h-3 w-5 -translate-x-1/2 rounded-[45%] bg-amber-950/28 blur-[1px]"
           />
           <span className="relative inline-flex items-center gap-px">
-            <ManaFontIcon iconClass="ms-counter-rad" fallbackText="☢" />
+            <DesignationArt
+              art="radiation"
+              className="h-4 w-4 shrink-0 rounded-full object-cover"
+              fallback={<ManaFontIcon iconClass="ms-counter-rad" fallbackText="☢" />}
+            />
             {value}
           </span>
         </span>
@@ -398,7 +511,7 @@ const CONDITION_GLYPH: Record<PlayerConditionKind["type"], string> = {
   CastOnlyFromZones: "📤",
 };
 
-const CONDITION_LABEL_KEY: Record<PlayerConditionKind["type"], string> = {
+const CONDITION_LABEL_KEY = {
   CantWin: "badges.condCantWin",
   CantGainLife: "badges.condCantGainLife",
   CantLoseLife: "badges.condCantLoseLife",
@@ -406,7 +519,7 @@ const CONDITION_LABEL_KEY: Record<PlayerConditionKind["type"], string> = {
   CantCastSpells: "badges.condCantCast",
   CantActivateAbilities: "badges.condCantActivate",
   CastOnlyFromZones: "badges.condCastOnlyFromZones",
-};
+} as const satisfies Record<PlayerConditionKind["type"], ParseKeys<"game">>;
 
 /**
  * Renders tooltip content in the project's custom <GameplayTooltip> rather than
@@ -521,7 +634,7 @@ const UNBOUNDED_FAMILY_GLYPH: Record<UnboundedFamily, string> = {
 /** Exported for `LoopShortcutModal`'s preview lines: the engine's
  *  `InteractionShortcutPreviewFamily` is the same 11 literals as `UnboundedFamily`, so the preview
  *  reuses these labels instead of minting a parallel 11-key catalog in 7 locales. */
-export const UNBOUNDED_FAMILY_LABEL_KEY: Record<UnboundedFamily, string> = {
+export const UNBOUNDED_FAMILY_LABEL_KEY = {
   mana: "badges.unboundedMana",
   life: "badges.unboundedLife",
   damage: "badges.unboundedDamage",
@@ -533,7 +646,7 @@ export const UNBOUNDED_FAMILY_LABEL_KEY: Record<UnboundedFamily, string> = {
   combats: "badges.unboundedCombats",
   turns: "badges.unboundedTurns",
   triggers: "badges.unboundedTriggers",
-};
+} as const satisfies Record<UnboundedFamily, ParseKeys<"game">>;
 
 /** CR 732.2a: a badge for one unbounded-resource display family. */
 export function UnboundedBadge({
@@ -637,7 +750,7 @@ export function UnboundedBadge({
 
 /** One human-readable line for a pending next-spell modifier. */
 function describeNextSpellModifier(
-  t: ReturnType<typeof useTranslation>["t"],
+  t: TFunction<"game">,
   modifier: NextSpellModifier,
 ): string {
   switch (modifier.type) {
@@ -787,6 +900,79 @@ export function RingBenefitsBadge({
       />
       {hoverOpen && chipRef.current ? (
         <RingBenefitsPopover anchorEl={chipRef.current} level={level} bearerName={ringBearerName} />
+      ) : null}
+    </>
+  );
+}
+
+// Matches RingBenefitsBadge's dismiss smoothing.
+const HORDE_RULES_HOVER_CLOSE_DELAY_MS = 80;
+
+/**
+ * Info badge for the Horde seat: a small chip that hover-opens a popover
+ * listing the active challenge deck's engine-authored rules summary
+ * (`ChallengeDeckMetadata.rules`) — so a player can see HOW the Horde deck plays
+ * and how it differs, mid-game. It surfaces the same engine-owned text as the
+ * setup deck picker; the frontend renders `rules` verbatim and never derives
+ * rules prose from the structured ruleset.
+ *
+ * Modeled on `RingBenefitsBadge` (chip + hover-open portaled popover). The chip
+ * is a `<span>` (not a `<button>`) with no `tabIndex`, because seat renderers
+ * like `OpponentTab` are themselves `<button>`s — a focusable/interactive
+ * descendant there would be invalid HTML. Callers gate rendering on the Horde
+ * seat (`player.has_no_life_total`); this also self-guards against empty rules.
+ */
+export function HordeRulesBadge({
+  deckLabel,
+  rules,
+}: {
+  deckLabel: string;
+  rules: readonly RuleSummaryLine[];
+}) {
+  const { t } = useTranslation("game");
+  const chipRef = useRef<HTMLSpanElement>(null);
+  const [hoverOpen, setHoverOpen] = useState(false);
+  const closeTimerRef = useRef<number | null>(null);
+
+  const cancelClose = useCallback(() => {
+    if (closeTimerRef.current != null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  }, []);
+  const onEnter = useCallback(() => {
+    cancelClose();
+    setHoverOpen(true);
+  }, [cancelClose]);
+  const onLeave = useCallback(() => {
+    cancelClose();
+    closeTimerRef.current = window.setTimeout(() => {
+      setHoverOpen(false);
+      closeTimerRef.current = null;
+    }, HORDE_RULES_HOVER_CLOSE_DELAY_MS);
+  }, [cancelClose]);
+  useEffect(() => () => cancelClose(), [cancelClose]);
+
+  if (rules.length === 0) return null;
+
+  return (
+    <>
+      <span
+        ref={chipRef}
+        role="img"
+        aria-label={t("badges.hordeRulesAriaLabel")}
+        onMouseEnter={onEnter}
+        onMouseLeave={onLeave}
+        className="relative inline-flex h-6 min-w-6 shrink-0 cursor-help items-center justify-center overflow-hidden rounded-full px-1 text-[12px] leading-none ring-1 bg-amber-500 ring-amber-200/80 shadow-[0_0_14px_rgba(245,158,11,0.5)]"
+      >
+        <span
+          aria-hidden
+          className="absolute inset-0 rounded-full bg-[radial-gradient(circle_at_30%_24%,rgba(255,255,255,0.9)_0_10%,transparent_12%),linear-gradient(135deg,#fef3c7_0%,#f59e0b_45%,#78350f_100%)]"
+        />
+        <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">📜</span>
+      </span>
+      {hoverOpen && chipRef.current ? (
+        <HordeRulesPopover anchorEl={chipRef.current} deckLabel={deckLabel} rules={rules} />
       ) : null}
     </>
   );

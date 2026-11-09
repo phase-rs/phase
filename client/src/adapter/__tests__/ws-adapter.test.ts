@@ -3,6 +3,7 @@ import { diagnosticIdFor, getDiagnosticHistory } from "../../services/troublesho
 import { loadDiagnosticHistory } from "../../services/diagnosticHistory";
 
 const lanGate = vi.hoisted(() => ({ supported: false, probe: vi.fn(), authorize: vi.fn() }));
+const terminalStore = vi.hoisted(() => ({ commit: vi.fn(async () => true) }));
 vi.mock("../../services/nativeEngineSocket", () => ({ NativeEngineSocket: class { constructor() { return new MockWebSocket("native-lan"); } } }));
 vi.mock("../../services/lan", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../services/lan")>(),
@@ -10,13 +11,17 @@ vi.mock("../../services/lan", async (importOriginal) => ({
   authorizeLanServer: lanGate.authorize,
   canUseLanBridge: () => lanGate.supported,
 }));
+vi.mock("../../services/fullTerminalResult", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../services/fullTerminalResult")>(),
+  commitFullTerminalDelivery: terminalStore.commit,
+}));
 
 import {
   NativeEngineVersionMismatchError,
   PROTOCOL_VERSION,
   WebSocketAdapter,
 } from "../ws-adapter";
-import { AdapterError, AdapterErrorCode, supportsMatchConcede, supportsServerRewind } from "../types";
+import { AdapterError, AdapterErrorCode, supportsMatchConcede, supportsTakeback, supportsTurnRewind } from "../types";
 import type { FormatConfig, GameAction, GameState, SubmitResult } from "../types";
 import type {
   InteractionChoiceId,
@@ -26,6 +31,7 @@ import type {
   PreviewRequestId,
 } from "../generated/interaction";
 import type { PhaseSocketTransport } from "../../services/openPhaseSocket";
+import type { FullTerminalDelivery } from "../../services/fullTerminalResult";
 
 // Minimal mock WebSocket. Latest-constructed instance is exposed via
 // `MockWebSocket.last` so tests can grab it synchronously — the adapter
@@ -281,6 +287,8 @@ describe("WebSocketAdapter", () => {
 
   beforeEach(async () => {
     MockWebSocket.last = null;
+    terminalStore.commit.mockReset();
+    terminalStore.commit.mockResolvedValue(true);
     adapter = new WebSocketAdapter(
       "wss://localhost:9374/ws",
       "join",
@@ -450,9 +458,34 @@ describe("WebSocketAdapter", () => {
     );
 
     await expect(exported).rejects.toMatchObject({
-      code: "WS_ERROR",
+      code: "REQUEST_FAILED",
       message: "Only the game host can export authoritative state",
-      recoverable: false,
+      recoverable: true,
+    });
+  });
+
+  it("rejects a correlated action failure and a mana-preview failure as recoverable request failures", async () => {
+    const action = adapter.submitAction({ type: "PassPriority" }, 0);
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({ type: "ActionFailed", data: { message: "action persistence failed" } }),
+    );
+    await expect(action).rejects.toMatchObject({
+      code: "REQUEST_FAILED",
+      message: "action persistence failed",
+      recoverable: true,
+    });
+
+    const preview = adapter.previewManaPayment({ type: "PassPriority" }, 0);
+    const sent = JSON.parse(ws.send.mock.lastCall![0] as string);
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({ type: "ManaPaymentPreviewFailed", data: { request_id: sent.data.request_id, message: "preview lookup failed" } }),
+    );
+    await expect(preview).rejects.toMatchObject({
+      code: "REQUEST_FAILED",
+      message: "preview lookup failed",
+      recoverable: true,
     });
   });
 
@@ -693,7 +726,8 @@ describe("WebSocketAdapter", () => {
 */
   describe("server rewind capability (F2)", () => {
     it("declares the capability through the standalone type guard", () => {
-      expect(supportsServerRewind(adapter)).toBe(true);
+      expect(supportsTurnRewind(adapter)).toBe(true);
+      expect(supportsTakeback(adapter)).toBe(true);
     });
 
     // The reverse-skew guard. The last-action frame must carry NO `data` key —
@@ -1198,6 +1232,64 @@ describe("WebSocketAdapter", () => {
         },
       },
     );
+
+    it("hands serialized terminal authority to native P2P without local commit or early ACK", async () => {
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "join",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Guest",
+        {
+          nativePregame: {
+            kind: "reconnect",
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            gameCode: "NATIVE",
+            playerId: 1,
+            playerToken: "guest-token",
+            fullKey: { game_code: "NATIVE", generation: 1 },
+            callerManagedTerminalDelivery: true,
+          },
+        },
+      );
+      const events: unknown[] = [];
+      nativeAdapter.onEvent((event) => events.push(event));
+      const delivery: FullTerminalDelivery = {
+        key: { game_code: "NATIVE", generation: 1 },
+        terminalRevision: 9,
+        deliveryId: "recipient-delivery",
+        credential: "recipient-credential",
+        display: { winner: 0, reason: "Finished" },
+        finalView: {
+          players: [],
+          objects: {},
+          waiting_for: { type: "GameOver", data: { winner: 0 } },
+        } as unknown as GameState,
+      };
+
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({
+        type: "SessionAttached",
+        data: {
+          game_code: "NATIVE",
+          player_id: 1,
+          player_token: "guest-token",
+          full_key: { game_code: "NATIVE", generation: 1 },
+        },
+      }));
+      await expect(attached).resolves.toMatchObject({ playerId: 1 });
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({ type: "TerminalResult", data: { delivery } }));
+
+      expect(events).toContainEqual({ type: "terminalDelivery", delivery });
+      expect(events).toContainEqual({ type: "sessionChanged", session: null });
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "terminalUnavailable" }));
+      expect(terminalStore.commit).not.toHaveBeenCalled();
+      expect(MockWebSocket.last).toBe(nativeSocket);
+      nativeAdapter.dispose();
+    });
 
     it("settles an export when native session identity validation fails", async () => {
       const nativeAdapter = new WebSocketAdapter(
@@ -2163,6 +2255,168 @@ describe("WebSocketAdapter", () => {
       }
     });
 
+    const BOOTSTRAP_WITHHELD = JSON.stringify({
+      type: "StateWithheld",
+      data: {
+        full_key: REPLY_OWNERSHIP_FULL_KEY, state_revision: 3,
+        withheld: { type: "GameStarted", data: { your_player: 0 } },
+        reason: "The game state is too large to send.",
+      },
+    });
+    const TAKEBACK_REQUESTED = JSON.stringify({
+      type: "TakebackRequested", data: { requester: 1, requester_name: "guest-one", voters: [0] },
+    });
+    const RESTORED = JSON.stringify({
+      type: "StateUpdate",
+      data: {
+        state_revision: 4, state: { ...createMockState(), turn_number: 4 },
+        events: [], full_key: REPLY_OWNERSHIP_FULL_KEY,
+      },
+    });
+    const teardownEvents = [
+      { type: "reconnectFailed" },
+      { type: "error", message: expect.anything() },
+      { type: "sessionChanged", session: null },
+    ];
+
+    it("reattaches a withheld reconnect onto the delivered board", async () => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const events = vi.fn();
+      adapter.onEvent(events);
+      try {
+        ws.dispatchSynthetic("close");
+        await vi.advanceTimersByTimeAsync(1000);
+        const retry = await completeHandshake(adapter);
+        retry.dispatchSynthetic("message", BOOTSTRAP_WITHHELD);
+        expect(events).toHaveBeenCalledWith({ type: "reconnected", inGame: true });
+        expect(events).toHaveBeenCalledWith({
+          type: "stateDelivery",
+          withheld: { revision: 3, reason: "The game state is too large to send." },
+        });
+        for (const teardown of teardownEvents) expect(events).not.toHaveBeenCalledWith(teardown);
+        expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "operationFailed" }));
+        retry.dispatchSynthetic("message", TAKEBACK_REQUESTED);
+        expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: "takebackRequested", requester: 1, voters: [0] }));
+        retry.dispatchSynthetic("message", RESTORED);
+        expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged", serverRevision: 4 }));
+        expect(events).toHaveBeenLastCalledWith(expect.objectContaining({ type: "stateChanged" }));
+        expect(events).toHaveBeenCalledWith({ type: "stateDelivery", withheld: null });
+      } finally {
+        adapter.dispose();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it("fails a withheld reconnect without a board recoverably, then clears the failure when a state arrives", async () => {
+      const subject = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      );
+      const events = vi.fn();
+      subject.onEvent(events);
+      const session = {
+        gameCode: "GAME01", playerToken: "accepted-full-session-token",
+        fullKey: REPLY_OWNERSHIP_FULL_KEY, serverUrl: "wss://localhost:9374/ws", timestamp: Date.now(),
+      };
+      try {
+        expect(subject.tryReconnect(session)).toBe(true);
+        const socket = await completeHandshake(subject);
+        expect(socket.send).toHaveBeenCalledWith(expect.stringContaining('"type":"Reconnect"'));
+        const seatOneNotice = JSON.parse(BOOTSTRAP_WITHHELD) as { data: Record<string, unknown> };
+        seatOneNotice.data.withheld = { type: "GameStarted", data: { your_player: 1 } };
+        socket.dispatchSynthetic("message", JSON.stringify(seatOneNotice));
+        const types = events.mock.calls.map(([event]) => (event as { type: string }).type);
+        expect(types.indexOf("playerIdentity")).toBeGreaterThan(-1);
+        expect(types.indexOf("playerIdentity")).toBeLessThan(types.indexOf("reconnectFailed"));
+        expect(events).toHaveBeenCalledWith({ type: "playerIdentity", playerId: 1, opponentName: null });
+        expect(subject.playerId).toBe(1);
+        expect(events).toHaveBeenCalledWith({ type: "reconnectFailed" });
+        expect(events).toHaveBeenCalledWith({ type: "operationFailed", message: "The game state is too large to send." });
+        expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+        expect(events).not.toHaveBeenCalledWith({ type: "sessionChanged", session: null });
+        expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "reconnected" }));
+
+        socket.dispatchSynthetic("message", JSON.stringify({
+          type: "TakebackRequested", data: { requester: 0, requester_name: "host", voters: [1] },
+        }));
+        const request = events.mock.calls
+          .map(([event]) => event as { type: string; requester?: number; voters?: number[] })
+          .find((event) => event.type === "takebackRequested");
+        // GamePage tests the announced seat's membership in the voters: seat 0's request is approvable here.
+        expect(request?.requester).toBe(0);
+        expect(request?.voters).toEqual([1]);
+        expect(subject.playerId).toBe(1);
+        socket.dispatchSynthetic("message", RESTORED);
+        expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged", serverRevision: 4 }));
+        expect(events).toHaveBeenCalledWith({ type: "reconnected", inGame: true });
+      } finally {
+        subject.dispose();
+      }
+    });
+
+    const GAME_STARTED = JSON.stringify({
+      type: "GameStarted",
+      data: { state_revision: 3, state: createMockState(), your_player: 0, full_key: REPLY_OWNERSHIP_FULL_KEY },
+    });
+    const reconnectedSocket = async (): Promise<{ subject: WebSocketAdapter; socket: MockWebSocket }> => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      ws.dispatchSynthetic("close");
+      await vi.advanceTimersByTimeAsync(1000);
+      return { subject: adapter, socket: await completeHandshake(adapter) };
+    };
+    const boardlessReconnectSocket = async (): Promise<{ subject: WebSocketAdapter; socket: MockWebSocket }> => {
+      const subject = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      );
+      subject.tryReconnect({
+        gameCode: "GAME01", playerToken: "accepted-full-session-token",
+        fullKey: REPLY_OWNERSHIP_FULL_KEY, serverUrl: "wss://localhost:9374/ws", timestamp: Date.now(),
+      });
+      return { subject, socket: await completeHandshake(subject) };
+    };
+
+    it.each([
+      ["GameStarted during a reconnect", reconnectedSocket, GAME_STARTED],
+      ["a withheld GameStarted onto the delivered board", reconnectedSocket, BOOTSTRAP_WITHHELD],
+      ["a withheld GameStarted with no board", boardlessReconnectSocket, BOOTSTRAP_WITHHELD],
+    ] as const)("marks %s as a bootstrap before the replayed takeback request", async (_leg, connect, bootstrap) => {
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const { subject, socket } = await connect();
+      const events = vi.fn();
+      subject.onEvent(events);
+      try {
+        socket.dispatchSynthetic("message", bootstrap);
+        socket.dispatchSynthetic("message", TAKEBACK_REQUESTED);
+        const types = events.mock.calls
+          .map(([event]) => (event as { type: string }).type)
+          .filter((type) => type === "bootstrapDelivered" || type === "takebackRequested");
+        expect(types).toEqual(["bootstrapDelivered", "takebackRequested"]);
+      } finally {
+        subject.dispose();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it("rejects a withheld initial bootstrap as a recoverable request failure", async () => {
+      const subject = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      );
+      try {
+        const initialized = trackRejection(subject.initialize());
+        const socket = await completeHandshake(subject);
+        socket.dispatchSynthetic("message", BOOTSTRAP_WITHHELD);
+        expect(await initialized()).toMatchObject({
+          code: "REQUEST_FAILED", message: "The game state is too large to send.", recoverable: true,
+        });
+      } finally {
+        subject.dispose();
+      }
+    });
+
     it.each(["online", "visible"] as const)("retries a backed-off session immediately on %s", async (resume) => {
       acceptFullReplyOwnershipSession(adapter, ws);
       vi.useFakeTimers();
@@ -2421,6 +2675,131 @@ describe("WebSocketAdapter", () => {
 
     afterEach(() => subject.dispose());
 
+    const WITHHELD_REASON = "The game state after this action is too large to send.";
+
+    function deliverWithheld(revision: number, commandId?: unknown, fullKey = REPLY_OWNERSHIP_FULL_KEY): void {
+      socket.dispatchSynthetic("message", JSON.stringify({
+        type: "StateWithheld",
+        command_id: commandId,
+        data: { full_key: fullKey, state_revision: revision, withheld: { type: "StateUpdate" }, reason: WITHHELD_REASON },
+      }));
+    }
+
+    function deliveries(events: ReturnType<typeof vi.fn>): unknown[] {
+      return events.mock.calls
+        .map(([event]) => event as { type: string; withheld?: unknown })
+        .filter((event) => event.type === "stateDelivery")
+        .map((event) => event.withheld);
+    }
+
+    function latestDelivery(events: ReturnType<typeof vi.fn>): unknown {
+      const all = deliveries(events);
+      return all[all.length - 1];
+    }
+
+    it("settles consecutive withheld commands as applied and keeps the status until a state arrives", async () => {
+      deliverOwnershipStateUpdate(socket, "cached", 5);
+      const events = vi.fn();
+      subject.onEvent(events);
+      for (const revision of [6, 7]) {
+        const outcome = trackRejection(subject.submitAction({ type: "PassPriority" }, 0));
+        deliverWithheld(revision, lastSubmissionCommandId(socket));
+        await expect(outcome()).resolves.toEqual({ resolvedWith: { events: [], log_entries: [] } });
+      }
+      expect(deliveries(events)).toEqual([
+        { revision: 6, reason: WITHHELD_REASON },
+        { revision: 7, reason: WITHHELD_REASON },
+      ]);
+      expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged" }));
+      deliverOwnershipStateUpdate(socket, "resumed", 8);
+      expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged", serverRevision: 8 }));
+      expect(latestDelivery(events)).toBeNull();
+
+      deliverWithheld(9);
+      expect(latestDelivery(events)).toEqual({ revision: 9, reason: WITHHELD_REASON });
+      const own = trackRejection(subject.submitAction({ type: "PassPriority" }, 0));
+      deliverOwnershipStateUpdate(socket, "own", 10, lastSubmissionCommandId(socket));
+      await expect(own()).resolves.toEqual({ resolvedWith: { events: [{ marker: "own" }], log_entries: [] } });
+      expect(latestDelivery(events)).toBeNull();
+    });
+
+    it("does not settle a stamped command from an id-less withheld notice", async () => {
+      deliverOwnershipStateUpdate(socket, "cached", 5);
+      const events = vi.fn();
+      subject.onEvent(events);
+      const outcome = trackRejection(subject.submitAction({ type: "PassPriority" }, 0));
+      deliverWithheld(6);
+      expect(await outcome()).toBe("never settled");
+      expect(deliveries(events)).toEqual([{ revision: 6, reason: WITHHELD_REASON }]);
+    });
+
+    it("settles a stale withheld notice's command without reporting the newer board withheld", async () => {
+      deliverOwnershipStateUpdate(socket, "cached", 5);
+      const events = vi.fn();
+      subject.onEvent(events);
+      const outcome = trackRejection(subject.submitAction({ type: "PassPriority" }, 0));
+      deliverWithheld(4, lastSubmissionCommandId(socket));
+      await expect(outcome()).resolves.toEqual({ resolvedWith: { events: [], log_entries: [] } });
+      expect(deliveries(events)).toEqual([]);
+      deliverWithheld(5);
+      expect(deliveries(events)).toEqual([{ revision: 5, reason: WITHHELD_REASON }]);
+    });
+
+    it("drops a withheld notice for another Full session", () => {
+      const events = vi.fn();
+      subject.onEvent(events);
+      deliverWithheld(6, undefined, { game_code: "GAME01", generation: 8 });
+      expect(events).toHaveBeenCalledWith({ type: "error", message: "Server changed the Full session identity" });
+      expect(deliveries(events)).toEqual([]);
+    });
+
+    it("clears the withheld status when a takeback's state arrives", async () => {
+      deliverOwnershipStateUpdate(socket, "cached", 5);
+      const events = vi.fn();
+      subject.onEvent(events);
+      const outcome = trackRejection(subject.submitAction({ type: "PassPriority" }, 0));
+      deliverWithheld(6, lastSubmissionCommandId(socket));
+      deliverWithheld(7);
+      socket.dispatchSynthetic("message", JSON.stringify({
+        type: "TakebackRequested", data: { requester: 1, requester_name: "guest-one", voters: [0] },
+      }));
+      socket.dispatchSynthetic("message", JSON.stringify({
+        type: "StateUpdate",
+        data: {
+          state_revision: 8, state: { ...createMockState(), turn_number: 8 },
+          events: [], full_key: REPLY_OWNERSHIP_FULL_KEY,
+        },
+      }));
+      socket.dispatchSynthetic("message", JSON.stringify({
+        type: "TakebackResolved", data: { resolution: "approved", resolved_by: 0 },
+      }));
+      await expect(outcome()).resolves.toEqual({ resolvedWith: { events: [], log_entries: [] } });
+      const sequence = events.mock.calls
+        .map(([event]) => event as { type: string; withheld?: { revision: number } | null; serverRevision?: number })
+        .filter((event) => ["stateDelivery", "takebackRequested", "stateChanged", "takebackResolved"].includes(event.type))
+        .map((event) => event.type === "stateDelivery"
+          ? `withheld:${event.withheld?.revision ?? "none"}`
+          : event.type === "stateChanged" ? `state:${event.serverRevision}` : event.type);
+      expect(sequence).toEqual([
+        "withheld:6", "withheld:7", "takebackRequested", "withheld:none", "state:8", "takebackResolved",
+      ]);
+
+      expect(events).toHaveBeenCalledWith({ type: "takebackResolved", resolution: "approved", resolvedBy: 0 });
+
+      deliverWithheld(9);
+      expect(latestDelivery(events)).toEqual({ revision: 9, reason: WITHHELD_REASON });
+    });
+
+    it("emits the resolution a TakebackResolved frame names", () => {
+      deliverOwnershipStateUpdate(socket, "cached", 5);
+      const events = vi.fn();
+      subject.onEvent(events);
+      socket.dispatchSynthetic("message", JSON.stringify({
+        type: "TakebackResolved", data: { resolution: "withdrawn", resolved_by: 1 },
+      }));
+      expect(events).toHaveBeenCalledWith({ type: "takebackResolved", resolution: "withdrawn", resolvedBy: 1 });
+    });
+
     it("keeps all four simultaneous mulligan submissions owned when a peer advances", async () => {
       const seats = [{ subject, socket }];
       const keep: GameAction = { type: "MulliganDecision", data: { choice: { type: "Keep" } } };
@@ -2557,7 +2936,7 @@ describe("WebSocketAdapter", () => {
           },
         }));
         await expect(first).rejects.toMatchObject({
-          code: type === "ActionRejected" ? "ACTION_REJECTED" : "WS_ERROR",
+          code: type === "ActionRejected" ? "ACTION_REJECTED" : "REQUEST_FAILED",
         });
         const next = trackRejection(subject.submitInteraction(interactionSubmission("correlated-next"), 0));
         const nextId = lastSubmissionCommandId(socket);
@@ -3417,9 +3796,9 @@ describe("WebSocketAdapter", () => {
         }),
       );
       await expect(pending).rejects.toMatchObject({
-        code: "WS_ERROR",
+        code: "REQUEST_FAILED",
         message: "preview lookup failed",
-        recoverable: false,
+        recoverable: true,
       });
     });
 

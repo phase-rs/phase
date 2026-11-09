@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "WaitingFor::ChooseObjectsSelection with max Some(1) is answered by a board-click GameAction::ChooseTarget (CR 608.2d, CR 115.10a) and the client no longer renders the SelectTargets list modal for it; an older full-game or P2P engine rejects that ChooseTarget, leaving the prompt unanswerable"
+}

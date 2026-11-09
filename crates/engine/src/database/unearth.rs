@@ -55,12 +55,26 @@ pub fn synthesize_unearth(face: &mut CardFace) {
     let abilities: Vec<AbilityDefinition> = face
         .keywords
         .iter()
-        .filter_map(|keyword| match keyword {
-            Keyword::Unearth(cost) => Some(unearth_ability(cost.clone())),
-            _ => None,
-        })
+        .filter_map(unearth_ability_for_keyword)
         .collect();
     face.abilities.extend(abilities);
+}
+
+/// CR 702.84a + CR 604.1: Standalone keyword→ability builder so the Unearth
+/// activated ability is synthesized both at card-build time
+/// (`synthesize_unearth`) and on the fly for runtime-granted Unearth (Dregscape
+/// Sliver, Sedris, Mishra, Solemn Doomguide — the graveyard activated-ability
+/// gather in `casting.rs`). Mirrors `encore::encore_ability_for_keyword`. Returns `None`
+/// for non-Unearth keywords.
+///
+/// A granted Unearth whose cost is self-referential (`ManaCost::SelfManaCost`)
+/// must be concretized by the caller first
+/// (`keywords::resolve_self_cost_graveyard_activated_keyword`).
+pub(crate) fn unearth_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefinition> {
+    match keyword {
+        Keyword::Unearth(cost) => Some(unearth_ability(cost.clone())),
+        _ => None,
+    }
 }
 
 /// CR 702.84a: Build the full activated ability
@@ -94,6 +108,7 @@ fn unearth_ability(mana_cost: ManaCost) -> AbilityDefinition {
 /// the owner of a card in their own graveyard), so `enters_under` stays `None`.
 fn return_to_battlefield_effect() -> Effect {
     Effect::ChangeZone {
+        library_shuffle: Default::default(),
         origin: Some(Zone::Graveyard),
         destination: Zone::Battlefield,
         target: TargetFilter::SelfRef,
@@ -188,6 +203,7 @@ fn leaves_battlefield_exile_step() -> AbilityDefinition {
 /// replacement's redirect. Targets `SelfRef` (the returned permanent).
 fn exile_self_from_battlefield_effect() -> Effect {
     Effect::ChangeZone {
+        library_shuffle: Default::default(),
         origin: Some(Zone::Battlefield),
         destination: Zone::Exile,
         target: TargetFilter::SelfRef,

@@ -2,7 +2,7 @@
 //!
 //! Parser AST verification — VERIFIED:
 //! - `Effect::Counter { .. }` — counterspell detection
-//!   (`crates/engine/src/types/ability.rs:2118`). CR 701.6.
+//!   (`crates/phase-ast/src/types/ability.rs`). CR 701.6.
 //! - `Effect::Destroy { .. }` — destroy removal
 //!   (`ability.rs:2106`). CR 701.8.
 //! - `Effect::Bounce { destination: None | Some(Hand) }` — bounce removal
@@ -381,6 +381,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -526,6 +527,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_remainder: engine::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: engine::types::ability::DigRestOrder::Preserve,
                 reveal: false,
@@ -557,6 +559,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_remainder: engine::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: engine::types::ability::DigRestOrder::Preserve,
                 reveal: false,

@@ -104,7 +104,7 @@ fn pay_mana(runner: &mut GameRunner, events: &mut Vec<GameEvent>) {
 fn reveal_prompt(runner: &GameRunner, count: usize) -> HashSet<ObjectId> {
     let WaitingFor::PayCost {
         player,
-        kind: PayCostKind::Reveal,
+        kind: PayCostKind::Reveal { .. },
         choices,
         count: prompt_count,
         ..
@@ -125,7 +125,7 @@ fn assert_still_revealing(runner: &GameRunner) {
         matches!(
             runner.state().waiting_for,
             WaitingFor::PayCost {
-                kind: PayCostKind::Reveal,
+                kind: PayCostKind::Reveal { .. },
                 ..
             }
         ),

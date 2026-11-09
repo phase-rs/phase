@@ -1,7 +1,7 @@
 use crate::game::{combat, players};
 use crate::types::ability::{
     DelayedTriggerCondition, DelayedTriggerKind, Effect, EffectError, QuantityExpr,
-    ResolvedAbility, TargetFilter, TargetRef,
+    ResolvedAbility, TargetFilter, TargetRef, TokenAttackDestination,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DelayedTrigger, GameState};
@@ -47,6 +47,7 @@ pub fn resolve(
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped: true,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],
@@ -76,6 +77,7 @@ pub fn resolve(
             },
             ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Battlefield),
                     destination: Zone::Exile,
                     target: TargetFilter::Any,

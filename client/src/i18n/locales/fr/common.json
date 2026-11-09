@@ -13,7 +13,8 @@
   "quantityRef": {
     "highestNumber": "le nombre le plus élevé",
     "lowestNumber": "le nombre le plus bas",
-    "chosenNumber": "le nombre choisi"
+    "chosenNumber": "le nombre choisi",
+    "energyPaidOrLostThisTurn": "énergie payée ou perdue ce tour"
   },
   "scryOutcome": {
     "title": "Regard terminé",
@@ -179,6 +180,7 @@
       "exportedTo": "Exporté vers {{path}}.",
       "exportRequested": "Export demandé — {{filename}}.",
       "exportFailed": "Impossible d'exporter l'état de la partie.",
+      "exportFailedDetail": "Impossible d'exporter l'état de la partie. {{detail}}",
       "replayExported": "Replay enregistré sous {{filename}}.",
       "replayExportUnavailable": "Aucun enregistrement de replay n'est disponible pour cette partie.",
       "replayExportFailed": "Impossible d'exporter le replay."

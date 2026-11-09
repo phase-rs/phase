@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -74,7 +75,7 @@ const FILTER_ALL_SENTINEL = "__all__";
 
 type RoomTypeFilter = "all" | "p2p" | "server" | "draft";
 
-const ROOM_TYPE_FILTERS: { value: RoomTypeFilter; labelKey: string }[] = [
+const ROOM_TYPE_FILTERS: { value: RoomTypeFilter; labelKey: ParseKeys<"multiplayer"> }[] = [
   { value: "all", labelKey: "lobbyView.roomTypeAll" },
   { value: "draft", labelKey: "lobbyView.roomTypeDraft" },
   { value: "p2p", labelKey: "lobbyView.roomTypeP2P" },
@@ -88,7 +89,7 @@ export function LobbyView({
   onSpectate,
   onServerOffline,
 }: LobbyViewProps) {
-  const { t } = useTranslation("multiplayer");
+  const { t } = useTranslation(["multiplayer", "common"]);
   const hostingServer = useMultiplayerStore((s) => s.hostingServer);
   const userLobbySources = useMultiplayerStore((s) => s.userLobbySources);
   const sourceStatus = useMultiplayerStore((s) => s.sourceStatus);

@@ -65,7 +65,7 @@ interface StackEntryProps {
 }
 
 export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds, index, isTop, isPending, cardSize, style, onHoverChange, pacingMultiplier = 1, groupCount = 1, details }: StackEntryProps) {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common"]);
   const isMobile = useIsMobile();
   const playerId = usePlayerId();
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -119,6 +119,7 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
   const sourceIsToken = sourceObj?.display_source === "Token" || Boolean(details?.token_image_ref);
   const sourceTokenImageRef =
     sourceObj?.display_source === "Token" ? sourceObj.token_image_ref : details?.token_image_ref;
+  const rowOwnerRef = details?.printed_ref ?? undefined;
 
   const { src, isLoading, rungs, advanceFailedSource } = useCardImage(
     imageProps?.cardName ?? sourceName,
@@ -130,6 +131,9 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
     tokenImageRef: sourceTokenImageRef,
     oracleId: imageProps?.oracleId,
     faceName: imageProps?.faceName,
+    // A present row owns both printing and identity; never borrow a stale live identity.
+    ownerPrinting: details ? (rowOwnerRef ? details.printing : undefined) : imageProps?.ownerPrinting,
+    ownerPrintedRef: rowOwnerRef,
     },
   );
 
@@ -681,6 +685,6 @@ function stackEntryTitle(
     description ? `${label}: ${description}` : label,
     targets.length > 0 ? t("stack.titleTargets", { targets: targets.join(", ") }) : "",
     paid.length > 0 ? t("stack.titlePaid", { paid: paid.join(", ") }) : "",
-    context.length > 0 ? t("stack.titleContext", { context: context.join(", ") }) : "",
+    context.length > 0 ? t("stack.titleContext", { items: context.join(", ") }) : "",
   ].filter(Boolean).join("\n");
 }

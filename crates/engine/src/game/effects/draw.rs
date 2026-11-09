@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::ops::ControlFlow;
 
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::static_abilities::prohibition_scope_matches_player;
@@ -2318,6 +2319,7 @@ mod tranche4_draw_pipeline_tests {
         let redirect = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Graveyard,
                 target: TargetFilter::SelfRef,
@@ -2393,6 +2395,7 @@ mod tranche4_draw_pipeline_tests {
         let redirect = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Graveyard,
                 target: TargetFilter::SelfRef,
