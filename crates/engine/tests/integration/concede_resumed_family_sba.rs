@@ -328,8 +328,7 @@ fn beacon_mox_scenario() -> (GameScenario, [ObjectId; 4]) {
         })
         .id();
     let mox = scenario
-        .add_spell_to_graveyard(P1, "Mox Diamond", false)
-        .as_artifact()
+        .add_artifact_to_graveyard(P1, "Mox Diamond")
         .with_mana_cost(ManaCost::generic(0))
         .from_oracle_text(MOX_DIAMOND)
         .id();
@@ -438,8 +437,7 @@ fn open_the_vaults_paid_mox_discard_completes_family_before_priority() {
         })
         .id();
     let mox = scenario
-        .add_spell_to_graveyard(P1, "Mox Diamond", false)
-        .as_artifact()
+        .add_artifact_to_graveyard(P1, "Mox Diamond")
         .with_mana_cost(ManaCost::generic(0))
         .from_oracle_text(MOX_DIAMOND)
         .id();
