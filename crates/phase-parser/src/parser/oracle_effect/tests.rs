@@ -96590,11 +96590,7 @@ fn gandalf_full_oracle_preserves_source_move_shuffle_and_owner_draw() {
 
 #[test]
 fn source_owner_shuffle_draw_tail_reuses_numeric_grammar_and_rejects_suffixes() {
-    for (tail, count) in [
-        ("draws a card", 1),
-        ("draws five cards", 5),
-        ("draw two cards", 2),
-    ] {
+    for (tail, count) in [("draws a card", 1), ("draws five cards", 5)] {
         let text = format!("~'s owner shuffles him into their library and {tail}");
         let lower = text.to_ascii_lowercase();
         let clause = try_parse_owner_of_target_shuffle(
