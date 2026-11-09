@@ -25593,7 +25593,7 @@ fn resolve_chain_body(
         {
             let mut sub_clone = sub.as_ref().clone();
             if should_propagate_parent_targets(ability, &sub_clone) {
-                sub_clone.mirror_targets_from(ability);
+                sub_clone.replace_target_occurrences(inherited_parent_occurrences(ability, sub));
             }
             apply_parent_chain_context(
                 &mut sub_clone,
@@ -25664,10 +25664,12 @@ fn resolve_chain_body(
         // CR 608.2c: every later condition, alternative, sibling and target
         // choice follows the completed parent instruction. Retain the intact
         // tail before evaluating any of it while this invocation is pending.
+        // CR 115.6 + CR 608.2c: pausing does not turn a declined independent
+        // target slot into a reference to the parent's object.
         if progress.is_pending() {
             let mut sub_clone = sub.as_ref().clone();
             if should_propagate_parent_targets(ability, &sub_clone) {
-                sub_clone.mirror_targets_from(ability);
+                sub_clone.replace_target_occurrences(inherited_parent_occurrences(ability, sub));
             }
             apply_parent_chain_context(
                 &mut sub_clone,
