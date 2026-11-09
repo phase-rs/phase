@@ -638,8 +638,16 @@ fn filter_names_library_owner(filter: &TargetFilter, origin_zones: &[Zone]) -> b
             .iter()
             .any(|branch| filter_names_library_owner(branch, origin_zones)),
         TargetFilter::And { .. } | TargetFilter::Typed(_) => {
-            let reach = composed_owner_reach(filter, &ControllerRef::ScopedPlayer);
-            reach.names && zone_reach_is_the_library(reach.zones.as_ref(), origin_zones)
+            // `And` conjoins, so a nested `Or` distributes over it
+            // (`And(A, Or(B, C)) == Or(And(A, B), And(A, C))`). Evaluating those
+            // conjunction alternatives keeps a distributed encoding classified
+            // exactly like its single-alternative form; inspecting an `Or`
+            // operand on its own would drop the scoped leg inside it.
+            owner_reach_alternatives(filter, &ControllerRef::ScopedPlayer)
+                .into_iter()
+                .any(|reach| {
+                    reach.names && zone_reach_is_the_library(reach.zones.as_ref(), origin_zones)
+                })
         }
         TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
             filter_names_library_owner(filter, origin_zones)
@@ -676,31 +684,62 @@ fn leg_zone_constraints(leg: &TypedFilter) -> Option<std::collections::BTreeSet<
     )
 }
 
-fn composed_owner_reach(filter: &TargetFilter, player: &ControllerRef) -> ComposedOwnerReach {
+/// Expand a filter into the conjunction alternatives (`And`-conjoined terms) it
+/// denotes, following the distributive law. `Or` contributes one alternative per
+/// branch, `And` multiplies its children's alternatives, and negation keeps the
+/// reach of what it guards. A conjunction alternative describes one way the
+/// filter can match, so its owner reach is evaluated on its own.
+fn owner_reach_alternatives(
+    filter: &TargetFilter,
+    player: &ControllerRef,
+) -> Vec<ComposedOwnerReach> {
     match filter {
-        TargetFilter::Typed(leg) => ComposedOwnerReach {
+        TargetFilter::Typed(leg) => vec![ComposedOwnerReach {
             names: leg_names_player(leg, player),
             zones: leg_zone_constraints(leg),
-        },
-        TargetFilter::And { filters } => {
-            let mut names = false;
-            let mut zones: Option<std::collections::BTreeSet<Zone>> = None;
-            for child in filters {
-                let child = composed_owner_reach(child, player);
-                names |= child.names;
-                zones = match (zones, child.zones) {
-                    (None, child) | (child, None) => child,
-                    (Some(left), Some(right)) => Some(left.intersection(&right).copied().collect()),
-                };
-            }
-            ComposedOwnerReach { names, zones }
+        }],
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            owner_reach_alternatives(filter, player)
         }
-        // `Or` and negation cannot contribute one conjunction; the caller
-        // handles `Or` existentially and recurses through `Not`.
-        _ => ComposedOwnerReach {
-            names: false,
-            zones: None,
-        },
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .flat_map(|branch| owner_reach_alternatives(branch, player))
+            .collect(),
+        TargetFilter::And { filters } => {
+            let mut alternatives = vec![ComposedOwnerReach {
+                names: false,
+                zones: None,
+            }];
+            for child in filters {
+                let child_alternatives = owner_reach_alternatives(child, player);
+                // A filter outside this classification's traversal set (and an
+                // empty `Or`) contributes no alternative; as a conjunction term
+                // it is neutral, exactly like `any_typed_leg`'s `false` leaf.
+                if child_alternatives.is_empty() {
+                    continue;
+                }
+                let mut combined =
+                    Vec::with_capacity(alternatives.len() * child_alternatives.len());
+                for base in &alternatives {
+                    for child in &child_alternatives {
+                        combined.push(ComposedOwnerReach {
+                            names: base.names || child.names,
+                            zones: match (&base.zones, &child.zones) {
+                                (None, zones) | (zones, None) => zones.clone(),
+                                (Some(left), Some(right)) => {
+                                    Some(left.intersection(right).copied().collect())
+                                }
+                            },
+                        });
+                    }
+                }
+                alternatives = combined;
+            }
+            alternatives
+        }
+        // Filters this classification never treats as owner-named, matching the
+        // traversal set of `any_typed_leg`.
+        _ => Vec::new(),
     }
 }
 
@@ -13944,6 +13983,71 @@ mod tests {
                 .count(),
             3,
             "every alternative's card is the caster's exile; got {leaf:?}"
+        );
+    }
+
+    /// An `Or` nested under an `And` denotes the same alternatives as its
+    /// distributed form. Evaluating the `Or` operand alone would lose the
+    /// `ScopedPlayer` leg inside it and answer "not a library owner" for
+    /// `And(any card, Or(scoped library, scoped graveyard))`, while the
+    /// distributed `Or(And(any, scoped library), And(any, scoped graveyard))`
+    /// answered "library owner". Both encodings must agree.
+    #[test]
+    fn and_over_or_matches_distributed_or_encoding() {
+        let any_card = card_leg(None, vec![]);
+        let scoped_library = card_leg(
+            Some(ControllerRef::ScopedPlayer),
+            vec![FilterProp::InZone {
+                zone: Zone::Library,
+            }],
+        );
+        let scoped_graveyard = card_leg(
+            Some(ControllerRef::ScopedPlayer),
+            vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }],
+        );
+        let nested = TargetFilter::And {
+            filters: vec![
+                any_card.clone(),
+                TargetFilter::Or {
+                    filters: vec![scoped_library.clone(), scoped_graveyard.clone()],
+                },
+            ],
+        };
+        let distributed = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::And {
+                    filters: vec![any_card.clone(), scoped_library],
+                },
+                TargetFilter::And {
+                    filters: vec![any_card, scoped_graveyard],
+                },
+            ],
+        };
+        let scan = [Zone::Library, Zone::Graveyard];
+        assert_eq!(
+            filter_names_library_owner(&nested, &scan),
+            filter_names_library_owner(&distributed, &scan),
+            "a nested Or must classify like its distributed form"
+        );
+        assert!(
+            filter_names_library_owner(&nested, &scan),
+            "the library alternative keeps the library-owner classification"
+        );
+        let nested_outcome = mass_zone_exile_outcome(nested);
+        let distributed_outcome = mass_zone_exile_outcome(distributed);
+        assert_eq!(
+            nested_outcome, distributed_outcome,
+            "both encodings select and attribute alike"
+        );
+        assert_eq!(
+            nested_outcome
+                .iter()
+                .filter(|(_, zone, actor)| *zone == Zone::Exile && *actor == Some(PlayerId(0)))
+                .count(),
+            3,
+            "every alternative's card is the caster's exile; got {nested_outcome:?}"
         );
     }
 
