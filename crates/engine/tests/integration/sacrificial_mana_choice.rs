@@ -18,6 +18,7 @@ use engine::types::mana::{
 };
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::resolved_commands::ManaActivationOccurrence;
 use engine::types::zones::Zone;
 use engine::types::{RulesExecutionNodeKind, RulesExecutionNodeRef};
 
@@ -2182,8 +2183,16 @@ const HERONBLADE_ELITE: &str =
 /// "unfinished" here, and the later colour answer wrote the SECOND activation's
 /// production into the FIRST activation's node.
 ///
-/// Two legs, because they are two different answers to the same absent record:
-///   * **the node is settled** ⇒ refused ([`ParkedActivationConflict::SettledWithoutOccurrence`]);
+/// Settlement is a property of the NODE, so it is checked whether or not the save
+/// states an occurrence beside the reference. Three legs, because they are three
+/// different answers to the same absent-or-stale record:
+///   * **the occurrence is absent and the node is settled** ⇒ refused
+///     ([`ParkedActivationConflict::SettledWithoutOccurrence`]);
+///   * **the occurrence is present and AGREES with the reference**, both naming the
+///     finished activation ⇒ refused too
+///     ([`ParkedActivationConflict::SettledOccurrence`]) — agreeing on the node is not
+///     owning it — and the same pair on a LIVE state is refused at the resume, so the
+///     colour answer cannot write this activation's mana into the old node;
 ///   * **nothing retained names a node** (the genuinely older save) ⇒ admitted, and
 ///     recovery opens this activation's own node.
 #[test]
@@ -2235,6 +2244,91 @@ fn zero_output_activation_settles_so_a_later_parked_activation_cannot_claim_its_
             .resolved_rules_journal
             .node_settled(first_node),
         "CR 605.3b: an activation that produced no mana has still resolved"
+    );
+
+    // Leg 2b — BOTH records present and AGREEING, both naming the finished activation.
+    // This is the sharp case: the occurrence beside the reference contradicts nothing,
+    // so the save's two records answer as one. Settlement is a property of the NODE, so
+    // it has to be asked here too — reading it only on the occurrence-ABSENT arm
+    // admitted the second prompt, and the colour answer then attributed this
+    // activation's mana to the zero-output node a finished activation already owned.
+    let (runner, source, first_node) = power_raised_elite_with_a_parked_second_activation();
+    let mut json = persisted_json(runner.state());
+    let stale_occurrence = ManaActivationOccurrence::of_node(first_node)
+        .expect("reach-guard: activation 1's node is an activated-mana node");
+    let pending = saved_pending_mut(&mut json);
+    assert!(
+        pending.contains_key("activated_mana_occurrence"),
+        "reach-guard: the save states an occurrence beside the reference"
+    );
+    pending.insert(
+        "rules_execution_node".to_string(),
+        serde_json::to_value(first_node).expect("the node identity serializes"),
+    );
+    pending.insert(
+        "activated_mana_occurrence".to_string(),
+        serde_json::to_value(stale_occurrence).expect("the occurrence serializes"),
+    );
+
+    match &admission_refusal(json) {
+        PersistedRestoreError::ContradictoryParkedActivation {
+            source_id,
+            reason: ParkedActivationConflict::SettledOccurrence { node, occurrence },
+        } => {
+            assert_eq!(*source_id, source.object_id);
+            assert_eq!(
+                *node, first_node,
+                "the zero-output activation's own settled node"
+            );
+            assert_eq!(
+                *occurrence, stale_occurrence,
+                "and the occurrence the save states beside it is that finished activation's own"
+            );
+        }
+        other => panic!(
+            "CR 605.2 + CR 605.3b: a save whose reference AND occurrence agree on a SETTLED node \
+             must be refused as a finished activation — the two records agreeing says they name \
+             one node, not that a parked activation owns it — got {other:?}"
+        ),
+    }
+
+    // Leg 2c — the same agreeing pair on a LIVE state, with no save and no restore in
+    // between. The resume boundary reads the one rule, so answering the colour prompt
+    // must refuse it the same way and write no pip into the finished node.
+    let (mut runner, _source, first_node) = power_raised_elite_with_a_parked_second_activation();
+    let own_node = parked_colour_pending(runner.state())
+        .rules_execution_node
+        .expect("activation 2 carries its own node");
+    {
+        let pending = parked_colour_pending_mut(runner.state_mut());
+        pending.rules_execution_node = Some(first_node);
+        pending.activated_mana_occurrence = ManaActivationOccurrence::of_node(first_node);
+    }
+    let error = runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Blue),
+            count: 1,
+        })
+        .expect_err("the resume must refuse the same pair restore refuses");
+    let rendered = format!("{error:?}");
+    assert!(
+        rendered.contains("already SETTLED"),
+        "the resume refusal must be the settled-node one, got {rendered}"
+    );
+    assert!(
+        node_produced_pips(runner.state(), first_node).is_empty(),
+        "CR 605.3b: the refused activation wrote nothing into the finished zero-output node"
+    );
+    assert!(
+        node_produced_pips(runner.state(), own_node).is_empty(),
+        "and nothing under its own node either — the refusal precedes production"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Blue),
+        0,
+        "the refusal produced no mana"
     );
 
     // Leg 2 — the genuinely older save: neither record names a node. Absence is

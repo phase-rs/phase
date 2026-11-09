@@ -16588,6 +16588,16 @@ fn auto_tap_mana_sources_inner(
                     true,
                     events,
                 );
+                // CR 605.3b: the intrinsic mana ability has RESOLVED — after the
+                // production, and whether or not any mana came out of it. The record
+                // is written by the same authority that settles every other activated
+                // mana node (`GameState::settle_mana_activation`, called by
+                // `mana_abilities::produce_mana_from_ability`), not inferred from the
+                // pips: this fallback produces through `mana_payment::produce_mana`,
+                // which has no settlement of its own, so leaving the node unrecorded
+                // made `node_settled` answer "unfinished" for a finished activation
+                // and a later parked activation could claim its node.
+                state.settle_mana_activation(node);
                 // CR 106.12 + CR 106.12a: a basic land's intrinsic mana ability
                 // always includes `{T}` in its cost, so this auto-tap fallback
                 // taps the land for mana. Emit one `TappedForMana` per resolution
@@ -19733,6 +19743,82 @@ mod tests {
         let mut shards = vec![ManaCostShard::X];
         shards.extend_from_slice(extra);
         ManaCost::Cost { shards, generic: 0 }
+    }
+
+    /// CR 305.6 + CR 605.3b: an intrinsic basic-land activation — the "{T}: Add …" a
+    /// basic land type carries without a printed ability — ends SETTLED, and the node
+    /// says so through its own record.
+    ///
+    /// Two routes reach that activation and both must record the same fact: the
+    /// ability-option route (settled by `produce_mana_from_ability`) and the
+    /// subtype-only fallback below, which produces through
+    /// `mana_payment::produce_mana` and has no settlement of its own — so it records
+    /// it with the same authority, `GameState::settle_mana_activation`, after the
+    /// production and whether or not any mana came out of it (CR 605.2).
+    ///
+    /// REVERT SCOPE: this witness reads the property, not the route. The board a test
+    /// can build through the public harness reaches the activation through the
+    /// ability option, so the assertion also holds with the fallback's settlement
+    /// removed; it pins the invariant both routes owe rather than distinguishing
+    /// them.
+    #[test]
+    fn intrinsic_basic_land_auto_tap_ends_settled() {
+        use crate::game::scenario::{GameRunner, GameScenario};
+        use crate::types::mana::ManaColor;
+        use crate::types::phase::Phase;
+        use crate::types::resolved_commands::{RulesExecutionNodeKind, SettlementNode};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let forest = scenario.add_basic_land(P0, ManaColor::Green);
+        let spell = {
+            let mut builder = scenario.add_spell_to_hand(P0, "Intrinsic Tap Witness", true);
+            builder.with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 0,
+            });
+            builder.id()
+        };
+        let mut state = scenario.build().state().clone();
+        // CR 305.6: the subtype-only shape the intrinsic fallback exists for — the land
+        // carries its "{T}: Add {G}." as an intrinsic, with no printed mana ability.
+        {
+            let object = state.objects.get_mut(&forest).unwrap();
+            Arc::make_mut(&mut object.abilities).clear();
+            Arc::make_mut(&mut object.base_abilities).clear();
+        }
+        let mut runner = GameRunner::from_state(state);
+        runner.cast(spell).commit();
+
+        assert!(
+            runner.state().objects[&forest].tapped,
+            "reach-guard: paying {{G}} auto-tapped the Forest through the intrinsic fallback"
+        );
+        let source = ObjectIncarnationRef::of(forest, runner.state().objects[&forest].incarnation);
+        let nodes: Vec<&SettlementNode> = runner
+            .state()
+            .resolved_rules_journal
+            .nodes()
+            .iter()
+            .filter(|node| {
+                matches!(
+                    &node.kind,
+                    RulesExecutionNodeKind::ActivatedMana { source: named } if *named == source
+                )
+            })
+            .collect();
+        assert_eq!(
+            nodes.len(),
+            1,
+            "reach-guard: the auto-tap opened exactly one activated-mana node for the land's epoch"
+        );
+        assert_eq!(
+            nodes[0].settled,
+            Some(true),
+            "CR 605.3b: the intrinsic activation has RESOLVED, and its node says so — recorded by \
+             the same authority that settles every other activated mana node, not inferred from \
+             the pips it produced"
+        );
     }
 
     /// CR 107.3a + CR 602.1a: "contains {X}" means the `{X}` mana symbol, read

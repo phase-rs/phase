@@ -1407,16 +1407,31 @@ pub struct PooledManaProducerSnapshot {
     pub lki: LKISnapshot,
 }
 
-// CR 104.4b: `pip_id` is a runtime/UI identity tag (the pin key used to direct
-// which pool unit pays a cost), NOT a game-state-semantic property — the same rule
-// `ManaUnit`'s own equality follows. Two loop positions one cycle apart mint
-// different pips for the mana they float, and comparing them would make a
-// genuinely repeated position look different, defeating the mandatory-loop
-// detection of CR 104.4b. `Eq` is derived (it only requires `PartialEq` to exist);
-// ignoring one field keeps the relation reflexive/symmetric/transitive.
+// CR 106.3 + CR 118.3a + CR 104.4b: a fact belongs to ONE pooled unit, so equality
+// compares the unit the fact is attached to as well as the fact — `pip_id`, the
+// same ownership key every reader of this ledger uses
+// (`mana_payment::pooled_mana_producer_snapshot`, `GameState::pip_recorded_producer_epochs`).
+// Comparing the fact alone equated two positions that differ only in WHICH unit of a
+// departed source owns the row, and they are not the same position: payment resolves
+// the fact by pip, so a coloured cost recovers the producer from the unit that holds
+// the row and not from the one that does not. `ManaPool`'s own equality is pip-blind
+// (a pip is a monotone mint tag, not a shape), so nothing else carried that
+// association; the pool answers the CANONICAL unit order this field is read against
+// (`ManaPool::units`, "every unit in pool order").
+//
+// The pip compared here is the CANONICAL one, never the mint tag: `normalize_for_loop`
+// renumbers every floating unit's pip to its rank in pool order and carries this
+// ledger's rows onto those ranks (`GameState::canonicalize_floating_pip_identities`),
+// so two positions one cycle apart — which mint different pips for the mana they
+// float — still compare equal, while two positions whose rows sit on different units
+// do not. `Eq` stays derived (it only requires `PartialEq` to exist). A comparison
+// that does NOT go through `normalize_for_loop` (AI-search dedup) reads the live mint
+// key instead: stricter, never looser, and only while a departed producer's mana is
+// still floating.
 impl PartialEq for PooledManaProducerSnapshot {
     fn eq(&self, other: &Self) -> bool {
-        self.source_id == other.source_id
+        self.pip_id == other.pip_id
+            && self.source_id == other.source_id
             && self.source_incarnation == other.source_incarnation
             && self.lki == other.lki
     }
@@ -11705,17 +11720,26 @@ impl PendingManaAbility {
     ///   activation must not write into it. The occurrence beside the reference and
     ///   the reference disagreeing is a contradiction
     ///   ([`ParkedActivationConflict::ForeignOccurrence`]), not absence.
-    /// * **the same shape with NO occurrence stated, on a node that has already
-    ///   SETTLED** — a save written before the occurrence existed can still be a
-    ///   save that points at a finished activation, and nothing beside the reference
-    ///   says otherwise. CR 605.3b settled that node the moment it was activated, so
-    ///   a still-parked activation cannot be it
-    ///   ([`ParkedActivationConflict::SettledWithoutOccurrence`]). The witness is the
-    ///   node's own settlement record
+    /// * **a retained activated-mana node of this source that has already SETTLED**
+    ///   — settlement is a property of the NODE, so this question is asked whether or
+    ///   not the save also states the occurrence beside the reference, and it is
+    ///   asked AFTER the occurrence-agreement check above rather than instead of it.
+    ///   CR 605.3b settled that node the moment it was activated, so it settles a
+    ///   FINISHED activation and nothing of a still-parked one belongs in it. Two
+    ///   records that agree name ONE node; agreeing is not owning. The answer carries
+    ///   the shape it was reached through
+    ///   ([`ParkedActivationConflict::SettledOccurrence`] when the save states the
+    ///   occurrence, [`ParkedActivationConflict::SettledWithoutOccurrence`] when it
+    ///   states none — the shape a save written before the field existed carries,
+    ///   where nothing beside the reference separates two activations of one object).
+    ///   The witness is the node's own settlement record
     ///   ([`ResolvedRulesJournal::node_settled`]), NOT the pips it produced: an
     ///   activation the game state allowed no mana (CR 605.2 — Heronblade Elite at
     ///   power 0) settled with an empty pip list, and a pip-based reading admitted a
-    ///   later parked activation against it.
+    ///   later parked activation against it. Reading settlement only when the
+    ///   occurrence was ABSENT let a save whose two records agreed on a finished
+    ///   activation through, and the colour answer then attributed a live
+    ///   activation's mana to a node a finished activation already owned.
     /// * **the retained node's epoch and the announcement epoch disagree** — two
     ///   records of one announcement naming two objects (CR 400.7: a moved object is
     ///   a new object). Neither side is preferred
@@ -11746,17 +11770,32 @@ impl PendingManaAbility {
             return Err(ParkedActivationConflict::NotAnActivatedManaNode { node });
         };
         // CR 605.3b: the node names this object and epoch, but is it THIS
-        // activation's node? Only the occurrence beside it can say — and when the
-        // save states none, the node's own settlement record answers instead.
+        // activation's node? The occurrence beside it can only answer the weaker
+        // question "do the save's two records name the SAME node" — it says nothing
+        // about whether that node is still the parked activation's to settle. So the
+        // two questions are asked in order, and neither replaces the other:
+        //
+        //   1. the records must AGREE (a save whose occurrence contradicts its
+        //      reference names two different activations);
+        //   2. the node they name must not have already SETTLED — settlement is a
+        //      property of the node, so this is checked whether or not an occurrence
+        //      is stated. Asking it only when the occurrence was absent let a save
+        //      whose records agreed on a FINISHED activation (Heronblade Elite at
+        //      power 0: settled, zero pips outside the settlement record) through,
+        //      and the colour answer then wrote this activation's production into it.
         match self.activated_mana_occurrence {
             Some(occurrence) if occurrence.ordinal() != ordinal => {
                 return Err(ParkedActivationConflict::ForeignOccurrence { node, occurrence });
             }
-            Some(_) => {}
-            None if journal.node_settled(node) => {
-                return Err(ParkedActivationConflict::SettledWithoutOccurrence { node });
-            }
-            None => {}
+            _ => {}
+        }
+        if journal.node_settled(node) {
+            return Err(match self.activated_mana_occurrence {
+                Some(occurrence) => {
+                    ParkedActivationConflict::SettledOccurrence { node, occurrence }
+                }
+                None => ParkedActivationConflict::SettledWithoutOccurrence { node },
+            });
         }
         // CR 602.2a + CR 400.7: the node's epoch and the announcement epoch are two
         // records of ONE announcement, so they must name the same object.
@@ -11884,6 +11923,24 @@ pub enum ParkedActivationConflict {
         node: RulesExecutionNodeRef,
         occurrence: crate::types::resolved_commands::ManaActivationOccurrence,
     },
+    /// CR 605.2 + CR 605.3b: the save states an occurrence AND the reference beside
+    /// it agrees with that occurrence, but the node the two name has already
+    /// SETTLED — so the occurrence is STALE: it belongs to an activation that ran to
+    /// completion (a zero-output activation is settled too, CR 605.2, which is why
+    /// the witness is the settlement record and not the pip list), while the pending
+    /// carrying it is still parked before production. Two records that agree name one
+    /// node; they do not make that node a still-parked activation's to settle.
+    ///
+    /// This is the shape a save carries when both of its records were re-pointed at
+    /// an earlier, finished activation of the same object and epoch (Prismite's two
+    /// activations share both). Reading settlement only on the occurrence-ABSENT arm
+    /// let restore admit the second prompt, and the colour answer
+    /// (`crate::game::mana_abilities::handle_choose_mana_color`) then attributed the
+    /// live activation's mana to the old node.
+    SettledOccurrence {
+        node: RulesExecutionNodeRef,
+        occurrence: crate::types::resolved_commands::ManaActivationOccurrence,
+    },
     /// CR 605.3b: the save states NO occurrence and points at a retained
     /// activated-mana node of its own source and epoch that has already SETTLED.
     /// A mana ability resolves immediately after it is activated, so that node
@@ -11919,6 +11976,7 @@ impl ParkedActivationConflict {
             Self::NotAnActivatedManaNode { node }
             | Self::ForeignSource { node, .. }
             | Self::ForeignOccurrence { node, .. }
+            | Self::SettledOccurrence { node, .. }
             | Self::SettledWithoutOccurrence { node }
             | Self::ContradictoryAnnouncementEpoch { node, .. } => Some(*node),
             Self::NoProducerEvidence { .. } => None,
@@ -11947,6 +12005,12 @@ impl std::fmt::Display for ParkedActivationConflict {
                 f,
                 "its execution node {node:?} belongs to a different activation of the same object \
                  than the {occurrence} it states — CR 605.3b already settled that one"
+            ),
+            Self::SettledOccurrence { node, occurrence } => write!(
+                f,
+                "its execution node {node:?} has already SETTLED a finished activation of this \
+                 object and epoch, so the {occurrence} it states is stale — CR 605.3b resolved \
+                 that activation immediately after it was activated"
             ),
             Self::SettledWithoutOccurrence { node } => write!(
                 f,
@@ -17715,9 +17779,11 @@ impl GameState {
     /// this walk used to miss because each boundary kept its own subset of checks:
     /// an `ActivatedMana` node of this very object and incarnation belonging to an
     /// EARLIER activation of it (Prismite's "{2}: Add one mana of any color." makes
-    /// that ordinary — two activations, one source, one epoch); the same shape with
-    /// no occurrence stated, where the node has already produced its mana and so
-    /// settled a finished activation (CR 605.3b); an announcement epoch that names
+    /// that ordinary — two activations, one source, one epoch); the same object and
+    /// epoch on a node that has already SETTLED, whether the save states an
+    /// occurrence beside the reference or none, because a settled node settles a
+    /// finished activation (CR 605.2 + CR 605.3b, which is why the witness is the
+    /// node's settlement record and not its pip list); an announcement epoch that names
     /// a different incarnation than the retained node does (CR 400.7); and a pending
     /// that names its producer nowhere at all while carrying the ability snapshot
     /// only this engine's activation entry writes.
@@ -18442,8 +18508,9 @@ pub enum PersistedRestoreError {
     /// producer evidence contradicts itself — a retained execution node that cannot
     /// be that activation's own (a triggered-mana node per CR 605.4a, an
     /// activated-mana node of a different object, or one belonging to a DIFFERENT
-    /// occurrence, including a node with no occurrence stated that has already
-    /// produced its mana), two records of one announcement naming two incarnations,
+    /// occurrence, including a node — with or without an occurrence stated beside
+    /// the reference — that has already SETTLED and so settles a finished
+    /// activation), two records of one announcement naming two incarnations,
     /// or no producer record at all behind an activation snapshot.
     ///
     /// The distinction this refuses on is the one the resume boundary needs: a save
@@ -37586,6 +37653,16 @@ impl GameState {
         // of one game hold equal entries at every common position anyway.
 
         clone.retain_carrier_referenced_lki();
+        // CR 106.3 + CR 118.3a + CR 104.4b: the producer ledger's facts are keyed by
+        // pip, and `PooledManaProducerSnapshot`'s equality compares that key — it is
+        // what keeps a fact attached to the unit that owns it, so two positions
+        // differing only in WHICH live pip carries a row compare unequal. The pip is
+        // also a monotone mint tag, so comparing it as minted would split two
+        // positions one cycle apart. Renumber both sides by rank in pool order, AFTER
+        // the prune above (which reads real pips), and the key becomes canonical: the
+        // unit at rank `i` holds pip `i + 1` on every side, and the ledger follows the
+        // unit it describes. The allocator is residue, like `next_object_id`.
+        clone.canonicalize_floating_pip_identities();
         // CR 104.4b + CR 608.2h: last-known copiable values no ability can still
         // read as its own copy source are history, not position — pruned against
         // the set captured above, before the identities were erased.
@@ -37625,6 +37702,53 @@ impl GameState {
         } else {
             UnrepresentablePolicy::IgnoreImpossible
         }
+    }
+
+    /// CR 106.3 + CR 118.3a + CR 104.4b: renumber every floating unit's pip to its
+    /// rank in pooled unit order, and carry the producer ledger onto those ranks.
+    ///
+    /// A pip is the key that keeps a retained producer fact attached to the unit it
+    /// describes, and `PooledManaProducerSnapshot`'s equality compares it — without
+    /// it, two positions differing only in WHICH live unit of a departed source owns
+    /// a row compared equal, though payment resolves the fact by pip and so recovers
+    /// the producer from one unit and not the other. A pip is ALSO a monotone mint
+    /// tag, so comparing it as minted would split two positions one cycle apart,
+    /// which float their mana under fresh pips. Ranking both the pool and the ledger
+    /// by pool order answers both questions with one key: `ManaPool::eq` already
+    /// compares units in that same order, so equal pools produce equal ranks, while
+    /// a fact attached to a different unit produces a different rank.
+    ///
+    /// The key is the association itself, not a copy of the pool: this runs inside
+    /// `normalize_for_loop`, which the resource projection then clears the pools
+    /// (`project_out_player_consumables`) — a rank computed at comparison time would
+    /// have no units left to rank.
+    ///
+    /// Idempotent (a second call rewrites nothing), and applied only to a
+    /// normalized clone: a live pool's pips are the player's pin identities.
+    pub(crate) fn canonicalize_floating_pip_identities(&mut self) {
+        let mut next: u64 = 1;
+        let mut renamed: HashMap<crate::types::mana::ManaPipId, crate::types::mana::ManaPipId> =
+            HashMap::new();
+        for player in &mut self.players {
+            player
+                .mana_pool
+                .canonicalize_pip_ids(&mut next, &mut renamed);
+        }
+        // A row whose pip no pool holds was pruned by
+        // [`Self::retain_carrier_referenced_lki`] before this ran; should one survive
+        // (a direct caller), it keeps the key it had rather than borrowing a unit's.
+        for row in &mut self.pooled_mana_producer_snapshots {
+            if let Some(canonical) = renamed.get(&row.pip_id) {
+                row.pip_id = *canonical;
+            }
+        }
+        // The ledger is compared positionally, and its writer orders rows by the pip
+        // as MINTED. Ranks follow pool order instead, so the order is re-established
+        // in the new key: two positions holding the same facts on the same units then
+        // list them the same way even if the minted numbers ran in another order.
+        self.pooled_mana_producer_snapshots
+            .sort_by_key(|row| (row.source_id, row.source_incarnation, row.pip_id));
+        self.next_pip_id = 0;
     }
 
     pub(crate) fn retain_carrier_referenced_lki(&mut self) {

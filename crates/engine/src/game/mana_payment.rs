@@ -462,19 +462,46 @@ pub(crate) fn producing_incarnation_for_ability(
 pub(crate) fn retain_pooled_mana_producer_snapshots(state: &mut GameState) {
     use crate::types::game_state::PooledManaProducerSnapshot;
 
-    let carried: Vec<PooledManaProducerSnapshot> = state.pooled_mana_producer_snapshots.clone();
-    // CR 118.3a + CR 400.7: the carried fact is read for ONE unit, by the same key
-    // the ledger is written with and the restore boundary validates with — the
-    // pip. A `(source, incarnation)` lookup would hand the first-recorded unit's
-    // fact to every other unit of the same tenure, which is the same "the entry
-    // belongs to some unit, not this one" mismatch
-    // [`pooled_mana_producer_snapshot`] exists to prevent.
+    // CR 118.3a: the ledger is read once per surviving unit, so it is INDEXED once
+    // here, at the boundary that owns it, rather than searched per unit. Taking it
+    // (instead of cloning it) is what lets the index borrow the rows: the vector is
+    // rebuilt below and installed in its place.
+    //
+    // The index key is the PIP alone — the ownership key — and the exact-source and
+    // epoch checks stay where they were, inside the bucket. A `(source, incarnation)`
+    // lookup would hand the first-recorded unit's fact to every other unit of the same
+    // tenure, which is the same "the entry belongs to some unit, not this one"
+    // mismatch [`pooled_mana_producer_snapshot`] exists to prevent; the bucket keeps
+    // the pip's own rows together so the remaining conjuncts are a handful of
+    // comparisons instead of a scan of the whole ledger.
+    //
+    // Without the index this boundary is quadratic in the carried units: after the
+    // exit cache is gone every row is carried forward, so N floating units from
+    // departed producers searched N rows each — once per step and phase boundary, for
+    // as long as the mana floats (CR 106.4 with Upwelling's "Players don't lose unspent
+    // mana as steps and phases end.").
+    let carried = std::mem::take(&mut state.pooled_mana_producer_snapshots);
+    let mut carried_by_pip: std::collections::HashMap<
+        crate::types::mana::ManaPipId,
+        Vec<&PooledManaProducerSnapshot>,
+    > = std::collections::HashMap::new();
+    for snapshot in &carried {
+        carried_by_pip
+            .entry(snapshot.pip_id)
+            .or_default()
+            .push(snapshot);
+    }
+    // CR 118.3a + CR 400.7: the carried fact is read for ONE unit, by the same key the
+    // ledger is written with and the restore boundary validates with — the pip.
     let carried_lki = |unit: &crate::types::mana::ManaUnit| {
-        carried
-            .iter()
+        carried_by_pip
+            .get(&unit.pip_id)
+            .into_iter()
+            .flatten()
             .find(|snapshot| {
-                snapshot.pip_id == unit.pip_id
-                    && snapshot.source_id == unit.source_id
+                #[cfg(feature = "test-support")]
+                crate::game::perf_counters::record_pooled_producer_row_probed();
+                snapshot.source_id == unit.source_id
                     && Some(snapshot.source_incarnation) == unit.source_incarnation
             })
             .map(|snapshot| snapshot.lki.clone())
@@ -535,6 +562,103 @@ pub(crate) fn retain_pooled_mana_producer_snapshots(state: &mut GameState) {
         )
     });
     state.pooled_mana_producer_snapshots = retained;
+}
+
+/// CR 106.4 + CR 118.3a + CR 400.7: the boundary rebuilds the retained producer facts
+/// in ONE pass over the pools and ONE index of the ledger, not a search of the ledger
+/// per unit.
+///
+/// The boundary keeps one row per still-floating unit whose producing source departed,
+/// and it runs at every step and phase boundary for as long as the mana floats
+/// (CR 106.4; Upwelling — "Players don't lose unspent mana as steps and phases end.").
+/// After the exit cache is gone every row is carried forward unchanged, so a per-unit
+/// scan of the ledger costs units × rows on each of those boundaries — quadratic in the
+/// number of floating units, which a single upkept board can make large (one Treasure
+/// each, one Upwelling).
+///
+/// The witness reads the row probes this boundary charged, so it measures the work
+/// rather than a wall clock: an index that consults only the pip's own rows charges at
+/// most one probe per unit, while a scan of the whole ledger charges the triangular
+/// sum (1 + 2 + … + units).
+#[cfg(all(test, feature = "test-support"))]
+mod pooled_producer_ledger_index_tests {
+    use super::retain_pooled_mana_producer_snapshots;
+    use crate::game::perf_counters;
+    use crate::game::zones::create_object;
+    use crate::types::game_state::{GameState, PooledManaProducerSnapshot};
+    use crate::types::identifiers::CardId;
+    use crate::types::mana::{ManaPipId, ManaType, ManaUnit};
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    /// `units` floating units of ONE departed tenure, each carrying its own ledger row —
+    /// the shape a boundary leaves behind while the mana floats. Returns the state with
+    /// the produced epoch, so a witness can show the exit cache is gone.
+    fn carried_ledger(units: u64) -> (GameState, crate::types::identifiers::ObjectId, u64) {
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mox Jet".to_string(),
+            Zone::Battlefield,
+        );
+        let incarnation = state.objects[&source].incarnation;
+        let lki = state.objects[&source].snapshot_public_characteristics();
+        // CR 400.7: the producer is GONE — the storage id holds a later object, so no
+        // live object can answer for these units and every one of them owes its row.
+        state.objects.get_mut(&source).unwrap().incarnation += 1;
+
+        let mut rows = Vec::new();
+        for index in 1..=units {
+            let mut unit = ManaUnit::new(ManaType::Black, source, false, vec![]);
+            unit.pip_id = ManaPipId(index);
+            unit.source_incarnation = Some(incarnation);
+            state.players[PlayerId(0).0 as usize].mana_pool.add(unit);
+            rows.push(PooledManaProducerSnapshot {
+                pip_id: ManaPipId(index),
+                source_id: source,
+                source_incarnation: incarnation,
+                lki: lki.clone(),
+            });
+        }
+        state.pooled_mana_producer_snapshots = rows;
+        (state, source, incarnation)
+    }
+
+    #[test]
+    fn retained_producer_facts_are_indexed_once_at_the_boundary() {
+        const UNITS: u64 = 12;
+        let (mut state, source, incarnation) = carried_ledger(UNITS);
+        // CR 400.7: the carried ledger is the ONLY source of the fact here, so every
+        // unit below must be answered from it.
+        assert!(
+            crate::game::filter::exit_lki_for_incarnation(&state, source, incarnation).is_none(),
+            "reach-guard: the exit cache that could answer instead is gone"
+        );
+
+        perf_counters::reset();
+        let before = perf_counters::take_cost_snapshot();
+        retain_pooled_mana_producer_snapshots(&mut state);
+        let probes = perf_counters::take_cost_snapshot()
+            .since(before)
+            .pooled_producer_rows_probed;
+
+        assert_eq!(
+            state.pooled_mana_producer_snapshots.len(),
+            UNITS as usize,
+            "reach-guard: every floating unit of the departed tenure keeps its fact — carried \
+             from the ledger, since the exit cache is gone"
+        );
+        assert!(
+            probes <= UNITS,
+            "CR 118.3a: one index of the carried rows serves every surviving unit, so the \
+             boundary examines at most one row per unit — it examined {probes} rows for {UNITS} \
+             units, which is the signature of a search of the whole ledger per unit \
+             ({})",
+            UNITS * (UNITS + 1) / 2
+        );
+    }
 }
 
 /// CR 106.3 + CR 400.7: the producer fact retained for ONE floating unit while a

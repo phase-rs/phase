@@ -1443,8 +1443,9 @@ pub(crate) fn mana_choice_prompt(
 ///   construction (captured before any cost);
 /// * a contradiction — a retained node of a different kind or object, a node of
 ///   this object and epoch belonging to a DIFFERENT occurrence (an earlier
-///   activation of it, already settled per CR 605.3b), a node that already
-///   produced mana behind a save that states no occurrence, two records naming two
+///   activation of it, already settled per CR 605.3b), a node that has already
+///   SETTLED — the question is about the node, so it is asked whether the save
+///   states an occurrence beside it or none at all — two records naming two
 ///   incarnations, or no producer record at all behind an activation snapshot — is
 ///   refused here exactly as restore refuses it, never read as absence;
 /// * neither record present: the rule refuses a snapshot-carrying pending, and the

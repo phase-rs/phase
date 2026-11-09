@@ -278,6 +278,13 @@ pub struct TakeCostCounters {
     pub journal_records_examined: u64,
     pub drive_snapshots: u64,
     pub pool_entries_walked: u64,
+    /// CR 118.3a: producer-ledger rows examined while rebuilding the retained
+    /// producer facts at a step/phase boundary
+    /// (`mana_payment::retain_pooled_mana_producer_snapshots`). The boundary holds one
+    /// row per still-floating unit whose producer departed, so a per-unit scan of the
+    /// ledger charges units × rows here while an index charges units + rows; the
+    /// witness `retained_producer_facts_are_indexed_once_at_the_boundary` reads it.
+    pub pooled_producer_rows_probed: u64,
 }
 
 #[cfg(feature = "test-support")]
@@ -294,6 +301,8 @@ impl TakeCostCounters {
                 - earlier.journal_records_examined,
             drive_snapshots: self.drive_snapshots - earlier.drive_snapshots,
             pool_entries_walked: self.pool_entries_walked - earlier.pool_entries_walked,
+            pooled_producer_rows_probed: self.pooled_producer_rows_probed
+                - earlier.pooled_producer_rows_probed,
         }
     }
 }
@@ -584,6 +593,7 @@ thread_local! {
             journal_records_examined: 0,
             drive_snapshots: 0,
             pool_entries_walked: 0,
+            pooled_producer_rows_probed: 0,
         })
     };
     #[cfg(feature = "test-support")]
@@ -1274,6 +1284,14 @@ pub(crate) fn outside_take_cost(check: impl FnOnce()) {
 #[cfg(feature = "test-support")]
 pub fn record_pool_entries_walked(entries: u64) {
     with_take_cost(|c| c.pool_entries_walked += entries);
+}
+
+/// CR 118.3a: one producer-ledger row examined while the retained producer facts are
+/// rebuilt at a step/phase boundary — see
+/// [`TakeCostCounters::pooled_producer_rows_probed`].
+#[cfg(feature = "test-support")]
+pub fn record_pooled_producer_row_probed() {
+    with_take_cost(|c| c.pooled_producer_rows_probed += 1);
 }
 
 #[cfg(feature = "test-support")]

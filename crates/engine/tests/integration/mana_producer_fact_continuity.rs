@@ -917,9 +917,17 @@ fn spending_one_of_two_pips_from_one_tenure_drops_only_the_spent_row() {
 /// comparison is reached by the same function without that game-ending short cut in
 /// the way, and it is the reader the prune is for.)
 ///
+/// One further leg, on the other half of the same key: with BOTH pips still floating,
+/// ONE row is moved from one live pip onto the other, keeping the total row count and
+/// every fact's content. The two rows describe one tenure, so only the pip tells them
+/// apart — and the comparison must see it, because payment resolves a fact by pip and
+/// so recovers the producer from one of the two units and not the other.
+///
 /// REVERT-FAIL: key the retention by `(source, incarnation)` again — the survivor
 /// names the same tenure, so the spent pip's row survives on one side and the two
-/// positions compare UNEQUAL.
+/// positions compare UNEQUAL. And compare the ledger or the pool with pip identity
+/// dropped, as each did on its own — the moved-row leg then compares EQUAL though the
+/// two positions pay differently.
 #[test]
 fn the_loop_comparison_drops_a_spent_pips_row_with_no_phase_boundary() {
     let mut scenario = GameScenario::new();
@@ -994,6 +1002,44 @@ fn the_loop_comparison_drops_a_spent_pips_row_with_no_phase_boundary() {
         tenure_pips.len(),
         2,
         "reach-guard: the two Prismite pips are both floating, got {tenure_pips:?}"
+    );
+
+    // CR 106.3 + CR 118.3a: a row is a fact about ONE unit, and these two rows describe
+    // one tenure — the same source, the same epoch, the same last-known information —
+    // so ONLY the pip says which of the two live units a row belongs to. Payment
+    // resolves the fact by that pip (`mana_payment::pooled_mana_producer_snapshot`), so
+    // a position that attaches a row to the other unit is a different position: a
+    // coloured cost recovers the producer from the unit that holds the row and not from
+    // the one that does not. Moving one row between the two LIVE pips, with the total
+    // row count preserved, must therefore compare UNEQUAL — which a comparator that
+    // dropped pip identity (the row's `PartialEq` and `ManaPool`'s, each on its own)
+    // could not see.
+    let mut content_only = runner.state().pooled_mana_producer_snapshots.clone();
+    for row in content_only.iter_mut() {
+        row.pip_id = ManaPipId(0);
+    }
+    assert!(
+        content_only.windows(2).all(|pair| pair[0] == pair[1]),
+        "reach-guard: the two rows are identical apart from the pip that owns them — {content_only:?}"
+    );
+    let (from_pip, to_pip) = (tenure_pips[0], tenure_pips[1]);
+    let mut moved_row = runner.state().clone();
+    for row in moved_row.pooled_mana_producer_snapshots.iter_mut() {
+        if row.pip_id == from_pip {
+            row.pip_id = to_pip;
+        }
+    }
+    assert_eq!(
+        moved_row.pooled_mana_producer_snapshots.len(),
+        rows_after_write,
+        "reach-guard: the move preserves the total row count — only WHICH unit owns a row changes"
+    );
+    assert!(
+        !loop_states_equal_modulo_resources(runner.state(), &moved_row),
+        "CR 106.3 + CR 118.3a + CR 104.4b: a fact belongs to the unit its pip names, so two \
+         positions differing only in which LIVE pip carries the row are not the same position — \
+         paying a coloured cost recovers the producer from {to_pip:?} in one and from \
+         {from_pip:?} in the other, and the comparison must not equate them"
     );
 
     // The Bauble spends exactly one of the two pips. Resolving it crosses no phase
