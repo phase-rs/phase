@@ -9821,7 +9821,8 @@ mod tests {
                     } if *id == ObjectId(target) => Some(event.clone()),
                     _ => None,
                 });
-            relational_recipient_reads(&selected, if accepted { &[ObjectId(target)] } else { &[] });
+            let expected = [ObjectId(target)];
+            relational_recipient_reads(&selected, if accepted { &expected } else { &[] });
         }
         assert!(
             visits <= journal_rows,
