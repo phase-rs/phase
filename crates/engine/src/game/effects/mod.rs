@@ -1052,21 +1052,14 @@ fn rebind_child_to_forwarded_objects(
         return Vec::new();
     }
     let attachment_candidates = attach::attachment_candidates_from_zone_change(state, child, moved);
-    // CR 707.10: `CopySpell { SelfRef }` copies the resolving spell
-    // itself (Sevinne's Reclamation, Chain cycle). `forward_result`
-    // rebinding `source_id` to the just-moved permanent would make
-    // `copy_spell::resolve` look up the wrong stack entry after
-    // `resolve_top` has popped the spell (issue #2860).
-    if copy_spell_self_ref_keeps_resolving_spell_source(child) {
-        return attachment_candidates;
-    }
-    // CR 603.7c + CR 201.5: `CreateDelayedTrigger` keeps the creating
-    // ability's source. Its ParentTarget anaphora read the separate
-    // forwarded-result context at delayed-trigger creation.
-    // CR 608.2c: the "repeat this process" directive names the process, not
-    // the forwarded object, so it keeps the process's source — the identity
-    // its `RepeatProcessRequest` carries to the root's loop predicate.
-    if !matches!(child.effect, Effect::CreateDelayedTrigger { .. })
+    // CR 201.5 + CR 400.7j: a primary SelfRef names the printed source,
+    // not the object returned by the preceding instruction. Keep the moved
+    // referent in its separate context; generic result grants were bound above.
+    // CopySpell(SelfRef) likewise keeps the resolving spell (CR 707.10).
+    // CR 603.7d/e: delayed triggers keep their creating source, and repeat
+    // directives keep the process source used by the loop predicate.
+    if !matches!(child.effect.target_filter(), Some(TargetFilter::SelfRef))
+        && !matches!(child.effect, Effect::CreateDelayedTrigger { .. })
         && !child.effect.is_repeat_directive()
     {
         child.source_id = moved[0];
@@ -14330,21 +14323,6 @@ fn effect_uses_implicit_tracked_set_targets(effect: &Effect) -> bool {
             ..
         } | Effect::PutAtLibraryPosition {
             target: TargetFilter::ExiledBySource,
-            ..
-        }
-    )
-}
-
-/// CR 707.10: A `CopySpell { SelfRef }` sub-ability after a `forward_result`
-/// parent copies the resolving spell, not the object the parent just moved.
-/// Rebinding `source_id` to the forwarded permanent breaks the
-/// `resolving_stack_entry` fallback in `copy_spell::resolve` once the spell
-/// has left the stack (Sevinne's Reclamation — issue #2860).
-fn copy_spell_self_ref_keeps_resolving_spell_source(sub: &ResolvedAbility) -> bool {
-    matches!(
-        &sub.effect,
-        Effect::CopySpell {
-            target: TargetFilter::SelfRef,
             ..
         }
     )

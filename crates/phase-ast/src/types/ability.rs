@@ -35949,9 +35949,11 @@ pub struct AbilityDefinition {
     /// CR 601.2f: Self-referential cost reduction applied before activation.
     /// "This ability costs {N} less to activate for each [condition]"
     pub cost_reduction: Option<CostReduction>,
-    /// When true, after this ability's effect resolves, moved/created objects are forwarded
-    /// to the sub_ability: the moved object becomes sub's source_id, and the original source
-    /// becomes a target. Used for "put onto the battlefield attached to [source]" patterns.
+    /// Forward the settled moved/created objects to the sub-ability's result context.
+    /// Legacy object-relative children may also rebind their source to the moved
+    /// object; a primary `SelfRef`, delayed trigger, or repeat directive keeps its
+    /// creating source instead. Use the forwarded-object operands for the result,
+    /// independently of the printed source identity.
     pub forward_result: bool,
     /// Player scope for "each player/opponent [effect]" patterns.
     /// When set, the effect iterates over matching players (each becomes the acting player).
