@@ -1985,12 +1985,11 @@ export class WebSocketAdapter implements EngineAdapter {
   // Aborts a handshake still in flight when the adapter is disposed.
   private readonly disposeAbort = new AbortController();
   /**
-   * Prepared decoder source for this adapter. Resolved once at construction:
-   * native sidecars stay snapshot-only; the remote default never waits for
-   * shared-engine startup. Explicit providers retain bounded preparation.
-   * `null` means no preparation and no advertisement.
+   * Decoder source resolved once at construction: `undefined` is the
+   * best-effort shared default; explicit providers retain bounded preparation.
+   * Native sidecars and `null` opt-outs stay snapshot-only.
    */
-  private readonly stateCodecProvider: StateCodecSessionProvider | null;
+  private readonly stateCodecProvider: StateCodecSessionProvider | null | undefined;
   /** Identifies the newest attachment; aborting it supersedes the older one. */
   private stateCodecPreparation: AbortController | null = null;
   /**
@@ -2051,14 +2050,13 @@ export class WebSocketAdapter implements EngineAdapter {
     // Keep retrying through the server's reconnect grace; pregame remains terminal.
     this.reconnectPolicy = options.nativeAi ? NATIVE_AI_RECONNECT_POLICY : REMOTE_RECONNECT_POLICY;
     this.maxReconnectAttempts = options.nativePregame ? 0 : this.reconnectPolicy.maxAttempts;
-    // R1: a native sidecar socket (solo/AI/reconnect) keeps snapshot bring-up.
-    // Resolved here, before any attach can await, and the lazy default is only
-    // invoked during an actual attach.
+    // Native sidecars keep snapshot bring-up unless explicitly overridden.
+    // The undefined remote default is started lazily during an actual attach.
     this.stateCodecProvider = options.stateCodecSessionProvider !== undefined
       ? options.stateCodecSessionProvider
       : this.isNativeSocket()
         ? null
-        : () => getSharedAdapter().openStateCodecSession("ifReady");
+        : undefined;
   }
 
   get gameCode(): string | null {
@@ -2311,8 +2309,8 @@ export class WebSocketAdapter implements EngineAdapter {
     // this attachment's supersession is tracked by `preparation` alone.
     const bootstrap = this.stateCodec.begin();
     try {
-      // The policy picks the provider synchronously: a degraded adapter, like a
-      // native/null opt-out, must not introduce even a microtask before opening.
+      // Only explicit providers prepare before dialing. The shared default
+      // races capability discovery without delaying socket creation.
       const provider = this.stateCodec.selectProvider(this.stateCodecProvider);
       const prepared = provider
         ? await this.prepareStateCodecSession(provider, preparation.signal)
@@ -2326,7 +2324,10 @@ export class WebSocketAdapter implements EngineAdapter {
         socketFactory: this.nativeSocketOptions()?.socketFactory,
         signal: this.disposeAbort.signal,
         // A lease that arrives after this adapter degraded is closed and not offered.
-        stateCodecSession: this.stateCodec.selectLease(prepared.session),
+        stateCodecSession: provider === undefined
+          ? getSharedAdapter().openStateCodecSession("ifReady")
+            .then((session) => this.stateCodec.selectLease(session))
+          : this.stateCodec.selectLease(prepared.session),
         stateCodecBootstrap: () => this.stateCodec.status(bootstrap, this.ws, this.disposed),
         onStateCodecRecovery: (state) => this.stateCodec.handleRecovery(
           bootstrap, state, this.ws, this.disposed,

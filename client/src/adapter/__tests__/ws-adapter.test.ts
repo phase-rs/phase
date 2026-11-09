@@ -6008,6 +6008,89 @@ describe("WebSocketAdapter — ordered codec errors", () => {
     }
   });
 
+  it.each(["rejects before the drain deadline", "never settles"] as const)(
+    "settles an in-flight submission and reconnects with codec capability when a naturally closed decode %s",
+    async (outcome) => {
+      const first = scriptedCodec();
+      const second = scriptedCodec();
+      const sessions = [first.session, second.session];
+      const provider = vi.fn(() => Promise.resolve(sessions.shift() ?? null));
+      const { adapter, raw, events } = await establishCodecAdapter(provider);
+      let rejectDecode!: (error: Error) => void;
+      let signalEntered!: () => void;
+      const entered = new Promise<void>((resolve) => { signalEntered = resolve; });
+      first.decode.mockImplementationOnce(() => new Promise<CodecDecodeResult>((_resolve, reject) => {
+        rejectDecode = reject;
+        signalEntered();
+      }));
+      const pendingOutcomes: unknown[] = [];
+      void adapter.submitAction({ type: "PassPriority" }, 0).then(
+        (result) => { pendingOutcomes.push({ resolvedWith: result }); },
+        (error: unknown) => { pendingOutcomes.push(error); },
+      );
+      const commandId = lastSubmissionCommandId(raw);
+      deliverCodec(raw, "Delta", codecStateUpdate(2, 2, { command_id: commandId }));
+      await entered;
+      // Reach guard: a genuine accepted game and an actual Action are waiting
+      // on a completion held inside the second decode, not on a mock promise.
+      expect(submissionTypes(raw)).toEqual(["Action"]);
+      expect(first.decode).toHaveBeenCalledTimes(2);
+      vi.useFakeTimers();
+      try {
+        raw.readyState = MockWebSocket.CLOSED;
+        raw.dispatchSynthetic("close");
+        await vi.advanceTimersByTimeAsync(0);
+        expect(pendingOutcomes).toEqual([]);
+        if (outcome === "rejects before the drain deadline") {
+          rejectDecode(new Error("RPC rejection after transport death"));
+          await vi.advanceTimersByTimeAsync(0);
+        } else {
+          // The natural-close drain has its own five-second ceiling, even
+          // though this fixture never installs a decoder watchdog.
+          await vi.advanceTimersByTimeAsync(5_000);
+        }
+        expect(pendingOutcomes).toEqual([expect.objectContaining({
+          code: "WS_CLOSED", message: "Connection closed during action", recoverable: true,
+        })]);
+        expect(events).toContainEqual({ type: "actionPendingChanged", pending: false });
+        expect(events.filter((event) => event !== null && typeof event === "object"
+          && "type" in event && event.type === "reconnecting")).toHaveLength(1);
+        expect(first.close).toHaveBeenCalledOnce();
+        expect(raw.close).not.toHaveBeenCalled();
+        expect(resyncRequests(raw)).toBe(0);
+        expect((await adapter.getSnapshot()).state.turn_number).toBe(1);
+
+        await vi.advanceTimersByTimeAsync(1000);
+        const replacement = await codecHandshake("Reconnect", raw);
+        // The observable policy witness: network death did not poison future
+        // attachments into snapshot-only mode or bypass the explicit provider.
+        expect(provider).toHaveBeenCalledTimes(2);
+        expect(offeredCodec(replacement)).toBe(true);
+        deliverCodec(replacement, "Full", codecGameStarted(5, 5));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(events).toContainEqual({ type: "reconnected", inGame: true });
+        expect((await adapter.getSnapshot()).state.turn_number).toBe(5);
+
+        if (outcome === "never settles") {
+          rejectDecode(new Error("obsolete decoder rejected after reconnection"));
+          await vi.advanceTimersByTimeAsync(0);
+        }
+        const resumed = adapter.submitAction({ type: "PassPriority" }, 0);
+        deliverCodec(replacement, "Delta", codecStateUpdate(6, 6, {
+          command_id: lastSubmissionCommandId(replacement),
+        }));
+        await expect(resumed).resolves.toMatchObject({ events: [] });
+        expect(pendingOutcomes).toHaveLength(1);
+        expect(first.close).toHaveBeenCalledOnce();
+        expect(second.close).not.toHaveBeenCalled();
+        expect(resyncRequests(replacement)).toBe(0);
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   describe("an attachment superseded while it installs its consumers", () => {
     const setupFrames = (send: { mock: { calls: unknown[][] } }) => send.mock.calls
       .map(([message]) => (message as { type?: string }).type)

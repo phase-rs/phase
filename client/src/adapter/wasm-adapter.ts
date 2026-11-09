@@ -1509,6 +1509,8 @@ export class WasmAdapter
    * game, disposes the shared engine, or affects another session.
    * `ifReady` warms a cold runtime in the background without delaying the
    * caller or allocating a lease when that startup eventually completes.
+   * A warm runtime still opens its lease asynchronously; best-effort socket
+   * callers must race that promise with capability discovery, not await it.
    */
   async openStateCodecSession(
     startup: "wait" | "ifReady" = "wait",

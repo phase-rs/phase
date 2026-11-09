@@ -257,8 +257,8 @@ export class ServerDraftAdapter implements EngineAdapter {
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
   private _serverInfo: ServerInfo | null = null;
-  /** Ready-only shared decoder by default; explicit providers retain bounded preparation. */
-  private readonly stateCodecProvider: StateCodecSessionProvider | null;
+  /** Undefined uses the best-effort shared default; explicit providers prepare before dialing. */
+  private readonly stateCodecProvider: StateCodecSessionProvider | null | undefined;
   /**
    * Application-bootstrap authority and recovery state for the current socket,
    * published when its attachment's socket is adopted. A new draft match resets
@@ -272,9 +272,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     private readonly serverUrl: string,
     options: ServerDraftAdapterOptions = {},
   ) {
-    this.stateCodecProvider = options.stateCodecSessionProvider !== undefined
-      ? options.stateCodecSessionProvider
-      : () => getSharedAdapter().openStateCodecSession("ifReady");
+    this.stateCodecProvider = options.stateCodecSessionProvider;
   }
 
   // ── Public accessors ───────────────────────────────────────────────
@@ -881,8 +879,8 @@ export class ServerDraftAdapter implements EngineAdapter {
     // adopted below: until then a still-current older socket keeps its own
     // binding and recovery gate, and `ownsAttachment` tracks supersession.
     try {
-      // The policy picks the provider synchronously: a degraded adapter, like a
-      // null opt-out, adds no preparation and no await before opening.
+      // Only explicit providers prepare before dialing. The shared default
+      // races capability discovery without delaying socket creation.
       const provider = this.stateCodec.selectProvider(this.stateCodecProvider);
       if (provider) {
         try {
@@ -904,7 +902,10 @@ export class ServerDraftAdapter implements EngineAdapter {
       // Ownership of the lease moves into the handshake helper, which releases
       // it on every failure path and on non-negotiation. A lease that arrives
       // after this adapter degraded is closed here and not offered.
-      const handed = this.stateCodec.selectLease(prepared);
+      const handed = provider === undefined
+        ? getSharedAdapter().openStateCodecSession("ifReady")
+          .then((session) => this.stateCodec.selectLease(session))
+        : this.stateCodec.selectLease(prepared);
       prepared = null;
       socket = await openPhaseSocket(this.serverUrl, {
         signal: attachment.controller.signal,

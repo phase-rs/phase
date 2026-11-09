@@ -30,6 +30,9 @@ class ControlledEngineWorker {
   onerror: ((event: ErrorEvent) => void) | null = null;
   readonly sessions = new Set<number>();
   readonly decodedReplies: string[] = [];
+  readonly closedSessions: number[] = [];
+  readonly pendingStateCodecReplies: (() => void)[] = [];
+  holdStateCodecReplies = false;
   decodeCount = 0;
   private nextSession = 1;
   private terminated = false;
@@ -51,7 +54,8 @@ class ControlledEngineWorker {
       case "openStateCodec": {
         const session = this.nextSession++;
         this.sessions.add(session);
-        reply(session);
+        if (this.holdStateCodecReplies) this.pendingStateCodecReplies.push(() => reply(session));
+        else reply(session);
         break;
       }
       case "decodeStateCodec": {
@@ -63,12 +67,17 @@ class ControlledEngineWorker {
         break;
       }
       case "closeStateCodec":
+        this.closedSessions.push(request.sessionId!);
         this.sessions.delete(request.sessionId!);
         reply(null);
         break;
       default:
         throw new Error(`Unexpected worker request: ${request.type}`);
     }
+  }
+
+  releaseStateCodecReplies(): void {
+    for (const reply of this.pendingStateCodecReplies.splice(0)) reply();
   }
 
   terminate(): void {
@@ -131,6 +140,13 @@ class ControlledWebSocket extends EventTarget {
   close(): void {
     this.readyState = 3;
   }
+
+  closeFromServer(): void {
+    this.readyState = 3;
+    const event = new CloseEvent("close", { code: 1000, wasClean: true });
+    this.onclose?.(event);
+    this.dispatchEvent(event);
+  }
 }
 
 const FULL_KEY = { game_code: "GAME01", generation: 1 };
@@ -140,6 +156,10 @@ const SERVER_HELLO = {
     server_version: "0.0.0-test", build_commit: "testhash", protocol_version: PROTOCOL_VERSION,
     mode: "Full", command_correlation: "CommandIdV1", state_codecs: ["StateCodecV1"],
   },
+};
+const LEGACY_SERVER_HELLO = {
+  ...SERVER_HELLO,
+  data: { ...SERVER_HELLO.data, state_codecs: undefined },
 };
 const CODEC_CONFIRMATION = {
   type: "ServerHello",
@@ -191,8 +211,13 @@ function startAttachment(kind: RemoteKind, provider?: StateCodecSessionProvider 
   return { kind, adapter, completion, setupType: "CreateDraftWithSettings" };
 }
 
-async function handshake(attachment: Attachment, socket: ControlledWebSocket, codec: boolean): Promise<void> {
-  socket.receive(SERVER_HELLO);
+async function handshake(
+  attachment: Attachment,
+  socket: ControlledWebSocket,
+  codec: boolean,
+  advertisesCodec = true,
+): Promise<void> {
+  socket.receive(advertisesCodec ? SERVER_HELLO : LEGACY_SERVER_HELLO);
   await drain();
   const hellos = socket.sent.filter((frame) => frame.type === "ClientHello");
   expect(hellos).toHaveLength(1);
@@ -228,6 +253,14 @@ async function finishSnapshot(attachment: Attachment, socket: ControlledWebSocke
   expect(attachment.adapter.playerId).toBe(0);
 }
 
+async function holdWarmCodecOpen(): Promise<ControlledEngineWorker> {
+  startup.resolve();
+  await getSharedAdapter().initialize();
+  const worker = ControlledEngineWorker.instances[0];
+  worker.holdStateCodecReplies = true;
+  return worker;
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   startup = deferred<void>();
@@ -240,6 +273,7 @@ beforeEach(() => {
 afterEach(async () => {
   for (const adapter of adapters.splice(0)) adapter.dispose();
   startup.resolve();
+  for (const worker of ControlledEngineWorker.instances) worker.releaseStateCodecReplies();
   await drain();
   getSharedAdapter().dispose();
   vi.unstubAllGlobals();
@@ -288,6 +322,102 @@ describe("remote default codec startup", () => {
       await drain();
       expect(worker.sessions.size).toBe(0);
       expect((await cold.adapter.getSnapshot()).state.turn_number).toBe(2);
+    },
+  );
+
+  it.each([
+    ["game", "legacy"], ["draft", "legacy"],
+    ["game", "codec-capable"], ["draft", "codec-capable"],
+  ] as const)(
+    "completes a warm default %s %s handshake while the codec open RPC is held",
+    async (kind, server) => {
+      const worker = await holdWarmCodecOpen();
+      const attachment = startAttachment(kind);
+      await drain();
+      expect(worker.pendingStateCodecReplies).toHaveLength(1);
+      // No clock advancement: neither dialing nor setup may spend the five-second preparation budget.
+      expect(ControlledWebSocket.instances).toHaveLength(1);
+      const socket = ControlledWebSocket.instances[0];
+      await handshake(attachment, socket, false, server === "codec-capable");
+      await finishSnapshot(attachment, socket, false);
+      expect(worker.closedSessions).toEqual([]);
+      expect(worker.decodeCount).toBe(0);
+
+      worker.releaseStateCodecReplies();
+      await drain();
+      expect(worker.sessions.size).toBe(0);
+      expect(worker.closedSessions).toEqual([1]);
+      // A late decoder cannot upgrade a socket whose capability decision already selected snapshots.
+      socket.receive({ type: "StateUpdate", data: {
+        state: gameState(2), state_revision: 2, events: [], full_key: FULL_KEY,
+      } });
+      await drain();
+      expect((await attachment.adapter.getSnapshot()).state.turn_number).toBe(2);
+      expect(socket.sent.filter((frame) => frame.type === "ClientHello")).toHaveLength(1);
+      expect(worker.decodeCount).toBe(0);
+      expect(ControlledWebSocket.instances).toHaveLength(1);
+      attachment.adapter.dispose();
+      await drain();
+      expect(worker.closedSessions).toEqual([1]);
+    },
+  );
+
+  it.each(["game", "draft"] as const)(
+    "selects a warm default %s lease that becomes ready before capability discovery",
+    async (kind) => {
+      const worker = await holdWarmCodecOpen();
+      const attachment = startAttachment(kind);
+      await drain();
+      expect(worker.pendingStateCodecReplies).toHaveLength(1);
+      expect(ControlledWebSocket.instances).toHaveLength(1);
+      const socket = ControlledWebSocket.instances[0];
+
+      worker.releaseStateCodecReplies();
+      await drain();
+      expect(worker.closedSessions).toEqual([]);
+      await handshake(attachment, socket, true);
+      await finishSnapshot(attachment, socket, true);
+      expect(worker.sessions.size).toBe(1);
+      expect(worker.decodeCount).toBe(1);
+      attachment.adapter.dispose();
+      await drain();
+      expect(worker.sessions.size).toBe(0);
+      expect(worker.closedSessions).toEqual([1]);
+    },
+  );
+
+  it.each([
+    ["game", "abort"], ["draft", "abort"],
+    ["game", "close before hello"], ["draft", "close before hello"],
+    ["game", "close after setup"], ["draft", "close after setup"],
+  ] as const)(
+    "releases a pending warm default %s lease exactly once after connection %s",
+    async (kind, end) => {
+      const worker = await holdWarmCodecOpen();
+      const attachment = startAttachment(kind);
+      await drain();
+      expect(worker.pendingStateCodecReplies).toHaveLength(1);
+      expect(ControlledWebSocket.instances).toHaveLength(1);
+      const socket = ControlledWebSocket.instances[0];
+
+      if (end === "close after setup") await handshake(attachment, socket, false, false);
+      if (end === "abort") attachment.adapter.dispose();
+      else socket.closeFromServer();
+      await expect(attachment.completion).rejects.toBeInstanceOf(Error);
+      expect(socket.readyState).toBe(3);
+      expect(worker.closedSessions).toEqual([]);
+
+      worker.releaseStateCodecReplies();
+      await drain();
+      expect(worker.sessions.size).toBe(0);
+      expect(worker.closedSessions).toEqual([1]);
+      expect(worker.decodeCount).toBe(0);
+      expect(socket.sent.filter((frame) => frame.type === "ClientHello"))
+        .toHaveLength(end === "close after setup" ? 1 : 0);
+      expect(ControlledWebSocket.instances).toHaveLength(1);
+      attachment.adapter.dispose();
+      await drain();
+      expect(worker.closedSessions).toEqual([1]);
     },
   );
 

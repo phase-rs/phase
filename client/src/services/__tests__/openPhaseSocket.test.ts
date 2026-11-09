@@ -37,12 +37,9 @@ class MockWebSocket extends EventTarget {
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
   onerror: (() => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event: CloseEvent) => void) | null = null;
   send = vi.fn();
-  close = vi.fn(() => {
-    this.onclose?.();
-    this.dispatchEvent(new Event("close"));
-  });
+  close = vi.fn(() => this.fireClose());
   constructor(public url: string) {
     super();
     MockWebSocket.instances.push(this);
@@ -52,6 +49,11 @@ class MockWebSocket extends EventTarget {
   }
   fireError() {
     this.onerror?.();
+  }
+  fireClose(event = new CloseEvent("close")) {
+    this.readyState = MockWebSocket.CLOSED;
+    this.onclose?.(event);
+    this.dispatchEvent(event);
   }
 }
 
@@ -2762,14 +2764,26 @@ const drainMacrotask = () => new Promise<void>((resolve) => setTimeout(resolve, 
 function heldDecoder() {
   const fake = fakeSession();
   let resolveDecode: ((result: StateCodecDecodeResult) => void) | null = null;
+  let rejectDecode: ((error: Error) => void) | null = null;
+  let signalEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { signalEntered = resolve; });
   fake.decode.mockImplementationOnce(
-    () => new Promise<StateCodecDecodeResult>((resolve) => { resolveDecode = resolve; }),
+    () => new Promise<StateCodecDecodeResult>((resolve, reject) => {
+      resolveDecode = resolve;
+      rejectDecode = reject;
+      signalEntered();
+    }),
   );
   return {
     fake,
+    entered,
     release: (result: StateCodecDecodeResult) => {
       if (resolveDecode === null) throw new Error("the decoder was never entered");
       resolveDecode(result);
+    },
+    reject: (error: Error) => {
+      if (rejectDecode === null) throw new Error("the decoder was never entered");
+      rejectDecode(error);
     },
   };
 }
@@ -2796,6 +2810,311 @@ async function openCodecSocket(
   expect(raw.send).toHaveBeenCalledWith(expect.stringContaining('"state_codecs":["StateCodecV1"]'));
   return { raw, socket };
 }
+
+describe("openPhaseSocket — natural close during codec decode", () => {
+  // Network teardown may drain already-received healthy frames for at most
+  // five seconds. This is a close bound, not the decoder's own RPC watchdog.
+  const orderedDrainBoundMs = 5_000;
+
+  async function heldAttachment(wire: "raw" | "gzip") {
+    const held = heldDecoder();
+    const attachment = new StateCodecAttachment();
+    const binding = attachment.begin();
+    const notices: StateCodecRecoveryNotice[] = [];
+    let adopted: PhaseSocketTransport | null = null;
+    const { raw, socket } = await openCodecSocket(held.fake, {
+      gzip: wire === "gzip",
+      bootstrap: () => "pending",
+      onRecovery: (state) => {
+        notices.push(state);
+        attachment.handleRecovery(binding, state, adopted, false, vi.fn());
+      },
+    });
+    adopted = socket.ws;
+    attachment.adopt(binding, socket.ws);
+    const received = vi.fn();
+    const closed = vi.fn();
+    const closeListener = vi.fn();
+    socket.ws.onmessage = received;
+    socket.ws.onclose = closed;
+    socket.ws.addEventListener("close", closeListener, { once: true });
+    raw.deliverMessage(confirmationFrame());
+    const text = gameStartedFullFrame({ padding: "x".repeat(WIRE_COMPRESSION_THRESHOLD) });
+    if (wire === "gzip") {
+      const compressed = await encodeJsonEnvelope(text);
+      // Exercise actual gzip inflation, not just the raw 0x00 envelope.
+      expect(compressed[0]).toBe(0x01);
+      raw.deliverMessage(compressed.buffer);
+    } else {
+      raw.deliverMessage(text);
+    }
+    await held.entered;
+    expect(held.fake.decode).toHaveBeenCalledOnce();
+    expect(new TextDecoder().decode(held.fake.decode.mock.calls[0][0])).toBe(text);
+    return { held, attachment, notices, raw, socket, received, closed, closeListener };
+  }
+
+  it.each(["raw", "gzip"] as const)(
+    "preserves the original %s network close when the held decode rejects, without degrading or resyncing",
+    async (wire) => {
+      const { held, attachment, notices, raw, socket, received, closed, closeListener } =
+        await heldAttachment(wire);
+      vi.useFakeTimers();
+      try {
+        const natural = new CloseEvent("close", { code: 1006, reason: "network lost", wasClean: false });
+        raw.fireClose(natural);
+        await vi.advanceTimersByTimeAsync(0);
+        // A finite drain still gives a healthy in-flight frame its chance.
+        expect(closed).not.toHaveBeenCalled();
+        held.reject(new Error("decoder RPC rejected after network loss"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(notices).toEqual([]);
+        expect(attachment.deliveryPolicy).toEqual({ kind: "negotiate" });
+        expect(closed).toHaveBeenCalledExactlyOnceWith(natural);
+        expect(closeListener).toHaveBeenCalledExactlyOnceWith(natural);
+        expect(held.fake.close).toHaveBeenCalledOnce();
+        expect(received).not.toHaveBeenCalled();
+        expect(raw.send).not.toHaveBeenCalledWith('{"type":"ResyncState"}');
+        // The network already closed: do not manufacture another raw close.
+        expect(raw.close).not.toHaveBeenCalled();
+        socket.close();
+        raw.fireClose(natural);
+        await vi.advanceTimersByTimeAsync(orderedDrainBoundMs);
+        expect(closed).toHaveBeenCalledOnce();
+        expect(closeListener).toHaveBeenCalledOnce();
+        expect(held.fake.close).toHaveBeenCalledOnce();
+        expect(notices).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["raw", "gzip"] as const)(
+    "does not start recovery when the held %s decode requests resync after network death",
+    async (wire) => {
+      const { held, attachment, notices, raw, received, closed } = await heldAttachment(wire);
+      vi.useFakeTimers();
+      try {
+        const natural = new CloseEvent("close", { code: 1006, reason: "network lost" });
+        raw.fireClose(natural);
+        await vi.advanceTimersByTimeAsync(0);
+        held.release({ kind: "resyncRequired" });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(notices).toEqual([]);
+        expect(raw.send).not.toHaveBeenCalledWith('{"type":"ResyncState"}');
+        expect(attachment.deliveryPolicy).toEqual({ kind: "negotiate" });
+        expect(closed).toHaveBeenCalledExactlyOnceWith(natural);
+        expect(held.fake.close).toHaveBeenCalledOnce();
+        expect(received).not.toHaveBeenCalled();
+        expect(raw.close).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([
+    ["raw", "decoded"], ["gzip", "decoded"],
+    ["raw", "rejected"], ["gzip", "rejected"],
+  ] as const)(
+    "bounds a never-settling %s decode on natural close and fences its late %s outcome",
+    async (wire, late) => {
+      const { held, attachment, notices, raw, socket, received, closed, closeListener } =
+        await heldAttachment(wire);
+      vi.useFakeTimers();
+      try {
+        // More already-received work must not keep the close waiting forever.
+        raw.deliverMessage(codecFrame("Delta"));
+        raw.deliverMessage('{"type":"Pong","data":{"timestamp":19}}');
+        const natural = new CloseEvent("close", { code: 1006, reason: "network lost" });
+        raw.fireClose(natural);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(closed).not.toHaveBeenCalled();
+        expect(held.fake.close).not.toHaveBeenCalled();
+        // The decoder has no watchdog in this fixture and stays unresolved for
+        // the entire drain allowance. Teardown must own its independent bound.
+        await vi.advanceTimersByTimeAsync(orderedDrainBoundMs);
+        expect(closed).toHaveBeenCalledExactlyOnceWith(natural);
+        expect(closeListener).toHaveBeenCalledExactlyOnceWith(natural);
+        expect(held.fake.close).toHaveBeenCalledOnce();
+        expect(notices).toEqual([]);
+        expect(attachment.deliveryPolicy).toEqual({ kind: "negotiate" });
+        expect(received).not.toHaveBeenCalled();
+        expect(held.fake.decode).toHaveBeenCalledOnce();
+        expect(raw.close).not.toHaveBeenCalled();
+
+        if (late === "decoded") {
+          held.release({ kind: "decoded", json: DECODED_PONG });
+        } else {
+          held.reject(new Error("decoder finished after the drain deadline"));
+        }
+        raw.deliverMessage(codecFrame("Full"));
+        raw.fireError();
+        raw.fireClose(natural);
+        socket.close();
+        await vi.advanceTimersByTimeAsync(orderedDrainBoundMs);
+        expect(received).not.toHaveBeenCalled();
+        expect(held.fake.decode).toHaveBeenCalledOnce();
+        expect(closed).toHaveBeenCalledOnce();
+        expect(closeListener).toHaveBeenCalledOnce();
+        expect(held.fake.close).toHaveBeenCalledOnce();
+        expect(notices).toEqual([]);
+        expect(raw.send).not.toHaveBeenCalledWith('{"type":"ResyncState"}');
+        expect(attachment.deliveryPolicy).toEqual({ kind: "negotiate" });
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["decoded", "resyncRequired", "rejected"] as const)(
+    "reserves network death before a queued frame starts its %s decode",
+    async (outcome) => {
+      const fake = fakeSession(() => outcome === "resyncRequired"
+        ? { kind: "resyncRequired" } : { kind: "decoded", json: DECODED_PONG });
+      if (outcome === "rejected") {
+        fake.decode.mockImplementationOnce(async () => { throw new Error("queued decode rejected"); });
+      }
+      const recovery = vi.fn();
+      const { raw, socket } = await openCodecSocket(fake, { onRecovery: recovery });
+      const received = vi.fn();
+      const closed = vi.fn();
+      socket.ws.onmessage = received;
+      socket.ws.onclose = closed;
+      vi.useFakeTimers();
+      try {
+        raw.deliverMessage(confirmationFrame());
+        raw.deliverMessage(codecFrame("Full"));
+        const natural = new CloseEvent("close", { code: 1006, reason: "network lost" });
+        raw.fireClose(natural);
+        // No queue task has started, but transport death is already visible.
+        expect(fake.decode).not.toHaveBeenCalled();
+        expect(socket.ws.readyState).toBe(MockWebSocket.CLOSED);
+        const sent = raw.send.mock.calls.length;
+        socket.ws.send('{"type":"Ping"}');
+        expect(raw.send).toHaveBeenCalledTimes(sent);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(fake.decode).toHaveBeenCalledOnce();
+        expect(received).toHaveBeenCalledTimes(outcome === "decoded" ? 1 : 0);
+        if (outcome === "decoded") {
+          expect(received).toHaveBeenCalledWith(expect.objectContaining({ data: DECODED_PONG }));
+        }
+        expect(closed).toHaveBeenCalledExactlyOnceWith(natural);
+        expect(recovery).not.toHaveBeenCalled();
+        expect(fake.close).toHaveBeenCalledOnce();
+        expect(raw.close).not.toHaveBeenCalled();
+        expect(raw.send).not.toHaveBeenCalledWith('{"type":"ResyncState"}');
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("bounds natural close while waiting for a message consumer and fences a consumer attached afterwards", async () => {
+    const fake = fakeSession();
+    const recovery = vi.fn();
+    const { raw, socket } = await openCodecSocket(fake, { onRecovery: recovery });
+    const closed = vi.fn();
+    socket.ws.onclose = closed;
+    vi.useFakeTimers();
+    try {
+      raw.deliverMessage(confirmationFrame());
+      raw.deliverMessage(codecFrame("Full"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fake.decode).not.toHaveBeenCalled();
+      const natural = new CloseEvent("close", { code: 1006, reason: "network lost" });
+      raw.fireClose(natural);
+      await vi.advanceTimersByTimeAsync(orderedDrainBoundMs);
+      expect(closed).toHaveBeenCalledExactlyOnceWith(natural);
+      expect(fake.close).toHaveBeenCalledOnce();
+      const received = vi.fn();
+      socket.ws.onmessage = received;
+      raw.deliverMessage(codecFrame("Full"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fake.decode).not.toHaveBeenCalled();
+      expect(received).not.toHaveBeenCalled();
+      expect(recovery).not.toHaveBeenCalled();
+      expect(raw.close).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drains healthy frames and the queued error when a consumer attaches after network death within the bound", async () => {
+    const fake = fakeSession();
+    const trace: string[] = [];
+    fake.close.mockImplementation(() => { trace.push("lease"); });
+    const { raw, socket } = await openCodecSocket(fake);
+    socket.ws.onerror = () => { trace.push("error"); };
+    socket.ws.onclose = () => { trace.push("close"); };
+    vi.useFakeTimers();
+    try {
+      const plain = '{"type":"Pong","data":{"timestamp":31}}';
+      raw.deliverMessage(confirmationFrame());
+      raw.deliverMessage(codecFrame("Full"));
+      raw.deliverMessage(plain);
+      raw.fireError();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fake.decode).not.toHaveBeenCalled();
+      raw.fireClose(new CloseEvent("close", { code: 1006 }));
+      await vi.advanceTimersByTimeAsync(100);
+      expect(trace).toEqual([]);
+      socket.ws.onmessage = (event) => { trace.push(`message:${event.data}`); };
+      await vi.advanceTimersByTimeAsync(0);
+      expect(trace).toEqual([`message:${DECODED_PONG}`, `message:${plain}`, "error", "lease", "close"]);
+      expect(fake.decode).toHaveBeenCalledOnce();
+      expect(fake.close).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(orderedDrainBoundMs);
+      expect(trace.filter((entry) => entry === "close")).toHaveLength(1);
+      expect(fake.close).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels the existing recovery deadline at network death while draining a healthy recovery Full without publishing ready", async () => {
+    let completeFull!: (result: StateCodecDecodeResult) => void;
+    const fake = fakeSession();
+    fake.decode.mockImplementationOnce(async () => ({ kind: "resyncRequired" }));
+    fake.decode.mockImplementationOnce(() => new Promise<StateCodecDecodeResult>((resolve) => {
+      completeFull = resolve;
+    }));
+    const notices: StateCodecRecoveryNotice[] = [];
+    const { raw, socket } = await openCodecSocket(fake, { onRecovery: (state) => notices.push(state) });
+    const received = vi.fn(() => true);
+    const closed = vi.fn();
+    socket.ws.onmessage = received;
+    socket.ws.onclose = closed;
+    vi.useFakeTimers();
+    try {
+      raw.deliverMessage(confirmationFrame());
+      raw.deliverMessage(codecFrame("Delta"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(notices).toEqual(["recovering"]);
+      raw.deliverMessage(codecFrame("Full"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fake.decode).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(STATE_CODEC_SOCKET_TIMEOUT_MS - 100);
+      const natural = new CloseEvent("close", { code: 1006, reason: "network lost" });
+      raw.fireClose(natural);
+      await vi.advanceTimersByTimeAsync(100);
+      // The former recovery deadline cannot cut short a natural healthy drain.
+      expect(closed).not.toHaveBeenCalled();
+      expect(notices).toEqual(["recovering"]);
+      completeFull({ kind: "decoded", json: DECODED_PONG });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(received).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ data: DECODED_PONG }));
+      expect(closed).toHaveBeenCalledExactlyOnceWith(natural);
+      expect(notices).toEqual(["recovering"]);
+      expect(fake.close).toHaveBeenCalledOnce();
+      expect(raw.close).not.toHaveBeenCalled();
+      expect(raw.send.mock.calls.filter(([text]) => text === '{"type":"ResyncState"}')).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe("openPhaseSocket — ordered codec errors", () => {
   it("delivers a raw error after the frame the wrapper already received and before the natural close, and fails nothing", async () => {

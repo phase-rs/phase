@@ -96,12 +96,15 @@ export interface OpenOptions<T extends PhaseSocketTransport = WebSocket> {
    */
   surface?: ProtocolSurface;
   /**
-   * Prepared StateCodecV1 decoder session, if one could be obtained in time.
-   * Ownership transfers to `openPhaseSocket` on call: the helper releases it on
-   * every failure path, and transfers it to the codec transport on successful
-   * mutual negotiation. `null`/absent selects snapshot-only delivery.
+   * Prepared StateCodecV1 decoder session, or a best-effort pending lease.
+   * Pending leases never delay dialing: only a lease ready at the first
+   * ServerHello can negotiate; a later lease is released without upgrading.
+   * Ownership transfers to `openPhaseSocket` on call, including pending leases.
+   * The helper releases unused leases on every failure/non-negotiation path,
+   * and transfers a negotiated lease to the codec transport.
+   * `null`/absent selects snapshot-only delivery.
    */
-  stateCodecSession?: StateCodecSession | null;
+  stateCodecSession?: StateCodecSession | Promise<StateCodecSession | null> | null;
   /**
    * Ordered notification from the negotiated codec transport: recovery
    * progress (`recovering`, `ready`) and, terminally, `failed` with its typed
@@ -168,17 +171,40 @@ export function openPhaseSocket(
   wsUrl: string,
   opts: OpenOptions<PhaseSocketTransport> = {},
 ): Promise<PhaseSocket<PhaseSocketTransport>> {
-  // Precondition: this call owns `opts.stateCodecSession` from here on. Exactly
-  // one owner exists at a time: `handOffLease` moves it into the recursive
-  // preflight call or into the codec transport, and `releaseLease` closes it.
-  let lease: StateCodecSession | null = opts.stateCodecSession ?? null;
-  const handOffLease = (): StateCodecSession | null => {
-    const held = lease;
+  // This call owns both ready and pending leases. Preflight transfers that
+  // ownership to its recursive handshake; capability discovery ends readiness
+  // sampling, so every result arriving after that decision is closed.
+  let lease: StateCodecSession | null = null;
+  let pendingLease: Promise<StateCodecSession | null> | null = null;
+  let acceptingLease = true;
+  const offered = opts.stateCodecSession;
+  if (offered && "then" in offered) {
+    const pending = offered;
+    pendingLease = pending;
+    void pending.then((session) => {
+      // A LAN preflight may already have transferred this promise to the
+      // recursive handshake. Only its current owner may adopt or release it.
+      if (pendingLease !== pending) return;
+      pendingLease = null;
+      if (acceptingLease) lease = session;
+      else session?.close();
+    }, () => {
+      if (pendingLease === pending) pendingLease = null;
+    });
+  } else {
+    lease = offered ?? null;
+  }
+  const handOffLease = (): OpenOptions["stateCodecSession"] => {
+    const held = lease ?? pendingLease;
     lease = null;
+    pendingLease = null;
+    acceptingLease = false;
     return held;
   };
   const releaseLease = (): void => {
-    const held = handOffLease();
+    acceptingLease = false;
+    const held = lease;
+    lease = null;
     held?.close();
   };
 
@@ -211,7 +237,11 @@ export function openPhaseSocket(
               : new WebSocket(url),
           }));
         } catch (error) {
-          handed?.close();
+          if (handed && "then" in handed) {
+            void handed.then((session) => session?.close(), () => undefined);
+          } else {
+            handed?.close();
+          }
           throw error;
         }
       };
@@ -403,6 +433,7 @@ export function openPhaseSocket(
       // surface, and a Full server that offered the codec. Initial
       // advertisement is not confirmation; the codec transport waits for the
       // server's second, plain-text `ServerHello`.
+      acceptingLease = false;
       const prepared = lease;
       const negotiatesCodec = prepared !== null
         && surface === "full"

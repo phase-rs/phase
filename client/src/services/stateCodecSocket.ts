@@ -12,6 +12,8 @@
  *    until the application commits a Full, with a bounded recovery window;
  *  - bounds queued expanded text behind one active frame and closes on overload
  *    without dropping deltas or waiting for the active decode to settle;
+ *  - records natural transport death immediately, then gives already-received
+ *    healthy frames at most five seconds to drain before closing consumers;
  *  - never interprets, diffs or patches state. Rust owns reconstruction.
  *
  * Ownership: the wrapper owns the prepared decoder session lease and releases
@@ -289,6 +291,13 @@ export const STATE_CODEC_PREPARATION_TIMEOUT_MS = 5_000;
  * `openPhaseSocket` passes its handshake timeout instead (also 5 s by default).
  */
 export const STATE_CODEC_SOCKET_TIMEOUT_MS = 5_000;
+/**
+ * Natural transport death permits one bounded, ordered drain of frames already
+ * received. Independent of decoder RPC/recovery timeouts: a hung decode or a
+ * missing consumer must release its lease and notify close within 5 s of
+ * event-loop time, rather than waiting for the decoder's watchdog.
+ */
+const STATE_CODEC_NATURAL_CLOSE_DRAIN_TIMEOUT_MS = 5_000;
 
 export type StateCodecSessionProvider = () => Promise<StateCodecSession | null>;
 
@@ -423,6 +432,9 @@ export class StateCodecSocket implements PhaseSocketTransport {
   private queuedTextBytes = 0;
   private state: ConnectionState = "awaitingConfirmation";
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** First terminal cause, latched before the ordered close can run. */
+  private naturalClose: CloseEvent | null = null;
+  private naturalCloseTimer: ReturnType<typeof setTimeout> | null = null;
   private sessionReleased = false;
   private readonly consumerWaiters: (() => void)[] = [];
   private pendingClose: Extract<Outbound, { kind: "close" }> | null = null;
@@ -441,13 +453,16 @@ export class StateCodecSocket implements PhaseSocketTransport {
     // An error is ordered behind every frame this wrapper has already received
     // and ahead of the natural close that follows it. It is only a
     // notification: it never fails, degrades or closes the codec attachment.
-    inner.onerror = (event) => this.enqueue(() => this.deliverError(event));
+    inner.onerror = (event) => {
+      if (this.naturalClose !== null) return;
+      this.enqueue(() => this.deliverError(event));
+    };
     inner.onmessage = (event) => this.enqueueMessage(event.data as string);
-    inner.onclose = (event) => this.enqueue(() => this.handleNaturalClose(event));
+    inner.onclose = (event) => this.recordNaturalClose(event);
   }
 
   get readyState(): number {
-    return this.closed ? WebSocket.CLOSED : this.options.inner.readyState;
+    return this.closed || this.naturalClose !== null ? WebSocket.CLOSED : this.options.inner.readyState;
   }
 
   /**
@@ -478,17 +493,17 @@ export class StateCodecSocket implements PhaseSocketTransport {
   }
 
   send(data: string): void {
-    if (this.state === "closed") return;
+    if (this.closed || this.naturalClose !== null) return;
     this.options.inner.send(data);
     this.options.onFrameSent?.();
   }
 
   close(): void {
-    // Local close is terminal even during an outstanding decode: the state is
-    // invalidated and the lease released here. The notification is posted on a
-    // microtask, as native and gzip sockets deliver close asynchronously, so a
-    // caller that closes and then settles its own state (dispose, a failed
-    // setup send) still observes its own reason before the close handler runs.
+    // A local-first close invalidates and releases even during an outstanding
+    // decode. Its notification is posted on a microtask, as native and gzip
+    // sockets close asynchronously, so dispose/setup failure can settle their
+    // own reason first. If network death arrived earlier, finish that original
+    // natural close instead of replacing its cause or closing the inner twice.
     // One close notification is retained for a consumer that has not attached
     // yet; the later native close cannot notify again.
     this.terminate("deferred");
@@ -535,7 +550,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
   // ── Receive pipeline ───────────────────────────────────────────────
 
   private enqueueMessage(text: string): void {
-    if (this.closed) return;
+    if (this.closed || this.naturalClose !== null) return;
     // GzipEnvelopeSocket can expand the next frame while decode is awaiting the
     // shared WASM runtime. Reserve synchronously at this expanded-text boundary,
     // before a closure retains the frame. Never drop a Delta and keep playing.
@@ -646,7 +661,11 @@ export class StateCodecSocket implements PhaseSocketTransport {
     const decoded = await this.decode(text);
     if (decoded === null || this.closed) return;
     if (decoded.kind === "resyncRequired") {
-      this.beginRecovery(text);
+      if (this.naturalClose !== null) {
+        this.handleNaturalClose(this.naturalClose);
+      } else {
+        this.beginRecovery(text);
+      }
       return;
     }
     if (this.state === "awaitingFull") {
@@ -703,6 +722,10 @@ export class StateCodecSocket implements PhaseSocketTransport {
     // Classified before any resync attempt, so a send failure cannot lose the
     // reason: before application bootstrap there is no state to restore.
     const bootstrapPending = this.bootstrap() === "pending";
+    if (this.closed || this.naturalClose !== null) {
+      this.terminate();
+      return;
+    }
     this.state = "awaitingFull";
     this.recoveryTimer = setTimeout(
       () => this.terminate("immediate", "recoveryTimeout"),
@@ -736,13 +759,15 @@ export class StateCodecSocket implements PhaseSocketTransport {
   }
 
   private finishRecoveryDecision(accepted: boolean): void {
-    if (this.state !== "awaitingFull") return;
+    if (this.state !== "awaitingFull" || this.naturalClose !== null) return;
     if (!accepted || this.bootstrap() !== "accepted") {
       // The application declined this Full or reset its bootstrap. There is no
       // committed recovery snapshot, and no codec evidence against the stream.
       this.terminate();
       return;
     }
+    // Bootstrap authority is an application callback; it can close the socket.
+    if (this.closed || this.naturalClose !== null) return;
     // The valid Full has been delivered; count the completed recovery. The
     // second one is still delivered, but it never publishes `ready`.
     this.completedRecoveries += 1;
@@ -756,7 +781,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
   }
 
   private sendResync(): boolean {
-    if (this.state === "closed") return false;
+    if (this.closed || this.naturalClose !== null) return false;
     try {
       this.send('{"type":"ResyncState"}');
       return true;
@@ -765,16 +790,33 @@ export class StateCodecSocket implements PhaseSocketTransport {
     }
   }
 
+  /**
+   * The transport has died, even if delivery is still awaiting a decoder or a
+   * consumer. Reserve its terminal cause now; only healthy already-received
+   * frames may drain ahead of the original close, within one fixed allowance.
+   */
+  private recordNaturalClose(event: CloseEvent): void {
+    if (this.closed || this.naturalClose !== null) return;
+    this.naturalClose = event;
+    this.clearRecoveryTimer();
+    this.naturalCloseTimer = setTimeout(
+      () => this.handleNaturalClose(event),
+      STATE_CODEC_NATURAL_CLOSE_DRAIN_TIMEOUT_MS,
+    );
+    this.enqueue(() => this.handleNaturalClose(event));
+  }
+
   private handleNaturalClose(event: CloseEvent): void {
     if (this.state === "closed") return;
     this.state = "closed";
     this.clearReceiveQueue();
     this.clearRecoveryTimer();
+    this.clearNaturalCloseTimer();
     this.wakeConsumers();
     try {
       this.releaseSession();
     } finally {
-      // Natural close follows all previously received messages.
+      // Healthy frames drained first, or a rejected/stalled drain was ended.
       this.deliver({ kind: "close", event });
     }
   }
@@ -787,9 +829,10 @@ export class StateCodecSocket implements PhaseSocketTransport {
    * A codec failure (`failure` set, always an immediate close) additionally
    * publishes the typed `failed` notice once, after invalidation and before the
    * close notification. The first terminal path wins: a failure after a local,
-   * natural or earlier fatal close reports nothing. The notice is dispatched
-   * directly because `notifyRecovery` drops everything once closed; a throwing
-   * callback is isolated and never skips the close notification or inner close.
+   * natural or earlier fatal close reports nothing. A pending natural drain
+   * ends with its original close event instead. A new failure notice is
+   * dispatched directly because `notifyRecovery` drops everything once closed;
+   * a throwing callback cannot skip the close notification or inner close.
    */
   private terminate(
     notification: CloseNotification = "immediate",
@@ -797,9 +840,14 @@ export class StateCodecSocket implements PhaseSocketTransport {
     joinCredentials: StateCodecJoinCredentials | null = null,
   ): void {
     if (this.state === "closed") return;
+    if (this.naturalClose !== null) {
+      this.handleNaturalClose(this.naturalClose);
+      return;
+    }
     this.state = "closed";
     this.clearReceiveQueue();
     this.clearRecoveryTimer();
+    this.clearNaturalCloseTimer();
     this.wakeConsumers();
     try {
       this.releaseSession();
@@ -894,7 +942,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
   }
 
   private notifyRecovery(state: StateCodecRecoveryNotice): void {
-    if (this.state === "closed") return;
+    if (this.closed || this.naturalClose !== null) return;
     this.deliver({ kind: "recovery", state });
   }
 
@@ -921,7 +969,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
    * and never retained.
    */
   private credentialsOf(text: string): StateCodecJoinCredentials | null {
-    if (this.closed || this.bootstrap() !== "pending") return null;
+    if (this.closed || this.naturalClose !== null || this.bootstrap() !== "pending") return null;
     return readGameStartedFullCredentials(text);
   }
 
@@ -937,6 +985,13 @@ export class StateCodecSocket implements PhaseSocketTransport {
     if (this.recoveryTimer !== null) {
       clearTimeout(this.recoveryTimer);
       this.recoveryTimer = null;
+    }
+  }
+
+  private clearNaturalCloseTimer(): void {
+    if (this.naturalCloseTimer !== null) {
+      clearTimeout(this.naturalCloseTimer);
+      this.naturalCloseTimer = null;
     }
   }
 
