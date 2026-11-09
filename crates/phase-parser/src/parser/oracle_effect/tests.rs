@@ -51387,8 +51387,59 @@ fn parse_possessive_owner_shuffles_into_library() {
     );
 }
 
-// --- "The next spell" parser tests ---
+/// CR 406.3 + CR 108.3: Binding Negotiation (OTJ) prints "Otherwise, you may
+/// put a face-up exiled card they own into their graveyard." (verified against
+/// `data/mtgjson/AtomicCards.json`). The article-led generic type phrase
+/// "a face-up exiled card they own" must reach the typed exile-visibility
+/// modifier run, not collapse to a match-anything filter.
+#[test]
+fn binding_negotiation_face_up_exiled_card_phrase_carries_the_exile_filter() {
+    const PRINTED: &str = "Target opponent reveals their hand. You may choose a nonland card from it. If you do, they discard it. Otherwise, you may put a face-up exiled card they own into their graveyard.";
+    let parsed = parse_oracle_text(
+        PRINTED,
+        "Binding Negotiation",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let mut nodes = Vec::new();
+    collect_parsed_roots(&parsed, false, &mut nodes);
+    let target = nodes.iter().find_map(|def| match def.effect.as_ref() {
+        Effect::ChangeZone {
+            destination: Zone::Graveyard,
+            target,
+            ..
+        } => Some(target),
+        _ => None,
+    });
+    let Some(TargetFilter::Typed(filter)) = target else {
+        panic!("expected the face-up exiled card move, got {nodes:?}");
+    };
+    assert!(
+        filter.type_filters.contains(&TypeFilter::Card),
+        "{filter:?}"
+    );
+    assert!(
+        filter
+            .properties
+            .contains(&FilterProp::InZone { zone: Zone::Exile }),
+        "{filter:?}"
+    );
+    assert!(
+        filter.properties.contains(&FilterProp::Not {
+            prop: Box::new(FilterProp::FaceDown)
+        }),
+        "{filter:?}"
+    );
+    assert!(
+        filter.properties.contains(&FilterProp::Owned {
+            controller: ControllerRef::ScopedPlayer
+        }),
+        "{filter:?}"
+    );
+}
 
+// --- "The next spell" parser tests ---
 #[test]
 fn parse_next_creature_spell_cant_be_countered() {
     // Insist pattern

@@ -242,3 +242,170 @@ fn alabaster_dragon_death_shuffles_the_whole_merged_pile_once() {
     assert!(state.stack.is_empty());
     assert!(state.resolution_stack.is_empty());
 }
+
+// CR 400.7e + CR 730.3c: an activated "return this card from your graveyard"
+// names the object that activated it, not the departure that split a former
+// merged permanent. Its split sibling must stay in the graveyard.
+#[test]
+fn activated_graveyard_return_does_not_sweep_the_former_merge_sibling() {
+    use engine::game::merge::{merge_object_onto, MergeSide};
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::CastPaymentMode;
+    use engine::types::identifiers::ObjectId;
+    use engine::types::mana::{ManaType, ManaUnit};
+
+    const SKELETON: &str =
+        "{1}{B}: Return this card from your graveyard to the battlefield tapped.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let skeleton = scenario
+        .add_creature(P0, "Reassembling Skeleton", 1, 1)
+        .from_oracle_text(SKELETON)
+        .id();
+    let component = scenario.add_creature(P0, "Migratory Greathorn", 3, 4).id();
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.battlefield.retain(|&id| id != component);
+        let mut events = vec![];
+        merge_object_onto(state, component, skeleton, MergeSide::Top, &mut events);
+        engine::game::zones::move_to_zone(state, skeleton, Zone::Graveyard, &mut events);
+    }
+    assert_eq!(runner.state().objects[&skeleton].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&component].zone, Zone::Graveyard);
+    assert!(runner.state().objects[&component]
+        .split_from_merge_survivor
+        .is_some());
+
+    let index = runner.state().objects[&skeleton]
+        .abilities
+        .iter()
+        .position(|ability| ability.cost.is_some())
+        .expect("the graveyard source keeps its activated return");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: skeleton,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the graveyard self-return is activatable");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(runner.state().objects[&skeleton].zone, Zone::Battlefield);
+    assert!(runner.state().objects[&skeleton].tapped);
+    assert_eq!(
+        runner.state().objects[&component].zone,
+        Zone::Graveyard,
+        "a non-triggered self-return has no recorded departure to expand"
+    );
+}
+
+// CR 400.7e + CR 730.3c + CR 609.3: responding to the dies trigger by exiling the
+// survivor alone must not erase the sibling that is still the same public-zone
+// successor. The effect acts on the successor it can still find.
+#[test]
+fn alabaster_death_after_the_survivor_is_exiled_still_shuffles_the_sibling() {
+    use engine::game::merge::{merge_object_onto, MergeSide};
+    use engine::types::actions::GameAction;
+    use engine::types::identifiers::ObjectId;
+    use engine::types::mana::{ManaType, ManaUnit};
+
+    const CREMATE: &str = "Exile target card from a graveyard. Draw a card.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dragon = scenario
+        .add_creature(P0, "Alabaster Dragon", 4, 4)
+        .from_oracle_text_with_keywords(&["Flying"], ALABASTER_DRAGON)
+        .id();
+    let component = scenario.add_creature(P0, "Migratory Greathorn", 3, 4).id();
+    scenario.with_library_top(P0, &["Owner A", "Owner B", "Owner C"]);
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let cremate = scenario
+        .add_spell_to_hand_from_oracle(P0, "Cremate", true, CREMATE)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.battlefield.retain(|&id| id != component);
+        let mut events = vec![];
+        merge_object_onto(state, component, dragon, MergeSide::Top, &mut events);
+    }
+
+    // Destroy the merged permanent, then stop as soon as its dies trigger is the
+    // top of the stack so the response window is available.
+    use engine::types::game_state::StackEntryKind;
+    runner.cast(murder).target_object(dragon).commit();
+    let top_is_trigger = |runner: &engine::game::scenario::GameRunner| {
+        runner
+            .state()
+            .stack
+            .last()
+            .is_some_and(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
+    };
+    for _ in 0..16 {
+        if top_is_trigger(&runner) {
+            break;
+        }
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            runner
+                .act(GameAction::PassPriority)
+                .expect("resolve the removal");
+        } else {
+            break;
+        }
+    }
+    assert_eq!(
+        runner.state().objects[&dragon].zone,
+        Zone::Graveyard,
+        "reach guard: the removal put the merged permanent into the graveyard; {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        top_is_trigger(&runner),
+        "reach guard: the dies trigger is on the stack"
+    );
+
+    // Respond by exiling only the survivor.
+    runner.cast(cremate).target_object(dragon).commit();
+    for _ in 0..24 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            runner
+                .act(GameAction::PassPriority)
+                .expect("resolve the response and the trigger");
+        } else {
+            break;
+        }
+    }
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&dragon].zone,
+        Zone::Exile,
+        "Cremate moved the survivor out of the public zone it departed into"
+    );
+    assert_eq!(
+        state.objects[&component].zone,
+        Zone::Library,
+        "the still-findable successor receives the trigger's action"
+    );
+    assert!(state.players[P0.0 as usize].library.contains(&component));
+    assert!(!state.players[P0.0 as usize].library.contains(&dragon));
+}

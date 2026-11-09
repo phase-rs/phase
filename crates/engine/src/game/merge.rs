@@ -573,6 +573,21 @@ pub(crate) fn expand_returned_merge_components(
     resolved: Vec<ObjectId>,
     target_filter: &TargetFilter,
 ) -> Vec<ObjectId> {
+    if matches!(target_filter, TargetFilter::SelfRef) {
+        if recorded_departure(state, ability).is_none() {
+            return resolved;
+        }
+        // The survivor may itself have moved again (Cremate responding to a
+        // dies trigger); its recorded siblings remain the successors the effect
+        // can still find (CR 400.7e + CR 609.3).
+        let mut expanded = resolved.clone();
+        for id in selfref_departure_components(state, ability) {
+            if !expanded.contains(&id) {
+                expanded.push(id);
+            }
+        }
+        return expanded;
+    }
     if !expansion_records_departure(state, ability, target_filter) {
         return resolved;
     }
@@ -582,6 +597,41 @@ pub(crate) fn expand_returned_merge_components(
         expanded.extend(components);
     }
     expanded
+}
+
+/// CR 730.3c + CR 400.7e + CR 603.7c: Whether this effect references the object
+/// a merged permanent became when it LEFT the battlefield, rather than an object
+/// it merely chose. The filter kind alone cannot answer this: a fresh
+/// `ParentTarget` selection and a flicker continuation carry the same announced
+/// occurrence. Departure provenance is a separate recorded fact:
+///
+/// * `ParentTarget`/`ParentTargetSlot` are departure continuations only when the
+///   referent was pinned by an event/delayed binding (`target_incarnations`) or
+///   by an immediate producer that moved objects (`forwarded_result_context`).
+///   A fresh choice has only positional announcement pins.
+/// * `TrackedSet`/`TrackedSetFiltered` and `ExiledBySource` are formed by an
+///   earlier move in the chain, and `TriggeringSource` is an event referent;
+///   those already record a departure.
+///
+/// `SelfRef` is answered separately by [`recorded_departure`], which requires
+/// the trigger's own departure event rather than mere incarnation currency.
+pub(crate) fn expansion_records_departure(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> bool {
+    match target_filter {
+        TargetFilter::SelfRef => false,
+        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => {
+            !ability.target_incarnations.is_empty()
+                || ability.context.forwarded_result_context.is_some()
+        }
+        TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource => true,
+        TargetFilter::TriggeringSource => state.current_trigger_event.is_some(),
+        _ => false,
+    }
 }
 
 /// CR 730.3c: The component cards that the merged permanent identified by
@@ -633,39 +683,67 @@ fn leave_successor(survivor: &GameObject) -> ObjectIncarnationRef {
     ObjectIncarnationRef::of(survivor.id, survivor.incarnation + 1)
 }
 
-/// CR 730.3c + CR 400.7e + CR 603.7c: Whether this effect references the object
-/// a merged permanent became when it LEFT the battlefield, rather than an object
-/// it merely chose. The filter kind alone cannot answer this: a fresh
-/// `ParentTarget` selection and a flicker continuation carry the same announced
-/// occurrence. Departure provenance is a separate recorded fact:
-///
-/// * `SelfRef` names its own source only while the ability's trigger context
-///   proves the source is that departure's public-zone successor (CR 400.7e) —
-///   Alabaster Dragon's dies trigger, not an activated return.
-/// * `ParentTarget`/`ParentTargetSlot` are departure continuations only when the
-///   referent was pinned by an event/delayed binding (`target_incarnations`) or
-///   by an immediate producer that moved objects (`forwarded_result_context`).
-///   A fresh choice has only positional announcement pins.
-/// * `TrackedSet`/`TrackedSetFiltered` and `ExiledBySource` are formed by an
-///   earlier move in the chain, and `TriggeringSource` is an event referent;
-///   those already record a departure.
-pub(crate) fn expansion_records_departure(
+/// CR 400.7e + CR 730.3c: The self-ref departure this ability's trigger event
+/// recorded: the zone the source moved to and the incarnation its split
+/// components were pinned to.
+struct RecordedDeparture {
+    zone: Zone,
+    successor: ObjectIncarnationRef,
+}
+
+fn recorded_departure(state: &GameState, ability: &ResolvedAbility) -> Option<RecordedDeparture> {
+    let source = ability.trigger_source.as_ref()?;
+    let expected = source.identity.reference;
+    let GameEvent::ZoneChanged {
+        object_id,
+        from,
+        to,
+        record,
+        ..
+    } = state.current_trigger_event.as_ref()?
+    else {
+        return None;
+    };
+    if *object_id != ability.source_id || *from != Some(Zone::Battlefield) || !to.is_public() {
+        return None;
+    }
+    let recorded = state
+        .zone_changes_this_turn
+        .get(record.turn_zone_change_index)?;
+    if recorded
+        .trigger_source_context()
+        .is_none_or(|event_source| event_source.identity.reference != expected)
+    {
+        return None;
+    }
+    Some(RecordedDeparture {
+        zone: *to,
+        successor: ObjectIncarnationRef::of(expected.object_id, expected.incarnation + 1),
+    })
+}
+
+/// CR 730.3c: the component cards of the merged permanent that just left the
+/// battlefield, independent of the survivor still being findable. The recorded
+/// pin is a value, so a survivor that moved again (Cremate responding to the
+/// dies trigger) does not hide its sibling; the effect still does as much as
+/// possible (CR 609.3).
+pub(crate) fn selfref_departure_components(
     state: &GameState,
     ability: &ResolvedAbility,
-    target_filter: &TargetFilter,
-) -> bool {
-    match target_filter {
-        TargetFilter::SelfRef => ability.self_ref_is_current(state),
-        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => {
-            !ability.target_incarnations.is_empty()
-                || ability.context.forwarded_result_context.is_some()
-        }
-        TargetFilter::TrackedSet { .. }
-        | TargetFilter::TrackedSetFiltered { .. }
-        | TargetFilter::ExiledBySource => true,
-        TargetFilter::TriggeringSource => state.current_trigger_event.is_some(),
-        _ => false,
-    }
+) -> Vec<ObjectId> {
+    let Some(departure) = recorded_departure(state, ability) else {
+        return Vec::new();
+    };
+    let mut components: Vec<ObjectId> = state
+        .objects
+        .iter()
+        .filter(|(_, obj)| {
+            obj.zone == departure.zone && obj.split_from_merge_survivor == Some(departure.successor)
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    components.sort_by_key(|id| id.0);
+    components
 }
 
 /// CR 730.3 + CR 712.21: Put a non-surviving merge component into `dest` as a

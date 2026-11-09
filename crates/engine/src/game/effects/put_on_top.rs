@@ -122,10 +122,15 @@ pub fn resolve(
     // `resolved_targets` already returns EMPTY for a stale non-triggered
     // `SelfRef` (`ResolvedAbility::self_ref_is_current`); the `[source]` shape is
     // the triggered and `None`/`ParentTarget` fallbacks.
+    // CR 730.3c + CR 609.3: a stale survivor does not suppress the departure's
+    // surviving components; only a departure with nothing left to act on is a
+    // no-op.
+    let departure_components = crate::game::merge::selfref_departure_components(state, ability);
     if resolves_to_source
         && (effective_targets.is_empty()
             || effective_targets == [crate::types::ability::TargetRef::Object(ability.source_id)])
         && !source_is_current
+        && departure_components.is_empty()
     {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::PutAtLibraryPosition,

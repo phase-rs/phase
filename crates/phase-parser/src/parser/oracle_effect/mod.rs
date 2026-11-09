@@ -16253,15 +16253,22 @@ fn try_parse_owner_of_target_shuffle(
     // Cerulean Sphinx) moves the source ITSELF. CR 115.10a: being affected by
     // the ability does not make the object a target, so the clause declares no
     // slot and source-bound placement (`SelfRef`) precedes one owner shuffle,
-    // never a selected-population `ChangeZoneAll`. This is a
-    // text-anchored whole-clause recognizer, matching the "its owner" form it
-    // sits beside: the possessor is typed on the printed subject, not derived
-    // from a target declaration.
-    let subject_owner_lower = subject_text.to_ascii_lowercase();
-    if all_consuming(tag::<_, _, OracleError<'_>>("~'s owner"))
-        .parse(subject_owner_lower.as_str())
-        .is_ok()
-    {
+    // never a selected-population `ChangeZoneAll`.
+    //
+    // The owner-subject shape is classified by the shared typed subject
+    // authority (`subject::parse_subject_application`), which models "~'s
+    // owner" as `affected == TargetFilter::Owner` — the same entry point the
+    // selected-object owner route below uses. The recognizer stays
+    // whole-clause: it only accepts the owner actor with no object target of
+    // its own, then validates the predicate tail.
+    let mut subject_ctx = ctx.clone();
+    let is_source_owner = subject::parse_subject_application(subject_text, &mut subject_ctx)
+        .is_some_and(|app| {
+            app.affected == TargetFilter::Owner
+                && app.target.is_none()
+                && app.multi_target.is_none()
+        });
+    if is_source_owner {
         // CR 201.5: source-name references still name this particular object
         // even when an earlier instruction declared a different target.
         let (_, (_, _, _, draw_tail)) = all_consuming((
@@ -16304,6 +16311,7 @@ fn try_parse_owner_of_target_shuffle(
             });
         let shuffle = movement.sub_ability.as_deref_mut()?;
         append_to_deepest_sub_ability(shuffle, draw);
+        *ctx = subject_ctx;
         return Some(movement);
     }
     all_consuming((
@@ -16388,30 +16396,44 @@ fn parse_into_library_nth_from_top_or_bottom(i: &str) -> OracleResult<'_, Librar
 ///
 /// Returns `Some(target_filter)` if the pattern matches, `None` otherwise.
 fn extract_owner_of_target(tp: TextPair, ctx: &mut ParseContext) -> Option<TargetFilter> {
-    // CR 400.3: a possessive anaphor subject ("that creature's owner", "its
-    // owner") announces no new target; restore the pre-declaration binding.
-    // allow-noncombinator: possessive boundary scan; target parsing stays in parse_target_with_ctx.
-    if let Some(idx) = tp.find("'s owner ") {
-        let subject = &tp.original[..idx];
-        if !nom_primitives::scan_contains(&subject.to_ascii_lowercase(), "target ") {
-            let (filter, remainder) =
-                ctx.with_player_antecedents(|scoped| parse_target_with_ctx(subject, scoped));
-            if remainder.trim().is_empty() {
-                return Some(filter);
+    let predicate_start = subject::find_predicate_start(tp.original)?;
+    let subject_text = tp.original[..predicate_start].trim();
+
+    // The owner-subject role is classified by the shared typed subject
+    // authority. Its declared-owner shapes ("the owner of target X", "target
+    // X's owner") carry the announced object directly; a bare anaphoric owner
+    // ("its owner" / "their owner") announces none and stays fail-closed here,
+    // because the generic chain binder owns that shape.
+    let mut trial = ctx.clone();
+    if let Some(application) = subject::parse_subject_application(subject_text, &mut trial) {
+        if application.affected == TargetFilter::ParentTargetOwner
+            && application.multi_target.is_none()
+        {
+            if let Some(target) = application.target {
+                *ctx = trial;
+                return Some(target);
             }
         }
     }
-    let predicate_start = subject::find_predicate_start(tp.original)?;
-    let mut trial = ctx.clone();
-    let application =
-        subject::parse_subject_application(tp.original[..predicate_start].trim(), &mut trial)?;
-    if application.affected != TargetFilter::ParentTargetOwner || application.multi_target.is_some()
-    {
+
+    // CR 608.2c: a possessive-anaphor subject ("That creature's owner",
+    // "Enchanted creature's owner") declares no target of its own; the moved
+    // object is the printed noun phrase. Recover it through the shared
+    // type-phrase entry point so attached-host and parent-anaphor nouns keep
+    // their existing filters.
+    let idx = subject_text
+        .find("'s owner") // allow-noncombinator: possessive boundary scan on the already-tokenized subject; the noun is parsed by `parse_target_with_ctx`
+        .or_else(|| subject_text.find("\u{2019}s owner"))?; // allow-noncombinator: the same scan for the typographic apostrophe
+    let noun = subject_text[..idx].trim();
+    if nom_primitives::scan_contains(&noun.to_ascii_lowercase(), "target ") {
         return None;
     }
-    let target = application.target?;
-    *ctx = trial;
-    Some(target)
+    let (filter, remainder) =
+        ctx.with_player_antecedents(|scoped| parse_target_with_ctx(noun, scoped));
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+    Some(filter)
 }
 
 fn try_parse_exile_from_top_until(

@@ -1115,7 +1115,10 @@ pub fn resolve(
         // trigger, its immediate recorded event successor. When no such binding
         // remains (for example, a Warp delayed exile after a blink), the zone-scan
         // fallback must not rediscover a same-id return by raw equality.
-        if matches!(target_filter, TargetFilter::SelfRef) && !ability.self_ref_is_current(state) {
+        if matches!(target_filter, TargetFilter::SelfRef)
+            && !ability.self_ref_is_current(state)
+            && crate::game::merge::selfref_departure_components(state, ability).is_empty()
+        {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,

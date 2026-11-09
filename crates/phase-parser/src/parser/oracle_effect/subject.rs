@@ -4149,6 +4149,28 @@ fn parse_subject_application_for(
             player_anaphor: None,
         });
     }
+    // CR 108.3: "~'s owner" names the owner of the ability's SOURCE object
+    // (Cerulean Sphinx, Etrata, Fblthp), the owner-side sibling of "~'s
+    // controller" above. Distinct from the anaphoric "its owner" / "[the|that]
+    // <noun>'s owner", which resolve to the PARENT TARGET's owner
+    // (`TargetFilter::ParentTargetOwner`). Lowered to `TargetFilter::Owner`,
+    // whose resolver reads the owner of the object referenced by the source id
+    // — the same filter the source-owner shuffle/put recognizers emit. Modeling
+    // it here keeps the source-owner and selected-object-owner subject grammar
+    // on one typed authority instead of a text-tagged branch beside it.
+    if tag::<_, _, OracleError<'_>>("~'s owner")
+        .parse(lower.as_str())
+        .is_ok_and(|(rest, _)| rest.trim().is_empty())
+    {
+        return Some(SubjectApplication {
+            affected: TargetFilter::Owner,
+            target: None,
+            multi_target: None,
+            inherits_parent: false,
+            is_optional: false,
+            player_anaphor: None,
+        });
+    }
     // CR 608.2c + CR 608.2d: "its controller" / "their controller" as anaphoric
     // subject, optionally carrying a "may" modal ("its controller may search
     // their library" — Assassin's Trophy, Path to Exile, Oblation, etc.). When
@@ -12006,6 +12028,20 @@ mod tests {
             parse_subject_application("its owner", &mut ctx).expect("should recognize 'its owner'");
         assert_eq!(app.affected, TargetFilter::ParentTargetOwner);
         assert!(!app.is_optional, "no 'may' modal → not optional");
+    }
+
+    // CR 108.3: "~'s owner" is the SOURCE's owner, not the parent target's
+    // owner — the shared typed subject authority models it as
+    // `TargetFilter::Owner` so the source-owner shuffle recognizer no longer
+    // needs a text-tagged route beside it.
+    #[test]
+    fn parse_subject_source_owner_routes_to_source_owner_filter() {
+        let mut ctx = ParseContext::default();
+        let app = parse_subject_application("~'s owner", &mut ctx)
+            .expect("should recognize \"~'s owner\"");
+        assert_eq!(app.affected, TargetFilter::Owner);
+        assert_eq!(app.target, None);
+        assert!(!app.is_optional);
     }
 
     #[test]
