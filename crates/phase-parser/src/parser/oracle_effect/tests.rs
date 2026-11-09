@@ -96635,7 +96635,6 @@ fn source_owner_draw_binding_is_independent_of_an_earlier_target() {
     let ability = parse_effect_chain(
         "Exile target creature. ~'s owner shuffles him into their library and draws two cards.",
         AbilityKind::Spell,
-        &mut ParseContext::default(),
     );
     let mut nodes = Vec::new();
     collect_test_tree(&ability, false, &mut nodes);
