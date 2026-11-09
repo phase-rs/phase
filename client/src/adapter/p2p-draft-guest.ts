@@ -11,6 +11,11 @@
 
 import type { DraftPlayerView, SeatPublicView, SharedStackPileDecision } from "./draft-adapter";
 import {
+  admitDraft27GuestView,
+  type Draft27CompatibilityError,
+  Draft27IncompatibilityError,
+} from "./draft-compatibility";
+import {
   createDraftPeerSession,
   type DraftPeerSession,
 } from "../network/draftPeerSession";
@@ -86,7 +91,7 @@ export type DraftGuestEvent =
  */
 export type DraftGuestRecoveryFailure =
   | { kind: "retryable"; message: string }
-  | { kind: "incompatible"; message: string }
+  | { kind: "incompatible"; message: string; code?: Draft27CompatibilityError["code"] }
   | { kind: "invalid"; message: string };
 
 /** First contact is intentionally an exclusive choice, never token fallback. */
@@ -137,9 +142,38 @@ function reconnectFailureForRejection(
 
 interface DraftHandshake {
   session: DraftPeerSession;
+  route: GuestRecoveryRoute;
   resolve: () => void;
   reject: (reason: Error) => void;
   cleanup: () => void;
+}
+
+interface OwnedRetryWait {
+  timer: ReturnType<typeof setTimeout>;
+  resolve: () => void;
+  reject: (reason: Error) => void;
+  cleanup: () => void;
+  settled: boolean;
+}
+
+interface GuestRecoveryRoute {
+  generation: number;
+  state: "active" | "cancelled";
+  session: DraftPeerSession | null;
+  retryWait: OwnedRetryWait | null;
+}
+
+interface DraftDeckSubmissionWaiter {
+  acknowledgement: Promise<void>;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  activeAttempts: number;
+  mainDeck: string[];
+  commanders: string[];
+  callerAttempts: number;
+  acknowledged: boolean;
+  sessions: Set<DraftPeerSession>;
+  routes: Set<GuestRecoveryRoute>;
 }
 
 // ── P2PDraftGuest ──────────────────────────────────────────────────────
@@ -161,20 +195,10 @@ export class P2PDraftGuest {
   private currentView: DraftPlayerView | null = null;
   private handshake: DraftHandshake | null = null;
   private reconnecting = false;
-  private retryTimer: ReturnType<typeof setTimeout> | null = null;
-  private deckSubmissionWaiters = new Map<
-    string,
-    {
-      acknowledgement: Promise<void>;
-      resolve: () => void;
-      reject: (error: Error) => void;
-      activeAttempts: number;
-      mainDeck: string[];
-      commanders: string[];
-      callerAttempts: number;
-      acknowledged: boolean;
-    }
-  >();
+  /** One route owns both the admitted session and any reconnect continuation. */
+  private recoveryRoute: GuestRecoveryRoute | null = null;
+  private nextRecoveryGeneration = 0;
+  private deckSubmissionWaiters = new Map<string, DraftDeckSubmissionWaiter>();
   private landSuggestionWaiters = new Map<
     string,
     {
@@ -222,49 +246,77 @@ export class P2PDraftGuest {
   // ── Initialization ─────────────────────────────────────────────────
 
   async initialize(signal?: AbortSignal, reconnectAttemptLimit = Number.POSITIVE_INFINITY): Promise<void> {
+    const route = this.beginRecoveryRoute();
     // A new guest gets exactly one join attempt. Only a persisted capability
     // may use retry, and every retry waits for a complete host acknowledgement.
     if (this.connection.kind === "new") {
-      await this.handshakeOn(this.initialConn, signal, false);
+      await this.handshakeOn(this.initialConn, signal, false, route);
       return;
     }
 
     let conn = this.initialConn;
-    for (let attempt = 0; !this.terminated && attempt < reconnectAttemptLimit; attempt++) {
+    for (let attempt = 0; this.isCurrentRoute(route) && !this.terminated && attempt < reconnectAttemptLimit; attempt++) {
       try {
-        await this.handshakeOn(conn, signal, true);
+        await this.handshakeOn(conn, signal, true, route);
         return;
       } catch (err) {
-        if (this.terminated || signal?.aborted) throw asError(err);
+        if (!this.isCurrentRoute(route) || this.terminated || signal?.aborted) throw asError(err);
         if (attempt + 1 >= reconnectAttemptLimit) throw asError(err);
         this.emit({ type: "reconnecting", attempt: attempt + 1 });
-        await this.waitForRetry(attempt, signal);
-        if (this.terminated || signal?.aborted) throw abortError();
-        conn = await this.openReconnectConnection(signal);
+        await this.waitForRetry(route, attempt, signal);
+        if (!this.isCurrentRoute(route) || this.terminated || signal?.aborted) throw abortError();
+        conn = await this.openReconnectConnection(signal, route);
       }
     }
     throw abortError();
   }
 
-  private attachSession(conn: TransportConnection): DraftPeerSession {
+  private beginRecoveryRoute(): GuestRecoveryRoute {
+    const previous = this.recoveryRoute;
+    if (previous) this.cancelRecoveryRoute(previous, abortError());
+    const route: GuestRecoveryRoute = {
+      generation: this.nextRecoveryGeneration++,
+      state: "active",
+      session: null,
+      retryWait: null,
+    };
+    this.recoveryRoute = route;
+    return route;
+  }
+
+  private isCurrentRoute(route: GuestRecoveryRoute): boolean {
+    return this.recoveryRoute === route && route.state === "active";
+  }
+
+  private attachSession(conn: TransportConnection, route: GuestRecoveryRoute): DraftPeerSession {
     const session = createDraftPeerSession(conn, {
       onSessionEnd: () => {
-        this.handleSessionEnd(session);
+        this.handleSessionEnd(session, route);
       },
     });
     this.session = session;
+    route.session = session;
     session.onMessage((msg) => {
       // A timed-out or superseded connection must never promote a later
       // reconnect attempt with its delayed acknowledgement.
-      if (this.session === session) return this.handleHostMessage(msg, session);
+      if (this.session === session && this.isCurrentRoute(route) && route.session === session) {
+        return this.handleHostMessage(msg, session);
+      }
     });
     return session;
   }
 
-  private async handshakeOn(conn: TransportConnection, signal?: AbortSignal, reconnect = true): Promise<void> {
+  private async handshakeOn(
+    conn: TransportConnection,
+    signal?: AbortSignal,
+    reconnect = true,
+    route: GuestRecoveryRoute = this.recoveryRoute ?? this.beginRecoveryRoute(),
+  ): Promise<void> {
     if (signal?.aborted) throw abortError();
+    if (!this.isCurrentRoute(route)) throw abortError();
     if (this.session) this.retireSession(this.session);
-    const session = this.attachSession(conn);
+    if (!this.isCurrentRoute(route)) throw abortError();
+    const session = this.attachSession(conn, route);
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.rejectHandshake(session, new Error("Draft host did not acknowledge connection"));
@@ -273,6 +325,7 @@ export class P2PDraftGuest {
       signal?.addEventListener("abort", onAbort, { once: true });
       this.handshake = {
         session,
+        route,
         resolve,
         reject,
         cleanup: () => {
@@ -303,31 +356,38 @@ export class P2PDraftGuest {
 
   private resolveHandshake(session: DraftPeerSession): void {
     const handshake = this.handshake;
-    if (!handshake || handshake.session !== session) return;
+    if (
+      !handshake
+      || handshake.session !== session
+      || !this.isCurrentRoute(handshake.route)
+      || handshake.route.session !== session
+    ) return;
     this.handshake = null;
     handshake.cleanup();
     handshake.resolve();
   }
 
-  private rejectHandshake(session: DraftPeerSession, reason: Error): void {
+  private rejectHandshake(session: DraftPeerSession, reason: Error, retire = true): void {
     const handshake = this.handshake;
     if (!handshake || handshake.session !== session) return;
     this.handshake = null;
     handshake.cleanup();
-    this.retireSession(session);
+    if (retire) this.retireSession(session);
     handshake.reject(reason);
   }
 
   private retireSession(session: DraftPeerSession): void {
     if (this.session === session) this.session = null;
     this.failLandSuggestionWaiters("Draft connection retired", session);
+    if (this.recoveryRoute?.session === session) this.recoveryRoute.session = null;
     session.close("Draft reconnect attempt retired");
   }
 
-  private handleSessionEnd(session: DraftPeerSession): void {
-    if (this.session !== session) return;
+  private handleSessionEnd(session: DraftPeerSession, route: GuestRecoveryRoute): void {
+    if (this.session !== session || !this.isCurrentRoute(route) || route.session !== session) return;
     this.session = null;
     this.failLandSuggestionWaiters("Draft host disconnected", session);
+    route.session = null;
     if (this.handshake?.session === session) {
       this.rejectHandshake(session, new Error("Draft host disconnected before acknowledging"));
     } else {
@@ -335,7 +395,7 @@ export class P2PDraftGuest {
         this.leaveAcknowledgement.reject(new Error("Draft host disconnected before acknowledging leave"));
         this.leaveAcknowledgement = null;
       }
-      this.handleHostDisconnect();
+      this.handleHostDisconnect(route);
     }
   }
 
@@ -441,7 +501,9 @@ export class P2PDraftGuest {
     commanders: string[],
     origin: DeckSubmissionOrigin,
   ): Promise<void> {
-    if (!this.session) throw new Error("Not connected to draft host");
+    const session = this.session;
+    if (!session) throw new Error("Not connected to draft host");
+    const route = this.recoveryRoute;
     let waiter = this.deckSubmissionWaiters.get(submissionId);
     if (!waiter) {
       let resolve!: () => void;
@@ -453,15 +515,18 @@ export class P2PDraftGuest {
       waiter = {
         acknowledgement, resolve, reject, activeAttempts: 0,
         mainDeck, commanders, callerAttempts: 0, acknowledged: false,
+        sessions: new Set(), routes: new Set(),
       };
       this.deckSubmissionWaiters.set(submissionId, waiter);
     }
     waiter.activeAttempts += 1;
     if (origin === "caller") waiter.callerAttempts += 1;
+    waiter.sessions.add(session);
+    if (route) waiter.routes.add(route);
     try {
       // Observe the receipt even if the session closes while encoding the send.
       await Promise.all([
-        this.session.send({ type: "draft_submit_deck", submissionId, mainDeck, commanders }),
+        session.send({ type: "draft_submit_deck", submissionId, mainDeck, commanders }),
         waiter.acknowledgement,
       ]);
     } catch (error) {
@@ -473,17 +538,25 @@ export class P2PDraftGuest {
       if (origin === "caller") waiter.callerAttempts -= 1;
       // A failed replay must not remove the receipt route used by other attempts.
       waiter.activeAttempts -= 1;
+      waiter.sessions.delete(session);
+      if (route) waiter.routes.delete(route);
       if (waiter.activeAttempts === 0 && this.deckSubmissionWaiters.get(submissionId) === waiter) {
         this.deckSubmissionWaiters.delete(submissionId);
       }
     }
   }
 
-  private failDeckSubmissionWaiters(reason: string): void {
+  private failDeckSubmissionWaiters(
+    reason: Error,
+    session?: DraftPeerSession,
+    route?: GuestRecoveryRoute,
+  ): void {
     for (const waiter of this.deckSubmissionWaiters.values()) {
-      waiter.reject(new Error(reason));
+      if (!session || waiter.sessions.has(session) || (route !== undefined && waiter.routes.has(route))) {
+        waiter.reject(reason);
+      }
     }
-    this.deckSubmissionWaiters.clear();
+    if (!session) this.deckSubmissionWaiters.clear();
   }
 
   private failLandSuggestionWaiters(reason: string, session?: DraftPeerSession): void {
@@ -549,6 +622,52 @@ export class P2PDraftGuest {
 
   // ── Message handling ───────────────────────────────────────────────
 
+  /** Returns true when the raw draft27 view was rejected before any carrier effects. */
+  private rejectIncompatibleView(rawView: unknown, session: DraftPeerSession): boolean {
+    const admission = admitDraft27GuestView(rawView);
+    if (admission.ok) return false;
+    this.rejectIncompatibleDelivery(session, new Draft27IncompatibilityError(admission.error));
+    return true;
+  }
+
+  /**
+   * Compatibility refusal is route-local: it invalidates this session and its
+   * continuations before any rejected promise can resume a reconnect catch.
+   */
+  private rejectIncompatibleDelivery(session: DraftPeerSession, reason: Draft27IncompatibilityError): void {
+    const route = this.recoveryRoute;
+    if (
+      !route
+      || !this.isCurrentRoute(route)
+      || this.session !== session
+      || route.session !== session
+    ) return;
+
+    // Make the route non-current before settling anything that can resume an
+    // asynchronous continuation. A late frame from this session then cannot
+    // close or mutate a newer recovery route.
+    route.state = "cancelled";
+    this.recoveryRoute = null;
+    route.session = null;
+    this.session = null;
+    this.reconnecting = false;
+
+    if (route.retryWait) this.settleRetryWait(route, route.retryWait, { kind: "reject", reason });
+    this.rejectHandshake(session, reason, false);
+    this.failDeckSubmissionWaiters(reason, session, route);
+    if (this.leaveAcknowledgement?.session === session) {
+      const leave = this.leaveAcknowledgement;
+      this.leaveAcknowledgement = null;
+      leave.reject(reason);
+    }
+    this.retireSession(session);
+
+    // The typed recovery event is deliberately first; the ordinary error is
+    // the established bridge that settles an existing store pending pick.
+    this.emit({ type: "reconnectFailed", failure: { kind: "incompatible", message: reason.message, code: reason.code } });
+    this.emit({ type: "error", message: reason.message });
+  }
+
   private async handleHostMessage(msg: DraftP2PMessage, session: DraftPeerSession): Promise<void> {
     // Protocol version check on first-contact messages
     if (msg.type === "draft_welcome" || msg.type === "draft_reconnect_ack") {
@@ -567,6 +686,7 @@ export class P2PDraftGuest {
 
     switch (msg.type) {
       case "draft_welcome": {
+        if (this.rejectIncompatibleView(msg.view, session)) break;
         this.seatIndex = msg.seatIndex;
         this.draftToken = msg.draftToken;
         this.draftCode = msg.draftCode;
@@ -597,6 +717,7 @@ export class P2PDraftGuest {
       }
 
       case "draft_reconnect_ack": {
+        if (this.rejectIncompatibleView(msg.view, session)) break;
         this.seatIndex = msg.seatIndex;
         this.draftCode = msg.draftCode;
         this.currentView = msg.view;
@@ -647,18 +768,21 @@ export class P2PDraftGuest {
       }
 
       case "draft_state_update": {
+        if (this.rejectIncompatibleView(msg.view, session)) break;
         this.currentView = msg.view;
         this.emit({ type: "viewUpdated", view: msg.view });
         break;
       }
 
       case "draft_pick_ack": {
+        if (this.rejectIncompatibleView(msg.view, session)) break;
         this.currentView = msg.view;
         this.emit({ type: "pickAcknowledged", view: msg.view });
         break;
       }
 
       case "draft_deck_submit_ack": {
+        if (this.rejectIncompatibleView(msg.view, session)) break;
         this.currentView = msg.view;
         await clearDraftDeckSubmission(this.hostPeerId, msg.submissionId);
         const ackWaiter = this.deckSubmissionWaiters.get(msg.submissionId);
@@ -717,7 +841,7 @@ export class P2PDraftGuest {
         this.terminated = true;
         this.resolveLeaveAcknowledgement(session);
         await this.revokeRecovery();
-        this.failDeckSubmissionWaiters(msg.reason);
+        this.failDeckSubmissionWaiters(new Error(msg.reason));
         this.failLandSuggestionWaiters(msg.reason, session);
         this.emit({ type: "kicked", reason: msg.reason });
         break;
@@ -796,7 +920,7 @@ export class P2PDraftGuest {
         this.terminated = true;
         this.resolveLeaveAcknowledgement(session);
         await this.revokeRecovery();
-        this.failDeckSubmissionWaiters(msg.reason);
+        this.failDeckSubmissionWaiters(new Error(msg.reason));
         this.failLandSuggestionWaiters(msg.reason, session);
         this.emit({ type: "hostLeft", reason: msg.reason });
         break;
@@ -861,27 +985,39 @@ export class P2PDraftGuest {
 
   // ── Disconnect / Reconnect ─────────────────────────────────────────
 
-  private handleHostDisconnect(): void {
-    if (this.terminated || this.reconnecting || this.leaveAcknowledgement || !this.draftToken) return;
+  private handleHostDisconnect(route: GuestRecoveryRoute): void {
+    if (
+      !this.isCurrentRoute(route)
+      || this.terminated
+      || this.reconnecting
+      || this.leaveAcknowledgement
+      || !this.draftToken
+    ) return;
     this.reconnecting = true;
-    void this.attemptReconnect(0);
+    void this.attemptReconnect(route, 0);
   }
 
-  private async attemptReconnect(attemptIndex: number): Promise<void> {
-    if (this.terminated || !this.draftToken) return;
+  private async attemptReconnect(route: GuestRecoveryRoute, attemptIndex: number): Promise<void> {
+    if (!this.isCurrentRoute(route) || this.terminated || !this.draftToken) return;
 
     this.emit({ type: "reconnecting", attempt: attemptIndex + 1 });
-    await this.waitForRetry(attemptIndex);
-
-    if (this.terminated || !this.draftToken) return;
-
     try {
-      const conn = await this.openReconnectConnection();
-      await this.handshakeOn(conn, undefined, true);
+      await this.waitForRetry(route, attemptIndex);
+      if (!this.isCurrentRoute(route) || this.terminated || !this.draftToken) return;
+      const conn = await this.openReconnectConnection(undefined, route);
+      if (!this.isCurrentRoute(route) || this.terminated || !this.draftToken) {
+        try { conn.close(); } catch { /* best-effort */ }
+        return;
+      }
+      await this.handshakeOn(conn, undefined, true, route);
+      if (!this.isCurrentRoute(route)) return;
       this.reconnecting = false;
     } catch (err) {
+      // Incompatibility and route replacement invalidate before rejecting the
+      // handshake/wait, so neither can recursively schedule another dial.
+      if (!this.isCurrentRoute(route) || this.terminated || !this.draftToken) return;
       console.warn(`[P2PDraftGuest] reconnect attempt ${attemptIndex + 1} failed:`, err);
-      void this.attemptReconnect(attemptIndex + 1);
+      void this.attemptReconnect(route, attemptIndex + 1);
     }
   }
 
@@ -889,9 +1025,8 @@ export class P2PDraftGuest {
 
   dispose(): void {
     this.terminated = true;
-    if (this.retryTimer) clearTimeout(this.retryTimer);
-    this.retryTimer = null;
-    this.failDeckSubmissionWaiters("Draft connection disposed");
+    if (this.recoveryRoute) this.cancelRecoveryRoute(this.recoveryRoute, abortError());
+    this.failDeckSubmissionWaiters(new Error("Draft connection disposed"));
     this.failLandSuggestionWaiters("Draft connection disposed");
     if (this.handshake) this.rejectHandshake(this.handshake.session, abortError());
     if (this.session) {
@@ -976,6 +1111,11 @@ export class P2PDraftGuest {
     return this.draftToken;
   }
 
+  /** Whether no session can carry a leave to the host right now. */
+  get hasNoLeaveSession(): boolean {
+    return !this.session || !this.draftToken;
+  }
+
   /** Whether the host has durably revoked this guest's reconnect capability. */
   get isRecoveryRevoked(): boolean {
     return this.recoveryRevoked;
@@ -1002,29 +1142,72 @@ export class P2PDraftGuest {
     });
   }
 
-  private waitForRetry(attemptIndex: number, signal?: AbortSignal): Promise<void> {
+  private cancelRecoveryRoute(route: GuestRecoveryRoute, reason: Error): void {
+    if (route.state === "cancelled") return;
+    route.state = "cancelled";
+    if (this.recoveryRoute === route) this.recoveryRoute = null;
+    this.reconnecting = false;
+    const session = route.session;
+    route.session = null;
+    if (this.session === session) this.session = null;
+    if (route.retryWait) this.settleRetryWait(route, route.retryWait, { kind: "reject", reason });
+    if (this.handshake?.route === route) {
+      this.rejectHandshake(this.handshake.session, reason);
+    } else if (session) {
+      session.close("Draft recovery route cancelled");
+    }
+  }
+
+  private settleRetryWait(
+    route: GuestRecoveryRoute,
+    wait: OwnedRetryWait,
+    outcome: { kind: "resolve" } | { kind: "reject"; reason: Error },
+  ): void {
+    if (wait.settled) return;
+    wait.settled = true;
+    clearTimeout(wait.timer);
+    wait.cleanup();
+    if (route.retryWait === wait) route.retryWait = null;
+    if (outcome.kind === "resolve") wait.resolve();
+    else wait.reject(outcome.reason);
+  }
+
+  private waitForRetry(
+    route: GuestRecoveryRoute,
+    attemptIndex: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (!this.isCurrentRoute(route)) return Promise.reject(abortError());
+    if (signal?.aborted) return Promise.reject(abortError());
     const delay = attemptIndex < RECONNECT_BACKOFF_MS.length
       ? RECONNECT_BACKOFF_MS[attemptIndex]
       : RECONNECT_STEADY_STATE_MS;
     return new Promise((resolve, reject) => {
-      let timer: ReturnType<typeof setTimeout> | null = null;
+      const onTimer = () => this.settleRetryWait(route, wait, { kind: "resolve" });
       const onAbort = () => {
-        if (timer) clearTimeout(timer);
-        this.retryTimer = null;
-        reject(abortError());
+        this.settleRetryWait(route, wait, { kind: "reject", reason: abortError() });
       };
       signal?.addEventListener("abort", onAbort, { once: true });
-      timer = setTimeout(() => {
-        this.retryTimer = null;
-        signal?.removeEventListener("abort", onAbort);
-        resolve();
-      }, delay);
-      this.retryTimer = timer;
+      const wait: OwnedRetryWait = {
+        timer: setTimeout(onTimer, delay),
+        resolve,
+        reject,
+        cleanup: () => signal?.removeEventListener("abort", onAbort),
+        settled: false,
+      };
+      route.retryWait = wait;
+      if (!this.isCurrentRoute(route)) {
+        this.settleRetryWait(route, wait, { kind: "reject", reason: abortError() });
+      }
     });
   }
 
-  private openReconnectConnection(signal?: AbortSignal): Promise<TransportConnection> {
+  private openReconnectConnection(
+    signal?: AbortSignal,
+    route: GuestRecoveryRoute = this.recoveryRoute ?? this.beginRecoveryRoute(),
+  ): Promise<TransportConnection> {
     if (signal?.aborted) return Promise.reject(abortError());
+    if (!this.isCurrentRoute(route)) return Promise.reject(abortError());
     // Ordered delivery is not the default: without `reliable: true` PeerJS
     // builds this channel with `ordered: false`, which a TURN relay will
     // actually exercise.
@@ -1035,7 +1218,14 @@ export class P2PDraftGuest {
         RECONNECT_DIAL_TIMEOUT_MS,
       );
       const onAbort = () => finish(() => reject(abortError()));
-      const onOpen = () => finish(() => resolve(conn));
+      const onOpen = () => finish(() => {
+        if (!this.isCurrentRoute(route)) {
+          try { conn.close(); } catch { /* best-effort */ }
+          reject(abortError());
+          return;
+        }
+        resolve(conn);
+      });
       const onError = (err: Error) => finish(() => reject(err));
       const finish = (complete: () => void) => {
         clearTimeout(timeout);

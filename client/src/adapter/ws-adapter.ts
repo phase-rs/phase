@@ -23,6 +23,7 @@ import type {
   StateWithheldNotice,
   SubmitResult,
   FormatConfig,
+  DeckPrinting,
   TakebackEvent,
   TakebackResolution,
   WithheldFrame,
@@ -53,6 +54,8 @@ import type { WireFormat } from "../network/wireEnvelope";
 /** Deck data format matching server protocol. */
 export interface DeckData {
   bracket_tier?: CommanderBracketTier;
+  /** The owner's explicit printing choices; display-only. Omitted when empty. */
+  printings?: DeckPrinting[];
   main_deck: string[];
   sideboard: string[];
   commander?: string[];
@@ -1310,6 +1313,18 @@ export const MIN_LOBBY_PROTOCOL_FOR_DANDAN = 16;
 
 /**
  * Lowest broker `LOBBY_PROTOCOL_VERSION` whose `GameFormat` deserializer knows
+ * `Horde`; below it a lobby frame naming it is rejected as malformed.
+ *
+ * Frozen at 17 and written as a bare literal, never derived from
+ * LOBBY_PROTOCOL_VERSION, so a later bump cannot drag it forward. Until a
+ * v17 broker ships, Horde lobby frames are refused — old brokers would
+ * reject the unknown format. `scripts/check-protocol-version.mjs` refuses a
+ * derived right-hand side for it.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_HORDE = 17;
+
+/**
+ * Lowest broker `LOBBY_PROTOCOL_VERSION` whose `GameFormat` deserializer knows
  * `TwoHeadedGiantCommander`; below it a lobby frame naming it is rejected as
  * malformed.
  *
@@ -1360,6 +1375,8 @@ export function lobbyProtocolRequiredForFormat(format: GameFormat): number | nul
       return MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS;
     case "Dandan":
       return MIN_LOBBY_PROTOCOL_FOR_DANDAN;
+    case "Horde":
+      return MIN_LOBBY_PROTOCOL_FOR_HORDE;
     case "TwoHeadedGiantCommander":
       return MIN_LOBBY_PROTOCOL_FOR_TWO_HEADED_GIANT_COMMANDER;
     case "ArchenemyCommander":

@@ -1,0 +1,8 @@
+{
+  "surfaces": [
+    "full",
+    "lobby",
+    "wire"
+  ],
+  "reason": "Owner printings: DeckData and PlayerDeckList gain an optional name-keyed printings sidecar (lobby CreateGameWithSettings/JoinGameWithPassword embed DeckData; an older P2P host drops a newer guest's sidecar on guest_deck), and the server-hosted draft's DraftAction::SubmitDeck gains the same optional sidecar (an older server drops it). GameState gains display-only printing on GameObject (printing/base_printing), LKISnapshot, StackEntryDisplay, LibrarySearchCardView, EmblemSource and the debug library row DebugLibraryCardView (CR 203.1/206.1); an older server or peer silently drops them, so the owner's chosen printing is lost while the viewer's toggle says it is shown (silent capability loss; defaults alone do not establish compatibility). The same release adds DerivedViews.waiting_for_identity, DerivedViews.state_revision and a persisted comparison list on the casting reversal, all optional with legacy fallbacks."
+}
