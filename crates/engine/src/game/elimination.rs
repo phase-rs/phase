@@ -279,6 +279,27 @@ pub(crate) fn eliminate_players(
         )
     });
 
+    // CR 800.4a + CR 608.2c: retain the exact family whose current member is
+    // parked. If that member leaves, only this surviving family may resume
+    // after the departure sweep; a new child or unrelated frame is not ours.
+    let interrupted_change_zone = state
+        .active_change_zone_frame()
+        .and_then(|frame| frame.pending.as_ref())
+        .filter(|pending| {
+            pending.paused_current.as_ref().is_some_and(|paused| {
+                state
+                    .pending_replacement
+                    .as_ref()
+                    .is_some_and(|replacement| replacement.parks_delivery(&paused.expected_event))
+            })
+        })
+        .map(|pending| {
+            (
+                pending.logical_zone_change_group.logical_group_id,
+                pending.controller,
+            )
+        });
+
     let interrupted_ordinary_search = state
         .pending_scoped_library_search
         .is_none()
@@ -672,6 +693,41 @@ pub(crate) fn eliminate_players(
                 let next = players::next_player(state, waiting_pid);
                 state.waiting_for = WaitingFor::Priority { player: next };
             }
+        }
+
+        // CR 800.4a + CR 608.2c: removing a paused member is not abandonment
+        // of its surviving family. Resume through the ordinary resolution
+        // boundary before exposing priority, but only after this exact pause
+        // was canceled and every departure/control-effect sweep has settled.
+        let resume_canceled_change_zone =
+            interrupted_change_zone.is_some_and(|(group, controller)| {
+                players::is_alive(state, controller)
+                    && state
+                        .active_change_zone_frame()
+                        .and_then(|frame| frame.pending.as_ref())
+                        .is_some_and(|pending| {
+                            pending.logical_zone_change_group.logical_group_id == group
+                                && pending.controller == controller
+                                && pending.paused_current.is_none()
+                        })
+            }) && state.pending_replacement.is_none()
+                && matches!(state.waiting_for, WaitingFor::Priority { .. });
+        if resume_canceled_change_zone {
+            // A concession has no post-action event scan. Keep its departure
+            // events outside the resumed instruction's observer-collection span.
+            let mut resumed = Vec::new();
+            super::engine::resume_pending_continuation_if_priority(state, &mut resumed)
+                .expect("a surviving canceled ChangeZone pause resumes at its ordinary boundary");
+            if departure_triggers == DepartureTriggers::CollectedByDeparture {
+                super::triggers::collect_unclaimed_triggers_into_deferred(
+                    state,
+                    &mut resumed,
+                    0,
+                    None,
+                );
+            }
+            events.extend(resumed);
+            drain_or_clear_deferred_triggers_after_elimination(state, departure_triggers, events);
         }
 
         // CR 800.4a + CR 608.2m + CR 608.2n: a paused spell the departure sweeps
@@ -2030,9 +2086,24 @@ fn abandon_change_zone_family_for_controller(
         return;
     }
 
+    // CR 800.4a: the family's out-of-band replacement pause retires with
+    // its controller, even when a surviving player was answering it. Match
+    // the exact delivery boundary so no unrelated/new child pause is cleared.
+    let owns_replacement = pending.paused_current.as_ref().is_some_and(|paused| {
+        state
+            .pending_replacement
+            .as_ref()
+            .is_some_and(|replacement| replacement.parks_delivery(&paused.expected_event))
+    });
+
     let _ = state
         .take_active_change_zone_frame()
         .expect("elimination cannot consume a buried ChangeZone frame");
+    if owns_replacement {
+        state.pending_replacement = None;
+        state.replacement_may_cost_paused = false;
+        super::replacement::abandon_post_replacement_continuation(state);
+    }
     finish_abandoned_source_bound_resolution_carrier(state, leaving_set, events);
     state.waiting_for = WaitingFor::Priority {
         player: players::next_player(state, player),

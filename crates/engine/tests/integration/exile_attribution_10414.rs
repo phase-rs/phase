@@ -115,6 +115,8 @@ const RONA_TOLARIAN_OBLITERATOR: &str = "Trample\nWhenever a source deals damage
 /// Lightning Bolt `{R}` Instant — verbatim Oracle text.
 const LIGHTNING_BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
 
+const AJANIS_PRIDEMATE: &str = "Whenever you gain life, put a +1/+1 counter on this creature.";
+
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
@@ -231,6 +233,16 @@ fn assert_resolution_finished(runner: &GameRunner) {
         .state()
         .pending_zone_change_delivery_from_replacement()
         .is_none());
+}
+
+fn assert_pridemate_counters(runner: &GameRunner, expected: u32) {
+    let observer = runner
+        .state()
+        .objects
+        .values()
+        .find(|object| object.name == "Ajani's Pridemate")
+        .expect("the surviving printed life-gain observer exists");
+    assert_eq!(observer.counters.values().copied().sum::<u32>(), expected);
 }
 
 fn activated_index(runner: &GameRunner, source: ObjectId) -> usize {
@@ -769,6 +781,12 @@ fn mudhole_replacement_fixture(
 
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
+    if continuation_witness {
+        assert_parses_clean("Ajani's Pridemate", &[], &["Creature"], AJANIS_PRIDEMATE);
+        scenario
+            .add_creature(P2, "Ajani's Pridemate", 2, 2)
+            .from_oracle_text(AJANIS_PRIDEMATE);
+    }
     let land_a = scenario
         .add_land_to_graveyard(P1, "Graveyard Forest A")
         .id();
@@ -925,12 +943,14 @@ fn mudhole_typed_continuation_completes_after_replacement_pauses() {
             .act(GameAction::ChooseReplacement { index: 1 })
             .expect("decline the optional replacement");
     }
+    drive_to_priority(&mut runner);
     assert_resolution_finished(&runner);
     assert_eq!(
         runner.life(P2),
         23,
         "the typed continuation runs exactly once"
     );
+    assert_pridemate_counters(&runner, 1);
     for land in lands {
         assert_eq!(zone(&runner, land), Zone::Exile);
         assert_eq!(exiled_by(&runner, land), Some(P1));
@@ -988,6 +1008,9 @@ fn mudhole_subject_departure_preserves_the_surviving_family_continuation() {
         23,
         "P1's departure must not discard P0's surviving continuation"
     );
+    // CR 603.2: the resumed life-gain event must reach its real printed observer.
+    drive_to_priority(&mut runner);
+    assert_pridemate_counters(&runner, 1);
     assert_resolution_finished(&runner);
     assert_eq!(zone(&runner, mudhole), Zone::Graveyard);
     for card in lands.into_iter().chain([relic]) {
@@ -1024,6 +1047,7 @@ fn mudhole_controller_departure_retires_the_family_continuation() {
     assert!(!runner.state().players[P2.0 as usize].is_eliminated);
     assert_eq!(runner.life(P2), 20, "the departed family's tail cannot run");
     assert_resolution_finished(&runner);
+    assert_pridemate_counters(&runner, 0);
     assert_eq!(
         zone(&runner, mudhole),
         Zone::Exile,
