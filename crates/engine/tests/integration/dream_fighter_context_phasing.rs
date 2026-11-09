@@ -261,6 +261,7 @@ fn mirror_match_fires_bare_becomes_blocked_only_for_the_first_copy() {
         .add_creature(P0, "Drelnoch", 3, 3)
         .from_oracle_text(DRELNOCH)
         .id();
+    let bystander = scenario.add_creature(P1, "Bystander", 2, 2).id();
     let mirrors: Vec<_> = (0..2)
         .map(|_| {
             scenario
@@ -334,6 +335,7 @@ fn mirror_match_fires_bare_becomes_blocked_only_for_the_first_copy() {
             outcome.final_waiting_for(),
             WaitingFor::Priority { .. }
         ));
+        assert!(outcome.state().objects[&bystander].is_phased_in());
     }
 }
 

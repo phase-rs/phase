@@ -597,6 +597,10 @@ mod tests {
         assert!(events.iter().any(|event| matches!(
             event,
             GameEvent::EffectResolved { kind: EffectKind::PhaseOut, source_id, .. }
+                if *source_id == source
+        )));
+    }
+
     // Existing AST consumer contract, not a verified printed slot-union producer.
     // Nearest printed examples are U.S.S. Defiant, Mirror Migrant ("it and up
     // to one target creature you control phase out") and Dream Fighter ("this
@@ -722,10 +726,6 @@ mod tests {
                 }) if *source_id == source
             ));
         }
-    }
-
-                if *source_id == source
-        )));
     }
 
     #[test]
