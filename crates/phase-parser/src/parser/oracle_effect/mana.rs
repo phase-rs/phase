@@ -1,3 +1,4 @@
+use crate::parser::oracle_effect::lower::WhereXBinding;
 use crate::parser::oracle_nom::error::{oracle_err, OracleError};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
@@ -220,6 +221,12 @@ pub(super) fn try_parse_add_mana_effect_with_context(
     let clause_lower = clause.to_lowercase();
     let clause_tp = TextPair::new(clause, &clause_lower);
     let (without_where_x, where_x_expression) = super::strip_trailing_where_x(clause_tp);
+    // CR 608.2c: captured beside the where-X text it will be read under, so a
+    // controller anaphor in the count ("where X is the number of Islands they
+    // control") binds to the player the chain declared rather than falling to
+    // `oracle_target`'s legacy `You` seed. Empty when nothing is in scope, which
+    // `bind_controller_phrase` fails closed on — see `WhereXBinding`.
+    let mana_antecedents = ctx.player_antecedents();
     let clause = without_where_x.original.trim().trim_end_matches(['.', '"']);
     // CR 605.1a + CR 107.4a: Track whether the "an additional " prefix was present
     // so that `ChosenColor`/`AnyOneColor` variants record their contribution role
@@ -240,7 +247,10 @@ pub(super) fn try_parse_add_mana_effect_with_context(
     // `parse_mana_production_clause` so the where-X count is resolved here,
     // co-located with `apply_where_x_count_expression`.
     if let Some((count, color_options)) = parse_repeated_count_color_choice(clause) {
-        let (count, target) = apply_where_x_count_expression(count, where_x_expression.as_deref())?;
+        let (count, target) = apply_where_x_count_expression(
+            count,
+            WhereXBinding::new(where_x_expression.as_deref(), &mana_antecedents),
+        )?;
         return Some(Effect::Mana {
             produced: ManaProduction::AnyOneColor {
                 count,
@@ -319,8 +329,10 @@ pub(super) fn try_parse_add_mana_effect_with_context(
     }
 
     if let Some((count, rest)) = parse_mana_count_prefix(clause) {
-        let (count, where_x_target) =
-            apply_where_x_count_expression(count, where_x_expression.as_deref())?;
+        let (count, where_x_target) = apply_where_x_count_expression(
+            count,
+            WhereXBinding::new(where_x_expression.as_deref(), &mana_antecedents),
+        )?;
         let rest = rest.trim().trim_end_matches(['.', '"']).trim();
         let rest_lower = rest.to_lowercase();
 
@@ -685,8 +697,10 @@ pub(super) fn try_parse_add_mana_effect_with_context(
     let fallback_count = parse_mana_count_prefix(clause)
         .map(|(count, _)| count)
         .unwrap_or(QuantityExpr::Fixed { value: 1 });
-    let (fallback_count, fallback_target) =
-        apply_where_x_count_expression(fallback_count, where_x_expression.as_deref())?;
+    let (fallback_count, fallback_target) = apply_where_x_count_expression(
+        fallback_count,
+        WhereXBinding::new(where_x_expression.as_deref(), &mana_antecedents),
+    )?;
 
     // Scan for mana production type at word boundaries using nom combinators.
     let produced = scan_mana_production_type(&clause_lower, fallback_count.clone(), contribution)?;
@@ -1100,9 +1114,9 @@ pub(super) fn parse_mana_count_prefix(text: &str) -> Option<(QuantityExpr, &str)
 /// `apply_where_x_quantity_expression` for why such a node is dead at runtime.
 pub(super) fn apply_where_x_count_expression(
     count: QuantityExpr,
-    where_x_expression: Option<&str>,
+    where_x: WhereXBinding<'_>,
 ) -> Option<(QuantityExpr, Option<ManaTargetRole>)> {
-    match (&count, where_x_expression) {
+    match (&count, where_x.expression) {
         (
             QuantityExpr::Ref {
                 qty: QuantityRef::Variable { ref name },
@@ -1114,7 +1128,7 @@ pub(super) fn apply_where_x_count_expression(
             // `QuantityRef::Variable { name: "<oracle text>" }` is dead at runtime
             // (game/quantity.rs resolves a non-`X` variable name to 0), so the mana
             // clause produced ZERO mana while still reading as supported.
-            let count = super::parse_where_x_quantity_expression(expression)?;
+            let count = where_x.resolve_quantity(expression)?;
             Some((count, where_x_expression_target_filter(expression)))
         }
         _ => Some((count, None)),
@@ -2533,34 +2547,87 @@ fn parse_conditional_cant_be_countered_grant(lower: &str) -> Option<ManaSpellGra
     })
 }
 
+/// CR 106.6: The opening of an additional effect on the spell a mana unit is
+/// spent to cast. The active ("if you spend this mana to cast"), passive
+/// ("if this/that mana is spent to cast"), and "spent on" phrasings all name
+/// the same per-unit spend event.
+fn parse_if_mana_is_spent_to_cast(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), tag("if you spend this mana to cast ")),
+        value(
+            (),
+            (
+                tag("if "),
+                alt((tag("this"), tag("that"))),
+                tag(" mana is spent to cast "),
+            ),
+        ),
+        parse_if_that_mana_is_spent_on,
+    ))
+    .parse(input)
+}
+
 /// CR 106.6a + CR 614.1c: Parse mana whose spent-mana replacement effect has
-/// a counter-bearing battlefield entry result (Opal Palace class).
-fn parse_conditional_enters_with_counters_grant(lower: &str) -> Option<ManaSpellGrant> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("if you spend this mana to cast ")
-        .parse(lower)
-        .ok()?;
+/// a counter-bearing battlefield entry result:
+/// - "If you spend this mana to cast your commander, it enters with a number of
+///   additional +1/+1 counters on it equal to …" (Opal Palace)
+/// - "If this mana is spent to cast a creature spell, that creature enters with
+///   an additional +1/+1 counter on it." (Biophagus; Animal Attendant's
+///   "that mana … non-Human creature spell")
+/// - "If that mana is spent on a multicolored creature spell, that creature
+///   enters with an additional +1/+1 counter on it." (Guildmages' Forum)
+///
+/// This is also the single recognizer `swallow_check`'s sentence-scoped carrier
+/// helpers use to locate the rider's OWN clause (`mana_entry_counter_grant_*
+/// residual_sentences`), so recognition and lowering cannot disagree on which
+/// sentence produced the `EntersWithCounters` grant.
+pub(crate) fn parse_conditional_enters_with_counters_grant(lower: &str) -> Option<ManaSpellGrant> {
+    let (rest, ()) = parse_if_mana_is_spent_to_cast(lower).ok()?;
     let (rest, filter_text) = terminated(
-        take_until::<_, _, OracleError<'_>>(", it enters with a number of additional "),
-        tag(", it enters with a number of additional "),
+        take_until::<_, _, OracleError<'_>>(", "),
+        tag::<_, _, OracleError<'_>>(", "),
     )
     .parse(rest)
     .ok()?;
     let filter = parse_spend_trigger_filter(filter_text.trim())?;
-    let (rest, counter_type) = terminated(
-        nom_primitives::parse_counter_type_typed,
-        tag::<_, _, OracleError<'_>>(" counters on it equal to "),
-    )
+    // The entering permanent is the spell the mana was spent on, named either
+    // by pronoun ("it") or by its type ("that creature").
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("it enters with "),
+        tag("that creature enters with "),
+    ))
     .parse(rest)
     .ok()?;
-    let (_, count) = all_consuming(terminated(
-        value(
-            QuantityExpr::Ref {
-                qty: QuantityRef::CommanderCastFromCommandZoneCount,
-            },
-            tag::<_, _, OracleError<'_>>(
-                "the number of times it's been cast from the command zone this game",
+    let (_, (counter_type, count)) = all_consuming(terminated(
+        alt((
+            // "an additional +1/+1 counter on it" — exactly one extra counter.
+            map(
+                delimited(
+                    tag::<_, _, OracleError<'_>>("an additional "),
+                    nom_primitives::parse_counter_type_typed,
+                    tag(" counter on it"),
+                ),
+                |counter_type| (counter_type, QuantityExpr::Fixed { value: 1 }),
             ),
-        ),
+            // "a number of additional +1/+1 counters on it equal to the number of
+            // times it's been cast from the command zone this game" (Opal Palace).
+            map(
+                (
+                    tag("a number of additional "),
+                    nom_primitives::parse_counter_type_typed,
+                    tag(" counters on it equal to "),
+                    tag("the number of times it's been cast from the command zone this game"),
+                ),
+                |(_, counter_type, _, _)| {
+                    (
+                        counter_type,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::CommanderCastFromCommandZoneCount,
+                        },
+                    )
+                },
+            ),
+        )),
         opt(char('.')),
     ))
     .parse(rest)
@@ -2664,7 +2731,15 @@ pub fn parse_mana_spend_trigger(lower: &str) -> Option<ManaSpellGrant> {
         return None;
     }
     // Parse the reflexive effect (scry N, gain N life, draw a card, copy that spell…).
-    let ability = super::parse_effect_chain(effect_text, AbilityKind::Activated);
+    // CR 603.7 + CR 608.2k: a mana-spend trigger's body has no announced parent
+    // target; hand down the event-source binding so the bare "that spell"
+    // anaphor keeps it (Primal Wellspring, Pyromancer's Goggles).
+    // Standalone mode, matching this builder's pre-existing entry point.
+    let ability = super::lower_ability_ir(&super::parse_ability_ir_standalone_with_spell_anaphor(
+        effect_text,
+        AbilityKind::Activated,
+        super::SpellAnaphorBinding::EventSource,
+    ));
     // COVERAGE-HONESTY ALLOWLIST — what it is actually for (CR 608.2c):
     // `parse_effect_chain` parses some spell-referencing effects only PARTIALLY and
     // silently swallows the remainder. Jade Orb of Dragonkind's "it enters with an
@@ -4108,6 +4183,68 @@ mod tests {
                 },
             }] if properties == &[FilterProp::IsCommander]
         ));
+    }
+
+    /// CR 106.6a + CR 614.1c: "that creature enters with an additional +1/+1
+    /// counter on it" riders across the three spend phrasings: Biophagus
+    /// ("this mana is spent to cast"), Animal Attendant ("that mana is spent to
+    /// cast"), and Guildmages' Forum ("that mana is spent on").
+    #[test]
+    fn parses_additional_counter_mana_entry_grants() {
+        let single_counter = |grants: Option<Vec<ManaSpellGrant>>| -> TargetFilter {
+            match grants.as_deref() {
+                Some(
+                    [ManaSpellGrant::EntersWithCounters {
+                        filter,
+                        counter_type: CounterType::Plus1Plus1,
+                        count: QuantityExpr::Fixed { value: 1 },
+                    }],
+                ) => filter.clone(),
+                other => panic!("expected a single +1/+1 entry-counter grant, got {other:?}"),
+            }
+        };
+
+        let biophagus = single_counter(parse_mana_spell_grant(
+            "if this mana is spent to cast a creature spell, that creature enters with an additional +1/+1 counter on it.",
+        ));
+        assert_eq!(
+            biophagus,
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))
+        );
+
+        let animal_attendant = single_counter(parse_mana_spell_grant(
+            "if that mana is spent to cast a non-human creature spell, that creature enters with an additional +1/+1 counter on it.",
+        ));
+        let TargetFilter::Typed(typed) = &animal_attendant else {
+            panic!("Animal Attendant filter must be typed, got {animal_attendant:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert_ne!(
+            animal_attendant, biophagus,
+            "the non-Human qualifier must narrow the filter"
+        );
+
+        let guildmages_forum = single_counter(parse_mana_spell_grant(
+            "if that mana is spent on a multicolored creature spell, that creature enters with an additional +1/+1 counter on it.",
+        ));
+        assert_ne!(
+            guildmages_forum, biophagus,
+            "the multicolored qualifier must narrow the filter"
+        );
+
+        // Unconsumed tails and unprinted openings stay unparsed.
+        assert_eq!(
+            parse_mana_spell_grant(
+                "if this mana is spent to cast a creature spell, that creature enters with an additional +1/+1 counter on it and gains haste.",
+            ),
+            None
+        );
+        assert_eq!(
+            parse_mana_spell_grant(
+                "if this mana is spent on a creature spell, that creature enters with an additional +1/+1 counter on it.",
+            ),
+            None
+        );
     }
 
     /// CR 106.6 + CR 702.10a: Hall of the Bandit Lord — any creature spell,
