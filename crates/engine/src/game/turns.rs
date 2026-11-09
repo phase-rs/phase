@@ -4367,8 +4367,8 @@ mod tests {
     use crate::types::card_type::{CardType, CoreType, Supertype};
     use crate::types::game_state::{
         CastOccurrence, DelayedTrigger, PendingContinuation, PendingResolutionCompletion,
-        PersistentAxisMaterialization, SpellCastRecord, StackEntry, StackEntryKind,
-        StackResolutionPolicy, StepTally,
+        PersistentAxisMaterialization, PhaseTransitionDrainState, PhaseTransitionProgress,
+        SpellCastRecord, StackEntry, StackEntryKind, StackResolutionPolicy, StepTally,
     };
     use crate::types::identifiers::{CardId, ExtraPhaseId, ObjectId};
     use crate::types::phase::{PhaseStop, PhaseStopScope, TurnSegment};
@@ -13895,8 +13895,6 @@ card into your hand at the beginning of your next end step.";
 
     #[test]
     fn phase_begin_abandonment_retires_only_its_unanswered_transition() {
-        use crate::types::game_state::{PhaseTransitionDrainState, PhaseTransitionProgress};
-
         let mut state = setup();
         state.phase = Phase::EndCombat;
         state.pending_phase_transition_progress = Some(PhaseTransitionProgress {

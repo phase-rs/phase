@@ -3296,6 +3296,21 @@ fn mimeoplasm_forced_cost_board(
     runner
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("accept Mimeoplasm's replacement cost");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "accepting the cost must park a real inner move for cost owner {cost_owner:?}: {:?}",
+        runner.state().waiting_for,
+    );
+    assert!(
+        matches!(
+            runner.state().pending_cost_move_resume,
+            Some(PendingCostMoveResume::ReplacementMayCost { .. })
+        ),
+        "the real exile-cost pipeline must own the nested continuation",
+    );
     (runner, first, second, mimeoplasm)
 }
 
@@ -3402,10 +3417,20 @@ fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exi
 fn fu7_nested_may_cost_departure_preserves_outer_cursor_or_retires_departed_payer() {
     for (leaver, cost_owner) in [(P1, P0), (P0, P0), (P1, P1)] {
         let (mut runner, first, second, mimeoplasm) = mimeoplasm_forced_cost_board(cost_owner);
-        let root_before = runner.state().pending_cost_move_resume.clone().unwrap();
-        let inner_before = runner.state().pending_replacement.as_ref().unwrap().clone();
+        let root_before = runner
+            .state()
+            .pending_cost_move_resume
+            .clone()
+            .expect("the forced exile must park its MayCost root before any departure");
+        let inner_before = runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .expect("the forced exile must park a real replacement prompt")
+            .clone();
         assert_eq!(inner_before.candidates.len(), 2);
         let PendingCostMoveResume::ReplacementMayCost {
+            source_id,
             current,
             remaining,
             outer_replacement: Some(outer),
@@ -3414,6 +3439,34 @@ fn fu7_nested_may_cost_departure_preserves_outer_cursor_or_retires_departed_paye
         else {
             panic!("the inner move must retain its exact outer MayCost root");
         };
+        assert_eq!(*source_id, mimeoplasm);
+        assert_eq!(inner_before.proposed.affected_object_id(), Some(*current));
+        assert!(matches!(
+            inner_before.proposed,
+            ProposedEvent::ZoneChange {
+                from: Zone::Graveyard,
+                to: Zone::Exile,
+                ..
+            }
+        ));
+        assert_eq!(outer.proposed.affected_object_id(), Some(mimeoplasm));
+        assert!(matches!(
+            outer.proposed,
+            ProposedEvent::ZoneChange {
+                from: Zone::Stack,
+                to: Zone::Battlefield,
+                ..
+            }
+        ));
+        assert_eq!(runner.state().objects[current].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&mimeoplasm].zone, Zone::Stack);
+        assert!(
+            runner
+                .state()
+                .active_spell_resolution()
+                .is_some_and(|ctx| ctx.object_id == mimeoplasm),
+            "the inner prompt must retain the actual outer permanent-spell resolution",
+        );
         assert_eq!(*current, if cost_owner == P0 { first } else { second });
         let expected_remaining = [if cost_owner == P0 { second } else { first }];
         assert_eq!(remaining.as_slice(), expected_remaining);

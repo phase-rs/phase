@@ -75,7 +75,7 @@ use crate::types::ability::ResolvedAbility;
 
 /// Helper to find eligible cards for exile cost payment at resolution.
 /// Returns cards in the specified zone matching the filter, excluding the source.
-fn find_eligible_exile_targets(
+pub(super) fn find_eligible_exile_targets(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,

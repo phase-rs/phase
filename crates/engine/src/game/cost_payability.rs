@@ -1405,14 +1405,61 @@ impl AbilityCostPayability for AbilityCost {
         player: PlayerId,
         source: ObjectId,
     ) -> bool {
-        self.is_payable_in(
-            state,
-            player,
-            source,
-            None,
-            ObjectLegPayment::Unguided,
-            CostSourceRole::AbilitySource,
-        )
+        match self {
+            // CR 118.3 + CR 614.12a: replacement costs are paid during
+            // resolution. Their preview must use the same zone population as
+            // payment, including unrestricted cards from all graveyards.
+            AbilityCost::Exile {
+                count,
+                zone,
+                filter,
+            } if !matches!(filter, Some(TargetFilter::SelfRef)) => {
+                super::costs::find_eligible_exile_targets(
+                    state,
+                    player,
+                    source,
+                    None,
+                    zone.unwrap_or(Zone::Graveyard),
+                    filter.as_ref(),
+                )
+                .len()
+                    >= *count as usize
+            }
+            AbilityCost::Composite { costs } => {
+                let has_tap = costs.iter().any(|cost| matches!(cost, AbilityCost::Tap));
+                costs.iter().all(|cost| match cost {
+                    AbilityCost::TapCreatures {
+                        requirement,
+                        filter,
+                    } if has_tap => has_enough_tap_creatures(
+                        state,
+                        player,
+                        source,
+                        None,
+                        requirement,
+                        filter,
+                        true,
+                    ),
+                    other => other.is_payable_for_replacement(state, player, source),
+                }) && object_cost_legs_jointly_payable(
+                    state,
+                    player,
+                    source,
+                    None,
+                    costs,
+                    ObjectLegPayment::Unguided,
+                    CostSourceRole::AbilitySource,
+                )
+            }
+            _ => self.is_payable_in(
+                state,
+                player,
+                source,
+                None,
+                ObjectLegPayment::Unguided,
+                CostSourceRole::AbilitySource,
+            ),
+        }
     }
 
     fn is_payable_for_activation(
@@ -3314,6 +3361,54 @@ mod tests {
             ],
         };
         assert!(!unpayable.is_payable_for_spell(&state, P0, ObjectId(0)));
+    }
+
+    #[test]
+    fn replacement_exile_payability_uses_resolution_population_in_each_cost_leg() {
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_creature(P0, "Replacement Source", 2, 2).id();
+        scenario.add_creature_to_graveyard(P0, "Own Creature", 2, 2);
+        scenario.add_creature_to_graveyard(PlayerId(1), "Other Creature", 3, 3);
+        scenario.add_creature_to_hand(PlayerId(1), "Other Hand Creature", 4, 4);
+        let state = &scenario.state;
+        let exile = |count, zone, filter| AbilityCost::Exile {
+            count,
+            zone: Some(zone),
+            filter: Some(filter),
+        };
+        let creatures = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+        let unrestricted = exile(2, Zone::Graveyard, creatures.clone());
+        assert!(unrestricted.is_payable_for_replacement(state, P0, source));
+        assert!(!unrestricted.is_payable_for_activation(state, P0, source, Some(0)));
+        assert!(!exile(3, Zone::Graveyard, creatures.clone())
+            .is_payable_for_replacement(state, P0, source));
+        assert!(!exile(1, Zone::Hand, creatures).is_payable_for_replacement(state, P0, source));
+        let own_creatures = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+        );
+        assert!(exile(1, Zone::Graveyard, own_creatures.clone())
+            .is_payable_for_replacement(state, P0, source));
+        assert!(
+            !exile(2, Zone::Graveyard, own_creatures).is_payable_for_replacement(state, P0, source)
+        );
+        assert!(!exile(1, Zone::Graveyard, TargetFilter::SelfRef)
+            .is_payable_for_replacement(state, P0, source));
+        for life in [1, 21] {
+            let composite = AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Composite {
+                        costs: vec![unrestricted.clone()],
+                    },
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: life },
+                    },
+                ],
+            };
+            assert_eq!(
+                composite.is_payable_for_replacement(state, P0, source),
+                life == 1,
+            );
+        }
     }
 
     /// CR 701.17b: a Mill cost is payable iff the library holds at least

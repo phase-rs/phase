@@ -38,6 +38,7 @@ use super::effects::mill::apply_mill_after_replacement;
 use super::effects::scry::apply_scry_after_replacement;
 use super::effects::token::apply_create_token_after_replacement;
 use super::engine::EngineError;
+use super::engine_resolution_choices::DepartureSettlement;
 use super::life_costs::{pay_life_as_cost, PayLifeCostResult};
 use super::sacrifice::{apply_sacrifice_after_replacement, SacrificeApply};
 
@@ -309,10 +310,27 @@ pub(crate) fn settle_replacement_after_departure(
     interrupted: Option<InterruptedReplacement>,
     events: &mut Vec<GameEvent>,
 ) -> Result<super::engine_resolution_choices::DepartureSettlement, EngineError> {
-    use super::engine_resolution_choices::DepartureSettlement;
     let Some(interrupted) = interrupted else {
-        return Ok(DepartureSettlement::NotSettled);
+        return Ok(super::engine_resolution_choices::DepartureSettlement::NotSettled);
     };
+    // CR 603.2 + CR 603.3b + CR 603.7: a concession has no post-action
+    // collector. Keep resumed instruction events separate from the departure
+    // prefix, just as the existing player-scope departure settlement does:
+    // a paused instruction may prepend its retained events to this buffer.
+    let mut resumed = Vec::new();
+    let settlement = settle_replacement_after_departure_inner(state, interrupted, &mut resumed);
+    if !resumed.is_empty() {
+        super::triggers::collect_unclaimed_triggers_into_deferred(state, &resumed, 0, None);
+        events.extend(resumed);
+    }
+    settlement
+}
+
+fn settle_replacement_after_departure_inner(
+    state: &mut GameState,
+    interrupted: InterruptedReplacement,
+    events: &mut Vec<GameEvent>,
+) -> Result<super::engine_resolution_choices::DepartureSettlement, EngineError> {
     if let Some(waiting) = super::costs::settle_replacement_may_cost_after_departure(state, events)?
     {
         state.waiting_for = waiting;
@@ -840,6 +858,34 @@ fn finish_replacement_execute_epilogue(
                 );
             }
             effects::PendingDiscardBatchOutcome::Completed => {
+                effects::drain_pending_continuation(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                    super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                        state,
+                        events,
+                        replacement_action_event_start,
+                    );
+                }
+            }
+        }
+    }
+
+    // Turtle Team-Up's hero-event stepper owns the remaining steps after a
+    // nested replacement. Resume it before the outer ability continuation,
+    // preserving any new prompt and the instruction's departure cohort.
+    if matches!(waiting_for, WaitingFor::Priority { .. }) && state.pending_hero_event.is_some() {
+        match super::boss::drain_pending_hero_event(state, events) {
+            super::boss::HeroEventDrainOutcome::Idle => {}
+            super::boss::HeroEventDrainOutcome::PausedForReplacement => {
+                waiting_for = state.waiting_for.clone();
+                super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                    state,
+                    events,
+                    replacement_action_event_start,
+                );
+            }
+            super::boss::HeroEventDrainOutcome::Completed => {
                 effects::drain_pending_continuation(state, events);
                 if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                     waiting_for = state.waiting_for.clone();
