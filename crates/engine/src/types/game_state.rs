@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::cell::OnceCell;
+use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::num::NonZeroU32;
@@ -32,7 +33,7 @@ use super::ability::{
     SearchOrderingHint, SearchSelectionConstraint, StackAbilityKind, StaticCondition,
     TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause, TriggerBaseSetInstanceRef,
     TriggerCondition, TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef,
-    TriggerEntry,
+    TriggerEntry, TriggerGrantProducerKey, TriggerProducerOrigin,
 };
 use super::actions::{DebugCardCreationKind, GameAction, ResolveAllScope};
 use super::attribution::ObjectAttribution;
@@ -2866,6 +2867,23 @@ pub struct DamageRecord {
     pub excess: u32,
 }
 
+impl DamageRecord {
+    /// The runtime join for a damage event's recipient (CR 400.7 + CR 608.2k).
+    /// Excess and characteristic snapshots are not part of this reader's key.
+    pub(crate) fn matches_damage_event(&self, event: &GameEvent) -> bool {
+        matches!(
+            event,
+            GameEvent::DamageDealt {
+                source_id, source_incarnation, target, amount, is_combat, ..
+            } if self.source_id == *source_id
+                && self.source_incarnation == *source_incarnation
+                && self.target == *target
+                && self.amount == *amount
+                && self.is_combat == *is_combat
+        )
+    }
+}
+
 /// CR 608.2i: Default damage-source zone. Combat damage — the overwhelmingly
 /// common recorded case — comes from the battlefield, so legacy serialized
 /// records and `..Default::default()` test fixtures default to it.
@@ -2875,10 +2893,9 @@ fn default_source_zone() -> Zone {
 
 impl Default for DamageRecord {
     /// A non-combat, zero-amount record from/to player 0 with an empty source
-    /// snapshot. Production damage recording (`deal_damage.rs`) always fills
-    /// every field explicitly; this default exists so test and synthesis
-    /// fixtures that only care about a few fields can spread `..Default::default()`
-    /// for the CR 608.2i source-snapshot fields they don't exercise.
+    /// snapshot. Damage emission always fills every field explicitly. Fixtures
+    /// and comparison-only recipient witnesses use this default for snapshot
+    /// payload their reader does not consume.
     fn default() -> Self {
         Self {
             source_id: ObjectId(0),
@@ -35941,14 +35958,16 @@ impl GameState {
     /// no-repeat history (CR 700.2), reveal leases (CR 701.20a), the per-definition
     /// trigger limits (CR 603.2/603.2h/603.4), instruction-result records
     /// (CR 608.2c), and the combat status an LKI record captured (CR 506.3).
-    /// An UNBOUNDED pump ledger is deliberately NOT ranked: it gains one entry per
-    /// cycle, so ranking it could not make two recurrence frames equal anyway.
+    /// Full damage history is an intentional unbounded exception: its source
+    /// and object-recipient epochs must join retained events and live objects.
+    /// Strict order, multiplicity and snapshot payload remain compared; only
+    /// resource projection reduces that history to bounded recipient read classes.
     ///
     /// A compared record's trigger identity needs TWO visitors — incarnations rank
     /// through `canonical`, layer-6 grant generations through the grant map — and
     /// routing one pool's value through the other's `above` panics, so
     /// `record_incarnations` takes both.
-    fn canonicalize_lki_incarnations_for_loop(&mut self) {
+    pub(crate) fn canonicalize_lki_incarnations_for_loop(&mut self) {
         /// Every incarnation a trigger event names OUTSIDE the records
         /// `event_record_incarnations` walks. Those records' own pins belong to
         /// `record_incarnations`: visiting them here too would re-rank an
@@ -36848,6 +36867,21 @@ impl GameState {
                 });
             }
         }
+        // Full journal identity participates in the same pool as its event.
+        // Do not prune or reorder damage-time look-back payload (CR 608.2i).
+        for record in &self.damage_dealt_this_turn {
+            if let Some(incarnation) = record.source_incarnation {
+                present
+                    .entry(record.source_id)
+                    .or_default()
+                    .push(incarnation);
+            }
+            if let (TargetRef::Object(id), Some(incarnation)) =
+                (&record.target, record.target_incarnation)
+            {
+                present.entry(*id).or_default().push(incarnation);
+            }
+        }
         let mut grants: HashMap<ObjectId, Vec<u64>> = HashMap::new();
         let mut carrier_read: HashSet<ObjectIncarnationRef> = HashSet::new();
         self.for_each_trigger_event_carrier_mut(&mut |event| {
@@ -36890,9 +36924,8 @@ impl GameState {
                 },
             );
         }
-        // CR 400.7 + CR 104.4b: the bounded per-turn ledgers that pin a participant
-        // by exact incarnation. Unbounded pump ledgers are deliberately absent: they
-        // grow one entry per cycle, so ranking cannot equalize a real loop.
+        // CR 400.7 + CR 104.4b: bounded participant ledgers. The full damage
+        // journal above also needs ranking for its joins, despite its growth.
         if let Some(combat) = self.combat.as_ref() {
             for reference in combat
                 .attacking_incarnations_this_combat
@@ -36946,21 +36979,18 @@ impl GameState {
                     .push(reference.incarnation);
             }
         }
-        // This pass only reads these keys, so it walks the live containers in place;
-        // taking and rebuilding a container belongs to the rewrite pass, which changes it.
-        // The containers expose their elements only as `&T` and every visit is
-        // mutating-shaped, so each key is cloned once rather than the container rebuilt.
+        // Read keys in place; borrowed visitors also avoid cloning finite
+        // expanded-provider trees just to collect their two identity namespaces.
         fn collect_reference(
             reference: &TriggerDefinitionRef,
             present: &mut HashMap<ObjectId, Vec<u64>>,
             grants: &mut HashMap<ObjectId, Vec<u64>>,
         ) {
-            let mut reference = (*reference).clone();
-            reference.for_each_incarnation_mut(&mut |object_id, incarnation| {
-                present.entry(object_id).or_default().push(*incarnation);
+            reference.for_each_incarnation(&mut |object_id, incarnation| {
+                present.entry(object_id).or_default().push(incarnation);
             });
-            reference.for_each_grant_generation_mut(&mut |object_id, generation| {
-                grants.entry(object_id).or_default().push(*generation);
+            reference.for_each_grant_generation(&mut |object_id, generation| {
+                grants.entry(object_id).or_default().push(generation);
             });
         }
         for reference in self.triggers_fired_this_turn.iter() {
@@ -37001,15 +37031,36 @@ impl GameState {
                 }
             }
         }
-        for (object_id, generations) in grants.iter_mut() {
-            if let Some(object) = self.objects.get(object_id) {
-                generations.extend(
-                    object
-                        .trigger_occurrence_state
-                        .active_grants()
-                        .map(|(_, instance)| instance.0),
-                );
+        // Compared refs seed the touched recipients. Map occupancy is the
+        // visited set: provider discovery may reach another recipient, but
+        // neither a cache cycle nor a repeated carried ref re-enqueues it.
+        let mut touched_grants: Vec<ObjectId> = grants.keys().copied().collect();
+        let mut next = 0;
+        while let Some(&object_id) = touched_grants.get(next) {
+            next += 1;
+            let Some(object) = self.objects.get(&object_id) else {
+                continue;
+            };
+            for (producer, instance) in object.trigger_occurrence_state.active_grants() {
+                grants
+                    .get_mut(&object_id)
+                    .expect("queued grant pool exists")
+                    .push(instance.0);
+                producer.for_each_incarnation(&mut |id, incarnation| {
+                    present.entry(id).or_default().push(incarnation);
+                });
+                producer.for_each_grant_generation(&mut |id, generation| match grants.entry(id) {
+                    std::collections::hash_map::Entry::Occupied(mut pool) => {
+                        pool.get_mut().push(generation);
+                    }
+                    std::collections::hash_map::Entry::Vacant(pool) => {
+                        pool.insert(vec![generation]);
+                        touched_grants.push(id);
+                    }
+                });
             }
+        }
+        for generations in grants.values_mut() {
             generations.sort_unstable();
             generations.dedup();
         }
@@ -37162,6 +37213,16 @@ impl GameState {
                 }
             }
         });
+        for record in self.damage_dealt_this_turn.iter_mut() {
+            if let Some(incarnation) = record.source_incarnation.as_mut() {
+                *incarnation = canonical(record.source_id, *incarnation);
+            }
+            if let (TargetRef::Object(id), Some(incarnation)) =
+                (&record.target, record.target_incarnation.as_mut())
+            {
+                *incarnation = canonical(*id, *incarnation);
+            }
+        }
         let rank_block_history = |pairs: HashSet<BlockHistoryPair>| -> HashSet<BlockHistoryPair> {
             pairs
                 .into_iter()
@@ -37292,15 +37353,23 @@ impl GameState {
                 *generation = u64::MAX - above(&grants, object_id, *generation);
             });
         });
-        for (object_id, object) in self.objects.iter_mut() {
-            if present.contains_key(object_id) {
+        for object_id in present.keys() {
+            if let Some(object) = self.objects.get_mut(object_id) {
                 object.incarnation = canonical(*object_id, object.incarnation);
             }
-            if grants.contains_key(object_id) {
+        }
+        for object_id in touched_grants {
+            if let Some(object) = self.objects.get_mut(&object_id) {
                 object
                     .trigger_occurrence_state
-                    .for_each_active_grant_generation_mut(|generation| {
-                        *generation = u64::MAX - above(&grants, *object_id, *generation);
+                    .for_each_active_grant_mut(|producer, instance| {
+                        producer.for_each_incarnation_mut(&mut |id, incarnation| {
+                            *incarnation = canonical(id, *incarnation);
+                        });
+                        producer.for_each_grant_generation_mut(&mut |id, generation| {
+                            *generation = u64::MAX - above(&grants, id, *generation);
+                        });
+                        instance.0 = u64::MAX - above(&grants, object_id, instance.0);
                     });
             }
         }
@@ -37324,7 +37393,8 @@ impl GameState {
     /// class. A field belongs in section 1 only when ranking changes a VERDICT it
     /// can express: it makes two frames equal when each carrier names the same incarnation
     /// position relative to its live object, or it keeps a stale pin distinct from the live one.
-    /// An unbounded pump ledger cannot do either — it gains a row every cycle.
+    /// Damage history is the intentional unbounded exception: ranking preserves
+    /// its event/live-object joins even while its full strict history stays compared.
     #[cfg(test)]
     fn _loop_incarnation_carriers_are_classified(s: &GameState) {
         let GameState {
@@ -37333,6 +37403,7 @@ impl GameState {
             objects: _,
             lki_by_incarnation: _,
             lki_copiable_values_by_incarnation: _,
+            damage_dealt_this_turn: _,
             creature_blocked_attackers_this_turn: _,
             combat: _,
             crew_activated_this_turn: _,
@@ -37578,7 +37649,6 @@ impl GameState {
             cards_discarded_this_turn_by_player: _,
             players_who_sacrificed_artifact_this_turn: _,
             battlefield_entries_this_turn: _,
-            damage_dealt_this_turn: _,
             creatures_exploited_this_turn: _,
             assassin_or_commander_dealt_combat_damage_this_turn: _,
             creature_types_dealt_combat_damage_this_turn: _,
@@ -39346,6 +39416,257 @@ impl Default for GameState {
     }
 }
 
+/// Supplemental relation between spent ledger occurrences and their CURRENT
+/// producers (CR 113.2c + CR 603.2). Numeric ledger equality alone cannot tell
+/// an active spent grant from a retired spent generation. Unused active grants,
+/// allocator clocks and cache order are not position. `include_source` scopes
+/// ledger roots only: a common root may still depend on a stripped provider.
+pub(crate) fn active_trigger_ledger_bindings_equal(
+    a: &GameState,
+    b: &GameState,
+    include_source: impl Fn(ObjectId) -> bool,
+) -> bool {
+    fn current_producer<'a>(
+        state: &'a GameState,
+        reference: &TriggerDefinitionRef,
+    ) -> Option<&'a TriggerGrantProducerKey> {
+        if matches!(
+            &reference.occurrence,
+            TriggerDefinitionOccurrenceRef::Printed { .. }
+                | TriggerDefinitionOccurrenceRef::CopiedValue { .. }
+                | TriggerDefinitionOccurrenceRef::Unmaterialized
+        ) {
+            return None;
+        }
+        let object = state.objects.get(&reference.source.object_id)?;
+        if object.incarnation != reference.source.incarnation {
+            return None;
+        }
+        object
+            .trigger_occurrence_state
+            .producer_for_occurrence(&reference.occurrence)
+    }
+
+    fn producer_header(producer: &TriggerGrantProducerKey) -> (u8, &TriggerProducerOrigin) {
+        match producer {
+            TriggerGrantProducerKey::KeywordCompanion { origin, .. } => (0, origin),
+            TriggerGrantProducerKey::CopyRetained { origin, .. } => (1, origin),
+            TriggerGrantProducerKey::Granted { origin, .. } => (2, origin),
+            TriggerGrantProducerKey::ExpandedGrant { origin, .. } => (3, origin),
+        }
+    }
+
+    fn compare_reference(
+        a: &GameState,
+        left: &TriggerDefinitionRef,
+        b: &GameState,
+        right: &TriggerDefinitionRef,
+    ) -> Ordering {
+        left.source.cmp(&right.source).then_with(|| {
+            match (current_producer(a, left), current_producer(b, right)) {
+                (Some(lp), Some(rp)) => compare_current(a, left, lp, b, right, rp),
+                (Some(_), None) => Ordering::Greater,
+                (None, Some(_)) => Ordering::Less,
+                // Non-current references retain the existing typed/ranked
+                // policy; this is not complete graph alpha-equivalence.
+                (None, None) => left.occurrence.cmp(&right.occurrence),
+            }
+        })
+    }
+
+    fn compare_current(
+        a: &GameState,
+        left_ref: &TriggerDefinitionRef,
+        left: &TriggerGrantProducerKey,
+        b: &GameState,
+        right_ref: &TriggerDefinitionRef,
+        right: &TriggerGrantProducerKey,
+    ) -> Ordering {
+        let (left_kind, left_origin) = producer_header(left);
+        let (right_kind, right_origin) = producer_header(right);
+        left_kind
+            .cmp(&right_kind)
+            .then_with(|| left_origin.cmp(right_origin))
+            .then_with(|| match (left, right) {
+                (
+                    TriggerGrantProducerKey::KeywordCompanion {
+                        keyword_output_index: lk,
+                        companion_index: lc,
+                        ..
+                    },
+                    TriggerGrantProducerKey::KeywordCompanion {
+                        keyword_output_index: rk,
+                        companion_index: rc,
+                        ..
+                    },
+                ) => lk.cmp(rk).then_with(|| lc.cmp(rc)),
+                (
+                    TriggerGrantProducerKey::CopyRetained {
+                        source_base_set: lb,
+                        source_printed_index: li,
+                        ..
+                    },
+                    TriggerGrantProducerKey::CopyRetained {
+                        source_base_set: rb,
+                        source_printed_index: ri,
+                        ..
+                    },
+                ) => lb.cmp(rb).then_with(|| li.cmp(ri)),
+                (
+                    TriggerGrantProducerKey::Granted {
+                        output_index: li, ..
+                    },
+                    TriggerGrantProducerKey::Granted {
+                        output_index: ri, ..
+                    },
+                ) => li.cmp(ri),
+                (
+                    TriggerGrantProducerKey::ExpandedGrant {
+                        provider_output_index: li,
+                        ..
+                    },
+                    TriggerGrantProducerKey::ExpandedGrant {
+                        provider_output_index: ri,
+                        ..
+                    },
+                ) => li.cmp(ri).then_with(|| {
+                    let (
+                        TriggerDefinitionOccurrenceRef::ExpandedGrant { provider: lp, .. },
+                        TriggerDefinitionOccurrenceRef::ExpandedGrant { provider: rp, .. },
+                    ) = (&left_ref.occurrence, &right_ref.occurrence)
+                    else {
+                        unreachable!("exact active lookup checked the expanded occurrence shape");
+                    };
+                    // Descend the already-carried finite reference trees, not
+                    // producer lookup edges. Exact lookup validated each shape.
+                    compare_reference(a, lp, b, rp)
+                }),
+                _ => unreachable!("equal producer kinds have the same variant"),
+            })
+    }
+
+    struct CurrentFact<'a, V> {
+        reference: &'a TriggerDefinitionRef,
+        producer: &'a TriggerGrantProducerKey,
+        value: V,
+    }
+
+    fn collect<'a, V: Copy>(
+        state: &'a GameState,
+        rows: impl Iterator<Item = (&'a TriggerDefinitionRef, V)>,
+        include_source: &impl Fn(ObjectId) -> bool,
+    ) -> smallvec::SmallVec<[CurrentFact<'a, V>; 4]> {
+        rows.filter_map(|(reference, value)| {
+            if !include_source(reference.source.object_id) {
+                return None;
+            }
+            current_producer(state, reference).map(|producer| CurrentFact {
+                reference,
+                producer,
+                value,
+            })
+        })
+        .collect()
+    }
+
+    fn compare_fact<V: Ord>(
+        a: &GameState,
+        left: &CurrentFact<'_, V>,
+        b: &GameState,
+        right: &CurrentFact<'_, V>,
+    ) -> Ordering {
+        left.reference
+            .source
+            .cmp(&right.reference.source)
+            .then_with(|| {
+                compare_current(
+                    a,
+                    left.reference,
+                    left.producer,
+                    b,
+                    right.reference,
+                    right.producer,
+                )
+            })
+            .then_with(|| left.value.cmp(&right.value))
+    }
+
+    fn facts_equal<'a, 'b, V: Copy + Ord>(
+        a: &'a GameState,
+        b: &'b GameState,
+        include_source: &impl Fn(ObjectId) -> bool,
+        left_rows: impl Iterator<Item = (&'a TriggerDefinitionRef, V)>,
+        right_rows: impl Iterator<Item = (&'b TriggerDefinitionRef, V)>,
+    ) -> bool {
+        let mut left = collect(a, left_rows, include_source);
+        let mut right = collect(b, right_rows, include_source);
+        if left.len() != right.len() {
+            return false;
+        }
+        // Inline-four for ordinary populations; larger histories may spill.
+        // Root lookups are cached; semantic sorts still do finite provider work.
+        left.sort_unstable_by(|l, r| compare_fact(a, l, a, r));
+        right.sort_unstable_by(|l, r| compare_fact(b, l, b, r));
+        left.iter()
+            .zip(right.iter())
+            .all(|(l, r)| compare_fact(a, l, b, r).is_eq())
+    }
+
+    facts_equal(
+        a,
+        b,
+        &include_source,
+        a.triggers_fired_this_turn.iter().map(|r| (r, ())),
+        b.triggers_fired_this_turn.iter().map(|r| (r, ())),
+    ) && facts_equal(
+        a,
+        b,
+        &include_source,
+        a.triggers_fired_this_game.iter().map(|r| (r, ())),
+        b.triggers_fired_this_game.iter().map(|r| (r, ())),
+    ) && facts_equal(
+        a,
+        b,
+        &include_source,
+        a.trigger_fire_counts_this_turn
+            .iter()
+            .map(|(r, count)| (r, *count)),
+        b.trigger_fire_counts_this_turn
+            .iter()
+            .map(|(r, count)| (r, *count)),
+    ) && facts_equal(
+        a,
+        b,
+        &include_source,
+        a.triggers_fired_this_turn_per_opponent
+            .iter()
+            .map(|(r, player)| (r, *player)),
+        b.triggers_fired_this_turn_per_opponent
+            .iter()
+            .map(|(r, player)| (r, *player)),
+    ) && facts_equal(
+        a,
+        b,
+        &include_source,
+        a.trigger_indicated_actions_this_turn
+            .iter()
+            .map(|(r, player)| (r, *player)),
+        b.trigger_indicated_actions_this_turn
+            .iter()
+            .map(|(r, player)| (r, *player)),
+    ) && facts_equal(
+        a,
+        b,
+        &include_source,
+        a.triggered_abilities_added_mana_this_turn
+            .iter()
+            .map(|(r, player)| (r, *player)),
+        b.triggered_abilities_added_mana_this_turn
+            .iter()
+            .map(|(r, player)| (r, *player)),
+    )
+}
+
 // Reconstruct RNG from seed on deserialization
 impl PartialEq for GameState {
     fn eq(&self, other: &Self) -> bool {
@@ -39624,6 +39945,9 @@ impl PartialEq for GameState {
             && self.boss_deck == other.boss_deck
             && self.boss_stage == other.boss_stage
             && self.baxter_set_aside == other.baxter_set_aside
+            // Preserve every raw/ranked ledger conjunct above; add only the
+            // current-producer relation after cheap mismatches have refused.
+            && active_trigger_ledger_bindings_equal(self, other, |_| true)
     }
 }
 
