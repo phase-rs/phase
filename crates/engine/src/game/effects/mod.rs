@@ -1061,6 +1061,18 @@ fn rebind_child_to_forwarded_objects(
     if copy_spell_self_ref_keeps_resolving_spell_source(child) {
         return attachment_candidates;
     }
+    // CR 701.3a + CR 608.2c: "attach them to ~" names what the producer created as its
+    // attachment, so its `~` recipient stays the ability's source (Outfitted Jouster). The
+    // forwarded result still reaches a later instruction it carries.
+    if matches!(
+        child.effect,
+        Effect::Attach {
+            attachment: TargetFilter::LastCreated,
+            ..
+        }
+    ) {
+        return attachment_candidates;
+    }
     // CR 603.7c + CR 201.5: `CreateDelayedTrigger` keeps the creating
     // ability's source. Its ParentTarget anaphora read the separate
     // forwarded-result context at delayed-trigger creation.

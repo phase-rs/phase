@@ -14756,7 +14756,7 @@ mod conjure_attach_parser_tests {
     /// CR 701.3a + CR 608.2c: Outfitted Jouster's "and attach them to Outfitted
     /// Jouster" attaches exactly the two conjured Equipment to the Jouster, so the
     /// conjure carries an `Attach` over `LastCreated` onto `SelfRef`, and the
-    /// result is not forwarded (forwarding would rebind `~` to a conjured card).
+    /// result is not forwarded (no later instruction reads the conjured cards).
     #[test]
     fn outfitted_jouster_conjure_attaches_what_it_created_to_itself() {
         let body = first_trigger_body(
@@ -14791,9 +14791,10 @@ mod conjure_attach_parser_tests {
 
     /// CR 400.7j + CR 608.2c: the "attach them to ~" exemption covers only the attach's
     /// own `~` recipient. A later instruction it carries that names the conjured card is
-    /// still found, so the conjure forwards its result. No printed card has this composite
-    /// shape; the nearest is Outfitted Jouster, whose parsed body is extended here with a
-    /// `Destroy { ParentTarget }` after its attach.
+    /// still found, so the conjure forwards its result, and the attach keeps what it
+    /// attaches and its `~` host (the runtime forward leaves that recipient on the source).
+    /// No printed card has this composite shape; the nearest is Outfitted Jouster, whose
+    /// parsed body is extended here with a `Destroy { ParentTarget }` after its attach.
     #[test]
     fn conjure_attach_tail_still_forwards_for_a_nested_moved_card_reader() {
         let mut body = first_trigger_body(
@@ -14813,6 +14814,18 @@ mod conjure_attach_parser_tests {
         lower::rewire_result_anchored_subchain(&mut body);
 
         assert!(body.forward_result, "got {body:?}");
+        let attach = body.sub_ability.as_deref().expect("the attach clause");
+        assert_eq!(
+            *attach.effect,
+            Effect::Attach {
+                attachment: TargetFilter::LastCreated,
+                target: TargetFilter::SelfRef,
+                selection: AttachSelection::AtResolution {
+                    count: AttachCardinality::All,
+                },
+            }
+        );
+        assert!(!attach.forward_result);
     }
 
     /// Conjures with no "and attach them to ~" tail keep no `Attach` sub. Perforator

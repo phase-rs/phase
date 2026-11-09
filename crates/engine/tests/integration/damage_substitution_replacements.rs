@@ -68,6 +68,8 @@ const FORCE_BUBBLE: &str = "If damage would be dealt to you, put that many deple
 const DELAYING_SHIELD: &str = "If damage would be dealt to you, put that many delay counters on this enchantment instead.\nAt the beginning of your upkeep, remove all delay counters from this enchantment. For each delay counter removed this way, you lose 1 life unless you pay {1}{W}.";
 const CRUMBLING_SANCTUARY: &str = "If damage would be dealt to a player, that player exiles that many cards from the top of their library instead.";
 const DRALNU: &str = "If damage would be dealt to Dralnu, sacrifice that many permanents instead.\n{T}: Target instant or sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to its mana cost. (You may cast that card from your graveyard for its flashback cost. Then exile it.)";
+const SANWELL: &str = "As long as an artifact creature you control is attacking, prevent all damage that would be dealt to Sanwell.\nWhenever Sanwell becomes tapped, exile the top six cards of your library. You may cast a Vehicle or artifact creature spell from among them. Then put the rest on the bottom of your library in a random order.";
+const ORNITHOPTER: &str = "Flying";
 const NEFARIOUS_LICH: &str = "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.\nIf you would gain life, draw that many cards instead.\nWhen this enchantment leaves the battlefield, you lose the game.";
 
 const FURNACE: &str = "If a source would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.";
@@ -1126,6 +1128,62 @@ fn a_later_instruction_follows_the_remaining_recipients_once() {
         }
         assert_at_rest(&runner);
     }
+}
+
+/// Shake the Foundations cast while Ornithopter ("Flying", an artifact creature) attacks, under
+/// Furnace of Rath, at Dralnu, Lich Lord and Sanwell, Avenger Ace ("As long as an artifact
+/// creature you control is attacking, prevent all damage that would be dealt to Sanwell."). The
+/// damage to every creature without flying is one simultaneous event (CR 608.2f, CR 700.1), so
+/// Sanwell's guard is read as it opens: Dralnu's controller sacrificing the Ornithopter at the
+/// order answer for Dralnu's portion (CR 616.1) doesn't strip Sanwell's shield, which still
+/// applies against Furnace of Rath (CR 616.1e).
+#[test]
+fn a_substitution_inside_the_batch_does_not_strip_a_board_census_guard() {
+    let mut scenario = scenario();
+    let id = dralnu(&mut scenario, P0);
+    let sanwell = scenario
+        .add_creature_from_oracle(P0, "Sanwell, Avenger Ace", 3, 1, SANWELL)
+        .id();
+    let thopter = {
+        let mut builder = scenario.add_creature_from_oracle(P0, "Ornithopter", 0, 2, ORNITHOPTER);
+        builder.as_artifact_creature();
+        builder.id()
+    };
+    let doubler = furnace(&mut scenario);
+    scenario.with_library_top(P0, &["One", "Two"]);
+    let spell = instant(&mut scenario, "Shake the Foundations", SHAKE);
+    let mut runner = scenario.build();
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(thopter, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("declare attackers");
+
+    let mut events = cast(&mut runner, spell, vec![]);
+    assert_prompt_is_replacement_choice(&runner);
+    choose_not_source(&mut runner, &mut events, doubler);
+    assert_eq!(zone_prompt(&runner), (1, 4));
+    answer(
+        &mut runner,
+        GameAction::SelectCards {
+            cards: vec![thopter],
+        },
+        &mut events,
+    );
+    assert_eq!(zone(&runner, thopter), Zone::Graveyard);
+    // Reach guard: with the guard read live, Furnace of Rath alone would apply and no order
+    // would be asked for Sanwell's portion.
+    assert_prompt_is_replacement_choice(&runner);
+    choose_source(&mut runner, &mut events, sanwell);
+
+    assert_eq!(zone(&runner, sanwell), Zone::Battlefield);
+    assert_eq!(damage(&runner, sanwell), 0);
+    assert_eq!(zone(&runner, id), Zone::Battlefield);
+    assert_eq!(damage(&runner, id), 0);
+    assert_eq!(draws(&events), 1);
+    assert_at_rest(&runner);
 }
 
 fn chain_effects(chain: &ResolvedAbility) -> Vec<&Effect> {

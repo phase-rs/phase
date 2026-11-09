@@ -5925,8 +5925,53 @@ pub(crate) fn replacement_condition_reads_sibling_mutable(
 
 /// Axis 1 on a replacement effect's `condition` (CR 614.1): the verdict varies by event, so
 /// it can't be settled once for a simultaneous batch (Divine Presence reads each proposal).
+///
+/// A board census reads no event of its own: Sanwell, Avenger Ace's "As long as an artifact
+/// creature you control is attacking" counts the battlefield, so only its filter's own
+/// controller and properties can reach the proposal (an `EventContextAmount` threshold). This
+/// precision is for `valid_card: SelfRef` definitions, whose affected object is their host, so a
+/// census's scoped player is fixed across the batch's portions. The shared `Typed` arm stays
+/// fail-closed for every other consumer.
 pub(crate) fn replacement_condition_reads_event(condition: &ReplacementCondition) -> bool {
-    scan_replacement_condition(condition, ScanMode::Conservative).event
+    match condition {
+        ReplacementCondition::And { conditions } => {
+            conditions.iter().any(replacement_condition_reads_event)
+        }
+        ReplacementCondition::OnlyIfQuantity {
+            lhs,
+            rhs,
+            active_player_req,
+            comparator: _,
+        }
+        | ReplacementCondition::UnlessQuantity {
+            lhs,
+            rhs,
+            active_player_req,
+            comparator: _,
+        } => {
+            census_quantity_reads_event(lhs)
+                || census_quantity_reads_event(rhs)
+                || active_player_req
+                    .as_ref()
+                    .is_some_and(|controller| scan_controller_ref(controller).event)
+        }
+        other => scan_replacement_condition(other, ScanMode::Conservative).event,
+    }
+}
+
+/// Axis 1 on a quantity a replacement condition compares: a census over a `Typed` filter reads
+/// the event only through that filter's controller or properties; any other shape keeps the
+/// shared scan's answer.
+fn census_quantity_reads_event(quantity: &QuantityExpr) -> bool {
+    match quantity {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(filter),
+                },
+        } => typed_filter_axes(filter, ScanMode::Conservative).event,
+        other => scan_quantity_expr(other, ScanMode::Conservative).event,
+    }
 }
 
 /// Axis 2 on a transient `Duration::ForAsLongAs` condition (CR 604.1).

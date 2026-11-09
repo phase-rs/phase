@@ -27,7 +27,10 @@ use engine::game::combat::AttackTarget;
 use engine::game::effects::attach::attach_to;
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{DamageGuardReading, EffectKind, TargetRef};
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, DamageGuardReading, Effect, EffectKind, TargetFilter,
+    TargetRef, TriggerDefinition,
+};
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType};
@@ -1578,6 +1581,79 @@ fn a_cast_outfitted_jouster_enters_wearing_both_equipment() {
         })
         .count();
     assert_eq!(attaches, 2);
+}
+
+/// CR 400.7j + CR 608.2c + CR 701.3a: a conjure that forwards its result to a later
+/// instruction still attaches what it created to its own source. No printed card has this
+/// composite shape. The nearest is Outfitted Jouster, whose parsed trigger body is extended
+/// here with a `Destroy { ParentTarget }` after its attach and forwarded as the parser forwards
+/// that composite: the Jouster wears both Equipment until the later instruction destroys them,
+/// and the Jouster itself is never that instruction's object.
+#[test]
+fn a_forwarding_conjure_still_attaches_what_it_created_to_its_source() {
+    fn extend(trigger: &mut TriggerDefinition) {
+        let body = trigger.execute.as_mut().expect("the conjure trigger body");
+        assert!(!body.forward_result);
+        body.forward_result = true;
+        let attach = body.sub_ability.as_mut().expect("the attach clause");
+        assert!(attach.sub_ability.is_none());
+        attach.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::ParentTarget,
+                cant_regenerate: false,
+            },
+        )));
+    }
+
+    let mut scenario = main_phase();
+    let jouster = scenario
+        .add_creature_to_hand_from_oracle(P0, "Outfitted Jouster", 2, 2, JOUSTER)
+        .id();
+    let mut runner = scenario.build();
+    seed_jouster_equipment_faces(&mut runner);
+    let object = runner.state_mut().objects.get_mut(&jouster).unwrap();
+    extend(&mut std::sync::Arc::make_mut(&mut object.base_trigger_definitions)[0]);
+    extend(
+        &mut object
+            .trigger_definitions
+            .get_mut(0)
+            .expect("the printed trigger")
+            .definition,
+    );
+
+    let events = cast(&mut runner, jouster, vec![]);
+
+    assert_settled(&runner);
+    let conjured: Vec<ObjectId> = runner
+        .state()
+        .objects
+        .values()
+        .filter(|o| o.name == "Steelclaw Lance" || o.name == "Brawler's Plate")
+        .map(|o| o.id)
+        .collect();
+    assert_eq!(conjured.len(), 2);
+    let attached: Vec<ObjectId> = events
+        .iter()
+        .filter_map(|e| match e {
+            GameEvent::EffectResolved {
+                kind: EffectKind::Attach,
+                source_id,
+                subject: Some(subject),
+            } if *source_id == jouster => Some(subject.identity.object_id),
+            _ => None,
+        })
+        .collect();
+    let mut sorted = attached.clone();
+    sorted.sort();
+    let mut expected = conjured.clone();
+    expected.sort();
+    assert_eq!(sorted, expected, "both attach to the Jouster");
+    for equipment in conjured {
+        assert_eq!(runner.state().objects[&equipment].zone, Zone::Graveyard);
+    }
+    assert_eq!(runner.state().objects[&jouster].zone, Zone::Battlefield);
+    assert!(runner.state().objects[&jouster].attachments.is_empty());
 }
 
 /// Then Lightning Bolt: the cast Jouster is equipped, so the shield prevents and its controller

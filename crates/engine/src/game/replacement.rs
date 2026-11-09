@@ -18680,8 +18680,9 @@ mod tests {
 
     /// CR 614.1 + CR 611.3a: a condition that reads the proposed event can't be settled
     /// once for a batch. Divine Presence reads each portion's amount ("If a source would
-    /// deal 4 or more damage"); Undergrowth Champion's counter guard and Jared
-    /// Carthalion's "while you're the monarch" read only the board.
+    /// deal 4 or more damage"); Undergrowth Champion's counter guard, Jared Carthalion's
+    /// "while you're the monarch" and Sanwell, Avenger Ace's "As long as an artifact
+    /// creature you control is attacking" census read only the board.
     #[test]
     fn only_board_reading_guards_settle_for_a_batch() {
         let presence = crate::parser::oracle_replacement::parse_replacement_line(
@@ -18697,6 +18698,10 @@ mod tests {
             (
                 "Jared Carthalion, True Heir",
                 "When Jared Carthalion enters, target opponent becomes the monarch. You can't become the monarch this turn.\nIf damage would be dealt to Jared Carthalion while you're the monarch, prevent that damage and put that many +1/+1 counters on it.",
+            ),
+            (
+                "Sanwell, Avenger Ace",
+                "As long as an artifact creature you control is attacking, prevent all damage that would be dealt to Sanwell.\nWhenever Sanwell becomes tapped, exile the top six cards of your library. You may cast a Vehicle or artifact creature spell from among them. Then put the rest on the bottom of your library in a random order.",
             ),
         ] {
             let shields = printed_damage_shields(text, name);
