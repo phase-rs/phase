@@ -45596,54 +45596,56 @@ fn reveal_until_passive_compound_stopping_rejected_counted_variants() {
 
 /// CR 608.2c / CR 701.20a: An intervening instruction (such as Draw) between RevealUntil
 /// and whole-pile placement must preserve the placement as a separate SequentialSibling
-/// instruction rather than folding it into RevealUntil.
+/// instruction rather than folding it into RevealUntil. Covers both the imperative
+/// placement and the third-person "that player puts ..." placement (Mind Funeral's form).
 #[test]
 fn reveal_until_all_to_zone_does_not_fold_across_intervening_draw() {
-    let def = parse_effect_chain(
+    for text in [
         "Reveal cards from the top of your library until you reveal a land card. That player draws a card. Put the revealed cards into your graveyard.",
-        AbilityKind::Spell,
-    );
-    let Effect::RevealUntil {
-        matched_disposition,
-        ..
-    } = &*def.effect
-    else {
-        panic!("expected RevealUntil, got {:?}", def.effect);
-    };
-    assert_eq!(
-        *matched_disposition,
-        RevealUntilDisposition::RevealOnly,
-        "RevealUntil must retain RevealOnly disposition when intervening instruction exists"
-    );
+        "Target opponent reveals cards from the top of their library until a land card is revealed. That player draws a card. That player puts all cards revealed this way into their graveyard.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let Effect::RevealUntil {
+            matched_disposition,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected RevealUntil for {text}, got {:?}", def.effect);
+        };
+        assert_eq!(
+            *matched_disposition,
+            RevealUntilDisposition::RevealOnly,
+            "RevealUntil must retain RevealOnly disposition when intervening instruction exists: {text}"
+        );
 
-    let draw = def
-        .sub_ability
-        .as_ref()
-        .expect("expected chained draw sub-ability");
-    assert!(
-        matches!(&*draw.effect, Effect::Draw { .. }),
-        "expected Draw effect, got {:?}",
-        draw.effect
-    );
+        let draw = def
+            .sub_ability
+            .as_ref()
+            .unwrap_or_else(|| panic!("expected chained draw sub-ability for {text}"));
+        assert!(
+            matches!(&*draw.effect, Effect::Draw { .. }),
+            "expected Draw effect for {text}, got {:?}",
+            draw.effect
+        );
 
-    let placement = draw
-        .sub_ability
-        .as_ref()
-        .expect("expected sequential sibling placement sub-ability");
-    assert_eq!(placement.sub_link, SubAbilityLink::SequentialSibling);
-    assert!(
-        matches!(
-            &*placement.effect,
-            Effect::ChangeZoneAll {
-                origin: Some(Zone::Library),
-                destination: Zone::Graveyard,
-                target: TargetFilter::LastRevealed,
-                ..
-            }
-        ),
-        "expected ChangeZoneAll placement, got {:?}",
-        placement.effect
-    );
+        let placement = draw.sub_ability.as_ref().unwrap_or_else(|| {
+            panic!("expected sequential sibling placement sub-ability for {text}")
+        });
+        assert_eq!(placement.sub_link, SubAbilityLink::SequentialSibling);
+        assert!(
+            matches!(
+                &*placement.effect,
+                Effect::ChangeZoneAll {
+                    origin: Some(Zone::Library),
+                    destination: Zone::Graveyard,
+                    target: TargetFilter::LastRevealed,
+                    ..
+                }
+            ),
+            "expected ChangeZoneAll placement for {text}, got {:?}",
+            placement.effect
+        );
+    }
 }
 
 /// CR 701.20a: Treasure Hunt — "then put all cards revealed this way into your hand."

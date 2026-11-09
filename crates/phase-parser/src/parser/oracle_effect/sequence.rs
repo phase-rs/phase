@@ -6743,7 +6743,7 @@ pub(super) fn apply_clause_continuation(
                 // that instruction. Leave the cards where the reveal found them and
                 // emit the placement as a later chain instruction over the revealed set.
                 let has_intervening_instruction = target_idx + 1 < defs.len();
-                if has_intervening_instruction && defs[target_idx].sub_ability.is_none() {
+                if has_intervening_instruction {
                     if let Effect::RevealUntil {
                         matched_disposition,
                         ..
