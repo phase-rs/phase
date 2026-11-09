@@ -5829,35 +5829,29 @@ fn migrate_legacy_change_zone_member_entries(
     Ok(())
 }
 
+fn migrate_legacy_change_zone_performer(carrier: &mut Value) {
+    let Some(carrier) = carrier.as_object_mut() else {
+        return;
+    };
+    if carrier.contains_key("performed_by") {
+        return;
+    }
+    if let Some(controller) = carrier.get("controller").and_then(Value::as_u64) {
+        carrier.insert("performed_by".to_string(), Value::from(controller));
+    }
+}
+
 /// Preserve the actor encoded by historical ChangeZone carriers. This runs
 /// only at the versioned save boundary; current carriers must supply their
 /// actor explicitly and no live object/controller lookup reconstructs it.
 fn migrate_legacy_change_zone_performers(value: &mut Value, version: u64) {
-    if !(LEGACY_RESOLUTION_STATE_WIRE_VERSION
+    if !(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION
         ..=LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION)
         .contains(&version)
     {
         return;
     }
 
-    fn migrate_carrier(carrier: &mut Value) {
-        let Some(carrier) = carrier.as_object_mut() else {
-            return;
-        };
-        if carrier.contains_key("performed_by") {
-            return;
-        }
-        if let Some(controller) = carrier.get("controller").and_then(Value::as_u64) {
-            carrier.insert("performed_by".to_string(), Value::from(controller));
-        }
-    }
-
-    if version == LEGACY_RESOLUTION_STATE_WIRE_VERSION {
-        if let Some(carrier) = value.get_mut("pending_change_zone_iteration") {
-            migrate_carrier(carrier);
-        }
-        return;
-    }
     let Some(frames) = value
         .get_mut("resolution_frames")
         .and_then(|stack| stack.get_mut("frames"))
@@ -5873,7 +5867,7 @@ fn migrate_legacy_change_zone_performers(value: &mut Value, version: u64) {
             .get_mut("data")
             .and_then(|data| data.get_mut("pending"))
         {
-            migrate_carrier(carrier);
+            migrate_legacy_change_zone_performer(carrier);
         }
     }
 }
@@ -6438,6 +6432,7 @@ impl ResolutionStateWire {
                     .filter(|carrier| !carrier.is_null())
                 {
                     migrate_legacy_change_zone_carrier(carrier)?;
+                    migrate_legacy_change_zone_performer(carrier);
                 }
                 let legacy_draw_sequence_frames = value
                     .get("draw_sequences")
