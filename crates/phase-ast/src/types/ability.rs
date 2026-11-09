@@ -8614,15 +8614,15 @@ pub enum TargetFilter {
     OriginalController,
     /// CR 613.1f + CR 608.2c: Resolves to the ability's *original*, pre-rebind
     /// source identity — the object that put this ability on the stack — even
-    /// inside a `ChangeZone { forward_result: true }` sub-ability chain where
-    /// the runtime has rebound `ResolvedAbility::source_id` to the just-moved
-    /// object.
+    /// inside a `ChangeZone { forward_result: true }` chain whose legacy
+    /// object-relative child has rebound `ResolvedAbility::source_id` to the
+    /// just-moved object.
     ///
     /// Motivation (reanimator-Aura class: Animate Dead / Dance of the Dead):
     /// the ETB effect returns the enchanted creature card to the battlefield
-    /// via `ChangeZone { forward_result: true }`, which rebinds `source_id` to
-    /// the reanimated creature so trailing `SelfRef`/`ParentTarget` anaphora
-    /// (the attach, the leaves-battlefield sacrifice) bind to that creature.
+    /// via `ChangeZone { forward_result: true }`. Its legacy immediate generic
+    /// grant reads the reanimated object, while returned-object anaphora use the
+    /// forwarded context. A primary `SelfRef` still names the creating source.
     /// But the same effect ALSO rewrites the Aura's OWN enchant restriction
     /// ("it loses \"enchant creature card in a graveyard\" and gains \"enchant
     /// creature put onto the battlefield with this Aura\""). That keyword swap
@@ -8636,8 +8636,9 @@ pub enum TargetFilter {
     /// `effects/mod.rs`, at the one point where the pre-rebind `source_id` and
     /// the about-to-be-mutated sub-ability clone coexist.
     ///
-    /// Distinct from `SelfRef` (rebound to the moved object under
-    /// `forward_result`) and from `OriginalController` (a player reference).
+    /// Unlike the current ability's primary `SelfRef` or a moved-object
+    /// `ParentTarget`, this pins the pre-rebind producer for legacy grants.
+    /// `OriginalController` is the separate player reference.
     OriginalSource,
     /// CR 615.5 + CR 609.7: Resolves to the controller of the *prevented event's*
     /// damage source. Used by prevention follow-up sentences such as "the source's

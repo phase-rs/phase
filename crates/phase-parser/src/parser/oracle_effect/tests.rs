@@ -61029,19 +61029,10 @@ fn flash_put_creature_forwards_reduced_cost_sacrifice() {
     );
 }
 
-/// CR 608.2c: Emperor of Bones class — a ChangeZone-to-Battlefield
-/// followed by sibling clauses that anaphorically reference the just-
-/// moved card ("it gains haste. sacrifice it ...") must mark
-/// `forward_result: true` on the ChangeZone parent so the runtime
-/// rewrites the sub-chain's `source_id` to the moved card. Without
-/// this, the trailing GenericEffect/Pump and CreateDelayedTrigger
-/// subs target Emperor itself (via `SelfRef`) instead of the
-/// returned creature.
-///
-/// Building-block test: the same pattern covers any
-/// "[move a card to the battlefield]. it gains [keyword].
-/// sacrifice it at the beginning of the next end step." chain
-/// (Emperor of Bones plus any future card with the same shape).
+/// CR 608.2c: Emperor of Bones' returned creature is the referent of
+/// "it gains haste" and the delayed sacrifice. The parent must forward that
+/// result context for the generic grant and delayed instruction without
+/// changing the creating source's identity.
 #[test]
 fn change_zone_to_battlefield_anaphor_subchain_sets_forward_result() {
     let def = parse_effect_chain(
