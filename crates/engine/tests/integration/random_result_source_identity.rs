@@ -3018,14 +3018,16 @@ fn public_coin_keep_action_preserves_the_die_result_settled_by_its_continuation(
             player: TargetFilter::Controller,
         },
     );
-    let coin = ResolvedAbility::new(
-        Effect::FlipCoins {
-            flips: CoinFlipRun::single(),
-            win_effect: Some(Box::new(gain_two.clone())),
-            lose_effect: Some(Box::new(gain_two)),
-            flipper: TargetFilter::Controller,
-        },
-        vec![],
+    let coin = engine::game::ability_utils::build_resolved_from_def(
+        &AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(gain_two.clone())),
+                lose_effect: Some(Box::new(gain_two)),
+                flipper: TargetFilter::Controller,
+            },
+        ),
         source,
         P0,
     );
