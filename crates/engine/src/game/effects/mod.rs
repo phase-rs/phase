@@ -16471,7 +16471,6 @@ fn phase_out_context_union_requires_parent(effect: &Effect) -> Option<bool> {
             | TargetFilter::EventTarget
             | TargetFilter::TriggeringSourceController
             | TargetFilter::EventTargetController
-            | TargetFilter::ParentTargetSlot { .. }
             | TargetFilter::DeclaredPlayer { .. }
             | TargetFilter::ParentTargetController
             | TargetFilter::ParentTargetOwner
