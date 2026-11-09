@@ -7837,7 +7837,7 @@ fn try_offer_object_growth_shortcut(
 /// `cleanup` the hand a turn-cycle period carries into each cleanup (CR 514.1), and `growth`
 /// what each repetition adds to the one before it (`resource::repetition_growth`), in which case
 /// `frames` are the offer's first repetition's; `seat_takes` is what the confirmer measured each
-/// charged slot taking per seat (`PeriodicDelta::seat_takes`).
+/// charged slot taking per seat and departed set (`PeriodicDelta::seat_takes`).
 pub(crate) fn replay_bounded_offer(
     state: &GameState,
     caster: PlayerId,
@@ -7849,6 +7849,7 @@ pub(crate) fn replay_bounded_offer(
         Vec<(PlayerId, i64)>,
     ),
     seat_takes: Vec<(
+        BTreeSet<PlayerId>,
         crate::analysis::decision_template::DecisionSlot,
         PlayerId,
         i64,

@@ -3433,9 +3433,10 @@ pub(crate) fn perform_declared_on(
     )
 }
 
-/// CR 119.3 + CR 601.2c: per slot that took life at an opponent, the life one resolution takes at
-/// its recorded aim and at each reachable living opponent where that is at most the recorded take,
-/// replayed from the offer frame with the slot declared there.
+/// CR 119.3 + CR 601.2c + CR 800.4a: per slot that took life at an opponent, the life one
+/// resolution takes at its recorded aim and at each reachable living opponent where that is at most
+/// the recorded take, replayed from the offer frame with the slot declared there, and again with
+/// each set of opponents that leaves one in the game eliminated first.
 fn measure_seat_takes(
     frame: &GameState,
     holder: PlayerId,
@@ -3444,7 +3445,7 @@ fn measure_seat_takes(
     end: &FrameEnd,
     frames: &[GameState],
     choices: &[PinnedDecision],
-) -> Vec<(DecisionSlot, PlayerId, i64)> {
+) -> Vec<(BTreeSet<PlayerId>, DecisionSlot, PlayerId, i64)> {
     use crate::analysis::decision_template::{
         AnnouncementSubject, DecisionGroupKey, DecisionKind, IterationCount, Ranking, ReplayMode,
         TargetSchedule,
@@ -3476,81 +3477,108 @@ fn measure_seat_takes(
             Some((charge.slot.clone(), aim, charge.magnitude))
         })
         .collect();
-    let mut takes = record.clone();
-    for seat in frame
+    let mut takes: Vec<(BTreeSet<PlayerId>, DecisionSlot, PlayerId, i64)> = record
+        .iter()
+        .map(|(slot, aim, took)| (BTreeSet::new(), slot.clone(), *aim, *took))
+        .collect();
+    let opponents: Vec<PlayerId> = frame
         .players
         .iter()
         .filter(|p| !p.is_eliminated && p.id != holder)
         .map(|p| p.id)
-    {
-        let probes: Vec<&(DecisionSlot, PlayerId, i64)> = record
+        .collect();
+    // ponytail: one replay per departed set and remaining seat, and the departed sets grow
+    // exponentially with seat count; measure only the chain of departures the witness predicts
+    // if that cost shows.
+    let departed_sets = (0u32..(1 << opponents.len()) - 1).map(|mask| {
+        opponents
             .iter()
-            .filter(|(slot, aim, took)| {
-                *took > 0
-                    && *aim != seat
-                    && recorded
-                        .iter()
-                        .any(|charge| charge.slot == *slot && charge.reaches.contains(&seat))
-            })
-            .collect();
-        if probes.is_empty() {
-            continue;
+            .enumerate()
+            .filter(|(bit, _)| mask & (1 << bit) != 0)
+            .map(|(_, seat)| *seat)
+            .collect::<BTreeSet<PlayerId>>()
+    });
+    for gone in departed_sets {
+        let mut start = s_n.clone();
+        for seat in &gone {
+            crate::game::elimination::eliminate_player(&mut start, *seat, &mut Vec::new());
         }
-        let template = DecisionTemplate {
-            owner: holder,
-            decisions: choices
+        for seat in opponents
+            .iter()
+            .copied()
+            .filter(|seat| !gone.contains(seat))
+        {
+            let probes: Vec<&(DecisionSlot, PlayerId, i64)> = record
                 .iter()
-                .cloned()
-                .map(|decision| match decision {
-                    PinnedDecision::Targets { slot, .. }
-                        if probes.iter().any(|(probe, ..)| *probe == slot) =>
-                    {
-                        PinnedDecision::Targets {
-                            slot,
-                            targets: vec![TargetPin::Scheduled(TargetSchedule::Constant(
-                                Ranking::one(AnnouncementSubject::Seat(seat)),
-                            ))],
-                        }
-                    }
-                    other => other,
+                .filter(|(slot, aim, took)| {
+                    *took > 0
+                        && (!gone.is_empty() || *aim != seat)
+                        && recorded
+                            .iter()
+                            .any(|charge| charge.slot == *slot && charge.reaches.contains(&seat))
                 })
-                .collect(),
-            replay: ReplayMode::Scheduled {
-                count: IterationCount::Fixed(2),
-            },
-            key: DecisionGroupKey::from_sources(&[], DecisionKind::LoopChoice),
-        };
-        let mut replay = s_n.clone();
-        let mut measured = Vec::new();
-        let came_round = end.repeat(
-            &mut replay,
-            items,
-            &mut Vec::new(),
-            None,
-            &mut Vec::new(),
-            Some((&template, 0)),
-        ) == CycleEnd::CameRound
-            && end.repeat(
+                .collect();
+            if probes.is_empty() {
+                continue;
+            }
+            let template = DecisionTemplate {
+                owner: holder,
+                decisions: choices
+                    .iter()
+                    .cloned()
+                    .map(|decision| match decision {
+                        PinnedDecision::Targets { slot, .. }
+                            if probes.iter().any(|(probe, ..)| *probe == slot) =>
+                        {
+                            PinnedDecision::Targets {
+                                slot,
+                                targets: vec![TargetPin::Scheduled(TargetSchedule::Constant(
+                                    Ranking::one(AnnouncementSubject::Seat(seat)),
+                                ))],
+                            }
+                        }
+                        other => other,
+                    })
+                    .collect(),
+                replay: ReplayMode::Scheduled {
+                    count: IterationCount::Fixed(2),
+                },
+                key: DecisionGroupKey::from_sources(&[], DecisionKind::LoopChoice),
+            };
+            let mut replay = start.clone();
+            let mut measured = Vec::new();
+            let came_round = end.repeat(
                 &mut replay,
                 items,
                 &mut Vec::new(),
-                Some(&mut measured),
+                None,
                 &mut Vec::new(),
-                Some((&template, 1)),
-            ) == CycleEnd::CameRound;
-        let Some(at) = charges(&measured).filter(|_| came_round) else {
-            continue;
-        };
-        takes.extend(at.into_iter().filter_map(|charge| {
-            let (_, _, record_take) = probes.iter().find(|(probe, ..)| *probe == charge.slot)?;
-            // CR 800.4a: a take above the record's may come from a permanent whose controller
-            // leaves first, so it is not published.
-            (charge.aimed_at == Some(seat) && charge.magnitude <= *record_take).then_some((
-                charge.slot,
-                seat,
-                charge.magnitude,
-            ))
-        }));
+                Some((&template, 0)),
+            ) == CycleEnd::CameRound
+                && end.repeat(
+                    &mut replay,
+                    items,
+                    &mut Vec::new(),
+                    Some(&mut measured),
+                    &mut Vec::new(),
+                    Some((&template, 1)),
+                ) == CycleEnd::CameRound;
+            let Some(at) = charges(&measured).filter(|_| came_round) else {
+                continue;
+            };
+            takes.extend(at.into_iter().filter_map(|charge| {
+                let (_, _, record_take) =
+                    probes.iter().find(|(probe, ..)| *probe == charge.slot)?;
+                // CR 800.4a: a take above the record's may come from a permanent whose controller
+                // leaves first, so it is not published.
+                (charge.aimed_at == Some(seat) && charge.magnitude <= *record_take).then_some((
+                    gone.clone(),
+                    charge.slot,
+                    seat,
+                    charge.magnitude,
+                ))
+            }));
+        }
     }
     takes
 }
