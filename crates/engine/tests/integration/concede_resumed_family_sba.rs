@@ -2,6 +2,10 @@
 //! family still owes the ordinary SBA/trigger boundary before priority.
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::{
+    AbilityCost, AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, QuantityExpr,
+    TargetFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
@@ -282,20 +286,17 @@ fn terminal_concession_preserves_its_single_game_result() {
     );
 }
 
-/// CR 603.2c + CR 603.7e + CR 616.1: a real activated delayed return observes
-/// the surviving destruction exactly once after the current chooser leaves.
+/// CR 603.2c + CR 603.7 + CR 616.1: delayed collection owns the same staged
+/// death occurrence once, independently of ordinary population collection.
+///
+/// Infrastructure exception: Adarkar Valkyrie is the nearest printed delayed
+/// death watcher, but its existing target_wrong hold is independently
+/// reproducible on retained main. Construct the exact typed watcher and a
+/// known life-gain consumer here; this claims no Adarkar parser/card repair.
 #[test]
-fn concession_keeps_a_staged_deaths_delayed_return_exactly_once() {
+fn staged_death_keeps_a_typed_delayed_observer_once_after_concession() {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
-    let valkyrie = scenario
-        .add_creature(P0, "Adarkar Valkyrie", 4, 5)
-        .with_subtypes(vec!["Angel"])
-        .from_oracle_text_with_keywords(
-            &["Flying", "Vigilance"],
-            "Flying, vigilance\n{T}: When target creature other than this creature dies this turn, return that card to the battlefield under your control.",
-        )
-        .id();
     let skeleton = scenario
         .add_creature(P1, "Drudge Skeletons", 1, 1)
         .with_subtypes(vec!["Skeleton"])
@@ -303,10 +304,32 @@ fn concession_keeps_a_staged_deaths_delayed_return_exactly_once() {
             "{B}: Regenerate this creature. (The next time this creature would be destroyed this turn, instead tap it, remove it from combat, and heal all damage on it.)",
         )
         .id();
-    // A shield from an earlier action competes with the regeneration shield
-    // created publicly below; no replacement definition is fabricated here.
     scenario.with_counter(skeleton, CounterType::Shield, 1);
     let bear = scenario.add_creature(P2, "Grizzly Bears", 2, 2).id();
+    let witness = scenario
+        .add_artifact_from_oracle(P0, "Typed delayed death witness", "")
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::CreateDelayedTrigger {
+                    condition: DelayedTriggerCondition::WhenDies {
+                        filter: TargetFilter::SpecificObject { id: bear },
+                    },
+                    effect: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 3 },
+                            player: TargetFilter::SpecificPlayer { id: P2 },
+                        },
+                    )),
+                    uses_tracked_set: false,
+                },
+            )
+            .cost(AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            }),
+        )
+        .id();
     let judgment = scenario
         .add_spell_to_hand_from_oracle(P0, "Day of Judgment", false, "Destroy all creatures.")
         .with_mana_cost(parse_mtgjson_mana_cost("{2}{W}{W}"))
@@ -324,7 +347,7 @@ fn concession_keeps_a_staged_deaths_delayed_return_exactly_once() {
     let mut runner = scenario.build();
     runner.act(GameAction::PassPriority).unwrap();
     runner.activate(skeleton, 0).resolve();
-    runner.activate(valkyrie, 0).target_object(bear).resolve();
+    runner.activate(witness, 0).resolve();
     let paused = runner.cast(judgment).resolve();
     assert!(matches!(
         paused.final_waiting_for(),
@@ -332,8 +355,8 @@ fn concession_keeps_a_staged_deaths_delayed_return_exactly_once() {
     ));
     let result = runner.act(GameAction::Concede { player_id: P1 }).unwrap();
     assert_eq!(runner.state().objects[&bear].zone, Zone::Graveyard);
-    assert_eq!(runner.state().objects[&valkyrie].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&skeleton].zone, Zone::Exile);
+    assert_eq!(runner.life(P2), 20);
     assert_eq!(
         move_count(&result.events, bear, Zone::Battlefield, Zone::Graveyard),
         1
@@ -341,9 +364,9 @@ fn concession_keeps_a_staged_deaths_delayed_return_exactly_once() {
     assert_eq!(
         runner.state().stack.len(),
         1,
-        "one death offers exactly one delayed return, not zero or two"
+        "one death queues one delayed observer, not zero or two"
     );
-    assert_eq!(runner.state().stack[0].source_id, valkyrie);
+    assert_eq!(runner.state().stack[0].source_id, witness);
     runner.advance_until_stack_empty();
     assert!(runner.state().stack.is_empty());
     assert!(runner.state().resolution_stack.is_empty());
@@ -351,9 +374,7 @@ fn concession_keeps_a_staged_deaths_delayed_return_exactly_once() {
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
-    assert_eq!(runner.state().objects[&bear].zone, Zone::Battlefield);
-    assert_eq!(runner.state().objects[&bear].controller, P0);
-    assert_eq!(runner.state().objects[&bear].owner, P2);
-    assert_eq!(runner.state().objects[&valkyrie].zone, Zone::Graveyard);
+    assert_eq!(runner.life(P2), 23, "the delayed consumer runs once");
+    assert_eq!(runner.state().objects[&bear].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&judgment].zone, Zone::Graveyard);
 }
