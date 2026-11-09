@@ -970,11 +970,12 @@ fn paused_subject_exile_restore_preserves_actor_before_public_resume() {
         WaitingFor::ReplacementChoice { player: P1, .. }
     ));
     let snapshots = [
-        PersistedGameState::Raw(Box::new(runner.state().clone())),
-        PersistedGameState::capture(runner.state().clone()),
+        serde_json::to_value(PersistedGameState::Raw(Box::new(runner.state().clone()))),
+        serde_json::to_value(PersistedGameState::capture(runner.state().clone())),
+        serde_json::to_value(runner.state()),
     ];
     for snapshot in snapshots {
-        let bytes = serde_json::to_value(snapshot).expect("the public saved-game writer succeeds");
+        let bytes = snapshot.expect("the public saved-game writer succeeds");
         let state = serde_json::from_value::<PersistedGameState>(bytes)
             .expect("the public saved-game reader accepts the current snapshot")
             .prepare_for_restore(PersistedRestoreFinalization::Immediate)

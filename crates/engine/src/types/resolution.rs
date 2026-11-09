@@ -4303,7 +4303,9 @@ impl ResolutionStack {
 /// and parked frames, and preserves unavailable announced bindings through coin
 /// outcomes and detached continuations (CR 601.2c + CR 608.2b); coin frames and
 /// unresolved coin abilities from earlier versions are refused.
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 11;
+/// Version 12 separates a parked ChangeZone instruction's recorded performer
+/// from its family/controller-relative duration authority.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 12;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -4344,6 +4346,10 @@ const LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION: u64 = 9;
 /// illegal-announcement absence provenance (#10300's random-result trigger-scope
 /// version).
 const LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION: u64 = 10;
+
+/// Last wire version whose parked ChangeZone instruction actor was recorded
+/// in `controller` rather than an independent `performed_by` field.
+const LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION: u64 = 11;
 
 /// Stable refusal: old coin saves lack the independently announced bindings;
 /// neither today's board nor the old flat target vector can reconstruct them.
@@ -4979,7 +4985,7 @@ fn migrate_legacy_change_zone_carrier(carrier: &mut Value) -> Result<(), String>
 /// [`LEGACY_GATED_CHANGE_ZONE_ENTRY_RESTORE_ERROR`]. The v1 top-level carrier
 /// is migrated by the v1 reader arm of `ResolutionStateWire::from_value`
 /// through the same `migrate_legacy_change_zone_carrier`, which stays the
-/// single per-carrier authority. v7 and later decode directly.
+/// single per-carrier authority. v7 and later already carry resolved members.
 fn migrate_legacy_change_zone_member_entries(
     value: &mut Value,
     version: u64,
@@ -5012,6 +5018,55 @@ fn migrate_legacy_change_zone_member_entries(
         }
     }
     Ok(())
+}
+
+/// Preserve the actor encoded by historical ChangeZone carriers. This runs
+/// only at the versioned save boundary; current carriers must supply their
+/// actor explicitly and no live object/controller lookup reconstructs it.
+fn migrate_legacy_change_zone_performers(value: &mut Value, version: u64) {
+    if !(LEGACY_RESOLUTION_STATE_WIRE_VERSION
+        ..=LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION)
+        .contains(&version)
+    {
+        return;
+    }
+
+    fn migrate_carrier(carrier: &mut Value) {
+        let Some(carrier) = carrier.as_object_mut() else {
+            return;
+        };
+        if carrier.contains_key("performed_by") {
+            return;
+        }
+        if let Some(controller) = carrier.get("controller").and_then(Value::as_u64) {
+            carrier.insert("performed_by".to_string(), Value::from(controller));
+        }
+    }
+
+    if version == LEGACY_RESOLUTION_STATE_WIRE_VERSION {
+        if let Some(carrier) = value.get_mut("pending_change_zone_iteration") {
+            migrate_carrier(carrier);
+        }
+        return;
+    }
+    let Some(frames) = value
+        .get_mut("resolution_frames")
+        .and_then(|stack| stack.get_mut("frames"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for frame in frames {
+        if frame.get("type").and_then(Value::as_str) != Some("ChangeZone") {
+            continue;
+        }
+        if let Some(carrier) = frame
+            .get_mut("data")
+            .and_then(|data| data.get_mut("pending"))
+        {
+            migrate_carrier(carrier);
+        }
+    }
 }
 
 /// Declares the resolution-wire shape of an UNVERSIONED raw `GameState`
@@ -5339,10 +5394,11 @@ impl ResolutionStateWire {
             | LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION
             | LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION
             | LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION
             | RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV4,
             _ => {
                 return Err(format!(
-                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, {LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
+                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, {LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
                 ));
             }
         };
@@ -5351,6 +5407,7 @@ impl ResolutionStateWire {
         }
         reject_ambiguous_legacy_paused_draw_result(&value, version)?;
         migrate_legacy_change_zone_member_entries(&mut value, version)?;
+        migrate_legacy_change_zone_performers(&mut value, version);
         // `ResolutionStateWire` is a public persistence boundary in its own
         // right. Its historic-shape preparation and raw-state materialization
         // both belong to `GameStateDecode`; no wire branch gets a private

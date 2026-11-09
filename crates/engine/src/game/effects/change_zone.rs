@@ -6573,6 +6573,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn current_parked_change_zone_without_actor_is_not_migrated() {
+        let (paused, ..) = paused_mass_return(|_| {}, true);
+        for (label, mut current) in both_wires(&paused) {
+            restore_persisted(current.clone())
+                .unwrap_or_else(|error| panic!("{label}: current save reach guard: {error}"));
+            change_zone_carrier_mut(wire_state_mut(&mut current), "resolution_frames")
+                .as_object_mut()
+                .expect("the current carrier is an object")
+                .remove("performed_by");
+            let error = restore_persisted(current)
+                .expect_err("a current save must provide its actor, not use historical migration");
+            assert!(error.contains("performed_by"), "{label}: {error}");
+        }
+    }
+
     /// CR 603.6a + CR 614.12 (persisted-version boundary): a v1–v6 save paused
     /// inside a multi-object ChangeZone wrote bare member ids with carrier-level
     /// entry modifications. With no gate, every member's pre-event entry is
