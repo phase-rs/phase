@@ -48,6 +48,7 @@ use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::EtbTapState;
 use engine::types::zones::Zone;
@@ -2489,8 +2490,6 @@ fn staged_destroy_refreshes_zero_or_one_surviving_umbra_after_chooser_departure(
 /// redirect, not a replay of the outer destruction.
 #[test]
 fn singleton_destroy_inner_graveyard_choice_reasks_after_controller_departure() {
-    use engine::types::proposed_event::ProposedEvent;
-
     let p2 = PlayerId(2);
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
@@ -2596,8 +2595,6 @@ fn singleton_destroy_inner_graveyard_choice_reasks_after_controller_departure() 
 /// The printed effects must produce (1 + 1) * 2 + 1 = 5, not restart at one.
 #[test]
 fn reconsult_preserves_modified_counter_event_after_controller_departure() {
-    use engine::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
-
     let p2 = PlayerId(2);
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
