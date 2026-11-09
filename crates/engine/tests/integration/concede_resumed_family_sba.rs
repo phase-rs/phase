@@ -1,20 +1,25 @@
 //! A public concession that cancels one member of a resolving activated
 //! family still owes the ordinary SBA/trigger boundary before priority.
 
+use engine::game::game_object::BackFaceData;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, QuantityExpr,
-    TargetFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, DelayedTriggerCondition, Effect,
+    QuantityExpr, ReplacementDefinition, ReplacementMode, TargetFilter,
 };
 use engine::types::actions::GameAction;
+use engine::types::card_type::{CardType, CoreType};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{ReplacementChoiceKind, WaitingFor, ZoneDeparture};
+use engine::types::game_state::{
+    GameState, LiminalEntryKind, ReplacementChoiceKind, WaitingFor, ZoneDeparture,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{parse_mtgjson_mana_cost, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::zones::Zone;
+use engine::types::replacements::ReplacementEvent;
+use engine::types::zones::{EtbTapState, Zone};
 
 const P2: PlayerId = PlayerId(2);
 
@@ -666,4 +671,139 @@ fn beacon_of_unrest_paid_mox_discard_completes_family_and_shuffle_before_priorit
         1,
         "the original begun spell completes exactly once"
     );
+}
+
+/// CR 614.12 + CR 800.4b: once the exact entry remains, its hypothetical
+/// battlefield back face must not shadow the surviving graveyard card.
+/// This is a latent typed DFC/return/optional-redirect witness, not a claim
+/// that a printed card has this combination of instructions.
+#[test]
+fn transformed_entry_departed_chooser_releases_projection_before_priority_and_save() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let entrant = scenario
+        .add_creature_to_graveyard(P1, "Latent front", 2, 2)
+        .id();
+    let latent_move = |target, destination, transformed| Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination,
+        target,
+        owner_library: false,
+        enter_transformed: transformed,
+        enters_under: Some(ControllerRef::You),
+        enter_tapped: EtbTapState::Unspecified,
+        enters_attacking: false,
+        up_to: false,
+        enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
+        face_down_profile: None,
+        enters_modified_if: None,
+    };
+    scenario
+        .add_creature(P2, "Latent optional entry redirect", 1, 1)
+        .with_replacement_definition(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .mode(ReplacementMode::Optional { decline: None })
+                .valid_card(TargetFilter::SpecificObject { id: entrant })
+                .destination_zone(Zone::Battlefield)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    latent_move(TargetFilter::SelfRef, Zone::Graveyard, false),
+                )),
+        );
+    let spell = scenario
+        .add_spell_to_hand(P0, "Latent transformed return", false)
+        .with_ability(latent_move(
+            TargetFilter::SpecificObject { id: entrant },
+            Zone::Battlefield,
+            true,
+        ))
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&entrant)
+        .unwrap()
+        .back_face = Some(BackFaceData {
+        is_swap_snapshot: false,
+        trigger_printed_origins: vec![],
+        name: "Latent back".to_owned(),
+        power: Some(3),
+        toughness: Some(3),
+        loyalty: None,
+        printed_loyalty: None,
+        defense: None,
+        card_types: CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec![],
+        },
+        mana_cost: Default::default(),
+        keywords: vec![],
+        abilities: vec![],
+        trigger_definitions: Default::default(),
+        replacement_definitions: Default::default(),
+        static_definitions: Default::default(),
+        color: vec![],
+        printed_ref: None,
+        modal: None,
+        additional_cost: None,
+        strive_cost: None,
+        casting_restrictions: vec![],
+        casting_options: vec![],
+        layout_kind: None,
+        parse_warnings: vec![],
+    });
+
+    runner.cast(spell).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+    assert!(matches!(
+        runner
+            .state()
+            .liminal_entries
+            .get(&entrant)
+            .map(|entry| &entry.kind),
+        Some(LiminalEntryKind::TransformedEntry)
+    ));
+    assert_eq!(
+        runner
+            .state()
+            .entering_or_live_object(entrant)
+            .unwrap()
+            .name,
+        "Latent back"
+    );
+
+    runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("the latched entry chooser concedes");
+    assert_eq!(runner.state().objects[&entrant].zone, Zone::Graveyard);
+    assert_eq!(
+        runner
+            .state()
+            .entering_or_live_object(entrant)
+            .unwrap()
+            .name,
+        "Latent front"
+    );
+    assert!(!runner.state().liminal_entries.contains_key(&entrant));
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(runner.state().pending_replacement.is_none());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    let restored: GameState = serde_json::from_slice(
+        &serde_json::to_vec(runner.state()).expect("the settled state serializes"),
+    )
+    .expect("the settled state restores");
+    assert_eq!(
+        restored.entering_or_live_object(entrant).unwrap().name,
+        "Latent front"
+    );
+    assert!(!restored.liminal_entries.contains_key(&entrant));
 }
