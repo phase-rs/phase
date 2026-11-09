@@ -407,3 +407,44 @@ fn etb_trigger_non_modal_reflexive_triggers_once_and_resolves() {
     );
     assert_settled(runner.state());
 }
+
+/// CR 603.12 + CR 603.3d: a TARGETED non-modal reflexive is put on the stack
+/// directly and asks for its target; releasing the completed payment frame
+/// while that prompt is open must not disturb the target choice or resolution.
+#[test]
+fn spell_targeted_non_modal_reflexive_chooses_target_and_resolves() {
+    let (mut runner, spell) = non_modal_runtime(|scenario| {
+        scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Paid Rider",
+                false,
+                "You may pay {1} up to three times. When you do, target player gains 3 life.",
+            )
+            .with_mana_cost(green_cost())
+            .id()
+    });
+    runner.cast(spell).commit();
+    pass_until_payment_offer(&mut runner);
+    decide(&mut runner, true);
+    decide(&mut runner, false);
+    assert_eq!(tapped_lands(runner.state(), P0), 2, "one {{1}} payment");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "reflexive asks for its target; got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P1)),
+        })
+        .expect("choose the reflexive's target");
+    assert_eq!(runner.state().stack.len(), 1, "one reflexive trigger");
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().players[1].life, 23, "target gained 3 once");
+    assert_eq!(runner.state().players[0].life, 20);
+    assert_settled(runner.state());
+}
