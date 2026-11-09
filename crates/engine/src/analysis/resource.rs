@@ -12625,6 +12625,122 @@ mod tests {
         assert!(loop_states_cover_modulo_growth(&prior, &current));
     }
 
+    #[test]
+    fn loop_relational_growing_stack_cover_uses_projected_event_ranks() {
+        use crate::types::ability::{TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef};
+        use crate::types::identifiers::ObjectIncarnationRef;
+
+        // Controlled cover fixture: the retained damage-source/receipt shape
+        // comes from the real Kinnan/Curse regression. The occupied mandatory
+        // GainLife growth is the existing cover rig, not a new card-support claim.
+        let mut prior = GameState::new_two_player(7);
+        let dealer = battlefield_creature(&mut prior, 20, 0);
+        {
+            let object = prior.objects.get_mut(&dealer).unwrap();
+            object.incarnation = 7;
+            object.power = Some(2);
+            object.toughness = Some(2);
+            object.base_power = Some(2);
+            object.base_toughness = Some(2);
+            object.base_card_types = object.card_types.clone();
+        }
+        let snapshot = prior.objects[&dealer].snapshot_public_characteristics();
+        prior
+            .lki_by_incarnation
+            .entry(dealer)
+            .or_default()
+            .insert(3, snapshot);
+        let mut frozen = churn_entry(100, 0, gain_ability(2), None);
+        let StackEntryKind::TriggeredAbility { trigger_event, .. } = &mut frozen.kind else {
+            unreachable!("the cover rig builds triggered entries");
+        };
+        *trigger_event = Some(GameEvent::DamageDealt {
+            source_id: dealer,
+            source_incarnation: Some(3),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        });
+        prior.stack.push_back(frozen.clone());
+        prior.stack.push_back(g(101));
+        let mut current = prior.clone();
+        current.stack.push_back(g(102));
+        let receipt = TriggerDefinitionRef {
+            source: ObjectIncarnationRef::of(dealer, 5),
+            occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                base_set: TriggerBaseSetInstanceRef::INITIAL,
+                printed_index: 0,
+            },
+        };
+        current
+            .triggered_abilities_added_mana_this_turn
+            .insert((receipt.clone(), PlayerId(0)));
+        assert!(3 < receipt.source.incarnation);
+        assert!(receipt.source.incarnation < current.objects[&dealer].incarnation);
+        assert_eq!(prior.stack.len(), 2);
+        assert_eq!(current.stack.len(), 3);
+        assert_eq!(
+            current.stack[0], frozen,
+            "the retained entry is frozen, not the growing kind"
+        );
+        assert_eq!(prior.lki_by_incarnation, current.lki_by_incarnation);
+
+        // Both entry points must first reach a genuine occupied mandatory
+        // growth cover without the unrelated receipt; equal false is not parity.
+        let mut receipt_free = current.clone();
+        receipt_free
+            .triggered_abilities_added_mana_this_turn
+            .clear();
+        assert!(loop_states_cover_modulo_growth(&prior, &receipt_free));
+        let clean_shared = SharedCurrentFrames::new(&receipt_free);
+        assert!(loop_states_cover_modulo_growth(&prior, &clean_shared));
+
+        let normalized_prior = prior.normalize_for_loop();
+        let normalized_current = current.normalize_for_loop();
+        for old in [&prior, &normalized_prior] {
+            for now in [&current, &normalized_current] {
+                let frames = SharedCurrentFrames::new(now);
+                assert!(
+                    loop_states_cover_modulo_growth(old, &frames),
+                    "post-erasure shared stack reaches the same occupied growth"
+                );
+                assert!(
+                    loop_states_cover_modulo_growth(old, now),
+                    "direct growing-stack cover must use the same projected retained-event ranks"
+                );
+            }
+        }
+
+        let mut no_growth = current.clone();
+        no_growth.stack.pop_back();
+        let mut changed_event = current.clone();
+        let StackEntryKind::TriggeredAbility {
+            trigger_event: Some(event),
+            ..
+        } = &mut changed_event.stack[0].kind
+        else {
+            unreachable!("the frozen entry retains its damage event");
+        };
+        let GameEvent::DamageDealt { amount, .. } = event else {
+            unreachable!("the retained event is damage");
+        };
+        *amount = 3;
+        let mut changed_lki = current.clone();
+        changed_lki
+            .lki_by_incarnation
+            .get_mut(&dealer)
+            .unwrap()
+            .get_mut(&3)
+            .unwrap()
+            .controller = PlayerId(1);
+        for hostile in [&no_growth, &changed_event, &changed_lki] {
+            assert!(!loop_states_cover_modulo_growth(&prior, hostile));
+            let frames = SharedCurrentFrames::new(hostile);
+            assert!(!loop_states_cover_modulo_growth(&prior, &frames));
+        }
+    }
+
     /// Stack growth compares trigger-firing semantics, not the fresh IDs that
     /// index their sidecar rows. This keeps the board-only precheck independent
     /// of stack depth while preserving CR 603.7's ordinary/delayed distinction.
