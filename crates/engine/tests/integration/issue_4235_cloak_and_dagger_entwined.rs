@@ -324,6 +324,7 @@ fn until_source_leaves_does_not_begin_after_source_left_event() {
 
     let mut ability = ResolvedAbility::new(
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Hand),
             destination: Zone::Exile,
             target: TargetFilter::Typed(
@@ -416,6 +417,7 @@ fn interactive_two_candidate_exile_choice_preserves_until_leaves_link() {
     // with the host-lifetime duration on the resolving ability.
     let mut ability = ResolvedAbility::new(
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Hand),
             destination: Zone::Exile,
             target: TargetFilter::Typed(TypedFilter {
