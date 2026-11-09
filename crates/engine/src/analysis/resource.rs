@@ -5035,17 +5035,6 @@ pub(crate) fn fodder_content_eq(a: &GameObject, b: &GameObject) -> bool {
     crate::types::game_state::object_content_eq(&probe, b)
 }
 
-/// Does `id` name a member of the fodder class in `state`? Content-derived (via
-/// [`fodder_content_eq`]), NOT ObjectId — fodder tokens are not id-stable (a
-/// reproduced token gets a fresh id; a tapped one keeps its id but flips `tapped`).
-#[cfg_attr(not(test), allow(dead_code))] // exercised by this module's unit tests.
-fn is_fodder(state: &GameState, id: &ObjectId, class: &GameObject) -> bool {
-    state
-        .objects
-        .get(id)
-        .is_some_and(|o| fodder_content_eq(o, class))
-}
-
 /// CR 110.1 / CR 732.2a: the winning controller's *tapped* fodder-class members —
 /// the objects forming the visible "∞ pile" for an accepted object-growth loop
 /// shortcut. Filters `state.battlefield` to permanents that `controller` controls,
@@ -10459,11 +10448,14 @@ mod tests {
         let mut tapped = current.clone();
         tapped.objects.get_mut(&ObjectId(22)).unwrap().tapped = true;
         let mut outside_class = current.clone();
-        outside_class
-            .objects
-            .get_mut(&ObjectId(22))
-            .unwrap()
-            .controller = PlayerId(0);
+        let outside_object = outside_class.objects.get_mut(&ObjectId(22)).unwrap();
+        outside_object.controller = PlayerId(0);
+        outside_object.base_controller = Some(PlayerId(0));
+        assert_eq!(
+            flush_clone(&outside_class).objects[&ObjectId(22)].controller,
+            PlayerId(0),
+            "the outside-class controller must survive the actual layer flush"
+        );
         let mut two_occurrences = current.clone();
         let mut second = prior.objects[&ObjectId(21)].clone();
         second.id = ObjectId(23);
