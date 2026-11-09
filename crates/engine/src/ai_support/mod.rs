@@ -5837,8 +5837,9 @@ mod tests {
 
     /// V4 (#544 case 2): a sac-for-mana source PLUS a mana-costed non-mana
     /// activated ability holds — the produced mana could feed the ability
-    /// (CR 605.3a + CR 603.6). The ability is present but unaffordable-now (no
-    /// floating mana), so it is absent from the flat list — proving the hold
+    /// (CR 605.3a + CR 603.6). The ability is present but unaffordable-now: its
+    /// {2} exceeds the single {C} the sacrifice makes, even in a manual payment's
+    /// CR 601.2g window, so it is absent from the flat list — proving the hold
     /// flows through the case-2 followup gate, not the flat meaningful-action path.
     #[test]
     fn sac_for_mana_holds_with_downstream_mana_costed_activated_ability() {
@@ -5852,7 +5853,7 @@ mod tests {
 
         add_sac_for_mana_source(&mut state, PlayerId(0));
 
-        // Separate permanent with "{1}: Draw a card" — a non-mana activated
+        // Separate permanent with "{2}: Draw a card" — a non-mana activated
         // ability with a mana component in its cost.
         let engine = create_object(
             &mut state,
@@ -5873,13 +5874,13 @@ mod tests {
                     },
                 )
                 .cost(AbilityCost::Mana {
-                    cost: ManaCost::generic(1),
+                    cost: ManaCost::generic(2),
                 }),
             );
         }
 
         let flat = super::flat_priority_actions(&state);
-        // Reach-guard: the flat list carries no meaningful action (the {1} ability
+        // Reach-guard: the flat list carries no meaningful action (the {2} ability
         // is unaffordable now), so the hold MUST come from the case-2 gate.
         assert!(
             !super::flat_actions_have_meaningful_priority(&state, &flat),
