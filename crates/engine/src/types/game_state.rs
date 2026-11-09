@@ -4878,14 +4878,13 @@ pub struct PendingChangeZoneIteration {
     /// (CR 603.6a).
     pub remaining: Vec<ChangeZoneMemberEntry>,
     pub source_id: ObjectId,
-    /// The player who performs this instruction's move (CR 608.2c) — the
-    /// controller for announced targets, bound referents and
-    /// search-outside-the-game pulls, `move_performer`'s answer on the mass
-    /// path, and the `EffectZoneChoice` chooser on an interactive pick resume.
-    /// Carried because a resumed member has no `ResolvedAbility` to re-derive
-    /// the performer from. `elimination.rs::abandon_change_zone_family_for_controller`
-    /// reads it as the resolving family's controller; see phase-rs/phase#10691.
+    /// Family controller and controller-relative duration anchor on direct,
+    /// mass and search paths. The pre-existing interactive `EffectZoneChoice`
+    /// path still carries its chooser here, not an independently captured owner.
     pub controller: PlayerId,
+    /// Instruction performer, captured independently across every pause.
+    /// Required: a missing actor cannot safely be inferred from the controller.
+    pub performed_by: PlayerId,
     pub origin: Option<crate::types::zones::Zone>,
     pub destination: crate::types::zones::Zone,
     pub enter_transformed: bool,
@@ -42627,6 +42626,7 @@ mod tests {
             remaining: Vec::new(),
             source_id: object,
             controller: PlayerId(0),
+            performed_by: PlayerId(0),
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             enter_transformed: false,
@@ -54785,6 +54785,7 @@ mod tests {
             }],
             source_id: ObjectId(7),
             controller: PlayerId(0),
+            performed_by: PlayerId(0),
             origin: None,
             destination: Zone::Battlefield,
             enter_transformed: false,
@@ -54837,6 +54838,15 @@ mod tests {
             "face_down_profile must survive the pause/resume round-trip"
         );
         assert_eq!(parsed, original);
+
+        let mut missing_actor = serde_json::to_value(&original).expect("serialize carrier");
+        missing_actor
+            .as_object_mut()
+            .unwrap()
+            .remove("performed_by");
+        let error = serde_json::from_value::<PendingChangeZoneIteration>(missing_actor)
+            .expect_err("an active carrier cannot guess a missing instruction performer");
+        assert!(error.to_string().contains("performed_by"));
 
         let mut legacy = serde_json::to_value(&original).expect("serialize modern carrier");
         legacy
