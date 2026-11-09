@@ -82,6 +82,7 @@ fn aangs_journey_search(source: ObjectId) -> ResolvedAbility {
     // Continuation link 1: move the found card(s) to hand.
     let mut to_hand = ResolvedAbility::new(
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Hand,
             target: TargetFilter::Any,

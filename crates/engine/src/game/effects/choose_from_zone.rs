@@ -3501,6 +3501,7 @@ mod tests {
         ];
         let change_zone = Box::new(ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
                 target: TargetFilter::Any,
@@ -3723,6 +3724,7 @@ mod tests {
             sub_ability: Some(bottom),
             ..ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Library),
                     destination: Zone::Hand,
                     target: TargetFilter::Any,
@@ -4500,6 +4502,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let (x, g) = chain_set_with_graveyard_card(&mut state);
         let mut ability = random_graveyard_pick_then(Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Exile,
             target: TargetFilter::ParentTarget,

@@ -146,6 +146,7 @@ fn transform_effect_in_place(effect: &mut Effect) {
             origin,
             destination,
             target,
+            library_shuffle,
             // Single-target-only modifiers — `ChangeZoneAll` carries no
             // equivalents and the overload corpus uses ChangeZone only for
             // hidden-zone exile where these have no semantics. Bind each
@@ -171,7 +172,7 @@ fn transform_effect_in_place(effect: &mut Effect) {
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
-            library_shuffle: Default::default(),
+            library_shuffle,
             random_order: false,
         },
         // Effects without an all-matching counterpart (e.g. `Counter` for
@@ -308,6 +309,7 @@ mod tests {
     fn change_zone_becomes_change_zone_all() {
         use crate::types::ability::ControllerRef;
         let mut def = leaf(Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Exile,
             target: TargetFilter::Typed(TypedFilter {
@@ -359,6 +361,7 @@ mod tests {
     #[test]
     fn change_zone_self_ref_not_promoted() {
         let mut def = leaf(Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Exile,
             target: TargetFilter::SelfRef,
@@ -398,6 +401,7 @@ mod tests {
         use crate::types::ability::ControllerRef;
         use crate::types::mana::ManaCost;
         let self_exile = leaf(Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Exile,
             target: TargetFilter::SelfRef,
@@ -426,6 +430,7 @@ mod tests {
         let mut root = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(TypedFilter {

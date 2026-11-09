@@ -1434,6 +1434,97 @@ fn a_lethal_drain_beyond_the_horizon_is_offered_at_the_reachable_count() {
     );
 }
 
+/// #10464: validating a responder's `Accept` must not TAKE the shortcut.
+///
+/// The last responder's `Accept` is the answer that materializes the whole take, so
+/// `SimulationFilter` used to answer "is this legal?" by cloning the state and applying it: the
+/// take ran once for the verdict and again for the real answer, holding the game lock for about
+/// two takes. This row measures the take drive itself (`take_cost_snapshot`), never a wall clock,
+/// and it measures it at the public `legal_actions` boundary — the call the server session makes
+/// after every action.
+///
+/// **Fixture pin:** P1 accepts first, so the window measured is P2's with `remaining_players`
+/// empty — the seat whose `Accept` is the materializing one (CR 732.2c: the shortcut is taken once
+/// the last player has answered). On a window that still has a queued
+/// responder an `Accept` merely advances the poll, which is why the shorter window would pass
+/// vacuously. The enumeration reach guard (`exactly one RespondToShortcut`) is what keeps the
+/// zero counters from being satisfied by an empty action list.
+#[test]
+fn shortcut_accept_validation_does_not_take_the_shortcut() {
+    // This measures the generic shortcut protocol using the existing composed synthetic loop.
+    // Nearest printed anchors: Marauding Blight-Priest and Exquisite Blood; the fixture's
+    // fixed-one Test Blood Sipper is not Exquisite Blood's variable-amount printed ability.
+    let (mut runner, kickoff) = setup_3p_optional_cascade(LoopDetectionMode::Interactive);
+    let _ = runner.cast(kickoff).resolve();
+    let (_events, wf) = drive_collect(&mut runner, 500);
+    assert!(
+        matches!(wf, WaitingFor::LoopShortcut { .. }),
+        "REACH-GUARD: the offer must fire, got {wf:?}"
+    );
+    runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::UntilLethal,
+            template: None,
+        })
+        .expect("P0 declares the shortcut");
+    runner
+        .act(GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        })
+        .expect("P1 accepts");
+
+    let WaitingFor::RespondToShortcut {
+        player,
+        remaining_players,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "REACH-GUARD: P2 must be prompted, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P2, "APNAP: the last responder is P2");
+    assert!(
+        remaining_players.is_empty(),
+        "REACH-GUARD: this row needs the seat whose Accept MATERIALIZES the take"
+    );
+
+    let before = take_cost_snapshot();
+    let validation_before = engine::game::perf_counters::snapshot().raw_validation_state_clones;
+    let actions = engine::ai_support::legal_actions(runner.state());
+    let during = take_cost_snapshot().since(before);
+    let validation_clones =
+        engine::game::perf_counters::snapshot().raw_validation_state_clones - validation_before;
+
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept
+            }]
+        ),
+        "REACH-GUARD: the window enumerates exactly the materializing Accept, got {actions:?} — \
+         a Shorten at place 0 takes nothing, so the take counters below would not be measuring \
+         the take this row exists to remove"
+    );
+    assert_eq!(
+        validation_clones, 0,
+        "deciding whether the Accept is legal must not reach the clone-and-apply probe"
+    );
+    // MEASURED, same fixture, same window: base `bf584d6bd` answers this call with
+    // `validation_clones=1, state_copies=50`; head with `0` and `1`. The copies above the one the
+    // candidate probe makes are the simulated Accept driving the shortcut — `GameState::clone`
+    // accounts every copy, so the take's snapshots land in this counter.
+    // `drive_snapshots` is 0 on BOTH sides here (the UntilLethal take drives through a path that
+    // records no drive snapshot), so the state copy is this board's take instrument, not that
+    // counter.
+    assert_eq!(
+        during.state_copies, 1,
+        "one copy, the candidate probe's; the legality verdict must not add a take's snapshot"
+    );
+}
+
 /// CR 732.2a: a shortcut belongs to the player with priority, not necessarily the player
 /// whose loop will win. P1 starts the proven P0-controlled drain by making P0 gain life on
 /// P1's turn, so the live bridge must offer P1 the choice while retaining P0 as the measured
