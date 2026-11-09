@@ -406,15 +406,16 @@ closes the transport; healthy-stream ignores are unchanged. The wrapper reports
 `CLOSED` before close callbacks, so synchronous reentrant submissions reject
 rather than occupying an unsent slot.
 
-A natural close is latched when it reaches the codec wrapper: `readyState`
-immediately reports `CLOSED` and no new sends or receives are admitted.
-Already-received healthy frames retain their ordered drain, bounded by an
-independent five-second event-loop timer rather than the 60-second decoder
-watchdog. A stalled decoder or missing consumer cannot retain the lease beyond
-that drain; late results are fenced. A codec rejection or resync request after
-network death settles the original network close instead of replacing its cause
-or downgrading the reconnect policy. The timer cannot preempt synchronous
-main-thread WASM.
+A natural close is latched directly from the undecorated transport, before
+pending gzip inflation can hide its death. `readyState` immediately reports
+`CLOSED`; no new sends or raw frames are admitted. Already-received healthy
+frames may finish inflation and decoding in order before the close notification.
+An independent five-second event-loop timer starts at raw death, not at inflater
+completion or the 60-second decoder watchdog. A stalled inflater, decoder or
+missing consumer cannot retain the lease beyond that drain; late results are
+fenced. A codec rejection or resync request after network death settles the
+original network close instead of replacing its cause or downgrading reconnect
+policy. The timer cannot preempt synchronous main-thread WASM.
 
 ### Design Principles
 

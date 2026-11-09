@@ -2999,7 +2999,6 @@ describe("openPhaseSocket — natural close during codec decode", () => {
   });
 
   it("preserves the original raw close when an earlier raw observer closes the codec during held gzip inflation", async () => {
-    let closeAdopted!: () => void;
     const closeFromRawObserver = vi.fn((_event: Event) => { closeAdopted(); });
     const wire = await pendingGzipAttachment(() => {
       // An existing application observer predates codec construction. Its
@@ -3007,7 +3006,7 @@ describe("openPhaseSocket — natural close during codec decode", () => {
       MockWebSocket.instances[0].addEventListener("close", closeFromRawObserver, { once: true });
     });
     const { held, raw, socket, received, inflation, messageListener } = wire;
-    closeAdopted = () => socket.close();
+    const closeAdopted = () => socket.close();
     try {
       raw.deliverMessage(wire.compressedB.buffer);
       await inflation.entered;
