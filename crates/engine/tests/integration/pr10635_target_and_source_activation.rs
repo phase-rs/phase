@@ -5,7 +5,9 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::events::{GameEvent, PlayerActionKind};
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, ReplacementChoiceKind, WaitingFor};
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -261,4 +263,124 @@ fn oblation_selected_owner_draws_after_the_owner_shuffle() {
     ));
     assert!(outcome.state().stack.is_empty());
     assert!(outcome.state().resolution_stack.is_empty());
+}
+
+#[test]
+fn paid_beacon_keeps_its_source_after_the_mox_entry_discard() {
+    // Full Oracle; the public entry-cost pause is the forwarded-result seam.
+    const BEACON: &str = "Put target artifact or creature card from a graveyard onto the battlefield under your control. Shuffle Beacon of Unrest into its owner's library.";
+    const MOX: &str = "If this artifact would enter, you may discard a land card instead. If you do, put this artifact onto the battlefield. If you don't, put it into its owner's graveyard.\n{T}: Add one mana of any color.";
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let beacon = scenario
+        .add_spell_to_hand_from_oracle(P0, "Beacon of Unrest", false, BEACON)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+        })
+        .id();
+    let mox = scenario
+        .add_spell_to_graveyard(P1, "Mox Diamond", false)
+        .as_artifact()
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text(MOX)
+        .id();
+    let forest = scenario.add_land_to_hand(P0, "Forest").id();
+    let island = scenario.add_land_to_hand(P0, "Island").id();
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Black,
+            ManaType::Black,
+        ]
+        .into_iter()
+        .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+        .collect(),
+    );
+    let mut runner = scenario.build();
+    let outcome = runner.cast(beacon).target_object(mox).resolve();
+    assert_eq!(outcome.mana_pool_total(P0), 0);
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::ReplacementChoice {
+            player: P0,
+            kind: ReplacementChoiceKind::OptionalBranch,
+            ..
+        }
+    ));
+    let mut events = outcome.events().to_vec();
+    events.extend(
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("the intended controller accepts Mox Diamond's entry cost")
+            .events,
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DiscardChoice {
+            player: P0,
+            count: 1,
+            ..
+        }
+    ));
+    events.extend(
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![forest],
+            })
+            .expect("discard the chosen real land")
+            .events,
+    );
+    for _ in 0..16 {
+        if runner.state().stack.is_empty()
+            && runner.state().resolution_stack.is_empty()
+            && runner.state().resolving_stack_entry.is_none()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    assert_eq!(runner.state().objects[&mox].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&mox].owner, P1);
+    assert_eq!(runner.state().objects[&mox].controller, P0);
+    assert_eq!(runner.state().objects[&forest].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&island].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&beacon].zone, Zone::Library);
+    let source_move = events
+        .iter()
+        .position(|event| {
+            matches!(event, GameEvent::ZoneChanged {
+            object_id, from: Some(Zone::Stack), to: Zone::Library, ..
+        } if *object_id == beacon)
+        })
+        .expect("the printed source, not the returned Mox, enters its library");
+    let shuffles: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some((index, *player_id)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shuffles.len(), 1);
+    assert_eq!(shuffles[0].1, P0);
+    assert!(source_move < shuffles[0].0);
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }
