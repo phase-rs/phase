@@ -2865,10 +2865,9 @@ fn interactive_loop_bridge_paths(
             let WaitingFor::Priority { player: proposer } = state.waiting_for else {
                 unreachable!("interactive bridge only runs during priority")
             };
-            // CR 732.2a: a non-targeted drain publishes no decision points, and this path
-            // MEASURES no CR 704 repetition threshold — `UntilLethal` is terminated by the
-            // real SBA, not by a caller-supplied count — so it passes the absence and the
-            // constructor derives the ceiling from the engine's own budget.
+            // CR 732.2a: a non-targeted drain publishes no decision points and measures no
+            // caller-supplied repetition ceiling — `UntilLethal` is terminated by the real SBA —
+            // but passes `representable` so the schema is bounded by the engine's scalar headroom.
             let period_frames: Vec<&GameState> = state
                 .loop_detect_ring
                 .iter()
@@ -2876,19 +2875,24 @@ fn interactive_loop_bridge_paths(
                 .map(|sample| &sample.live)
                 .chain(std::iter::once(&*state))
                 .collect();
-            let cycle = crate::analysis::headroom::PeriodExcursions::of_frames(&period_frames);
             let representable =
-                crate::analysis::headroom::PeriodExcursions::representable_repetitions(
-                    &[cycle.clone(), cycle],
+                crate::analysis::headroom::PeriodExcursions::representable_over_frames(
+                    &period_frames,
                     state,
                     MAX_SHORTCUT_CYCLES,
                 );
+            // CR 704.5a / CR 704.5c: measure how many cycles are required to eliminate every
+            // non-eliminated opponent. If the engine cannot represent that many repetitions,
+            // withhold the shortcut so the loop does not offer a count that overflows before lethal.
+            let frame_wise = delta.with_frame_wise_life_loss(&period_frames);
             let cycles_to_lethal = state
                 .players
                 .iter()
                 .filter(|p| !p.is_eliminated && p.id != winner)
                 .map(|p| {
-                    let loss = -delta.life.get(&p.id).copied().unwrap_or(0);
+                    // CR 119.3 + CR 704.5a: 0 or less life loses; read frame-wise life loss.
+                    let loss = -frame_wise.life.get(&p.id).copied().unwrap_or(0);
+                    // CR 704.5c: ten or more poison counters loses.
                     let poison_gain = delta.poison.get(&p.id).copied().unwrap_or(0);
                     let life_cycles = if loss > 0 {
                         if p.life <= 0 {
@@ -2913,7 +2917,8 @@ fn interactive_loop_bridge_paths(
                 })
                 .max()
                 .unwrap_or(0);
-            if representable.is_some_and(|r| u64::from(r) < cycles_to_lethal as u64) {
+            let cycles_to_lethal = u64::try_from(cycles_to_lethal).unwrap_or(0);
+            if representable.is_some_and(|r| u64::from(r) < cycles_to_lethal) {
                 return;
             }
             let schema = build_shortcut_schema(
@@ -4006,10 +4011,9 @@ fn bounded_offer_tail(
             ) {
                 return Err(BoundedOfferRefusal::UnspecifiedChoiceWindow);
             }
-            let cycle = crate::analysis::headroom::PeriodExcursions::of_frames(&period_frames);
             let representable =
-                crate::analysis::headroom::PeriodExcursions::representable_repetitions(
-                    &[cycle.clone(), cycle],
+                crate::analysis::headroom::PeriodExcursions::representable_over_frames(
+                    &period_frames,
                     state,
                     MAX_SHORTCUT_CYCLES,
                 );
@@ -5730,11 +5734,9 @@ fn shortcut_consumption_bound(
                         .map(|sample| &sample.live)
                         .chain(std::iter::once(state))
                         .collect();
-                    let cycle =
-                        crate::analysis::headroom::PeriodExcursions::of_frames(&period_frames);
                     if let Some(r) =
-                        crate::analysis::headroom::PeriodExcursions::representable_repetitions(
-                            &[cycle.clone(), cycle],
+                        crate::analysis::headroom::PeriodExcursions::representable_over_frames(
+                            &period_frames,
                             state,
                             MAX_SHORTCUT_CYCLES,
                         )

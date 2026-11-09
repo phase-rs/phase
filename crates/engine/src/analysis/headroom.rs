@@ -246,6 +246,16 @@ impl PeriodExcursions {
         excursions
     }
 
+    /// Repetitions that `state` can represent when the cycle seen in `frames` repeats unchanged.
+    pub(crate) fn representable_over_frames(
+        frames: &[&GameState],
+        state: &GameState,
+        budget: u32,
+    ) -> Option<u32> {
+        let cycle = Self::of_frames(frames);
+        Self::representable_repetitions(&[cycle.clone(), cycle], state, budget)
+    }
+
     /// The player-resource excursions of iteration `iteration` of a declared period,
     /// constructing seat life charges from `per_cycle.declared_seat_life_charges` so
     /// declared victim relocations are accounted for in headroom analysis.

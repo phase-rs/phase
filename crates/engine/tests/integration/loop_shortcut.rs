@@ -595,6 +595,25 @@ fn printed_energy_counting_replay_stops_on_tally_overflow_without_panicking() {
 /// cleanly without panicking (#10543).
 #[test]
 fn printed_energy_initial_confirmation_refuses_when_cycle_unrepresentable_without_panicking() {
+    // Positive control: the exact same setup with headroom (energy_paid_or_lost_this_turn left at
+    // zero) certifies and reaches WaitingFor::LoopShortcut within the same live periods, proving
+    // the withheld offer below is attributable specifically to unrepresentable tally headroom.
+    let (mut control_state, control_line) = setup_energy_activation_loop(false, 3);
+    let control_index = energy_activation_index(&control_state, control_line);
+    let mut control_offered = false;
+    for _ in 1..=2 {
+        energy_activation_period(&mut control_state, control_line, control_index);
+        if matches!(control_state.waiting_for, WaitingFor::LoopShortcut { .. }) {
+            control_offered = true;
+            break;
+        }
+    }
+    assert!(
+        control_offered,
+        "positive control with headroom must reach WaitingFor::LoopShortcut, got {:?}",
+        control_state.waiting_for
+    );
+
     let (mut state, line) = setup_energy_activation_loop(false, 3);
     let index = energy_activation_index(&state, line);
 
