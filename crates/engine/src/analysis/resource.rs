@@ -12692,7 +12692,13 @@ mod tests {
         receipt_free
             .triggered_abilities_added_mana_this_turn
             .clear();
+        reset_loop_detect_cost();
         assert!(loop_states_cover_modulo_growth(&prior, &receipt_free));
+        let direct_cost = loop_detect_cost();
+        assert!(
+            direct_cost.projected_clones <= 2 * direct_cost.resource_compares(),
+            "direct cover must retain the existing two-projection-per-comparison budget"
+        );
         let clean_shared = SharedCurrentFrames::new(&receipt_free);
         assert!(loop_states_cover_modulo_growth(&prior, &clean_shared));
 
