@@ -10,9 +10,10 @@
 
 use engine::game::scenario::{CastOutcome, GameScenario, P0, P1};
 use engine::types::ability::EffectKind;
+use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::{GameEvent, PlayerActionKind};
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{ReplacementChoiceKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -28,9 +29,8 @@ const QUANDRIX_ORACLE: &str = "Choose two —\n• Return target creature or pla
 const COSI_ORACLE: &str = "Whenever an opponent shuffles their library, you may put a +1/+1 counter on this creature.";
 
 /// Ordered projection of who actually shuffled a library.
-fn shuffled_players(outcome: &CastOutcome) -> Vec<PlayerId> {
-    outcome
-        .events()
+fn shuffled_players(events: &[GameEvent]) -> Vec<PlayerId> {
+    events
         .iter()
         .filter_map(|event| match event {
             GameEvent::PlayerPerformedAction {
@@ -47,7 +47,7 @@ fn shuffled_players(outcome: &CastOutcome) -> Vec<PlayerId> {
 /// after the chosen set is delivered. Member delivery must not publish extra
 /// shuffles (and therefore extra shuffle-trigger opportunities).
 fn assert_only_player_shuffled(outcome: &CastOutcome, player: PlayerId, why: &str) {
-    let shuffled = shuffled_players(outcome);
+    let shuffled = shuffled_players(outcome.events());
     assert_eq!(
         shuffled.as_slice(),
         &[player],
@@ -438,4 +438,100 @@ fn dwell_on_the_past_one_card_shuffles_once_and_triggers_cosi_once() {
         P1,
         "the single printed shuffle must give Cosi's Trickster one opportunity",
     );
+}
+
+/// CR 903.9b + CR 614.1 + CR 701.24a: a chosen commander pauses delivery
+/// for its owner's library/command-zone decision. Declining that replacement
+/// must retain the whole set and still publish only the terminal shuffle.
+#[test]
+fn dwell_on_the_past_shuffles_once_after_a_commander_replacement_pause() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dwell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Dwell on the Past", false, DWELL_ORACLE)
+        .id();
+    let commander = scenario
+        .add_creature_to_graveyard(P1, "Chosen Commander", 2, 2)
+        .as_legendary()
+        .commander()
+        .id();
+    let second = scenario
+        .add_creature_to_graveyard(P1, "Second Chosen Card", 1, 1)
+        .id();
+    let unchosen = scenario
+        .add_creature_to_graveyard(P1, "Unchosen Graveyard Card", 1, 1)
+        .id();
+    let target_library = scenario.add_card_to_library_top(P1, "Target Library Card");
+    scenario.add_card_to_library_top(P0, "Caster Library Card");
+    let mut runner = scenario.build();
+    runner.state_mut().format_config.command_zone = true;
+
+    // CR 903.9a: establish the owner's ordinary decision to leave the
+    // commander in its initial graveyard before announcing the spell.
+    runner
+        .act(GameAction::PassPriority)
+        .expect("initial commander state-based choice is reachable");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::CommanderZoneChoice { .. }
+    ));
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("the owner leaves the commander in the graveyard");
+
+    let paused = runner
+        .cast(dwell)
+        .target_player(P1)
+        .target_objects(&[commander, second])
+        .resolve();
+    assert!(matches!(
+        paused.final_waiting_for(),
+        WaitingFor::ReplacementChoice {
+            player: P1,
+            kind: ReplacementChoiceKind::OptionalBranch,
+            ..
+        }
+    ));
+    let mut events = paused.events().to_vec();
+    assert!(
+        shuffled_players(&events).is_empty(),
+        "delivery must not shuffle any partial set before the owner decides"
+    );
+
+    // OptionalBranch's public choice contract is index 0 = accept,
+    // index 1 = decline. Keep the originally requested library destination.
+    events.extend(
+        runner
+            .act(GameAction::ChooseReplacement { index: 1 })
+            .expect("declining the commander replacement resumes the move")
+            .events,
+    );
+    for _ in 0..16 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("normal priority passing finishes the resumed spell")
+                .events,
+        );
+    }
+
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    for card in [commander, second, target_library] {
+        assert!(runner.state().players[P1.0 as usize].library.contains(&card));
+    }
+    assert_eq!(runner.state().objects[&unchosen].zone, Zone::Graveyard);
+    assert_eq!(shuffled_players(&events).as_slice(), &[P1]);
 }
