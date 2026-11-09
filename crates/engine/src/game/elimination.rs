@@ -176,16 +176,23 @@ pub fn concede(
     player: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<usize>, super::engine::EngineError> {
+    let departing_entry_payment =
+        super::engine_replacement::DepartingEntryPayment::capture(state, player);
     let resume_canceled_change_zone = eliminate_players(
         state,
         &[player],
         DepartureTriggers::CollectedByDeparture,
         events,
     );
-    if !resume_canceled_change_zone {
+    let scan_from = events.len();
+    let settled_payment = if let Some(payment) = departing_entry_payment {
+        payment.settle(state, events)?
+    } else {
+        false
+    };
+    if !resume_canceled_change_zone && !settled_payment {
         return Ok(None);
     }
-    let scan_from = events.len();
     super::engine::resume_pending_continuation_if_priority(state, events)?;
     Ok(Some(scan_from))
 }
@@ -337,6 +344,15 @@ pub(crate) fn eliminate_players(
                 && state.pending_replacement.is_none()
                 && matches!(state.waiting_for, WaitingFor::Priority { .. })
         };
+
+    let departing_entry_payment = state
+        .waiting_for
+        .acting_player()
+        .filter(|payer| {
+            departure_triggers != DepartureTriggers::CollectedByDeparture
+                && leaving_set.contains(payer)
+        })
+        .and_then(|payer| super::engine_replacement::DepartingEntryPayment::capture(state, payer));
 
     let interrupted_ordinary_search = state
         .pending_scoped_library_search
@@ -730,6 +746,17 @@ pub(crate) fn eliminate_players(
             if !players::is_alive(state, waiting_pid) {
                 let next = players::next_player(state, waiting_pid);
                 state.waiting_for = WaitingFor::Priority { player: next };
+            }
+        }
+
+        // CR 800.4f + CR 608.2m: settle the captured entry payment through its
+        // ordinary unpaid replacement branch after every departure. A
+        // concession does this in its fallible, prefix-bounded caller instead.
+        if departure_triggers != DepartureTriggers::CollectedByDeparture {
+            if let Some(payment) = departing_entry_payment.as_ref() {
+                payment
+                    .settle(state, events)
+                    .expect("a departed entry payer follows the ordinary unpaid branch");
             }
         }
 
@@ -1478,6 +1505,8 @@ fn do_eliminate(
     // CR 800.4a + CR 616.1: Capture the parked replacement chooser before
     // cast-abandonment teardown can replace its prompt with priority.
     let leaving_is_latched_chooser = state.waiting_for.acting_player() == Some(player);
+    let departing_entry_payment =
+        super::engine_replacement::DepartingEntryPayment::owns_prompt(state, player);
 
     // CR 800.4b + CR 117.2e: a surviving owner's parked entry cannot enter
     // under this departed controller. Capture and terminalize its exact
@@ -1705,6 +1734,7 @@ fn do_eliminate(
         }
     }
     if !terminalized_departed_entry
+        && !departing_entry_payment
         && state.pending_replacement.is_some()
         && leaving_is_latched_chooser
     {

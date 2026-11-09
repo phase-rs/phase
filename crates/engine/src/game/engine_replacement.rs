@@ -11,11 +11,11 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    CounterCostRootSubtree, DeferredLifeCostResume, GameState, PendingCostMoveResume,
-    PendingCounterPostAction, PendingReplacement, TokenEntryEventEmission, UnrepresentablePolicy,
-    WaitingFor,
+    CounterCostRootSubtree, DeferredLifeCostResume, GameState, PendingChangeZoneIteration,
+    PendingCostMoveResume, PendingCounterPostAction, PendingReplacement, PendingZoneChangeDelivery,
+    TokenEntryEventEmission, UnrepresentablePolicy, WaitingFor,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{LogicalZoneChangeGroupId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
@@ -40,6 +40,110 @@ use super::effects::token::apply_create_token_after_replacement;
 use super::engine::EngineError;
 use super::life_costs::{pay_life_as_cost, PayLifeCostResult};
 use super::sacrifice::{apply_sacrifice_after_replacement, SacrificeApply};
+
+/// CR 800.4f + CR 608.2m: an accepted replacement payment belongs to the
+/// exact entry that raised it, not to a later prompt for the same player.
+pub(crate) struct DepartingEntryPayment {
+    group: LogicalZoneChangeGroupId,
+    controller: PlayerId,
+    member: ObjectIncarnationRef,
+    proposal: ProposedEvent,
+    payer: PlayerId,
+}
+
+impl DepartingEntryPayment {
+    fn owned_prompt(
+        state: &GameState,
+        payer: PlayerId,
+    ) -> Option<(&PendingChangeZoneIteration, &PendingZoneChangeDelivery)> {
+        if state.waiting_for.acting_player() != Some(payer) {
+            return None;
+        }
+        let pending = state.active_change_zone_frame()?.pending.as_ref()?;
+        let paused = pending.paused_current.as_ref()?;
+        let replacement = state.pending_replacement.as_ref()?;
+        if !replacement.is_optional
+            || !replacement.may_cost_paid
+            || replacement.choice_player != Some(payer)
+            || !replacement.parks_delivery(&paused.expected_event)
+            || paused.terminal_completion.is_some()
+            || !matches!(
+                paused.expected_event,
+                ProposedEvent::ZoneChange {
+                    to: Zone::Battlefield,
+                    ..
+                }
+            )
+        {
+            return None;
+        }
+        Some((pending, paused))
+    }
+
+    /// An active child or another payer's replacement is deliberately excluded.
+    pub(crate) fn owns_prompt(state: &GameState, payer: PlayerId) -> bool {
+        Self::owned_prompt(state, payer).is_some()
+    }
+
+    /// Capture before departure teardown can replace the payment prompt.
+    pub(crate) fn capture(state: &GameState, payer: PlayerId) -> Option<Self> {
+        let (pending, paused) = Self::owned_prompt(state, payer)?;
+        Some(Self {
+            group: pending.logical_zone_change_group.logical_group_id,
+            controller: pending.controller,
+            member: paused.member,
+            proposal: paused.expected_event.clone(),
+            payer,
+        })
+    }
+
+    /// The departing payer cannot finish the cost. Run the ordinary unpaid
+    /// branch only after the leave sweep, preserving any unrelated/new child.
+    /// Its normal delivery capture and epilogue terminalize and resume the
+    /// owning family; no fabricated paid cost or field-nulling is involved.
+    pub(crate) fn settle(
+        &self,
+        state: &mut GameState,
+        events: &mut Vec<GameEvent>,
+    ) -> Result<bool, EngineError> {
+        if matches!(state.waiting_for, WaitingFor::GameOver { .. })
+            || super::players::is_alive(state, self.payer)
+            || !state
+                .active_change_zone_frame()
+                .and_then(|frame| frame.pending.as_ref())
+                .is_some_and(|pending| {
+                    pending.logical_zone_change_group.logical_group_id == self.group
+                        && pending.controller == self.controller
+                        && pending.paused_current.as_ref().is_some_and(|paused| {
+                            paused.captures(self.member, &self.proposal)
+                                && paused.terminal_completion.is_none()
+                        })
+                })
+            || !state
+                .pending_replacement
+                .as_ref()
+                .is_some_and(|replacement| {
+                    replacement.is_optional
+                        && replacement.may_cost_paid
+                        && replacement.choice_player == Some(self.payer)
+                        && replacement.parks_delivery(&self.proposal)
+                })
+        {
+            return Ok(false);
+        }
+        handle_replacement_choice(state, 1, events)?;
+        // CR 117.3 + CR 800.4a: the ordinary replacement epilogue seeds the
+        // active player's priority. A departed active player cannot receive it.
+        if let WaitingFor::Priority { player } = state.waiting_for {
+            if !super::players::is_alive(state, player) {
+                state.waiting_for = WaitingFor::Priority {
+                    player: super::players::next_player(state, player),
+                };
+            }
+        }
+        Ok(true)
+    }
+}
 
 /// CR 101.4 + CR 616.1: In a Prevented replacement-resume arm, resume a parked
 /// `EachPlayerCopyChosen` walk once its inner copy/counter primitive has fully

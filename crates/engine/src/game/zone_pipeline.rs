@@ -850,7 +850,9 @@ pub(crate) fn terminalize_paused_entry_for_departed_controller(
     let Some(replacement) = state.pending_replacement.as_ref() else {
         return false;
     };
-    if !replacement.parks_delivery(&paused.expected_event) {
+    // The transient pause flag is consumed before a payment prompt is exposed.
+    // Its persistent MayCost marker still owns the ordinary unpaid decline.
+    if replacement.may_cost_paid || !replacement.parks_delivery(&paused.expected_event) {
         return false;
     }
     let ProposedEvent::ZoneChange {

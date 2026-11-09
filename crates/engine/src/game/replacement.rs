@@ -13535,7 +13535,10 @@ fn continue_replacement_impl(
         let reparked_library_placement = pending.library_placement.clone();
         let reparked_sacrifice_provenance = pending.sacrifice_provenance;
         let reparked_choice_player = pending.choice_player;
-        let reparked_delivery_boundary = pending.delivery_boundary.clone();
+        // The payment's proposal is marked applied below before it can park.
+        // Retain the owner's original boundary even when it was not yet boxed;
+        // otherwise the accepted-cost sub-choice loses its exact parent.
+        let reparked_delivery_boundary = Some(Box::new(pending.delivery_boundary_event().clone()));
         let reparked_unrepresentable_life_change = pending.unrepresentable_life_change;
         let mut proposed = pending.proposed.clone();
         if chosen_index == 0 {
