@@ -41225,6 +41225,14 @@ fn is_default_nth_spell_comparator(comparator: &Comparator) -> bool {
     *comparator == Comparator::EQ
 }
 
+fn default_nth_draw_comparator() -> Comparator {
+    Comparator::EQ
+}
+
+fn is_default_nth_draw_comparator(comparator: &Comparator) -> bool {
+    *comparator == Comparator::EQ
+}
+
 /// CR 603.2 + CR 603.2h: what uses up a once-each-turn trigger limit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TriggerLimitSpend {
@@ -41275,9 +41283,17 @@ pub enum TriggerConstraint {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<TargetFilter>,
     },
-    /// "Whenever you draw your Nth card each turn" — fires exactly when the
-    /// triggering draw event's per-turn ordinal equals `n`.
-    NthDrawThisTurn { n: u32 },
+    /// "Whenever you draw your Nth card each turn" — the triggering draw event's
+    /// per-turn ordinal satisfies `comparator` against `n`. `EQ` preserves exact
+    /// ordinals; `LE` covers a contiguous prefix such as "your first or second card."
+    NthDrawThisTurn {
+        n: u32,
+        #[serde(
+            default = "default_nth_draw_comparator",
+            skip_serializing_if = "is_default_nth_draw_comparator"
+        )]
+        comparator: Comparator,
+    },
     /// "At the beginning of each opponent's [phase]"
     OnlyDuringOpponentsTurn,
     /// CR 505.1: Trigger fires only during the controller's main phase
