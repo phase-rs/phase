@@ -1576,9 +1576,9 @@ fn replay_cycle_ordered(
             {
                 return Ok(performed);
             }
-            // CR 616.1: an answer whose prompt never comes within the step is not a choice the
-            // shortcut describes; it stays pending and answers a later prompt. CR 117.4: passing
-            // on an empty stack ends the step, so only a period inside one step goes past it.
+            // An answer whose prompt never comes within the step stays pending for a later prompt.
+            // CR 117.4: passing on an empty stack ends the step, so only a period inside one step
+            // goes past it.
             let next = match &pending {
                 Some(range)
                     if end.reach == PeriodReach::InStep
