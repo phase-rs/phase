@@ -107,7 +107,7 @@ async fn produce_native_large_spectator_full() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     const OBJECTS: usize = 9_000;
-    assert!(OBJECTS <= MAX_SNAPSHOT_OBJECTS);
+    const { assert!(OBJECTS <= MAX_SNAPSHOT_OBJECTS) };
     for _ in 0..OBJECTS {
         scenario.add_real_card(PlayerId(0), "Llanowar Elves", Zone::Battlefield, &db);
     }
