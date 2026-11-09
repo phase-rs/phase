@@ -10,7 +10,7 @@ use engine::game::mana_payment::{
     can_pay_for_spell, compute_phyrexian_shards, pay_cost_with_demand_and_choices, pay_from_pool,
 };
 use engine::game::mana_sources::{
-    activatable_land_mana_options, activatable_mana_source_selections,
+    activatable_land_mana_options, activatable_mana_options, activatable_mana_source_selections,
 };
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
@@ -769,9 +769,9 @@ fn conditional_counted_bundle_refills_after_its_power_condition_disappears() {
                 .get(&CounterType::Generic("depletion".to_owned())),
             Some(&depletion)
         );
-        assert!(activatable_mana_source_selections(r.state(), P0)
+        assert!(activatable_mana_options(r.state(), caryatid, P0)
             .iter()
-            .any(|row| row.source.object_id == caryatid
+            .any(|row| row.object_id == caryatid
                 && row.mana_type == ManaType::Blue
                 && row
                     .atomic_combination
