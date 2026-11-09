@@ -31,8 +31,8 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    active_trigger_ledger_bindings_equal, loop_states_equal, DamageRecord, GameState, LKISnapshot,
-    StackEntry, StackEntryKind, TrackedMemberOrigin,
+    active_trigger_ledger_bindings_equal, loop_states_equal, DamageEventKey, DamageRecord,
+    GameState, LKISnapshot, StackEntry, StackEntryKind, TrackedMemberOrigin,
 };
 use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
 use crate::types::mana::ManaType;
@@ -8730,64 +8730,75 @@ thread_local! {
 /// Keep only the recipient answer retained damage carriers can still read:
 /// unknown (no row), live, or all-stale. Full damage history remains strict
 /// state; this bounded reduction belongs only to the resource projection.
+/// Collect C requested keys, then inspect H journal rows once: expected O(C+H)
+/// hash work and O(C) storage, before the existing final witness sort.
 fn project_damage_recipient_relations_for_loop(state: &mut GameState) {
+    enum ReadClass {
+        Unknown,
+        Stale,
+        Live,
+    }
+    struct RequestedRecipient {
+        live_incarnation: u64,
+        class: ReadClass,
+    }
+
     let journal = std::mem::take(&mut state.damage_dealt_this_turn);
-    let mut tuples = HashSet::new();
+    if journal.is_empty() {
+        return;
+    }
+    // The whole-state carrier visitor needs &mut self, but never writes the
+    // object store. Alias only its persistent root: no GameState/object clone
+    // or per-object COW, and no second requested-key collection.
+    let objects = state.objects.clone();
+    let mut requested = HashMap::new();
     state.for_each_trigger_event_carrier_mut(&mut |event| {
-        if let GameEvent::DamageDealt {
-            source_id,
-            source_incarnation,
-            target: TargetRef::Object(target),
-            amount,
-            is_combat,
-            ..
-        } = event
-        {
-            tuples.insert((
-                *source_id,
-                *source_incarnation,
-                *target,
-                *amount,
-                *is_combat,
-            ));
-        }
+        let Some(key) = DamageEventKey::from_event(event) else {
+            return;
+        };
+        let TargetRef::Object(target) = &key.target else {
+            return;
+        };
+        let Some(object) = objects.get(target) else {
+            return;
+        };
+        requested.entry(key).or_insert_with(|| RequestedRecipient {
+            live_incarnation: object.incarnation,
+            class: ReadClass::Unknown,
+        });
     });
-    for (source_id, source_incarnation, target, amount, is_combat) in tuples {
-        let Some(object) = state.objects.get(&target) else {
+    drop(objects);
+    if requested.is_empty() {
+        return;
+    }
+    for record in &journal {
+        #[cfg(test)]
+        DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(visits.get() + 1));
+        let Some(epoch) = record.target_incarnation else {
             continue;
         };
-        let event = GameEvent::DamageDealt {
-            source_id,
-            source_incarnation,
-            target: TargetRef::Object(target),
-            amount,
-            is_combat,
-            excess: 0,
-        };
-        let mut stamped = journal
-            .iter()
-            .filter(|record| {
-                #[cfg(test)]
-                DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(visits.get() + 1));
-                record.matches_damage_event(&event)
-            })
-            .filter_map(|record| record.target_incarnation)
-            .peekable();
-        if stamped.peek().is_none() {
+        let Some(relation) = requested.get_mut(&record.event_key()) else {
             continue;
+        };
+        if epoch == relation.live_incarnation {
+            relation.class = ReadClass::Live;
+        } else if matches!(relation.class, ReadClass::Unknown) {
+            relation.class = ReadClass::Stale;
         }
-        let target_incarnation = if stamped.any(|epoch| epoch == object.incarnation) {
-            object.incarnation
-        } else {
-            0
+    }
+    for (key, relation) in requested {
+        let target_incarnation = match relation.class {
+            ReadClass::Unknown => continue,
+            ReadClass::Stale => 0,
+            ReadClass::Live => relation.live_incarnation,
         };
         state.damage_dealt_this_turn.push_back(DamageRecord {
-            source_id,
-            source_incarnation,
-            target: TargetRef::Object(target),
+            source_id: key.source_id,
+            source_incarnation: key.source_incarnation,
+            target: key.target,
             target_incarnation: Some(target_incarnation),
-            amount,
-            is_combat,
+            amount: key.amount,
+            is_combat: key.is_combat,
             ..Default::default()
         });
     }

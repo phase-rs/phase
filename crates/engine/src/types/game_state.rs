@@ -2867,20 +2867,56 @@ pub struct DamageRecord {
     pub excess: u32,
 }
 
+/// The five-field damage event/journal join (CR 400.7 + CR 608.2k).
+/// Optional source identity is exact; excess and snapshot payload are not keys.
+/// This internal value is neither serialized nor added to game state.
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub(crate) struct DamageEventKey {
+    pub(crate) source_id: ObjectId,
+    pub(crate) source_incarnation: Option<u64>,
+    pub(crate) target: TargetRef,
+    pub(crate) amount: u32,
+    pub(crate) is_combat: bool,
+}
+
+impl DamageEventKey {
+    pub(crate) fn from_event(event: &GameEvent) -> Option<Self> {
+        let GameEvent::DamageDealt {
+            source_id,
+            source_incarnation,
+            target,
+            amount,
+            is_combat,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        Some(Self {
+            source_id: *source_id,
+            source_incarnation: *source_incarnation,
+            target: target.clone(),
+            amount: *amount,
+            is_combat: *is_combat,
+        })
+    }
+}
+
 impl DamageRecord {
+    pub(crate) fn event_key(&self) -> DamageEventKey {
+        DamageEventKey {
+            source_id: self.source_id,
+            source_incarnation: self.source_incarnation,
+            target: self.target.clone(),
+            amount: self.amount,
+            is_combat: self.is_combat,
+        }
+    }
+
     /// The runtime join for a damage event's recipient (CR 400.7 + CR 608.2k).
     /// Excess and characteristic snapshots are not part of this reader's key.
     pub(crate) fn matches_damage_event(&self, event: &GameEvent) -> bool {
-        matches!(
-            event,
-            GameEvent::DamageDealt {
-                source_id, source_incarnation, target, amount, is_combat, ..
-            } if self.source_id == *source_id
-                && self.source_incarnation == *source_incarnation
-                && self.target == *target
-                && self.amount == *amount
-                && self.is_combat == *is_combat
-        )
+        DamageEventKey::from_event(event).is_some_and(|key| self.event_key() == key)
     }
 }
 
@@ -39687,7 +39723,12 @@ pub(crate) fn active_trigger_ledger_bindings_equal(
                     // producer lookup edges. Exact lookup validated each shape.
                     compare_reference(a, lp, b, rp)
                 }),
-                _ => unreachable!("equal producer kinds have the same variant"),
+                (TriggerGrantProducerKey::KeywordCompanion { .. }, _)
+                | (TriggerGrantProducerKey::CopyRetained { .. }, _)
+                | (TriggerGrantProducerKey::Granted { .. }, _)
+                | (TriggerGrantProducerKey::ExpandedGrant { .. }, _) => {
+                    unreachable!("equal producer kinds have the same variant")
+                }
             })
     }
 
