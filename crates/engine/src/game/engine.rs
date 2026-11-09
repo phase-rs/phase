@@ -11008,35 +11008,33 @@ fn stack_resolution_session_participant_authorizes_pass(
     participant: PlayerId,
     window_top: &StackEntry,
 ) -> bool {
-    // Committed consent authorizes every window but Full Control's, so the
-    // standing-pass ladder, whose `Held` reasons probe the board, isn't read.
-    if session.policy == StackResolutionPolicy::Committed {
-        return !priority::holds_full_control(state, participant);
-    }
-    let standing_pass = match priority::standing_priority_pass(state, participant, Some(window_top))
-    {
-        // CR 117.1: Full Control is a standing refusal to give up any window —
-        // the session's own representative's included.
-        priority::StandingPriorityPass::Withheld => return false,
-        priority::StandingPriorityPass::Granted => true,
-        // CR 117.1d + CR 605.3a: an own object that can remove an activatable
-        // mana source, or an own spell or activated ability that would waste an
-        // untap on one, is no standing pass; only explicit consent skips it.
-        priority::StandingPriorityPass::Held | priority::StandingPriorityPass::Undecided => false,
-    };
     match session.policy {
+        // A representative consented to the session. A non-representative's
+        // skipped windows are not rechecked for a meaningful action (only its
+        // live window is, in `stack_resolution_session_priority_decision`).
+        // CR 117.1: Full Control is the one window consent doesn't cover, so the
+        // standing-pass ladder, whose `Held` reasons probe the board, isn't read.
+        StackResolutionPolicy::Committed => !priority::holds_full_control(state, participant),
         // A verified AI pass authorizes later windows in this exact fenced
         // cohort; CR 117.3d + CR 732.2b: a representative's standing pass over
         // this window's top authorizes this window.
         StackResolutionPolicy::RecheckNoMeaningfulPriorityAction => {
+            let standing_pass =
+                match priority::standing_priority_pass(state, participant, Some(window_top)) {
+                    // CR 117.1: Full Control is a standing refusal to give up any
+                    // window — the session's own representative's included.
+                    priority::StandingPriorityPass::Withheld => return false,
+                    priority::StandingPriorityPass::Granted => true,
+                    // CR 117.1d + CR 605.3a: an own object that can remove an
+                    // activatable mana source, or an own spell or activated
+                    // ability that would waste an untap on one, is no standing
+                    // pass; only explicit consent skips it.
+                    priority::StandingPriorityPass::Held
+                    | priority::StandingPriorityPass::Undecided => false,
+                };
             session.representatives.contains(&participant)
                 && (standing_pass || session.verified_pass_representatives.contains(&participant))
         }
-        // A representative consented to the session. A non-representative's
-        // skipped windows are not rechecked for a meaningful action (only its
-        // live window is, in `stack_resolution_session_priority_decision`);
-        // Full Control was enforced above.
-        StackResolutionPolicy::Committed => true,
     }
 }
 
@@ -11093,7 +11091,9 @@ pub(crate) fn stack_resolution_session_authorized_limit(state: &GameState) -> Op
     // triggered abilities, so a spell or an activated ability always resolves
     // alone, and the window over one is read when it comes rather than looked
     // ahead to. Basalt Monolith's queued "{3}: Untap this artifact" entries then
-    // cost one window each, not a probe of every entry below.
+    // cost one window each, not a probe of every entry below. A keyword action
+    // never batches either, but it isn't held for an untap, so its windows are
+    // still looked ahead to as before.
     let resolves_alone = |entry: &StackEntry| match entry.kind {
         StackEntryKind::Spell { .. } | StackEntryKind::ActivatedAbility { .. } => true,
         StackEntryKind::TriggeredAbility { .. }
@@ -11109,11 +11109,10 @@ pub(crate) fn stack_resolution_session_authorized_limit(state: &GameState) -> Op
     // (CR 732.2b), so K = 1 + the authorized prefix of those windows. Each
     // window is judged against the board before anything resolves, so it cannot
     // see a mana source an earlier member untaps. That is sound for the `Held`
-    // rung, both its removal reason and its untap reason, because a batch
-    // consumes only windows this look-ahead authorized, and its members are
-    // either the resolver's fixed inert kinds or one repeated untargeted
-    // triggered ability, so a spell or activated entry resolves alone and this rung is
-    // read again at its window. A member that untaps a mana source which a later
+    // rung's removal reason, because a batch consumes only windows this
+    // look-ahead authorized, and its members are triggered abilities. Its untap
+    // reason is for a spell or activated ability only, whose window is never
+    // looked ahead to. A member that untaps a mana source which a later
     // identical member then removes, without pausing, is an accepted
     // under-approximation.
     let authorized_skipped_windows = fenced_prefix

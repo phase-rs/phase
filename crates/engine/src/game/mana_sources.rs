@@ -453,11 +453,12 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
 /// must still be on the battlefield and, untapped, able to activate it again. A
 /// mana ability with no {T} can't be repeated by untapping. The activation runs
 /// on a copy of the game, and the untap after it is the resolving instruction's
-/// own, so a stun counter on the source is removed instead (CR 122.1d). The
-/// source's own cost answers too: a cost that removes
-/// the source (Treasure, Lotus Petal, Mirrored Lotus) leaves nothing to untap,
-/// and a cost that can't be paid again stops a second use (Gemstone Mine or Peat
-/// Bog on its last counter, whose effect then sacrifices it, CR 701.21a). An
+/// own, so a stun counter on the source is removed instead (CR 122.1d), and a
+/// replacement that asks a choice keeps the pass. The source's own cost answers
+/// too: a cost that removes the source (Treasure, Lotus Petal, Mirrored Lotus)
+/// leaves nothing to untap, and a cost that can't be paid again stops a second
+/// use (Gemstone Mine or Peat Bog on its last counter, whose effect then
+/// sacrifices it, CR 701.21a). An
 /// ability that stops for its color (Gemstone Mine) stops the copy after its
 /// cost and before its effect, so there only the cost answers; every such rider
 /// in card data sits beside a counter cost that runs out with it. One that stops
@@ -512,7 +513,8 @@ pub(crate) fn untap_repeats_mana(
                 return false;
             }
             // The untap itself, as the resolving instruction does it: a stun counter
-            // is removed instead (CR 122.1d), and a replacement may apply.
+            // is removed instead (CR 122.1d), and a replacement may apply. One that
+            // asks a choice can't be read ahead, so it keeps the pass.
             let untapped = matches!(
                 super::effects::tap_untap::process_one_untap(&mut copy, object, &mut events),
                 Ok(super::effects::tap_untap::TapUntapOutcome::Complete)

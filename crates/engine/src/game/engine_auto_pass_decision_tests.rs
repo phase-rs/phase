@@ -2743,8 +2743,8 @@ fn own_untap_of_your_lands(forest_tapped: bool) -> GameState {
 
 /// CR 701.26b + CR 605.3a: an own top that would waste an untap on a permanent
 /// the player can tap for mana now is `Held`, so a rechecking session pauses an
-/// unverified representative's live window and authorizes no skipped window
-/// over it.
+/// unverified representative's live window. No skipped window is authorized
+/// over it, as over any spell, which resolves alone.
 #[test]
 fn recheck_session_pauses_an_own_top_held_for_a_wasted_untap() {
     // The look-ahead: with an own inert entry above the untap, the boundary
