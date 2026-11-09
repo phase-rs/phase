@@ -1063,6 +1063,16 @@ fn subject_exile_legacy_frame_fixture(runner: &GameRunner) -> GameState {
         enter_attached_to: request.attach_to,
         effect_kind: tail.effect_kind,
     };
+    // The staged consultation keeps delivery modifiers on the request; the
+    // old writer also retained them on its out-of-band replacement carrier.
+    let replacement = state
+        .pending_replacement
+        .as_mut()
+        .expect("the captured member still owns its optional replacement");
+    replacement.exile_controller = request.exile_controller;
+    replacement.exile_duration = request.exile_duration.clone();
+    replacement.exile_tracking = request.exile_tracking;
+    replacement.library_placement = request.library_placement.clone();
     // The staged writer parks its typed tail between marker and batch. The
     // old iteration writer parked that same continuation below its owner.
     let continuation = state

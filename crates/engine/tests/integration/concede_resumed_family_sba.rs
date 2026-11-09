@@ -3,10 +3,11 @@
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{ReplacementChoiceKind, WaitingFor, ZoneDeparture};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaCostShard};
+use engine::types::mana::{parse_mtgjson_mana_cost, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -279,4 +280,80 @@ fn terminal_concession_preserves_its_single_game_result() {
             .count(),
         1
     );
+}
+
+/// CR 603.2c + CR 603.7e + CR 616.1: a real activated delayed return observes
+/// the surviving destruction exactly once after the current chooser leaves.
+#[test]
+fn concession_keeps_a_staged_deaths_delayed_return_exactly_once() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let valkyrie = scenario
+        .add_creature(P0, "Adarkar Valkyrie", 4, 5)
+        .with_subtypes(vec!["Angel"])
+        .from_oracle_text_with_keywords(
+            &["Flying", "Vigilance"],
+            "Flying, vigilance\n{T}: When target creature other than this creature dies this turn, return that card to the battlefield under your control.",
+        )
+        .id();
+    let skeleton = scenario
+        .add_creature(P1, "Drudge Skeletons", 1, 1)
+        .with_subtypes(vec!["Skeleton"])
+        .from_oracle_text(
+            "{B}: Regenerate this creature. (The next time this creature would be destroyed this turn, instead tap it, remove it from combat, and heal all damage on it.)",
+        )
+        .id();
+    // A shield from an earlier action competes with the regeneration shield
+    // created publicly below; no replacement definition is fabricated here.
+    scenario.with_counter(skeleton, CounterType::Shield, 1);
+    let bear = scenario.add_creature(P2, "Grizzly Bears", 2, 2).id();
+    let judgment = scenario
+        .add_spell_to_hand_from_oracle(P0, "Day of Judgment", false, "Destroy all creatures.")
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{W}{W}"))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    scenario.with_mana_pool(
+        P1,
+        vec![ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![])],
+    );
+    let mut runner = scenario.build();
+    runner.act(GameAction::PassPriority).unwrap();
+    runner.activate(skeleton, 0).resolve();
+    runner.activate(valkyrie, 0).target_object(bear).resolve();
+    let paused = runner.cast(judgment).resolve();
+    assert!(matches!(
+        paused.final_waiting_for(),
+        WaitingFor::ReplacementChoice { player: P1, .. }
+    ));
+    let result = runner.act(GameAction::Concede { player_id: P1 }).unwrap();
+    assert_eq!(runner.state().objects[&bear].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&valkyrie].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&skeleton].zone, Zone::Exile);
+    assert_eq!(
+        move_count(&result.events, bear, Zone::Battlefield, Zone::Graveyard),
+        1
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "one death offers exactly one delayed return, not zero or two"
+    );
+    assert_eq!(runner.state().stack[0].source_id, valkyrie);
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().objects[&bear].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&bear].controller, P0);
+    assert_eq!(runner.state().objects[&bear].owner, P2);
+    assert_eq!(runner.state().objects[&valkyrie].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&judgment].zone, Zone::Graveyard);
 }
