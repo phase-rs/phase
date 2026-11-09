@@ -2162,28 +2162,30 @@ pub struct SettlementNode {
     /// activation was admitted against its finished node and wrote its own
     /// production there ([`Self::node_settled`]).
     ///
-    /// `Some(true)` is the only value this build WRITES
-    /// ([`ResolvedRulesJournal::settle_node`]); `None` — the serde default — is a
-    /// node whose record does not state settlement, which is the shape a save
-    /// written before this field existed carries, and which
-    /// [`ResolvedRulesJournal::node_settled`] reads through the pip record such a
-    /// save does have. `Some(false)` is a stated "not resolved", and it is the one
-    /// value that can contradict the rest of the payload:
-    /// [`ResolvedRulesJournal::validate_serialized_authority`] refuses it beside a
-    /// produced pip, so a node this build reads as `Some(false)` provably produced
-    /// nothing. Three answers, then, not one — see
-    /// [`NodeSettlement`] and [`ResolvedRulesJournal::node_settlement`].
+    /// The record is written EXPLICITLY at both ends of a node's life: every
+    /// allocation writes `Some(false)` ("open") and
+    /// [`ResolvedRulesJournal::settle_node`] writes `Some(true)`. Nothing is left
+    /// unstated, so `Open` and `Resolved` are both authoritative — `Open` means a
+    /// live activation holds the node and nothing has produced under it, `Resolved`
+    /// means the activation finished, whether or not it made any mana (CR 605.2).
     ///
-    /// Protocol: serde-ADDITIVE (`Option`, `#[serde(default)]`, skipped when
-    /// unset), so an older peer parses a payload that carries it and a newer peer
-    /// parses one that does not — the `crates/lobby-broker/src/protocol.rs` rule
-    /// for an optional defaulted addition ("does not require a bump — unless the
-    /// client stops deriving a fallback for it"). No gameplay fact and no rendered
-    /// feature is derived from it: it strengthens restore validation only, and a
-    /// peer that drops it falls back to the pre-change pip reading rather than
-    /// losing a capability, so no protocol record was added. The field is also
-    /// absent from every node this build leaves unsettled, so it adds no bytes to
-    /// the journal of a game that never settles an activation under one.
+    /// `Some(false)` is the one value that can contradict the rest of the payload:
+    /// [`ResolvedRulesJournal::validate_serialized_authority`] refuses it beside a
+    /// produced pip, so a node this reader ever sees with `Open` provably produced
+    /// nothing.
+    ///
+    /// `None` is a payload that states no settlement. `settled` has never been on
+    /// the wire without a value — it was introduced with this node record and no
+    /// released build omits it — so
+    /// [`ResolvedRulesJournal::validate_serialized_authority`] refuses it as a
+    /// contradiction instead of reading the pip list as a settlement, which is what
+    /// made a completed zero-output activation indistinguishable from a live one.
+    ///
+    /// Protocol: serde-ADDITIVE (`Option`, `#[serde(default)]`, skipped when unset)
+    /// so a peer's parser tolerates either shape, but this build always WRITES a
+    /// value: `Option` here is the decoder's tolerance, not a state the writer
+    /// produces. No gameplay fact and no rendered feature is derived from it — it
+    /// is restore authority only — so no protocol record was added.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled: Option<bool>,
 }
@@ -2642,32 +2644,29 @@ impl ResolvedRulesJournal {
     /// while it is still parked at a colour prompt, so an append-only command
     /// history is non-empty on a node that has settled nothing.
     ///
-    /// A node whose record states no settlement — the serde default, which is the
-    /// shape a save written before the field existed carries — answers from the pip
-    /// record that save does have. That arm is the LEGACY reading of an unrecorded
-    /// field, not the rule: this build writes `settled` before any pip can exist.
+    /// Nothing is inferred from the pip record: a zero-output activation (Heronblade
+    /// Elite at power 0 — CR 605.2 keeps it a mana ability when the game state allows
+    /// it no mana) settles with no pips, so pips answer a different question, and
+    /// reading them as settlement made such a node indistinguishable from one a live
+    /// activation still holds.
     ///
-    /// An unknown node answers `false`: the journal no longer holds it, so it
-    /// proves nothing either way.
+    /// An unknown node answers `false`: the journal no longer holds it, so it proves
+    /// nothing either way.
     ///
-    /// Read [`Self::node_settlement`] instead when the caller must tell "this node
-    /// has not resolved" from "this payload states no settlement". Collapsing the two
-    /// made a zero-output activation (Heronblade Elite at power 0 — CR 605.2 keeps it
-    /// a mana ability when the game state allows it no mana) indistinguishable from a
-    /// node a live activation is still working on, so a current-format save could be
-    /// read as if it were older than it is.
+    /// Read [`Self::node_settlement`] instead when the caller must tell "this node has
+    /// not resolved" from "this payload states no settlement"; the latter is refused
+    /// by [`Self::validate_serialized_authority`].
     pub fn node_settled(&self, node: RulesExecutionNodeRef) -> bool {
         match self.node_settlement(node) {
             Some(NodeSettlement::Resolved) => true,
-            Some(NodeSettlement::Open) => false,
-            // LEGACY SHIM — see `_LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4`
-            // below and `docs/LEGACY-COMPAT.md`: a journal payload written before
-            // the field existed carries no settlement record, so the answer is
-            // inferred from the pips that payload does have.
-            Some(NodeSettlement::Unrecorded) => self
-                .node_index(node)
-                .map(|position| !self.nodes[position].produced_pips.is_empty())
-                .unwrap_or(false),
+            // CR 605.2 + CR 605.3b: a node that states no settlement has not
+            // resolved. It is NOT inferred from the pips: a zero-output activation
+            // (Heronblade Elite at power 0) settles with none, so the pip list is a
+            // different question. No shipped build can write an unrecorded node —
+            // every allocation records `Open` and `settle_node` records `Resolved` —
+            // and `validate_serialized_authority` refuses such a payload, so this arm
+            // is the answer for a payload read before that validation runs.
+            Some(NodeSettlement::Open) | Some(NodeSettlement::Unrecorded) => false,
             None => false,
         }
     }
@@ -2682,13 +2681,11 @@ impl ResolvedRulesJournal {
     /// node and nothing has produced under it, `Resolved` means the activation
     /// finished — whether or not it made any mana at all (CR 605.2).
     ///
-    /// `Unrecorded` is the payload that predates the field. It is deliberately its
-    /// own answer rather than a synonym for either: such a payload's only evidence
-    /// is its pip list, which is exactly the evidence CR 605.2 says is not the same
-    /// question. `node_settled` applies that inference for compatibility;
-    /// `validate_serialized_authority` refuses the shape where the stated record and
-    /// the pip list contradict each other, so a node this reader ever sees with
-    /// `Open` provably produced nothing.
+    /// `Unrecorded` is a payload that states no settlement — a contradiction, since
+    /// the record is written at both ends of every node's life and no released build
+    /// omits it. It keeps its own answer so
+    /// [`Self::validate_serialized_authority`] can name the defect; nothing infers a
+    /// settlement from the pip list.
     pub fn node_settlement(&self, node: RulesExecutionNodeRef) -> Option<NodeSettlement> {
         let position = self.node_index(node).ok()?;
         Some(match self.nodes[position].settled {
@@ -2861,7 +2858,8 @@ impl ResolvedRulesJournal {
             produced_pips: Vec::new(),
             spent_pips: Vec::new(),
             journal_ordinals: vec![command],
-            settled: None,
+            // CR 605.3b: open from the moment the node exists — see `SettlementNode::settled`.
+            settled: Some(false),
         });
         Ok(identity)
     }
@@ -2898,7 +2896,8 @@ impl ResolvedRulesJournal {
             produced_pips: Vec::new(),
             spent_pips: Vec::new(),
             journal_ordinals: vec![command],
-            settled: None,
+            // CR 605.3b: open from the moment the node exists — see `SettlementNode::settled`.
+            settled: Some(false),
         });
         Ok(identity)
     }
@@ -3344,7 +3343,8 @@ impl ResolvedRulesJournal {
             produced_pips: Vec::new(),
             spent_pips: Vec::new(),
             journal_ordinals: vec![command],
-            settled: None,
+            // CR 605.3b: open from the moment the node exists — see `SettlementNode::settled`.
+            settled: Some(false),
         });
         Ok(identity)
     }
@@ -3490,18 +3490,26 @@ impl ResolvedRulesJournal {
                     "node metadata contains duplicate identities".to_string(),
                 ));
             }
-            // CR 605.2 + CR 605.3b: a node that RECORDS its own settlement can only
-            // record "not resolved" while nothing has been produced under it. The
-            // writer emits `Some(true)` at the settlement and never `Some(false)`, so
-            // `Some(false)` beside a produced pip is not a state the engine can be in:
-            // it is a payload whose two records contradict each other, and answering
-            // from the settlement flag alone let such a save read a finished
-            // activation as still open — restore admitted a parked activation that
-            // pointed at it, and the resume then wrote that activation's mana into a
-            // node CR 605.3b had already finished. Refusing here keeps the two records
-            // one fact. An ABSENT record (`None`) is the older payload shape and is
-            // not this contradiction: it states no settlement for `node_settled`'s
-            // compatibility arm to read, which is why that arm stays its own case.
+            // CR 605.2 + CR 605.3b: every node this build allocates records `Open`,
+            // and `settle_node` records `Resolved`, so an ABSENT record is not a
+            // state any shipped build can write: `settled` was introduced with the
+            // journal's settlement record and has never been on the wire without it.
+            // A payload that states nothing is therefore a contradiction, refused
+            // rather than read as the legacy shape — reading it as "open" would let a
+            // completed zero-output activation (Heronblade Elite at power 0) pass for
+            // one a live activation still holds, and reading it through the pip list
+            // would restate the settlement question as a production question.
+            if node.settled.is_none() {
+                return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                    "settlement node states no settlement record".to_string(),
+                ));
+            }
+            // CR 605.2 + CR 605.3b: a node that records "not resolved" can only record
+            // it while nothing has been produced under it. `settle_node` writes
+            // `Some(true)` and allocation writes `Some(false)`, so `Some(false)` beside
+            // a produced pip is not a state the engine can be in: it is a payload whose
+            // two records contradict each other. Refusing here keeps the two records
+            // one fact.
             if node.settled == Some(false) && !node.produced_pips.is_empty() {
                 return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
                     "settlement node states it has not resolved beside a produced mana pip"
@@ -4163,45 +4171,6 @@ impl ResolvedRulesJournal {
     }
 }
 
-/// Legacy on-disk compatibility for [`SettlementNode::settled`].
-///
-/// A journal payload written before the field existed carries no settlement record,
-/// so [`ResolvedRulesJournal::node_settled`] falls back to that payload's own pip
-/// record (`None => !node.produced_pips.is_empty()`). The fallback is a SHIM, not the
-/// rule: CR 605.2 keeps an activation a mana ability when the game state allows it no
-/// mana, and such an activation settles with an EMPTY pip list — which is exactly why
-/// this build writes the record before any pip can exist.
-///
-/// The tripwire below fails to COMPILE once the workspace version crosses the removal
-/// boundary, so the fallback cannot outlive it by inattention. Removing it means
-/// answering `None` as "this payload states no settlement" instead of inferring one,
-/// and deleting both this const and its `docs/LEGACY-COMPAT.md` entry.
-///
-/// Grep token: `LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4`. See
-/// `docs/LEGACY-COMPAT.md`.
-#[allow(dead_code)]
-const _LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4: () = {
-    // Added in 0.121.0; the `+14` patch window closes after 0.121.14.
-    const LANDED: (u32, u32, u32) = (0, 121, 0);
-    const BOUNDARY: (u32, u32, u32) = (
-        LANDED.0,
-        LANDED.1,
-        LANDED.2 + crate::types::legacy_compat::LEGACY_REMOVAL_WINDOW_PATCH,
-    );
-    let now = (
-        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_MAJOR")),
-        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_MINOR")),
-        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_PATCH")),
-    );
-    assert!(
-        crate::types::legacy_compat::within_legacy_window(BOUNDARY, now),
-        "LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4: remove the pip-inference \
-         fallback in ResolvedRulesJournal::node_settled (the `None => \
-         !node.produced_pips.is_empty()` arm) and this tripwire once we ship past \
-         0.121.14. See docs/LEGACY-COMPAT.md."
-    );
-};
-
 /// CR 605.2 + CR 605.3b: what a retained settlement node's own record states about
 /// whether it resolved. See [`ResolvedRulesJournal::node_settlement`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4214,9 +4183,9 @@ pub enum NodeSettlement {
     /// [`ResolvedRulesJournal::validate_serialized_authority`] refuses a payload that
     /// states `Open` beside a produced pip.
     Open,
-    /// The payload states no settlement at all — written before the field existed.
-    /// The legacy compatibility reading lives in
-    /// [`ResolvedRulesJournal::node_settled`].
+    /// The payload states no settlement at all. Refused as a contradiction by
+    /// [`ResolvedRulesJournal::validate_serialized_authority`]: no shipped build can
+    /// write it, and nothing infers a settlement from the pip list.
     Unrecorded,
 }
 

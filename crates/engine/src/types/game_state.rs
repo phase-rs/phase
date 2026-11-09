@@ -506,47 +506,6 @@ pub enum AssistState {
     Paid { helper: PlayerId, generic: u32 },
 }
 
-/// Legacy on-disk compatibility for [`PendingCast::assist_contributed_units`].
-///
-/// A parked Assist cast written before the field existed carries no record of the
-/// units its helper spent, so the cast's snapshot is completed from the units it does
-/// have — the caster's own — and the helper's contribution is simply missing from
-/// `GameObject::mana_spent_to_cast_amount`, `colors_spent_to_cast` and
-/// `mana_spent_source_snapshots`. That under-records rather than mis-records: the
-/// payment really did happen, so the only honest repair would be the pips themselves,
-/// which such a save does not carry. It is a SHIM, not the rule — this build writes
-/// the units at the spend boundary, before any later pause can save the cast.
-///
-/// The tripwire below fails to COMPILE once the workspace version crosses the removal
-/// boundary. Removing it means requiring the record on every parked Assist cast past
-/// its payment boundary, so a payload that omits it becomes a refused contradiction
-/// instead of the legacy shape.
-///
-/// Grep token: `LEGACY_ASSIST_CONTRIBUTION_ABSENT_2026Q4`. See
-/// `docs/LEGACY-COMPAT.md`.
-#[allow(dead_code)]
-const _LEGACY_ASSIST_CONTRIBUTION_ABSENT_2026Q4: () = {
-    // Added in 0.121.0; the `+14` patch window closes after 0.121.14.
-    const LANDED: (u32, u32, u32) = (0, 121, 0);
-    const BOUNDARY: (u32, u32, u32) = (
-        LANDED.0,
-        LANDED.1,
-        LANDED.2 + crate::types::legacy_compat::LEGACY_REMOVAL_WINDOW_PATCH,
-    );
-    let now = (
-        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_MAJOR")),
-        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_MINOR")),
-        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_PATCH")),
-    );
-    assert!(
-        crate::types::legacy_compat::within_legacy_window(BOUNDARY, now),
-        "LEGACY_ASSIST_CONTRIBUTION_ABSENT_2026Q4: stop admitting a parked Assist cast \
-         whose `assist_contributed_units` the payload omits (the empty default the \
-         recording path reads as \"the helper spent nothing\") and this tripwire once we \
-         ship past 0.121.14. See docs/LEGACY-COMPAT.md."
-    );
-};
-
 /// CR 500.11 + CR 614.10a: One pending "[player] skips their next combat phase"
 /// (Revenant Patriarch, Stonehorn Dignitary, Blinding Angel, Moment of Silence).
 /// It is a virtual replacement of that player's combat phase beginning, used up
@@ -11795,12 +11754,11 @@ impl PendingManaAbility {
     ///   asked AFTER the occurrence-agreement check above rather than instead of it.
     ///   CR 605.3b settled that node the moment it was activated, so it settles a
     ///   FINISHED activation and nothing of a still-parked one belongs in it. Two
-    ///   records that agree name ONE node; agreeing is not owning. The answer carries
-    ///   the shape it was reached through
-    ///   ([`ParkedActivationConflict::SettledOccurrence`] when the save states the
-    ///   occurrence, [`ParkedActivationConflict::SettledWithoutOccurrence`] when it
-    ///   states none — the shape a save written before the field existed carries,
-    ///   where nothing beside the reference separates two activations of one object).
+    ///   records that agree name ONE node; agreeing is not owning
+    ///   ([`ParkedActivationConflict::SettledOccurrence`]). A save that states no
+    ///   occurrence cannot separate two activations of one object at all, so it is
+    ///   refused before this question is reached
+    ///   ([`ParkedActivationConflict::AbsentOccurrence`]).
     ///   The witness is the node's own settlement record
     ///   ([`ResolvedRulesJournal::node_settled`]), NOT the pips it produced: an
     ///   activation the game state allowed no mana (CR 605.2 — Heronblade Elite at
@@ -11852,19 +11810,18 @@ impl PendingManaAbility {
         //      whose records agreed on a FINISHED activation (Heronblade Elite at
         //      power 0: settled, zero pips outside the settlement record) through,
         //      and the colour answer then wrote this activation's production into it.
-        match self.activated_mana_occurrence {
-            Some(occurrence) if occurrence.ordinal() != ordinal => {
-                return Err(ParkedActivationConflict::ForeignOccurrence { node, occurrence });
-            }
-            _ => {}
+        //   3. the save must STATE the occurrence. Absence is a contradiction, not a
+        //      legacy shape: `activated_mana_occurrence` was introduced with this
+        //      record and no released build omits it, so a payload that states none
+        //      cannot be placed and is refused instead of read as an older save.
+        let Some(occurrence) = self.activated_mana_occurrence else {
+            return Err(ParkedActivationConflict::AbsentOccurrence { node });
+        };
+        if occurrence.ordinal() != ordinal {
+            return Err(ParkedActivationConflict::ForeignOccurrence { node, occurrence });
         }
         if journal.node_settled(node) {
-            return Err(match self.activated_mana_occurrence {
-                Some(occurrence) => {
-                    ParkedActivationConflict::SettledOccurrence { node, occurrence }
-                }
-                None => ParkedActivationConflict::SettledWithoutOccurrence { node },
-            });
+            return Err(ParkedActivationConflict::SettledOccurrence { node, occurrence });
         }
         // CR 602.2a + CR 400.7: the node's epoch and the announcement epoch are two
         // records of ONE announcement, so they must name the same object.
@@ -11940,46 +11897,6 @@ impl PendingManaAbility {
     }
 }
 
-/// Legacy on-disk compatibility for `PendingManaAbility::activated_mana_occurrence`.
-///
-/// A save written before the occurrence existed states no occurrence, so
-/// [`PendingManaAbility::activation_producer_evidence`] changes its evidence check
-/// for that payload: the `None` arm asks the node's own settlement record, while the
-/// `Some` arm can also compare the stated occurrence against the node's ordinal. The
-/// shape is supported deliberately — such a save's announcement epoch is still exact
-/// evidence — so it is a SHIM beside the current record, not the rule.
-///
-/// The tripwire below fails to COMPILE once the workspace version crosses the removal
-/// boundary. Removing it means requiring the occurrence on every parked activation (a
-/// payload that omits it then becomes a refused contradiction rather than the legacy
-/// shape), and deleting both this const and its `docs/LEGACY-COMPAT.md` entry.
-///
-/// Grep token: `LEGACY_PARKED_ACTIVATION_OCCURRENCE_ABSENT_2026Q4`. See
-/// `docs/LEGACY-COMPAT.md`.
-#[allow(dead_code)]
-const _LEGACY_PARKED_ACTIVATION_OCCURRENCE_ABSENT_2026Q4: () = {
-    // Added in 0.121.0; the `+14` patch window closes after 0.121.14.
-    const LANDED: (u32, u32, u32) = (0, 121, 0);
-    const BOUNDARY: (u32, u32, u32) = (
-        LANDED.0,
-        LANDED.1,
-        LANDED.2 + crate::types::legacy_compat::LEGACY_REMOVAL_WINDOW_PATCH,
-    );
-    let now = (
-        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_MAJOR")),
-        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_MINOR")),
-        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_PATCH")),
-    );
-    assert!(
-        crate::types::legacy_compat::within_legacy_window(BOUNDARY, now),
-        "LEGACY_PARKED_ACTIVATION_OCCURRENCE_ABSENT_2026Q4: remove the \
-         occurrence-absent arm in \
-         PendingManaAbility::activation_producer_evidence (the `None => \
-         ParkedActivationConflict::SettledWithoutOccurrence` branch) and this \
-         tripwire once we ship past 0.121.14. See docs/LEGACY-COMPAT.md."
-    );
-};
-
 /// CR 605.3b + CR 113.7: the producer evidence a parked mana activation's own
 /// recorded execution node carries, once the journal has been asked what that
 /// node is. See [`PendingManaAbility::activation_producer_evidence`].
@@ -12050,16 +11967,12 @@ pub enum ParkedActivationConflict {
         node: RulesExecutionNodeRef,
         occurrence: crate::types::resolved_commands::ManaActivationOccurrence,
     },
-    /// CR 605.3b: the save states NO occurrence and points at a retained
-    /// activated-mana node of its own source and epoch that has already SETTLED.
-    /// A mana ability resolves immediately after it is activated, so that node
-    /// settled a finished activation; nothing of a still-parked activation belongs
-    /// in it, and no record in the save separates the two, so the reference is
-    /// refused rather than reused as this activation's node. Settlement is the
-    /// node's own record ([`ResolvedRulesJournal::node_settled`]), not its pip
-    /// list: CR 605.2 keeps an ability a mana ability when the game state allows it
-    /// no mana at all, and such an activation settles with no pips.
-    SettledWithoutOccurrence { node: RulesExecutionNodeRef },
+    /// CR 605.3b: the save states NO occurrence for a parked activation that names
+    /// a retained node. Every activation this engine announces writes the occurrence
+    /// beside the node, and no released build omits it, so a payload that states
+    /// none is a contradiction: the two records that identify an announcement cannot
+    /// be reduced to one without guessing which activation the reference belongs to.
+    AbsentOccurrence { node: RulesExecutionNodeRef },
     /// CR 602.2a + CR 400.7: two records of ONE announcement naming two objects.
     /// The retained node was opened under `node_epoch` and the announcement
     /// captured `announced`; a moved object is a new object, so one of the two
@@ -12086,7 +11999,7 @@ impl ParkedActivationConflict {
             | Self::ForeignSource { node, .. }
             | Self::ForeignOccurrence { node, .. }
             | Self::SettledOccurrence { node, .. }
-            | Self::SettledWithoutOccurrence { node }
+            | Self::AbsentOccurrence { node }
             | Self::ContradictoryAnnouncementEpoch { node, .. } => Some(*node),
             Self::NoProducerEvidence { .. } => None,
         }
@@ -12121,11 +12034,10 @@ impl std::fmt::Display for ParkedActivationConflict {
                  object and epoch, so the {occurrence} it states is stale — CR 605.3b resolved \
                  that activation immediately after it was activated"
             ),
-            Self::SettledWithoutOccurrence { node } => write!(
+            Self::AbsentOccurrence { node } => write!(
                 f,
-                "its execution node {node:?} has already produced its mana and the save states no \
-                 occurrence, so it belongs to a finished activation of this object and epoch — \
-                 CR 605.3b resolved that one immediately"
+                "it states no activation occurrence for its execution node {node:?}, so the save \
+                 cannot say which activation of this object and epoch the node belongs to"
             ),
             Self::ContradictoryAnnouncementEpoch {
                 node,

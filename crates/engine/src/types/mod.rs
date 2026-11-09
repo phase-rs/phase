@@ -19,7 +19,6 @@ pub mod interaction;
 #[cfg(any(test, feature = "test-support"))]
 pub mod legacy_capture_fixture;
 /// Legacy-compat tripwire arithmetic; see `docs/LEGACY-COMPAT.md`.
-pub mod legacy_compat;
 pub mod log;
 pub mod mana;
 pub mod match_config;
