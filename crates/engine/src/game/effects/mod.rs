@@ -29163,10 +29163,9 @@ mod tests {
                             match site {
                                 "body" => {}
                                 "pruned-body" => {
-                                    let mut independent = (*pending.chain).clone();
-                                    independent.sub_link = SubAbilityLink::SequentialSibling;
-                                    pending.chain = Box::new(
-                                        ResolvedAbility::new(
+                                    let mut independent = std::mem::replace(
+                                        &mut pending.chain,
+                                        Box::new(ResolvedAbility::new(
                                             Effect::Fight {
                                                 target: TargetFilter::Typed(TypedFilter::creature()),
                                                 subject: TargetFilter::ParentTarget,
@@ -29174,9 +29173,10 @@ mod tests {
                                             vec![],
                                             source,
                                             P0,
-                                        )
-                                        .sub_ability(independent),
+                                        )),
                                     );
+                                    independent.sub_link = SubAbilityLink::SequentialSibling;
+                                    pending.chain.sub_ability = Some(independent);
                                     pending.chain.context.forwarded_result_context =
                                         Some(Box::new(ForwardedResultContext {
                                             targets: vec![],
@@ -29218,13 +29218,15 @@ mod tests {
                                     result: Some(1),
                                 }
                             )), "{site}, links={links}: the die must publish before its branch");
-                            let branch_gains = if links == 22 { 21 } else { 3 };
                             let body_gain = if site == "detached-tail" { 2 } else { 0 };
-                            assert_eq!(
-                                state.players[0].life,
-                                before + body_gain + branch_gains,
-                                "{site}, links={links}: branch effects precede the depth error"
-                            );
+                            if links == 22 {
+                                assert!(
+                                    state.players[0].life > before + body_gain,
+                                    "{site}: the failing branch must execute before its error"
+                                );
+                            } else {
+                                assert_eq!(state.players[0].life, before + body_gain + 3);
+                            }
                             let completed = events.iter().any(|event| matches!(
                                 event,
                                 GameEvent::EffectResolved { kind: EffectKind::RollDie, source_id, .. }

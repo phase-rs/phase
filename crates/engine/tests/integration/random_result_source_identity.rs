@@ -3238,7 +3238,7 @@ fn public_coin_keep_continuation_publishes_each_paused_survivor_then_the_aggrega
     // not the last survivor or the continuation's snapshotted 7.
     assert_eq!(state.die_result_this_resolution, Some(2));
     assert_eq!(state.players[0].life, before + 4);
-    assert_eq!(state.players[0].hand, vec![hand[2]]);
+    assert_eq!(state.players[0].hand, vec![hand[2]].into());
     for card in hand.iter().take(2) {
         assert_eq!(state.objects[card].zone, Zone::Graveyard);
         assert_eq!(
