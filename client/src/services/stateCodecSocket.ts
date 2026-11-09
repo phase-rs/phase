@@ -399,6 +399,8 @@ const MAX_OUTSTANDING_MESSAGES = 64;
 const MAX_QUEUED_TEXT_BYTES = 16 * 1024 * 1024;
 
 export interface StateCodecSocketOptions {
+  /** Undecorated transport: death must not wait for an inflater's delivery queue. */
+  raw: PhaseSocketTransport;
   inner: PhaseSocketTransport;
   session: StateCodecSession;
   /**
@@ -435,6 +437,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
   /** First terminal cause, latched before the ordered close can run. */
   private naturalClose: CloseEvent | null = null;
   private naturalCloseTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly rawCloseListener: CloseListener = (event) => this.latchNaturalClose(event);
   private sessionReleased = false;
   private readonly consumerWaiters: (() => void)[] = [];
   private pendingClose: Extract<Outbound, { kind: "close" }> | null = null;
@@ -442,7 +445,9 @@ export class StateCodecSocket implements PhaseSocketTransport {
   private readonly encoder = new TextEncoder();
 
   constructor(private readonly options: StateCodecSocketOptions) {
-    const { inner } = options;
+    const { inner, raw } = options;
+    // Capture first: an existing raw observer can synchronously dispose us.
+    raw.addEventListener("close", this.rawCloseListener, { capture: true, once: true });
     inner.onopen = (event) => {
       try {
         this.onopen?.(event);
@@ -550,7 +555,9 @@ export class StateCodecSocket implements PhaseSocketTransport {
   // ── Receive pipeline ───────────────────────────────────────────────
 
   private enqueueMessage(text: string): void {
-    if (this.closed || this.naturalClose !== null) return;
+    if (this.closed || (this.naturalClose !== null && this.options.inner === this.options.raw)) return;
+    // Gzip fences new raw arrivals at death, but text already in its inflater
+    // can still join this bounded ordered drain before its close notification.
     // GzipEnvelopeSocket can expand the next frame while decode is awaiting the
     // shared WASM runtime. Reserve synchronously at this expanded-text boundary,
     // before a closure retains the frame. Never drop a Delta and keep playing.
@@ -791,11 +798,10 @@ export class StateCodecSocket implements PhaseSocketTransport {
   }
 
   /**
-   * The transport has died, even if delivery is still awaiting a decoder or a
-   * consumer. Reserve its terminal cause now; only healthy already-received
-   * frames may drain ahead of the original close, within one fixed allowance.
+   * Reserve raw death and its deadline before pending inflation, decoding or
+   * consumer attachment can delay the ordered close notification.
    */
-  private recordNaturalClose(event: CloseEvent): void {
+  private latchNaturalClose(event: CloseEvent): void {
     if (this.closed || this.naturalClose !== null) return;
     this.naturalClose = event;
     this.clearRecoveryTimer();
@@ -803,7 +809,13 @@ export class StateCodecSocket implements PhaseSocketTransport {
       () => this.handleNaturalClose(event),
       STATE_CODEC_NATURAL_CLOSE_DRAIN_TIMEOUT_MS,
     );
-    this.enqueue(() => this.handleNaturalClose(event));
+  }
+
+  private recordNaturalClose(event: CloseEvent): void {
+    if (this.closed) return;
+    this.latchNaturalClose(event);
+    const natural = this.naturalClose ?? event;
+    this.enqueue(() => this.handleNaturalClose(natural));
   }
 
   private handleNaturalClose(event: CloseEvent): void {
@@ -812,6 +824,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
     this.clearReceiveQueue();
     this.clearRecoveryTimer();
     this.clearNaturalCloseTimer();
+    this.options.raw.removeEventListener("close", this.rawCloseListener, true);
     this.wakeConsumers();
     try {
       this.releaseSession();
@@ -848,6 +861,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
     this.clearReceiveQueue();
     this.clearRecoveryTimer();
     this.clearNaturalCloseTimer();
+    this.options.raw.removeEventListener("close", this.rawCloseListener, true);
     this.wakeConsumers();
     try {
       this.releaseSession();

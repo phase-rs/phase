@@ -41,12 +41,14 @@ export class GzipEnvelopeSocket implements PhaseSocketTransport {
         .catch(() => undefined);
     };
     socket.onmessage = (event) => {
+      if (this.closeQueued) return;
       this.receiveQueue = this.receiveQueue
         .then(async () => {
           let json: string;
           try {
             json = await this.decodeIncoming(event.data as unknown);
           } catch {
+            if (this.closeQueued) return;
             // A frame we cannot decode is a broken transport, not a droppable
             // message: mirror `send()` so the drop is observable and
             // `withReconnect` gets its close event. Deliberately scoped to the
@@ -83,6 +85,7 @@ export class GzipEnvelopeSocket implements PhaseSocketTransport {
         this.onFrameSent?.();
       })
       .catch(() => {
+        if (this.closeQueued) return;
         // The close is what `withReconnect` recovers from, so it must survive a
         // throwing error handler: `ws-adapter`'s `emit` does not catch.
         try {

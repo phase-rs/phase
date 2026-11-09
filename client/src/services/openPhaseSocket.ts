@@ -46,7 +46,11 @@ export interface PhaseSocketTransport {
     listener: (event: MessageEvent<string>) => void,
     options?: AddEventListenerOptions | boolean,
   ): void;
-  removeEventListener(type: "close", listener: (event: CloseEvent) => void): void;
+  removeEventListener(
+    type: "close",
+    listener: (event: CloseEvent) => void,
+    options?: EventListenerOptions | boolean,
+  ): void;
   removeEventListener(type: "message", listener: (event: MessageEvent<string>) => void): void;
   send(data: string): void;
   close(): void;
@@ -455,6 +459,7 @@ export function openPhaseSocket(
           outer = inner;
           if (negotiatesCodec && prepared) {
             outer = new StateCodecSocket({
+              raw: ws,
               inner,
               session: prepared,
               bootstrap: opts.stateCodecBootstrap ?? (() => "pending" as StateCodecBootstrap),

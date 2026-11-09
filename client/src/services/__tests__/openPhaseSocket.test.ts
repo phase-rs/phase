@@ -2816,7 +2816,7 @@ describe("openPhaseSocket — natural close during codec decode", () => {
   // five seconds. This is a close bound, not the decoder's own RPC watchdog.
   const orderedDrainBoundMs = 5_000;
 
-  async function heldAttachment(wire: "raw" | "gzip") {
+  async function heldAttachment(wire: "raw" | "gzip", beforeAdoption?: () => void) {
     const held = heldDecoder();
     const attachment = new StateCodecAttachment();
     const binding = attachment.begin();
@@ -2825,6 +2825,7 @@ describe("openPhaseSocket — natural close during codec decode", () => {
     const { raw, socket } = await openCodecSocket(held.fake, {
       gzip: wire === "gzip",
       bootstrap: () => "pending",
+      beforeAdoption,
       onRecovery: (state) => {
         notices.push(state);
         attachment.handleRecovery(binding, state, adopted, false, vi.fn());
@@ -2853,6 +2854,273 @@ describe("openPhaseSocket — natural close during codec decode", () => {
     expect(new TextDecoder().decode(held.fake.decode.mock.calls[0][0])).toBe(text);
     return { held, attachment, notices, raw, socket, received, closed, closeListener };
   }
+
+  /** Hold real inflater output, rather than delaying acquisition of the frame bytes. */
+  function heldGzipInflation() {
+    const NativeDecompressionStream = globalThis.DecompressionStream;
+    const started = vi.fn();
+    let signalEntered!: () => void;
+    let signalFinished!: () => void;
+    let release!: () => void;
+    let reject!: (error: Error) => void;
+    const entered = new Promise<void>((resolve) => { signalEntered = resolve; });
+    const finished = new Promise<void>((resolve) => { signalFinished = resolve; });
+    const gate = new Promise<void>((resolve, rejectGate) => {
+      release = resolve;
+      reject = rejectGate;
+    });
+    vi.stubGlobal("DecompressionStream", class {
+      readonly readable: ReadableStream<Uint8Array>;
+      readonly writable: DecompressionStream["writable"];
+
+      constructor(format: CompressionFormat) {
+        started(format);
+        const inflater = new NativeDecompressionStream(format);
+        this.writable = inflater.writable;
+        this.readable = inflater.readable.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+          async transform(chunk, controller) {
+            // Real gzip bytes have already reached the native inflater. Keep
+            // wireEnvelope's Response.arrayBuffer() pending inside its stream.
+            signalEntered();
+            try {
+              await gate;
+              controller.enqueue(chunk);
+            } catch (error) {
+              signalFinished();
+              throw error;
+            }
+          },
+          flush() { signalFinished(); },
+        }));
+      }
+    });
+    return {
+      entered, finished, release, reject, started,
+      restore: () => { vi.stubGlobal("DecompressionStream", NativeDecompressionStream); },
+    };
+  }
+
+  async function pendingGzipAttachment(beforeAdoption?: () => void) {
+    const frameB = codecFrame("Delta").padEnd(WIRE_COMPRESSION_THRESHOLD + 1, " ");
+    // Compression itself must finish before the controlled inflater or fake
+    // clock is installed. Both frames use genuine 0x01 gzip envelopes.
+    const compressedB = await encodeJsonEnvelope(frameB);
+    expect(compressedB[0]).toBe(0x01);
+    const wire = await heldAttachment("gzip", beforeAdoption);
+    expect(wire.raw.send).toHaveBeenCalledWith(expect.stringContaining('"wire_formats":["GzipEnvelopeV1"]'));
+    const errored = vi.fn();
+    const messageListener = vi.fn();
+    wire.socket.ws.onerror = errored;
+    wire.socket.ws.addEventListener("message", messageListener);
+    // A persistent observer also detects an incorrectly repeated close.
+    wire.socket.ws.removeEventListener("close", wire.closeListener);
+    wire.socket.ws.addEventListener("close", wire.closeListener);
+    const inflation = heldGzipInflation();
+    return {
+      ...wire, frameB, compressedB, inflation, errored, messageListener,
+      dispose: async () => {
+        wire.held.release({ kind: "decoded", json: DECODED_PONG });
+        inflation.release();
+        try {
+          await inflation.finished;
+        } finally {
+          inflation.restore();
+          vi.useRealTimers();
+          wire.socket.close();
+        }
+      },
+    };
+  }
+
+  interface NaturalGzipCloseObservation {
+    closed: Mock;
+    closeListener: Mock;
+    held: { fake: { close: Mock } };
+    notices: StateCodecRecoveryNotice[];
+    attachment: StateCodecAttachment;
+    raw: MockWebSocket;
+    errored: Mock;
+    inflation: { started: Mock };
+  }
+
+  function expectOriginalGzipClose(
+    wire: NaturalGzipCloseObservation,
+    natural: CloseEvent,
+  ) {
+    expect(wire.closed).toHaveBeenCalledOnce();
+    expect(wire.closed.mock.calls[0][0]).toBe(natural);
+    expect(wire.closeListener).toHaveBeenCalledOnce();
+    expect(wire.closeListener.mock.calls[0][0]).toBe(natural);
+    expect(wire.held.fake.close).toHaveBeenCalledOnce();
+    expect(wire.notices).toEqual([]);
+    expect(wire.attachment.deliveryPolicy).toEqual({ kind: "negotiate" });
+    expect(wire.raw.send).not.toHaveBeenCalledWith('{"type":"ResyncState"}');
+    expect(wire.raw.close).not.toHaveBeenCalled();
+    expect(wire.errored).not.toHaveBeenCalled();
+    expect(wire.inflation.started).toHaveBeenCalledExactlyOnceWith("gzip");
+  }
+
+  it("preserves the original network close when decode rejects while the next real gzip inflation is held", async () => {
+    const wire = await pendingGzipAttachment();
+    const { held, raw, socket, received, closed, inflation, messageListener } = wire;
+    try {
+      raw.deliverMessage(wire.compressedB.buffer);
+      await inflation.entered;
+      expect(held.fake.decode).toHaveBeenCalledOnce();
+      expect(received).not.toHaveBeenCalled();
+      vi.useFakeTimers();
+      const natural = new CloseEvent("close", { code: 1006, reason: "network lost during inflation", wasClean: false });
+      raw.fireClose(natural);
+      // Gzip cannot deliver its ordered close until B finishes inflation.
+      expect(closed).not.toHaveBeenCalled();
+      held.reject(new Error("A decoder rejected before B finished inflation"));
+      await vi.advanceTimersByTimeAsync(0);
+      expectOriginalGzipClose(wire, natural);
+      expect(received).not.toHaveBeenCalled();
+      expect(messageListener).not.toHaveBeenCalled();
+
+      inflation.release();
+      await inflation.finished;
+      await vi.advanceTimersByTimeAsync(0);
+      // B was already in the real inflater, but A's rejected drain ended the
+      // connection. Neither B nor later raw work can reach the released lease.
+      raw.deliverMessage(wire.compressedB.buffer);
+      raw.fireError();
+      raw.fireClose(natural);
+      socket.close();
+      await vi.advanceTimersByTimeAsync(orderedDrainBoundMs);
+      expectOriginalGzipClose(wire, natural);
+      expect(held.fake.decode).toHaveBeenCalledOnce();
+      expect(received).not.toHaveBeenCalled();
+      expect(messageListener).not.toHaveBeenCalled();
+    } finally {
+      await wire.dispose();
+    }
+  });
+
+  it("preserves the original raw close when an earlier raw observer closes the codec during held gzip inflation", async () => {
+    let closeAdopted!: () => void;
+    const closeFromRawObserver = vi.fn((_event: Event) => { closeAdopted(); });
+    const wire = await pendingGzipAttachment(() => {
+      // An existing application observer predates codec construction. Its
+      // synchronous cleanup must not replace network death with a local close.
+      MockWebSocket.instances[0].addEventListener("close", closeFromRawObserver, { once: true });
+    });
+    const { held, raw, socket, received, inflation, messageListener } = wire;
+    closeAdopted = () => socket.close();
+    try {
+      raw.deliverMessage(wire.compressedB.buffer);
+      await inflation.entered;
+      vi.useFakeTimers();
+      const natural = new CloseEvent("close", { code: 1006, reason: "network lost during reentrant cleanup" });
+      raw.fireClose(natural);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(closeFromRawObserver).toHaveBeenCalledOnce();
+      expect(closeFromRawObserver.mock.calls[0][0]).toBe(natural);
+      expectOriginalGzipClose(wire, natural);
+
+      held.reject(new Error("A decoder rejected after the raw observer disposed the socket"));
+      inflation.release();
+      await inflation.finished;
+      raw.deliverMessage(wire.compressedB.buffer);
+      socket.close();
+      await vi.advanceTimersByTimeAsync(orderedDrainBoundMs);
+      expectOriginalGzipClose(wire, natural);
+      expect(closeFromRawObserver).toHaveBeenCalledOnce();
+      expect(held.fake.decode).toHaveBeenCalledOnce();
+      expect(received).not.toHaveBeenCalled();
+      expect(messageListener).not.toHaveBeenCalled();
+    } finally {
+      await wire.dispose();
+    }
+  });
+
+  it("drains both already-received real gzip frames before the original network close", async () => {
+    const wire = await pendingGzipAttachment();
+    const { held, raw, received, closed, inflation, messageListener } = wire;
+    const decodedB = '{"type":"Pong","data":{"timestamp":29}}';
+    const trace: string[] = [];
+    held.fake.decode.mockResolvedValueOnce({ kind: "decoded", json: decodedB });
+    held.fake.close.mockImplementation(() => { trace.push("lease"); });
+    received.mockImplementation((event: MessageEvent<string>) => { trace.push(event.data); return true; });
+    closed.mockImplementation(() => { trace.push("close"); });
+    try {
+      raw.deliverMessage(wire.compressedB.buffer);
+      await inflation.entered;
+      vi.useFakeTimers();
+      const natural = new CloseEvent("close", { code: 1006, reason: "network lost during healthy drain" });
+      raw.fireClose(natural);
+      held.release({ kind: "decoded", json: DECODED_PONG });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(trace).toEqual([DECODED_PONG]);
+      expect(held.fake.decode).toHaveBeenCalledOnce();
+      expect(held.fake.close).not.toHaveBeenCalled();
+      expect(closed).not.toHaveBeenCalled();
+
+      inflation.release();
+      await inflation.finished;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(trace).toEqual([DECODED_PONG, decodedB, "lease", "close"]);
+      expect(held.fake.decode).toHaveBeenCalledTimes(2);
+      expect(new TextDecoder().decode(held.fake.decode.mock.calls[1][0])).toBe(wire.frameB);
+      expect(received.mock.calls.map(([event]) => event.data)).toEqual([DECODED_PONG, decodedB]);
+      expect(messageListener.mock.calls.map(([event]) => event.data)).toEqual([DECODED_PONG, decodedB]);
+      expectOriginalGzipClose(wire, natural);
+      await vi.advanceTimersByTimeAsync(orderedDrainBoundMs);
+      expect(trace).toEqual([DECODED_PONG, decodedB, "lease", "close"]);
+      expectOriginalGzipClose(wire, natural);
+    } finally {
+      await wire.dispose();
+    }
+  });
+
+  it.each(["success", "failure"] as const)(
+    "starts the natural-close bound at raw death while real gzip inflation is held and fences late inflation %s",
+    async (late) => {
+      const wire = await pendingGzipAttachment();
+      const { held, raw, socket, received, closed, inflation, messageListener } = wire;
+      try {
+        raw.deliverMessage(wire.compressedB.buffer);
+        await inflation.entered;
+        vi.useFakeTimers();
+        const natural = new CloseEvent("close", { code: 1006, reason: "network lost before inflation deadline" });
+        raw.fireClose(natural);
+        held.release({ kind: "decoded", json: DECODED_PONG });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(received).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ data: DECODED_PONG }));
+        expect(messageListener).toHaveBeenCalledOnce();
+        expect(held.fake.decode).toHaveBeenCalledOnce();
+        // The ordered gzip close is still behind B. The five-second allowance
+        // nevertheless belongs to raw death, not to a future inflation result.
+        await vi.advanceTimersByTimeAsync(orderedDrainBoundMs - 1);
+        expect(closed).not.toHaveBeenCalled();
+        expect(held.fake.close).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        expectOriginalGzipClose(wire, natural);
+
+        if (late === "success") {
+          inflation.release();
+        } else {
+          inflation.reject(new Error("B inflater failed after the natural-close deadline"));
+        }
+        await inflation.finished;
+        await vi.advanceTimersByTimeAsync(0);
+        // A failed inflater must not close the already-dead raw transport again.
+        expectOriginalGzipClose(wire, natural);
+        raw.deliverMessage(wire.compressedB.buffer);
+        raw.fireError();
+        raw.fireClose(natural);
+        socket.close();
+        await vi.advanceTimersByTimeAsync(orderedDrainBoundMs);
+        expectOriginalGzipClose(wire, natural);
+        expect(held.fake.decode).toHaveBeenCalledOnce();
+        expect(received).toHaveBeenCalledOnce();
+        expect(messageListener).toHaveBeenCalledOnce();
+      } finally {
+        await wire.dispose();
+      }
+    },
+  );
 
   it.each(["raw", "gzip"] as const)(
     "preserves the original %s network close when the held decode rejects, without degrading or resyncing",
