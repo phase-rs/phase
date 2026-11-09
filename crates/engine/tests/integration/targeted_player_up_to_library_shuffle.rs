@@ -10,6 +10,7 @@
 
 use engine::game::scenario::{CastOutcome, GameScenario, P0, P1};
 use engine::types::ability::EffectKind;
+use engine::types::counter::CounterType;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -24,6 +25,7 @@ const WAND_ORACLE: &str = "{T}: Mill a card.\n{2}, {T}, Exile this artifact: Shu
 const LOAMING_ORACLE: &str = "When this creature enters, target player shuffles any number of target cards from their graveyard into their library.";
 const RITE_ORACLE: &str = "Return up to two target permanent cards from your graveyard to your hand. Target player shuffles up to four target cards from their graveyard into their library. Exile Rite of Renewal.";
 const QUANDRIX_ORACLE: &str = "Choose two —\n• Return target creature or planeswalker to its owner's hand.\n• Counter target artifact or enchantment spell.\n• Put two +1/+1 counters on target creature.\n• Target player shuffles up to three target cards from their graveyard into their library.";
+const COSI_ORACLE: &str = "Whenever an opponent shuffles their library, you may put a +1/+1 counter on this creature.";
 
 /// Ordered projection of who actually shuffled a library.
 fn shuffled_players(outcome: &CastOutcome) -> Vec<PlayerId> {
@@ -390,5 +392,50 @@ fn quandrix_command_keeps_the_shuffle_player_after_an_earlier_targeted_mode() {
         &outcome,
         P1,
         "an earlier mode's creature target must not replace the shuffle player",
+    );
+}
+
+/// CR 701.24a + CR 603.2c: one selected opposing card gives Cosi's Trickster
+/// one trigger opportunity, not one for delivery plus another for the terminal
+/// instruction. The trigger is accepted and resolves through the normal stack.
+#[test]
+fn dwell_on_the_past_one_card_shuffles_once_and_triggers_cosi_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let cosi = scenario
+        .add_creature_from_oracle(P0, "Cosi's Trickster", 1, 1, COSI_ORACLE)
+        .id();
+    let dwell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Dwell on the Past", false, DWELL_ORACLE)
+        .id();
+    let selected = scenario
+        .add_creature_to_graveyard(P1, "Chosen Graveyard Card", 1, 1)
+        .id();
+    let unchosen = scenario
+        .add_creature_to_graveyard(P1, "Unchosen Graveyard Card", 1, 1)
+        .id();
+    scenario.add_card_to_library_top(P0, "Caster Library Card");
+    let target_library = scenario.add_card_to_library_top(P1, "Target Library Card");
+
+    let mut runner = scenario.build();
+    let outcome = runner
+        .cast(dwell)
+        .target_player(P1)
+        .target_object(selected)
+        .accept_optional()
+        .resolve();
+
+    assert_completed(&outcome);
+    outcome.assert_zone(&[selected], Zone::Library);
+    outcome.assert_zone(&[unchosen], Zone::Graveyard);
+    assert!(outcome.state().players[P1.0 as usize]
+        .library
+        .contains(&target_library));
+    outcome.assert_counters(cosi, CounterType::Plus1Plus1, 1);
+    assert_eq!(shuffle_resolutions(&outcome), 1);
+    assert_only_player_shuffled(
+        &outcome,
+        P1,
+        "the single printed shuffle must give Cosi's Trickster one opportunity",
     );
 }
