@@ -1221,6 +1221,44 @@ describe("openPhaseSocket — negotiated StateCodecV1", () => {
     await vi.waitFor(() => expect(fake.close).toHaveBeenCalledOnce());
   });
 
+  it.each(["raw", "gzip"] as const)(
+    "passes a canonical ordinary %s frame through without a throwaway parse and keeps the noncanonical fallback",
+    async (wire) => {
+      const fake = fakeSession();
+      const { raw, socket } = await openCodecSocket(fake, { gzip: wire === "gzip" });
+      const received: string[] = [];
+      socket.ws.onmessage = (event) => { received.push(event.data); };
+      const canonical = JSON.stringify({
+        type: "OpponentDisconnected",
+        data: { grace_seconds: 30, full_key: { game_code: "GAME01", generation: 7 } },
+      });
+      const noncanonical = JSON.stringify({
+        data: { grace_seconds: 30, full_key: { game_code: "GAME01", generation: 7 } },
+        type: "OpponentDisconnected",
+      });
+      const deliver = async (text: string) => {
+        if (wire === "gzip") raw.deliverMessage((await encodeJsonEnvelope(text)).buffer);
+        else raw.deliverMessage(text);
+      };
+      const parse = vi.spyOn(JSON, "parse");
+      try {
+        // Reach guard: a canonical frame still reaches the consumer verbatim.
+        await deliver(canonical);
+        await vi.waitFor(() => expect(received).toEqual([canonical]));
+        // The socket already knows the tag from the canonical prefix: the only
+        // remaining materialization is the adapter's own dispatch parse.
+        expect(parse).not.toHaveBeenCalled();
+        parse.mockClear();
+        await deliver(noncanonical);
+        await vi.waitFor(() => expect(received).toHaveLength(2));
+        // Noncanonical field order keeps the compatibility parse.
+        expect(parse).toHaveBeenCalledTimes(1);
+      } finally {
+        parse.mockRestore();
+      }
+    },
+  );
+
   it("closes when a codec frame arrives before confirmation", async () => {
     const fake = fakeSession();
     const promise = openPhaseSocket("ws://test", { stateCodecSession: fake.session });

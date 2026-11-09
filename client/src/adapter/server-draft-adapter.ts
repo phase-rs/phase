@@ -353,7 +353,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
     }
-    this.assertGameReady(this.ws);
+    this.assertGameReady(this.ws, this.activeFullKey);
 
     return this.submitGameFrame(
       { type: "Action", data: { action } },
@@ -372,7 +372,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
     }
-    this.assertGameReady(this.ws);
+    this.assertGameReady(this.ws, this.activeFullKey);
 
     return this.submitGameFrame(
       { type: "Interaction", data: { submission } },
@@ -380,9 +380,13 @@ export class ServerDraftAdapter implements EngineAdapter {
     );
   }
 
-  private assertGameReady(socket: PhaseSocketTransport | null): void {
+  private assertGameReady(
+    socket: PhaseSocketTransport | null,
+    ownerKey: FullSessionKey | null,
+  ): void {
     if (socket !== null && socket === this.ws && this.acceptedGameSocket === socket
-      && fullSessionKeysEqual(this.acceptedFullKey, this.activeFullKey)) return;
+      && fullSessionKeysEqual(ownerKey, this.activeFullKey)
+      && fullSessionKeysEqual(this.acceptedFullKey, ownerKey)) return;
     throw new AdapterError(
       AdapterErrorCode.ACTION_NOT_SENT,
       "This connection has not accepted the current draft match; the request was not sent.",
@@ -410,7 +414,13 @@ export class ServerDraftAdapter implements EngineAdapter {
         reject,
         this._serverInfo?.commandCorrelation === "CommandIdV1",
       );
-      this.submissionSocket = this.ws;
+      // Bind the claimed socket and its owning match together BEFORE any
+      // listener can run: a synchronous match change must not bless this
+      // command with the replacement match.
+      const claimedSocket = this.ws;
+      const claimedKey = this.activeFullKey;
+      this.submissionSocket = claimedSocket;
+      this.submissionFullKey = claimedKey;
       try {
         this.emit({ type: "actionPendingChanged", pending: true });
       } catch (error) {
@@ -428,7 +438,7 @@ export class ServerDraftAdapter implements EngineAdapter {
       try {
         // Pending notifications may synchronously announce another match.
         // Never stamp or send with authority revoked by that reentry.
-        this.assertGameReady(this.submissionSocket);
+        this.assertGameReady(claimedSocket, claimedKey);
       } catch (error) {
         this.submission.release(submission);
         this.submissionSocket = null;
@@ -438,7 +448,6 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.emit({ type: "actionPendingChanged", pending: false });
         return;
       }
-      this.submissionFullKey = this.activeFullKey;
       if (!this.send(this.submission.stamp(frame, submission)) && this.submission.release(submission)) {
         this.submissionSocket = null;
         this.submissionFullKey = null;
@@ -457,7 +466,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
     }
-    this.assertGameReady(socket);
+    this.assertGameReady(socket, this.activeFullKey);
 
     const requestId = this.nextManaPaymentPreviewRequestId++;
     return new Promise<ObjectId[]>((resolve, reject) => {
@@ -481,7 +490,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
     }
-    this.assertGameReady(socket);
+    this.assertGameReady(socket, this.activeFullKey);
 
     return new Promise<InteractionPreview>((resolve, reject) => {
       let previews = this.pendingInteractionPreviews.get(socket);

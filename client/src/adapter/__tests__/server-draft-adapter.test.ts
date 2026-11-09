@@ -2481,13 +2481,15 @@ describe("draft attachment settlement", () => {
         match_id: "r2-t0", round: 2, game_code: nextKey.game_code, full_key: nextKey,
         player_token: "match-draft-token", your_player: 1, opponent_name: "Next opponent",
       });
+      // The same synchronous callback completes the replacement bootstrap too:
+      // readiness alone must not bless the command already captured for match A.
+      receive(established, "GameStarted", {
+        state: matchState("next-match-ready"), your_player: 1, full_key: nextKey,
+      });
     });
     expect(await trackRejection(adapter.submitAction({ type: "PassPriority" }, 0))()).toMatchObject({ code: "ACTION_NOT_SENT" });
     expect(submissionTypes(established)).toEqual([]);
     expect(pending).toEqual([true, false]);
-    receive(established, "GameStarted", {
-      state: matchState("next-match-ready"), your_player: 1, full_key: nextKey,
-    });
     const current = trackRejection(adapter.submitAction({ type: "PassPriority" }, 1));
     receive(established, "StateUpdate", {
       state: matchState("next-match-complete"), events: [{ marker: "next-match-complete" }], full_key: nextKey,

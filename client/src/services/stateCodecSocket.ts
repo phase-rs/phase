@@ -1026,10 +1026,22 @@ export class StateCodecSocket implements PhaseSocketTransport {
  * Read the server's compact, type-first codec header without materializing its
  * payload. Rust validates the body. The compatibility path keeps noncanonical
  * field order/escaped tags and plain or malformed non-codec routing unchanged.
+ *
+ * Canonical frames (any type, not only Full/Delta) are recognized by their
+ * prefix so an ordinary pass-through frame is serialized to the adapter without
+ * a throwaway parse here; only a noncanonical envelope falls back to parsing.
  */
+const CANONICAL_ENVELOPE_PREFIX = '{"type":"';
+
 function frameType(text: string): string {
-  if (text.startsWith('{"type":"Full","data":')) return "Full";
-  if (text.startsWith('{"type":"Delta","data":')) return "Delta";
+  if (text.startsWith(CANONICAL_ENVELOPE_PREFIX)) {
+    const end = text.indexOf('"', CANONICAL_ENVELOPE_PREFIX.length);
+    // `,"data":` immediately after the tag is the canonical serde envelope; a
+    // tag containing an escape or another field order falls back to parsing.
+    if (end > CANONICAL_ENVELOPE_PREFIX.length && text.startsWith(',"data":', end + 1)) {
+      return text.slice(CANONICAL_ENVELOPE_PREFIX.length, end);
+    }
+  }
   try {
     const parsed = JSON.parse(text) as { type?: unknown };
     return typeof parsed?.type === "string" ? parsed.type : "";

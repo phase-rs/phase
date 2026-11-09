@@ -445,6 +445,9 @@ stay buffered through those callbacks and drain in wire order, so a synchronous
 peer reply cannot overtake an older bootstrap. A game command is also refused
 with the typed unsent error until the *current* socket has accepted its own
 validated `GameStarted`; a predecessor's Full never authorizes the replacement.
+The socket and its owning match key are bound together when the command is
+claimed, before pending-indicator listeners run, so a synchronous match change
+inside that callback cannot stamp the old command with the new match.
 
 Draft adapters explicitly own current and retired transports. Healthy replacement
 closes an idle predecessor immediately; a source with a permitted command,
@@ -466,6 +469,11 @@ Without complete selection authority the original source retains the reply.
 This reports the selected-inventory outcome, not a new request-level
 acknowledgement: an automatic timer pick of the identical instance is
 indistinguishable on the existing wire.
+
+The codec socket reads the canonical type-first envelope header by prefix, so an
+ordinary frame is handed to the adapter without a throwaway parse; only a
+noncanonical field order falls back to parsing. `Full`/`Delta` still decode
+through the shared runtime, and Rust remains the only authority over bodies.
 
 ### Design Principles
 
