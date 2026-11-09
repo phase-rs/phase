@@ -271,18 +271,35 @@ fn snow_hybrid_payment_preserves_a_quality_eligible_alternative() {
 #[test]
 fn fully_floated_snow_hybrid_cast_keeps_the_only_snow_unit() {
     // Supplemental costs: no printing combines Snow and these hybrids.
-    // Astrolabe supplies S; Judge's Familiar supplies W/U and Ulalek C/U.
+    // Astrolabe supplies S; Opt supplies U, Judge's Familiar W/U, Ulalek C/U.
     // CR 107.4e/h: the ordinary Island unit pays the hybrid, preserving
     // the Snow source's unit for S. Every source is exhausted before casting.
     for (symbol, snow_name, snow_text, snow_color) in [
         ("{W/U}", "Snow-Covered Plains", "({T}: Add {W}.)", ManaType::White),
         ("{C/U}", "Faceless Haven", "{T}: Add {C}.\n{S}{S}{S}: This land becomes a 4/3 creature with vigilance and all creature types until end of turn. It's still a land. ({S} can be paid with one mana from a snow source.)", ManaType::Colorless),
+        ("{U}", "Snow-Covered Island", "({T}: Add {U}.)", ManaType::Blue),
+        ("{W/U}", "Snow-Covered Island", "({T}: Add {U}.)", ManaType::Blue),
     ] {
-        for snow_first in [true, false] {
+        for (snow_first, pin_snow, any_color) in [
+            (true, false, false),
+            (false, false, false),
+            (true, true, false),
+            (false, true, false),
+            (true, true, true),
+            (false, true, true),
+        ] {
             let mut s = board();
+            if any_color {
+                s.add_artifact_from_oracle(P0, "Mycosynth Lattice",
+                    "All permanents are artifacts in addition to their other types.\nAll cards that aren't on the battlefield, spells, and permanents are colorless.\nPlayers may spend mana as though it were mana of any color.")
+                    .with_mana_cost(parse_mtgjson_mana_cost("{6}"));
+            }
             let snow = if snow_color == ManaType::White {
                 s.add_land_from_oracle(P0, snow_name, snow_text).as_snow()
                     .with_subtypes(vec!["Plains"]).id()
+            } else if snow_color == ManaType::Blue {
+                s.add_land_from_oracle(P0, snow_name, snow_text).as_snow()
+                    .with_subtypes(vec!["Island"]).id()
             } else {
                 s.add_land_from_oracle(P0, snow_name, snow_text).as_snow().id()
             };
@@ -292,10 +309,12 @@ fn fully_floated_snow_hybrid_cast_keeps_the_only_snow_unit() {
                 "({S} can be paid with one mana from a snow source.)\nWhen this artifact enters, draw a card.\n{1}, {T}: Add one mana of any color.")
                 .as_snow().with_mana_cost(parse_mtgjson_mana_cost(&cost)).id();
             let mut r = s.build();
-            if snow_color == ManaType::White {
+            if snow_color != ManaType::Colorless {
                 finish_snow_forest(&mut r, snow);
             }
             evaluate_layers(r.state_mut());
+            assert_eq!(engine::game::static_abilities::player_mana_spend_permission_for_spell_object(r.state(), P0, astrolabe),
+                any_color.then_some(ManaSpendPermission::AnyColor));
             for (source, color) in [(snow, snow_color), (island, ManaType::Blue)] {
                 let (_, _, grouped) = legal_actions_full(r.state());
                 let action = grouped[&source].iter().find(|action| matches!(action,
@@ -311,7 +330,27 @@ fn fully_floated_snow_hybrid_cast_keeps_the_only_snow_unit() {
                 && unit.color == snow_color && unit.supertype == Some(ManaSupertype::Snow)).count(), 1);
             assert_eq!(pool.units().filter(|unit| unit.source_id == island
                 && unit.color == ManaType::Blue && unit.supertype.is_none()).count(), 1);
-            r.cast(astrolabe).resolve().assert_zone(&[astrolabe], Zone::Battlefield);
+            if pin_snow {
+                let pip_id = pool.units().find(|unit| unit.source_id == snow).unwrap().pip_id;
+                r.act(GameAction::CastSpell {
+                    object_id: astrolabe,
+                    card_id: r.state().objects[&astrolabe].card_id,
+                    targets: Vec::new(),
+                    payment_mode: CastPaymentMode::Manual,
+                }).unwrap();
+                assert!(matches!(r.state().waiting_for, WaitingFor::ManaPayment { player: P0, .. }));
+                r.act(GameAction::SpendPoolMana { pip_id }).unwrap();
+                assert_eq!(r.state().pending_cast.as_ref().unwrap().pinned_pool_units, vec![pip_id]);
+                r.act(GameAction::PassPriority).unwrap_or_else(|error| panic!(
+                    "{symbol}, snow_first={snow_first}, lattice={any_color}: pinned Snow payment failed: {error:?}"));
+                assert_eq!(r.state().objects[&astrolabe].zone, Zone::Stack);
+                assert_eq!(r.state().objects[&astrolabe].mana_spent_to_cast_amount, 2);
+                assert!(!r.state().players[0].mana_pool.units().any(|unit| unit.pip_id == pip_id));
+                r.advance_until_stack_empty();
+                assert_eq!(r.state().objects[&astrolabe].zone, Zone::Battlefield);
+            } else {
+                r.cast(astrolabe).resolve().assert_zone(&[astrolabe], Zone::Battlefield);
+            }
             assert_complete(&r, 0);
         }
     }
@@ -3165,11 +3204,13 @@ fn snow_pool_z_hybrid_keeps_executable_baseline_and_pins() {
             );
             assert!(life.is_empty());
         } else {
-            assert!(
-                result.is_err(),
-                "pins remain binding even when an unpinned allocation succeeds"
+            let (spent, life) = result.expect("a pin is a priority hint, not a shard assignment");
+            assert_eq!(
+                spent.iter().map(|u| u.pip_id.0).collect::<Vec<_>>(),
+                [2, 3, 1]
             );
-            assert_eq!(pool, original);
+            assert!(life.is_empty());
+            assert!(pool.is_empty());
         }
     }
 }
