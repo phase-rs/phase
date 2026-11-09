@@ -65,15 +65,13 @@ async fn write_frame(
 }
 
 #[tokio::test]
-#[ignore = "manual native spectator Full producer; requires LARGE_SPECTATOR_FULL_DIR"]
+#[ignore = "manual native spectator Full producer; writes fixed target/state-codec-fixtures"]
 async fn produce_native_large_spectator_full() {
-    let destination = PathBuf::from(
-        std::env::var_os("LARGE_SPECTATOR_FULL_DIR").expect("absolute output directory required"),
-    );
-    assert!(destination.is_absolute());
-    std::fs::create_dir(&destination).expect("output directory must not already exist");
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../engine/tests/fixtures/integration_cards.json.gz");
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let destination = manifest_dir.join("../../target/state-codec-fixtures/large-spectator-full");
+    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    std::fs::create_dir(&destination).expect("generated fixture directory must not already exist");
+    let fixture = manifest_dir.join("../engine/tests/fixtures/integration_cards.json.gz");
     let db = CardDatabase::from_export_reader(flate2::read::GzDecoder::new(BufReader::new(
         std::fs::File::open(fixture).unwrap(),
     )))

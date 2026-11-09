@@ -442,15 +442,19 @@ spectator projection and frame guards, and the connection codec/gzip encoder.
 Its consumer proof uses real WASM reconstruction and the production spectator
 adapter for both initial and established delivery. This is a supported-size
 scenario, not an action replay or a claim that a 9,000-card deck is reachable.
-Run producer and consumer from the same committed source; keep generated output
-outside the checkout in a fresh, nonexistent absolute directory:
+Run producer and consumer from the same committed source. Output is fixed at the
+gitignored `target/state-codec-fixtures/large-spectator-full` directory; no runtime
+environment variable selects a local input/output path. The producer refuses an
+existing fixture directory, so remove only that generated directory before
+regenerating. A missing directory visibly skips this manual consumer suite;
+an existing directory must contain complete, valid fixtures.
 
 ```bash
-LARGE_SPECTATOR_FULL_DIR=/tmp/phase-large-full cargo test -p phase-server \
+cargo test -p phase-server \
   --bin phase-server socket_io::large_full_tests::produce_native_large_spectator_full \
   -- --ignored --exact --nocapture
 ./scripts/build-wasm.sh wasm-dev
-LARGE_SPECTATOR_FULL_DIR=/tmp/phase-large-full pnpm --dir client exec vitest run \
+pnpm --dir client exec vitest run \
   --config vitest.integration.config.ts --coverage.enabled=false \
   src/adapter/__tests__/largeSpectatorFull.integration.test.ts
 ```

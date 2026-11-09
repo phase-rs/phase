@@ -1,12 +1,12 @@
 /**
  * Manual native -> gzip -> transport -> real WASM -> spectator adapter proof.
  * No decoder/adapter mocks or generated multi-megabyte fixtures are committed.
- * From the repo root, produce a fresh nonexistent absolute output directory:
- * LARGE_SPECTATOR_FULL_DIR=/tmp/phase-large-full cargo test -p phase-server \
+ * From the repo root, produce the fixed gitignored fixture directory:
+ * cargo test -p phase-server \
  *   --bin phase-server socket_io::large_full_tests::produce_native_large_spectator_full \
  *   -- --ignored --exact --nocapture
- * Build same-HEAD WASM: bash scripts/build-wasm.sh wasm-dev
- * cd client && LARGE_SPECTATOR_FULL_DIR=/tmp/phase-large-full pnpm exec vitest run \
+ * Build same-source WASM: bash scripts/build-wasm.sh wasm-dev
+ * cd client && pnpm exec vitest run \
  *   --config vitest.integration.config.ts --coverage.enabled=false \
  *   src/adapter/__tests__/largeSpectatorFull.integration.test.ts
  * The generated fixture is a native scenario-constructed board of real fixture
@@ -15,8 +15,9 @@
  * genuine phase-server code. The transport is deliberately an in-process socket.
  */
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { resolve } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type * as WasmEngine from "@wasm/engine";
@@ -24,8 +25,8 @@ import { StateCodecRuntime } from "../state-codec-runtime";
 import { PROTOCOL_VERSION, WebSocketAdapter } from "../ws-adapter";
 import { decodeJsonEnvelope } from "../../network/wireEnvelope";
 
-const DIRECTORY = process.env.LARGE_SPECTATOR_FULL_DIR;
-const ENABLED = DIRECTORY !== undefined;
+const DIRECTORY = resolve(__dirname, "../../../../target/state-codec-fixtures/large-spectator-full");
+const ENABLED = existsSync(DIRECTORY);
 const MAX_BYTES = 256 * 1024 * 1024;
 const WASM_BINARY = resolve(__dirname, "../../wasm/engine_wasm_bg.wasm");
 type FrameStats = { wire_bytes: number; frame_utf16_units: number; decoded_bytes: number; revision: number; decoded_sha256: string };
@@ -62,7 +63,9 @@ class ProbeSocket extends EventTarget {
   deliver(data: unknown): void { this.onmessage?.({ data }); }
 }
 
-if (!ENABLED) process.stdout.write("large spectator Full probe skipped: LARGE_SPECTATOR_FULL_DIR is unset\n");
+if (!ENABLED) {
+  process.stdout.write("large spectator Full proof skipped: run the native producer for target/state-codec-fixtures/large-spectator-full\n");
+}
 
 describe.skipIf(!ENABLED)("native large spectator GameStarted Full", () => {
   let wasm: typeof WasmEngine;
@@ -71,7 +74,6 @@ describe.skipIf(!ENABLED)("native large spectator GameStarted Full", () => {
   const adapters: WebSocketAdapter[] = [];
 
   beforeAll(async () => {
-    if (!DIRECTORY || !isAbsolute(DIRECTORY)) throw new Error("LARGE_SPECTATOR_FULL_DIR must be absolute");
     manifest = JSON.parse(await readFile(resolve(DIRECTORY, "manifest.json"), "utf8"));
     expect(manifest.schema_version).toBe(1);
     expect(manifest.card).toBe("Llanowar Elves");
@@ -90,7 +92,7 @@ describe.skipIf(!ENABLED)("native large spectator GameStarted Full", () => {
       expect(full.type).toBe("Full");
       expect(full.data.state.type).toBe(name === "after" ? "StateUpdate" : "GameStarted");
     }
-    // Generated WASM does not exist in every checkout; keep the unset manual
+    // Generated WASM does not exist in every checkout; keep the missing-fixture
     // gate usable without resolving this platform/build-specific artifact.
     wasm = await import("@wasm/engine");
     await wasm.default({ module_or_path: await WebAssembly.compile(await readFile(WASM_BINARY)) });
