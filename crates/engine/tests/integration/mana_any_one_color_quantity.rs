@@ -502,6 +502,110 @@ fn assert_complete(r: &GameRunner, pool: usize) {
 }
 
 #[test]
+fn toluz_keeps_a_payable_hybrid_suffix_with_ineligible_mana() {
+    // CR 106.6 + CR 107.4e + CR 601.2h: W/U, U, U/B can use W/U/U.
+    // The Lute's spell-only mana cannot pay for this creature. Eligible U=2
+    // must not make the first hybrid strand the later strict U and U/B.
+    const TOLUZ: &str = "When Toluz enters, it connives. (Draw a card, then discard a card. If you discarded a nonland card, put a +1/+1 counter on this creature.)\nWhenever you discard one or more cards, exile them from your graveyard.\nWhen Toluz dies, put the cards exiled with it into their owner's hand.";
+    for extra in [Some(ManaType::White), Some(ManaType::Blue), None] {
+        let mut s = board();
+        s.add_artifact_from_oracle(P0, "Resonating Lute", LUTE)
+            .with_mana_cost(parse_mtgjson_mana_cost("{2}{U}{R}"));
+        let plains = s.add_basic_land(P0, ManaColor::White);
+        let island_a = s.add_basic_land(P0, ManaColor::Blue);
+        let island_b = s.add_basic_land(P0, ManaColor::Blue);
+        let restricted_land =
+            extra.map(|_| s.add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.").id());
+        let toluz = s
+            .add_creature_to_hand_from_oracle(P0, "Toluz, Clever Conductor", 3, 1, TOLUZ)
+            .as_legendary()
+            .with_subtypes(vec!["Human", "Rogue"])
+            .with_mana_cost(parse_mtgjson_mana_cost("{W/U}{U}{U/B}"))
+            .id();
+        let mut r = s.build();
+        evaluate_layers(r.state_mut());
+        for (source, color) in [
+            (plains, ManaType::White),
+            (island_a, ManaType::Blue),
+            (island_b, ManaType::Blue),
+        ] {
+            let (_, _, grouped) = legal_actions_full(r.state());
+            let action = grouped[&source]
+                .iter()
+                .find(|action| {
+                    matches!(action,
+                    GameAction::TapLandForMana { selection }
+                        if selection.mana_type == color && selection.restrictions.is_empty())
+                })
+                .expect("the printed basic-land ability offers unrestricted mana")
+                .clone();
+            r.act(action).unwrap();
+        }
+        if let (Some(source), Some(color)) = (restricted_land, extra) {
+            let (_, _, grouped) = legal_actions_full(r.state());
+            let action = grouped[&source]
+                .iter()
+                .find(|action| {
+                    matches!(action,
+                    GameAction::TapLandForMana { selection }
+                        if selection.mana_type == color
+                            && !selection.restrictions.is_empty()
+                            && selection.atomic_combination.as_ref()
+                                .is_some_and(|units| units.len() == 2))
+                })
+                .expect("the real Lute ability offers two restricted units")
+                .clone();
+            r.act(action).unwrap();
+        }
+        assert!([plains, island_a, island_b]
+            .iter()
+            .all(|id| r.state().objects[id].tapped));
+        assert!(restricted_land.is_none_or(|id| r.state().objects[&id].tapped));
+        assert!(activatable_mana_source_selections(r.state(), P0).is_empty());
+        let before: Vec<_> = r.state().players[0].mana_pool.units().collect();
+        assert_eq!(before.len(), 3 + 2 * usize::from(extra.is_some()));
+        assert_eq!(
+            before
+                .iter()
+                .filter(|unit| unit.restrictions.is_empty() && unit.color == ManaType::White)
+                .count(),
+            1
+        );
+        assert_eq!(
+            before
+                .iter()
+                .filter(|unit| unit.restrictions.is_empty() && unit.color == ManaType::Blue)
+                .count(),
+            2
+        );
+
+        let payment = r.cast(toluz).commit();
+        // Deliberately stop at the fully paid casting boundary; Toluz's
+        // enters/connive resolution is not the behavior under test.
+        assert_eq!(payment.state().objects[&toluz].zone, Zone::Stack);
+        assert_eq!(payment.state().stack.len(), 1);
+        assert_eq!(payment.state().objects[&toluz].mana_spent_to_cast_amount, 3);
+        assert_eq!(
+            payment.state().objects[&toluz]
+                .mana_spent_source_snapshots
+                .len(),
+            3
+        );
+        let remaining: Vec<_> = payment.state().players[0].mana_pool.units().collect();
+        assert_eq!(remaining.len(), 2 * usize::from(extra.is_some()));
+        assert!(remaining
+            .iter()
+            .all(|unit| Some(unit.source_id) == restricted_land
+                && Some(unit.color) == extra
+                && !unit.restrictions.is_empty()));
+        assert!(matches!(
+            payment.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
+#[test]
 fn live_life_total_bundle_refills_only_the_actual_absorb_shortfall() {
     for life in [2, 3] {
         let mut s = board();
