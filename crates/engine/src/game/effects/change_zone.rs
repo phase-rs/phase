@@ -622,34 +622,114 @@ fn any_typed_leg<F: Fn(&TypedFilter) -> bool>(filter: &TargetFilter, pred: &F) -
 }
 
 /// A scoped library leg names whose library is used, not who performs the
-/// instruction. Its own inline constraints intersect the resolver's selected
-/// scan zones; a sibling leg's zone cannot supply this leg's ownership meaning.
+/// instruction. The answer is a function of the filter's composed constraints,
+/// not of where the parser put them: two `InZone`/`InAnyZone` properties in one
+/// leaf and the same constraints split across `And` operands both describe one
+/// conjunction, so both are intersected here. Inspecting operands independently
+/// answered differently for those two encodings of the same library relation.
+///
+/// `Or` alternates target sets rather than conjoining them; there any
+/// alternative that names the library owner makes the instruction a
+/// library-owner instruction, and a mixed-zone alternative set stays classified
+/// by that same existential rule in both encodings.
 fn filter_names_library_owner(filter: &TargetFilter, origin_zones: &[Zone]) -> bool {
-    any_typed_leg(filter, &|leg| {
-        if !leg_names_player(leg, &ControllerRef::ScopedPlayer) {
-            return false;
+    match filter {
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|branch| filter_names_library_owner(branch, origin_zones)),
+        TargetFilter::And { .. } | TargetFilter::Typed(_) => {
+            let reach = composed_owner_reach(filter, &ControllerRef::ScopedPlayer);
+            reach.names && zone_reach_is_the_library(reach.zones.as_ref(), origin_zones)
         }
-        let inline_zones = leg.properties.iter().filter_map(|property| match property {
-            FilterProp::InZone { zone } => Some(std::slice::from_ref(zone)),
-            FilterProp::InAnyZone { zones } => Some(zones.as_slice()),
-            _ => None,
-        });
-        let candidates = if origin_zones.is_empty() {
-            inline_zones.clone().next().unwrap_or(&[])
-        } else {
-            origin_zones
-        };
-        let mut includes_library = false;
-        for zone in candidates {
-            if inline_zones.clone().all(|zones| zones.contains(zone)) {
-                if *zone != Zone::Library {
-                    return false;
-                }
-                includes_library = true;
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            filter_names_library_owner(filter, origin_zones)
+        }
+        _ => false,
+    }
+}
+
+/// One conjunction's scoped-owner reach. `zones` is the intersection of every
+/// `InZone`/`InAnyZone` constraint in the conjunction; `None` means the
+/// conjunction carries no zone constraint at all.
+struct ComposedOwnerReach {
+    names: bool,
+    zones: Option<std::collections::BTreeSet<Zone>>,
+}
+
+/// A typed leg's own zone constraints, intersected: `InAnyZone { Library,
+/// Graveyard }` plus `InZone { Library }` in one leaf requires both, i.e. the
+/// library alone.
+fn leg_zone_constraints(leg: &TypedFilter) -> Option<std::collections::BTreeSet<Zone>> {
+    leg.properties.iter().fold(
+        None,
+        |acc: Option<std::collections::BTreeSet<Zone>>, property| {
+            let zones: std::collections::BTreeSet<Zone> = match property {
+                FilterProp::InZone { zone } => std::iter::once(*zone).collect(),
+                FilterProp::InAnyZone { zones } => zones.iter().copied().collect(),
+                _ => return acc,
+            };
+            Some(match acc {
+                None => zones,
+                Some(existing) => existing.intersection(&zones).copied().collect(),
+            })
+        },
+    )
+}
+
+fn composed_owner_reach(filter: &TargetFilter, player: &ControllerRef) -> ComposedOwnerReach {
+    match filter {
+        TargetFilter::Typed(leg) => ComposedOwnerReach {
+            names: leg_names_player(leg, player),
+            zones: leg_zone_constraints(leg),
+        },
+        TargetFilter::And { filters } => {
+            let mut names = false;
+            let mut zones: Option<std::collections::BTreeSet<Zone>> = None;
+            for child in filters {
+                let child = composed_owner_reach(child, player);
+                names |= child.names;
+                zones = match (zones, child.zones) {
+                    (None, child) | (child, None) => child,
+                    (Some(left), Some(right)) => Some(left.intersection(&right).copied().collect()),
+                };
             }
+            ComposedOwnerReach { names, zones }
         }
-        includes_library
-    })
+        // `Or` and negation cannot contribute one conjunction; the caller
+        // handles `Or` existentially and recurses through `Not`.
+        _ => ComposedOwnerReach {
+            names: false,
+            zones: None,
+        },
+    }
+}
+
+/// Whether the composed constraint confines the owner-named subject to the
+/// library.
+///
+/// The resolver may scan several zones (`InAnyZone` union), so the answer is the
+/// intersection of the constraint with that scan: only the zones both admit can
+/// actually be selected. With no explicit origin the constraint must be exactly
+/// `Library`; a conjunction that carries no zone constraint reaches exactly the
+/// caller's origin, so it qualifies only when that origin is the library alone.
+fn zone_reach_is_the_library(
+    zones: Option<&std::collections::BTreeSet<Zone>>,
+    origin_zones: &[Zone],
+) -> bool {
+    let reach: std::collections::BTreeSet<Zone> = match zones {
+        Some(zones) => zones.clone(),
+        None if origin_zones.is_empty() => return false,
+        None => origin_zones.iter().copied().collect(),
+    };
+    let reach = if origin_zones.is_empty() {
+        reach
+    } else {
+        reach
+            .intersection(&origin_zones.iter().copied().collect())
+            .copied()
+            .collect()
+    };
+    !reach.is_empty() && reach.iter().all(|zone| *zone == Zone::Library)
 }
 
 /// CR 608.2c + CR 701.23a: a mass move announces no subject through
@@ -13670,6 +13750,201 @@ mod tests {
             .iter()
             .map(|id| (state.objects[id].zone, state.objects[id].exiled_by))
             .collect()
+    }
+
+    /// Runs `ChangeZoneAll { any -> Exile }` scoped to P1 over two P1 library
+    /// cards and one P1 graveyard card, returning every card's actual selection
+    /// and exiling actor. Used to prove that equivalent encodings of one composed
+    /// constraint select and attribute identically.
+    fn mass_zone_exile_outcome(target: TargetFilter) -> Vec<(ObjectId, Zone, Option<PlayerId>)> {
+        let mut state = GameState::new_two_player(42);
+        let cards: Vec<ObjectId> = [
+            ("Library Card A", Zone::Library),
+            ("Library Card B", Zone::Library),
+            ("Graveyard Card", Zone::Graveyard),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (name, zone))| {
+            create_object(
+                &mut state,
+                CardId(9730 + index as u64),
+                PlayerId(1),
+                name.to_string(),
+                zone,
+            )
+        })
+        .collect();
+        let mut ability = performer_test_mass_exile(None, target, PlayerId(0));
+        ability.scoped_player = Some(PlayerId(1));
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).expect("scoped mass exile resolves");
+        cards
+            .into_iter()
+            .map(|id| (id, state.objects[&id].zone, state.objects[&id].exiled_by))
+            .collect()
+    }
+
+    fn library_and_graveyard_any_zone() -> FilterProp {
+        FilterProp::InAnyZone {
+            zones: vec![Zone::Library, Zone::Graveyard],
+        }
+    }
+
+    /// CR 608.2c + CR 109.4: who exiles is a function of the composed
+    /// constraints, not of where the parser put them. A leaf carrying
+    /// `InAnyZone { Library, Graveyard }` plus `InZone { Library }`, and the same
+    /// two constraints split across `And` operands, describe one relation: they
+    /// must select only the library cards and credit the ability's controller.
+    ///
+    /// Revert sensitivity: independent operand inspection credits the scoped
+    /// player (P1) for the split form while crediting the caster (P0) for the
+    /// single-leaf form.
+    #[test]
+    fn library_owner_composed_constraints_match_across_and_encodings() {
+        let single_leaf = card_leg(
+            Some(ControllerRef::ScopedPlayer),
+            vec![
+                library_and_graveyard_any_zone(),
+                FilterProp::InZone {
+                    zone: Zone::Library,
+                },
+            ],
+        );
+        let split_operands = TargetFilter::And {
+            filters: vec![
+                card_leg(
+                    Some(ControllerRef::ScopedPlayer),
+                    vec![library_and_graveyard_any_zone()],
+                ),
+                card_leg(
+                    None,
+                    vec![FilterProp::InZone {
+                        zone: Zone::Library,
+                    }],
+                ),
+            ],
+        };
+        let scan = [Zone::Library, Zone::Graveyard];
+        assert_eq!(
+            filter_names_library_owner(&single_leaf, &scan),
+            filter_names_library_owner(&split_operands, &scan),
+            "one composed relation, one classification"
+        );
+        assert!(
+            filter_names_library_owner(&single_leaf, &scan),
+            "the composed relation confines the pick to the library"
+        );
+
+        let single = mass_zone_exile_outcome(single_leaf);
+        let split = mass_zone_exile_outcome(split_operands);
+        assert_eq!(
+            single, split,
+            "equivalent encodings select and attribute identically"
+        );
+        assert_eq!(
+            single
+                .iter()
+                .filter(|(_, zone, actor)| *zone == Zone::Exile && *actor == Some(PlayerId(0)))
+                .count(),
+            2,
+            "both library cards are the caster's exile; got {single:?}"
+        );
+        assert!(
+            single
+                .iter()
+                .filter(|(_, zone, actor)| *zone == Zone::Graveyard && actor.is_none())
+                .count()
+                == 1,
+            "the graveyard card is neither selected nor attributed; got {single:?}"
+        );
+    }
+
+    /// A conjunction whose composed reach is genuinely mixed stays the subject's
+    /// move: `InAnyZone { Library, Graveyard }` alone admits both zones, so the
+    /// scoped player is the performer rather than the caster.
+    #[test]
+    fn mixed_zone_conjunction_keeps_the_subject_actor() {
+        let mixed = card_leg(
+            Some(ControllerRef::ScopedPlayer),
+            vec![library_and_graveyard_any_zone()],
+        );
+        assert!(!filter_names_library_owner(
+            &mixed,
+            &[Zone::Library, Zone::Graveyard]
+        ));
+        let outcome = mass_zone_exile_outcome(mixed);
+        assert_eq!(
+            outcome
+                .iter()
+                .filter(|(_, zone, actor)| *zone == Zone::Exile && *actor == Some(PlayerId(1)))
+                .count(),
+            3,
+            "the mixed conjunction is the scoped player's move; got {outcome:?}"
+        );
+    }
+
+    /// A mixed-zone `Or` alternates target sets; an alternative that names the
+    /// library owner keeps the library-owner classification, and both encodings
+    /// of the same alternatives select and attribute identically.
+    #[test]
+    fn mixed_zone_or_control_matches_across_encodings() {
+        let leaf_form = TargetFilter::Or {
+            filters: vec![
+                card_leg(
+                    Some(ControllerRef::ScopedPlayer),
+                    vec![FilterProp::InZone {
+                        zone: Zone::Library,
+                    }],
+                ),
+                card_leg(
+                    Some(ControllerRef::ScopedPlayer),
+                    vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }],
+                ),
+            ],
+        };
+        let split_form = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::And {
+                    filters: vec![
+                        card_leg(
+                            Some(ControllerRef::ScopedPlayer),
+                            vec![library_and_graveyard_any_zone()],
+                        ),
+                        card_leg(
+                            None,
+                            vec![FilterProp::InZone {
+                                zone: Zone::Library,
+                            }],
+                        ),
+                    ],
+                },
+                card_leg(
+                    Some(ControllerRef::ScopedPlayer),
+                    vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }],
+                ),
+            ],
+        };
+        let scan = [Zone::Library, Zone::Graveyard];
+        assert_eq!(
+            filter_names_library_owner(&leaf_form, &scan),
+            filter_names_library_owner(&split_form, &scan),
+            "the library-owner alternative classifies both encodings alike"
+        );
+        let leaf = mass_zone_exile_outcome(leaf_form);
+        let split = mass_zone_exile_outcome(split_form);
+        assert_eq!(leaf, split, "both encodings select and attribute alike");
+        assert_eq!(
+            leaf.iter()
+                .filter(|(_, zone, actor)| *zone == Zone::Exile && *actor == Some(PlayerId(0)))
+                .count(),
+            3,
+            "every alternative's card is the caster's exile; got {leaf:?}"
+        );
     }
 
     /// CR 608.2c + CR 109.4: a library-owner leg ("exile … from their library",

@@ -5,7 +5,7 @@ use engine::game::game_object::BackFaceData;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ControllerRef, Effect, ReplacementDefinition, ReplacementMode,
-    TargetFilter,
+    TargetFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
@@ -14,6 +14,7 @@ use engine::types::game_state::{
     GameState, LiminalEntryKind, ReplacementChoiceKind, WaitingFor, ZoneDeparture,
 };
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -692,4 +693,154 @@ fn transformed_entry_departed_chooser_releases_projection_before_priority_and_sa
         "Latent front"
     );
     assert!(!restored.liminal_entries.contains_key(&entrant));
+}
+
+/// Verbatim Oracle text for the returning Aura and the surviving artifact.
+const PACIFISM: &str = "Enchant creature\nEnchanted creature can't attack or block.";
+const DARKSTEEL_INGOT: &str = "Indestructible\n{T}: Add one mana of any color.";
+
+/// CR 303.4f + CR 800.4a + CR 608.2m: a returning Aura that parks on its host
+/// pick is the mass family's own pause even though it carries no replacement
+/// record. When the pick's controller concedes, the Aura's already-counted
+/// entry stays counted, the prompt is dropped, and the surviving member parked
+/// behind it still returns before priority.
+#[test]
+fn open_the_vaults_aura_host_chooser_concession_resumes_surviving_member() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let vaults = scenario
+        .add_spell_to_hand_from_oracle(P0, "Open the Vaults", false, OPEN_THE_VAULTS)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 4,
+            shards: vec![ManaCostShard::White, ManaCostShard::White],
+        })
+        .id();
+    // CR 303.4f: two legal creature hosts keep the returned Aura on the host
+    // pick instead of auto-attaching to a single one.
+    scenario.add_creature(P0, "Runeclaw Bear", 2, 2);
+    scenario.add_creature(P2, "Grizzly Bears", 2, 2);
+    let pacifism = scenario
+        .add_enchantment_to_graveyard(P1, "Pacifism")
+        .from_oracle_text(PACIFISM)
+        .with_subtypes(vec!["Aura"])
+        .id();
+    // P2 owns the artifact parked behind the Aura; it must survive P1 leaving.
+    let ingot = scenario
+        .add_artifact_to_graveyard(P2, "Darksteel Ingot")
+        .from_oracle_text(DARKSTEEL_INGOT)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::White,
+            ManaType::White,
+        ]
+        .into_iter()
+        .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+        .collect(),
+    );
+    let mut runner = scenario.build();
+    {
+        // CR 702.5a: the Aura's own Enchant filter is the host restriction
+        // authority. Pushed to the live and base lists so a layer flush
+        // re-derives it, and only when the Oracle line did not already parse it.
+        let needs_enchant = runner.state().objects.get(&pacifism).is_some_and(|obj| {
+            !obj.keywords
+                .iter()
+                .any(|k| matches!(k, Keyword::Enchant(_)))
+        });
+        if needs_enchant {
+            let enchant = Keyword::Enchant(TargetFilter::Typed(TypedFilter::creature()));
+            let obj = runner
+                .state_mut()
+                .objects
+                .get_mut(&pacifism)
+                .expect("the staged Aura exists");
+            obj.keywords.push(enchant.clone());
+            obj.base_keywords.push(enchant);
+        }
+    }
+
+    let outcome = runner.cast(vaults).resolve();
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::ReturnAsAuraTarget { player: P1, returned_id, .. }
+                if *returned_id == pacifism
+        ),
+        "the returning Aura parks on P1's host pick; got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert_eq!(runner.state().objects[&pacifism].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&ingot].zone, Zone::Graveyard);
+    let pending = runner
+        .state()
+        .active_change_zone_frame()
+        .and_then(|frame| frame.pending.as_ref())
+        .expect("the mass return stays parked behind the host pick");
+    assert_eq!(pending.remaining.len(), 1, "the artifact is still parked");
+    assert_eq!(
+        move_count(
+            &outcome.events(),
+            pacifism,
+            Zone::Graveyard,
+            Zone::Battlefield
+        ),
+        1,
+        "the Aura's counted entry is delivered exactly once"
+    );
+    assert_eq!(
+        move_count(&outcome.events(), ingot, Zone::Graveyard, Zone::Battlefield),
+        0,
+        "the parked artifact has not entered before the pick is answered"
+    );
+
+    let result = runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("the host pick's controller concedes");
+    let state = runner.state();
+    assert!(state.players[P1.0 as usize].is_eliminated);
+    assert_eq!(
+        state.objects[&pacifism].zone,
+        Zone::Exile,
+        "P1's Aura leaves the game with its owner (CR 800.4a)"
+    );
+    assert_eq!(
+        state.objects[&ingot].zone,
+        Zone::Battlefield,
+        "the surviving member parked behind the Aura still returns"
+    );
+    assert_eq!(state.objects[&ingot].controller, P2);
+    assert!(state.battlefield.contains(&ingot));
+    assert!(state.pending_replacement.is_none());
+    assert!(state.resolution_stack.is_empty());
+    assert!(state.stack.is_empty());
+    assert_eq!(state.objects[&vaults].zone, Zone::Graveyard);
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "ordinary priority follows the resumed family; got {:?}",
+        state.waiting_for
+    );
+    assert_eq!(result.waiting_for, state.waiting_for);
+    assert_eq!(
+        move_count(&result.events, ingot, Zone::Graveyard, Zone::Battlefield),
+        1,
+        "the artifact enters exactly once during the departure resume"
+    );
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::StackResolved { object_id } if *object_id == vaults
+            ))
+            .count(),
+        1,
+        "the begun spell completes exactly once after the concession"
+    );
 }

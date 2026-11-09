@@ -300,50 +300,84 @@ pub(crate) fn eliminate_players(
     // CR 800.4a + CR 608.2c: retain the exact parked family and delivery before
     // teardown. A departed member is removed; a surviving member whose entry
     // controller leaves instead completes as Remained through the zone boundary.
+    // CR 303.4f: a returning Aura's host pick is the family's own pause even
+    // though it carries no replacement record. Its delivery already entered and
+    // was counted before the prompt, so the remaining members still owe their
+    // ordinary resume once the departed chooser's prompt is dropped — otherwise
+    // a mass return would silently lose every member parked behind the Aura.
     let interrupted_change_zone = state
         .active_change_zone_frame()
         .and_then(|frame| frame.pending.as_ref())
-        .filter(|pending| {
-            pending.paused_current.as_ref().is_some_and(|paused| {
-                state
-                    .pending_replacement
-                    .as_ref()
-                    .is_some_and(|replacement| replacement.parks_delivery(&paused.expected_event))
+        .and_then(|pending| {
+            let paused = pending.paused_current.as_ref()?;
+            let parked_replacement = state
+                .pending_replacement
+                .as_ref()
+                .is_some_and(|replacement| replacement.parks_delivery(&paused.expected_event));
+            let departed_aura_chooser = matches!(
+                &state.waiting_for,
+                WaitingFor::ReturnAsAuraTarget {
+                    player,
+                    returned_id,
+                    ..
+                } if leaving_set.contains(player)
+                    && *returned_id == paused.member.object_id
+                    && paused.count
+                        == crate::types::game_state::PausedZoneChangeDeliveryCount::AlreadyCounted
+                    && paused.terminal_completion
+                        == Some(crate::types::game_state::ZoneMoveCompletion::Moved)
+            );
+            (parked_replacement || departed_aura_chooser).then(|| {
+                (
+                    pending.logical_zone_change_group.logical_group_id,
+                    pending.controller,
+                    paused.member,
+                    paused.expected_event.clone(),
+                    departed_aura_chooser,
+                )
             })
-        })
-        .map(|pending| {
-            let paused = pending
-                .paused_current
-                .as_ref()
-                .expect("the interrupted family has a paused delivery");
-            (
-                pending.logical_zone_change_group.logical_group_id,
-                pending.controller,
-                paused.member,
-                paused.expected_event.clone(),
-            )
         });
-    let canceled_change_zone_is_resumable =
-        |state: &GameState| {
-            interrupted_change_zone
-                .as_ref()
-                .is_some_and(|(group, controller, member, proposal)| {
-                    state
-                        .active_change_zone_frame()
-                        .and_then(|frame| frame.pending.as_ref())
-                        .is_some_and(|pending| {
-                            pending.logical_zone_change_group.logical_group_id == *group
-                                && pending.controller == *controller
-                                && pending.paused_current.as_ref().is_none_or(|paused| {
+    let canceled_change_zone_is_resumable = |state: &GameState| {
+        interrupted_change_zone.as_ref().is_some_and(
+                |(group, controller, member, proposal, aura_host_pause)| {
+                    let settles_without_replacement = if *aura_host_pause {
+                        state
+                            .active_change_zone_frame()
+                            .and_then(|frame| frame.pending.as_ref())
+                            .and_then(|pending| pending.paused_current.as_ref())
+                            .is_some_and(|paused| {
+                                paused.captures(*member, proposal)
+                                    && paused.count
+                                        == crate::types::game_state::PausedZoneChangeDeliveryCount::AlreadyCounted
+                                    && paused.terminal_completion
+                                        == Some(crate::types::game_state::ZoneMoveCompletion::Moved)
+                            })
+                    } else {
+                        state
+                            .active_change_zone_frame()
+                            .and_then(|frame| frame.pending.as_ref())
+                            .is_some_and(|pending| {
+                                pending.paused_current.as_ref().is_none_or(|paused| {
                                     paused.captures(*member, proposal)
-                                && paused.terminal_completion
-                                    == Some(crate::types::game_state::ZoneMoveCompletion::Remained)
+                                        && paused.terminal_completion
+                                            == Some(
+                                                crate::types::game_state::ZoneMoveCompletion::Remained,
+                                            )
                                 })
-                        })
-                })
-                && state.pending_replacement.is_none()
+                            })
+                    };
+                    settles_without_replacement
+                        && state
+                            .active_change_zone_frame()
+                            .and_then(|frame| frame.pending.as_ref())
+                            .is_some_and(|pending| {
+                                pending.logical_zone_change_group.logical_group_id == *group
+                                    && pending.controller == *controller
+                            })
+                },
+            ) && state.pending_replacement.is_none()
                 && matches!(state.waiting_for, WaitingFor::Priority { .. })
-        };
+    };
 
     let departing_entry_payment = state
         .waiting_for
