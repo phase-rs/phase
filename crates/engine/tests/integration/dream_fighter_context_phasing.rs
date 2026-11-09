@@ -253,3 +253,100 @@ fn dream_fighter_does_not_phase_out_a_blinked_combat_partner() {
         }
     }
 }
+
+fn restore_combat_state(state: GameState, trusted: bool) -> Result<GameState, String> {
+    let saved = if trusted {
+        PersistedGameState::capture(state)
+    } else {
+        PersistedGameState::Raw(Box::new(state))
+    };
+    let bytes = serde_json::to_vec(&saved).map_err(|error| error.to_string())?;
+    serde_json::from_slice::<PersistedGameState>(&bytes)
+        .map_err(|error| error.to_string())?
+        .into_game_state()
+        .map_err(|error| error.to_string())
+}
+
+#[test]
+fn dream_fighter_restore_refuses_an_unbound_live_combat_partner() {
+    for partner_zone in [Zone::Battlefield, Zone::Exile] {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let fighter = scenario
+            .add_creature(P1, "Dream Fighter", 1, 1)
+            .from_oracle_text(DREAM_FIGHTER)
+            .id();
+        let partner = scenario.add_creature(P0, "Combat partner", 2, 2).id();
+        let mut runner = scenario.build();
+        priority_to_combat_prompt(&mut runner, false);
+        runner
+            .act(GameAction::DeclareAttackers {
+                attacks: vec![(partner, AttackTarget::Player(P1))],
+                bands: vec![],
+            })
+            .unwrap();
+        priority_to_combat_prompt(&mut runner, true);
+        runner
+            .act(GameAction::DeclareBlockers {
+                assignments: vec![(fighter, partner)],
+            })
+            .unwrap();
+        let mut captured = runner.state().clone();
+        if partner_zone != Zone::Battlefield {
+            // Infrastructure: an old save may already have lost this referent.
+            engine::game::zones::move_to_zone(
+                &mut captured,
+                partner,
+                partner_zone,
+                &mut Vec::new(),
+            );
+        }
+        let mut legacy = captured.clone();
+        legacy
+            .stack
+            .back_mut()
+            .unwrap()
+            .ability_mut()
+            .unwrap()
+            .set_target_incarnations_recursive(Vec::new());
+        for trusted in [false, true] {
+            let restored = restore_combat_state(captured.clone(), trusted)
+                .expect("captured current or stale pins remain valid authority");
+            let mut control = GameRunner::from_state(restored);
+            control.advance_until_stack_empty();
+            assert!(control.state().objects[&fighter].is_phased_out());
+            assert!(control.state().stack.is_empty());
+            assert!(control.state().resolution_stack.is_empty());
+            assert!(matches!(
+                control.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            if partner_zone == Zone::Battlefield {
+                assert!(control.state().objects[&partner].is_phased_out());
+            } else {
+                assert_eq!(control.state().objects[&partner].zone, Zone::Exile);
+            }
+
+            let restored_legacy = restore_combat_state(legacy.clone(), trusted);
+            if partner_zone == Zone::Battlefield {
+                assert!(
+                    restored_legacy.is_err(),
+                    "a live raw id cannot establish the original combat partner"
+                );
+            } else {
+                let mut restored = GameRunner::from_state(
+                    restored_legacy.expect("an already-departed partner cannot alias a live one"),
+                );
+                restored.advance_until_stack_empty();
+                assert!(restored.state().objects[&fighter].is_phased_out());
+                assert_eq!(restored.state().objects[&partner].zone, Zone::Exile);
+                assert!(restored.state().stack.is_empty());
+                assert!(restored.state().resolution_stack.is_empty());
+                assert!(matches!(
+                    restored.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+            }
+        }
+    }
+}
