@@ -9,7 +9,7 @@ use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 use server_core::game_state_snapshot_wire_guard::{
-    MAX_SERVER_FRAME_BYTES, MAX_SNAPSHOT_OBJECTS, guard_frame_bytes,
+    guard_frame_bytes, MAX_SERVER_FRAME_BYTES, MAX_SNAPSHOT_OBJECTS,
 };
 use server_core::session::{FullRuntime, SessionManager};
 use state_codec::{Frame, FrameKind};
@@ -78,12 +78,11 @@ async fn produce_native_large_spectator_full() {
         std::fs::File::open(fixture).unwrap(),
     )))
     .unwrap();
-    assert!(
-        !db.get_face_by_name("Llanowar Elves")
-            .unwrap()
-            .abilities
-            .is_empty()
-    );
+    assert!(!db
+        .get_face_by_name("Llanowar Elves")
+        .unwrap()
+        .abilities
+        .is_empty());
     let executor = GameExecutor::new(NonZeroUsize::MIN);
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -129,12 +128,10 @@ async fn produce_native_large_spectator_full() {
     assert!(legal_actions.is_empty());
     assert!(player_token.is_none());
     assert_eq!(state.objects.len(), OBJECTS);
-    assert!(
-        state
-            .objects
-            .values()
-            .all(|object| !object.abilities.is_empty())
-    );
+    assert!(state
+        .objects
+        .values()
+        .all(|object| !object.abilities.is_empty()));
     let large_stats = write_frame(&executor, &destination, "large", large).await;
     assert!(large_stats["frame_utf16_units"].as_u64().unwrap() > 8_388_608);
 
