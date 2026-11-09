@@ -18048,17 +18048,14 @@ fn evaluate_trigger_condition_with_source(
             PlayerFilter::Opponent => {
                 super::players::is_opponent(state, controller, state.active_player)
             }
-            // CR 603.4 + CR 102.1 + CR 805.4: "that player's turn" — the player
-            // named by the trigger event is on the active team's side.
+            // CR 603.4 + CR 102.1: "that player's turn" — the player named by
+            // the trigger event (drawer / tapper / damaged player / etc.) is
+            // currently the active player. Shared-team normalization for this
+            // arm is deliberately not claimed here; this PR verifies only the
+            // controller arm through production play.
             PlayerFilter::TriggeringPlayer => trigger_event
                 .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
-                .is_some_and(|p| {
-                    super::topology::normalize_shared_turn_recipient(state, p)
-                        == super::topology::normalize_shared_turn_recipient(
-                            state,
-                            state.active_player,
-                        )
-                }),
+                .is_some_and(|p| state.active_player == p),
             // Set-valued / action-result / no-turn-binding variants: no natural
             // "whose turn" semantic. Fail-closed.
             PlayerFilter::DefendingPlayer
@@ -44004,41 +44001,6 @@ pub mod tests {
         state.active_player = PlayerId(2);
         assert!(!check_trigger_condition(
             &state, &condition, controller, None, None
-        ));
-    }
-
-    /// CR 603.4 + CR 102.1 + CR 805.4: the triggering player's shared team turn
-    /// is "that player's turn" even from the nonrepresentative teammate seat.
-    #[test]
-    fn during_players_turn_triggering_player_uses_shared_team_turn() {
-        let mut state = GameState::new(
-            crate::types::format::FormatConfig::two_headed_giant(),
-            4,
-            42,
-        );
-        let condition = TriggerCondition::DuringPlayersTurn {
-            player: PlayerFilter::TriggeringPlayer,
-        };
-        let event = GameEvent::CardDrawn {
-            player_id: PlayerId(1),
-            object_id: ObjectId(52),
-            nth_in_turn: 1,
-            nth_in_step: 1,
-        };
-
-        state.active_player = PlayerId(0);
-        assert!(
-            check_trigger_condition(&state, &condition, PlayerId(0), None, Some(&event)),
-            "the drawer's teammate seat is on the shared active team"
-        );
-
-        state.active_player = PlayerId(2);
-        assert!(!check_trigger_condition(
-            &state,
-            &condition,
-            PlayerId(0),
-            None,
-            Some(&event)
         ));
     }
 
