@@ -23258,6 +23258,13 @@ pub struct LoopDetectSample {
     pub trace_at: Option<usize>,
 }
 
+#[cfg(test)]
+thread_local! {
+    // Counts journal rows in strict collection/rewrite AND resource reduction.
+    pub(crate) static LOOP_DAMAGE_JOURNAL_VISITS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// CR 608.1 + CR 732.2a: a loop window kept across beats whose stack fell below its start depth,
 /// until a beat returns to that depth; only the top resolves, so a window whose depth only falls
 /// is a finite drain and is never admitted.
@@ -36918,6 +36925,8 @@ impl GameState {
         // Full journal identity participates in the same pool as its event.
         // Do not prune or reorder damage-time look-back payload (CR 608.2i).
         for record in &self.damage_dealt_this_turn {
+            #[cfg(test)]
+            LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(visits.get() + 1));
             if let Some(incarnation) = record.source_incarnation {
                 present
                     .entry(record.source_id)
@@ -37262,6 +37271,8 @@ impl GameState {
             }
         });
         for record in self.damage_dealt_this_turn.iter_mut() {
+            #[cfg(test)]
+            LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(visits.get() + 1));
             if let Some(incarnation) = record.source_incarnation.as_mut() {
                 *incarnation = canonical(record.source_id, *incarnation);
             }
@@ -53825,6 +53836,226 @@ mod tests {
         };
         source_incarnations.clear();
         assert!(empty.normalize_for_loop().lki_by_incarnation.is_empty());
+    }
+
+    // Controlled selected-snapshot fixtures: only the departed damage source's
+    // exact history carries the remembered pin, never its live row or latest LKI.
+    fn relational_remembered_damage_frame(
+        shift: u64,
+        remembered_live: u64,
+        remembered_pin: Option<u64>,
+    ) -> (GameState, ObjectId, ObjectId, LKISnapshot) {
+        let (mut state, source) = records_naming(4 + shift, &[]);
+        let remembered = create_object(
+            &mut state,
+            CardId(63),
+            PlayerId(1),
+            "Remembered Card".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&remembered).unwrap().incarnation = remembered_live;
+        let mut selected = state.objects[&source].snapshot_public_characteristics();
+        selected.controller = PlayerId(1);
+        selected.power = Some(5);
+        selected.toughness = Some(6);
+        selected.colors = vec![ManaColor::Red];
+        selected.chosen_attributes = vec![ChosenAttribute::Number(17)];
+        if let Some(pin) = remembered_pin {
+            selected.chosen_attributes.push(ChosenAttribute::Card(
+                ObjectIncarnationRef::of(remembered, pin),
+            ));
+        }
+        let latest = state.objects[&source].snapshot_public_characteristics();
+        let history = state.lki_by_incarnation.entry(source).or_default();
+        history.insert(2 + shift, selected.clone());
+        history.insert(3 + shift, latest.clone());
+        state.lki_cache.insert(source, latest);
+        push_trigger(
+            &mut state,
+            source,
+            draw_one(source),
+            Some(GameEvent::DamageDealt {
+                source_id: source,
+                target: TargetRef::Player(PlayerId(1)),
+                amount: 2,
+                is_combat: false,
+                excess: 0,
+                source_incarnation: Some(2 + shift),
+            }),
+        );
+        (state, source, remembered, selected)
+    }
+
+    fn assert_relational_remembered_damage_retained(
+        frame: &(GameState, ObjectId, ObjectId, LKISnapshot),
+        reads_remembered: bool,
+    ) {
+        let (state, source, remembered, expected) = frame;
+        let normalized = state.normalize_for_loop();
+        let StackEntryKind::TriggeredAbility {
+            trigger_event: Some(event),
+            ..
+        } = &normalized.stack[0].kind
+        else {
+            panic!("the selected damage event must survive");
+        };
+        let GameEvent::DamageDealt {
+            source_id,
+            source_incarnation: Some(stamp),
+            ..
+        } = event
+        else {
+            panic!("the damage source must retain its exact stamp");
+        };
+        assert_eq!(source_id, source);
+        assert_ne!(*stamp, normalized.objects[source].incarnation);
+        let history = &normalized.lki_by_incarnation[source];
+        assert_eq!(history.len(), 1, "only the selected history survives");
+        let selected = &history[stamp];
+        assert_eq!(
+            crate::game::targeting::event_referent_controller(&normalized, event),
+            Some(PlayerId(1)),
+            "the rewritten event reads the selected departed controller"
+        );
+        let mut payload = selected.clone();
+        for (actual, original) in payload
+            .chosen_attributes
+            .iter_mut()
+            .zip(&expected.chosen_attributes)
+        {
+            if let (ChosenAttribute::Card(actual), ChosenAttribute::Card(original)) =
+                (actual, original)
+            {
+                assert_eq!(actual.object_id, original.object_id);
+                if original.incarnation == LEGACY_INCARNATION {
+                    assert_eq!(actual.incarnation, LEGACY_INCARNATION);
+                }
+                actual.incarnation = original.incarnation;
+            }
+        }
+        assert_eq!(&payload, expected, "all other selected payload survives");
+
+        // Feed the event-selected payload into the existing departed-source
+        // reader, without adding a second stored carrier to the loop position.
+        let mut context = normalized.objects[source]
+            .snapshot_for_zone_change(*source, Some(Zone::Battlefield), Zone::Graveyard)
+            .trigger_source_context()
+            .unwrap()
+            .clone();
+        context.identity.reference = ObjectIncarnationRef::of(*source, *stamp);
+        context.lki = selected.clone();
+        assert_eq!(
+            crate::game::filter::matches_target_filter(
+                &normalized,
+                *remembered,
+                &TargetFilter::ChosenCard,
+                &crate::game::filter::FilterContext::from_trigger_source(&context),
+            ),
+            reads_remembered,
+            "the selected remembered card keeps its exact-instance read"
+        );
+        assert!(loop_states_equal(
+            &normalized,
+            &normalized.normalize_for_loop()
+        ));
+    }
+
+    #[test]
+    fn loop_relational_damage_lki_remembered_card_shifted_epochs() {
+        for (live, pin, reads) in [(8, 6, false), (7, 7, true)] {
+            let early = relational_remembered_damage_frame(0, live, Some(pin));
+            let late = relational_remembered_damage_frame(88, live + 88, Some(pin + 88));
+            assert_ne!(early.0, late.0, "reach: allocator epochs differ");
+            assert!(
+                normalized_equal(&early.0, &late.0),
+                "retained remembered-card pins must share the object incarnation ranks"
+            );
+            assert_relational_remembered_damage_retained(&early, reads);
+            assert_relational_remembered_damage_retained(&late, reads);
+        }
+    }
+
+    #[test]
+    fn loop_relational_damage_lki_remembered_card_live_stale_and_identity() {
+        let live = relational_remembered_damage_frame(0, 7, Some(7));
+        let stale = relational_remembered_damage_frame(0, 9, Some(7));
+        assert_eq!(live.3, stale.3, "reach: identical raw selected payloads");
+        assert!(
+            !normalized_equal(&live.0, &stale.0),
+            "one raw remembered pin is live in one frame and stale in the other"
+        );
+        assert_relational_remembered_damage_retained(&live, true);
+        assert_relational_remembered_damage_retained(&stale, false);
+
+        let mut other = live.clone();
+        let different = ObjectId(500);
+        let ChosenAttribute::Card(pin) = &mut other.3.chosen_attributes[1] else {
+            unreachable!("the fixture remembers one card");
+        };
+        pin.object_id = different;
+        other
+            .0
+            .lki_by_incarnation
+            .get_mut(&other.1)
+            .unwrap()
+            .insert(2, other.3.clone());
+        assert!(
+            !normalized_equal(&live.0, &other.0),
+            "different remembered target identities must remain different"
+        );
+        assert_relational_remembered_damage_retained(&other, false);
+    }
+
+    #[test]
+    fn loop_relational_damage_lki_remembered_card_legacy_and_absent() {
+        let legacy = relational_remembered_damage_frame(0, 7, Some(LEGACY_INCARNATION));
+        let late_legacy = relational_remembered_damage_frame(88, 95, Some(LEGACY_INCARNATION));
+        let absent = relational_remembered_damage_frame(0, 7, None);
+        let live = relational_remembered_damage_frame(0, 7, Some(7));
+        assert!(normalized_equal(&legacy.0, &late_legacy.0));
+        assert!(!normalized_equal(&legacy.0, &absent.0));
+        assert!(!normalized_equal(&legacy.0, &live.0));
+        assert!(!normalized_equal(&absent.0, &live.0));
+        for frame in [&legacy, &late_legacy, &absent] {
+            assert_relational_remembered_damage_retained(frame, false);
+        }
+        for missing_stamp in [false, true] {
+            let mut unselected = live.0.clone();
+            if missing_stamp {
+                let StackEntryKind::TriggeredAbility {
+                    trigger_event:
+                        Some(GameEvent::DamageDealt {
+                            source_incarnation, ..
+                        }),
+                    ..
+                } = &mut unselected.stack[0].kind
+                else {
+                    unreachable!("the fixture has one damage trigger");
+                };
+                *source_incarnation = None;
+            } else {
+                unselected
+                    .lki_by_incarnation
+                    .get_mut(&live.1)
+                    .unwrap()
+                    .remove(&2);
+            }
+            let normalized = unselected.normalize_for_loop();
+            assert!(normalized.lki_by_incarnation.is_empty());
+            let StackEntryKind::TriggeredAbility {
+                trigger_event: Some(event),
+                ..
+            } = &normalized.stack[0].kind
+            else {
+                unreachable!("the fixture has one damage trigger");
+            };
+            assert_eq!(
+                crate::game::targeting::event_referent_controller(&normalized, event),
+                Some(PlayerId(0)),
+                "absent exact authority keeps the existing live fallback"
+            );
+        }
+        assert_relational_remembered_damage_retained(&live, true);
     }
 
     /// CR 400.7 + CR 104.4b: zone-change allocation order is history.

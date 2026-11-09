@@ -8905,6 +8905,9 @@ fn project_damage_recipient_relations_for_loop(state: &mut GameState) {
     for record in &journal {
         #[cfg(test)]
         DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(visits.get() + 1));
+        #[cfg(test)]
+        crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS
+            .with(|visits| visits.set(visits.get() + 1));
         let Some(epoch) = record.target_incarnation else {
             continue;
         };
@@ -9903,10 +9906,31 @@ mod tests {
         duplicate.id = ObjectId(90_000);
         state.stack.push_back(duplicate);
         state.damage_dealt_this_turn = state.damage_dealt_this_turn.iter().rev().cloned().collect();
+        // Unread history must not be ranked at each priority sample. It is
+        // deliberately much larger than the retained carrier frontier.
+        for _ in 0..2_048 {
+            let mut row = row_template.clone();
+            row.target = TargetRef::Player(PlayerId(1));
+            row.amount = 99;
+            state.damage_dealt_this_turn.push_back(row);
+        }
         let journal_rows = state.damage_dealt_this_turn.len();
         DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(0));
-        let projected = project_out_resources(&state);
+        crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+        state.waiting_for = crate::types::WaitingFor::Priority {
+            player: state.active_player,
+        };
+        state.record_loop_detect_sample();
+        let projected = project_out_resources(
+            &state
+                .loop_detect_ring
+                .back()
+                .expect("the priority sample must reach the resource path")
+                .normalized,
+        );
         let visits = DAMAGE_RECIPIENT_JOURNAL_VISITS.with(std::cell::Cell::get);
+        let whole_path_visits =
+            crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get);
         assert_eq!(
             projected.damage_dealt_this_turn.len(),
             MANY + 3,
@@ -9971,6 +9995,58 @@ mod tests {
             visits <= journal_rows,
             "{visits} journal-row visits for {journal_rows} input rows; requested keys must not multiply the scan"
         );
+        assert!(
+            whole_path_visits <= journal_rows + 8 * projected.damage_dealt_this_turn.len(),
+            "{whole_path_visits} whole-priority journal visits for {journal_rows} rows and {} retained keys; strict ranking must follow reduction",
+            projected.damage_dealt_this_turn.len()
+        );
+    }
+
+    #[test]
+    fn loop_relational_priority_sampling_does_not_rank_unread_damage_history() {
+        use crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS;
+        let mut state = relational_recipient_frame(Some(7), false, false);
+        state.stack.clear();
+        state.waiting_for = crate::types::WaitingFor::Priority {
+            player: state.active_player,
+        };
+        let row = state.damage_dealt_this_turn[0].clone();
+        for _ in 0..8 {
+            for _ in 0..32 {
+                state.damage_dealt_this_turn.push_back(row.clone());
+            }
+            LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+            state.record_loop_detect_sample();
+            let sample = &state
+                .loop_detect_ring
+                .back()
+                .expect("record the actual priority boundary")
+                .normalized;
+            assert!(
+                loop_states_equal_modulo_resources(sample, &state),
+                "no retained damage reader changes the resource position"
+            );
+            let sampled_visits = LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get);
+            // Positive liveness control: full strict confirmation retains the
+            // journal payload and the counter covers its real rank/rewrite work.
+            LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+            let strict = state.normalize_for_loop();
+            let mut different = strict.clone();
+            different.damage_dealt_this_turn.back_mut().unwrap().amount += 1;
+            assert!(
+                !loop_states_equal(&strict, &different),
+                "strict confirmation must still distinguish damage payload"
+            );
+            assert!(
+                LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get)
+                    >= 2 * state.damage_dealt_this_turn.len(),
+                "the work observation includes strict collection and rewrite"
+            );
+            assert_eq!(
+                sampled_visits, 0,
+                "priority sampling/resource comparison must not walk unread damage history"
+            );
+        }
     }
 
     #[test]
@@ -10735,6 +10811,102 @@ mod tests {
             negative.contains(&FodderCoverRefusal::NonObjectRemainder),
             "the same two damage keys split across two recipients must refuse: {negative:?}"
         );
+
+        fn tapped_after_pending_triggers(raw: &GameState) -> BTreeSet<ObjectId> {
+            let mut future = raw.clone();
+            let mut events = Vec::new();
+            assert_eq!(future.stack.len(), 2, "two actual pending consumers");
+            assert!(
+                future.battlefield.iter().all(|id| !future.objects[id].tapped),
+                "the pending consumers must cause the observed taps"
+            );
+            for remaining in [1, 0] {
+                crate::game::stack::resolve_top(&mut future, &mut events);
+                assert_eq!(future.stack.len(), remaining, "each trigger resolves");
+            }
+            future
+                .battlefield
+                .iter()
+                .copied()
+                .filter(|id| future.objects[id].tapped)
+                .collect()
+        }
+
+        // Legacy compatibility states have the same pending consumers but no
+        // recipient stamp authority. Runtime accepts the named live recipient;
+        // the cover must conservatively refuse these eligible retained shapes.
+        // Exercise both raw futures before checking cover, so a projected
+        // witness-count assertion cannot hide the semantic regression.
+        let mut legacy_covers = Vec::new();
+        for missing_rows in [false, true] {
+            let label = if missing_rows {
+                "missing-row"
+            } else {
+                "no-stamp"
+            };
+            let mut legacy_shared = shared.clone();
+            let mut legacy_renamed = renamed.clone();
+            let mut legacy_split = split.clone();
+            for frame in [&mut legacy_shared, &mut legacy_renamed, &mut legacy_split] {
+                if missing_rows {
+                    frame.damage_dealt_this_turn.clear();
+                } else {
+                    for row in frame.damage_dealt_this_turn.iter_mut() {
+                        row.target_incarnation = None;
+                    }
+                    assert_eq!(frame.damage_dealt_this_turn.len(), 2, "{label}");
+                }
+                assert!(
+                    frame
+                        .damage_dealt_this_turn
+                        .iter()
+                        .all(|row| row.target_incarnation.is_none()),
+                    "{label}: no stamped recipient authority"
+                );
+                assert_eq!(
+                    frame
+                        .stack
+                        .iter()
+                        .map(|entry| entry.source_id)
+                        .collect::<BTreeSet<_>>(),
+                    BTreeSet::from([ObjectId(20), ObjectId(24)]),
+                    "{label}: two distinct stable dealers retain their consumers"
+                );
+            }
+            for (raw, expected) in [
+                (&legacy_shared, BTreeSet::from([ObjectId(21)])),
+                (&legacy_renamed, BTreeSet::from([ObjectId(22)])),
+                (&legacy_split, BTreeSet::from([ObjectId(21), ObjectId(22)])),
+            ] {
+                assert_eq!(
+                    recipients(raw),
+                    expected,
+                    "{label}: raw EventTarget consumer"
+                );
+                assert_eq!(
+                    tapped_after_pending_triggers(raw),
+                    expected,
+                    "{label}: actual raw trigger resolutions tap the named recipients"
+                );
+            }
+            for (shape, current) in [("split", &legacy_split), ("renamed", &legacy_renamed)] {
+                let refusals =
+                    fodder_growth_cover_refusals(&legacy_shared, current, &class, PlayerId(0)).0;
+                assert!(
+                    refusals
+                        .iter()
+                        .all(|refusal| *refusal == FodderCoverRefusal::NonObjectRemainder),
+                    "{label}/{shape}: other cover gates must admit the fixture: {refusals:?}"
+                );
+                legacy_covers.push((label, shape, refusals));
+            }
+        }
+        for (label, shape, refusals) in legacy_covers {
+            assert!(
+                refusals.contains(&FodderCoverRefusal::NonObjectRemainder),
+                "{label}/{shape}: retained legacy recipients must refuse fodder cover: {refusals:?}"
+            );
+        }
     }
 
     fn relational_resource_grants(wr: u64, ss: u64, spent: &[u64]) -> GameState {
