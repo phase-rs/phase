@@ -81,6 +81,7 @@
 //!   independent evidence the save carried and recovery is the only case that
 //!   writes them.
 
+use engine::analysis::loop_states_equal_modulo_resources;
 use engine::game::derived_views::ClientGameStateRef;
 use engine::game::effects::token::predefined_token_abilities;
 use engine::game::layers::evaluate_layers;
@@ -97,7 +98,7 @@ use engine::types::game_state::{
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaPipId, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
@@ -883,6 +884,203 @@ fn spending_one_of_two_pips_from_one_tenure_drops_only_the_spent_row() {
         "CR 106.3 + CR 118.3a: the ledger row belongs to its PIP, so the boundary must drop the \
          spent pip's row even though another pip of the same (source, incarnation) tenure is \
          still floating — rows {rows_after_spend:?}, survivor {surviving_pip:?}"
+    );
+}
+
+/// CR 106.3 + CR 104.4b: the SAME pip-keyed rule, reached through the LOOP clean
+/// path rather than a phase boundary.
+///
+/// [`spending_one_of_two_pips_from_one_tenure_drops_only_the_spent_row`] spends one
+/// pip and then crosses a phase, and the phase boundary REBUILDS the ledger from the
+/// pools (`mana_payment::retain_pooled_mana_producer_snapshots`), so that witness
+/// still passes with the pruning at `GameState::retain_carrier_referenced_lki`
+/// reverted — the rebuild hides it. This row never crosses a boundary after the
+/// spend; it reaches the pruning through the reader the pruning exists for:
+/// `analysis::loop_states_equal_modulo_resources`, the CR 104.4b loop comparison,
+/// which projects both sides through `normalize_for_loop` and therefore through
+/// `retain_carrier_referenced_lki` — on the SAME real board (Upwelling keeps the
+/// survivor floating, Prismite's two activations share one tenure, Cloudshift
+/// returns it as a new object so both pips owe a fact, one pip is spent by
+/// Wayfarer's Bauble).
+///
+/// The comparison partner is one row different, and that row is a SPENT pip's: two
+/// positions describing the same game must compare equal on the loop feed, which is
+/// exactly the invariant `GameState::eq`'s whole-ledger comparison needs and the
+/// reason the prune is keyed by pip. The control leg removes the SURVIVOR's row
+/// instead, and must compare UNEQUAL — the comparison is not blind to the ledger, so
+/// the first leg's equality is a real answer about the spent row rather than a
+/// vacuous one.
+///
+/// (The sampler's own `normalized` frame is not read here: a sample is only recorded
+/// on a beat whose stack did not shrink, and once the ring holds a frame the
+/// detector's CR 732.2a reconcile runs on the same action and ends the game. The
+/// comparison is reached by the same function without that game-ending short cut in
+/// the way, and it is the reader the prune is for.)
+///
+/// REVERT-FAIL: key the retention by `(source, incarnation)` again — the survivor
+/// names the same tenure, so the spent pip's row survives on one side and the two
+/// positions compare UNEQUAL.
+#[test]
+fn the_loop_comparison_drops_a_spent_pips_row_with_no_phase_boundary() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    scenario.add_enchantment_from_oracle(P0, "Upwelling", UPWELLING);
+    let prismite = scenario
+        .add_creature_from_oracle(P0, "Prismite", 1, 1, PRISMITE)
+        .id();
+    let cloudshift = {
+        let mut builder =
+            scenario.add_spell_to_hand_from_oracle(P0, "Cloudshift", true, CLOUDSHIFT);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        });
+        builder.id()
+    };
+    let bauble = {
+        let mut builder =
+            scenario.add_artifact_to_hand_from_oracle(P0, "Wayfarer's Bauble", WAYFARERS_BAUBLE);
+        builder.with_mana_cost(ManaCost::generic(1));
+        builder.id()
+    };
+    scenario.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .chain(std::iter::once(ManaUnit::new(
+                ManaType::White,
+                ObjectId(0),
+                false,
+                vec![],
+            )))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    let producing_incarnation = runner.state().objects[&prismite].incarnation;
+
+    activate_mana_ability(&mut runner, prismite, ManaType::Red);
+    activate_mana_ability(&mut runner, prismite, ManaType::Blue);
+    runner.cast(cloudshift).target_object(prismite).commit();
+    pass_until(
+        &mut runner,
+        |r| {
+            r.state()
+                .objects
+                .get(&prismite)
+                .is_some_and(|object| object.zone == Zone::Battlefield)
+                && r.state().objects[&prismite].incarnation != producing_incarnation
+        },
+        "Cloudshift returning the card",
+    );
+    // The boundary that WRITES the retained facts for both pips.
+    pass_until(
+        &mut runner,
+        |r| r.state().phase == Phase::PostCombatMain,
+        "crossing combat into postcombat main",
+    );
+    let rows_after_write = runner.state().pooled_mana_producer_snapshots.len();
+    assert_eq!(
+        rows_after_write, 2,
+        "reach-guard: the boundary retained a fact for each of the two pips"
+    );
+
+    let tenure_pips: Vec<ManaPipId> = pool_units(&runner)
+        .into_iter()
+        .filter(|unit| unit.source_id == prismite)
+        .map(|unit| unit.pip_id)
+        .collect();
+    assert_eq!(
+        tenure_pips.len(),
+        2,
+        "reach-guard: the two Prismite pips are both floating, got {tenure_pips:?}"
+    );
+
+    // The Bauble spends exactly one of the two pips. Resolving it crosses no phase
+    // and no step, so the boundary that would rebuild the ledger never runs.
+    runner.cast(bauble).commit();
+    pass_until(
+        &mut runner,
+        |r| {
+            r.state().stack.is_empty()
+                && matches!(r.state().waiting_for, WaitingFor::Priority { .. })
+        },
+        "the spent mana resolving",
+    );
+    assert_eq!(
+        runner.state().phase,
+        Phase::PostCombatMain,
+        "reach-guard: the spend happened inside the step the facts were written in — no boundary \
+         has rebuilt the ledger since"
+    );
+    assert_eq!(
+        pool_units(&runner)
+            .into_iter()
+            .filter(|unit| unit.source_id == prismite)
+            .count(),
+        1,
+        "reach-guard: the cast spent exactly one of the two pips"
+    );
+    let survivor = pool_units(&runner)
+        .into_iter()
+        .find(|unit| unit.source_id == prismite)
+        .expect("the surviving pip")
+        .pip_id;
+    let spent = tenure_pips
+        .into_iter()
+        .find(|pip| *pip != survivor)
+        .expect("the spent pip is the other one of the tenure");
+    // The spend does NOT prune the ledger on its own — only the loop clean path does
+    // — so the spent pip's row is still here at the comparison below.
+    let live_rows: Vec<ManaPipId> = runner
+        .state()
+        .pooled_mana_producer_snapshots
+        .iter()
+        .map(|snapshot| snapshot.pip_id)
+        .collect();
+    assert_eq!(
+        live_rows.len(),
+        2,
+        "reach-guard: no boundary has rebuilt the ledger since the spend, so both rows remain \
+         ({live_rows:?})"
+    );
+
+    // The position that describes the same game with the spent pip's row already gone
+    // — the shape the prune is supposed to produce.
+    let mut pruned = runner.state().clone();
+    pruned
+        .pooled_mana_producer_snapshots
+        .retain(|snapshot| snapshot.pip_id != spent);
+    assert_eq!(
+        pruned.pooled_mana_producer_snapshots.len(),
+        1,
+        "reach-guard: one row removed"
+    );
+    assert_ne!(
+        runner.state().pooled_mana_producer_snapshots,
+        pruned.pooled_mana_producer_snapshots,
+        "reach-guard: the two positions differ in the ledger, which `GameState::eq` compares whole"
+    );
+
+    assert!(
+        loop_states_equal_modulo_resources(runner.state(), &pruned),
+        "CR 106.3 + CR 104.4b: two positions describing the same game must compare equal on the \
+         loop feed. The spent pip's row is history, not position, and the projection prunes it on \
+         both sides — a tenure-keyed prune keeps it on the live side (its survivor names the same \
+         (source, incarnation)) and the two positions compare UNEQUAL"
+    );
+
+    // Control: remove the SURVIVOR's row instead. Its unit is still floating, so its
+    // row is position — the comparison must see the difference, which is what keeps
+    // the leg above from being a vacuous equality.
+    let mut without_survivor_row = runner.state().clone();
+    without_survivor_row
+        .pooled_mana_producer_snapshots
+        .retain(|snapshot| snapshot.pip_id != survivor);
+    assert!(
+        !loop_states_equal_modulo_resources(runner.state(), &without_survivor_row),
+        "control: the comparison reads the ledger this prune writes — dropping a STILL-POOLED \
+         unit's row is a difference in position and must compare unequal"
     );
 }
 

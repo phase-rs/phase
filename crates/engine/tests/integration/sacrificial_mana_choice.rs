@@ -1519,6 +1519,64 @@ fn parked_activation_naming_a_triggered_mana_node_is_refused_at_restore() {
         serde_json::to_value(triggered[0]).expect("the node identity serializes"),
     );
 
+    // The SAME wrong-kind node, named the other way a save can name it: the
+    // explicit pointer OMITTED and the wrong-kind ORDINAL retained. The ordinal is
+    // spoken for — settlement ordinals come from one counter, so it resolves to the
+    // `TriggeredMana` node this journal holds, and that is a node the activation
+    // NAMES and contradicts. Rebuilding an `ActivatedMana` reference from it and
+    // looking THAT up answered "missing", so the announcement epoch admitted the
+    // save and recovery opened a fresh activated node for an activation whose
+    // occurrence the journal had already spoken for.
+    let RulesExecutionNodeRef::TriggeredMana(triggered_ordinal) = triggered[0] else {
+        panic!("reach-guard: the triggered settlement is a triggered-mana node");
+    };
+    let mut ordinal_only = json.clone();
+    let pending = saved_pending_mut(&mut ordinal_only);
+    assert!(
+        pending.remove("rules_execution_node").is_some(),
+        "reach-guard: the explicit pointer is what this leg omits"
+    );
+    pending.insert(
+        "activated_mana_occurrence".to_string(),
+        serde_json::to_value(triggered_ordinal).expect("the settlement ordinal serializes"),
+    );
+    assert!(
+        runner
+            .state()
+            .resolved_rules_journal
+            .nodes()
+            .iter()
+            .any(|node| node.ordinal == triggered_ordinal
+                && matches!(node.kind, RulesExecutionNodeKind::TriggeredMana { .. })),
+        "reach-guard: the journal RETAINS a triggered-mana node at the ordinal this save states"
+    );
+    assert!(
+        runner
+            .state()
+            .resolved_rules_journal
+            .node_at_ordinal(triggered_ordinal)
+            .is_some_and(|node| node == triggered[0]),
+        "reach-guard: the ordinal resolves to that node whatever its kind — nothing about it is \
+         missing"
+    );
+    match &admission_refusal(ordinal_only) {
+        PersistedRestoreError::ContradictoryParkedActivation {
+            source_id,
+            reason: ParkedActivationConflict::NotAnActivatedManaNode { node },
+        } => {
+            assert_eq!(*source_id, kinnan);
+            assert_eq!(
+                *node, triggered[0],
+                "the ordinal named the triggered node, so that is the node the refusal is about"
+            );
+        }
+        other => panic!(
+            "a retained ordinal naming a TRIGGERED-mana node is a contradiction, not absence: it \
+             must be refused as the wrong KIND rather than admitted as an activation that names no \
+             node, got {other:?}"
+        ),
+    }
+
     let refusal = admission_refusal(json);
     match &refusal {
         PersistedRestoreError::ContradictoryParkedActivation {
@@ -2098,4 +2156,227 @@ fn node_absent_legacy_colour_prompt_is_recovered_with_one_settlement_node() {
         after,
         "and it keeps the same one node"
     );
+}
+
+/// CR 605.2 + CR 605.3b: **Heronblade Elite** — "{T}: Add X mana of any one
+/// color, where X is this creature's power." At power 0 it makes NO mana, and it is
+/// still a mana ability that still resolved.
+const HERONBLADE_ELITE: &str =
+    "{T}: Add X mana of any one color, where X is this creature's power.";
+
+/// CR 605.2 + CR 605.3b: a ZERO-OUTPUT activation is a settled activation, so a
+/// later parked activation cannot claim its node.
+///
+/// The board is the printed card the clause is about. Heronblade Elite resolves its
+/// mana ability at power 0, where the game state allows it to produce no mana at
+/// all — CR 605.2 keeps it a mana ability regardless ("A mana ability remains a mana
+/// ability even if the game state doesn't allow it to produce mana."), and CR 605.3b
+/// resolved it the moment it was activated. The first node therefore settles with an
+/// EMPTY pip list. The Elite is then untapped and its power raised in the SAME step,
+/// and a second activation parks at its colour prompt — the pair a save cannot
+/// separate by object, epoch or kind, exactly like Prismite's two activations.
+///
+/// The save is then pointed at the first node with NO occurrence field (the shape a
+/// save written before that field existed carries). Settlement must answer that a
+/// finished activation owns that node; reading settlement off the pip list answered
+/// "unfinished" here, and the later colour answer wrote the SECOND activation's
+/// production into the FIRST activation's node.
+///
+/// Two legs, because they are two different answers to the same absent record:
+///   * **the node is settled** ⇒ refused ([`ParkedActivationConflict::SettledWithoutOccurrence`]);
+///   * **nothing retained names a node** (the genuinely older save) ⇒ admitted, and
+///     recovery opens this activation's own node.
+#[test]
+fn zero_output_activation_settles_so_a_later_parked_activation_cannot_claim_its_node() {
+    let (runner, source, first_node) = power_raised_elite_with_a_parked_second_activation();
+
+    // CR 605.2: the first activation produced NOTHING, and CR 605.3b still settled
+    // it — the record is the node's, not its pip list's.
+    assert!(
+        node_produced_pips(runner.state(), first_node).is_empty(),
+        "reach-guard: the power-0 activation made no mana at all"
+    );
+
+    let mut json = persisted_json(runner.state());
+    let pending = saved_pending_mut(&mut json);
+    assert_eq!(
+        pending.get("announced_source_incarnation"),
+        Some(&serde_json::json!(source.incarnation)),
+        "reach-guard: the save carries the epoch both activations share"
+    );
+    assert!(
+        pending.remove("activated_mana_occurrence").is_some(),
+        "reach-guard: the occurrence is what this leg removes"
+    );
+    pending.insert(
+        "rules_execution_node".to_string(),
+        serde_json::to_value(first_node).expect("the node identity serializes"),
+    );
+
+    match &admission_refusal(json) {
+        PersistedRestoreError::ContradictoryParkedActivation {
+            source_id,
+            reason: ParkedActivationConflict::SettledWithoutOccurrence { node },
+        } => {
+            assert_eq!(*source_id, source.object_id);
+            assert_eq!(
+                *node, first_node,
+                "the zero-output activation's own settled node"
+            );
+        }
+        other => panic!(
+            "CR 605.2 + CR 605.3b: a save pointing at a SETTLED node that produced no mana must be \
+             refused as a finished activation, got {other:?}"
+        ),
+    }
+    assert!(
+        runner
+            .state()
+            .resolved_rules_journal
+            .node_settled(first_node),
+        "CR 605.3b: an activation that produced no mana has still resolved"
+    );
+
+    // Leg 2 — the genuinely older save: neither record names a node. Absence is
+    // legacy evidence, so the activation is admitted and recovered as its OWN
+    // activation, and the zero-output node it could have claimed is left alone.
+    let (runner, source, first_node) = power_raised_elite_with_a_parked_second_activation();
+    let before = activated_mana_nodes(runner.state(), source);
+    let mut json = persisted_json(runner.state());
+    let pending = saved_pending_mut(&mut json);
+    assert!(
+        pending.remove("rules_execution_node").is_some(),
+        "reach-guard: and no execution node"
+    );
+    assert!(
+        pending.remove("activated_mana_occurrence").is_some(),
+        "reach-guard: nor an occurrence — nothing in this save names a node"
+    );
+
+    let mut runner = GameRunner::from_state(
+        admitted(json).expect("absence is legacy evidence, never a contradiction"),
+    );
+    runner = choose_blue(runner);
+    let after = activated_mana_nodes(runner.state(), source);
+    assert_eq!(
+        after.len(),
+        before.len() + 1,
+        "the legacy activation proceeds as its OWN activation — {before:?} before, {after:?} after"
+    );
+    assert!(
+        node_produced_pips(runner.state(), first_node).is_empty(),
+        "CR 605.3b: the finished zero-output node keeps the empty settlement it had — the later \
+         activation's pip did not land in it"
+    );
+    assert!(
+        runner
+            .state()
+            .resolved_rules_journal
+            .node_settled(first_node),
+        "and it is still recorded as settled, not as unfinished for want of a pip"
+    );
+    let produced = runner
+        .state()
+        .resolved_rules_journal
+        .produced_mana()
+        .iter()
+        .find(|record| record.unit.color == ManaType::Blue)
+        .expect("the choice recorded its production");
+    assert_ne!(
+        produced.producer, first_node,
+        "the pip is settled by the node recovery opened, not by the finished one"
+    );
+}
+
+/// The board behind
+/// [`zero_output_activation_settles_so_a_later_parked_activation_cannot_claim_its_node`]:
+/// Heronblade Elite resolves its mana ability at power 0 (no mana, settled), is then
+/// untapped and raised to power 1 in the same step, and activates again — parking at
+/// its colour prompt with a node of its own.
+fn power_raised_elite_with_a_parked_second_activation(
+) -> (GameRunner, ObjectIncarnationRef, RulesExecutionNodeRef) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // CR 605.2: power 0 at announcement. The body is a 0/1 so the state-based
+    // actions do not end the game before the ability is activated; the ability's
+    // COUNT is this creature's power, which is what makes the output zero.
+    let elite = scenario
+        .add_creature_from_oracle(P0, "Heronblade Elite", 0, 1, HERONBLADE_ELITE)
+        .id();
+    let mut runner = scenario.build();
+    let announced = runner.state().objects[&elite].incarnation;
+    let source = ObjectIncarnationRef::of(elite, announced);
+
+    // Activation 1: power 0, so production resolves to no mana and the colour
+    // prompt's own `produces_mana` gate is not satisfied — the activation resolves
+    // inline and settles.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: elite,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Heronblade Elite's mana ability activates at power 0");
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseManaColor { .. }
+        ),
+        "an ability whose production resolves to no mana offers no colour choice, got {:?}",
+        runner.state().waiting_for
+    );
+    let first = activated_mana_nodes(runner.state(), source);
+    assert_eq!(
+        first.len(),
+        1,
+        "reach-guard: activation 1 settled under exactly one activated-mana node, got {first:?}"
+    );
+
+    // The SAME step: untap and raise its power, so the second activation's
+    // production is real mana that must not be written into activation 1's node.
+    {
+        let state = runner.state_mut();
+        let object = state.objects.get_mut(&elite).unwrap();
+        object.tapped = false;
+        object.power = Some(1);
+        object.base_power = Some(1);
+        state.layers_dirty.mark_full();
+    }
+    engine::game::layers::evaluate_layers(runner.state_mut());
+    assert_eq!(
+        runner.state().objects[&elite].power,
+        Some(1),
+        "reach-guard: the Elite is a 1-power creature now"
+    );
+
+    // Activation 2 parks at its colour prompt with a node of its own.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: elite,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the raised Elite activates again and parks at its colour choice");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseManaColor { .. }
+        ),
+        "activation 2 parks at its colour prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    let parked = parked_colour_pending(runner.state());
+    let second = parked
+        .rules_execution_node
+        .expect("activation 2 carries its own node");
+    assert_ne!(
+        second, first[0],
+        "the two activations are different settlement nodes"
+    );
+    assert_eq!(
+        activated_mana_nodes(runner.state(), source).len(),
+        2,
+        "reach-guard: two activations of one object and epoch, so two nodes"
+    );
+    (runner, source, first[0])
 }

@@ -585,6 +585,15 @@ pub(super) fn resolve_mana_ability_excluding(
 /// resolve cost-paid-object refs (Food Chain / Burnt Offering class).
 /// `cost_removed_counters` is this activation's own payment's removed-counter
 /// count (`PendingManaAbility::cost_removed_counters`).
+///
+/// `settlement_node` is the node this activation settles under — the producer node
+/// its own pending names. Recording the settlement HERE, in the one production
+/// chokepoint, is what makes it a fact about the activation rather than a guess
+/// from its output: an activation the game state allows no mana (CR 605.2) still
+/// ran the production that this function owns, so it settles exactly like one that
+/// made pips (CR 605.3b). A caller with no node to settle (a direct
+/// prompt/production call on a live state, whose pending predates both node
+/// records) passes `None`.
 #[allow(clippy::too_many_arguments)]
 fn produce_mana_from_ability(
     state: &mut GameState,
@@ -597,6 +606,7 @@ fn produce_mana_from_ability(
     cost_paid_object: Option<CostPaidObjectSnapshot>,
     announced_source_incarnation: Option<u64>,
     cost_removed_counters: Option<u32>,
+    settlement_node: Option<RulesExecutionNodeRef>,
 ) {
     with_bound_mana_activation(
         state,
@@ -617,6 +627,11 @@ fn produce_mana_from_ability(
                 color_override,
                 resolved_for_quantity,
             );
+            // CR 605.3b: the ability has resolved — after the production, and
+            // whether or not it made any mana.
+            if let Some(node) = settlement_node {
+                state.settle_mana_activation(node);
+            }
         },
     );
 }
@@ -1567,6 +1582,9 @@ pub fn handle_choose_mana_color(
             pending.cost_paid_object.clone(),
             Some(producer.source.incarnation),
             pending.cost_removed_counters,
+            // CR 605.3b: the settlement this choice completes is the node the
+            // producer evidence resolved — the same value production runs under.
+            Some(producer.node),
         );
         complete_mana_ability_activation(
             state,
@@ -3815,6 +3833,9 @@ fn finish_mana_ability_cost_payment(
         pending.cost_paid_object,
         pending.announced_source_incarnation,
         pending.cost_removed_counters,
+        // CR 605.3b: the node this activation was announced under, as the resume
+        // boundary resolved and re-bound it onto the pending.
+        pending.rules_execution_node,
     );
     if !resolves_automatically {
         complete_mana_ability_activation(

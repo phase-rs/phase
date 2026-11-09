@@ -2147,6 +2147,40 @@ pub struct SettlementNode {
     pub spent_pips: Vec<ManaPipId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub journal_ordinals: Vec<ResolvedCommandOrdinal>,
+    /// CR 605.3b: whether this node has RESOLVED — a fact about the node itself,
+    /// recorded where the resolution happened, and independent of how much mana
+    /// that resolution made.
+    ///
+    /// A mana ability "resolves immediately after it is activated", so the node an
+    /// activation was announced under is finished the moment the activation's
+    /// production runs — including the case CR 605.2 names, where the game state
+    /// does not allow the ability to produce mana at all (Heronblade Elite's
+    /// "{T}: Add X mana of any one color, where X is this creature's power." at
+    /// power 0 makes no pips and still resolves). Reading settlement off
+    /// [`Self::produced_pips`] was therefore wrong in exactly that case: a
+    /// zero-output activation looked unfinished, so a later, still-parked
+    /// activation was admitted against its finished node and wrote its own
+    /// production there ([`Self::node_settled`]).
+    ///
+    /// `Some(true)` is the only value this build WRITES
+    /// ([`ResolvedRulesJournal::settle_node`]); `None` — the serde default — is a
+    /// node whose record does not state settlement, which is the shape a save
+    /// written before this field existed carries, and which
+    /// [`ResolvedRulesJournal::node_settled`] reads through the pip record such a
+    /// save does have.
+    ///
+    /// Protocol: serde-ADDITIVE (`Option`, `#[serde(default)]`, skipped when
+    /// unset), so an older peer parses a payload that carries it and a newer peer
+    /// parses one that does not — the `crates/lobby-broker/src/protocol.rs` rule
+    /// for an optional defaulted addition ("does not require a bump — unless the
+    /// client stops deriving a fallback for it"). No gameplay fact and no rendered
+    /// feature is derived from it: it strengthens restore validation only, and a
+    /// peer that drops it falls back to the pre-change pip reading rather than
+    /// losing a capability, so no protocol record was added. The field is also
+    /// absent from every node this build leaves unsettled, so it adds no bytes to
+    /// the journal of a game that never settles an activation under one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled: Option<bool>,
 }
 
 #[cfg(feature = "test-support")]
@@ -2163,6 +2197,7 @@ impl Clone for SettlementNode {
             produced_pips,
             spent_pips,
             journal_ordinals,
+            settled,
         } = self;
         Self {
             ordinal: *ordinal,
@@ -2174,6 +2209,7 @@ impl Clone for SettlementNode {
             produced_pips: produced_pips.clone(),
             spent_pips: spent_pips.clone(),
             journal_ordinals: journal_ordinals.clone(),
+            settled: *settled,
         }
     }
 }
@@ -2584,24 +2620,77 @@ impl ResolvedRulesJournal {
     }
 
     /// CR 605.3b: whether this journal retains `node` AND that node has already
-    /// produced mana — the only witness that says an activation's settlement
-    /// happened.
+    /// RESOLVED — the witness that says an activation's settlement happened.
     ///
-    /// A mana ability "resolves immediately after it is activated", so the node an
-    /// activation was announced under is finished the moment it records the pips it
-    /// produced: nothing of a later, still-parked activation belongs in it. The
-    /// commands a node owns are NOT that witness and must not be read as one — an
-    /// activation pays its own cost (CR 602.2b routes it through CR 601.2h) under
-    /// this very node while it is still parked at a colour prompt, so an
-    /// append-only command history is non-empty on a node that has settled nothing.
+    /// The record is [`SettlementNode::settled`], written by [`Self::settle_node`]
+    /// where the resolution happened. It is NOT the node's pip list: a mana ability
+    /// "resolves immediately after it is activated" whether or not the game state
+    /// allows it to produce mana (CR 605.2 — Heronblade Elite's
+    /// "{T}: Add X mana of any one color, where X is this creature's power." at
+    /// power 0 makes no pips and still resolved). Inferring settlement from a
+    /// nonempty `produced_pips` read exactly that zero-output activation as
+    /// unfinished, so a later, still-parked activation pointing at its finished
+    /// node passed admission and wrote its own production there.
+    ///
+    /// The commands a node owns are not this witness either — an activation pays
+    /// its own cost (CR 602.2b routes it through CR 601.2h) under this very node
+    /// while it is still parked at a colour prompt, so an append-only command
+    /// history is non-empty on a node that has settled nothing.
+    ///
+    /// A node whose record states no settlement — the serde default, which is the
+    /// shape a save written before the field existed carries — answers from the pip
+    /// record that save does have. That arm is the LEGACY reading of an unrecorded
+    /// field, not the rule: this build writes `settled` before any pip can exist.
     ///
     /// An unknown node answers `false`: the journal no longer holds it, so it
     /// proves nothing either way.
-    pub fn node_produced_mana(&self, node: RulesExecutionNodeRef) -> bool {
+    pub fn node_settled(&self, node: RulesExecutionNodeRef) -> bool {
         let Ok(position) = self.node_index(node) else {
             return false;
         };
-        !self.nodes[position].produced_pips.is_empty()
+        let node = &self.nodes[position];
+        match node.settled {
+            Some(settled) => settled,
+            None => !node.produced_pips.is_empty(),
+        }
+    }
+
+    /// CR 605.3b: record that `node` has RESOLVED — the writer behind
+    /// [`Self::node_settled`], called where the node's own resolution completes
+    /// (for an activated mana ability, immediately after it is activated, whether
+    /// or not the game state allowed it to produce mana).
+    ///
+    /// Idempotent, because "has resolved" is a state of the node and not a count.
+    /// An unknown node is refused: a settlement record for a node this journal does
+    /// not hold would make [`Self::validate_serialized_authority`] unreachable from
+    /// the node side and attribute a resolution to nothing.
+    pub fn settle_node(
+        &mut self,
+        node: RulesExecutionNodeRef,
+    ) -> Result<(), ResolvedRulesJournalError> {
+        let position = self.node_index(node)?;
+        self.nodes[position].settled = Some(true);
+        Ok(())
+    }
+
+    /// The identity of the node this journal retains at `ordinal`, WHATEVER KIND it
+    /// is; `None` when no retained node carries that ordinal.
+    ///
+    /// Settlement ordinals are minted from one counter
+    /// ([`SettlementNodeOrdinal`]), so an ordinal names exactly one node — and a
+    /// [`ManaActivationOccurrence`] is that ordinal. A holder asking "which node
+    /// does my occurrence name?" must therefore ask THIS question rather than
+    /// rebuilding an `ActivatedMana` reference and looking that up: a retained node
+    /// of another kind at the same ordinal is a node the occurrence NAMES and
+    /// contradicts, never an ordinal nobody holds. Answering the latter made such a
+    /// save look evidence-less, so restore admitted it and recovery opened a fresh
+    /// activated node for an activation whose occurrence was already spoken for.
+    pub fn node_at_ordinal(&self, ordinal: SettlementNodeOrdinal) -> Option<RulesExecutionNodeRef> {
+        // `validate_serialized_authority` pins every node to its own index, and the
+        // live allocator appends ordinals in order, so the index IS the ordinal.
+        let position = usize::try_from(ordinal.0).ok()?;
+        let node = self.nodes.get(position)?;
+        (node.ordinal == ordinal).then_some(node.identity)
     }
 
     /// CR 106.3 + CR 118.3a: stamp `epoch` onto EVERY copy this journal holds of
@@ -2729,6 +2818,7 @@ impl ResolvedRulesJournal {
             produced_pips: Vec::new(),
             spent_pips: Vec::new(),
             journal_ordinals: vec![command],
+            settled: None,
         });
         Ok(identity)
     }
@@ -2765,6 +2855,7 @@ impl ResolvedRulesJournal {
             produced_pips: Vec::new(),
             spent_pips: Vec::new(),
             journal_ordinals: vec![command],
+            settled: None,
         });
         Ok(identity)
     }
@@ -3210,6 +3301,7 @@ impl ResolvedRulesJournal {
             produced_pips: Vec::new(),
             spent_pips: Vec::new(),
             journal_ordinals: vec![command],
+            settled: None,
         });
         Ok(identity)
     }

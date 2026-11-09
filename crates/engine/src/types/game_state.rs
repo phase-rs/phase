@@ -11693,7 +11693,10 @@ impl PendingManaAbility {
     ///   activation's object and epoch) or an `ActivatedMana` node naming a different
     ///   object. That is a state contradicting itself, and it is refused rather than
     ///   read as absence: reading it as absence would price the activation's mana
-    ///   from a node that settles something else.
+    ///   from a node that settles something else. The occurrence ordinal counts here
+    ///   too — it resolves to whatever node the journal retains at that ordinal
+    ///   ([`ResolvedRulesJournal::node_at_ordinal`]), so an ordinal naming another
+    ///   KIND of node is this same contradiction, not a missing record.
     /// * **a retained activated-mana node of this source that is a DIFFERENT
     ///   OCCURRENCE** — an earlier activation of the same object in the same
     ///   incarnation (Prismite can be activated twice; both activations share a
@@ -11703,11 +11706,16 @@ impl PendingManaAbility {
     ///   the reference disagreeing is a contradiction
     ///   ([`ParkedActivationConflict::ForeignOccurrence`]), not absence.
     /// * **the same shape with NO occurrence stated, on a node that has already
-    ///   PRODUCED its mana** — a save written before the occurrence existed can
-    ///   still be a save that points at a finished activation, and nothing beside the
-    ///   reference says otherwise. CR 605.3b settled that node the moment it was
-    ///   activated, so a still-parked activation cannot be it
-    ///   ([`ParkedActivationConflict::SettledWithoutOccurrence`]).
+    ///   SETTLED** — a save written before the occurrence existed can still be a
+    ///   save that points at a finished activation, and nothing beside the reference
+    ///   says otherwise. CR 605.3b settled that node the moment it was activated, so
+    ///   a still-parked activation cannot be it
+    ///   ([`ParkedActivationConflict::SettledWithoutOccurrence`]). The witness is the
+    ///   node's own settlement record
+    ///   ([`ResolvedRulesJournal::node_settled`]), NOT the pips it produced: an
+    ///   activation the game state allowed no mana (CR 605.2 — Heronblade Elite at
+    ///   power 0) settled with an empty pip list, and a pip-based reading admitted a
+    ///   later parked activation against it.
     /// * **the retained node's epoch and the announcement epoch disagree** — two
     ///   records of one announcement naming two objects (CR 400.7: a moved object is
     ///   a new object). Neither side is preferred
@@ -11745,7 +11753,7 @@ impl PendingManaAbility {
                 return Err(ParkedActivationConflict::ForeignOccurrence { node, occurrence });
             }
             Some(_) => {}
-            None if journal.node_produced_mana(node) => {
+            None if journal.node_settled(node) => {
                 return Err(ParkedActivationConflict::SettledWithoutOccurrence { node });
             }
             None => {}
@@ -11766,7 +11774,7 @@ impl PendingManaAbility {
 
     /// CR 605.3b: the settlement node this parked activation's save NAMES — the
     /// reference it carries when the journal still retains it, and otherwise the one
-    /// its occurrence ordinal mints.
+    /// its occurrence ordinal resolves to.
     ///
     /// Settlement ordinals are minted from one counter
     /// (`crate::types::resolved_commands::SettlementNodeOrdinal`), so an ordinal
@@ -11775,6 +11783,17 @@ impl PendingManaAbility {
     /// settlement this activation is; answering "no node" for it let recovery open a
     /// second node for one activation, leaving the node the save actually named
     /// settling nothing and the pip attributed to a node the save never mentioned.
+    ///
+    /// The ordinal is resolved through
+    /// [`ResolvedRulesJournal::node_at_ordinal`], which answers the node the journal
+    /// RETAINS at that ordinal whatever KIND it is — not an `ActivatedMana` reference
+    /// filtered by kind. Filtering by kind conflated two different answers: an
+    /// ordinal this journal does hold as, say, a `TriggeredMana` node is a node the
+    /// occurrence NAMES and contradicts, and calling it "missing" let the
+    /// announcement epoch admit a fresh activated node for an activation whose
+    /// occurrence was already spoken for. The contradiction is raised by
+    /// [`Self::activation_producer_evidence`] (the node is not an activated-mana
+    /// node), which is the same rule everywhere else.
     ///
     /// `None` when neither record names a node the journal retains. A reference the
     /// journal has cleared proves nothing (the journal is turn-scoped), so the
@@ -11787,8 +11806,7 @@ impl PendingManaAbility {
             .filter(|node| journal.contains_node(*node))
             .or_else(|| {
                 self.activated_mana_occurrence
-                    .map(|occurrence| RulesExecutionNodeRef::ActivatedMana(occurrence.ordinal()))
-                    .filter(|node| journal.contains_node(*node))
+                    .and_then(|occurrence| journal.node_at_ordinal(occurrence.ordinal()))
             })
     }
 
@@ -11867,11 +11885,14 @@ pub enum ParkedActivationConflict {
         occurrence: crate::types::resolved_commands::ManaActivationOccurrence,
     },
     /// CR 605.3b: the save states NO occurrence and points at a retained
-    /// activated-mana node of its own source and epoch that has already produced
-    /// mana. A mana ability resolves immediately after it is activated, so that
-    /// node settled a finished activation; nothing of a still-parked activation
-    /// belongs in it, and no record in the save separates the two, so the
-    /// reference is refused rather than reused as this activation's node.
+    /// activated-mana node of its own source and epoch that has already SETTLED.
+    /// A mana ability resolves immediately after it is activated, so that node
+    /// settled a finished activation; nothing of a still-parked activation belongs
+    /// in it, and no record in the save separates the two, so the reference is
+    /// refused rather than reused as this activation's node. Settlement is the
+    /// node's own record ([`ResolvedRulesJournal::node_settled`]), not its pip
+    /// list: CR 605.2 keeps an ability a mana ability when the game state allows it
+    /// no mana at all, and such an activation settles with no pips.
     SettledWithoutOccurrence { node: RulesExecutionNodeRef },
     /// CR 602.2a + CR 400.7: two records of ONE announcement naming two objects.
     /// The retained node was opened under `node_epoch` and the announcement
@@ -35303,6 +35324,30 @@ impl GameState {
         let result = operation(self);
         self.active_rules_execution_node = previous;
         result
+    }
+
+    /// CR 605.3b: record that the settlement node `node` has RESOLVED.
+    ///
+    /// The one writer behind [`ResolvedRulesJournal::node_settled`] and the one
+    /// place settlement is decided: production calls it for the activation it just
+    /// produced for, AFTER the production ran and whether or not any mana came out
+    /// of it. A mana ability "resolves immediately after it is activated", and CR
+    /// 605.2 keeps one that the game state allows no mana to produce a mana ability
+    /// (Heronblade Elite's "{T}: Add X mana of any one color, where X is this
+    /// creature's power." at power 0) — so zero output is a settled activation, not
+    /// an unfinished one, and this record is what says so without reading the pip
+    /// list.
+    ///
+    /// A node the journal no longer retains is silently a no-op: the journal is
+    /// turn-scoped, and a settlement record for a node it has dropped would describe
+    /// nothing.
+    pub(crate) fn settle_mana_activation(&mut self, node: RulesExecutionNodeRef) {
+        if !self.resolved_rules_journal.contains_node(node) {
+            return;
+        }
+        self.resolved_rules_journal
+            .settle_node(node)
+            .expect("a retained settlement node accepts its own settlement record");
     }
 
     /// `with_rules_execution_node` for callers whose node is conditional
