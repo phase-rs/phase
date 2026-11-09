@@ -31189,6 +31189,7 @@ fn is_declared_player_filter(filter: &TargetFilter) -> bool {
 fn bind_player_anchor_in_chain(
     clause: &mut ParsedEffectClause,
     declared: &mut impl FnMut() -> TargetFilter,
+    declared_player_group: &mut Option<ChosenGroupId>,
 ) -> Option<TargetFilter> {
     if let Some(anchor) = extract_player_anchor(&clause.effect, declared) {
         return Some(anchor);
@@ -31240,6 +31241,9 @@ fn bind_player_anchor_in_chain(
                 {
                     let anchor = declared();
                     if let TargetFilter::DeclaredPlayer { group } = &anchor {
+                        // Publish before ClauseIrBuilder::push so its generic
+                        // TargetOnly clause-id group cannot shadow this binding.
+                        *declared_player_group = Some(*group);
                         // CR 608.2b: ownership still validates against the announced
                         // player; applying the compound requires that player live.
                         for property in &mut filter.properties {
@@ -31256,7 +31260,9 @@ fn bind_player_anchor_in_chain(
                             }
                         }
                     }
-                    return Some(anchor);
+                    // Keep the lexical carry separate from the local instruction
+                    // binding: a later bare imperative still belongs to the caster.
+                    return Some(TargetFilter::ParentTarget);
                 }
                 Effect::ChangeZone {
                     origin: Some(Zone::Graveyard),
@@ -49704,13 +49710,17 @@ fn parse_effect_chain_ir_body(
         // The clause being parsed is the next one pushed, so a search that declares its
         // own player is registered at that index.
         let next_clause_index = builder.clauses().len();
-        if let Some(extracted) = bind_player_anchor_in_chain(&mut clause, &mut || {
-            reference_to_declaration(
-                &mut declarations,
-                &mut chain_declared_groups,
-                next_clause_index,
-            )
-        }) {
+        if let Some(extracted) = bind_player_anchor_in_chain(
+            &mut clause,
+            &mut || {
+                reference_to_declaration(
+                    &mut declarations,
+                    &mut chain_declared_groups,
+                    next_clause_index,
+                )
+            },
+            &mut ctx.clause_declared_group,
+        ) {
             let text_lower_for_anchor = text.to_lowercase();
             apply_anchor_subject_to_clause(&mut clause, &extracted, &text_lower_for_anchor);
             carried_player = Some(CarriedPlayerSubject::antecedent(extracted));
