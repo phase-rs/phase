@@ -795,6 +795,9 @@ fn next_of_kin_attaches_to_put_creature_not_dying_host() {
             generic: 2,
         })
         .id();
+    scenario
+        .add_creature(P0, "Hand-Entry Watcher", 1, 1)
+        .with_replacement_definition(hand_entry_life_replacement());
     let aura = scenario
         .add_creature(P0, "Next of Kin", 0, 0)
         .as_enchantment()
@@ -821,6 +824,11 @@ fn next_of_kin_attaches_to_put_creature_not_dying_host() {
         runner.state().objects[&put_b].zone,
         Zone::Battlefield,
         "Next of Kin puts the lesser-MV creature"
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        21,
+        "hand-origin control: the same replacement must fire for the hand leg"
     );
     assert_eq!(
         runner.state().delayed_triggers.len(),
@@ -1104,6 +1112,13 @@ fn open_next_of_kin_choice(eligible_hand_creatures: usize, lands: usize) -> Game
         .with_mana_cost(generic_cost(1))
         .id();
     scenario.with_commander(command);
+    // A second public command-zone candidate so the opponent can subtract two
+    // known cards from the placeholder count.
+    let partner = scenario
+        .add_creature_to_hand(P0, "Partner Vanguard", 2, 1)
+        .with_mana_cost(generic_cost(1))
+        .id();
+    scenario.with_commander(partner);
     for index in 0..eligible_hand_creatures {
         scenario
             .add_creature_to_hand(P0, &format!("Hand Bear {index}"), 2, 2)
@@ -1156,37 +1171,49 @@ fn open_next_of_kin_choice(eligible_hand_creatures: usize, lands: usize) -> Game
 /// chooser still sees the exact options.
 #[test]
 fn next_of_kin_mixed_choice_redacts_private_eligibility() {
-    let two_eligible = open_next_of_kin_choice(2, 0);
+    // Equal hand size (2), zero vs one eligible hidden card, with two public
+    // command-zone candidates. If the redaction keyed on the current candidate
+    // set, the zero-eligible payload would expose both commanders while the
+    // one-eligible payload would be empty, leaking whether the hand contains a
+    // qualifying card.
+    let zero_eligible = open_next_of_kin_choice(0, 2);
     let one_eligible = open_next_of_kin_choice(1, 1);
 
-    for runner in [&two_eligible, &one_eligible] {
+    for (runner, expect_hand) in [(&zero_eligible, false), (&one_eligible, true)] {
         let WaitingFor::EffectZoneChoice { cards, .. } = &runner.state().waiting_for else {
             panic!("the unfiltered choice must be open");
         };
-        assert!(
-            cards.iter().any(|id| runner
+        let has_hand = cards.iter().any(|id| {
+            runner
                 .state()
                 .objects
                 .get(id)
-                .is_some_and(|object| object.zone == Zone::Hand)),
-            "reach guard: the unfiltered choice must contain a hand card; got {cards:?}"
+                .is_some_and(|object| object.zone == Zone::Hand)
+        });
+        assert_eq!(
+            has_hand, expect_hand,
+            "reach guard: hand eligibility mismatch; got {cards:?}"
         );
-        assert!(
-            cards.iter().any(|id| runner
-                .state()
-                .objects
-                .get(id)
-                .is_some_and(|object| object.zone == Zone::Command)),
-            "reach guard: the unfiltered choice must contain the command-zone card; got {cards:?}"
+        assert_eq!(
+            cards
+                .iter()
+                .filter(|id| runner
+                    .state()
+                    .objects
+                    .get(id)
+                    .is_some_and(|object| object.zone == Zone::Command))
+                .count(),
+            2,
+            "reach guard: both public command-zone candidates must be offered; got {cards:?}"
         );
     }
 
-    let opponent_two = filter_state_for_viewer(two_eligible.state(), P1);
+    let opponent_zero = filter_state_for_viewer(zero_eligible.state(), P1);
     let opponent_one = filter_state_for_viewer(one_eligible.state(), P1);
     let WaitingFor::EffectZoneChoice {
-        cards: opponent_cards_two,
+        cards: opponent_cards_zero,
         ..
-    } = &opponent_two.waiting_for
+    } = &opponent_zero.waiting_for
     else {
         panic!("opponent must still see the redacted choice envelope");
     };
@@ -1198,16 +1225,16 @@ fn next_of_kin_mixed_choice_redacts_private_eligibility() {
         panic!("opponent must still see the redacted choice envelope");
     };
     assert!(
-        opponent_cards_two.is_empty() && opponent_cards_one.is_empty(),
-        "equal-sized hands with different eligible counts must have identical, empty opponent payloads; got {opponent_cards_two:?} and {opponent_cards_one:?}"
+        opponent_cards_zero.is_empty() && opponent_cards_one.is_empty(),
+        "equal-sized hands with different eligible counts must have identical, empty opponent payloads; got {opponent_cards_zero:?} and {opponent_cards_one:?}"
     );
 
-    let chooser_two = filter_state_for_viewer(two_eligible.state(), P0);
+    let chooser_zero = filter_state_for_viewer(zero_eligible.state(), P0);
     let chooser_one = filter_state_for_viewer(one_eligible.state(), P0);
     let WaitingFor::EffectZoneChoice {
-        cards: chooser_cards_two,
+        cards: chooser_cards_zero,
         ..
-    } = &chooser_two.waiting_for
+    } = &chooser_zero.waiting_for
     else {
         panic!("chooser must retain the exact choice");
     };
@@ -1219,17 +1246,17 @@ fn next_of_kin_mixed_choice_redacts_private_eligibility() {
         panic!("chooser must retain the exact choice");
     };
     assert_eq!(
-        chooser_cards_two.len(),
-        3,
-        "chooser sees two hand creatures plus the command-zone creature"
+        chooser_cards_zero.len(),
+        2,
+        "chooser sees both command-zone creatures"
     );
     assert_eq!(
         chooser_cards_one.len(),
-        2,
-        "chooser sees one hand creature plus the command-zone creature"
+        3,
+        "chooser sees one hand creature plus both command-zone creatures"
     );
     assert!(
-        chooser_cards_two
+        chooser_cards_zero
             .iter()
             .chain(chooser_cards_one)
             .all(|id| *id != engine::types::identifiers::ObjectId(0)),
