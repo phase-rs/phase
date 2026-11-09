@@ -2415,7 +2415,6 @@ export class WebSocketAdapter implements EngineAdapter {
     }
     let closed = false;
     let previousPending = false;
-    let settingUp = true;
     let setupMessages: MessageEvent<string>[] | null = null;
     const closeSocket = () => {
       if (closed) return;
@@ -2502,11 +2501,7 @@ export class WebSocketAdapter implements EngineAdapter {
       }
       if (this.disposed || this.stateCodecPreparation !== preparation) return;
 
-      socket.ws.onmessage = (event) => {
-        if (settingUp) {
-          (setupMessages ??= []).push(event);
-          return;
-        }
+      const handleSocketMessage = (event: MessageEvent<string>) => {
         if (this.disposed || this.ws !== socket.ws) return;
         this.lastInboundAt = Date.now();
         let message: unknown;
@@ -2530,6 +2525,11 @@ export class WebSocketAdapter implements EngineAdapter {
           return;
         }
         return this.handleMessage(message as { type: string; data?: unknown });
+      };
+      // Keep admission buffered through public handoff callbacks and the
+      // entire drain: their synchronous replies follow already-admitted frames.
+      socket.ws.onmessage = (event) => {
+        (setupMessages ??= []).push(event);
       };
 
       socket.ws.onerror = () => {
@@ -2645,7 +2645,6 @@ export class WebSocketAdapter implements EngineAdapter {
       this.closeSocket = closeSocket;
       this.stateCodec.adopt(bootstrap, socket.ws);
       this._serverInfo = socket.serverInfo;
-      settingUp = false;
       if (previousPending) {
         previousPending = false;
         this.emit({ type: "actionPendingChanged", pending: false });
@@ -2654,15 +2653,19 @@ export class WebSocketAdapter implements EngineAdapter {
       this.emit({ type: "serverHello", info: socket.serverInfo, compatible: true });
       if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
       this.startPing();
-      // The message-handler closure can populate this during synchronous send.
+      // The same buffer stays live while callbacks append synchronous replies.
       const messages = setupMessages as MessageEvent<string>[] | null;
-      setupMessages = null;
       if (messages) {
-        for (const message of messages) {
+        // Index, not an iterator: a consumer callback may synchronously append
+        // its own reply, which must follow every already-admitted frame.
+        for (let index = 0; index < messages.length; index++) {
           if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
-          socket.ws.onmessage?.(message);
+          handleSocketMessage(messages[index]!);
         }
       }
+      if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
+      setupMessages = null;
+      socket.ws.onmessage = handleSocketMessage;
       retained = !this.disposed && this.ws === socket.ws
         && this.stateCodecPreparation === preparation;
     } catch (error) {

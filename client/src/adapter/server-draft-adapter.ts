@@ -1211,7 +1211,6 @@ export class ServerDraftAdapter implements EngineAdapter {
       }
       this._serverInfo = socket.serverInfo;
       this.retireIdleSockets();
-      sourceSocket.onmessage = handleMessage;
       this.emit({ type: "serverHello", info: socket.serverInfo, compatible: true });
       // A setup reply may already have settled initialization. Attachment
       // identity, not an unsettled initializer, owns the remaining handoff.
@@ -1221,10 +1220,16 @@ export class ServerDraftAdapter implements EngineAdapter {
         return;
       }
       this.startPing();
-      for (const message of setupMessages) {
-        if (!this.sockets.has(sourceSocket)) break;
-        handleMessage(message);
+      // The buffer stays installed through hello callbacks and this whole
+      // drain: their synchronous replies must follow the frames admitted before
+      // the candidate was published. Index, not an iterator, so appended
+      // replies are drained in wire order.
+      for (let index = 0; index < setupMessages.length; index++) {
+        if (!this.sockets.has(sourceSocket)) return;
+        handleMessage(setupMessages[index]!);
       }
+      if (!this.sockets.has(sourceSocket)) return;
+      sourceSocket.onmessage = handleMessage;
     } catch (error) {
       const failure = error instanceof HandshakeError
         ? new AdapterError("WS_ERROR", error.message, error.kind !== "protocol_mismatch" && error.kind !== "invalid_url")

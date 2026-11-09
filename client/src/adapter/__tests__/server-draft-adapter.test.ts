@@ -2495,6 +2495,79 @@ describe("draft attachment settlement", () => {
     expect(await current()).toMatchObject({ resolvedWith: { events: [{ marker: "next-match-complete" }] } });
   });
 
+  it.each(["serverHello", "draftViewUpdated"] as const)(
+    "drains older reconnect views before the synchronous selected-inventory reply from a %s pick consumer",
+    async (trigger) => {
+      const card = cutoverCard("setup-fifo-selected-card");
+      const initial = createMockDraftView({
+        current_pack: [card], required_pick_count: 1, timer_remaining_ms: 30_000,
+      });
+      const older = createMockDraftView({ ...initial, timer_remaining_ms: 25_000 });
+      const selected = createMockDraftView({
+        ...initial, current_pack: null, required_pick_count: 0,
+        pool: [card], pick_number: 1, timer_remaining_ms: 20_000,
+      });
+      await receiveDraftView(adapter, established, initial);
+      const initialized = start("reconnect");
+      const candidate = MockWebSocket.last!;
+      const wire: string[] = [];
+      let authenticated = false;
+      candidate.send.mockImplementation((raw: string) => {
+        const frame = JSON.parse(raw) as {
+          type: string;
+          data?: { draft_code: string; action: { type: string; data: { seat: number; card_instance_ids: string[] } } };
+        };
+        wire.push(frame.type);
+        if (frame.type === "ClientHello") return;
+        if (frame.type === "ReconnectDraft") {
+          authenticated = true;
+          // Both views were captured before the pick. They are older
+          // admissions even when their callbacks synchronously cause a reply.
+          receive(candidate, "DraftStateUpdate", { view: initial });
+          receive(candidate, "DraftStateUpdate", { view: older });
+          return;
+        }
+        if (!authenticated) throw new Error(`Strict peer rejected ${frame.type} before ReconnectDraft`);
+        expect(frame).toEqual({
+          type: "DraftAction", data: {
+            draft_code: "ABCD12",
+            action: { type: "Pick", data: { seat: 0, card_instance_ids: [card.instance_id] } },
+          },
+        });
+        // No request-level draft ack: the exact selected instance in the
+        // authoritative pool is the completion witness, through the real handler.
+        receive(candidate, "DraftStateUpdate", { view: selected });
+      });
+      const settled = vi.fn();
+      let picked: (() => Promise<unknown>) | undefined;
+      const presented: DraftPlayerView[] = [];
+      const off = adapter.onEvent((event) => {
+        if (event.type === "draftViewUpdated") presented.push(event.view);
+        if (picked || event.type !== trigger) return;
+        const promise = adapter.submitPick(card.instance_id);
+        picked = trackRejection(promise);
+        void promise.then(settled, settled);
+      });
+      try {
+        await completeHandshake();
+        expect(await initialized()).toEqual({ resolvedWith: undefined });
+        expect(picked).toBeTypeOf("function");
+        expect(await picked!()).toMatchObject({ resolvedWith: selected });
+        expect(settled).toHaveBeenCalledExactlyOnceWith(selected);
+        expect(adapter.currentDraftView).toEqual(selected);
+        expect(adapter.currentDraftView?.pool).toContainEqual(card);
+        expect(presented.at(-1)).toEqual(selected);
+        const firstSelection = presented.findIndex((view) => view.pool.some((entry) => entry.instance_id === card.instance_id));
+        const lastUnselected = presented.findLastIndex((view) => !view.pool.some((entry) => entry.instance_id === card.instance_id));
+        expect(firstSelection).toBeGreaterThan(lastUnselected);
+        expect(wire.indexOf("DraftAction")).toBeGreaterThan(wire.indexOf("ReconnectDraft"));
+        expect(adapter.currentPhase).toBe("drafting");
+      } finally {
+        off();
+      }
+    },
+  );
+
   it.each(["create", "join", "reconnect"] as const)(
     "orders %s setup before callbacks without lending a new draft the prior match's authority",
     async (kind) => {
@@ -2564,7 +2637,7 @@ describe("draft attachment settlement", () => {
           interactionId: "setup-first-interaction" as InteractionId,
           response: { type: "shortcut", data: { decision: { type: "fixed", data: { iterations: 1 } }, pins: [] } },
         }, 0));
-        helloDraft = trackRejection(adapter.submitSharedStackDecision(0, "Take"));
+        if (kind !== "reconnect") helloDraft = trackRejection(adapter.submitSharedStackDecision(0, "Take"));
       });
       try {
         await completeHandshake(CORRELATED_HELLO);
@@ -2578,11 +2651,13 @@ describe("draft attachment settlement", () => {
           for (const read of [helloAction, helloMana, helloInteraction, timerMana]) {
             expect(await read!()).toMatchObject({ code: "ACTION_NOT_SENT" });
           }
-          expect(await helloDraft!()).toMatchObject({ code: "ACTION_REJECTED", message: "invalid transition from MatchInProgress: SharedStackDecision" });
           expect(submissionTypes(candidate)).toEqual([]);
           enterAcceptedFullMatch(adapter, candidate);
           await expect(adapter.submitAction({ type: "PassPriority" }, 0)).resolves.toMatchObject({ events: [{ marker: "hello-command" }] });
           await expect(adapter.previewManaPayment({ type: "PassPriority" }, 0)).resolves.toEqual([7]);
+          // The uncorrelated draft protocol reports views, not request ACKs.
+          // Stage the refusal after B's initial view, not against that bootstrap.
+          await expect(adapter.submitSharedStackDecision(0, "Take")).rejects.toMatchObject({ code: "ACTION_REJECTED" });
         } else {
           for (const read of [helloAction, helloMana, helloInteraction, helloDraft, timerMana]) {
             expect(await read!()).toMatchObject({ code: "PHASE_ERROR" });
@@ -2644,6 +2719,48 @@ describe("draft attachment settlement", () => {
     expect(await initialized()).toEqual({ resolvedWith: undefined });
     deliverOwnershipStateUpdate(established, "next-A-command");
     expect(await next!()).toMatchObject({ resolvedWith: { events: [{ marker: "next-A-command" }] } });
+  });
+
+  it("drains a hello-consumer pick's synchronous selected inventory after every buffered admission", async () => {
+    const card = cutoverCard("fifo-selected");
+    const selectable = createMockDraftView({
+      status: "Drafting", current_pack: [card], required_pick_count: 1,
+    });
+    const ambientOlder = createMockDraftView({ status: "Drafting", pick_number: 2 });
+    const selected = createMockDraftView({ status: "Drafting", pick_number: 3, pool: [card] });
+    const initialized = start("reconnect");
+    const candidate = MockWebSocket.last!;
+    const wire: string[] = [];
+    candidate.send.mockImplementation((raw: string) => {
+      const frame: { type: string } = JSON.parse(raw);
+      wire.push(frame.type);
+      if (frame.type === "ReconnectDraft") {
+        // Both frames are admitted before the candidate is published.
+        receive(candidate, "DraftStateUpdate", { view: selectable });
+        receive(candidate, "DraftStateUpdate", { view: ambientOlder });
+      } else if (frame.type === "DraftAction") {
+        // The strict peer answers inside the send. That reply must queue behind
+        // the admission already buffered, not overtake it.
+        receive(candidate, "DraftStateUpdate", { view: selected });
+      }
+    });
+    let pick: (() => Promise<unknown>) | undefined;
+    const off = adapter.onEvent((event) => {
+      if (event.type !== "draftViewUpdated" || pick !== undefined) return;
+      if (!event.view.current_pack?.some((entry) => entry.instance_id === card.instance_id)) return;
+      pick = trackRejection(adapter.submitPick(card.instance_id));
+    });
+    try {
+      await completeHandshake();
+      expect(await initialized()).toEqual({ resolvedWith: undefined });
+      expect(pick).toBeTypeOf("function");
+      await expect(pick!()).resolves.toMatchObject({ pool: [card] });
+      expect(adapter.currentDraftView?.pick_number).toBe(3);
+      expect(adapter.currentDraftView?.pool).toEqual([card]);
+      expect(wire.indexOf("DraftAction")).toBeGreaterThan(wire.indexOf("ReconnectDraft"));
+    } finally {
+      off();
+    }
   });
 
   it("does not expose a failed setup candidate to hello consumers or steal A's pending pick", async () => {
@@ -4531,7 +4648,7 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
     await vi.waitFor(() => expect(replacement.send).toHaveBeenCalledWith(
       expect.stringContaining('"type":"ReconnectDraft"')));
     replacement.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
-    receive(replacement, "DraftStateUpdate", { view: createMockDraftView() });
+    receive(replacement, "DraftStateUpdate", { view: createMockDraftView({ status: "MatchInProgress" }) });
     await reattached;
     return { replacement, replacementSession };
   }
