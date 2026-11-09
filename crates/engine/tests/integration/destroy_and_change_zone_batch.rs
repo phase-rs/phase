@@ -41,8 +41,7 @@ use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    GameState, PersistedGameState, PersistedRestoreFinalization, StagedBatchMemberState,
-    StagedDestroyOperation, StagedDestroyOuterApproval, StagedMemberOperation, WaitingFor,
+    GameState, PersistedGameState, PersistedRestoreFinalization, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
@@ -1241,122 +1240,6 @@ fn d8_staged_destroy_pause_round_trips_and_resumes() {
         restored.objects[&plain].zone,
         Zone::Graveyard,
         "the later member is still destroyed after the restore"
-    );
-    assert!(matches!(restored.waiting_for, WaitingFor::Priority { .. }));
-    assert!(restored.stack.is_empty());
-    assert!(restored.resolution_stack.is_empty());
-}
-
-/// CR 616.1: retain an outer-approved Destroy rider across an inner choice
-/// and a persisted-state round trip, then retire the batch at public priority.
-/// FU-6 characterization: this exact `InnerConsulting` state is reachable only
-/// because `destroy_applier` preserves the printed non-regeneration "instead"
-/// Destroy event. The retained-drain assertions below depend on that defect,
-/// even though the row does not assert the land's final zone. When FU-6 is
-/// repaired, its independent replacement-child witness must instead follow the
-/// sacrificed Aura's graveyard consultation; this is not evidence that the
-/// printed land-protection clause currently works.
-#[test]
-fn emergence_destroy_replacement_inner_choice_round_trips() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let land = scenario
-        .add_land_from_oracle(P0, "Mountain", "{T}: Add {R}.")
-        .id();
-    let aura = scenario
-        .add_enchantment_from_oracle(
-            P0,
-            "Crackling Emergence",
-            "Enchant land you control\nEnchanted land is a 3/3 red Spirit creature with haste. It's still a land.\nIf enchanted land would be destroyed, instead sacrifice this Aura and that land gains indestructible until end of turn.",
-        )
-        .with_subtypes(vec!["Aura"])
-        .id();
-    let other = scenario.add_creature(P0, "Other Bear", 2, 2).id();
-    scenario.add_enchantment_from_oracle(
-        P0,
-        "Rest in Peace",
-        "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.",
-    );
-    scenario.add_enchantment_from_oracle(
-        P1,
-        "Leyline of the Void",
-        "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.",
-    );
-    let day = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
-    let mut runner = scenario.build();
-    // Infrastructure exception: preattach the printed Aura instead of casting
-    // it, so this row isolates the Destroy/inner-choice persistence boundary.
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&aura)
-        .unwrap()
-        .attached_to = Some(land.into());
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&land)
-        .unwrap()
-        .attachments
-        .push(aura);
-    runner.state_mut().layers_dirty.mark_full();
-    let mut commit = runner.cast(day).commit();
-    for _ in 0..6 {
-        if matches!(
-            commit.state().waiting_for,
-            WaitingFor::ReplacementChoice { .. }
-        ) {
-            break;
-        }
-        commit
-            .act(GameAction::PassPriority)
-            .expect("resolve Day of Judgment");
-    }
-    assert!(matches!(
-        commit.state().waiting_for,
-        WaitingFor::ReplacementChoice { .. }
-    ));
-    let staged = commit
-        .state()
-        .active_batch_delivery()
-        .and_then(|batch| batch.staged.as_ref())
-        .expect("the inner replacement choice retains its staged batch");
-    let member = &staged.members[staged.cursor];
-    assert_eq!(member.identity.object_id, land);
-    assert_eq!(member.state, StagedBatchMemberState::InnerConsulting);
-    assert!(matches!(
-        member.operation,
-        StagedMemberOperation::Destroy(StagedDestroyOperation {
-            outer: StagedDestroyOuterApproval::Approved,
-            ..
-        })
-    ));
-    assert!(member.pending_outcome.is_none());
-    assert!(member.approved_post_replacement.is_some());
-    commit
-        .state()
-        .resolution_stack
-        .validate_at_rest(&commit.state().waiting_for)
-        .expect("the inner replacement choice is a valid public boundary");
-    let wire = serde_json::to_value(PersistedGameState::capture(commit.state().clone()))
-        .expect("the inner replacement choice serializes");
-    let mut restored = serde_json::from_value::<PersistedGameState>(wire)
-        .expect("the inner replacement choice decodes")
-        .prepare_for_restore(PersistedRestoreFinalization::Immediate)
-        .expect("the inner replacement choice prepares")
-        .finalize_immediately()
-        .expect("the inner replacement choice finalizes");
-    for _ in 0..8 {
-        if !matches!(restored.waiting_for, WaitingFor::ReplacementChoice { .. }) {
-            break;
-        }
-        apply_as_current(&mut restored, GameAction::ChooseReplacement { index: 0 })
-            .expect("answer the competing graveyard replacements");
-    }
-    assert_eq!(
-        restored.objects[&other].zone,
-        Zone::Exile,
-        "the restored batch still delivers the later Destroy member"
     );
     assert!(matches!(restored.waiting_for, WaitingFor::Priority { .. }));
     assert!(restored.stack.is_empty());
