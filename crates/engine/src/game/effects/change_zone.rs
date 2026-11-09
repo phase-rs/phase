@@ -13467,6 +13467,36 @@ mod tests {
         assert_eq!(a.1, b.1, "encoding A must classify exactly as encoding B");
     }
 
+    // Latent typed-origin contract: Rahilda is the nearest printed library-owner
+    // instruction; these fixtures deliberately omit its redundant inline zone.
+    #[test]
+    fn explicit_library_origin_mass_performer_matches_with_and_without_inline_zone() {
+        let without_inline = card_leg(
+            None,
+            vec![FilterProp::Owned {
+                controller: ControllerRef::ScopedPlayer,
+            }],
+        );
+        let with_inline = mass_library_exile_outcome(library_leg_encoding_b());
+        let without_inline = mass_library_exile_outcome(without_inline);
+        assert_eq!(with_inline, vec![(Zone::Exile, Some(PlayerId(0))); 2]);
+        assert_eq!(without_inline, with_inline);
+    }
+
+    #[test]
+    fn explicit_library_origin_pick_performer_matches_with_and_without_inline_zone() {
+        let without_inline = card_leg(
+            None,
+            vec![FilterProp::Owned {
+                controller: ControllerRef::ScopedPlayer,
+            }],
+        );
+        let with_inline = pick_library_exile_outcome(library_leg_encoding_b());
+        let without_inline = pick_library_exile_outcome(without_inline);
+        assert_eq!(with_inline, (Zone::Exile, Some(PlayerId(0)), false));
+        assert_eq!(without_inline, with_inline);
+    }
+
     /// CR 608.2c + CR 701.23a: "Search its controller's graveyard, hand, and
     /// library for all cards with the same name as that creature and exile them"
     /// (Eradicate) announces no subject through `ParentTargetController` — it

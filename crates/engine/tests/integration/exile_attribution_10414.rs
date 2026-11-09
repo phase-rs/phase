@@ -29,20 +29,18 @@
 //!   * R9 — Ashiok, Nightmare Muse: the paired pick ("then that player exiles a
 //!     card from their hand") with the same `ParentTargetController` scope is
 //!     the subject form and records that player.
-//!   * R10 — Mudhole: a public-action subject-form mass exile that parks on a
-//!     `ReplacementChoice` records the subject for the paused member and for the
-//!     member resumed from the pending frame, then settles. No printed card the
-//!     engine supports replaces a move into exile (Yawgmoth's Testament, "If a
-//!     card would be put into your graveyard or exile from anywhere this turn,
-//!     put it on the bottom of your library instead.", is not parsed); the
-//!     nearest supported printed cards are Rest in Peace
-//!     ("If a card or token would be put into a graveyard from anywhere, exile
-//!     it instead.") and Dauthi Voidwalker ("If a card would be put into an
-//!     opponent's graveyard from anywhere, instead exile it with a void counter
-//!     on it."), which redirect a graveyard-bound move into exile. One
-//!     SYNTHETIC optional replacement on a move into exile raises the prompt;
-//!     Mudhole is the only card text the row exercises (the graveyard lands
-//!     and relic are vanilla placeholders).
+//!   * R10 — Mudhole: a public-action subject-form mass exile that parks on an
+//!     optional `ReplacementChoice` records the subject for paused and resumed
+//!     members. Three-player departure rows distinguish the subject from the
+//!     resolving family's controller with an explicitly typed continuation
+//!     witness; that witness is not part of Mudhole's printed Oracle.
+//!     No supported printed card supplies this exile-destination replacement.
+//!     The nearest printed replacements are Rest in Peace and Dauthi Voidwalker,
+//!     which redirect graveyard-bound moves into exile. The fixture's optional
+//!     exile-to-graveyard replacement is synthetic.
+//!   * R11 — Rona, Tolarian Obliterator: another player's Lightning Bolt emits
+//!     the real damage trigger, which randomly exiles one of two hand cards.
+//!     The printed optional land tail is explicitly declined.
 //!
 //! Class premise for R8/R9: every parsed `ChangeZoneAll` scoped by
 //! `ParentTargetController` is a subjectless sweep (Declaration in Stone,
@@ -60,11 +58,14 @@
 //! detection. No printed card observes this change, and these rows claim no
 //! reader-level discrimination.
 
+use std::sync::Arc;
+
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, ReplacementMode, TargetFilter,
+    AbilityDefinition, AbilityKind, Effect, QuantityExpr, ReplacementDefinition, ReplacementMode,
+    TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{ReplacementChoiceKind, WaitingFor};
@@ -107,6 +108,12 @@ const ASHIOK_NIGHTMARE_MUSE: &str = "[+1]: Create a 2/3 blue and black Nightmare
 
 /// Mudhole `{2}{R}` Instant — verbatim Oracle text.
 const MUDHOLE: &str = "Target player exiles all land cards from their graveyard.";
+
+/// Rona, Tolarian Obliterator, the 5/5 back face — verbatim Oracle text.
+const RONA_TOLARIAN_OBLITERATOR: &str = "Trample\nWhenever a source deals damage to Rona, that source's controller exiles a card from their hand at random. If it's a land card, you may put it onto the battlefield under your control. Otherwise, you may cast it without paying its mana cost.";
+
+/// Lightning Bolt `{R}` Instant — verbatim Oracle text.
+const LIGHTNING_BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -206,6 +213,24 @@ fn drive_to_priority(runner: &mut GameRunner) {
         "drive_to_priority did not settle: {:?}",
         runner.state().waiting_for
     );
+}
+
+fn assert_resolution_finished(runner: &GameRunner) {
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "expected ordinary priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert!(runner.state().active_change_zone_frame().is_none());
+    assert!(runner.state().active_ability_continuation().is_none());
+    assert!(runner.state().pending_replacement.is_none());
+    assert!(runner
+        .state()
+        .pending_zone_change_delivery_from_replacement()
+        .is_none());
 }
 
 fn activated_index(runner: &GameRunner, source: ObjectId) -> usize {
@@ -734,24 +759,15 @@ fn ashiok_minus_three_pick_records_that_player() {
 // R10 — a paused subject-form mass exile records the subject across resume.
 // ---------------------------------------------------------------------------
 
-/// Mudhole: "Target player exiles all land cards from their graveyard." The
-/// subject is the target player for every member regardless of a pause: the
-/// performer is fixed once at resolver entry (CR 608.2h) and carried by the
-/// pending frame to the members resumed from it.
-///
-/// The prompt is raised by one SYNTHETIC optional replacement ("Synthetic Exile
-/// Redirect", controlled by P0) on a move into exile — see the module doc for
-/// the nearest printed cards. Both prompts are answered through
-/// `GameAction::ChooseReplacement`.
-///
-/// Revert sensitivity: reverting the pending frame's `controller: performer`
-/// makes the second land `Some(P0)`; reverting the member loop's
-/// `Some(performer)` makes the first land `Some(P0)`.
-#[test]
-fn mudhole_replacement_pause_resume_records_the_subject() {
+/// Mudhole's real mass-exile root, with one SYNTHETIC optional replacement.
+/// The optional typed continuation is solely a family-lifetime witness, not
+/// printed Mudhole text: P2 gains 3 life only if the surviving family completes.
+fn mudhole_replacement_fixture(
+    continuation_witness: bool,
+) -> (GameRunner, [ObjectId; 2], ObjectId, ObjectId) {
     assert_parses_clean("Mudhole", &[], &["Instant"], MUDHOLE);
 
-    let mut scenario = GameScenario::new();
+    let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
     let land_a = scenario
         .add_land_to_graveyard(P1, "Graveyard Forest A")
@@ -761,7 +777,7 @@ fn mudhole_replacement_pause_resume_records_the_subject() {
         .id();
     scenario.with_graveyard(P1, &["Graveyard Relic"]);
     scenario
-        .add_creature(P0, "Synthetic Exile Redirect", 1, 1)
+        .add_creature(P2, "Synthetic Exile Redirect", 1, 1)
         .with_replacement_definition(
             ReplacementDefinition::new(ReplacementEvent::Moved)
                 .mode(ReplacementMode::Optional { decline: None })
@@ -794,12 +810,34 @@ fn mudhole_replacement_pause_resume_records_the_subject() {
         .id();
 
     let mut runner = scenario.build();
+    if continuation_witness {
+        let object = runner.state_mut().objects.get_mut(&mudhole).unwrap();
+        for abilities in [&mut object.abilities, &mut object.base_abilities] {
+            let root = &mut Arc::make_mut(abilities)[0];
+            assert!(root.sub_ability.is_none(), "printed Mudhole has no tail");
+            root.sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    player: TargetFilter::SpecificPlayer { id: P2 },
+                },
+            )));
+        }
+    }
     let relic = runner.state().players[P1.0 as usize]
         .graveyard
         .iter()
         .copied()
         .find(|id| *id != land_a && *id != land_b)
         .expect("the nonland graveyard card exists");
+    (runner, [land_a, land_b], relic, mudhole)
+}
+
+/// CR 608.2c: the target player performs every member, including after a pause.
+/// The two actual optional replacement prompts are both declined publicly.
+#[test]
+fn mudhole_replacement_pause_resume_records_the_subject() {
+    let (mut runner, [land_a, land_b], relic, mudhole) = mudhole_replacement_fixture(false);
 
     let outcome = runner.cast(mudhole).target_player(P1).resolve();
 
@@ -820,7 +858,6 @@ fn mudhole_replacement_pause_resume_records_the_subject() {
         .active_change_zone_frame()
         .and_then(|frame| frame.pending.as_ref())
         .expect("the paused mass move stashed a pending frame");
-    assert_eq!(frame.controller, P1, "the frame carries the subject");
     assert_eq!(frame.remaining.len(), 1, "one land is still to be moved");
 
     runner
@@ -840,10 +877,6 @@ fn mudhole_replacement_pause_resume_records_the_subject() {
         .active_change_zone_frame()
         .and_then(|frame| frame.pending.as_ref())
         .expect("the resumed member re-parked with a pending frame");
-    assert_eq!(
-        frame.controller, P1,
-        "the resumed frame still carries the subject"
-    );
     assert!(
         frame.remaining.is_empty(),
         "the last land is the one parked"
@@ -854,14 +887,7 @@ fn mudhole_replacement_pause_resume_records_the_subject() {
         .expect("decline the second replacement");
 
     // Settled: nothing pending, both lands exiled by the subject.
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::Priority { .. }
-    ));
-    assert!(runner.state().stack.is_empty());
-    assert!(runner.state().resolution_stack.is_empty());
-    assert!(runner.state().resolving_stack_entry.is_none());
-    assert!(runner.state().active_change_zone_frame().is_none());
+    assert_resolution_finished(&runner);
     for land in [land_a, land_b] {
         assert_eq!(zone(&runner, land), Zone::Exile);
         assert_eq!(
@@ -876,4 +902,225 @@ fn mudhole_replacement_pause_resume_records_the_subject() {
         "the nonland card is not part of \"all land cards\""
     );
     assert_eq!(exile_count(&runner), 2);
+}
+
+/// Narrow typed continuation contract fixture, not an additional printed
+/// Mudhole clause. This positive control proves the exact P2 benefit is reachable.
+#[test]
+fn mudhole_typed_continuation_completes_after_replacement_pauses() {
+    let (mut runner, lands, relic, mudhole) = mudhole_replacement_fixture(true);
+    runner.cast(mudhole).target_player(P1).resolve();
+    for _ in lands {
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice {
+                player: P1,
+                kind: ReplacementChoiceKind::OptionalBranch,
+                ..
+            }
+        ));
+        runner
+            .act(GameAction::ChooseReplacement { index: 1 })
+            .expect("decline the optional replacement");
+    }
+    assert_resolution_finished(&runner);
+    assert_eq!(
+        runner.life(P2),
+        23,
+        "the typed continuation runs exactly once"
+    );
+    for land in lands {
+        assert_eq!(zone(&runner, land), Zone::Exile);
+        assert_eq!(exiled_by(&runner, land), Some(P1));
+    }
+    assert_eq!(zone(&runner, relic), Zone::Graveyard);
+    assert_eq!(zone(&runner, mudhole), Zone::Graveyard);
+}
+
+/// CR 800.4a + CR 800.4g: losing the instruction's subject removes that
+/// player's cards, not the surviving controller's resolving family.
+/// The typed P2 benefit discriminates completion from silent abandonment;
+/// Mudhole's own final part alone would not distinguish those outcomes.
+#[test]
+fn mudhole_subject_departure_preserves_the_surviving_family_continuation() {
+    let (mut runner, lands, relic, mudhole) = mudhole_replacement_fixture(true);
+    runner.cast(mudhole).target_player(P1).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice {
+            player: P1,
+            kind: ReplacementChoiceKind::OptionalBranch,
+            ..
+        }
+    ));
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("decline the first replacement");
+
+    // The first member really moved under P1's authority; the resumed member
+    // must have reached its own actual replacement prompt before departure.
+    let exiled: Vec<_> = lands
+        .into_iter()
+        .filter(|land| zone(&runner, *land) == Zone::Exile)
+        .collect();
+    assert_eq!(exiled.len(), 1);
+    assert_eq!(exiled_by(&runner, exiled[0]), Some(P1));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice {
+            player: P1,
+            kind: ReplacementChoiceKind::OptionalBranch,
+            ..
+        }
+    ));
+    assert_eq!(runner.life(P2), 20, "the continuation has not run yet");
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("the subject concedes at the actual replacement prompt");
+
+    assert!(runner.state().players[P1.0 as usize].is_eliminated);
+    assert!(!runner.state().players[P0.0 as usize].is_eliminated);
+    assert!(!runner.state().players[P2.0 as usize].is_eliminated);
+    assert_eq!(
+        runner.life(P2),
+        23,
+        "P1's departure must not discard P0's surviving continuation"
+    );
+    assert_resolution_finished(&runner);
+    assert_eq!(zone(&runner, mudhole), Zone::Graveyard);
+    for card in lands.into_iter().chain([relic]) {
+        assert_eq!(
+            zone(&runner, card),
+            Zone::Exile,
+            "P1-owned cards leave the game with P1"
+        );
+    }
+}
+
+/// CR 800.4a: the resolving family's controller leaves, so its typed tail
+/// must retire even though the subject, replacement source and P2 beneficiary
+/// all survive. The positive row above proves the benefit can actually run.
+#[test]
+fn mudhole_controller_departure_retires_the_family_continuation() {
+    let (mut runner, lands, relic, mudhole) = mudhole_replacement_fixture(true);
+    runner.cast(mudhole).target_player(P1).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice {
+            player: P1,
+            kind: ReplacementChoiceKind::OptionalBranch,
+            ..
+        }
+    ));
+    assert_eq!(runner.life(P2), 20);
+    runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("the controller concedes at the actual replacement prompt");
+
+    assert!(runner.state().players[P0.0 as usize].is_eliminated);
+    assert!(!runner.state().players[P1.0 as usize].is_eliminated);
+    assert!(!runner.state().players[P2.0 as usize].is_eliminated);
+    assert_eq!(runner.life(P2), 20, "the departed family's tail cannot run");
+    assert_resolution_finished(&runner);
+    assert_eq!(
+        zone(&runner, mudhole),
+        Zone::Exile,
+        "P0's spell leaves the game"
+    );
+    for card in lands.into_iter().chain([relic]) {
+        assert_eq!(
+            zone(&runner, card),
+            Zone::Graveyard,
+            "P1's surviving cards must not be moved by the retired family"
+        );
+        assert_eq!(exiled_by(&runner, card), None);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// R11 — Rona's real damage trigger binds the Random pick to the damage source.
+// ---------------------------------------------------------------------------
+
+/// CR 603.2: damage from P1's publicly cast Lightning Bolt triggers P0's Rona.
+/// CR 608.2c: "that source's controller exiles" makes P1 the performer, while
+/// the printed "you may" land tail still belongs to Rona's controller P0.
+/// Both hand candidates are lands, so the actual optional land instruction
+/// must be offered regardless of which random identity the engine chooses.
+#[test]
+fn rona_damage_trigger_random_pick_records_the_damage_source_controller() {
+    assert_parses_clean(
+        "Rona, Tolarian Obliterator",
+        &["Trample"],
+        &["Creature"],
+        RONA_TOLARIAN_OBLITERATOR,
+    );
+    assert_parses_clean("Lightning Bolt", &[], &["Instant"], LIGHTNING_BOLT);
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let rona = scenario
+        .add_creature(P0, "Rona, Tolarian Obliterator", 5, 5)
+        .from_oracle_text_with_keywords(&["Trample"], RONA_TOLARIAN_OBLITERATOR)
+        .id();
+    let candidates = [
+        scenario.add_land_to_hand(P1, "Hand Forest A").id(),
+        scenario.add_land_to_hand(P1, "Hand Forest B").id(),
+    ];
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(P1, "Lightning Bolt", true, LIGHTNING_BOLT)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes so P1 can cast Lightning Bolt");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    let outcome = runner
+        .cast(bolt)
+        .target_objects(&[rona])
+        .commit()
+        .stop_at_optional()
+        .resolve();
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ),
+        "Rona's actual printed optional land tail must be offered to P0; got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert_eq!(runner.state().objects[&rona].damage_marked, 3);
+    assert_eq!(zone(&runner, bolt), Zone::Graveyard);
+    let exiled: Vec<_> = candidates
+        .into_iter()
+        .filter(|card| zone(&runner, *card) == Zone::Exile)
+        .collect();
+    let remaining: Vec<_> = candidates
+        .into_iter()
+        .filter(|card| zone(&runner, *card) == Zone::Hand)
+        .collect();
+    assert_eq!((exiled.len(), remaining.len()), (1, 1));
+    assert!(candidates.contains(&exiled[0]));
+    assert!(candidates.contains(&remaining[0]));
+    assert_ne!(exiled[0], remaining[0]);
+    assert_eq!(runner.state().players[P1.0 as usize].hand.len(), 1);
+    assert_eq!(exile_count(&runner), 1);
+    assert_eq!(
+        exiled_by(&runner, exiled[0]),
+        Some(P1),
+        "Rona attributes the random exile to the damage source's controller"
+    );
+    assert_eq!(exiled_by(&runner, remaining[0]), None);
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("decline Rona's printed optional land instruction");
+    drive_to_priority(&mut runner);
+    assert_resolution_finished(&runner);
+    assert_eq!(zone(&runner, rona), Zone::Battlefield);
+    assert_eq!(zone(&runner, exiled[0]), Zone::Exile);
+    assert_eq!(zone(&runner, remaining[0]), Zone::Hand);
+    assert_eq!(exiled_by(&runner, exiled[0]), Some(P1));
+    assert_eq!(exile_count(&runner), 1);
 }
