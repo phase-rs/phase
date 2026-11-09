@@ -18,9 +18,11 @@ Cards listed in `crates/phase-ast/data/confirmed-misparses.toml` are held unsupp
 The owner/phasing repairs in PR #10635 retain distinct binding authorities:
 
 - A source-owner shuffle retains the source binding and its owner's shuffle obligation without announcing a target. Alabaster Dragon's death trigger follows its recorded graveyard successor; a stolen token copy still shuffles its owner's library after it ceases to exist. Etrata's source shuffle remains independent of its earlier exile target.
+- Coordinated owner instructions preserve the actor through the shuffle and draw. Gandalf, Wandering Wizard draws three for its owner even under another player's control; Oblation draws two for the selected permanent's owner.
 - An owner-population shuffle uses the selected objects' owners, but does not rewrite an explicit origin possessor. A stolen Elixir of Immortality still moves its activator's graveyard.
-- Compound phasing distinguishes an announced optional target from an untargeted combat partner. Dream Fighter phases out both combat participants without a target declaration.
+- Compound phasing distinguishes an announced optional target from an untargeted combat partner. Dream Fighter captures the partner's incarnation when the trigger binds: blinking that partner does not phase out the returned object, including after save/restore. Ordinary mixed source/creature filters still phase out only their announced target.
 - A target filter containing only properties is still constrained. Forge of Heroes retains both commander designation and entry-this-turn restrictions.
+- An untargeted Aura-host instruction remains a resolution-time attachment operand. Watery Grasp can shuffle its enchanted creature into that creature's owner's library after the host gains shroud; the activation does not announce the host as a target.
 
 The full-Oracle controls establish these clauses, not complete support for every ability on those cards. Etrata's conditional game-loss clause remains a separate parser gap under [#10728](https://github.com/phase-rs/phase/issues/10728); Forge of Heroes' conditional dual-counter tail remains unsupported under [#8112](https://github.com/phase-rs/phase/issues/8112). Fblthp, Impossibly Lost is a gendered source-reference parsing control, not a claim that its trigger condition is supported.
 
