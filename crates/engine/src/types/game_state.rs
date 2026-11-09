@@ -54178,6 +54178,10 @@ mod tests {
             "reach: the raw sample forms are equal, so an exact-first accept would be wrong"
         );
         assert!(
+            projected_states_equal(&sample(&live), &sample(&stale)),
+            "reach: the WHOLE raw comparison accepts this pair, not only PartialEq"
+        );
+        assert!(
             !loop_states_equal(&sample(&live), &sample(&stale)),
             "confirmation must rank the deferred pins and reject live versus stale"
         );

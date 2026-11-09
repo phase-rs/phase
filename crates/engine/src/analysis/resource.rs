@@ -10549,10 +10549,13 @@ mod tests {
             1,
             "one object-reader tuple, not history size"
         );
-        assert!(loop_states_equal(
-            &projected,
-            &project_out_resources(&projected)
-        ));
+        assert!(
+            crate::types::game_state::projected_states_equal(
+                &projected,
+                &project_out_resources(&projected)
+            ),
+            "P(P(x)) must keep the projected stale class without a re-rank"
+        );
         relational_projection_feeds(&a, &relational_recipient_frame(Some(7), true, false), false);
         assert!(
             eq_except_growable(
@@ -10580,10 +10583,13 @@ mod tests {
         assert!(projected
             .triggered_abilities_added_mana_this_turn
             .is_empty());
-        assert!(loop_states_equal(
-            &projected,
-            &project_out_resources(&projected)
-        ));
+        assert!(
+            crate::types::game_state::projected_states_equal(
+                &projected,
+                &project_out_resources(&projected)
+            ),
+            "P(P(x)) must keep the projected stale class without a re-rank"
+        );
     }
 
     /// CR 104.4b: removing an accounted recipient does not excuse its retained event's live/stale relation.
