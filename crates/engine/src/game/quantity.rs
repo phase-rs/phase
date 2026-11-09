@@ -227,10 +227,11 @@ fn linked_exile_for_context(
     ctx.trigger_source
         .as_ref()
         .map(|source| {
-            // CR 607.2a + CR 400.7: the linked pile is the cards still in the exile zone
-            // as the objects the trigger latched; a card that left exile after the
-            // trigger latched its pile (a CR 610.3 return, for one) is not "the exiled
-            // card", including when another effect exiled it again.
+            // CR 607.2a + CR 400.7 + CR 608.2h: the linked pile (`linked_exile_pile`:
+            // the latched cards plus, while the bound incarnation is still current,
+            // cards it has exiled since) filtered to cards still in exile as the same
+            // objects; a card that left exile (a CR 610.3 return, for one) is not "the
+            // exiled card", including when another effect exiled it again.
             crate::game::players::linked_exile_pile(state, source)
                 .into_iter()
                 .filter(|linked| linked.is_still_exiled(state))

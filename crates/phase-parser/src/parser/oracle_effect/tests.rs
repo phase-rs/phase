@@ -69545,6 +69545,126 @@ fn assimilate_without_a_graveyard_target_stays_unimplemented() {
     );
 }
 
+/// CR 607.2a + CR 608.2d: the linked-exile `assimilate` form (Borg Cube,
+/// Assimilation Assessor) lowers to the same move-then-retype chain as the
+/// graveyard form, choosing its card from the source's "exiled with" pool while
+/// the ability resolves (no stack target).
+#[test]
+fn assimilate_a_creature_card_exiled_with_it_lowers_to_linked_exile_pick() {
+    const BORG_CUBE: &str = "Affinity for artifact creatures\n\
+         Whenever this Spacecraft enters or attacks, assimilate a creature card exiled with it. \
+         If you can't, exile up to one target creature. (To assimilate a card, put it onto the \
+         battlefield under your control with a +1/+1 counter. It's a Borg artifact creature and \
+         loses all other creature types.)\n\
+         Station (Tap another creature you control: Put charge counters equal to its power on \
+         this Spacecraft. Station only as a sorcery. It's an artifact creature at 12+.)\n\
+         12+ | Artifact creatures you control have flying.";
+    let parsed = parse_oracle_text(
+        BORG_CUBE,
+        "Borg Cube",
+        &["Affinity".to_string(), "Station".to_string()],
+        &["Artifact".to_string()],
+        &["Spacecraft".to_string()],
+    );
+    let execute = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("the enters-or-attacks trigger must carry an execute body");
+    assert!(
+        !ability_chain_has_unimplemented(execute),
+        "the linked-exile assimilate must lower with no residual Unimplemented node: {execute:#?}"
+    );
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        enters_under,
+        target,
+        enter_with_counters,
+        ..
+    } = &*execute.effect
+    else {
+        panic!(
+            "assimilate must lower to a ChangeZone head, got {:#?}",
+            execute.effect
+        );
+    };
+    assert_eq!(*origin, Some(Zone::Exile));
+    assert_eq!(*destination, Zone::Battlefield);
+    assert_eq!(*enters_under, Some(ControllerRef::You));
+    assert_eq!(
+        *enter_with_counters,
+        vec![(
+            crate::types::counter::CounterType::Plus1Plus1,
+            QuantityExpr::Fixed { value: 1 }
+        )]
+    );
+    let TargetFilter::And { filters } = target else {
+        panic!("expected a creature-card AND linked-exile filter, got {target:#?}");
+    };
+    assert!(
+        filters.contains(&TargetFilter::ExiledBySource),
+        "{filters:#?}"
+    );
+    assert_eq!(
+        execute.target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "CR 608.2d: an untargeted pick from the linked pool is made at resolution"
+    );
+    let retype = execute
+        .sub_ability
+        .as_deref()
+        .expect("the retype continuation must be a direct child");
+    assert!(matches!(
+        &*retype.effect,
+        Effect::GenericEffect {
+            duration: Some(Duration::Permanent),
+            ..
+        }
+    ));
+
+    // The "If you can't" fallback: exile up to one target creature, gated on the
+    // assimilate having moved nothing.
+    let mut node = Some(execute);
+    let mut fallback = None;
+    while let Some(def) = node {
+        if matches!(
+            &*def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ) {
+            fallback = Some(def);
+        }
+        node = def.sub_ability.as_deref();
+    }
+    let fallback = fallback.expect("the If-you-can't exile must be chained");
+    assert!(
+        fallback.condition.is_some(),
+        "the fallback exile must be conditioned on the assimilate failing"
+    );
+
+    // Assimilation Assessor: the attack-only sibling of the same phrase.
+    const ASSESSOR: &str = "When this creature enters, exile target opponent's graveyard.\n\
+         Whenever this creature attacks, assimilate a creature card exiled with it. (Put it onto \
+         the battlefield under your control with a +1/+1 counter. It's a Borg artifact creature \
+         and loses all other creature types.)";
+    let parsed = parse_oracle_text(
+        ASSESSOR,
+        "Assimilation Assessor",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Borg".to_string()],
+    );
+    for trigger in &parsed.triggers {
+        let execute = trigger.execute.as_deref().expect("execute body");
+        assert!(
+            !ability_chain_has_unimplemented(execute),
+            "Assimilation Assessor must lower fully: {execute:#?}"
+        );
+    }
+}
+
 const CODIE_CONTINUATION_TEXT: &str = "Add {W}{U}{B}{R}{G}. When you next cast a spell this turn, \
 exile cards from the top of your library until you exile an instant or sorcery card with lesser mana \
 value. Until end of turn, you may cast that card without paying its mana cost. Put each other card \
