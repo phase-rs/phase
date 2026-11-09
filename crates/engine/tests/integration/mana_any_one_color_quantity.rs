@@ -53,9 +53,8 @@ const WOWZER: &str = "Whenever Wowzer, the Aspirational attacks, if you have an 
 const RAPTOR: &str = "Flying\n{S}{S}: This creature gains shroud until end of turn. ({S} can be paid with one mana from a snow source. A creature with shroud can't be the target of spells or abilities.)";
 const NYKTHOS: &str = "{T}: Add {C}.\n{2}, {T}: Choose a color. Add an amount of mana of that color equal to your devotion to that color. (Your devotion to a color is the number of mana symbols of that color in the mana costs of permanents you control.)";
 const SPIRAL: &str = "Draw a card. You may put a land card from your hand onto the battlefield.";
-const DIG: &str = "{T}: Add {C}.\n{T}, Sacrifice this land: Add one mana of any color.";
-const RUINS: &str =
-    "This land enters tapped.\n{T}: Add {R}.\n{T}, Sacrifice this land: Add {R}{R}.";
+const QUARRY: &str = "{T}: Add {C}.\n{T}, Sacrifice a creature: Add one mana of any color.\n{X}{2}, {T}, Sacrifice a Desert: Exile target creature card with mana value X from your graveyard. Create a token that's a copy of it, except it's a 4/4 black Zombie. Activate only as a sorcery.";
+const BASAL_THRULL: &str = "{T}, Sacrifice this creature: Add {B}{B}.";
 const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
 const LEYLINE_VOID: &str = "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.";
 
@@ -1197,7 +1196,11 @@ fn nykthos_aura_board(
             .with_mana_cost(parse_mtgjson_mana_cost("{1}{W}"));
         s.add_enchantment_from_oracle(P1, "Leyline of the Void", LEYLINE_VOID)
             .with_mana_cost(parse_mtgjson_mana_cost("{2}{B}{B}"));
-        vec![s.add_land_from_oracle(P0, "Dwarven Ruins", RUINS).id()]
+        vec![s
+            .add_creature_from_oracle(P0, "Basal Thrull", 1, 2, BASAL_THRULL)
+            .with_subtypes(vec!["Thrull"])
+            .with_mana_cost(parse_mtgjson_mana_cost("{B}{B}"))
+            .id()]
     } else {
         (0..wastes_count)
             .map(|_| s.add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.").id())
@@ -1379,7 +1382,7 @@ fn costed_counted_source_cannot_fund_itself_from_future_aura_output() {
     assert_complete(&r, 0);
 }
 
-fn dig_aura_consent(
+fn quarry_aura_consent(
     paused: bool,
     aura_color: ManaType,
 ) -> (
@@ -1390,7 +1393,10 @@ fn dig_aura_consent(
     engine::types::mana::ManaSourceSelection,
 ) {
     let mut s = board();
-    let dig = s.add_land_from_oracle(P0, "Archaeological Dig", DIG).id();
+    let quarry = s.add_land_from_oracle(P0, "Lazotep Quarry", QUARRY).id();
+    s.add_creature(P0, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"));
     let aura = s
         .add_enchantment_from_oracle(P0, "Fertile Ground", FERTILE_GROUND)
         .with_subtypes(vec!["Aura"])
@@ -1404,7 +1410,7 @@ fn dig_aura_consent(
     }
     let spiral = spell(&mut s, "Growth Spiral", true, SPIRAL, "{G}{U}");
     let mut r = s.build();
-    engine::game::effects::attach::attach_to(r.state_mut(), aura, dig);
+    engine::game::effects::attach::attach_to(r.state_mut(), aura, quarry);
     evaluate_layers(r.state_mut());
     let card_id = r.state().objects[&spiral].card_id;
     r.act(GameAction::CastSpell {
@@ -1419,7 +1425,7 @@ fn dig_aura_consent(
     } = &r.state().waiting_for
     else {
         panic!(
-            "Dig's printed sacrifice must require consent, got {:?}",
+            "Quarry's printed sacrifice must require consent, got {:?}",
             r.state().waiting_for
         );
     };
@@ -1427,7 +1433,7 @@ fn dig_aura_consent(
     let selection = options
         .iter()
         .find(|selection| {
-            selection.source.object_id == dig
+            selection.source.object_id == quarry
                 && matches!(
                     selection.output,
                     ManaSourceOutput::DeferredColorChoice {
@@ -1444,9 +1450,32 @@ fn dig_aura_consent(
         })
         .expect("the offered consent retains the independent Aura choice")
         .clone();
-    assert!(!r.state().objects[&dig].tapped);
+    assert!(!r.state().objects[&quarry].tapped);
     assert!(r.state().players[0].mana_pool.is_empty());
-    (r, dig, aura, spiral, selection)
+    (r, quarry, aura, spiral, selection)
+}
+
+fn pay_quarry_creature(r: &mut GameRunner) -> Vec<engine::types::events::GameEvent> {
+    let WaitingFor::PayCost {
+        player,
+        kind: PayCostKind::Sacrifice,
+        count,
+        choices,
+        ..
+    } = &r.state().waiting_for
+    else {
+        panic!("the selected Quarry activation must ask for its real creature cost");
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*count, 1);
+    assert_eq!(choices.len(), 1);
+    let creature = choices[0];
+    assert_eq!(r.state().objects[&creature].name, "Grizzly Bears");
+    r.act(GameAction::SelectCards {
+        cards: vec![creature],
+    })
+    .unwrap()
+    .events
 }
 
 #[test]
@@ -1455,11 +1484,12 @@ fn manual_sacrificial_source_keeps_its_independent_aura_and_base_choices() {
         (ManaType::Blue, ManaType::Green),
         (ManaType::Green, ManaType::Blue),
     ] {
-        let (mut r, dig, aura, spiral, selection) = dig_aura_consent(false, aura_color);
+        let (mut r, quarry, aura, spiral, selection) = quarry_aura_consent(false, aura_color);
         let mut events = r
             .act(GameAction::ActivateManaSource { selection })
             .unwrap()
             .events;
+        events.extend(pay_quarry_creature(&mut r));
         let WaitingFor::ChooseManaColor {
             player,
             choice: ManaChoicePrompt::SingleColor { options },
@@ -1475,7 +1505,8 @@ fn manual_sacrificial_source_keeps_its_independent_aura_and_base_choices() {
             pending.selected_taps_for_mana[0].production_override,
             engine::types::game_state::ProductionOverride::SingleColor(aura_color)
         );
-        assert_eq!(r.state().objects[&dig].zone, Zone::Graveyard);
+        assert_eq!(r.state().objects[&quarry].zone, Zone::Battlefield);
+        assert!(r.state().objects[&quarry].tapped);
         assert!(r.state().players[0].mana_pool.is_empty());
         events.extend(
             r.act(GameAction::ChooseManaColor {
@@ -1486,8 +1517,8 @@ fn manual_sacrificial_source_keeps_its_independent_aura_and_base_choices() {
             .events,
         );
         // CR 608.2d + CR 605.4a: the real manual choice consumer retains
-        // the separately selected producer after the source's sacrifice.
-        assert_eq!(production_count(&events, dig, base_color), 1);
+        // the separately selected producer after sacrificing the selected creature.
+        assert_eq!(production_count(&events, quarry, base_color), 1);
         assert_eq!(production_count(&events, aura, aura_color), 1);
         assert_eq!(production_count(&events, aura, ManaType::White), 0);
         assert!(matches!(
@@ -1504,7 +1535,7 @@ fn manual_sacrificial_source_keeps_its_independent_aura_and_base_choices() {
 fn selected_aura_survives_prefunding_pause_roundtrip_and_terminal_siblings() {
     use engine::types::game_state::{GameState, PendingCostMoveResume, ProductionOverride};
     let (mut r, nykthos, aura, spiral, funders) = nykthos_aura_board(true, 0);
-    let ruins = funders[0];
+    let thrull = funders[0];
     let selected = activatable_land_mana_options(r.state(), nykthos, P0)
         .into_iter()
         .find(|row| {
@@ -1529,7 +1560,7 @@ fn selected_aura_survives_prefunding_pause_roundtrip_and_terminal_siblings() {
         .unwrap()
         .events;
     assert_replacement_pair(&r);
-    assert!(r.state().objects[&ruins].tapped);
+    assert!(r.state().objects[&thrull].tapped);
     assert!(!r.state().objects[&nykthos].tapped);
     assert_eq!(production_count(&events, nykthos, ManaType::Blue), 0);
     assert_eq!(production_count(&events, aura, ManaType::Green), 0);
@@ -1537,9 +1568,9 @@ fn selected_aura_survives_prefunding_pause_roundtrip_and_terminal_siblings() {
     let Some(PendingCostMoveResume::ManaAbilityPayment { pending, cursor }) =
         &r.state().pending_cost_move_resume
     else {
-        panic!("the Ruins child must park the existing mana-cost cursor");
+        panic!("the Basal Thrull child must park the existing mana-cost cursor");
     };
-    assert_eq!(pending.source_id, ruins);
+    assert_eq!(pending.source_id, thrull);
     let parent = cursor
         .parent
         .as_ref()
@@ -1596,10 +1627,10 @@ fn selected_aura_survives_prefunding_pause_roundtrip_and_terminal_siblings() {
             .unwrap()
             .events,
     );
-    // CR 616.1 + CR 118.10 + CR 605.4a: Ruins' RR funds the
+    // CR 616.1 + CR 118.10 + CR 605.4a: Basal Thrull's BB funds the
     // activation before its UU and exact Aura G exist, once after restore.
-    assert_eq!(r.state().objects[&ruins].zone, Zone::Exile);
-    assert_eq!(production_count(&events, ruins, ManaType::Red), 2);
+    assert_eq!(r.state().objects[&thrull].zone, Zone::Exile);
+    assert_eq!(production_count(&events, thrull, ManaType::Black), 2);
     assert_eq!(production_count(&events, nykthos, ManaType::Blue), 2);
     assert_eq!(production_count(&events, aura, ManaType::Green), 1);
     assert_eq!(production_count(&events, aura, ManaType::White), 0);
@@ -1614,13 +1645,14 @@ fn selected_aura_survives_prefunding_pause_roundtrip_and_terminal_siblings() {
 
 #[test]
 fn manual_selected_aura_survives_actual_cost_pause_and_color_response() {
-    let (mut r, dig, aura, spiral, selection) = dig_aura_consent(true, ManaType::Green);
+    let (mut r, quarry, aura, spiral, selection) = quarry_aura_consent(true, ManaType::Green);
     let mut events = r
         .act(GameAction::ActivateManaSource { selection })
         .unwrap()
         .events;
+    events.extend(pay_quarry_creature(&mut r));
     assert_replacement_pair(&r);
-    assert_eq!(production_count(&events, dig, ManaType::Blue), 0);
+    assert_eq!(production_count(&events, quarry, ManaType::Blue), 0);
     assert_eq!(production_count(&events, aura, ManaType::Green), 0);
     assert!(r.state().pending_taps_for_mana_overrides.is_empty());
     let restored = serde_json::from_slice(&serde_json::to_vec(r.state()).unwrap()).unwrap();
@@ -1646,7 +1678,8 @@ fn manual_selected_aura_survives_actual_cost_pause_and_color_response() {
         pending.selected_taps_for_mana[0].production_override,
         engine::types::game_state::ProductionOverride::SingleColor(ManaType::Green)
     );
-    assert_eq!(r.state().objects[&dig].zone, Zone::Exile);
+    assert_eq!(r.state().objects[&quarry].zone, Zone::Battlefield);
+    assert!(r.state().objects[&quarry].tapped);
     events.extend(
         r.act(GameAction::ChooseManaColor {
             choice: ManaChoice::SingleColor(ManaType::Blue),
@@ -1657,7 +1690,7 @@ fn manual_selected_aura_survives_actual_cost_pause_and_color_response() {
     );
     // CR 608.2d + CR 605.4a + CR 616.1: the resumed manual color
     // consumer preserves the exact selected trigger after replacement.
-    assert_eq!(production_count(&events, dig, ManaType::Blue), 1);
+    assert_eq!(production_count(&events, quarry, ManaType::Blue), 1);
     assert_eq!(production_count(&events, aura, ManaType::Green), 1);
     assert_eq!(production_count(&events, aura, ManaType::White), 0);
     assert!(matches!(
