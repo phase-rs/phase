@@ -182,8 +182,6 @@ pub enum CountedTake {
 pub enum UnperformableCause {
     /// CR 732.2c: each repetition makes a game choice no declaration of the offer contains.
     UncontainedChoice,
-    /// The period recurs only where the ring drain's cycle delimiter does not fire.
-    UndelimitedCover,
 }
 
 impl CountedTake {
@@ -225,7 +223,6 @@ impl UnperformableCause {
             Self::UncontainedChoice => {
                 "CR 732.2a: the proposal contains no choice its repetitions make"
             }
-            Self::UndelimitedCover => "this engine will not take a counted repetition of this loop",
         }
     }
 }
@@ -266,8 +263,7 @@ pub struct ShortcutProposal {
     pub win_kind_at: Option<u32>,
     /// PR-7 Phase 4b: an optional CR 732.2a decision template pinning the loop's
     /// free choices for `IterationCount::Fixed(N)` finite materialization. `None`
-    /// for a choice-free drain or an `UntilLethal`
-    /// proposal, which never reads this field.
+    /// for a choice-free drain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<DecisionTemplate>,
     /// CR 732.2a: copied verbatim off the confirmed certificate so the drive reads ONE
@@ -333,9 +329,6 @@ impl ShortcutProposal {
             IterationCount::Fixed(iterations) => iterations
                 .checked_sub(1)
                 .map_or(std::ops::RangeInclusive::new(1, 0), |last| 0..=last),
-            // CR 704.5a: the drain runs until a player loses, so the proposal names no count
-            // and no place is past its end.
-            IterationCount::UntilLethal => 0..=u32::MAX,
             // CR 732.2b: a proposal with no ending point has no place past its end.
             IterationCount::WithoutEnd => 0..=u32::MAX,
         };

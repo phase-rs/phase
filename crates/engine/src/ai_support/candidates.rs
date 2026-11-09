@@ -3710,14 +3710,11 @@ pub fn candidate_actions_broad_with_probe(
         // sole candidate is rejected by the reducer's `amount > max` guard and the AI has no
         // legal action at this prompt.
         //
-        // AI-reachable since the bounded fast-forward landed, which is what stales the older
-        // "the arm below only ever proposes `UntilLethal`" note this replaces: the
-        // `WaitingFor::LoopShortcut` arm below also proposes a capacity-valued `Fixed` against
-        // a bounded offer that publishes no pins, and only a `Fixed` count routes through
-        // `materialize_fixed_shortcut` — the single path that registers the stash `turns.rs`
-        // turns into this prompt. `UntilLethal` still routes to `apply_until_lethal_shortcut`
-        // and never gets here; it is now also not offered against a bounded offer at all. A
-        // human-declared shortcut in a mixed game reaches this prompt too.
+        // AI-reachable: the `WaitingFor::LoopShortcut` arm below proposes a capacity-valued
+        // `Fixed` against a bounded offer that publishes no pins, and only a `Fixed` count routes
+        // through `materialize_fixed_shortcut` — the single path that registers the stash
+        // `turns.rs` turns into this prompt. A human-declared shortcut in a mixed game reaches
+        // this prompt too.
         WaitingFor::PayAmountChoice {
             player,
             resource: PayableResource::LoopCollapse { .. },
@@ -3912,22 +3909,11 @@ pub fn candidate_actions_broad_with_probe(
         // (Scored by `phase_ai::policies::loop_shortcut::LoopShortcutPolicy`.)
         WaitingFor::LoopShortcut {
             proposer,
-            predicted_winner,
             schema,
             declaration,
             period,
             ..
         } => {
-            // CR 732.2a: `UntilLethal` names no count, so it is legal ONLY against an offer
-            // that narrowed no bound. `handle_declare_shortcut` rejects it outright against
-            // a bounded one (`IterationCount::UntilLethal if offer.schema.is_bounded()` =>
-            // `reject_shortcut_declaration`), and that reject is a SUCCESSFUL, fail-closed
-            // handback to priority — `Ok(result)`, not an `Err`. So an unconditional
-            // `UntilLethal` candidate did not merely waste a search node: it handed the
-            // simulation layer an action the engine ACCEPTS and then silently discards,
-            // i.e. an illegal quantity choice wearing the shape of a legal one, which the
-            // policy layer then has to know to score away.
-            //
             // Emit only the quantity choices the offer can actually take. A bounded offer gets
             // `Fixed` at the published capacity below when its pin set permits a
             // `template: None` declaration; where neither applies, `DeclineShortcut` really is
@@ -3938,12 +3924,7 @@ pub fn candidate_actions_broad_with_probe(
                 crate::analysis::decision_template::IterationCount::WithoutEnd => {
                     Some(crate::analysis::decision_template::IterationCount::WithoutEnd)
                 }
-                // CR 732.2a: until lethal ends only where the offer's named winner wins.
-                crate::analysis::decision_template::IterationCount::Fixed(_)
-                | crate::analysis::decision_template::IterationCount::UntilLethal => {
-                    (!schema.is_bounded() && predicted_winner.is_some())
-                        .then_some(crate::analysis::decision_template::IterationCount::UntilLethal)
-                }
+                crate::analysis::decision_template::IterationCount::Fixed(_) => None,
             };
             if let Some(count) = unbounded {
                 v.push(candidate(
@@ -3955,10 +3936,8 @@ pub fn candidate_actions_broad_with_probe(
                     Some(*proposer),
                 ));
             }
-            // CR 732.2a: a BOUNDED offer states a legal repetition count, and the declare
-            // handler rejects `UntilLethal` against one outright — so without this candidate
-            // the AI's only non-declining option at such a node is an answer the engine
-            // refuses. `ShortcutDecisionSchema::is_bounded()` is the engine's single
+            // CR 732.2a: a BOUNDED offer states a legal repetition count.
+            // `ShortcutDecisionSchema::is_bounded()` is the engine's single
             // authority for "this producer narrowed the bound"; do NOT re-spell it as a
             // comparison against `MAX_SHORTCUT_CYCLES`.
             //
@@ -3983,13 +3962,11 @@ pub fn candidate_actions_broad_with_probe(
             // its own candidate. Reading `iteration_count` rather than re-deriving anything keeps
             // one authority for that count, the producer's.
             //
-            // WILDCARD-FREE over `IterationCount`: a bounded offer publishes `Fixed`, and the
-            // `UntilLethal` arm above already covers the unbounded case, so an `UntilLethal`
-            // suggestion here has no count to name and emits nothing rather than guessing one.
+            // WILDCARD-FREE over `IterationCount`: a `WithoutEnd` suggestion has no count to name
+            // and emits nothing rather than guessing one.
             let suggested = match schema.iteration_count {
                 crate::analysis::decision_template::IterationCount::Fixed(n) => Some(n),
-                crate::analysis::decision_template::IterationCount::UntilLethal
-                | crate::analysis::decision_template::IterationCount::WithoutEnd => None,
+                crate::analysis::decision_template::IterationCount::WithoutEnd => None,
             };
             if let Some(n) = suggested.filter(|_| {
                 schema.is_bounded()
@@ -7846,9 +7823,9 @@ mod tests {
         )));
     }
 
-    /// CR 732.2a: an AI-controlled priority holder receives both legal shortcut choices.
+    /// CR 732.2a: an AI-controlled priority holder may decline the offered shortcut.
     /// The `legal_actions` assertion reaches the simulation-filtered surface used by AI search;
-    /// reverting the DeclineShortcut candidate leaves that surface declaration-only.
+    /// reverting the DeclineShortcut candidate leaves that surface without it.
     #[test]
     fn loop_shortcut_candidates_include_decline() {
         let mut state = GameState::new_two_player(42);
@@ -7879,10 +7856,6 @@ mod tests {
             }),
             "the priority holder's DeclineShortcut must be an AI candidate"
         );
-        assert!(candidates.iter().any(|candidate| {
-            matches!(candidate.action, GameAction::DeclareShortcut { .. })
-                && candidate.metadata.actor == Some(PlayerId(1))
-        }));
 
         assert!(
             crate::ai_support::legal_actions(&state)

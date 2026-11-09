@@ -453,7 +453,7 @@ fn shortcut_template(decision_count: usize) -> DecisionTemplate {
 #[test]
 fn rejects_oversized_declare_shortcut_template() {
     let action = GameAction::DeclareShortcut {
-        count: IterationCount::UntilLethal,
+        count: IterationCount::Fixed(1),
         template: Some(shortcut_template(MAX_ACTION_LIST_LEN + 1)),
     };
     assert!(
@@ -465,7 +465,7 @@ fn rejects_oversized_declare_shortcut_template() {
 #[test]
 fn accepts_within_bound_declare_shortcut_template() {
     let action = GameAction::DeclareShortcut {
-        count: IterationCount::UntilLethal,
+        count: IterationCount::Fixed(1),
         template: Some(shortcut_template(4)),
     };
     assert!(
@@ -474,7 +474,7 @@ fn accepts_within_bound_declare_shortcut_template() {
     );
     // The Phase-3 default (no pinned template) is trivially accepted.
     assert!(guard_game_action_payload(&GameAction::DeclareShortcut {
-        count: IterationCount::UntilLethal,
+        count: IterationCount::Fixed(1),
         template: None,
     })
     .is_ok());
@@ -538,7 +538,7 @@ fn rejects_over_cap_shortcut_schedule() {
         index: 0,
     };
     let action = GameAction::DeclareShortcut {
-        count: IterationCount::UntilLethal,
+        count: IterationCount::Fixed(1),
         template: Some(DecisionTemplate {
             owner: PlayerId(0),
             decisions: vec![PinnedDecision::Targets {
@@ -602,7 +602,7 @@ fn rejects_over_cap_shortcut_ranking_on_every_scheduled_arm() {
         Ranking::new(subjects).expect("distinct subjects are a legal ranking")
     };
     let declare = |targets: Vec<TargetPin>| GameAction::DeclareShortcut {
-        count: IterationCount::UntilLethal,
+        count: IterationCount::Fixed(1),
         template: Some(DecisionTemplate {
             owner: PlayerId(0),
             decisions: vec![PinnedDecision::Targets {

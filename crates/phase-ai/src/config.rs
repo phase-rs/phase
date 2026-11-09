@@ -557,9 +557,8 @@ pub struct PolicyPenalties {
     /// `SelfCostValuePolicy`.
     #[serde(default = "default_self_cost_counter_replacement_prevented_penalty")]
     pub self_cost_counter_replacement_prevented_penalty: f64,
-    /// CR 732.2a / CR 104.2a: bonus for proposing an `UntilLethal` loop shortcut whose latched
-    /// `predicted_winner` IS the proposer — the crown ends the game in their favor, and the only
-    /// other outcome (`until_lethal_fallback`) restores the board a decline would have produced.
+    /// CR 732.2a / CR 104.2a: bonus for proposing a loop shortcut whose latched
+    /// `predicted_winner` IS the proposer — the crown ends the game in their favor.
     /// Game-deciding ⇒ the default lands in the `critical` band (5.0, 15.0]. Consumed by
     /// `LoopShortcutPolicy`; fed through `PolicyVerdict::score`, which auto-bands and clamps to
     /// `CRITICAL_MAX`. (The losing / no-crown cases are `PolicyVerdict::reject`s and take no

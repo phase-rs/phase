@@ -269,6 +269,132 @@ fn grown_not_inert(verdict: &Result<Vec<String>, OfferRefusal>) -> bool {
     )
 }
 
+/// The seat `state` hands priority to, when it waits on priority and publishes that seat.
+fn handed_to(state: &GameState) -> Option<PlayerId> {
+    match state.waiting_for {
+        WaitingFor::Priority { player } if state.priority_player == player => Some(player),
+        _ => None,
+    }
+}
+
+/// CR 732.2a + CR 800.4a: a shortcut that is not taken (declined, its declaration rejected, or its
+/// accepted proposal refused because its proposer conceded, CR 104.3a) hands priority back to the
+/// proposer, or to the next player in turn order still in the game; an accepted take ends where
+/// the active player receives priority (CR 117.3b). P1 holds priority on P0's turn with
+/// Kiki-Jiki, Mirror Breaker ("Haste / {T}: Create a token that's a copy of target nonlegendary
+/// creature you control, except it has haste. Sacrifice it at the beginning of the next end
+/// step.") and Deceiver Exarch ("Flash (You may cast this spell any time you could cast an
+/// instant.) / When this creature enters, choose one — / • Untap target permanent you control. /
+/// • Tap target permanent an opponent controls.").
+#[test]
+fn a_shortcut_not_taken_hands_priority_back_to_its_proposer() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let p2 = PlayerId(2);
+    let mut state = crate::loop_shortcut::restore_dump(&crate::loop_shortcut::gunzip_dump(
+        include_bytes!("../fixtures/kilo_freed_relic_pentad_4p.json.gz"),
+    ));
+    let kiki = place(&mut state, P1, "Kiki-Jiki, Mirror Breaker", db);
+    let exarch = place(&mut state, P1, "Deceiver Exarch", db);
+    let score = kiki_score(kiki, exarch);
+    let mut runner = GameRunner::from_state(state);
+    let mut plain_priority = None;
+    for _ in 0..40 {
+        if is_offer(runner.state()) {
+            break;
+        }
+        match runner.state().waiting_for {
+            WaitingFor::Priority { player } if player == P1 => {
+                plain_priority.get_or_insert_with(|| runner.state().clone());
+                kiki_activates(&mut runner, kiki, &score);
+            }
+            WaitingFor::Priority { .. } => act(&mut runner, GameAction::PassPriority),
+            ref other => panic!("unexpected {other:?}"),
+        }
+    }
+    let offer = runner.state().clone();
+    assert!(
+        matches!(offer.waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P1)
+            && offer.active_player == P0,
+        "reach: P1's loop is offered on P0's turn: {:?}",
+        offer.waiting_for
+    );
+    let declare = |count| GameAction::DeclareShortcut {
+        count,
+        template: None,
+    };
+    let accept_all = |runner: &mut GameRunner| {
+        let mut last_responder = None;
+        while matches!(
+            runner.state().waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ) {
+            last_responder = Some(runner.state().priority_player);
+            act(
+                runner,
+                GameAction::RespondToShortcut {
+                    response: ShortcutResponse::Accept,
+                },
+            );
+        }
+        last_responder
+    };
+
+    let mut conceded = GameRunner::from_state(plain_priority.expect("P1 held priority"));
+    act(&mut conceded, GameAction::Concede { player_id: P1 });
+    assert_eq!(
+        handed_to(conceded.state()),
+        Some(p2),
+        "control: a concession at plain priority"
+    );
+
+    let mut declined = GameRunner::from_state(offer.clone());
+    act(&mut declined, GameAction::DeclineShortcut);
+
+    let mut rejected = GameRunner::from_state(offer.clone());
+    act(&mut rejected, declare(IterationCount::Fixed(u32::MAX)));
+    assert!(
+        !matches!(
+            rejected.state().waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ),
+        "reach: the over-cap declaration opens no window"
+    );
+
+    let mut refused = GameRunner::from_state(offer.clone());
+    act(&mut refused, declare(IterationCount::Fixed(3)));
+    assert!(
+        matches!(refused.state().waiting_for, WaitingFor::RespondToShortcut { player, .. } if player == p2),
+        "reach: the declaration polls P2: {:?}",
+        refused.state().waiting_for
+    );
+    act(&mut refused, GameAction::Concede { player_id: P1 });
+    assert_eq!(
+        accept_all(&mut refused),
+        Some(P0),
+        "hostile: the last polled responder holds `priority_player` at the refusal"
+    );
+    assert!(!engine::game::players::is_alive(refused.state(), P1));
+
+    assert_eq!(
+        [declined.state(), rejected.state(), refused.state()].map(handed_to),
+        [Some(P1), Some(P1), Some(p2)],
+        "decline, rejected declaration, refused proposal of a departed proposer"
+    );
+
+    let mut taken = GameRunner::from_state(offer);
+    act(&mut taken, declare(IterationCount::Fixed(3)));
+    accept_all(&mut taken);
+    assert_eq!(
+        handed_to(taken.state()),
+        Some(P0),
+        "control: the accepted take: {:?}",
+        taken.state().waiting_for
+    );
+    assert!(taken.state().stack.is_empty());
+}
+
 /// CR 702.8a + CR 702.10c: Kiki-Jiki copying Deceiver Exarch ("Flash … When this creature enters,
 /// choose one — • Untap target permanent you control. …") confirms, its copies' flash and haste
 /// and their delayed "sacrifice it" each grown. CR 702.9b + CR 732.2a: Pestermite's copies ("Flash
@@ -3274,14 +3400,7 @@ fn a_grove_marvin_period_is_offered_a_bounded_shortcut_and_taken() {
     let offered = runner.state().clone();
     let life = offered.players[1].life;
     let l = life as u32;
-    let certificate = bounded_recorded_offer(&offered, l);
-    assert_eq!(
-        certificate
-            .per_cycle
-            .as_ref()
-            .map(engine::analysis::resource::PeriodSignature::frames_per_period),
-        Some(2)
-    );
+    bounded_recorded_offer(&offered, l);
     assert!(offered.stack.is_empty());
 
     let three = taken(&offered, 3);

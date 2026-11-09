@@ -2155,8 +2155,9 @@ fn forced_winning_loop_is_won(drive: Drive) {
     assert_eq!(off.life(P1), 0, "Off {leg}");
 }
 
-/// CR 732.2c: a restored winning offer whose take refuses one repetition refuses P0's counted and
-/// until-lethal declarations with the board as it was, and the AI's only move is to decline.
+/// CR 732.2c: a restored winning offer whose take refuses one repetition refuses every counted
+/// declaration with the board as it was, and the AI's only move is to decline, which leaves
+/// priority with the proposer (CR 732.2a: suggesting a shortcut is the priority holder's option).
 #[test]
 fn a_restored_winning_offer_over_a_choice_refuses_every_counted_declaration() {
     let choice = UnperformableCause::UncontainedChoice;
@@ -2214,7 +2215,7 @@ fn a_restored_winning_offer_over_a_choice_refuses_every_counted_declaration() {
     }
     let (declined, _) = admitted(&restored, proposer, GameAction::DeclineShortcut, leg);
     assert!(
-        priority_to(&declined, restored.active_player),
+        priority_to(&declined, proposer),
         "{leg}: {:?}",
         declined.waiting_for
     );
@@ -3545,8 +3546,6 @@ fn goblin_tokens_created(events: &[GameEvent]) -> usize {
         .count()
 }
 
-const NO_WINNER: &str = "naming no winner";
-
 /// Asserts each player's view of the offer at `offered` carries the engine's counted take.
 fn assert_viewers_read_the_take(offered: &GameState, leg: &str) {
     for viewer in [P0, P1] {
@@ -3565,8 +3564,8 @@ fn armed(offered: &GameState) -> GameState {
     armed
 }
 
-/// Asserts the offer at `offered` carries `take`, so P0's counted and until-lethal declarations
-/// and P1's shortens past the current place are refused with the board as it was, while a
+/// Asserts the offer at `offered` carries `take`, so P0's counted declarations and P1's shortens
+/// past the current place are refused with the board as it was, while a
 /// declaration without end is admitted and a shorten at the current place gives P1 priority.
 pub(crate) fn assert_no_counted_take(offered: &GameState, take: CountedTake, leg: &str) {
     let offered = &armed(offered);
@@ -3580,13 +3579,6 @@ pub(crate) fn assert_no_counted_take(offered: &GameState, take: CountedTake, leg
         P0,
         declare(IterationCount::Fixed(3)),
         cause.reason(),
-        leg,
-    );
-    assert_refused(
-        offered,
-        P0,
-        declare(IterationCount::UntilLethal),
-        NO_WINNER,
         leg,
     );
     let (window, _) = admitted(offered, P0, DECLARE_WITHOUT_END, leg);
@@ -3609,17 +3601,10 @@ pub(crate) fn assert_no_counted_take(offered: &GameState, take: CountedTake, leg
 
 /// Asserts the offer at `offered` carries a counted take that performs: a proposal without end or
 /// a declared `Fixed(3)` shortened at place 2 drives two cycles and gives P1 priority, the
-/// accepted `Fixed(3)` drives three, and `UntilLethal`, naming no winner, is refused.
+/// accepted `Fixed(3)` drives three.
 fn assert_counted_take_performs(offered: &GameState, leg: &str) {
     assert_eq!(counted_take(offered), CountedTake::Performs, "{leg}");
     assert_viewers_read_the_take(offered, leg);
-    assert_refused(
-        offered,
-        P0,
-        declare(IterationCount::UntilLethal),
-        NO_WINNER,
-        leg,
-    );
     let (without_end, _) = admitted(offered, P0, DECLARE_WITHOUT_END, leg);
     let (_, one) = admitted(&without_end, P1, shorten_at(1), leg);
     let cycle = battlefield_entries(&one);
@@ -3644,8 +3629,7 @@ fn assert_counted_take_performs(offered: &GameState, leg: &str) {
 }
 
 /// CR 732.2b + CR 732.2c: on the Lightning Bolt board, beside P0's Soul Warden with its trigger
-/// ordered first or not, and over Wood Elves' shuffle, a counted take performs on every drive,
-/// and `UntilLethal` names no winner.
+/// ordered first or not, and over Wood Elves' shuffle, a counted take performs on every drive.
 #[test]
 fn a_without_end_offer_the_drain_delimits_takes_every_count() {
     let warden = Board {
@@ -4649,7 +4633,8 @@ fn a_restored_counted_proposal_over_a_choice_refuses_a_later_place() {
         let leg = format!("{:?}", board.first);
         assert_out_offer(&offered, &leg);
         let (window, _) = admitted(&armed(offered.state()), P0, DECLARE_WITHOUT_END, &leg);
-        for count in [IterationCount::Fixed(3), IterationCount::UntilLethal] {
+        {
+            let count = IterationCount::Fixed(3);
             let leg = format!("{leg} {count:?}");
             let mut counted = window.clone();
             let WaitingFor::RespondToShortcut { proposal, .. } = &mut counted.waiting_for else {

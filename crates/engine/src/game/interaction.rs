@@ -2980,14 +2980,9 @@ fn shortcut_preview_entries(
 ///
 /// `step` starts at 1 rather than 0 deliberately: at 0 the loop regenerates `min` itself, and the
 /// explicit `min` seed would then be unfalsifiable.
-///
-/// The exhaustive match is also the offer's single finite-count gate — `UntilLethal` names no
-/// number to multiply a period by, so it yields no sample and the caller publishes nothing.
 fn shortcut_preview_counts(count: &InteractionShortcutCountSpec) -> Vec<u32> {
     match count {
-        InteractionShortcutCountSpec::UntilLethal | InteractionShortcutCountSpec::WithoutEnd => {
-            Vec::new()
-        }
+        InteractionShortcutCountSpec::WithoutEnd => Vec::new(),
         InteractionShortcutCountSpec::Fixed {
             min,
             max,
@@ -3122,9 +3117,6 @@ struct VictimCharge {
 /// a `delta.life` with exactly ONE losing seat, and that seat one the declaration allocates
 /// to. Outside it the answer is `None` and the fold keeps `payload_seat`'s own keys — an
 /// unsplit magnitude on the right seat beats a split one on the wrong seats.
-///
-/// Deliberately NOT `analysis::resource::slot_charged_life`, which answers a different
-/// question — what TOTAL is liftable, largest loss first, refusing a tie.
 ///
 /// Four refusals, all fail-closed: no entry for the slot, a period whose life map names zero or
 /// several losing seats, a losing seat the declaration does not announce, and a per-period loss
@@ -3470,9 +3462,8 @@ fn loop_shortcut_preview(
 ///
 /// The count resolution is the exhaustive `(decision, count_spec)` match
 /// `declared_shortcut_preview` performs, `AcceptSuggested` included — that decision reaches this
-/// completion exactly as a `Fixed` one does. `UntilLethal` names no number to partition and
-/// returns on every arm, so this is structurally unreachable there; a new
-/// `InteractionShortcutCountSpec` variant build-breaks the match rather than falling through.
+/// completion exactly as a `Fixed` one does. A new `InteractionShortcutCountSpec` variant
+/// build-breaks the match rather than falling through.
 ///
 /// Consulted BEFORE legality, at the one chokepoint both the preview and the submit paths share,
 /// so a request that previews `Confirmable` submits the same sequenced announcement.
@@ -3497,7 +3488,7 @@ fn completed_shortcut_declaration(
         | (
             InteractionShortcutDecision::AcceptSuggested
             | InteractionShortcutDecision::Fixed { .. },
-            InteractionShortcutCountSpec::UntilLethal | InteractionShortcutCountSpec::WithoutEnd,
+            InteractionShortcutCountSpec::WithoutEnd,
         ) => {
             return None;
         }
@@ -3585,7 +3576,7 @@ fn declared_shortcut_preview(
         | (
             InteractionShortcutDecision::AcceptSuggested
             | InteractionShortcutDecision::Fixed { .. },
-            InteractionShortcutCountSpec::UntilLethal | InteractionShortcutCountSpec::WithoutEnd,
+            InteractionShortcutCountSpec::WithoutEnd,
         ) => return None,
     };
     let basis = shortcut_preview_basis(interaction_id, &projection)?;
@@ -3670,8 +3661,7 @@ fn scheduled_announcements(
 /// iterations a decision's announcements start at — successive differences, the last running to
 /// the count.
 ///
-/// The one place that rule is expressed, for every pin kind. An until-lethal proposal names no
-/// count to partition, so it declares an ORDER and no segment. The projection cuts every step
+/// The one place that rule is expressed, for every pin kind. The projection cuts every step
 /// the count does not reach before asking (`DecisionTemplate::cut_schedules_at`), so each segment
 /// is positive; `None` is a start past the count, which is a partition nobody could have declared.
 fn declared_segments(starts: &[u32], declared_count: Option<u32>) -> Option<Vec<u32>> {
@@ -3771,14 +3761,13 @@ fn declared_shortcut_projection(waiting_for: &WaitingFor) -> Option<DeclaredSequ
             max: iterations,
             suggested: iterations,
         },
-        IterationCount::UntilLethal => InteractionShortcutCountSpec::UntilLethal,
         IterationCount::WithoutEnd => InteractionShortcutCountSpec::WithoutEnd,
     };
     let declared_count = match proposal.count {
         IterationCount::Fixed(iterations) => Some(iterations),
-        // CR 732.1b: an until-lethal or endless proposal names no count to partition, so every
+        // CR 732.1b: an endless proposal names no count to partition, so every
         // arm below declares an ORDER and no segment.
-        IterationCount::UntilLethal | IterationCount::WithoutEnd => None,
+        IterationCount::WithoutEnd => None,
     };
 
     let mut candidates: Vec<LoopShortcutCandidateValue> = Vec::new();
@@ -4062,9 +4051,6 @@ fn loop_shortcut_projection(
                 suggested: suggested.clamp(1, max),
             }
         }
-        crate::analysis::decision_template::IterationCount::UntilLethal => {
-            InteractionShortcutCountSpec::UntilLethal
-        }
         crate::analysis::decision_template::IterationCount::WithoutEnd => {
             InteractionShortcutCountSpec::WithoutEnd
         }
@@ -4076,7 +4062,7 @@ fn loop_shortcut_projection(
     // other mint carries `None`, as does every save written before the field existed. The other
     // authority the magnitudes need — a FINITE count — is `count` above, and the two coincide by
     // construction rather than by luck: each producer mints a `Fixed` VARIANT, which is what
-    // selects the finite arm, and no clamp can turn a `Fixed` into an `UntilLethal`.
+    // selects the finite arm.
     let per_cycle = certificate.per_cycle.clone();
     let mut candidates = Vec::new();
     let mut points = Vec::with_capacity(schema.points.len());
@@ -11001,10 +10987,6 @@ fn materialize_loop_shortcut_response(
     let count = match (*decision, projection.count) {
         (
             InteractionShortcutDecision::AcceptSuggested,
-            InteractionShortcutCountSpec::UntilLethal,
-        ) => IterationCount::UntilLethal,
-        (
-            InteractionShortcutDecision::AcceptSuggested,
             InteractionShortcutCountSpec::WithoutEnd,
         ) => IterationCount::WithoutEnd,
         (
@@ -11082,10 +11064,8 @@ fn materialize_loop_shortcut_response(
         let sequenced = !pin.amounts.is_empty() || pin.choice_ids.len() > point.max as usize;
         // CR 732.2a: a SEQUENCED pin is ONE target position's partition of a DECLARED count, and
         // nothing else. A multi-position slot needs a per-position carrier a flat list cannot
-        // express; an until-lethal proposal has no count to partition, so a sequence there names
-        // announcements past the head that no drive ever reads (CR 732.2c). Both are refused
-        // rather than mis-read. Binding the count here carries "this can only be a `Fixed`
-        // partition" in the type instead of in a comment.
+        // express, so it is refused rather than mis-read. Binding the count here carries "this
+        // can only be a `Fixed` partition" in the type instead of in a comment.
         let sequenced_partition: Option<u32> = if sequenced {
             match (&count, &point.kind) {
                 (IterationCount::Fixed(declared), InteractionShortcutPointKind::Targets)
@@ -11353,9 +11333,7 @@ fn shortcut_announcement_subject(
 /// the running prefix sums, so the pin is a `TargetSchedule::Piecewise`. Positive parts summing
 /// to `declared` put every segment start inside `0..declared`, which is the range
 /// `game::engine::shortcut_validated_range` validates, so this producer can never mint a
-/// `ScheduleExhausted`. An until-lethal proposal names no count to partition and is not
-/// sequenced at all — its caller refuses the shape before reaching here, and its submission
-/// decodes through the ordinary flat `Targets` arm.
+/// `ScheduleExhausted`.
 ///
 /// `Ranking::new` validates the sequence, and it is the only thing that can:
 /// `loop_shortcut_projection` hard-codes `unique: false` into every `Targets` point it mints,
@@ -12556,7 +12534,7 @@ mod tests {
     ///   measured field is observable at all.
     /// * ⓑ the production-reachable boundary — a threshold ABOVE the budget, whose capacity is
     ///   therefore the budget. The pair a real above-budget board carries.
-    /// * ⓒ the hostile sibling — `UntilLethal` publishes NO finite ceiling, stated on the
+    /// * ⓒ the hostile sibling — `WithoutEnd` publishes NO finite ceiling, stated on the
     ///   SUGGESTION's variant rather than on `is_bounded()`: an un-narrowed object-growth offer
     ///   measures no threshold and still publishes a finite ceiling, so the two are not the same
     ///   question.
@@ -12653,12 +12631,12 @@ mod tests {
              publishes it"
         );
 
-        // ⓒ the hostile sibling: a measured threshold beside an `UntilLethal` suggestion still
+        // ⓒ the hostile sibling: a measured threshold beside a `WithoutEnd` suggestion still
         //   publishes no finite ceiling, because the finite arm is chosen on the VARIANT.
         assert_eq!(
-            offer_at(IterationCount::UntilLethal, Some(12), 12),
-            InteractionShortcutCountSpec::UntilLethal,
-            "CR 732.2a: `UntilLethal` names no count, so there is no ceiling to publish"
+            offer_at(IterationCount::WithoutEnd, Some(12), 12),
+            InteractionShortcutCountSpec::WithoutEnd,
+            "CR 732.2a: `WithoutEnd` names no count, so there is no ceiling to publish"
         );
     }
 

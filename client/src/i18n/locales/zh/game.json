@@ -1165,9 +1165,6 @@
     "allocationIncreaseAria": "增加{{subject}}的重复次数",
     "allocationSum": "已分配 {{total}} 次重复中的 {{allocated}} 次。",
     "allocationTitle": "将重复次数分配到各目标：",
-    "announce": "宣告",
-    "announceAria": "宣告{{subject}}",
-    "announceTitle": "选择每次重复宣告的目标：",
     "confirm": "使用捷径",
     "convokeInfo_one": "每次循环自动横置至多 1 个生物以召集。",
     "convokeInfo_other": "每次循环自动横置至多 {{count}} 个生物以召集。",
@@ -1200,7 +1197,6 @@
     "respondSubtitle": "对手提议使用循环捷径。你可以接受，或指定该序列停止的位置。",
     "respondTitle": "有人提议循环捷径",
     "shorten": "缩短循环",
-    "untilLethal": "重复直到游戏结束。",
     "withoutEnd": "无限重复。若所有玩家都接受，本局游戏为平局。",
     "winKind": {
       "Advantage": "此循环能产生无限的优势。",

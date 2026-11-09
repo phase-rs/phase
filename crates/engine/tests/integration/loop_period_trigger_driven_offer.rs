@@ -6,9 +6,6 @@
 //! rebuilt. Both answer the CR 603.3b ordering prompt with `altar_resolves_first`, except where a
 //! row names `identity_order`.
 
-use std::collections::BTreeMap;
-use std::path::Path;
-
 use engine::analysis::decision_template::{
     declaration_conforms, validate_recorded_answers, AimContext, ChoicePoint, DecisionSlot,
     DecisionTemplate, IterationCount, MayChoiceOption, PinValidation, PinnedDecision, TargetPin,
@@ -20,7 +17,8 @@ use engine::game::NamingCause;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
-    CastPaymentMode, GameState, LoopDetectionMode, StackEntryKind, WaitingFor, YieldTarget,
+    CastPaymentMode, GameState, LoopDetectionMode, PersistedGameState, StackEntryKind, WaitingFor,
+    YieldTarget,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::zones::Zone;
@@ -203,41 +201,6 @@ fn token_count(state: &GameState) -> usize {
         .iter()
         .filter(|id| state.objects.get(id).is_some_and(|object| object.is_token))
         .count()
-}
-
-type PlayerZones = (i32, Vec<ObjectId>, Vec<ObjectId>, Vec<ObjectId>);
-
-type BoardFingerprint = (
-    BTreeMap<ObjectId, (Zone, bool)>,
-    Vec<PlayerZones>,
-    Vec<ObjectId>,
-    Vec<ObjectId>,
-);
-
-/// Every object's zone and tapped state, each player's life, library, hand and graveyard, the
-/// stack, and the battlefield.
-fn board_fingerprint(state: &GameState) -> BoardFingerprint {
-    (
-        state
-            .objects
-            .values()
-            .map(|object| (object.id, (object.zone, object.tapped)))
-            .collect(),
-        state
-            .players
-            .iter()
-            .map(|player| {
-                (
-                    player.life,
-                    player.library.iter().copied().collect(),
-                    player.hand.iter().copied().collect(),
-                    player.graveyard.iter().copied().collect(),
-                )
-            })
-            .collect(),
-        state.stack.iter().map(|entry| entry.id).collect(),
-        state.battlefield.iter().copied().collect(),
-    )
 }
 
 impl Drive {
@@ -423,11 +386,13 @@ fn a_trigger_driven_period_is_offered_at_its_first_recurrence_window_and_taken()
         }
     }
 
-    let restored = crate::committed_dump_walk::restore_committed(
-        &Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/combo_infinite_pile_4p_offer.json.gz"),
+    let restored = serde_json::from_value::<PersistedGameState>(
+        serde_json::to_value(crate::combo_infinite_pile::offer_state())
+            .expect("the live offer encodes"),
     )
-    .expect("the committed offer restores");
+    .expect("the live offer decodes")
+    .into_game_state()
+    .expect("the live offer restores");
     assert!(
         matches!(
             restored.waiting_for,
@@ -585,53 +550,8 @@ fn board_b_is_offered_at_its_base_window_with_its_target_answers() {
     );
 }
 
-/// CR 732.2a: an until-lethal proposal names an ending point where a player loses, so on a
-/// trigger-driven offer, whose mint names no winner, it is refused with the offer, the board and
-/// the trace unchanged.
-#[test]
-fn an_until_lethal_take_of_a_trigger_driven_offer_changes_nothing() {
-    let Some((mut drive, _)) = offered(Board::A) else {
-        return;
-    };
-    let offer = board_fingerprint(drive.state());
-    let trace = format!("{:?}", engine::game::play_trace_view(drive.state()));
-    let refused = drive
-        .runner
-        .act(GameAction::DeclareShortcut {
-            count: IterationCount::UntilLethal,
-            template: None,
-        })
-        .err();
-    assert!(
-        matches!(
-            refused,
-            Some(engine::game::engine::EngineError::InvalidAction(_))
-        ),
-        "{refused:?}"
-    );
-    let state = drive.state();
-    assert!(
-        matches!(
-            state.waiting_for,
-            WaitingFor::LoopShortcut {
-                proposer: P0,
-                predicted_winner: None,
-                ..
-            }
-        ),
-        "the offer stays open; got {}",
-        state.waiting_for.variant_name()
-    );
-    assert_eq!(board_fingerprint(state), offer, "the board is the offer's");
-    assert_eq!(
-        format!("{:?}", engine::game::play_trace_view(state)),
-        trace,
-        "the trace is the offer's"
-    );
-}
-
-/// The AI's candidates at Board A's offer, which names no winner, hold no until-lethal
-/// declaration, so its one legal answer is the decline.
+/// The AI's candidates at Board A's offer, which names no winner, hold no declaration, so its one
+/// legal answer is the decline.
 #[test]
 fn the_ai_answers_a_trigger_driven_offer_naming_no_winner_with_the_decline() {
     let Some((drive, _)) = offered(Board::A) else {

@@ -1393,9 +1393,7 @@ fn board_observer_may_react(state: &GameState, actor: PlayerId) -> bool {
 /// Its cost, on both axes, for the reader deciding whether that matters:
 ///   - across windows: a bounded miss — a seat's fetched answer goes unused for
 ///     THIS shortcut;
-///   - within the window: NOT bounded by "one shortcut". On an `UntilLethal`
-///     offer the accepted sequence runs to lethal, so the in-window cost of a
-///     missed out is elimination.
+///   - within the window: NOT bounded by "one shortcut".
 ///
 /// The miss requires the out to be reachable ONLY through the fetched permanent
 /// AND that permanent to arrive tapped; a directly-castable answer is already

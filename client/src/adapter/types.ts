@@ -4306,7 +4306,7 @@ export interface LoopCertificate {
  * Mirrors `engine::analysis::decision_template::IterationCount` (serde externally
  * tagged: unit variant → bare string, data variant → single-key object).
  */
-export type IterationCount = "UntilLethal" | "WithoutEnd" | { Fixed: number };
+export type IterationCount = "WithoutEnd" | { Fixed: number };
 
 /**
  * Mirrors `engine::analysis::decision_template::ShortcutDecisionSchema`

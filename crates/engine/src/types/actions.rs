@@ -980,10 +980,9 @@ pub enum GameAction {
         player_id: PlayerId,
     },
     /// CR 732.2a: the proposer (the loop's determinate winner, holding priority)
-    /// declares the loop shortcut. `count` is the repeat count — Phase 3 only produces
-    /// [`IterationCount::UntilLethal`]. `template` pins the per-iteration choices for a
-    /// choice-bearing loop, and `Some` IS accepted and consumed: the declare handler binds
-    /// `template.owner` to the engine-issued `offer.proposer` (CR 603.5 — a proposer may pin only
+    /// declares the loop shortcut. `count` is the repeat count. `template` pins the
+    /// per-iteration choices for a choice-bearing loop, and `Some` IS accepted and consumed: the
+    /// declare handler binds `template.owner` to the engine-issued `offer.proposer` (CR 603.5 — a proposer may pin only
     /// their own choices) and, for a non-empty schema, requires
     /// `decision_template::{predictability_gate, validate_pins}` to pass before the pins drive the
     /// cycle; any failure rejects the declaration and hands back to manual play. That owner binding

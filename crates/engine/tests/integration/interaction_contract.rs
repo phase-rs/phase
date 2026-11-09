@@ -3643,7 +3643,6 @@ fn preview_offer_with_points(
             per_cycle: per_cycle.map(|delta| {
                 engine::analysis::resource::PeriodSignature::EveryRepetition(
                     engine::analysis::resource::PeriodicDelta {
-                        frames_per_period: 1,
                         delta,
                         declarable_victims: Vec::new(),
                         forced_aims: Vec::new(),
@@ -3886,17 +3885,17 @@ fn loop_shortcut_preview_is_absent_without_both_a_period_and_a_finite_count() {
         "an offer that states no per-period signature has nothing to multiply"
     );
 
-    // ── CR 704.5a: `UntilLethal` is the determinate-drain mode. It names no number, so
-    //    there is no declared count to state a finished magnitude for — even though the
-    //    period here IS measured, which is what keeps this arm distinct from the one above.
+    // ── A proposal without end names no number, so there is no declared count to state a
+    //    finished magnitude for — even though the period here IS measured, which is what keeps
+    //    this arm distinct from the one above.
     assert_eq!(
         shortcut_preview_of(&preview_offer(
-            IterationCount::UntilLethal,
+            IterationCount::WithoutEnd,
             Some(4),
             Some(preview_period_delta()),
         )),
         Vec::new(),
-        "`UntilLethal` states no finite count to multiply the period by"
+        "`WithoutEnd` states no finite count to multiply the period by"
     );
 
     // ── A period whose every family nets to zero (one W gained and one W spent) states
@@ -4468,7 +4467,6 @@ fn respond_period(
         delta.life.insert(*seat, *amount);
     }
     engine::analysis::resource::PeriodicDelta {
-        frames_per_period: 1,
         delta,
         declarable_victims: Vec::new(),
         forced_aims: Vec::new(),
@@ -5277,7 +5275,7 @@ fn a_scheduled_step_carrying_a_next_episode_tail_still_states_this_drive() {
 /// `evaluate_schedule` resolves `Ranking::head` for a schedule of every kind and never advances
 /// past it, so no iteration announces a ranking's tail. The responder is shown one subject per
 /// step — what the drive performs — and that subject
-/// takes the whole of its step. CR 732.1b: an until-lethal proposal names no count to partition,
+/// takes the whole of its step. CR 732.1b: a proposal without end names no count to partition,
 /// so it states an ORDER and no magnitude.
 ///
 /// # Discrimination
@@ -5319,11 +5317,11 @@ fn a_multi_subject_schedule_states_the_head_its_drive_announces() {
         ))
     };
 
-    for count in [IterationCount::UntilLethal, IterationCount::Fixed(COUNT)] {
+    for count in [IterationCount::WithoutEnd, IterationCount::Fixed(COUNT)] {
         // A one-step schedule partitions the whole declared count, and nothing at all when the
         // proposal names no count.
         let partition = match &count {
-            IterationCount::UntilLethal | IterationCount::WithoutEnd => None,
+            IterationCount::WithoutEnd => None,
             IterationCount::Fixed(n) => Some(vec![*n]),
         };
         for ((shape, tailed), (_, single)) in shapes(&TAILED).into_iter().zip(shapes(&HEAD)) {
@@ -5424,7 +5422,7 @@ fn a_step_the_declared_count_never_reaches_is_not_stated() {
 /// **CR 732.1b — an order-only declaration publishes the ORDER its drive announces in, and no
 /// magnitude.**
 ///
-/// An until-lethal proposal names no count, so there is nothing for a partition to divide and a
+/// A proposal without end names no count, so there is nothing for a partition to divide and a
 /// magnitude stated there could only be invented. What it does state is the sequence of
 /// announcements the proposer described (CR 732.2a) — one subject per scheduled step, in their
 /// order — which is the object CR 732.2b gives the responder the right to shorten.
@@ -5438,7 +5436,7 @@ fn a_step_the_declared_count_never_reaches_is_not_stated() {
 ///
 /// # Discrimination
 ///
-/// Resolve `declared_count` to anything but `None` for an until-lethal proposal ⇒ the order-only
+/// Resolve `declared_count` to anything but `None` for a proposal without end ⇒ the order-only
 /// board states a partition and the `is_none` leg fails. Publish the steps in any other order, or
 /// only the first ⇒ the seat equality fails on both boards.
 #[test]
@@ -5480,7 +5478,7 @@ fn an_order_only_declaration_publishes_its_announcement_order_and_no_magnitude()
         segments_from(&STARTS, COUNT),
     );
 
-    let order_only = window(IterationCount::UntilLethal);
+    let order_only = window(IterationCount::WithoutEnd);
     let seats = announced_seats(&order_only);
     assert_eq!(
         seats,
@@ -5497,7 +5495,7 @@ fn an_order_only_declaration_publishes_its_announcement_order_and_no_magnitude()
     );
     assert!(
         order_only.declared.is_none(),
-        "CR 732.1b: an until-lethal proposal names no count, so there is no partition to state \
+        "CR 732.1b: a proposal without end names no count, so there is no partition to state \
          and any magnitude here would be invented. got {:?}",
         order_only.declared
     );
@@ -6234,7 +6232,7 @@ fn the_published_preview_always_states_the_count_window_endpoints() {
 /// REVERT-PROBES: drop the `counts.len() < MAX_SHORTCUT_PREVIEW_ELEMENTS` guard ⇒ the cap leg
 /// fails, the separating window then publishing 18; collapse the stride to 1 ⇒ the spread leg
 /// fails and NO other leg moves, because a stride of 1 fills the cap just as well; yield a
-/// non-empty sample for `UntilLethal` ⇒ the finite-count leg fails.
+/// non-empty sample for `WithoutEnd` ⇒ the finite-count leg fails.
 #[test]
 fn the_published_preview_thins_its_interior_and_stops_at_the_element_cap() {
     let offer = shortcut_offer_of(&separating_window());
@@ -6300,16 +6298,16 @@ fn the_published_preview_thins_its_interior_and_stops_at_the_element_cap() {
         );
     }
 
-    // ── HOSTILE: `UntilLethal` names no number, so the exhaustive match yields no sample and
+    // ── HOSTILE: `WithoutEnd` names no number, so the exhaustive match yields no sample and
     //    the producer publishes nothing — the offer's single finite-count gate.
     assert!(
         shortcut_preview_of(&preview_offer(
-            IterationCount::UntilLethal,
+            IterationCount::WithoutEnd,
             Some(999),
             Some(preview_period_delta()),
         ))
         .is_empty(),
-        "`UntilLethal` states no finite count, so no element is published"
+        "`WithoutEnd` states no finite count, so no element is published"
     );
 }
 
@@ -8480,7 +8478,7 @@ fn activate_mana_source_labels_fixed_and_flexible_sacrificial_sources() {
 
 // ═════════════════════════════════════════════════════════════════════════════════════════
 // PHASE 4 — the SEQUENCED-pin ingress: the A3 coherence relation, the hostile allocations,
-// the until-lethal withdrawal, the wire charge, serde additivity, and the progress window.
+// the count-free withdrawal, the wire charge, serde additivity, and the progress window.
 // ═════════════════════════════════════════════════════════════════════════════════════════
 
 /// CR 732.2a: which [`ChoicePoint`] a PUBLISHED point's own kind names. Written here rather
@@ -8552,8 +8550,7 @@ fn stage_sequenced_offer(
             suggested_declaration: None,
             leading_aims: Vec::new(),
             iteration_count,
-            // The pair a producer publishes: `None` is an offer that measured nothing, which is
-            // what keeps `handle_declare_shortcut`'s `UntilLethal` arm reachable below.
+            // The pair a producer publishes: `None` is an offer that measured nothing.
             measured_repetition_bound: measured,
             deliverable_capacity: measured.map_or(
                 ShortcutDecisionSchema::default().deliverable_capacity,
@@ -8944,17 +8941,17 @@ fn p4_row_4_hostile_allocations_are_refused_each_at_its_own_guard() {
     );
 }
 
-/// **Row (5) — the human ingress no longer mints a sequenced until-lethal pin, and the FIXED
-/// one still does.**
+/// **Row (5) — the human ingress mints no sequenced pin without end, and the FIXED one still
+/// does.**
 ///
-/// CR 732.2c: an accepted proposal's choices are all taken, so an until-lethal declaration may
+/// CR 732.2c: an accepted proposal's choices are all taken, so a declaration without end may
 /// announce only the ONE subject its drive resolves at every repetition. Under a FIXED count the
 /// extra ids are a partition across ITERATIONS and every one of them becomes its own segment's
 /// head, so that mode is untouched.
 ///
 /// # Discrimination
 ///
-/// Restore the until-lethal sequenced route ⇒ the first leg accepts. Refuse EVERY until-lethal
+/// Admit a sequenced pin without end ⇒ the first leg accepts. Refuse EVERY count-free
 /// `Targets` submission rather than only the sequenced one — the shape a guard written on the
 /// count alone would have — ⇒ the second leg fails. Refuse every sequenced pin ⇒ the FIXED legs
 /// fail. The guard's other two conjuncts (the point's KIND, and its published `max`) keep their
@@ -8962,14 +8959,14 @@ fn p4_row_4_hostile_allocations_are_refused_each_at_its_own_guard() {
 /// `p4_row_3_the_sequenced_pin_coherence_relation_refuses_each_incoherent_shape`, so a rewrite
 /// dropping either while adding the count one passes every leg here and fails that row.
 #[test]
-fn p4_row_5_an_until_lethal_declaration_announces_the_one_subject_its_drive_resolves() {
+fn p4_row_5_a_declaration_without_end_announces_the_one_subject_its_drive_resolves() {
     use engine::analysis::decision_template::{
         AnnouncementSubject, PinnedDecision, Ranking, TargetPin, TargetSchedule,
     };
 
     let (runner, slots) = stage_sequenced_offer(
         "p4-announce-one",
-        IterationCount::UntilLethal,
+        IterationCount::WithoutEnd,
         Some(6),
         vec![victims_point(1, 1)],
     );
@@ -8982,7 +8979,7 @@ fn p4_row_5_an_until_lethal_declaration_announces_the_one_subject_its_drive_reso
          the published max and a one-id submission can name a candidate other than the head"
     );
 
-    // ── REFUSE: more ids than the point's published `max`, on an until-lethal offer. ──
+    // ── REFUSE: more ids than the point's published `max`, on an offer without end. ──
     let over_max = submit_pins(
         runner.state(),
         &view,
@@ -9012,7 +9009,7 @@ fn p4_row_5_an_until_lethal_declaration_announces_the_one_subject_its_drive_reso
             amounts: Vec::new(),
         }],
     )
-    .expect("a one-subject until-lethal declaration is accepted to the end of the human ingress");
+    .expect("a one-subject declaration without end is accepted to the end of the human ingress");
     let GameAction::DeclareShortcut {
         template: Some(template),
         count,
@@ -9020,7 +9017,7 @@ fn p4_row_5_an_until_lethal_declaration_announces_the_one_subject_its_drive_reso
     else {
         panic!("a shortcut acceptance carrying pins materializes a template");
     };
-    assert_eq!(count, IterationCount::UntilLethal);
+    assert_eq!(count, IterationCount::WithoutEnd);
     assert_eq!(
         template.decisions,
         vec![PinnedDecision::Targets {
@@ -9491,8 +9488,8 @@ fn untargeted_offer_board() -> (GameState, PlayerId) {
 ///
 /// # Reach guards, asserted before the claim
 ///
-/// Both legs assert the spec is the `Fixed` variant and that `max` is strictly positive, so an
-/// `UntilLethal` projection or a zeroed authority fails rather than passing by absence; and
+/// Both legs assert the spec is the `Fixed` variant and that `max` is strictly positive, so a
+/// `WithoutEnd` projection or a zeroed authority fails rather than passing by absence; and
 /// `suggested` is asserted inside `[min, max]`, which is the window the picker renders.
 ///
 /// # Discrimination
@@ -10875,11 +10872,6 @@ fn targets_template(
 ///
 /// Each call stages its OWN offer: a declaration consumes it, so one runner cannot serve a
 /// second leg.
-///
-/// ⚠ the measured threshold is a parameter and not a constant because
-/// `handle_declare_shortcut` refuses `UntilLethal` outright on an offer whose producer MEASURED
-/// one, before any pin is read. An until-lethal leg staged that way lands on `Priority` for a
-/// reason with nothing to do with the pin, and every leg then agrees.
 fn declare_targets_verdict(
     label: &str,
     count: IterationCount,
@@ -10930,12 +10922,11 @@ fn accepted(verdict: &WaitingFor) -> bool {
 /// subject.
 #[test]
 fn p10_row_1_a_declaration_naming_an_unread_announcement_is_refused_at_the_declare_ingress() {
-    // An offer whose producer measured nothing: the shape the `UntilLethal` legs below need.
     let unbounded: Option<u32> = None;
 
     let hostile = declare_targets_verdict(
         "p10-row1-hostile",
-        IterationCount::UntilLethal,
+        IterationCount::WithoutEnd,
         unbounded,
         (1, 1),
         vec![constant_of(&[P1, P0])],
@@ -10947,7 +10938,7 @@ fn p10_row_1_a_declaration_naming_an_unread_announcement_is_refused_at_the_decla
 
     let head_only = declare_targets_verdict(
         "p10-row1-positive",
-        IterationCount::UntilLethal,
+        IterationCount::WithoutEnd,
         unbounded,
         (1, 1),
         vec![constant_of(&[P1])],
@@ -10961,7 +10952,7 @@ fn p10_row_1_a_declaration_naming_an_unread_announcement_is_refused_at_the_decla
 
     let unpublished_head = declare_targets_verdict(
         "p10-row1-control",
-        IterationCount::UntilLethal,
+        IterationCount::WithoutEnd,
         unbounded,
         (1, 1),
         vec![constant_of(&[P0])],

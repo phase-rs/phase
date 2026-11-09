@@ -414,9 +414,8 @@ pub enum PinnedDecision {
 /// offer construction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShortcutDecisionSchema {
-    /// CR 732.1b: the proposed repeat mode. `UntilLethal` for a determinate CR 704.5a /
-    /// CR 704.5c drain; `Fixed(n)` seeds the frontend count picker for an optional loop, and is
-    /// the count [`ShortcutDecisionSchema::suggestion`] drives — the count roles are stated on
+    /// CR 732.1b: the proposed repeat mode. `Fixed(n)` seeds the frontend count picker for an
+    /// optional loop, and is the count [`ShortcutDecisionSchema::suggestion`] drives — the count roles are stated on
     /// [`ShortcutDecisionSchema::suggested_declaration`].
     pub iteration_count: IterationCount,
     /// CR 732.2a: the repetition bound this offer's producer MEASURED — the CR 704 threshold
@@ -477,7 +476,7 @@ pub struct ShortcutDecisionSchema {
     ///   published, else the published declaration's own count.
     #[serde(default)]
     pub suggested_declaration: Option<DecisionTemplate>,
-    /// CR 603.3d + CR 601.2c: when the top stack entry at the offer is a published target slot's
+    /// CR 603.3d + CR 601.2c: when the top stack entry at the offer is a charged target slot's
     /// trigger, the seat it latched — the aim its first repetition resolves. A
     /// snapshot for `game::interaction`, which reads no `GameState`; the engine's own seams
     /// re-read it off the board they ask about (`game::engine::leading_announcement_aims`).
@@ -745,11 +744,6 @@ pub enum ReplayMode {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum IterationCount {
     Fixed(u32),
-    /// CR 704.5a + CR 732.1b: repeat until a player is at 0-or-less life — the driver
-    /// PR-7 Phase 3 adds for the interactive loop-shortcut of a determinate lethal drain.
-    /// The terminating condition is the SBA, not a caller-supplied count. (`UntilResource`
-    /// stays deferred to Phase 4/B5.)
-    UntilLethal,
     /// CR 104.4b + CR 732.4: repeat a loop whose in-loop actions are all mandatory with no
     /// ending point; once every player accepts, the game is a draw.
     WithoutEnd,
@@ -1737,9 +1731,8 @@ pub enum AimViolation {
 /// are not its own, which is not what CR 732.2a's "predictable results of the sequence of
 /// choices" quantifies over. The attributable reading subtracts those aims out and lets an
 /// unresolved term fall to the ADMITTING side. That is sound here and nowhere else in this
-/// chain: a wrongly admitted declaration is caught three times at the drive — CR 704.3's live
-/// sweep, [`crate::analysis::resource::PeriodicDelta::conforms_in`], and the departure verdict —
-/// while nothing at all catches a wrongly refused one, which simply loses CR 732.2a's licence
+/// chain: a wrongly admitted declaration is caught twice at the drive — CR 704.3's live sweep
+/// and the departure verdict — while nothing at all catches a wrongly refused one, which simply loses CR 732.2a's licence
 /// with no instrument that says so.
 ///
 /// A departure ON a repetition is admitted — that repetition's choice is made before CR 704.3's
@@ -2102,7 +2095,7 @@ mod tests {
         let schema = ShortcutDecisionSchema {
             suggested_declaration: None,
             leading_aims: Vec::new(),
-            iteration_count: IterationCount::UntilLethal,
+            iteration_count: IterationCount::WithoutEnd,
             // BOTH published answers, each deliberately distinct from its own default: a
             // round-trip carrying a default would pass even if that field were dropped from
             // the wire. They are also distinct from EACH OTHER, so a wire that serialized one

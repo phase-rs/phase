@@ -95,13 +95,16 @@ static OFFER_STATE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     ))
 });
 
-/// The dump's offer, re-reached live: the captured offer carries no confirmed period, so it is
-/// declined and one more real Sprout Swarm cycle (buyback, convoking an untapped Saproling) brings
-/// the offer back with its period.
+/// The dump's offer, re-reached live: the save stands at P0's priority, and one more real Sprout
+/// Swarm cycle (buyback, convoking an untapped Saproling) brings the offer with its period.
 pub(crate) fn offer_state() -> GameState {
-    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
+    let state: GameState = serde_json::from_str(&OFFER_STATE)
         .expect("the real 4p offer dump must deserialize into the current GameState");
-    apply(&mut state, P0, GameAction::DeclineShortcut).expect("P0 declines the captured offer");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+        "the save stands at P0's priority, got {:?}",
+        state.waiting_for
+    );
     let fodder = state
         .battlefield
         .iter()

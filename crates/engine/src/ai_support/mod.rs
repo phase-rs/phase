@@ -1871,9 +1871,7 @@ pub fn smart_shortcut_response(
         return crate::analysis::loop_check::ShortcutResponse::Accept;
     }
 
-    // Arm (B). No bounded/unbounded exemption: an `IterationCount::Fixed(n)`
-    // offer ends the game just as surely as an `UntilLethal` one, so both
-    // classes take the identical rule.
+    // Arm (B). No bounded/unbounded exemption.
     //
     // The fold reads [`stage_two_action_set`], never the bare flat `actions` —
     // see that function for the coverage invariant and what folding over the

@@ -931,10 +931,7 @@ pub struct InteractionShortcutPin {
     /// outnumber the point's published `max` — and both limbs bind the same partition,
     /// which only an `IterationCount::Fixed` can fill. Under a fixed count that
     /// partition is `amounts`: one part per announced subject, in the sequence's own
-    /// order, every part at least 1, summing to the DECLARED count. An until-lethal
-    /// count has nothing to partition and refuses BOTH limbs — an empty `amounts` does
-    /// not rescue a longer `choice_ids` list — so no announcement order past the head
-    /// is declarable through this ingress.
+    /// order, every part at least 1, summing to the DECLARED count.
     ///
     /// A sequenced pin is admissible only on a `Targets` point whose published `max`
     /// is 1: a multi-position slot needs a per-position carrier a flat list cannot
@@ -1067,8 +1064,7 @@ pub enum InteractionResponseSpec {
     /// `declared` is what the DECLARED count does: the same element vocabulary the offer's own
     /// published list carries, minted by the same producer over the allocation the proposer
     /// actually declared. Absent only on a declaration whose PARTITION cannot be stated: an
-    /// order-only one (CR 732.1b: an until-lethal proposal names no count to partition, so a
-    /// magnitude there could only be invented), and one whose segments cannot be read back
+    /// order-only one, and one whose segments cannot be read back
     /// against the announced-target decision's own published ids and total. A declaration whose
     /// partition IS stated and whose magnitudes are not — a proposal carrying no per-period
     /// signature, or one whose per-slot life charge resolves to a seat the declaration never
@@ -1115,7 +1111,6 @@ pub enum InteractionResponseSpec {
 )]
 pub enum InteractionShortcutCountSpec {
     Fixed { min: u32, max: u32, suggested: u32 },
-    UntilLethal,
     WithoutEnd,
 }
 

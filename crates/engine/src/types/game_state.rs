@@ -16134,6 +16134,23 @@ fn delayed_trigger_install_command_mut(
         .as_object_mut()
 }
 
+/// A ring-road offer or proposal carries no confirmed period; a recorded-road offer, bounded or
+/// not, carries the period it confirmed. Shared so the offer and the proposal
+/// declared against it refuse the same pair.
+fn reject_period_on_the_ring_road(
+    road: crate::analysis::loop_check::OfferRoad,
+    period: &crate::game::period_confirm::ConfirmedPeriod,
+    host: &str,
+) -> Result<(), String> {
+    if road == crate::analysis::loop_check::OfferRoad::Ring && !period.is_empty() {
+        return Err(format!(
+            "persisted {host} minted on the ring road carries a confirmed period, which routes \
+             the agreed cycles away from the ring drain"
+        ));
+    }
+    Ok(())
+}
+
 /// CR 732.2a: a shortcut proposal describes "a sequence of game choices ... that may be
 /// legally taken based on the current game state". A restored `LoopShortcut` OFFER whose
 /// bound is `0` can describe no such sequence — it admits only the empty one — so the
@@ -16164,49 +16181,9 @@ fn delayed_trigger_install_command_mut(
 /// the budget belongs here; and an ABSENT capacity key decodes to the budget through its own
 /// `#[serde(default)]`, while a save written in the pre-split shape has its single legacy count
 /// mapped onto both fields by `migrate_legacy_shortcut_repetition_bound` before serde runs.
-/// CR 732.2a: a certified period spanning ZERO frames is not a period.
-///
-/// Single authority for the field so both wire hosts enforce identically — the offer's
-/// `LoopCertificate::per_cycle` and the proposal's `ShortcutProposal::per_cycle` are different
-/// structs carrying the same `PeriodSignature`, and only the second is what the drive reads.
-fn reject_zero_frames_per_period(
-    period: &Option<crate::analysis::resource::PeriodSignature>,
-    host: &str,
-) -> Result<(), String> {
-    if period
-        .as_ref()
-        .is_some_and(|signature| signature.frames_per_period() == 0)
-    {
-        return Err(format!(
-            "persisted {host} states frames_per_period 0, which delimits every committed cycle \
-             at the first priority beat rather than at the certified CR 732.2a period"
-        ));
-    }
-    Ok(())
-}
-
-/// A ring-road offer or proposal carries no confirmed period, because its take is the ring drain
-/// and `take_route` routes a carried period to the mark or the replay instead; a recorded-road
-/// offer, bounded or not, carries the period it confirmed. Shared so the offer and the proposal
-/// declared against it refuse the same pair.
-fn reject_period_on_the_ring_road(
-    road: crate::analysis::loop_check::OfferRoad,
-    period: &crate::game::period_confirm::ConfirmedPeriod,
-    host: &str,
-) -> Result<(), String> {
-    if road == crate::analysis::loop_check::OfferRoad::Ring && !period.is_empty() {
-        return Err(format!(
-            "persisted {host} minted on the ring road carries a confirmed period, which routes \
-             the agreed cycles away from the ring drain"
-        ));
-    }
-    Ok(())
-}
-
 fn reject_zero_bound_shortcut_offer(state: &GameState) -> Result<(), String> {
     if let WaitingFor::LoopShortcut {
         schema,
-        certificate,
         road,
         period,
         ..
@@ -16222,37 +16199,8 @@ fn reject_zero_bound_shortcut_offer(state: &GameState) -> Result<(), String> {
         // After the zero-capacity check, so a corrupt zero bound carrying a period is refused as
         // the zero it is.
         reject_period_on_the_ring_road(*road, period, "LoopShortcut offer")?;
-        // The SIBLING wire zero. `deliverable_capacity` says how many repetitions there are;
-        // `frames_per_period` says what one repetition IS, and a wire-supplied 0 corrupts the
-        // second question exactly as a 0 capacity corrupts the first.
-        //
-        // ⚠ THIS CALL COVERS ONE OF THE FIELD'S TWO HOSTS. `frames_per_period` rides
-        // `PeriodicDelta`, which hangs off BOTH `LoopCertificate` (here) and `ShortcutProposal`
-        // (the `RespondToShortcut` arm below) — and the second is the one the drive reads. Neither
-        // call is complete alone; `reject_zero_frames_per_period` is the shared authority so the
-        // two can never drift apart.
-        //
-        // Mechanism, not a symmetry argument: `drive_one_shortcut_cycle` delimits a committed
-        // cycle with `frames_per_period.is_some_and(|k| frames_this_cycle >= k)`
-        // (`game/engine.rs`). `frames_this_cycle` is a `u32`, so `>= 0` is a TAUTOLOGY — that
-        // disjunct fires at the first active-player priority beat, collapsing the cycle boundary
-        // to one beat instead of the certified span, and every per-cycle conformance check then
-        // measures a truncated cycle against a whole-period delta.
-        //
-        // Production never mints 0 — both certification bases derive it measured (`span as u32`
-        // on basis A, `k` on basis B) — which is exactly why a 0 arriving on the wire is a
-        // corrupted or hand-edited save rather than a live shape.
-        reject_zero_frames_per_period(&certificate.per_cycle, "LoopShortcut offer")?;
     }
-    // THE SECOND WIRE HOST FOR THE SAME FIELD, and the one the drive actually reads.
-    // `frames_per_period` is not a `LoopCertificate` field — it lives on `PeriodSignature`, and
-    // `ShortcutProposal` carries its own `per_cycle` too. `materialize_fixed_shortcut` feeds
-    // `drive_one_shortcut_cycle` from `proposal.per_cycle.as_ref().map(PeriodSignature::frames_per_period)`
-    // (`game/engine.rs`), i.e. from THIS host, not from the offer's certificate. Guarding only
-    // the offer would leave the consumed path open — the restored `RespondToShortcut` state is
-    // reached without ever re-entering `LoopShortcut`.
     if let WaitingFor::RespondToShortcut { proposal, .. } = &state.waiting_for {
-        reject_zero_frames_per_period(&proposal.per_cycle, "RespondToShortcut proposal")?;
         reject_period_on_the_ring_road(
             proposal.road,
             &proposal.period,
@@ -24864,7 +24812,7 @@ declare_game_state! {
     /// only let the controller collapse to at most N, because re-asking for a larger
     /// count would be a new game choice the accepted proposal never contained. Written
     /// by `materialize_fixed_shortcut` (the ONLY path that can register a deferred
-    /// materialization — `UntilLethal` never reaches it); read by
+    /// materialization); read by
     /// `turns::drain_pending_phase_transition_progress` as the prompt's `max`; cleared in
     /// lockstep with `pending_unbounded_materialization` by `take_pending_materialization`,
     /// `clear_collapsed_materializations` and `clear_unbounded_loop`.
@@ -37339,12 +37287,7 @@ impl GameState {
     ///     would in manual play.
     /// (c) BECAME OBSERVED IN-WINDOW → `engine_resolution_choices::boundary_declines` → manual
     ///     play, where the player performs the actions.
-    /// (d) DRAIN PATH → a ring offer materializes through
-    ///     `materialize_fixed_shortcut` / `apply_until_lethal_shortcut`, which LITERALLY PERFORM
-    ///     the iterations beat by beat through `pass_priority_once_with_pipeline`. Identity holds
-    ///     the way it holds on route (b), and for the same reason: nothing is elided that
-    ///     performance would not produce.
-    /// (e) SHORTENED, OR A COUNT OF ZERO → the captured period is PERFORMED the named number of
+    /// (d) SHORTENED, OR A COUNT OF ZERO → the captured period is PERFORMED the named number of
     ///     times, through the same driver route (b) names. Route (a)'s licence is that the table
     ///     accepted an unbounded advance; a responder who named a place (CR 732.2b) accepted no
     ///     such thing, and a sequence performed zero times reaches its ending point having done
@@ -39153,7 +39096,7 @@ mod forced_cascade_window_tests {
                     proposal: crate::analysis::loop_check::ShortcutProposal {
                         proposer: PlayerId(0),
                         predicted_winner: Some(PlayerId(0)),
-                        count: crate::analysis::decision_template::IterationCount::UntilLethal,
+                        count: crate::analysis::decision_template::IterationCount::Fixed(1),
                         unbounded: vec![crate::analysis::resource::ResourceAxis::Life(PlayerId(1))],
                         rising: Vec::new(),
                         win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
@@ -42147,7 +42090,7 @@ mod tests {
             CountedTake, OfferRoad, ShortcutProposal, UnperformableCause,
         };
         use std::io::Read;
-        let unperformable = CountedTake::Unperformable(UnperformableCause::UndelimitedCover);
+        let unperformable = CountedTake::Unperformable(UnperformableCause::UncontainedChoice);
 
         let mut json = String::new();
         flate2::read::GzDecoder::new(
@@ -42165,7 +42108,10 @@ mod tests {
             .into_game_state()
             .expect("the dump restores");
         let offer = serde_json::to_value(&restored.waiting_for).expect("the offer encodes");
-        assert_eq!(offer["data"]["road"], "Ring", "reach: a ring-road offer");
+        assert_eq!(
+            offer["data"]["road"], "RecordedPeriod",
+            "reach: a recorded-road offer"
+        );
         assert!(
             offer["data"].get("counted_take").is_none(),
             "an offer saved without the field performs and is saved without it"
@@ -42216,6 +42162,7 @@ mod tests {
 
         let mut with_period = |period: serde_json::Value| {
             board["waiting_for"] = carried.clone();
+            board["waiting_for"]["data"]["road"] = serde_json::Value::from("Ring");
             board["waiting_for"]["data"]["period"] = period;
             serde_json::from_value::<PersistedGameState>(board.clone())
                 .map(drop)
@@ -42236,60 +42183,6 @@ mod tests {
         }))
         .expect_err("a ring offer carrying a confirmed period fails the load")
         .contains("ring road carries a confirmed period"));
-    }
-
-    /// The committed restore-time offers predate the stamp and decode to the road that minted them.
-    #[test]
-    fn committed_restore_offers_decode_to_their_minting_road() {
-        use crate::analysis::loop_check::OfferRoad;
-        use std::io::Read;
-        for (dump, road) in [
-            (
-                &include_bytes!("../../tests/fixtures/combo_infinite_pile_4p_offer.json.gz")[..],
-                OfferRoad::RecordedPeriod,
-            ),
-            (
-                &include_bytes!("../../tests/fixtures/tenacity_exquisite_blood_4p.json.gz")[..],
-                OfferRoad::Ring,
-            ),
-            (
-                &include_bytes!("../../tests/fixtures/lethal_lifegain_loss_4p.json.gz")[..],
-                OfferRoad::Ring,
-            ),
-            (
-                &include_bytes!("../../tests/fixtures/weird_drain_4p.json.gz")[..],
-                OfferRoad::Ring,
-            ),
-        ] {
-            let mut json = String::new();
-            flate2::read::GzDecoder::new(dump)
-                .read_to_string(&mut json)
-                .expect("the dump inflates");
-            let mut envelope: serde_json::Value =
-                serde_json::from_str(&json).expect("the dump parses");
-            // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
-            record_captured_onsets(&mut envelope);
-            let board = envelope.get("gameState").unwrap_or(&envelope).clone();
-            assert!(
-                board["waiting_for"]["data"].get("road").is_none(),
-                "the dump predates the stamp"
-            );
-            let state = serde_json::from_value::<PersistedGameState>(board)
-                .expect("the dump deserializes")
-                .into_game_state()
-                .expect("the dump restores");
-            assert_eq!(
-                state.waiting_for.variant_name(),
-                "LoopShortcut",
-                "the dump restores at its offer"
-            );
-            let encoded = serde_json::to_value(&state.waiting_for).expect("the offer encodes");
-            assert_eq!(
-                serde_json::from_value::<OfferRoad>(encoded["data"]["road"].clone())
-                    .expect("the restored offer carries a road"),
-                road
-            );
-        }
     }
 
     #[test]

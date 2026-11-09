@@ -38,26 +38,6 @@
 //! to the weight AND the temperature: `-inf * 0.1 == -inf * 0.35 == -inf`, and `exp(-inf / T) == 0`
 //! at every temperature, so no difficulty ever throws the game away.
 //!
-//! ## The three rulings the verdict encodes
-//!
-//! 1. `predicted_winner == Some(w), w != proposer` + `UntilLethal` ⇒ REJECT.
-//!    `loop_check::live_mandatory_loop_winner` partitions the living players into `fallers`
-//!    (per-cycle `delta.life < 0 || delta.poison > 0`) and `nonfallers`, and names a winner ONLY
-//!    when `nonfallers.len() == 1`. The two sets partition `living`, so a named winner other than
-//!    the proposer PROVES the proposer is a faller — a deterministic self-loss (CR 704.5a life /
-//!    CR 704.5c poison) with the other player crowned by CR 104.2a. The declare is WEAKLY
-//!    DOMINATED, not merely bad: the drive either reaches that crown, or aborts into
-//!    `until_lethal_fallback`, which restores exactly the board a decline would have left.
-//!    Loss-or-no-op — never a gain.
-//! 2. `predicted_winner == None` + `UntilLethal` ⇒ REJECT.
-//!    CR 732.2a: the engine refuses an `UntilLethal` declaration on an offer naming no winner.
-//! 3. `predicted_winner == Some(proposer)` + `UntilLethal` ⇒ positive (critical band).
-//!    The crown IS the win (CR 104.2a); the only other outcome is `until_lethal_fallback`, which
-//!    lands where declining lands. Dominant in outcome. (It is not costless: declaring opens the
-//!    CR 732.2b window, and an opponent's `Shorten` hands THEM a priority window they would not
-//!    get if the AI declined and kept priority. The crown is worth that risk; the phrase "no
-//!    downside" would not be true.)
-//!
 //! ## Why the `IterationCount` gate is load-bearing for the CLASS
 //!
 //! `materialize_fixed_shortcut` drives `n` whole cycles and COMMITS each atomically (an
@@ -69,11 +49,9 @@
 //! `Fixed` at the published SUGGESTION against a bounded offer — the count the offer's
 //! suggestion (`ShortcutDecisionSchema::suggestion`) drives, which is at or below the published
 //! capacity and is the same integer
-//! wherever a producer's two answers coincide — and offers `UntilLethal` only against an offer
-//! that measured no threshold; `Fixed(n)` is additionally reachable through the public
-//! `GameAction` surface. `handle_declare_shortcut` checks the declared count against the
-//! global cap and against the offer's own `deliverable_capacity`, and refuses `UntilLethal`
-//! against a bounded offer; what it
+//! wherever a producer's two answers coincide; `Fixed(n)` is additionally reachable through the
+//! public `GameAction` surface. `handle_declare_shortcut` checks the declared count against the
+//! global cap and against the offer's own `deliverable_capacity`; what it
 //! never checks is the declared shape against the schema's *suggested* `iteration_count` (the
 //! fail-closed pin firewall validates only `template` pins, and it runs against the RESOLVED
 //! template rather than the payload's: the handler shadows it with
@@ -83,11 +61,6 @@
 //! pin-validated by `declaration_conforms`. The firewall is skipped only when the payload carried
 //! none AND the offer published none — the arm that still refuses unless the proposer controls
 //! the recorded loop period).
-//!
-//! The count gate is what keeps the three rulings off the AI's own bounded candidate. Every offer
-//! the AI answers with `Fixed` is a bounded one, and every production mint of a bounded offer
-//! latches `predicted_winner: None` — ruling 2's antecedent shape, which a count-blind reject would
-//! fire on.
 //!
 //! ## Why the verdict reads `proposer` from the state, never `ctx.ai_player`
 //!
@@ -168,37 +141,6 @@ impl TacticalPolicy for LoopShortcutPolicy {
         };
 
         match (predicted_winner, count) {
-            // CR 704.5a / CR 704.5c + CR 104.2a: the offer's winner is somebody else. The
-            // faller/non-faller partition in `loop_check::live_mandatory_loop_winner` is total over
-            // the living players, so a named winner != proposer PROVES the proposer's per-cycle
-            // life/poison delta is a loss. Declaring `UntilLethal` runs that loop to the SBA and
-            // crowns the other player. WEAKLY DOMINATED: the alternative branch is
-            // `until_lethal_fallback` (a rollback to exactly where a decline lands), so the
-            // outcome set is {self-loss, no-op} — never a gain.
-            (Some(winner), IterationCount::UntilLethal) if winner != proposer => {
-                PolicyVerdict::reject(
-                    PolicyReason::new("loop_shortcut_declare_hands_opponent_the_win")
-                        .with_fact("proposer", i64::from(proposer.0))
-                        .with_fact("predicted_winner", i64::from(winner.0)),
-                )
-            }
-
-            // CR 732.2a + CR 104.2a: the crown gate requires `Some(winner) == predicted_winner`, so
-            // an `UntilLethal` declare on an offer whose latched winner IS the proposer is the win.
-            // Worst case the gate refuses and `until_lethal_fallback` restores the pre-drive board.
-            // Game-deciding ⇒ critical band (`PolicyVerdict::score` auto-bands the config-routed
-            // value).
-            (Some(winner), IterationCount::UntilLethal) => PolicyVerdict::score(
-                ctx.penalties().loop_shortcut_winning_declare_bonus,
-                PolicyReason::new("loop_shortcut_declare_wins")
-                    .with_fact("winner", i64::from(winner.0)),
-            ),
-
-            // CR 732.2a: the engine refuses an `UntilLethal` declaration on an offer naming no winner.
-            (None, IterationCount::UntilLethal) => {
-                PolicyVerdict::reject(PolicyReason::new("loop_shortcut_untillethal_cannot_crown"))
-            }
-
             // CR 732.2b: an offer naming no winner is proposed as a draw, which every
             // other player may still shorten.
             (None, IterationCount::WithoutEnd) => PolicyVerdict::preference(
@@ -253,8 +195,7 @@ impl TacticalPolicy for LoopShortcutPolicy {
             // only the seat `proposal.predicted_winner` names (or any seat when it names
             // nobody), so what lets such a declare through is no longer the absence of a filter
             // but the offer's own prediction agreeing with the drive. Such a declare by a faller
-            // proposer is a committed self-loss, exactly what the `UntilLethal` arm above
-            // rejects, and this arm is still neutral on it. On a BOUNDED offer that hazard is
+            // proposer is a committed self-loss, and this arm is still neutral on it. On a BOUNDED offer that hazard is
             // discharged by the `loop_shortcut_declare_eliminates_proposer` arm BELOW, which asks
             // `cycles_to_proposer_elimination` of the proposer alone. It is NOT discharged by
             // `PeriodicDelta::elimination_cascade`'s contract: that cascade admits the proposer's
@@ -262,19 +203,6 @@ impl TacticalPolicy for LoopShortcutPolicy {
             // own fatal count and a capacity-valued `Fixed` — the AI's only bounded candidate — can
             // name it. That arm's remaining limit is stated where it sits, not assumed away here.
             //
-            // ⚠ AN EARLIER FORM OF THIS ARM ALSO RESTED ON A DRIVE THAT DID NOT HONOUR THE
-            // PUBLISHED BOUND, which is why the delimiter's history is kept here. At `c6d834040`
-            // `materialize_fixed_shortcut` had no cycle delimiter for the basis-B class, so the
-            // drive ran to the beat cap and `Fixed(1)` on a bounded 3p/4p drain eliminated the
-            // whole table — the arithmetic above described a bound the drive never honoured. Fix
-            // round 1 delimits a cycle by the published `PeriodicDelta::frames_per_period` and
-            // drops any cycle whose measured delta differs from the published one.
-            //
-            // RE-MEASURED after that fix, through the production accept path (declare + APNAP
-            // accepts) at `n` = 1, 3 and AT the offered bound:
-            //   bloodloop 3p (bound 16): n=1 [20,16,16]  n=3 [20,14,14]  n=16 [20,1,1]  elim 0
-            //   bloodloop 4p (bound 16): n=1/3/16 likewise, elim 0
-            //   dina 4p      (bound 30): n=1 [50,34,30,35] … n=30 [79,5,1,6]            elim 0
             // The engine-side regression row that keeps this honest is
             // `bounded_fixed_count_commits_exactly_n_periods`, which asserts zero eliminations
             // and `committed == n × published δ` on all three fixtures.
@@ -633,7 +561,7 @@ mod tests {
         let config = create_config(AiDifficulty::Medium, Platform::Native);
         let decision = AiDecisionContext {
             waiting_for: state.waiting_for.clone(),
-            candidates: vec![declare(IterationCount::UntilLethal), decline()],
+            candidates: vec![declare(IterationCount::Fixed(1)), decline()],
         };
         let context = crate::context::AiContext::empty(&config.weights);
         LoopShortcutPolicy.verdict(&PolicyContext {
@@ -718,46 +646,9 @@ mod tests {
     fn declare_outside_loop_shortcut_returns_zero() {
         let mut state = GameState::new_two_player(0);
         state.waiting_for = WaitingFor::Priority { player: P0 };
-        let v = verdict_for(&state, &declare(IterationCount::UntilLethal));
+        let v = verdict_for(&state, &declare(IterationCount::Fixed(1)));
         assert_eq!(delta_of(&v), 0.0);
         assert_eq!(kind_of(&v), "loop_shortcut_na");
-    }
-
-    /// Row 2 — THE BUG. The latched winner is an opponent ⇒ declaring `UntilLethal` runs a loop
-    /// whose SBA crowns them (CR 104.2a) and kills the proposer (CR 704.5a).
-    #[test]
-    fn declare_until_lethal_when_opponent_wins_is_rejected() {
-        let state = offer_state(Some(P1));
-        let v = verdict_for(&state, &declare(IterationCount::UntilLethal));
-        assert!(
-            matches!(v, PolicyVerdict::Reject { .. }),
-            "declaring a shortcut an OPPONENT wins must be vetoed, got {v:?}"
-        );
-        assert_eq!(kind_of(&v), "loop_shortcut_declare_hands_opponent_the_win");
-    }
-
-    /// Row 6 — the over-suppression guard: the proposer's OWN win must still be boosted.
-    #[test]
-    fn declare_until_lethal_when_self_wins_is_critical() {
-        let state = offer_state(Some(P0));
-        let v = verdict_for(&state, &declare(IterationCount::UntilLethal));
-        assert!(
-            delta_of(&v) > STRONG_MAX,
-            "a guaranteed CR 104.2a crown is critical-band, got {v:?}"
-        );
-        assert_eq!(kind_of(&v), "loop_shortcut_declare_wins");
-    }
-
-    /// Row 4 — an `UntilLethal` declare on an offer naming no winner is vetoed.
-    #[test]
-    fn declare_until_lethal_with_no_predicted_winner_is_rejected() {
-        let state = offer_state(None);
-        let v = verdict_for(&state, &declare(IterationCount::UntilLethal));
-        assert!(
-            matches!(v, PolicyVerdict::Reject { .. }),
-            "an UntilLethal declare that cannot crown must be vetoed, got {v:?}"
-        );
-        assert_eq!(kind_of(&v), "loop_shortcut_untillethal_cannot_crown");
     }
 
     fn without_end_offer(predicted_winner: Option<PlayerId>) -> GameState {
@@ -886,7 +777,6 @@ mod tests {
     /// One repetition's whole-game delta, given only the axes a test cares about.
     fn periodic(library_delta: &[(PlayerId, i64)], life: &[(PlayerId, i64)]) -> PeriodicDelta {
         PeriodicDelta {
-            frames_per_period: 1,
             delta: ResourceVector {
                 library_delta: library_delta.iter().copied().collect(),
                 life: life.iter().copied().collect(),
@@ -911,7 +801,6 @@ mod tests {
     /// certificate would add an in-test hit to the CR 732.2a offer-writer census for no gain.
     fn periodic_poison(poison: &[(PlayerId, i64)]) -> PeriodicDelta {
         PeriodicDelta {
-            frames_per_period: 1,
             delta: ResourceVector {
                 poison: poison.iter().copied().collect(),
                 ..Default::default()
@@ -1210,7 +1099,6 @@ mod tests {
         state.players[P0.0 as usize].life = 18;
         let slot = announced_slot(&mut state, CardId(1));
         let period = PeriodicDelta {
-            frames_per_period: 1,
             delta: ResourceVector {
                 life: [(P1, -2)].into_iter().collect(),
                 ..Default::default()
@@ -1505,9 +1393,7 @@ mod tests {
     ///   not carried by ⓟ1.
     /// * ⓟ3 invert `ShortcutDecisionSchema::is_bounded()` to `is_none()` ⇒ the in-test schema reads
     ///   unbounded ⇒ both arms take `na()` ⇒ FAILS, and so does
-    ///   `loop_shortcut_unbounded_offer_keeps_fixed_neutral`. ⓟ3 flipping BOTH rows plus the
-    ///   engine's `until_lethal_against_a_bounded_offer_is_rejected` is the single-authority
-    ///   proof: one edit to one predicate is measurable at every caller.
+    ///   `loop_shortcut_unbounded_offer_keeps_fixed_neutral`.
     #[test]
     fn loop_shortcut_bounded_declare_scores_and_rejects_over_bound() {
         let state = bounded_offer_state(10);
@@ -1660,118 +1546,6 @@ mod tests {
             );
             assert_eq!(kind_of(&v), "loop_shortcut_na");
         }
-    }
-
-    /// E2E, HEURISTIC branch (VeryEasy: `search.enabled == false` ⇒ the tactical score is added
-    /// RAW). Without the policy the class-bonus table makes Declare (0.5) beat Decline (0.4) in
-    /// every state; with it the `Reject` drives Declare's softmax weight to `exp(-inf/T) == 0`, so
-    /// the pick is deterministic across every seed.
-    #[test]
-    fn heuristic_picker_declines_a_losing_shortcut() {
-        let config = create_config(AiDifficulty::VeryEasy, Platform::Native);
-        assert!(
-            !config.search.enabled,
-            "reach-guard: VeryEasy must exercise the HEURISTIC branch"
-        );
-        let state = offer_state(Some(P1));
-        assert_both_candidates_reach_the_scorer(&state, &config);
-
-        for seed in 0..32u64 {
-            let mut rng = SmallRng::seed_from_u64(seed);
-            assert_eq!(
-                choose_action(&state, P0, &config, &mut rng),
-                Some(GameAction::DeclineShortcut),
-                "seed {seed}: the AI must NOT propose a shortcut that crowns its opponent"
-            );
-        }
-    }
-
-    /// E2E, SEARCH branch (Hard). The TEETH are the two RNG-free SCORE assertions: the `-inf` must
-    /// survive the `tactical_weight` multiply (`-inf * 0.1 == -inf * 0.35 == -inf`).
-    ///
-    /// # ⚠️ DO NOT "SIMPLIFY" THIS DOWN TO THE SEED LOOP.
-    ///
-    /// The seed loop at the end is a POST-CONDITION INVARIANT (necessary, NOT discriminating). With
-    /// the policy unregistered the control Declare score here is a FINITE `-9999.925` (measured) —
-    /// which still loses the softmax to Decline — so a pick-only assertion PASSES WITH THE POLICY
-    /// DELETED. The only assertion with teeth is
-    /// `declare_score.is_infinite() && declare_score.is_sign_negative()`: that is what proves the
-    /// `Reject` (and not the beam's own continuation value) is doing the work.
-    #[test]
-    fn search_picker_declines_a_losing_shortcut() {
-        let mut config = create_config(AiDifficulty::Hard, Platform::Native);
-        assert!(
-            config.search.enabled,
-            "reach-guard: Hard must exercise the SEARCH branch"
-        );
-        // The verdict is state-only, so K determinization samples add nothing; 0 keeps the test on
-        // the deterministic core path.
-        config.search.determinization_samples = 0;
-        let state = offer_state(Some(P1));
-        assert_both_candidates_reach_the_scorer(&state, &config);
-
-        let session = AiSession::arc_from_game(&state);
-        let scored = score_candidates_with_session(&state, P0, &config, &session);
-        let declare_score = scored
-            .iter()
-            .find(|(a, _)| matches!(a, GameAction::DeclareShortcut { .. }))
-            .map(|(_, s)| *s)
-            .expect("DeclareShortcut is scored");
-        let decline_score = scored
-            .iter()
-            .find(|(a, _)| matches!(a, GameAction::DeclineShortcut))
-            .map(|(_, s)| *s)
-            .expect("DeclineShortcut is scored");
-        assert!(
-            declare_score.is_infinite() && declare_score.is_sign_negative(),
-            "the Reject must survive the tactical_weight multiply, got {declare_score}"
-        );
-        assert!(
-            decline_score.is_finite(),
-            "DeclineShortcut must stay finite (NaN safety), got {decline_score}"
-        );
-
-        // POST-CONDITION INVARIANT (necessary, NOT discriminating — see the doc comment): the
-        // `-inf` must actually reach the picker. This loop passes with the policy deleted (the
-        // control Declare score is a finite -9999.925, which also loses the softmax), so it proves
-        // the end-to-end wiring, never the policy.
-        for seed in 0..8u64 {
-            let mut rng = SmallRng::seed_from_u64(seed);
-            assert_eq!(
-                choose_action(&state, P0, &config, &mut rng),
-                Some(GameAction::DeclineShortcut),
-                "seed {seed}: the search picker must decline too"
-            );
-        }
-    }
-
-    /// The over-suppression e2e guard. VeryEasy (heuristic ⇒ UNWEIGHTED) is the branch the `8.0`
-    /// default is sized for. Do NOT rewrite this against a search-ON difficulty: there the margin
-    /// is `8.1 * 0.1 = 0.81` (or `2.835` at `w = 0.35`), both `< STRONG_MAX`, and the assertion
-    /// would be false for a CORRECT implementation.
-    #[test]
-    fn winning_shortcut_is_still_declared() {
-        let config = create_config(AiDifficulty::VeryEasy, Platform::Native);
-        let state = offer_state(Some(P0));
-        assert_both_candidates_reach_the_scorer(&state, &config);
-
-        let session = AiSession::arc_from_game(&state);
-        let scored = score_candidates_with_session(&state, P0, &config, &session);
-        let declare_score = scored
-            .iter()
-            .find(|(a, _)| matches!(a, GameAction::DeclareShortcut { .. }))
-            .map(|(_, s)| *s)
-            .expect("DeclareShortcut is scored");
-        let decline_score = scored
-            .iter()
-            .find(|(a, _)| matches!(a, GameAction::DeclineShortcut))
-            .map(|(_, s)| *s)
-            .expect("DeclineShortcut is scored");
-        assert!(
-            declare_score - decline_score > STRONG_MAX,
-            "a shortcut the proposer WINS must stay strongly preferred; declare = \
-             {declare_score}, decline = {decline_score}"
-        );
     }
 
     #[test]

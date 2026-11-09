@@ -2410,7 +2410,7 @@ mod tests {
         assert_eq!(witnessed(&state, 3, Held), None);
         let offered = Witnessed::Offered {
             counted_take: crate::analysis::loop_check::CountedTake::Unperformable(
-                crate::analysis::loop_check::UnperformableCause::UndelimitedCover,
+                crate::analysis::loop_check::UnperformableCause::UncontainedChoice,
             ),
             residual: Default::default(),
             period: Default::default(),

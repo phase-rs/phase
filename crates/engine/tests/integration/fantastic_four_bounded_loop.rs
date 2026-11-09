@@ -94,7 +94,7 @@ pub(crate) fn published_suggestion(
 ) -> u32 {
     match schema.iteration_count {
         IterationCount::Fixed(n) => n,
-        IterationCount::UntilLethal | IterationCount::WithoutEnd => panic!(
+        IterationCount::WithoutEnd => panic!(
             "a bounded offer publishes a `Fixed` suggestion; this one measured {:?}",
             schema.measured_repetition_bound
         ),
@@ -2563,11 +2563,8 @@ fn d6_the_ai_declare_candidate_carries_the_offers_own_published_declaration() {
             },
             GameAction::DeclineShortcut,
         ],
-        "CR 732.2a: exactly two candidates. No `UntilLethal` declaration (gated on \
-         `!schema.is_bounded()`, and this offer measured a threshold of {:?}), and the `Fixed` \
-         declaration carries the ENGINE'S OWN pin set for the {} published point(s) at the count \
-         that declaration drives",
-        schema.measured_repetition_bound,
+        "CR 732.2a: exactly two candidates, and the `Fixed` declaration carries the ENGINE'S OWN \
+         pin set for the {} published point(s) at the count that declaration drives",
         schema.points.len()
     );
 
@@ -2590,8 +2587,8 @@ fn d6_the_ai_declare_candidate_carries_the_offers_own_published_declaration() {
     );
 }
 
-/// §5 U6 (ii) — the generator's OWN candidate now opens the CR 732.2b window, and the four
-/// one-axis declare drives that say why.
+/// §5 U6 (ii) — the generator's OWN candidate now opens the CR 732.2b window, and the two
+/// declare drives that say why.
 ///
 /// ⚠ **THIS ROW'S PREVIOUS CLAIM WAS THAT THE CAPABILITY WAS ABSENT, AND IT IS SUPERSEDED, NOT
 /// BROKEN.** As `u6_no_declaration_the_generator_can_emit_opens_the_window_while_the_accepted_
@@ -2602,7 +2599,7 @@ fn d6_the_ai_declare_candidate_carries_the_offers_own_published_declaration() {
 /// RE-DERIVED from the generator rather than hand-named: the declare candidate opens the window
 /// and the decline hands priority back.
 ///
-/// **The four one-axis drives below still measure the engine-side guards the generator's gate
+/// **The two drives below still measure the engine-side guards the generator's gate
 /// depends on, but one of them has FLIPPED, deliberately.** `Fixed(declared) + None` used to be a
 /// live fail-closed guard, on the stated grounds that resolving a `template: None` declaration
 /// against the offer's own published declaration was a declare-handler change deferred out of
@@ -2616,44 +2613,18 @@ fn d6_the_ai_declare_candidate_carries_the_offers_own_published_declaration() {
 /// [`a_template_free_declaration_is_admitted_only_by_the_proposers_own_period`] (offer with
 /// `declaration: None`).
 ///
-/// Four declarations are driven through `apply()` on the SAME real offer board, differing one
-/// axis at a time:
+/// Two declarations are driven through `apply()` on the SAME real offer board, differing in
+/// their template:
 ///
 /// | declaration | measured |
 /// |---|---|
-/// | `UntilLethal` + `None` — **the shape the generator emitted before the bounded gate** | REFUSED ⇒ `Priority` |
-/// | `UntilLethal` + a conformant template | REFUSED ⇒ `Priority` (so the refusal is keyed on the COUNT, not on the pins) |
 /// | `Fixed(declared)` + `None` | **ACCEPTED** ⇒ item-4 C2 resolves the `None` against the declaration this offer published, so the browser payload reaches the same window the AI's does |
 /// | `Fixed(declared)` + a conformant template | **ACCEPTED** ⇒ the CR 732.2b APNAP window opens |
-///
-/// The last row is the ANTI-VACUITY control: without it, "everything reaches `Priority`" would
-/// be satisfied by a board that refuses every declaration for some unrelated reason. With it,
-/// the two `UntilLethal` refusals are proved to be refusals of *those* declarations.
 ///
 /// ⚠ This row deliberately does NOT assert what the accepted declaration then accomplishes —
 /// that is [`r2a_an_accepted_declaration_commits_exactly_n_cycles_because_reeds_may_is_announced`]'s
 /// job, and it now measures an exact `n`-repetition commit (it measured a zero commit while
 /// Reed's `may` was unpublished). Splitting the two keeps this row a DECLARE-time matrix.
-///
-/// The `UntilLethal` rows are what justifies the generator's `!schema.is_bounded()` gate
-/// ([`d6_the_ai_declare_candidate_carries_the_offers_own_published_declaration`]): the engine refuses that count
-/// against a narrowed bound on a real board, so emitting it was offering the search layer an
-/// action that is accepted-then-discarded. These rows keep measuring the ENGINE guard directly,
-/// which is the fact the generator gate depends on and must not be allowed to rot.
-///
-/// REVERT-PROBES, both RUN, and the measured result CORRECTS the obvious prediction — the
-/// count-free declaration is refused by TWO INDEPENDENT guards, so disabling either alone
-/// leaves it refused:
-///
-/// * disable `IterationCount::UntilLethal if offer.schema.is_bounded()` in
-///   `handle_declare_shortcut` ⇒ the *`UntilLethal` + conformant template* arm flips
-///   (`Priority` → `RespondToShortcut`), while the AI's own `template: None` candidate stays
-///   refused by the `None if … offer.period.is_empty()` arm;
-/// * disable BOTH ⇒ the AI-candidate loop itself flips — `UntilLethal` + `None` builds a
-///   proposal and opens APNAP for `PlayerId(1)`.
-///
-/// The row asserts both arms for exactly that reason: a single-guard probe would report the
-/// AI's candidate as still-refused and hide the change.
 #[test]
 fn u6_the_generators_own_candidate_opens_the_window_and_the_accepted_shape_is_measured() {
     let mut state = load_f4();
@@ -2734,16 +2705,6 @@ fn u6_the_generators_own_candidate_opens_the_window_and_the_accepted_shape_is_me
     };
 
     assert_eq!(
-        outcome(
-            IterationCount::UntilLethal,
-            Some(f4_pin_template(&schema, proposer, 1))
-        ),
-        "Priority",
-        "CR 732.2a: the refusal of the AI's candidate is keyed on the COUNT — `UntilLethal` \
-         against a narrowed bound — not on its missing pins. Carrying the very template the \
-         positive control below has accepted changes nothing"
-    );
-    assert_eq!(
         outcome(IterationCount::Fixed(declared), None),
         "RespondToShortcut",
         "item-4 C2, and this arm FLIPPED with it: `Fixed` + `template: None` is the browser's \
@@ -2761,7 +2722,7 @@ fn u6_the_generators_own_candidate_opens_the_window_and_the_accepted_shape_is_me
         ),
         "RespondToShortcut",
         "the accepted shape is `Fixed(n)` + a template pinning every published point, owner == \
-         proposer. Without this arm the three refusals above would be vacuous"
+         proposer"
     );
 }
 
@@ -3646,10 +3607,7 @@ fn c2_r1_the_browsers_template_free_declaration_reaches_the_accepted_declaration
         "REACH-GUARD: with an empty point set `declaration_conforms` has no published slot to \
          check and this row would measure the owner firewall instead of the repair"
     );
-    assert!(
-        bounded,
-        "REACH-GUARD: an unbounded schema takes the `UntilLethal` arms, not this one"
-    );
+    assert!(bounded, "REACH-GUARD: the schema is bounded");
     let published = offer_declaration(&state).expect(
         "REACH-GUARD: the `or_else` resolves against THIS field — without it every arm \
                  below would be measuring site F's period test, not the repair",

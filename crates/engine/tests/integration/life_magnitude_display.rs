@@ -30,7 +30,6 @@ use crate::support::shared_card_db;
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
 const P2: PlayerId = PlayerId(2);
-const P3: PlayerId = PlayerId(3);
 
 fn life(state: &GameState, player: PlayerId) -> i32 {
     state
@@ -183,63 +182,6 @@ fn own_life_growth_reads_unbounded_until_the_collapse_lands() {
     );
 }
 
-/// Enduring Tenacity ("Whenever you gain life, target opponent loses that much life.") and
-/// Exquisite Blood ("Whenever an opponent loses life, you gain that much life."): one shortcut
-/// under P0 marks both P0's gain and P3's drain, so only P0's readout is ∞.
-#[test]
-fn drain_victim_keeps_a_finite_readout_under_a_mixed_mark() {
-    let state = restore_dump(&gunzip_dump(include_bytes!(
-        "../fixtures/tenacity_exquisite_blood_4p.json.gz"
-    )));
-    let WaitingFor::LoopShortcut {
-        proposer,
-        ref schema,
-        ref certificate,
-        ..
-    } = state.waiting_for
-    else {
-        panic!("expected the restored offer, got {:?}", state.waiting_for);
-    };
-    assert_eq!(proposer, P0);
-    assert_eq!(schema.iteration_count, IterationCount::UntilLethal);
-    assert!(schema.points.is_empty());
-    assert_eq!(
-        certificate.unbounded,
-        vec![ResourceAxis::Life(P0), ResourceAxis::Life(P3)]
-    );
-
-    let mut runner = GameRunner::from_state(state);
-    runner
-        .act(GameAction::DeclareShortcut {
-            count: IterationCount::UntilLethal,
-            template: None,
-        })
-        .expect("declare the shortcut");
-    accept_every_responder(&mut runner);
-
-    let state = runner.state();
-    assert!(matches!(
-        state.waiting_for,
-        WaitingFor::GameOver { winner: Some(P0) }
-    ));
-    assert_eq!(
-        state.unbounded_resources.get(&P0),
-        Some(&BTreeSet::from([
-            ResourceAxis::Life(P0),
-            ResourceAxis::Life(P3)
-        ]))
-    );
-    let views = derive_views(state, None);
-    assert!(views.unbounded_resources.contains(&UnboundedResourceView {
-        player: P3,
-        axis: ResourceAxis::Life(P3),
-    }));
-    assert_eq!(
-        views.life_magnitude,
-        BTreeMap::from([(P0, DisplayMagnitude::Unbounded)])
-    );
-}
-
 /// Soul Warden's controller ("you") gains on every Gravecrawler P0's loop recasts, so each
 /// Warden controller's life rises under P0's mark and reads ∞ until the collapse lands.
 fn warden_gains_read_unbounded(p0_warden: bool, gaining: &[PlayerId]) {
@@ -312,50 +254,31 @@ fn both_wardens_gains_read_unbounded_under_one_mark() {
     warden_gains_read_unbounded(true, &[P0, P1]);
 }
 
-/// A certificate saved before `rising` existed loads with an empty subset, so the take marks no
-/// seat as rising and no readout claims ∞.
+/// A certificate saved before `rising` existed loads with an empty subset.
 #[test]
-fn a_pre_field_certificate_marks_no_seat_as_rising() {
+fn a_pre_field_certificate_loads_with_no_rising_seat() {
     let mut dump: serde_json::Value = serde_json::from_str(&gunzip_dump(include_bytes!(
         "../fixtures/tenacity_exquisite_blood_4p.json.gz"
     )))
     .expect("dump parses");
-    let removed = dump["gameState"]["waiting_for"]["data"]["certificate"]
+    let rising = |dump: &serde_json::Value| {
+        let state = restore_dump(&dump.to_string());
+        let WaitingFor::LoopShortcut { certificate, .. } = state.waiting_for else {
+            panic!("expected the restored offer, got {:?}", state.waiting_for);
+        };
+        certificate.rising
+    };
+    assert_eq!(
+        rising(&dump),
+        vec![ResourceAxis::Life(P0)],
+        "reach: the save states a rising seat"
+    );
+    dump["gameState"]["waiting_for"]["data"]["certificate"]
         .as_object_mut()
         .expect("the dump stores the offer's certificate")
-        .remove("rising");
-    assert_eq!(removed, Some(serde_json::json!([{ "Life": 0 }])));
-
-    let mut runner = GameRunner::from_state(restore_dump(&dump.to_string()));
-    runner
-        .act(GameAction::DeclareShortcut {
-            count: IterationCount::UntilLethal,
-            template: None,
-        })
-        .expect("declare the shortcut");
-    accept_every_responder(&mut runner);
-
-    let state = runner.state();
-    assert!(matches!(
-        state.waiting_for,
-        WaitingFor::GameOver { winner: Some(P0) }
-    ));
-    assert_eq!(
-        state.unbounded_resources.get(&P0),
-        Some(&BTreeSet::from([
-            ResourceAxis::Life(P0),
-            ResourceAxis::Life(P3)
-        ]))
-    );
-    let views = derive_views(state, None);
-    for seat in [P0, P3] {
-        assert!(views.unbounded_resources.contains(&UnboundedResourceView {
-            player: seat,
-            axis: ResourceAxis::Life(seat),
-        }));
-    }
-    assert!(state.unbounded_rising.is_empty());
-    assert!(views.life_magnitude.is_empty());
+        .remove("rising")
+        .expect("the save carries the field");
+    assert!(rising(&dump).is_empty());
 }
 
 /// A synthetic drain, not a printed board ("Whenever you gain life, each opponent loses 1 life."
