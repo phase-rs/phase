@@ -13,9 +13,8 @@ use server_core::game_state_snapshot_wire_guard::{
 };
 use server_core::session::{FullRuntime, SessionManager};
 use state_codec::{Frame, FrameKind};
-use std::io::BufReader;
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 async fn write_frame(
     executor: &GameExecutor,
@@ -67,14 +66,13 @@ async fn write_frame(
 #[tokio::test]
 #[ignore = "manual native spectator Full producer; writes fixed target/state-codec-fixtures"]
 async fn produce_native_large_spectator_full() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let destination = manifest_dir.join("../../target/state-codec-fixtures/large-spectator-full");
+    // Cargo runs unit tests from this package's root, regardless of its launcher.
+    let destination = Path::new("../../target/state-codec-fixtures/large-spectator-full");
     std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
-    std::fs::create_dir(&destination).expect("generated fixture directory must not already exist");
-    let fixture = manifest_dir.join("../engine/tests/fixtures/integration_cards.json.gz");
-    let db = CardDatabase::from_export_reader(flate2::read::GzDecoder::new(BufReader::new(
-        std::fs::File::open(fixture).unwrap(),
-    )))
+    std::fs::create_dir(destination).expect("generated fixture directory must not already exist");
+    let db = CardDatabase::from_export_reader(flate2::read::GzDecoder::new(
+        &include_bytes!("../../engine/tests/fixtures/integration_cards.json.gz")[..],
+    ))
     .unwrap();
     assert!(!db
         .get_face_by_name("Llanowar Elves")
@@ -98,7 +96,7 @@ async fn produce_native_large_spectator_full() {
     session.state_revision = 99;
     session.game_started = true;
     let small = crate::build_spectator_game_started_message(&session).unwrap();
-    let small_stats = write_frame(&executor, &destination, "small", small).await;
+    let small_stats = write_frame(&executor, destination, "small", small).await;
 
     // Scenario-constructed real permanents with their actual ability payloads;
     // not padded JSON, invented abilities, or a gameplay-reachability claim.
@@ -130,7 +128,7 @@ async fn produce_native_large_spectator_full() {
         .objects
         .values()
         .all(|object| !object.abilities.is_empty()));
-    let large_stats = write_frame(&executor, &destination, "large", large).await;
+    let large_stats = write_frame(&executor, destination, "large", large).await;
     assert!(large_stats["frame_utf16_units"].as_u64().unwrap() > 8_388_608);
 
     let mut scenario = GameScenario::new();
@@ -139,7 +137,7 @@ async fn produce_native_large_spectator_full() {
     let after = scenario.build().state().clone();
     let key = &session.full_runtime.as_ref().unwrap().key;
     let update = crate::build_spectator_state_update_message(key, &after, &[], &[], 101).unwrap();
-    let after_stats = write_frame(&executor, &destination, "after", update).await;
+    let after_stats = write_frame(&executor, destination, "after", update).await;
     let manifest = serde_json::json!({
         "schema_version": 1,
         "producer": "phase-server native spectator builder + encode_application + ConnectionEncoder + native gzip",

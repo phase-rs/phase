@@ -449,6 +449,12 @@ existing fixture directory, so remove only that generated directory before
 regenerating. A missing directory visibly skips this manual consumer suite;
 an existing directory must contain complete, valid fixtures.
 
+The producer embeds the existing committed card fixture using the same
+source-relative `include_bytes!` pattern as the engine integration tests, without
+reading environment metadata. Its output is relative to
+[Cargo's documented package-root test working directory](https://doc.rust-lang.org/cargo/commands/cargo-test.html#working-directory-of-tests),
+so the Cargo invocation below is independent of the launcher's working directory.
+
 ```bash
 cargo test -p phase-server \
   --bin phase-server socket_io::large_full_tests::produce_native_large_spectator_full \
