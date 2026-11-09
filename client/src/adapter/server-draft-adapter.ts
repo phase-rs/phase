@@ -284,6 +284,8 @@ export class ServerDraftAdapter implements EngineAdapter {
   private submissionSocket: PhaseSocketTransport | null = null;
   /** Full match lifetime owning the command, independent of later match bootstraps. */
   private submissionFullKey: FullSessionKey | null = null;
+  /** True once this claim was handed to the transport for the owning match. */
+  private submissionSent = false;
 
   constructor(
     private readonly serverUrl: string,
@@ -421,6 +423,7 @@ export class ServerDraftAdapter implements EngineAdapter {
       const claimedKey = this.activeFullKey;
       this.submissionSocket = claimedSocket;
       this.submissionFullKey = claimedKey;
+      this.submissionSent = false;
       try {
         this.emit({ type: "actionPendingChanged", pending: true });
       } catch (error) {
@@ -440,17 +443,25 @@ export class ServerDraftAdapter implements EngineAdapter {
         // Never stamp or send with authority revoked by that reentry.
         this.assertGameReady(claimedSocket, claimedKey);
       } catch (error) {
-        this.submission.release(submission);
-        this.submissionSocket = null;
-        this.submissionFullKey = null;
-        this.retireIdleSockets();
+        // Only an owned slot is ours to release; a listener that already
+        // settled it keeps its own outcome and notification.
+        if (this.submission.release(submission)) {
+          this.submissionSocket = null;
+          this.submissionFullKey = null;
+          this.submissionSent = false;
+          this.retireIdleSockets();
+          this.emit({ type: "actionPendingChanged", pending: false });
+        }
         reject(error instanceof Error ? error : new Error(String(error)));
-        this.emit({ type: "actionPendingChanged", pending: false });
         return;
       }
+      // From here the frame leaves this adapter, so a later match revocation
+      // must settle the caller instead of leaving the slot fenced.
+      this.submissionSent = true;
       if (!this.send(this.submission.stamp(frame, submission)) && this.submission.release(submission)) {
         this.submissionSocket = null;
         this.submissionFullKey = null;
+        this.submissionSent = false;
         this.retireIdleSockets();
         this.emit({ type: "actionPendingChanged", pending: false });
         reject(sendFailure);
@@ -882,6 +893,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (pending) {
       this.submissionSocket = null;
       this.submissionFullKey = null;
+      this.submissionSent = false;
     }
     return pending;
   }
@@ -956,6 +968,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     const dropped = this.submission.drop();
     this.submissionSocket = null;
     this.submissionFullKey = null;
+    this.submissionSent = false;
     try {
       if (dropped) {
         dropped.reject(error);
@@ -986,6 +999,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     const dropped = this.submission.drop();
     this.submissionSocket = null;
     this.submissionFullKey = null;
+    this.submissionSent = false;
     if (!dropped) return;
     dropped.reject(new AdapterError("WS_CLOSED", "Connection closed during action", true));
     this.emit({ type: "actionPendingChanged", pending: false });
@@ -1347,6 +1361,24 @@ export class ServerDraftAdapter implements EngineAdapter {
           && this._playerId === data.your_player
           && fullSessionKeysEqual(this.activeFullKey, data.full_key);
         if (!sameMatch) {
+          // A command already SENT for the outgoing match on this same socket
+          // can never complete: its addressed reply is fenced by the new match
+          // key below. Release the slot before listeners can observe B. A
+          // command still being claimed is released unsent by its own recheck.
+          if (this.submission.occupied && this.submissionSocket === sourceSocket
+            && this.submissionSent) {
+            const revoked = this.submission.drop();
+            this.submissionSocket = null;
+            this.submissionFullKey = null;
+            this.submissionSent = false;
+            if (revoked) {
+              revoked.reject(new AdapterError(
+                "REQUEST_FAILED",
+                "The draft match changed before this command completed",
+                true,
+              ));
+            }
+          }
           this.clearSnapshot();
           this.acceptedFullKey = null;
           this.acceptedGameSocket = null;
@@ -1818,6 +1850,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     );
     this.submissionSocket = null;
     this.submissionFullKey = null;
+    this.submissionSent = false;
     this.rejectPendingManaPaymentPreviews(
       new AdapterError("WS_CLOSED", "Adapter disposed during mana-payment preview", true),
     );

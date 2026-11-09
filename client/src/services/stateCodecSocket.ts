@@ -1039,7 +1039,10 @@ function frameType(text: string): string {
     // `,"data":` immediately after the tag is the canonical serde envelope; a
     // tag containing an escape or another field order falls back to parsing.
     if (end > CANONICAL_ENVELOPE_PREFIX.length && text.startsWith(',"data":', end + 1)) {
-      return text.slice(CANONICAL_ENVELOPE_PREFIX.length, end);
+      const tag = text.slice(CANONICAL_ENVELOPE_PREFIX.length, end);
+      // `{"type":"Fu\u006cl","data":…}` is a compact but escaped tag: the raw
+      // slice is not the discriminator, so keep it on the JSON path.
+      if (!tag.includes("\\")) return tag;
     }
   }
   try {

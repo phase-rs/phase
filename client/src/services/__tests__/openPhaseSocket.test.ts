@@ -1999,6 +1999,29 @@ describe("openPhaseSocket — canonical codec discriminator", () => {
     }
   });
 
+  const escapedCodecTags: Array<["Full" | "Delta", boolean]> = [
+    ["Full", false], ["Delta", false], ["Full", true], ["Delta", true],
+  ];
+  it.each(escapedCodecTags)("decodes a compact escaped %s tag (gzip=%s)", async (type, compressed) => {
+    const fake = fakeSession();
+    const wire = await openWire(compressed, fake);
+    // Compact canonical envelope whose tag is escaped: the prefix branch must
+    // not hand the raw `Fu\u006cl` slice to ordinary pass-through.
+    const tag = type === "Full" ? "Fu\\u006cl" : "Delt\\u0061";
+    const text = `{"type":"${tag}","data":{"state":{"type":"Pong"},"revision":1}}`
+      .padEnd(gzipFixtureLength, " ");
+    try {
+      await wire.deliver(text);
+      await vi.waitFor(() => expect(wire.received).toEqual([DECODED_PONG]));
+      expect(fake.decode).toHaveBeenCalledOnce();
+      expect(new TextDecoder().decode(fake.decode.mock.calls[0][0])).toBe(text);
+      expect(wire.recovery).toEqual([]);
+      expect(wire.raw.close).not.toHaveBeenCalled();
+    } finally {
+      wire.socket.close();
+    }
+  });
+
   it.each([false, true])("retains noncanonical field order and escaped codec tags (gzip=%s)", async (compressed) => {
     const fake = fakeSession();
     const wire = await openWire(compressed, fake);

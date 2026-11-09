@@ -2497,6 +2497,36 @@ describe("draft attachment settlement", () => {
     expect(await current()).toMatchObject({ resolvedWith: { events: [{ marker: "next-match-complete" }] } });
   });
 
+  it("settles a sent command when the same socket switches matches", async () => {
+    enterAcceptedFullMatch(adapter, established);
+    const nextKey = { game_code: "GAME03", generation: 9 };
+    const first = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+    const firstId = lastSubmissionCommandId(established);
+    receive(established, "DraftMatchStart", {
+      match_id: "r3-t0", round: 3, game_code: nextKey.game_code, full_key: nextKey,
+      player_token: "match-draft-token", your_player: 0, opponent_name: "Next opponent",
+    });
+    // The outgoing match's slot is released before B's bootstrap commits.
+    expect(await first()).toMatchObject({
+      code: "REQUEST_FAILED",
+      message: "The draft match changed before this command completed",
+    });
+    receive(established, "GameStarted", {
+      state: matchState("switched-match-ready"), your_player: 0, full_key: nextKey,
+    });
+    // The old match's addressed failure is fenced by the new key: it can
+    // neither resurrect the settled caller nor take the new slot.
+    established.dispatchSynthetic("message", JSON.stringify({
+      type: "ActionFailed", command_id: firstId, data: { message: "old match failed" },
+    }));
+    const next = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+    receive(established, "StateUpdate", {
+      state: matchState("switched-match-complete"),
+      events: [{ marker: "switched-match-complete" }], full_key: nextKey,
+    });
+    expect(await next()).toMatchObject({ resolvedWith: { events: [{ marker: "switched-match-complete" }] } });
+  });
+
   it.each(["serverHello", "draftViewUpdated"] as const)(
     "drains older reconnect views before the synchronous selected-inventory reply from a %s pick consumer",
     async (trigger) => {
