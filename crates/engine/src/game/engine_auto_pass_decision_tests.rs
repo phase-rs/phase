@@ -2654,8 +2654,9 @@ fn own_bounce_of_your_land(forest_tapped: bool) -> GameState {
 fn recheck_session_pauses_an_own_top_held_for_a_removable_mana_source() {
     // The look-ahead: with an own inert entry above the bounce, the skipped
     // window over the bounce is authorized only when nothing can be lost. The
-    // bounce is a trigger here (a karoo's "return a land you control"), since a
-    // spell resolves alone and its window is never looked ahead to.
+    // bounce is a trigger here (Guildless Commons: "When this land enters,
+    // return a land you control to its owner's hand."), since a spell resolves
+    // alone and its window is never looked ahead to.
     for (forest_tapped, limit) in [(false, 1), (true, 2)] {
         let mut state = own_bounce_of_your_land(forest_tapped);
         let spell = state.stack.pop_back().expect("the bounce is on the stack");
@@ -2673,7 +2674,7 @@ fn recheck_session_pauses_an_own_top_held_for_a_removable_mana_source() {
                 condition: None,
                 trigger_event: None,
                 description: None,
-                source_name: "Karoo".to_string(),
+                source_name: "Guildless Commons".to_string(),
                 subject_match_count: None,
                 die_result: None,
                 provenance: None,
@@ -2728,64 +2729,69 @@ fn until_end_of_turn_breaks_on_an_own_top_held_for_a_removable_mana_source() {
         );
         let decision = priority_auto_pass_decision(&state, PlayerId(0));
         if expect_break {
-            assert!(is_break(&decision), "untapped Forest: the window is held");
+            assert!(is_break(&decision), "untapped Monolith: the window is held");
         } else {
-            assert!(is_pass(&decision), "tapped Forest: own top passes");
+            assert!(is_pass(&decision), "tapped Monolith: own top passes");
         }
     }
 }
 
-/// P0's own Reset ("Untap all lands you control.") alone on the stack, with P0's
-/// Forest, a permanent P0 can tap for mana now, untapped or tapped.
-fn own_untap_of_your_lands(forest_tapped: bool) -> GameState {
+/// Basalt Monolith, verbatim.
+const BASALT_MONOLITH: &str = "This artifact doesn't untap during your untap step.\n{T}: Add {C}{C}{C}.\n{3}: Untap this artifact.";
+
+/// P0's Basalt Monolith, untapped or tapped, with its own "{3}: Untap this
+/// artifact." alone on the stack.
+fn own_basalt_untap(monolith_tapped: bool) -> GameState {
     let mut scenario = crate::game::scenario::GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let forest = scenario.add_basic_land(PlayerId(0), ManaColor::Green);
+    let monolith = scenario
+        .add_artifact_from_oracle(PlayerId(0), "Basalt Monolith", BASALT_MONOLITH)
+        .id();
     let mut state = scenario.build().state().clone();
-    state.objects.get_mut(&forest).unwrap().tapped = forest_tapped;
-    let source = ObjectId(30_601);
-    push_spell(
-        &mut state,
-        source,
-        PlayerId(0),
-        ResolvedAbility::new(
-            Effect::SetTapState {
-                target: TargetFilter::Typed(
-                    crate::types::ability::TypedFilter::land()
-                        .controller(crate::types::ability::ControllerRef::You),
-                ),
-                scope: crate::types::ability::EffectScope::All,
-                state: crate::types::ability::TapStateChange::Untap,
-            },
-            vec![],
-            source,
-            PlayerId(0),
-        ),
-    );
+    state.objects.get_mut(&monolith).unwrap().tapped = monolith_tapped;
+    state.stack.push_back(StackEntry {
+        id: ObjectId(30_601),
+        source_id: monolith,
+        controller: PlayerId(0),
+        kind: StackEntryKind::ActivatedAbility {
+            source_id: monolith,
+            ability: Box::new(ResolvedAbility::new(
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: crate::types::ability::EffectScope::Single,
+                    state: crate::types::ability::TapStateChange::Untap,
+                },
+                Vec::new(),
+                monolith,
+                PlayerId(0),
+            )),
+        },
+    });
     state
 }
 
-/// CR 701.26b + CR 605.3a: an own top that would waste an untap on a permanent
-/// the player can tap for mana now is `Held`, so a rechecking session pauses an
-/// unverified representative's live window. No skipped window is authorized
-/// over it, as over any spell, which resolves alone.
+/// CR 701.26b + CR 605.3a: an own activated ability that would waste an untap
+/// on its source while that source can tap for mana now is `Held`, so a
+/// rechecking session pauses an unverified representative's live window. No
+/// skipped window is authorized over it, as over any activated ability, which
+/// resolves alone.
 #[test]
 fn recheck_session_pauses_an_own_top_held_for_a_wasted_untap() {
     // The look-ahead: with an own inert entry above the untap, the boundary
-    // stops before the spell either way. A spell resolves alone, so its window
+    // stops before the activation either way. It resolves alone, so its window
     // is read when it comes, not ahead of time.
-    for forest_tapped in [false, true] {
-        let mut state = own_untap_of_your_lands(forest_tapped);
+    for monolith_tapped in [false, true] {
+        let mut state = own_basalt_untap(monolith_tapped);
         push_simple_stack_entry(&mut state, 30_602, PlayerId(0));
         install_recheck_session(&mut state, &[PlayerId(1)]);
         assert_eq!(
             stack_resolution_session_authorized_limit(&state),
             Some(1),
-            "Forest tapped: {forest_tapped}"
+            "Monolith tapped: {monolith_tapped}"
         );
     }
 
-    let mut held = own_untap_of_your_lands(false);
+    let mut held = own_basalt_untap(false);
     install_recheck_session(&mut held, &[PlayerId(1)]);
     assert!(matches!(
         stack_resolution_session_priority_decision(
@@ -2796,9 +2802,9 @@ fn recheck_session_pauses_an_own_top_held_for_a_wasted_untap() {
         StackResolutionSessionPriorityDecision::PauseRetained
     ));
 
-    // Control: with the Forest tapped the untap is not wasted, so the own-object
+    // Control: with Monolith tapped the untap is not wasted, so the own-object
     // standing pass authorizes the window again.
-    let mut granted = own_untap_of_your_lands(true);
+    let mut granted = own_basalt_untap(true);
     install_recheck_session(&mut granted, &[PlayerId(1)]);
     assert!(matches!(
         stack_resolution_session_priority_decision(
@@ -2891,7 +2897,7 @@ fn authorized_limit_does_not_look_past_an_activated_ability() {
 /// session passes through the window the rechecking session pauses at.
 #[test]
 fn committed_session_passes_through_an_own_top_held_for_a_wasted_untap() {
-    let mut state = own_untap_of_your_lands(false);
+    let mut state = own_basalt_untap(false);
     install_stack_resolution_session(
         &mut state,
         BTreeSet::from([PlayerId(0), PlayerId(1)]),
@@ -2913,8 +2919,8 @@ fn committed_session_passes_through_an_own_top_held_for_a_wasted_untap() {
 /// `Held` for a wasted untap, and keeps passing own tops otherwise.
 #[test]
 fn until_end_of_turn_breaks_on_an_own_top_held_for_a_wasted_untap() {
-    for (forest_tapped, expect_break) in [(false, true), (true, false)] {
-        let mut state = own_untap_of_your_lands(forest_tapped);
+    for (monolith_tapped, expect_break) in [(false, true), (true, false)] {
+        let mut state = own_basalt_untap(monolith_tapped);
         state.auto_pass.insert(
             PlayerId(0),
             AutoPassMode::UntilTurnBoundary {
@@ -2923,9 +2929,9 @@ fn until_end_of_turn_breaks_on_an_own_top_held_for_a_wasted_untap() {
         );
         let decision = priority_auto_pass_decision(&state, PlayerId(0));
         if expect_break {
-            assert!(is_break(&decision), "untapped Forest: the window is held");
+            assert!(is_break(&decision), "untapped Monolith: the window is held");
         } else {
-            assert!(is_pass(&decision), "tapped Forest: own top passes");
+            assert!(is_pass(&decision), "tapped Monolith: own top passes");
         }
     }
 }

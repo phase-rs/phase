@@ -1,6 +1,7 @@
-//! CR 701.26b + CR 605.3a: a player's own spell or activated ability that will
-//! untap a permanent they can tap for mana now holds their priority, because
-//! only tapped permanents can be untapped and this is the window to tap it.
+//! CR 701.26b + CR 605.3a: a player's own activated ability that will untap
+//! its own source while they can tap that source for mana now holds their
+//! priority, because only tapped permanents can be untapped and this is the
+//! window to tap it.
 //!
 //! The defining line, with Basalt Monolith ("{T}: Add {C}{C}{C}." and "{3}: Untap
 //! this artifact.") and Rings of Brighthearth ("Whenever you activate an ability,
@@ -19,28 +20,16 @@
 //! recommends passing the window, and the loop detector can't see a cycle the
 //! player never got to play.
 //!
-//! The class around it:
-//! - Arbor Elf: "{T}: Untap target Forest."
-//! - Dramatic Reversal: "Untap all nonland permanents you control."
-//! - Vitalize: "Untap all creatures you control."
-//! - Freed from the Real and Pemmin's Aura: "{U}: Untap enchanted creature."
-//! - Illusionist's Bracers: "Whenever an ability of equipped creature is
-//!   activated, if it isn't a mana ability, copy that ability. You may choose new
-//!   targets for the copy."
+//! The class around it: Grim Monolith ("{4}: Untap this artifact."), Devoted
+//! Druid ("Put a -1/-1 counter on this creature: Untap this creature."), Staff
+//! of Compleation ("{5}: Untap this artifact."), and Illusionist's Bracers
+//! ("Whenever an ability of equipped creature is activated, if it isn't a mana
+//! ability, copy that ability.") copying such an untap.
 //!
-//! What keeps the pass:
-//! - Gilded Goose: "{T}, Sacrifice a Food: Add one mana of any color." asks which
-//!   Food as its cost is paid, so a copy of the game can't read whether a second
-//!   use exists. With one Food there is none.
-//! - Krark-Clan Ironworks: "Sacrifice an artifact: Add {C}{C}." has no {T}.
-//! - Lotus Petal: "{T}, Sacrifice this artifact: Add one mana of any color." is
-//!   gone once it is tapped.
-//! - Snap: "Return target creature to its owner's hand. Untap up to two lands."
-//!   chooses its lands as it resolves.
-//! - Acrobatic Leap: "Target creature gets +1/+3 and gains flying until end of
-//!   turn. Untap it." sits below a pump, which the reach can't bound.
-//! - Wilderness Reclamation: "At the beginning of your end step, untap all lands
-//!   you control." is a trigger, which goes on the stack with no player act.
+//! What keeps the pass: a stunned source (CR 122.1d), a first use that ends the
+//! game, an untap of another permanent (Arbor Elf, Freed from the Real), and
+//! a trigger (Wilderness Reclamation: "At the beginning of your end step, untap
+//! all lands you control."), which goes on the stack with no player act.
 
 use super::support::shared_card_db;
 use engine::ai_support::{
@@ -51,10 +40,10 @@ use engine::analysis::loop_check::{ShortcutResponse, WinKind};
 use engine::analysis::resource::ResourceAxis;
 use engine::database::card_db::CardDatabase;
 use engine::game::effects::attach::attach_to;
-use engine::game::effects::stack_reach::stack_entry_node_reach;
 use engine::game::engine::apply_verified_ai_priority_pass;
 use engine::game::layers::flush_layers;
 use engine::game::mana_abilities::is_mana_ability;
+use engine::game::perf_counters;
 use engine::game::period_confirm::performed_for_tests;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -65,20 +54,15 @@ use engine::types::game_state::{
     CastPaymentMode, LoopDetectionMode, PriorityPassingMode, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaCostShard, ManaType};
+use engine::types::mana::ManaType;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 const ARBOR_ELF: &str = "{T}: Untap target Forest.";
 const WILDERNESS_RECLAMATION: &str =
     "At the beginning of your end step, untap all lands you control.";
-const SNAP: &str = "Return target creature to its owner's hand. Untap up to two lands.";
-const ACROBATIC_LEAP: &str =
-    "Target creature gets +1/+3 and gains flying until end of turn. Untap it.";
-const FOOD: &str = "{2}, {T}, Sacrifice this artifact: You gain 3 life.";
-const MIRRORED_LOTUS: &str = "Reflect {0} (As this enters, each opponent may pay {0}. When they \
-     do, they create a token copy of this except it lacks this ability.)\n{T}, Exile Mirrored \
-     Lotus: Add three mana of any one color.";
+/// Treasure's mana ability, as the engine's token has it.
+const TREASURE: &str = "{T}, Sacrifice this artifact: Add one mana of any color.";
 
 fn recommends_pass(runner: &GameRunner) -> bool {
     let state = runner.state();
@@ -231,10 +215,6 @@ fn optional_effect_prompt(runner: &GameRunner) -> bool {
         runner.state().waiting_for,
         WaitingFor::OptionalEffectChoice { .. }
     )
-}
-
-fn copy_retarget_prompt(runner: &GameRunner) -> bool {
-    matches!(runner.state().waiting_for, WaitingFor::CopyRetarget { .. })
 }
 
 struct BasaltRings {
@@ -466,74 +446,57 @@ fn both_windows_hold_when_the_source_is_untapped_at_activation() {
     assert!(!recommends_pass(&rig.runner), "the original's untap, too");
 }
 
-/// Arbor Elf, a tapped Forest and an untapped Forest.
-fn arbor_elf_board(db: &CardDatabase) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+/// Basalt Monolith and three Mountains, Monolith untapped, its untap activated
+/// with the Mountains' mana floated first, so Monolith can tap for mana in the
+/// window.
+/// `stun` puts a stun counter on Monolith first (Nesting Grounds can move one
+/// there).
+fn untapped_monolith_with_its_untap_on_the_stack(
+    db: &CardDatabase,
+    stun: bool,
+) -> (GameRunner, ObjectId) {
     let mut scenario = main_phase_scenario();
-    let elf = scenario
-        .add_creature_from_oracle(P0, "Arbor Elf", 1, 1, ARBOR_ELF)
-        .id();
-    let tapped = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
-    let untapped = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    let monolith = scenario.add_real_card(P0, "Basalt Monolith", Zone::Battlefield, db);
+    let mountains: Vec<_> = (0..3)
+        .map(|_| scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db))
+        .collect();
     let mut runner = scenario.build();
-    clear_summoning_sickness(&mut runner, elf);
-    tap_for_mana(&mut runner, tapped);
-    (runner, elf, tapped, untapped)
-}
-
-/// The declared object decides, not a ready source elsewhere on the board.
-#[test]
-fn only_the_declared_target_of_an_untap_counts() {
-    let Some(db) = shared_card_db() else { return };
-
-    let (mut runner, elf, tapped, untapped) = arbor_elf_board(db);
-    let untap = untap_ability_index(&runner, elf);
-    activate(&mut runner, elf, untap, &[tapped]);
-    assert_eq!(top_source_name(&runner).as_deref(), Some("Arbor Elf"));
-    assert!(mana_action(&runner, untapped).is_some());
-    assert!(
-        recommends_pass(&runner),
-        "the declared Forest is tapped, so the untap isn't wasted"
-    );
-
-    let (mut runner, elf, _, untapped) = arbor_elf_board(db);
-    activate(&mut runner, elf, untap, &[untapped]);
-    assert_eq!(top_source_name(&runner).as_deref(), Some("Arbor Elf"));
-    assert!(
-        !recommends_pass(&runner),
-        "the declared Forest can tap for mana first"
-    );
+    for mountain in mountains {
+        tap_for_mana(&mut runner, mountain);
+    }
+    if stun {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&monolith)
+            .expect("Monolith is on the battlefield")
+            .counters
+            .insert(parse_counter_type("stun"), 1);
+    }
+    let untap = untap_ability_index(&runner, monolith);
+    activate(&mut runner, monolith, untap, &[]);
+    assert_eq!(top_source_name(&runner).as_deref(), Some("Basalt Monolith"));
+    assert!(mana_action(&runner, monolith).is_some() && !is_tapped(&runner, monolith));
+    (runner, monolith)
 }
 
 /// CR 122.1d: "If a permanent with a stun counter on it would become untapped,
-/// instead remove a stun counter from it." Arbor Elf targets the untapped
-/// Forest. Plain, tapping it first gives its mana twice, so the window holds.
-/// Stunned, the untap after that tap only removes the counter, so there's no
-/// second tap and the pass stays; played out, the Forest ends tapped.
+/// instead remove a stun counter from it." Plain, tapping Monolith first gives
+/// its mana twice, so the window holds. Stunned, the untap after that tap only
+/// removes the counter, so there's no second tap and the pass stays; played out,
+/// Monolith ends tapped with the counter gone.
 #[test]
-fn a_stunned_target_gets_no_second_tap_from_the_untap() {
+fn a_stunned_source_gets_no_second_tap_from_its_untap() {
     let Some(db) = shared_card_db() else { return };
     for stunned in [false, true] {
-        let (mut runner, elf, _, forest) = arbor_elf_board(db);
-        if stunned {
-            runner
-                .state_mut()
-                .objects
-                .get_mut(&forest)
-                .expect("the Forest is on the battlefield")
-                .counters
-                .insert(parse_counter_type("stun"), 1);
-        }
-        let untap = untap_ability_index(&runner, elf);
-        activate(&mut runner, elf, untap, &[forest]);
-        assert_eq!(top_source_name(&runner).as_deref(), Some("Arbor Elf"));
-        assert!(mana_action(&runner, forest).is_some() && !is_tapped(&runner, forest));
+        let (mut runner, monolith) = untapped_monolith_with_its_untap_on_the_stack(db, stunned);
         assert_eq!(
             recommends_pass(&runner),
             stunned,
             "stunned: {stunned}: whether the untap window passes"
         );
 
-        tap_for_mana(&mut runner, forest);
+        tap_for_mana(&mut runner, monolith);
         for _ in 0..4 {
             if runner.state().stack.is_empty() {
                 break;
@@ -541,13 +504,13 @@ fn a_stunned_target_gets_no_second_tap_from_the_untap() {
             runner.act(GameAction::PassPriority).expect("pass");
         }
         let state = runner.state();
-        assert!(state.stack.is_empty(), "Arbor Elf's untap resolved");
+        assert!(state.stack.is_empty(), "Monolith's untap resolved");
         assert_eq!(
-            state.objects[&forest].tapped, stunned,
-            "stunned: {stunned}: whether the Forest stays tapped"
+            state.objects[&monolith].tapped, stunned,
+            "stunned: {stunned}: whether Monolith stays tapped"
         );
         assert!(
-            !state.objects[&forest]
+            !state.objects[&monolith]
                 .counters
                 .contains_key(&parse_counter_type("stun")),
             "the untap removed the stun counter instead"
@@ -555,319 +518,117 @@ fn a_stunned_target_gets_no_second_tap_from_the_untap() {
     }
 }
 
-/// Dramatic Reversal, its {1}{U} floated first so that automatic payment leaves
-/// `permanents` untapped.
-fn dramatic_reversal_on_the_stack(permanents: &[&str], db: &CardDatabase) -> GameRunner {
-    dramatic_reversal_over(db, |scenario| {
-        for permanent in permanents {
-            scenario.add_real_card(P0, permanent, Zone::Battlefield, db);
-        }
-    })
-}
-
-fn dramatic_reversal_over(
-    db: &CardDatabase,
-    add_board: impl FnOnce(&mut GameScenario),
-) -> GameRunner {
+/// The hold reads the top entry and its source only: with forty more queued
+/// untaps below it and sixty Treasures beside it, it copies the game once, for
+/// Monolith's one {T} mana row.
+#[test]
+fn the_untap_hold_reads_only_the_top_and_its_source() {
+    let Some(db) = shared_card_db() else { return };
     let mut scenario = main_phase_scenario();
-    let reversal = scenario.add_real_card(P0, "Dramatic Reversal", Zone::Hand, db);
-    let islands = [
-        scenario.add_real_card(P0, "Island", Zone::Battlefield, db),
-        scenario.add_real_card(P0, "Island", Zone::Battlefield, db),
-    ];
-    add_board(&mut scenario);
-    let mut runner = scenario.build();
-    for island in islands {
-        tap_for_mana(&mut runner, island);
+    let monolith = scenario.add_real_card(P0, "Basalt Monolith", Zone::Battlefield, db);
+    let mountains: Vec<_> = (0..3)
+        .map(|_| scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db))
+        .collect();
+    for _ in 0..60 {
+        scenario.add_artifact_from_oracle(P0, "Treasure", TREASURE);
     }
-    runner.cast(reversal).commit();
-    assert_eq!(
-        top_source_name(&runner).as_deref(),
-        Some("Dramatic Reversal")
-    );
-    runner
-}
-
-fn permanent_named(runner: &GameRunner, name: &str) -> ObjectId {
-    let state = runner.state();
-    state
-        .battlefield
-        .iter()
-        .copied()
-        .find(|id| state.objects[id].name == name)
-        .expect("the permanent is on the battlefield")
-}
-
-#[test]
-fn a_mass_untap_holds_until_nothing_it_reaches_is_wasted() {
-    let Some(db) = shared_card_db() else { return };
-    let mut runner = dramatic_reversal_on_the_stack(&["Mind Stone", "Krark-Clan Ironworks"], db);
-    let stone = permanent_named(&runner, "Mind Stone");
-    assert!(!is_tapped(&runner, stone));
-    assert!(!recommends_pass(&runner), "the Stone can tap first");
-
-    tap_for_mana(&mut runner, stone);
-    let ironworks = permanent_named(&runner, "Krark-Clan Ironworks");
-    assert!(
-        !is_tapped(&runner, ironworks),
-        "Ironworks is in the mass filter and untapped"
-    );
-    assert!(
-        recommends_pass(&runner),
-        "Ironworks has no {{T}} in its cost, so untapping it gives nothing"
-    );
-}
-
-#[test]
-fn a_source_with_no_tap_cost_keeps_the_pass() {
-    let Some(db) = shared_card_db() else { return };
-    let runner = dramatic_reversal_on_the_stack(&["Krark-Clan Ironworks"], db);
-    let ironworks = permanent_named(&runner, "Krark-Clan Ironworks");
-    assert!(mana_action(&runner, ironworks).is_some());
-    assert!(recommends_pass(&runner));
-}
-
-#[test]
-fn a_source_that_sacrifices_itself_keeps_the_pass() {
-    let Some(db) = shared_card_db() else { return };
-    let runner = dramatic_reversal_on_the_stack(&["Lotus Petal"], db);
-    let petal = permanent_named(&runner, "Lotus Petal");
-    assert!(mana_action(&runner, petal).is_some());
-    assert!(recommends_pass(&runner));
-}
-
-#[test]
-fn a_source_that_exiles_itself_keeps_the_pass() {
-    let Some(db) = shared_card_db() else { return };
-    let runner = dramatic_reversal_over(db, |scenario| {
-        scenario.add_artifact_from_oracle(P0, "Mirrored Lotus", MIRRORED_LOTUS);
-    });
-    let lotus = permanent_named(&runner, "Mirrored Lotus");
-    assert!(mana_action(&runner, lotus).is_some());
-    assert!(recommends_pass(&runner));
-}
-
-/// Garruk Wildspeaker, verbatim.
-const GARRUK_WILDSPEAKER: &str = "[+1]: Untap two target lands.\n[\u{2212}1]: Create a 3/3 green Beast creature token.\n[\u{2212}4]: Creatures you control get +3/+3 and gain trample until end of turn.";
-/// Gemstone Mine, verbatim.
-const GEMSTONE_MINE: &str = "This land enters with three mining counters on it.\n{T}, Remove a mining counter from this land: Add one mana of any color. If there are no mining counters on this land, sacrifice it.";
-
-/// Garruk Wildspeaker's +1 on the stack, targeting a tapped Forest and an
-/// untapped Gemstone Mine with `mining_counters` on it. Returns the runner and
-/// the Mine.
-fn garruk_over_gemstone_mine(db: &CardDatabase, mining_counters: u32) -> (GameRunner, ObjectId) {
-    let mut scenario = main_phase_scenario();
-    let garruk = scenario
-        .add_planeswalker_from_oracle(P0, "Garruk Wildspeaker", "Garruk", 3, GARRUK_WILDSPEAKER)
-        .id();
-    let forest = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
-    let mine = scenario
-        .add_land_from_oracle(P0, "Gemstone Mine", GEMSTONE_MINE)
-        .id();
-    // Scenario permanents skip the enters replacement, so the counters are set here.
-    scenario.with_counter(mine, parse_counter_type("mining"), mining_counters);
     let mut runner = scenario.build();
-    tap_for_mana(&mut runner, forest);
-    activate(&mut runner, garruk, 0, &[forest, mine]);
-    assert_eq!(
-        top_source_name(&runner).as_deref(),
-        Some("Garruk Wildspeaker"),
-        "the +1 is on the stack"
-    );
-    (runner, mine)
+    for mountain in mountains {
+        tap_for_mana(&mut runner, mountain);
+    }
+    let untap = untap_ability_index(&runner, monolith);
+    activate(&mut runner, monolith, untap, &[]);
+    let queued = runner.state().stack.back().expect("the untap").clone();
+    for _ in 0..40 {
+        runner.state_mut().stack.push_front(queued.clone());
+    }
+
+    let state = runner.state();
+    let actions = legal_actions(state);
+    perf_counters::reset_untap_repeat_probe_counters();
+    assert!(!auto_pass_recommended(state, &actions));
+    assert_eq!(perf_counters::untap_repeat_probe_snapshot().state_clones, 1);
 }
 
-/// Tapping Gemstone Mine removes a mining counter. On its last one the cost
-/// can't be paid again, and the mana ability then sacrifices the Mine as it
-/// resolves (CR 605.3b + CR 701.21a), so Garruk's untap has nothing to give it
-/// and the pass stays. With two counters the Mine keeps one, and untapped it can
-/// be used again, so the window holds.
+/// Staff of Compleation, verbatim.
+const STAFF_OF_COMPLEATION: &str = "{T}, Pay 1 life: Destroy target permanent you own.\n{T}, Pay 2 life: Add one mana of any color.\n{T}, Pay 3 life: Proliferate.\n{T}, Pay 4 life: Draw a card.\n{5}: Untap this artifact.";
+
+/// The Staff's "{T}, Pay 2 life: Add one mana of any color." CR 119.4 +
+/// CR 704.5a: paying 2 life at 2 life is legal, and the player then loses the
+/// game, so the untap has no second use to wait for and the pass stays. At 3
+/// life the first use leaves 1, too little to pay again, so the pass stays too.
+/// At 4 it leaves 2, and the window holds.
 #[test]
-fn an_untap_holds_only_for_a_source_that_survives_its_use() {
+fn a_use_that_ends_the_game_leaves_no_second_one() {
     let Some(db) = shared_card_db() else { return };
-    for (counters, holds) in [(1, false), (2, true)] {
-        let (runner, mine) = garruk_over_gemstone_mine(db, counters);
+    for (life, holds) in [(2, false), (3, false), (4, true)] {
+        let mut scenario = main_phase_scenario();
+        let staff = scenario
+            .add_artifact_from_oracle(P0, "Staff of Compleation", STAFF_OF_COMPLEATION)
+            .id();
+        let mountains: Vec<_> = (0..5)
+            .map(|_| scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db))
+            .collect();
+        let mut runner = scenario.build();
+        runner.state_mut().players[0].life = life;
+        for mountain in mountains {
+            tap_for_mana(&mut runner, mountain);
+        }
+        let untap = untap_ability_index(&runner, staff);
+        activate(&mut runner, staff, untap, &[]);
+        assert_eq!(
+            top_source_name(&runner).as_deref(),
+            Some("Staff of Compleation")
+        );
         assert!(
-            mana_action(&runner, mine).is_some() && !is_tapped(&runner, mine),
-            "{counters} counters: the Mine can tap for mana now"
+            mana_action(&runner, staff).is_some(),
+            "{life} life: the Staff can tap for mana now"
         );
         assert_eq!(
             !recommends_pass(&runner),
             holds,
-            "{counters} counters: whether the untap window holds"
+            "{life} life: whether the untap window holds"
         );
     }
 }
 
-/// The two-counter row played out: the player taps the Mine in the held window,
-/// and Garruk's untap then untaps it with a counter left to use.
-#[test]
-fn an_untap_gives_a_surviving_source_its_second_use() {
-    let Some(db) = shared_card_db() else { return };
-    let (mut runner, mine) = garruk_over_gemstone_mine(db, 2);
-    assert!(!recommends_pass(&runner));
-    tap_for_mana(&mut runner, mine);
-    if !p0_has_priority(&runner) {
-        let choose = legal_actions(runner.state())
-            .into_iter()
-            .next()
-            .expect("the Mine's color choice offers an answer");
-        runner.act(choose).expect("choose a color");
-    }
-    assert!(is_tapped(&runner, mine), "the Mine was tapped for mana");
-    for _ in 0..4 {
-        if runner.state().stack.is_empty() {
-            break;
-        }
-        runner.act(GameAction::PassPriority).expect("pass");
-    }
-    let state = runner.state();
-    assert!(state.stack.is_empty(), "Garruk's +1 resolved");
-    assert_eq!(state.objects[&mine].zone, Zone::Battlefield);
-    assert!(!state.objects[&mine].tapped, "the untap reached the Mine");
-    assert_eq!(
-        state.objects[&mine]
-            .counters
-            .get(&parse_counter_type("mining"))
-            .copied(),
-        Some(1),
-        "one counter is left for the second use"
-    );
-}
+/// Devoted Druid, verbatim.
+const DEVOTED_DRUID: &str =
+    "{T}: Add {G}.\nPut a -1/-1 counter on this creature: Untap this creature.";
 
-/// Vitalize, its {G} floated first so that automatic payment leaves the board
-/// untapped, over what `add_board` adds and a spare Forest, which can tap for
-/// mana and is outside "creatures you control".
-fn vitalize_on_the_stack(
-    db: &CardDatabase,
-    add_board: impl FnOnce(&mut GameScenario) -> Option<ObjectId>,
-) -> (GameRunner, Option<ObjectId>, ObjectId) {
-    let mut scenario = main_phase_scenario();
-    let vitalize = scenario.add_real_card(P0, "Vitalize", Zone::Hand, db);
-    let forest = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
-    let spare = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
-    let creature = add_board(&mut scenario);
-    let mut runner = scenario.build();
-    if let Some(creature) = creature {
-        clear_summoning_sickness(&mut runner, creature);
-    }
-    tap_for_mana(&mut runner, forest);
-    runner.cast(vitalize).commit();
-    assert_eq!(top_source_name(&runner).as_deref(), Some("Vitalize"));
-    (runner, creature, spare)
-}
-
-/// Gilded Goose's cost sacrifices a Food, not the Goose, but which Food is asked
-/// as the cost is paid, before any of it is, so the repeat check can't read a
-/// second use and the pass stays. With this one Food there is no second use.
-#[test]
-fn a_source_whose_cost_asks_a_choice_keeps_the_pass() {
-    let Some(db) = shared_card_db() else { return };
-    let (runner, goose, _) = vitalize_on_the_stack(db, |scenario| {
-        let goose = scenario.add_real_card(P0, "Gilded Goose", Zone::Battlefield, db);
-        scenario
-            .add_artifact_from_oracle(P0, "Food", FOOD)
-            .with_subtypes(vec!["Food"]);
-        Some(goose)
-    });
-    let goose = goose.expect("the Goose was added");
-    assert!(mana_action(&runner, goose).is_some());
-    assert!(!is_tapped(&runner, goose));
-    assert!(recommends_pass(&runner));
-}
-
-#[test]
-fn a_mass_untap_reads_its_filter() {
-    let Some(db) = shared_card_db() else { return };
-
-    let (runner, _, spare) = vitalize_on_the_stack(db, |_| None);
-    assert!(mana_action(&runner, spare).is_some());
-    assert!(
-        recommends_pass(&runner),
-        "a Forest is outside \"creatures you control\""
-    );
-
-    let (runner, elves, spare) = vitalize_on_the_stack(db, |scenario| {
-        Some(scenario.add_real_card(P0, "Llanowar Elves", Zone::Battlefield, db))
-    });
-    assert!(mana_action(&runner, spare).is_some());
-    assert!(mana_action(&runner, elves.expect("the Elves were added")).is_some());
-    assert!(!recommends_pass(&runner));
-}
-
-/// Preservation, decided by the node's place below `Bounce` rather than by its
-/// binding: the untap keeps the pass, and the lands are chosen as it resolves.
-#[test]
-fn snap_keeps_the_pass_and_chooses_its_lands_as_it_resolves() {
-    let Some(db) = shared_card_db() else { return };
-    let mut scenario = main_phase_scenario();
-    let snap = scenario
-        .add_spell_to_hand_from_oracle(P0, "Snap", true, SNAP)
-        .with_mana_cost(ManaCost::Cost {
-            shards: vec![ManaCostShard::Blue],
-            generic: 1,
-        })
-        .id();
-    let paying = [
-        scenario.add_real_card(P0, "Island", Zone::Battlefield, db),
-        scenario.add_real_card(P0, "Island", Zone::Battlefield, db),
-    ];
-    let third = scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
-    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
-    let mut runner = scenario.build();
-    for island in paying {
-        tap_for_mana(&mut runner, island);
-    }
-    runner.cast(snap).target_object(bears).commit();
-
-    assert_eq!(top_source_name(&runner).as_deref(), Some("Snap"));
-    assert!(mana_action(&runner, third).is_some());
-    assert!(recommends_pass(&runner));
-
-    client_drive(&mut runner, Rings::NotAsked, |runner| {
-        runner.state().stack.is_empty()
-    });
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::EffectZoneChoice { .. }
-    ));
-}
-
-/// CR 707.10: Illusionist's Bracers on Arbor Elf. The copy is mandatory, so
-/// there is no prompt; it untaps the Forest, the Forest taps again, and the
+/// CR 707.10: Illusionist's Bracers on Devoted Druid. The copy is mandatory, so
+/// there is no prompt; it untaps the Druid, the Druid taps again, and the
 /// original untaps it.
 #[test]
-fn illusionists_bracers_on_arbor_elf_gives_the_forest_a_second_tap() {
+fn illusionists_bracers_on_devoted_druid_gives_the_druid_a_second_tap() {
     let Some(db) = shared_card_db() else { return };
     let mut scenario = main_phase_scenario();
-    let elf = scenario
-        .add_creature_from_oracle(P0, "Arbor Elf", 1, 1, ARBOR_ELF)
+    let druid = scenario
+        .add_creature_from_oracle(P0, "Devoted Druid", 0, 2, DEVOTED_DRUID)
         .id();
     let bracers = scenario.add_real_card(P0, "Illusionist's Bracers", Zone::Battlefield, db);
-    let forest = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
     let mut runner = scenario.build();
-    attach_to(runner.state_mut(), bracers, elf);
+    attach_to(runner.state_mut(), bracers, druid);
     flush_layers(runner.state_mut());
-    clear_summoning_sickness(&mut runner, elf);
+    clear_summoning_sickness(&mut runner, druid);
 
-    tap_for_mana(&mut runner, forest);
-    let untap = untap_ability_index(&runner, elf);
-    activate(&mut runner, elf, untap, &[forest]);
+    tap_for_mana(&mut runner, druid);
+    let untap = untap_ability_index(&runner, druid);
+    activate(&mut runner, druid, untap, &[]);
 
-    client_drive(&mut runner, Rings::NotAsked, copy_retarget_prompt);
     client_drive(&mut runner, Rings::NotAsked, original_and_copy);
-    assert!(is_tapped(&runner, forest));
+    assert!(is_tapped(&runner, druid));
     assert!(recommends_pass(&runner));
 
     client_drive(&mut runner, Rings::NotAsked, left_to_player);
     assert_eq!(runner.state().stack.len(), 1);
-    assert!(!is_tapped(&runner, forest), "the copy untapped the Forest");
+    assert!(!is_tapped(&runner, druid), "the copy untapped the Druid");
     assert!(!recommends_pass(&runner));
-    tap_for_mana(&mut runner, forest);
+    tap_for_mana(&mut runner, druid);
 
     client_drive(&mut runner, Rings::NotAsked, left_to_player);
     assert!(runner.state().stack.is_empty());
-    assert!(!is_tapped(&runner, forest), "the original untapped it");
+    assert!(!is_tapped(&runner, druid), "the original untapped it");
     assert_eq!(mana_in_pool(&runner, ManaType::Green), 2);
 }
 
@@ -916,79 +677,58 @@ fn wilderness_reclamation_keeps_the_pass() {
         runner.act(GameAction::PassPriority).expect("pass");
     }
 
-    let state = runner.state();
     assert!(p0_has_priority(&runner));
     assert_eq!(
         top_source_name(&runner).as_deref(),
         Some("Wilderness Reclamation")
     );
     assert!(mana_action(&runner, forest).is_some());
-    let top = state.stack.back().expect("the trigger is on the stack");
+    let top = runner
+        .state()
+        .stack
+        .back()
+        .expect("the trigger is on the stack");
     assert!(matches!(top.kind, StackEntryKind::TriggeredAbility { .. }));
-    assert!(
-        stack_entry_node_reach(state, top)
-            .iter()
-            .any(|reach| reach.acted_on.contains(&TargetRef::Object(forest))),
-        "the untap reaches the untapped Forest, so the kind decides"
-    );
     assert!(recommends_pass(&runner));
 }
 
-/// CR 303.4b: "Untap enchanted creature." names the Aura's host, so the host's
-/// mana ability is the one the untap would repeat.
+/// Only an untap of the ability's own source holds. Arbor Elf's "{T}: Untap
+/// target Forest." on an untapped Forest, and Freed from the Real's "{U}: Untap
+/// enchanted creature." on untapped Llanowar Elves, keep the pass, as on main.
 #[test]
-fn an_auras_untap_of_its_host_holds_while_the_host_can_tap_for_mana() {
-    let Some(db) = shared_card_db() else { return };
-    for aura in ["Freed from the Real", "Pemmin's Aura"] {
-        for host_tapped in [false, true] {
-            let mut scenario = main_phase_scenario();
-            let elves = scenario.add_real_card(P0, "Llanowar Elves", Zone::Battlefield, db);
-            let enchantment = scenario.add_real_card(P0, aura, Zone::Battlefield, db);
-            let island = scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
-            let mut runner = scenario.build();
-            attach_to(runner.state_mut(), enchantment, elves);
-            flush_layers(runner.state_mut());
-            clear_summoning_sickness(&mut runner, elves);
-            runner.state_mut().objects.get_mut(&elves).unwrap().tapped = host_tapped;
-            tap_for_mana(&mut runner, island);
-
-            let untap = untap_ability_index(&runner, enchantment);
-            activate(&mut runner, enchantment, untap, &[]);
-            assert_eq!(top_source_name(&runner).as_deref(), Some(aura));
-
-            assert_eq!(
-                mana_action(&runner, elves).is_some(),
-                !host_tapped,
-                "{aura}: the host's mana action"
-            );
-            assert_eq!(recommends_pass(&runner), host_tapped, "{aura}");
-        }
-    }
-}
-
-/// Only the untap node's objects count: "Untap it." sits below a pump, so the
-/// reach can't name it, and the pump's own answer isn't an untap.
-#[test]
-fn a_pump_above_an_untap_is_not_read_as_the_untap() {
+fn an_untap_of_another_permanent_keeps_the_pass() {
     let Some(db) = shared_card_db() else { return };
     let mut scenario = main_phase_scenario();
-    let leap = scenario
-        .add_spell_to_hand_from_oracle(P0, "Acrobatic Leap", true, ACROBATIC_LEAP)
-        .with_mana_cost(ManaCost::zero())
+    let elf = scenario
+        .add_creature_from_oracle(P0, "Arbor Elf", 1, 1, ARBOR_ELF)
         .id();
-    let elves = scenario.add_real_card(P0, "Llanowar Elves", Zone::Battlefield, db);
+    let forest = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
     let mut runner = scenario.build();
-    clear_summoning_sickness(&mut runner, elves);
-    runner.cast(leap).target_object(elves).commit();
-
-    assert!(mana_action(&runner, elves).is_some());
-    let state = runner.state();
-    let top = state.stack.back().expect("the spell is on the stack");
-    let reach = stack_entry_node_reach(state, top);
-    assert_eq!(
-        reach[0].acted_on,
-        vec![TargetRef::Object(elves)],
-        "the root node acts on the Elves, so the node filter is what refuses"
+    clear_summoning_sickness(&mut runner, elf);
+    let untap = untap_ability_index(&runner, elf);
+    activate(&mut runner, elf, untap, &[forest]);
+    assert_eq!(top_source_name(&runner).as_deref(), Some("Arbor Elf"));
+    assert!(mana_action(&runner, forest).is_some() && !is_tapped(&runner, forest));
+    assert!(
+        recommends_pass(&runner),
+        "Arbor Elf untaps another permanent"
     );
-    assert!(recommends_pass(&runner));
+
+    let mut scenario = main_phase_scenario();
+    let elves = scenario.add_real_card(P0, "Llanowar Elves", Zone::Battlefield, db);
+    let aura = scenario.add_real_card(P0, "Freed from the Real", Zone::Battlefield, db);
+    let island = scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), aura, elves);
+    flush_layers(runner.state_mut());
+    clear_summoning_sickness(&mut runner, elves);
+    tap_for_mana(&mut runner, island);
+    let untap = untap_ability_index(&runner, aura);
+    activate(&mut runner, aura, untap, &[]);
+    assert_eq!(
+        top_source_name(&runner).as_deref(),
+        Some("Freed from the Real")
+    );
+    assert!(mana_action(&runner, elves).is_some() && !is_tapped(&runner, elves));
+    assert!(recommends_pass(&runner), "the Aura untaps its host");
 }

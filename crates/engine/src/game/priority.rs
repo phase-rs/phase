@@ -3,8 +3,8 @@ use std::borrow::Cow;
 use crate::game::engine::EngineError;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::types::ability::{
-    battlefield_departure_slot, extract_target_filter_from_effect, Effect, ResolvedAbility,
-    TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef,
+    battlefield_departure_slot, extract_target_filter_from_effect, Effect, EffectScope,
+    ResolvedAbility, TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef,
 };
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
@@ -15,7 +15,7 @@ use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 
-use super::effects::stack_reach::{resolution_board, stack_entry_node_reach};
+use super::effects::stack_reach::resolution_board;
 use super::effects::{bind_scoped_seat, player_scope_members};
 use super::mana_sources;
 use super::players;
@@ -358,9 +358,9 @@ pub(crate) enum StandingPriorityPass {
     /// CR 117.1d + CR 605.3a: the window is kept for a mana activation. Either
     /// the player's own object is on top, and resolving it moves a permanent
     /// whose mana ability they can activate now off the battlefield (CR 400.7),
-    /// so that activation is lost; or the object is their own spell or
-    /// activated ability, and resolving it untaps a permanent they can tap for
-    /// mana now, so the untap is wasted unless they tap it first (CR 701.26b).
+    /// so that activation is lost; or the object is their own activated ability
+    /// that untaps its own source while they can tap that source for mana now,
+    /// so the untap is wasted unless they tap it first (CR 701.26b).
     ///
     /// The departure reason is kept unconditionally: the mana stays until the
     /// step ends (CR 106.4), and what it can pay for once the object resolves
@@ -394,9 +394,9 @@ pub(crate) fn standing_priority_pass(
         // outranks castability, see `auto_pass_recommended`): whatever the
         // player could do now, they can still do once it resolves — except
         // activate a mana ability of a permanent it moves off the battlefield,
-        // or, when it is their spell or activated ability, tap for mana a
-        // permanent it untaps while the untap can still give that mana a second
-        // time.
+        // or, when it is their activated ability untapping its own source, tap
+        // that source for mana while the untap can still give that mana a
+        // second time.
         Some(top) if top.controller == player => {
             if resolution_forecloses_mana_activation(state, player, top) {
                 StandingPriorityPass::Held
@@ -467,56 +467,44 @@ fn resolution_can_remove_activatable_mana_source(
         .any(|&source| reaches.iter().any(|reach| reach.contains(&board, source)))
 }
 
-/// CR 701.26b + CR 605.3a: whether resolving `top` untaps a permanent `player`
-/// can tap for mana now. Only tapped permanents can be untapped, so the
-/// instruction does nothing to that permanent unless they tap it first, and
-/// this is the window to do it. Basalt Monolith: "{3}: Untap this artifact."
-/// under Rings of Brighthearth, with the copy resolved and the original still
-/// on the stack. Objects are the resolver's own (`stack_entry_node_reach`), so
-/// an untap the player chooses as it resolves ("untap up to two lands") names
-/// none and keeps the pass, because the lands tapped for its cost are usually
-/// the ones chosen.
+/// CR 701.26b + CR 605.3a: whether resolving `top`, `player`'s own activated
+/// ability, untaps its own source while `player` can tap that source for mana
+/// now. Only tapped permanents can be untapped, so the untap does nothing unless
+/// they tap it first, and this is the window to do it. Basalt Monolith: "{3}:
+/// Untap this artifact." under Rings of Brighthearth, with the copy resolved and
+/// the original still on the stack. Only the top entry and its source are read.
 fn resolution_untaps_ready_mana_source(
     state: &GameState,
     player: PlayerId,
     top: &StackEntry,
 ) -> bool {
-    // A spell or activated ability is on the stack because a player cast or
-    // activated it (CR 601.2, CR 602.2), or as a copy of one (CR 707.10: Rings of
-    // Brighthearth's copy isn't activated), so this stop is one per object of a
-    // line the player started. A triggered ability goes on the stack by itself
-    // (CR 603.2 + CR 603.3); holding for it would stop Wilderness Reclamation
-    // every end step.
-    match top.kind {
-        StackEntryKind::Spell { .. } | StackEntryKind::ActivatedAbility { .. } => {}
-        StackEntryKind::TriggeredAbility { .. }
+    // An activated ability is on the stack because a player activated it
+    // (CR 602.2), or as a copy of one (CR 707.10: Rings of Brighthearth's copy
+    // isn't activated), so this stop is one per object of a line the player
+    // started. A triggered ability goes on the stack by itself (CR 603.2 +
+    // CR 603.3); holding for it would stop Wilderness Reclamation every end step.
+    // A spell, or an untap of anything but the ability's own source, keeps the
+    // pass.
+    let (source, ability) = match &top.kind {
+        StackEntryKind::ActivatedAbility { source_id, ability } => (*source_id, ability),
+        StackEntryKind::Spell { .. }
+        | StackEntryKind::TriggeredAbility { .. }
         | StackEntryKind::KeywordAction { .. }
         | StackEntryKind::CombatDamage { .. } => return false,
-    }
-    let Some(root) = top.ability() else {
-        return false;
     };
-    if !chain_has_effect(root, is_untap) {
-        return false;
-    }
-    let untapped: Vec<ObjectId> = stack_entry_node_reach(state, top)
-        .iter()
-        .filter(|reach| is_untap(&reach.node.effect))
-        .flat_map(|reach| &reach.acted_on)
-        .filter_map(|acted_on| match acted_on {
-            TargetRef::Object(id) => Some(*id),
-            TargetRef::Player(_) => None,
-        })
-        .collect();
-    mana_sources::untap_repeats_mana(state, player, &untapped)
+    chain_has_effect(ability, untaps_its_source)
+        && mana_sources::untap_repeats_mana(state, player, source)
 }
 
-fn is_untap(effect: &Effect) -> bool {
+/// "Untap this artifact." / "Untap this creature.": an untap of the ability's
+/// own source.
+fn untaps_its_source(effect: &Effect) -> bool {
     matches!(
         effect,
         Effect::SetTapState {
             state: TapStateChange::Untap,
-            ..
+            scope: EffectScope::Single,
+            target: TargetFilter::SelfRef,
         }
     )
 }

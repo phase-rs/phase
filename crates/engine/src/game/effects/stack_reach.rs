@@ -923,28 +923,11 @@ fn node_acted_on(
                 state, ids, &filter,
             ))
         }
-        // CR 303.4b + CR 301.5a: "untap enchanted creature" names the source's host,
-        // which the chain resolver binds before `tap_untap_target_ids` reads `targets`.
-        Effect::SetTapState {
-            scope: EffectScope::Single,
-            state: TapStateChange::Untap,
-            target,
-        } => objects(
-            targeting::resolution_bound_attachment_hosts(state, bound, target)
-                .unwrap_or_else(|| super::tap_untap::tap_untap_target_ids(state, bound, target)),
-        ),
         Effect::SetTapState {
             scope: EffectScope::Single,
             target,
             ..
         } => objects(super::tap_untap::tap_untap_target_ids(state, bound, target)),
-        // CR 608.2h: a mass untap acts on the population its resolver reads. Mass
-        // tap has no reader, so it stays on the `_` arm.
-        Effect::SetTapState {
-            scope: EffectScope::All,
-            state: TapStateChange::Untap,
-            target,
-        } => objects(super::tap_untap::mass_tap_untap_ids(state, bound, target)),
         Effect::PutCounter { .. } | Effect::MultiplyCounter { .. } => {
             objects(super::counters::resolve_defined_or_targets(state, bound))
         }

@@ -10408,9 +10408,8 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
             // the session keeps auto-passing through it. CR 117.1d + CR 605.3a:
             // `Held` ends it too: the player's own object that can move one of
             // their activatable mana sources off the battlefield, or their own
-            // spell or activated ability that would waste an untap on one. That
-            // activation is lost once the object
-            // resolves. (`UntilStackEmpty` is consent to resolve the stack
+            // activated ability that would waste an untap on its own source.
+            // That activation is lost once the object resolves. (`UntilStackEmpty` is consent to resolve the stack
             // itself, so it passes through.) The standing rungs are
             // `priority::standing_priority_pass`'s; Full Control already
             // returned above, so `Withheld` cannot reach this arm.
@@ -11026,8 +11025,8 @@ fn stack_resolution_session_participant_authorizes_pass(
                     priority::StandingPriorityPass::Withheld => return false,
                     priority::StandingPriorityPass::Granted => true,
                     // CR 117.1d + CR 605.3a: an own object that can remove an
-                    // activatable mana source, or an own spell or activated
-                    // ability that would waste an untap on one, is no standing
+                    // activatable mana source, or an own activated ability that
+                    // would waste an untap on its own source, is no standing
                     // pass; only explicit consent skips it.
                     priority::StandingPriorityPass::Held
                     | priority::StandingPriorityPass::Undecided => false,
@@ -11111,8 +11110,8 @@ pub(crate) fn stack_resolution_session_authorized_limit(state: &GameState) -> Op
     // see a mana source an earlier member untaps. That is sound for the `Held`
     // rung's removal reason, because a batch consumes only windows this
     // look-ahead authorized, and its members are triggered abilities. Its untap
-    // reason is for a spell or activated ability only, whose window is never
-    // looked ahead to. A member that untaps a mana source which a later
+    // reason is for an activated ability only, whose window is never looked
+    // ahead to. A member that untaps a mana source which a later
     // identical member then removes, without pausing, is an accepted
     // under-approximation.
     let authorized_skipped_windows = fenced_prefix

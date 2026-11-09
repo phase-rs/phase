@@ -447,45 +447,38 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
     actions
 }
 
-/// CR 605.3a + CR 605.3b + CR 701.26b: whether untapping any of `objects` gives
-/// `player` its mana a second time. An object needs a mana ability with {T} in
-/// its cost that `player` can activate now, and after that activation the object
-/// must still be on the battlefield and, untapped, able to activate it again. A
-/// mana ability with no {T} can't be repeated by untapping. The activation runs
-/// on a copy of the game, and the untap after it is the resolving instruction's
-/// own, so a stun counter on the source is removed instead (CR 122.1d), and a
-/// replacement that asks a choice keeps the pass. The source's own cost answers
-/// too: a cost that removes the source (Treasure, Lotus Petal, Mirrored Lotus)
-/// leaves nothing to untap, and a cost that can't be paid again stops a second
-/// use (Gemstone Mine or Peat Bog on its last counter, whose effect then
-/// sacrifices it, CR 701.21a). An
-/// ability that stops for its color (Gemstone Mine) stops the copy after its
-/// cost and before its effect, so there only the cost answers; every such rider
-/// in card data sits beside a counter cost that runs out with it. One that stops
-/// for a choice inside its cost (Gilded Goose's Food, Bog Witch's discard) can't
-/// be read this way and keeps the pass.
-pub(crate) fn untap_repeats_mana(
-    state: &GameState,
-    player: PlayerId,
-    objects: &[ObjectId],
-) -> bool {
-    if objects.is_empty() {
+/// CR 605.3a + CR 605.3b + CR 701.26b: whether untapping `object` gives `player`
+/// its mana a second time. The object needs a mana ability with {T} in its cost
+/// that `player` can activate now, and after that activation it must still be
+/// on the battlefield and, untapped, able to activate it again. A mana ability
+/// with no {T} can't be repeated by untapping. The activation runs on a copy of
+/// the game, and the untap after it is the resolving instruction's own, so a
+/// stun counter on the source is removed instead (CR 122.1d), and a replacement
+/// that asks a choice keeps the pass. The source's own cost answers too: a cost
+/// that removes the source (Treasure, Lotus Petal, Mirrored Lotus) leaves
+/// nothing to untap, and a cost that can't be paid again stops a second use. A
+/// use that ends the game (Staff of Compleation's "Pay 2 life" at 2 life,
+/// CR 119.4 + CR 704.5a) leaves no second one. One that stops for a choice
+/// inside its cost (Gilded Goose's Food, Bog Witch's discard) can't be read this
+/// way and keeps the pass. Only `object`'s own rows are read, one copy each.
+pub(crate) fn untap_repeats_mana(state: &GameState, player: PlayerId, object: ObjectId) -> bool {
+    let Some(source) = state.objects.get(&object) else {
         return false;
-    }
+    };
     let taps = |selection: &ManaSourceSelection| {
         selection.ability_index.is_none_or(|ability_index| {
-            state
-                .objects
-                .get(&selection.source.object_id)
-                .and_then(|source| source.abilities.get(ability_index))
+            source
+                .abilities
+                .get(ability_index)
                 .is_some_and(|ability| has_tap_component(&ability.cost))
         })
     };
-    activatable_mana_source_selections(state, player)
+    activatable_mana_source_selections_for_object(state, player, object)
         .iter()
-        .filter(|selection| objects.contains(&selection.source.object_id) && taps(selection))
+        .filter(|selection| taps(selection))
         .any(|selection| {
-            let object = selection.source.object_id;
+            #[cfg(feature = "test-support")]
+            crate::game::perf_counters::record_untap_repeat_probe_clone();
             let mut copy = state.clone();
             let mut events = Vec::new();
             // Only a paid cost answers. A prompt for the cost itself (a card to
@@ -502,7 +495,12 @@ pub(crate) fn untap_repeats_mana(
                 ),
                 Ok(WaitingFor::Priority { .. } | WaitingFor::ChooseManaColor { .. })
             );
-            if !paid || copy.pending_cost_move_resume.is_some() {
+            // CR 704.5a: the public action's terminal checkpoint
+            // (`engine::reconcile_terminal_sba`) ends the game here.
+            if !paid
+                || copy.pending_cost_move_resume.is_some()
+                || super::sba::has_pending_player_loss_sba(&copy)
+            {
                 return false;
             }
             if copy
@@ -520,12 +518,9 @@ pub(crate) fn untap_repeats_mana(
                 Ok(super::effects::tap_untap::TapUntapOutcome::Complete)
             ) && copy.objects.get(&object).is_some_and(|after| !after.tapped);
             untapped
-                && activatable_mana_source_selections(&copy, player)
+                && activatable_mana_source_selections_for_object(&copy, player, object)
                     .iter()
-                    .any(|again| {
-                        again.source.object_id == object
-                            && again.ability_index == selection.ability_index
-                    })
+                    .any(|again| again.ability_index == selection.ability_index)
         })
 }
 
@@ -584,18 +579,57 @@ pub fn activatable_mana_source_selections(
             continue;
         }
 
-        let options = current_mana_source_options(state, player, object_id, &aura_sources, &gates);
-        for option in options {
-            let Some(selection) = manual_selection_for_option(state, &option) else {
-                continue;
-            };
-            if !selections.contains(&selection) {
-                selections.push(selection);
-            }
-        }
+        push_object_mana_source_selections(
+            state,
+            player,
+            object_id,
+            &aura_sources,
+            &gates,
+            &mut selections,
+        );
     }
     selections.sort_by(|left, right| left.cmp_stable(right));
     selections
+}
+
+/// [`activatable_mana_source_selections`] for one object: its rows, without
+/// sweeping the rest of the battlefield.
+pub(crate) fn activatable_mana_source_selections_for_object(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Vec<ManaSourceSelection> {
+    let aura_sources = taps_for_mana_trigger_sources(state);
+    let gates = mana_abilities::ManaActivationGates::compute(state);
+    let mut selections = Vec::new();
+    push_object_mana_source_selections(
+        state,
+        player,
+        object_id,
+        &aura_sources,
+        &gates,
+        &mut selections,
+    );
+    selections.sort_by(|left, right| left.cmp_stable(right));
+    selections
+}
+
+fn push_object_mana_source_selections(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    aura_sources: &[ObjectId],
+    gates: &mana_abilities::ManaActivationGates,
+    selections: &mut Vec<ManaSourceSelection>,
+) {
+    for option in current_mana_source_options(state, player, object_id, aura_sources, gates) {
+        let Some(selection) = manual_selection_for_option(state, &option) else {
+            continue;
+        };
+        if !selections.contains(&selection) {
+            selections.push(selection);
+        }
+    }
 }
 
 /// CR 605.3a: Return the source rows a frozen, explicit mana selection may

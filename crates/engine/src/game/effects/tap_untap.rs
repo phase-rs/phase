@@ -405,7 +405,18 @@ fn resolve_all(
     change: TapStateChange,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let matching = mass_tap_untap_ids(state, ability, target);
+    let effective_filter = crate::game::effects::resolved_object_filter(state, ability, target);
+
+    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    let matching: Vec<_> = state
+        .battlefield
+        .iter()
+        .filter(|id| {
+            crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
+        })
+        .copied()
+        .collect();
 
     for obj_id in matching {
         let outcome = match change {
@@ -425,27 +436,6 @@ fn resolve_all(
     });
 
     Ok(())
-}
-
-/// The battlefield permanents a mass tap or untap reads as its population. The
-/// one authority for [`resolve_all`] and `stack_reach`'s mass untap answer.
-pub(super) fn mass_tap_untap_ids(
-    state: &GameState,
-    ability: &ResolvedAbility,
-    target: &TargetFilter,
-) -> Vec<ObjectId> {
-    let effective_filter = crate::game::effects::resolved_object_filter(state, ability, target);
-
-    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
-    let ctx = crate::game::filter::FilterContext::from_ability(ability);
-    state
-        .battlefield
-        .iter()
-        .filter(|id| {
-            crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
-        })
-        .copied()
-        .collect()
 }
 
 #[cfg(test)]
