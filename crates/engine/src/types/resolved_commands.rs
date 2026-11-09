@@ -2651,6 +2651,10 @@ impl ResolvedRulesJournal {
         let node = &self.nodes[position];
         match node.settled {
             Some(settled) => settled,
+            // LEGACY SHIM — see `_LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4`
+            // below and `docs/LEGACY-COMPAT.md`: a journal payload written before
+            // the field existed carries no settlement record, so the answer is
+            // inferred from the pips that payload does have.
             None => !node.produced_pips.is_empty(),
         }
     }
@@ -4101,6 +4105,45 @@ impl ResolvedRulesJournal {
         Ok(())
     }
 }
+
+/// Legacy on-disk compatibility for [`SettlementNode::settled`].
+///
+/// A journal payload written before the field existed carries no settlement record,
+/// so [`ResolvedRulesJournal::node_settled`] falls back to that payload's own pip
+/// record (`None => !node.produced_pips.is_empty()`). The fallback is a SHIM, not the
+/// rule: CR 605.2 keeps an activation a mana ability when the game state allows it no
+/// mana, and such an activation settles with an EMPTY pip list — which is exactly why
+/// this build writes the record before any pip can exist.
+///
+/// The tripwire below fails to COMPILE once the workspace version crosses the removal
+/// boundary, so the fallback cannot outlive it by inattention. Removing it means
+/// answering `None` as "this payload states no settlement" instead of inferring one,
+/// and deleting both this const and its `docs/LEGACY-COMPAT.md` entry.
+///
+/// Grep token: `LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4`. See
+/// `docs/LEGACY-COMPAT.md`.
+#[allow(dead_code)]
+const _LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4: () = {
+    // Added in 0.121.0; the `+14` patch window closes after 0.121.14.
+    const LANDED: (u32, u32, u32) = (0, 121, 0);
+    const BOUNDARY: (u32, u32, u32) = (
+        LANDED.0,
+        LANDED.1,
+        LANDED.2 + crate::types::legacy_compat::LEGACY_REMOVAL_WINDOW_PATCH,
+    );
+    let now = (
+        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_MAJOR")),
+        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_MINOR")),
+        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_PATCH")),
+    );
+    assert!(
+        crate::types::legacy_compat::within_legacy_window(BOUNDARY, now),
+        "LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4: remove the pip-inference \
+         fallback in ResolvedRulesJournal::node_settled (the `None => \
+         !node.produced_pips.is_empty()` arm) and this tripwire once we ship past \
+         0.121.14. See docs/LEGACY-COMPAT.md."
+    );
+};
 
 fn identity_matches_kind(identity: RulesExecutionNodeRef, kind: &RulesExecutionNodeKind) -> bool {
     matches!(

@@ -24,7 +24,34 @@ Each entry MUST include:
 
 ## Active shims
 
-_(none)_
+### `LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4` — ACTIVE
+
+- **Covers:** a `SettlementNode` payload written before the `settled` field
+  existed. `ResolvedRulesJournal::node_settled` answers from the node's recorded
+  `produced_pips` when `settled` is absent (`None`), instead of requiring the
+  settlement record this build always writes.
+- **Added in:** 0.121.0.
+- **Removal trigger:** the tripwire `assert!` fires once a release above 0.121.14
+  ships (`+14` patch releases from the landing version). Removing the shim means
+  answering `None` as "this payload states no settlement" rather than inferring one.
+- **Source:** `crates/engine/src/types/resolved_commands.rs:4126` (tripwire const);
+  the shimmed arm is at `crates/engine/src/types/resolved_commands.rs:2658`.
+
+### `LEGACY_PARKED_ACTIVATION_OCCURRENCE_ABSENT_2026Q4` — ACTIVE
+
+- **Covers:** a parked `PendingManaAbility` payload written before
+  `activated_mana_occurrence` existed. `PendingManaAbility::activation_producer_evidence`
+  changes its evidence check when the occurrence is absent: the `None` arm asks the
+  node's own settlement record (`SettledWithoutOccurrence`), where the `Some` arm can
+  also compare the stated occurrence against the node's ordinal. Such a save's
+  announcement epoch is still exact evidence, so it is admitted rather than refused.
+- **Added in:** 0.121.0.
+- **Removal trigger:** the tripwire `assert!` fires once a release above 0.121.14
+  ships (`+14` patch releases from the landing version). Removing the shim means
+  requiring the occurrence on every parked activation, so a payload that omits it
+  becomes a refused contradiction instead of the legacy shape.
+- **Source:** `crates/engine/src/types/game_state.rs:11891` (tripwire const); the
+  shimmed arm is at `crates/engine/src/types/game_state.rs:11797`.
 
 ## Removed shims
 

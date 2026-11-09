@@ -11871,6 +11871,46 @@ impl PendingManaAbility {
     }
 }
 
+/// Legacy on-disk compatibility for `PendingManaAbility::activated_mana_occurrence`.
+///
+/// A save written before the occurrence existed states no occurrence, so
+/// [`PendingManaAbility::activation_producer_evidence`] changes its evidence check
+/// for that payload: the `None` arm asks the node's own settlement record, while the
+/// `Some` arm can also compare the stated occurrence against the node's ordinal. The
+/// shape is supported deliberately — such a save's announcement epoch is still exact
+/// evidence — so it is a SHIM beside the current record, not the rule.
+///
+/// The tripwire below fails to COMPILE once the workspace version crosses the removal
+/// boundary. Removing it means requiring the occurrence on every parked activation (a
+/// payload that omits it then becomes a refused contradiction rather than the legacy
+/// shape), and deleting both this const and its `docs/LEGACY-COMPAT.md` entry.
+///
+/// Grep token: `LEGACY_PARKED_ACTIVATION_OCCURRENCE_ABSENT_2026Q4`. See
+/// `docs/LEGACY-COMPAT.md`.
+#[allow(dead_code)]
+const _LEGACY_PARKED_ACTIVATION_OCCURRENCE_ABSENT_2026Q4: () = {
+    // Added in 0.121.0; the `+14` patch window closes after 0.121.14.
+    const LANDED: (u32, u32, u32) = (0, 121, 0);
+    const BOUNDARY: (u32, u32, u32) = (
+        LANDED.0,
+        LANDED.1,
+        LANDED.2 + crate::types::legacy_compat::LEGACY_REMOVAL_WINDOW_PATCH,
+    );
+    let now = (
+        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_MAJOR")),
+        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_MINOR")),
+        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_PATCH")),
+    );
+    assert!(
+        crate::types::legacy_compat::within_legacy_window(BOUNDARY, now),
+        "LEGACY_PARKED_ACTIVATION_OCCURRENCE_ABSENT_2026Q4: remove the \
+         occurrence-absent arm in \
+         PendingManaAbility::activation_producer_evidence (the `None => \
+         ParkedActivationConflict::SettledWithoutOccurrence` branch) and this \
+         tripwire once we ship past 0.121.14. See docs/LEGACY-COMPAT.md."
+    );
+};
+
 /// CR 605.3b + CR 113.7: the producer evidence a parked mana activation's own
 /// recorded execution node carries, once the journal has been asked what that
 /// node is. See [`PendingManaAbility::activation_producer_evidence`].
