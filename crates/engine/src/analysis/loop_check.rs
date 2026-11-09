@@ -332,6 +332,10 @@ fn default_deliverable_capacity() -> u32 {
 }
 
 impl ShortcutProposal {
+    /// CR 732.2a: the count ceiling the DRIVE enforces for this proposal, read by the
+    /// consumption-time bound and the drivability gate. Never the published range: the engine's
+    /// budget is not a rule, so `shortening_places` keeps a restored proposal's own ends and the
+    /// reducer alone refuses a place the board cannot take.
     pub fn effective_deliverable_capacity(&self) -> u32 {
         if self.deliverable_capacity > 0
             && self.deliverable_capacity <= crate::game::engine::MAX_SHORTCUT_CYCLES
@@ -353,18 +357,15 @@ impl ShortcutProposal {
     /// return type rather than an error: the empty range's floor sits above its ceiling, and
     /// `contains` refuses every place against it, zero included.
     pub fn shortening_places(&self) -> std::ops::RangeInclusive<u32> {
-        let capacity = self.effective_deliverable_capacity();
         let places = match self.count {
             IterationCount::Fixed(iterations) => iterations
                 .checked_sub(1)
-                .map_or(std::ops::RangeInclusive::new(1, 0), |last| {
-                    0..=last.min(capacity)
-                }),
+                .map_or(std::ops::RangeInclusive::new(1, 0), |last| 0..=last),
             // CR 704.5a: the drain runs until a player loses, so the proposal names no count
             // and no place is past its end.
-            IterationCount::UntilLethal => 0..=capacity,
+            IterationCount::UntilLethal => 0..=u32::MAX,
             // CR 732.2b: a proposal with no ending point has no place past its end.
-            IterationCount::WithoutEnd => 0..=capacity,
+            IterationCount::WithoutEnd => 0..=u32::MAX,
         };
         // CR 732.2a: a counted take that performs no repetition leaves place 0 the only place.
         match self.counted_take.refusal(1) {

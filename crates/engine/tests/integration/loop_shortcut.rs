@@ -1384,6 +1384,56 @@ fn an_accepted_until_lethal_grant_drains_even_with_a_foreign_period_in_state() {
     );
 }
 
+/// CR 732.2a + CR 704.5a: a lethal drain whose crossing lies past the engine's repetition
+/// horizon is still a shortcut this player may take — the offer states the repetitions it CAN
+/// drive rather than withholding the offer entirely (#10543).
+///
+/// `setup_2p_optional_drain` drains P1 by 1 per cycle, so the repetitions needed to cross P1's
+/// life are that life total. At 1500 the crossing lies beyond `MAX_SHORTCUT_CYCLES` and the
+/// offer is the reachable fixed count; at 500 it fits, so the offer is still `UntilLethal` —
+/// the reach guard proving this board reaches Path A and its lethal branch at all.
+#[test]
+fn a_lethal_drain_beyond_the_horizon_is_offered_at_the_reachable_count() {
+    let offered = |life: i32| {
+        let (mut runner, kickoff, _bolt, _cleric) =
+            setup_2p_optional_drain(LoopDetectionMode::Interactive);
+        runner.state_mut().players[P1.0 as usize].life = life;
+        let _ = runner.cast(kickoff).resolve();
+        let (_events, wf) = drive_collect(&mut runner, 500);
+        let WaitingFor::LoopShortcut {
+            proposer,
+            predicted_winner,
+            schema,
+            ..
+        } = wf
+        else {
+            panic!("the 2p drain must be OFFERED at P1 life {life}, got {wf:?}");
+        };
+        assert_eq!(proposer, P0, "P0 has priority and proposes the shortcut");
+        assert_eq!(
+            predicted_winner,
+            Some(P0),
+            "reach guard: the offer is Path A's, which names the drain's winner"
+        );
+        (schema.iteration_count, schema.deliverable_capacity)
+    };
+    // The engine's repetition budget, as every other row on this seam reads it.
+    let budget =
+        engine::analysis::decision_template::ShortcutDecisionSchema::default().deliverable_capacity;
+
+    assert_eq!(
+        offered(500),
+        (IterationCount::UntilLethal, budget),
+        "the crossing fits inside the horizon, so the draining offer is still until lethal"
+    );
+    assert_eq!(
+        offered(1500),
+        (IterationCount::Fixed(budget), budget),
+        "the crossing is beyond the horizon, so the offer states the reachable repetitions \
+         instead of withholding the shortcut"
+    );
+}
+
 /// CR 732.2a: a shortcut belongs to the player with priority, not necessarily the player
 /// whose loop will win. P1 starts the proven P0-controlled drain by making P0 gain life on
 /// P1's turn, so the live bridge must offer P1 the choice while retaining P0 as the measured
@@ -12176,40 +12226,79 @@ fn setup_2p_optional_dina_conqueror(
 
 /// CR 732.2a + CR 104.2a + CR 119.3: an optional winning Ring offer evaluates representable
 /// repetitions against cycles to lethal using printed-card ingress (Dina, Soul Steeper and
-/// Bloodthirsty Conqueror). When representable is less than cycles needed for living
-/// opponents to cross lethal damage, the offer is withheld and played out. When representable
-/// is sufficient, the offer is made, declarations exceeding representability are refused, and
-/// an accepted take completes to GameOver (#10543).
+/// Bloodthirsty Conqueror). When representable is less than the cycles a lethal crossing needs,
+/// the offer states the reachable fixed count — a count its take can perform — rather than
+/// withholding the shortcut. When representable is sufficient, the drain is offered until
+/// lethal, declarations exceeding representability are refused, and an accepted take completes
+/// to GameOver (#10543).
 #[test]
 fn optional_winning_ring_offer_headroom_bounds_and_plays_out_when_insufficient() {
-    // Arm 1: P0 headroom = 2, P1 life = 3 on offer frame. Cycles to lethal is 3 > 2 (headroom).
-    // Loop is played out without offering shortcut.
+    // Arm 1: P0 headroom = 2, P1 needs more repetitions than that to cross lethal. The drain
+    // is real but the crossing is past the horizon, so the offer is a fixed count.
     {
         let (mut runner, kickoff, _bolt, _cleric) =
             setup_2p_optional_dina_conqueror(LoopDetectionMode::Interactive);
         runner.state_mut().players[P0.0 as usize].life = i32::MAX - 4;
         runner.state_mut().players[P1.0 as usize].life = 5;
 
-        let res = runner.cast(kickoff).try_resolve();
+        let _ = runner.cast(kickoff).resolve();
+        let (_events, wf) = drive_collect(&mut runner, 500);
+        let WaitingFor::LoopShortcut {
+            predicted_winner,
+            schema,
+            ..
+        } = wf
+        else {
+            panic!(
+                "a lethal drain past the representable headroom must still OFFER the reachable \
+                 repetitions; got {wf:?}"
+            );
+        };
+        assert_eq!(predicted_winner, Some(P0));
+        assert_eq!(
+            schema.deliverable_capacity, 2,
+            "P0 can represent two more gains"
+        );
+        assert_eq!(
+            schema.iteration_count,
+            IterationCount::Fixed(2),
+            "the crossing is past the horizon, so the offer states a fixed count rather than an \
+             `UntilLethal` promise it cannot keep"
+        );
+
+        // The stated count is performable: taking it lands P0 on the life limit, and P1 is left
+        // alive because this offer promised no crossing.
+        runner
+            .act(GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(2),
+                template: None,
+            })
+            .expect("the stated count is admitted");
+        runner
+            .act(GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            })
+            .expect("accept Fixed(2)");
+        assert_eq!(runner.state().players[P0.0 as usize].life, i32::MAX);
         assert!(
-            matches!(res, Err(EngineError::LifeChangeUnrepresentable { player }) if player == P0),
-            "loop plays out until life change overflows when shortcut is withheld, got {:?}",
-            res.as_ref().err()
+            runner.state().players[P1.0 as usize].life > 0,
+            "the fixed count ends short of lethal"
         );
         assert!(
-            !matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { .. }),
-            "when representable < cycles_to_lethal, loop must be played out without offering shortcut; got {:?}",
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "the take completed and handed priority back; got {:?}",
             runner.state().waiting_for
         );
     }
 
-    // Arm 2: P0 headroom = 2, P1 life = 2 on offer frame. Cycles to lethal is 2 <= 2 (headroom).
-    // Offer is made. Fixed(3) is refused. Fixed(2) is accepted and reaches GameOver at i32::MAX.
+    // Arm 2: P0 headroom = 2, P1 life = 2 on offer frame. Cycles to lethal is 2 <= 2 (headroom),
+    // so the offer states `UntilLethal`. Fixed(3) is refused. Fixed(2) is accepted and reaches
+    // GameOver at i32::MAX.
     {
         let (mut runner, kickoff, _bolt, _cleric) =
             setup_2p_optional_dina_conqueror(LoopDetectionMode::Interactive);
         runner.state_mut().players[P0.0 as usize].life = i32::MAX - 4;
-        runner.state_mut().players[P1.0 as usize].life = 4;
+        runner.state_mut().players[P1.0 as usize].life = 3;
 
         let _ = runner.cast(kickoff).resolve();
         let (_events, wf) = drive_collect(&mut runner, 500);
@@ -12225,6 +12314,11 @@ fn optional_winning_ring_offer_headroom_bounds_and_plays_out_when_insufficient()
         assert_eq!(proposer, P0);
         assert_eq!(predicted_winner, Some(P0));
         assert_eq!(schema.deliverable_capacity, 2);
+        assert_eq!(
+            schema.iteration_count,
+            IterationCount::UntilLethal,
+            "the crossing is within the representable headroom, so the offer may promise lethal"
+        );
 
         // Fixed(3) is refused
         let mut refused = runner.state().clone();
@@ -12254,7 +12348,11 @@ fn optional_winning_ring_offer_headroom_bounds_and_plays_out_when_insufficient()
                 response: ShortcutResponse::Accept,
             })
             .expect("accept Fixed(2)");
-        assert_eq!(runner.state().players[P0.0 as usize].life, i32::MAX);
+        // P0 ends one short of the limit: the drain that takes P1 to 0 ends the game at the
+        // state-based-action check (CR 704.5a) before the last "you gain 1 life" trigger
+        // resolves, so that repetition's gain never happens.
+        assert_eq!(runner.state().players[P0.0 as usize].life, i32::MAX - 1);
+        assert_eq!(runner.state().players[P1.0 as usize].life, 0);
         assert!(
             matches!(
                 runner.state().waiting_for,
@@ -16350,45 +16448,29 @@ fn a_declared_target_made_illegal_mid_drive_stops_short_and_never_retargets() {
 }
 
 /// CR 732.2a + CR 119.3: when an offer's choices re-aim a drain from the observed victim (P1)
-/// onto another legal victim (P2), consumption headroom must construct excursions from the
-/// declared victim charges rather than the historical vector, so gross edits on the newly declared
-/// victim bound the take. With P2 having life_lost_this_turn = u32::MAX - 1, only 1 repetition is drivable (#10543).
+/// onto another legal victim (P2), the declaration's capacity must be constructed from the
+/// declared victim charges rather than the historical vector, so gross edits on the newly
+/// declared victim bound the take. With P2 having life_lost_this_turn = u32::MAX - 1, two
+/// repetitions are representable (the in-flight lead's loss lands on P1), so Fixed(3) is
+/// refused AT THE DECLARATION (#10543).
 #[test]
 fn r5_drain_retargeted_to_p2_with_near_max_life_lost_bounds_take() {
     let (mut runner, slot, _bond, _hexproof_src, _l0) = r5_reach_offer();
     // P2 has life_lost_this_turn = u32::MAX - 1.
     runner.state_mut().players[P2.0 as usize].life_lost_this_turn = u32::MAX - 1;
 
-    // Declaring 3 cycles targeting P2. P2 can only represent 2 repetitions before life_lost_this_turn overflows.
+    // Declaring 3 cycles targeting P2. P2 can only represent 2 repetitions before
+    // life_lost_this_turn overflows, so the declaration is refused before any window opens.
     let template = r5_pin_template(slot.clone(), P2, 3);
     runner
         .act(GameAction::DeclareShortcut {
             count: IterationCount::Fixed(3),
             template: Some(template),
         })
-        .expect("declare Fixed(3)");
+        .expect("a refused declaration is a manual handback, not an error");
     assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::RespondToShortcut { .. }
-        ),
-        "declaration must open RespondToShortcut window"
-    );
-
-    // When opponents accept, consumption check verifies drivability on final accept and refuses Fixed(3).
-    while matches!(
-        runner.state().waiting_for,
-        WaitingFor::RespondToShortcut { .. }
-    ) {
-        runner
-            .act(GameAction::RespondToShortcut {
-                response: ShortcutResponse::Accept,
-            })
-            .expect("respond to shortcut");
-    }
-    assert!(
-        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-        "Fixed(3) on P2 must be refused at consumption because P2 headroom is 2, falling back to priority; got {:?}",
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "declaring past the declaration's own capacity opens no response window; got {:?}",
         runner.state().waiting_for
     );
     assert_eq!(
@@ -19156,17 +19238,17 @@ fn r5_piecewise_pin_template(slot: DecisionSlot, p1_count: u32, p2_count: u32) -
 
 /// CR 732.2a: evaluate representability under each piecewise schedule segment so later pins
 /// cannot escape the scalar headroom cap (#10543).
-/// In 4p Sanguine Bond drain, pinning P1 for the first 2 repetitions and P2 thereafter
-/// when P2 has only 1 headroom remaining must refuse Fixed(4) and accept Fixed(3).
+/// In 4p Sanguine Bond drain, pinning P1 for the first repetitions and P2 thereafter when P2
+/// has only 1 headroom remaining must refuse Fixed(4) at the declaration and admit Fixed(3),
+/// whose take performs exactly its one representable loss to P2.
 #[test]
-fn sanguine_bond_piecewise_schedule_bounds_later_pins_at_declaration_and_take() {
+fn sanguine_bond_piecewise_schedule_bounds_later_pins_at_declaration() {
     let (mut runner, slot, _bond, _hexproof_src, _l0) = r5_reach_offer();
     // P2 has life_lost_this_turn = u32::MAX - 1 (room for only 1 loss).
     runner.state_mut().players[P2.0 as usize].life_lost_this_turn = u32::MAX - 1;
 
-    // Piecewise schedule: P1 for 1 iteration, then P2 for 3 iterations (total 4 iterations).
-    // In repetition 0 (in-flight lead) and 1, P1 takes the losses. In repetition 2, P2 takes
-    // 1 loss (saturating P2's headroom). Repetition 3 would cause a 2nd loss to P2 and overflow.
+    // Piecewise schedule: P1 for the first repetitions, then P2. Over four repetitions the
+    // schedule makes P2 take a second loss it cannot represent, so the declaration is refused.
     let template_4 = r5_piecewise_pin_template(slot.clone(), 1, 3);
     runner
         .act(GameAction::DeclareShortcut {
@@ -19174,36 +19256,20 @@ fn sanguine_bond_piecewise_schedule_bounds_later_pins_at_declaration_and_take() 
             template: Some(template_4),
         })
         .expect("declare Fixed(4)");
-    let WaitingFor::RespondToShortcut { proposal, .. } = &runner.state().waiting_for else {
-        panic!(
-            "expected RespondToShortcut, got {:?}",
-            runner.state().waiting_for
-        );
-    };
-    assert_eq!(
-        proposal.deliverable_capacity, 3,
-        "proposal deliverable_capacity must be bounded to 3 under schedule"
-    );
-
-    // When opponents accept, consumption check refuses Fixed(4) because deliverable_capacity is 3.
-    while matches!(
-        runner.state().waiting_for,
-        WaitingFor::RespondToShortcut { .. }
-    ) {
-        runner
-            .act(GameAction::RespondToShortcut {
-                response: ShortcutResponse::Accept,
-            })
-            .expect("respond to shortcut");
-    }
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-        "Fixed(4) must be refused at consumption because deliverable_capacity is 3; got {:?}",
+        "Fixed(4) is unrepresentable under this schedule, so the declaration is refused 
+         before any response window opens; got {:?}",
         runner.state().waiting_for
     );
+    assert_eq!(
+        runner.state().players[P2.0 as usize].life_lost_this_turn,
+        u32::MAX - 1,
+        "a refused declaration performs nothing"
+    );
 
-    // Fixed(3) on fresh offer: P1 for 1 iteration, P2 for 2 iterations (total 3 iterations).
-    // Repetition 0 (lead) and 1 hit P1; repetition 2 hits P2 (1 loss, fitting within headroom).
+    // The same schedule over three repetitions keeps P2 within its one-loss headroom: the take
+    // commits that loss and lands P2's tally exactly on the limit.
     let (mut runner_3, slot_3, _bond, _hexproof_src, _l0) = r5_reach_offer();
     runner_3.state_mut().players[P2.0 as usize].life_lost_this_turn = u32::MAX - 1;
     let template_3 = r5_piecewise_pin_template(slot_3, 1, 2);
@@ -19231,12 +19297,28 @@ fn sanguine_bond_piecewise_schedule_bounds_later_pins_at_declaration_and_take() 
             })
             .expect("respond to shortcut");
     }
+    // Positive control: the admitted take ran to its ending point and P2 absorbed exactly the
+    // one loss its headroom allowed. Fixed(4) above is refused because its fourth repetition
+    // would take a second.
+    assert!(
+        matches!(runner_3.state().waiting_for, WaitingFor::Priority { .. }),
+        "the admitted take ends at priority; got {:?}",
+        runner_3.state().waiting_for
+    );
+    assert_eq!(
+        runner_3.state().players[P2.0 as usize].life_lost_this_turn,
+        u32::MAX,
+        "the take performed exactly its one representable loss to P2"
+    );
 }
 
-/// CR 732.2b + CR 732.2a: proposal carries durable deliverable_capacity so public shortening
-/// cannot shorten to an over-cap count, and restored legacy proposals safely bound capacity (#10543).
+/// CR 732.2b + CR 732.2a: the proposal carries `deliverable_capacity` durably, so the drive
+/// enforces the offer's count ceiling across declaration, response and restore, while the
+/// PUBLISHED range keeps the proposal's own ends — the engine's budget is not published as one,
+/// and the reducer alone refuses a place the board cannot take. A restored legacy proposal whose
+/// field is 0 falls back to its own count.
 #[test]
-fn proposal_deliverable_capacity_caps_shortening_and_restored_legacy_proposal() {
+fn proposal_deliverable_capacity_bounds_the_drive_and_restored_legacy_proposal() {
     let mut proposal = ShortcutProposal {
         proposer: P0,
         predicted_winner: Some(P0),
@@ -19255,9 +19337,11 @@ fn proposal_deliverable_capacity_caps_shortening_and_restored_legacy_proposal() 
         period: Default::default(),
         deliverable_capacity: 5,
     };
-    // shortening_places must be capped by deliverable_capacity (5)
-    let places = proposal.shortening_places();
-    assert_eq!(places, 0..=5);
+    // The published range is the proposal's own ends: a place above the drive's capacity is
+    // still published, so the responder is told rather than pre-refused by the projection.
+    assert_eq!(proposal.shortening_places(), 0..=9);
+    // The drive's own ceiling is the capacity the offer published.
+    assert_eq!(proposal.effective_deliverable_capacity(), 5);
 
     // Restored legacy proposal where deliverable_capacity is 0 falls back to count / MAX_SHORTCUT_CYCLES
     proposal.deliverable_capacity = 0;
@@ -19372,36 +19456,12 @@ fn boon_reflection_before_boundary_bounds_parked_prompt_and_revalidates_on_resto
     );
 }
 
-const PLATINUM_ANGEL: &str =
-    "Flying\nYou can't lose the game and your opponents can't win the game.";
-
-/// CR 107.14 + CR 704.5c + CR 732.2a: A protected opponent at u32::MAX poison cannot receive
-/// another poison counter without overflowing the player counter tally. Frame-based excursions
-/// include Poison in counter kinds so representable_over_frames withholds further repetitions (#10543).
-#[test]
-fn protected_opponent_at_max_poison_prevents_loop_offer() {
-    let mut scenario = GameScenario::new_n_player(2, 7);
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_life(P0, 20);
-    scenario.with_life(P1, 20);
-    scenario.add_creature_from_oracle(P0, "Test Drain Poison Cleric", 2, 2, DRAIN_POISON_CLERIC);
-    scenario.add_creature_from_oracle(P0, "Test Blood Sipper", 2, 2, BLOOD_SIPPER);
-    // P1 controls Platinum Angel so P1 cannot lose from 10+ poison counters
-    scenario.add_creature_from_oracle(P1, "Platinum Angel", 4, 4, PLATINUM_ANGEL);
-    scenario.add_basic_land(P1, ManaColor::Red);
-    scenario.add_bolt_to_hand(P1);
-    let kickoff = scenario
-        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
-        .id();
-    let mut runner = scenario.build();
-    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
-
-    let _ = runner.cast(kickoff).resolve();
-    runner.state_mut().players[P1.0 as usize].poison_counters = u32::MAX;
-
-    let (_events, wf) = drive_collect(&mut runner, 500);
-    assert!(
-        !matches!(wf, WaitingFor::LoopShortcut { .. }),
-        "poison at u32::MAX must prevent loop shortcut offer from being published; got {wf:?}"
-    );
-}
+// The poison half of `#10543` has NO offer-level fixture on this board shape, and that is a
+// property of the rules rather than of the test: a seat holding `u32::MAX` poison counters has
+// already lost by CR 704.5c, so the only way to keep it in the game is a `CantLoseTheGame` static
+// — and `live_mandatory_loop_winner` refuses any faller that cannot lose (CR 104.3b), which is
+// exactly the seat a poison-dripping loop makes a faller. A driver reaching `LoopShortcut` on
+// this board would have to be measuring something other than the poison headroom. The
+// frame-based authority is pinned where it IS reachable: `analysis::headroom`'s
+// `a_frame_measured_poison_increment_is_bounded_at_the_counter_width`, whose below-limit arm is
+// the reach guard.

@@ -2931,17 +2931,36 @@ fn interactive_loop_bridge_paths(
                 })
                 .max()
                 .unwrap_or(0);
-            if cycles_to_lethal == u64::MAX
-                || representable.is_some_and(|r| u64::from(r) < cycles_to_lethal)
-            {
-                return;
-            }
-            let schema = build_shortcut_schema(
-                Vec::new(),
-                shortcut_iteration_count(certificate.win_kind),
-                None,
-                representable,
-            );
+            // CR 732.2a: what one offer can drive. `representable` measured the scalar headroom
+            // over the period's own frames; `None` states that the whole engine budget fits.
+            let reachable = representable.unwrap_or(MAX_SHORTCUT_CYCLES);
+            let lethal_within_reach =
+                cycles_to_lethal != u64::MAX && u64::from(reachable) >= cycles_to_lethal;
+            // CR 732.2a + CR 704.5a: a lethal shortcut's take must end the game inside the
+            // repetitions it promises, so `UntilLethal` is offered only where the crossing lies
+            // within what this offer can drive. Where the drain is real but the crossing is not
+            // — it needs more repetitions than the engine's horizon, or than the scalar widths
+            // can represent — the shortcut is still legal for the repetitions that DO fit: offer
+            // them as a fixed count rather than withholding the offer and making the player play
+            // a thousand repetitions by hand. A `Fixed` count states its own ending point, so it
+            // promises no crossing.
+            let iteration_count = match shortcut_iteration_count(certificate.win_kind) {
+                crate::analysis::decision_template::IterationCount::UntilLethal
+                    if !lethal_within_reach && reachable > 0 =>
+                {
+                    crate::analysis::decision_template::IterationCount::Fixed(reachable)
+                }
+                crate::analysis::decision_template::IterationCount::UntilLethal
+                    if !lethal_within_reach =>
+                {
+                    return;
+                }
+                // CR 732.2a: a non-lethal suggestion keeps the producer's own ending point;
+                // `cycles_to_lethal` bounds no promise it makes, so the old gate stays.
+                _ if !lethal_within_reach => return,
+                other => other,
+            };
+            let schema = build_shortcut_schema(Vec::new(), iteration_count, None, representable);
             state.waiting_for = WaitingFor::LoopShortcut {
                 proposer,
                 predicted_winner: Some(winner),
@@ -4195,7 +4214,6 @@ fn bounded_offer_tail(
             lead,
             own_cap,
         );
-    let own_cap = own_representable.map_or(own_cap, |r| own_cap.min(r));
     let witness_representable = witness.as_ref().and_then(|w| {
         crate::analysis::headroom::PeriodExcursions::representable_under_schedule(
             &periodic,
@@ -4207,8 +4225,24 @@ fn bounded_offer_tail(
             witness_bound,
         )
     });
-    let witness_cap = witness_representable.map_or(witness_bound, |r| witness_bound.min(r));
-    let measured_bound = own_cap.max(witness_cap);
+    // THE RULES-DERIVED THRESHOLD STAYS RULES-DERIVED. `measured_bound` is the cascade's own
+    // count and is published verbatim as `measured_repetition_bound`; the scalar headroom is an
+    // engine limit (CR 119.3 sets no maximum), so it narrows `deliverable_capacity` and never
+    // this. It reaches the schema through `representable` below, beside whatever the frame
+    // source measured, which is the constructor's stated contract.
+    let measured_bound = own_cap.max(witness_bound);
+    // The schedule-aware ceiling is the largest count a declaration the offer admits may
+    // specify, so the max of the two declarations' representable counts is the narrowing this
+    // producer contributes — never below what either of them can take.
+    let schedule_representable = Some(
+        own_representable
+            .map_or(own_cap, |r| own_cap.min(r))
+            .max(witness_representable.map_or(witness_bound, |r| witness_bound.min(r))),
+    );
+    let representable = [representable, schedule_representable]
+        .into_iter()
+        .flatten()
+        .min();
 
     // (8) The certificate, with the two fields the bounded class states differently from
     // Path A's spelled out at the site rather than mutated after the fact.
@@ -5710,7 +5744,13 @@ struct ConsumptionBound {
     /// published declaration subtracts every aim it may have made, so this list can be empty at a
     /// count whose `Ceiling` cascade still names a crossing, and the drive's departure verdict
     /// then refuses that departure.
-    entries: Vec<crate::analysis::resource::PredictedDeparture>,
+    ///
+    /// `None` states that NO prediction was published: a restored ring proposal carrying no
+    /// per-period signature bounds its count by the offer's capacity but promises nothing about
+    /// departures, so the drive keeps the commit-and-stop an unsigned proposal gets. That is not
+    /// the same statement as `Some(vec![])`, which says a signed reduction measured no crossing
+    /// at this count and so refuses a departure whole.
+    entries: Option<Vec<crate::analysis::resource::PredictedDeparture>>,
 }
 
 /// CR 704.5a + CR 732.2a: what a consumption-time re-derivation can state about one confirmed
@@ -5725,7 +5765,9 @@ enum ConsumptionDerivation {
     /// no CR 704 threshold — CR 800.4 + CR 102.1 put the period's victims outside the population
     /// the reduction walks.
     NoMeasurement,
-    /// Signed, with the threshold the reduction measured.
+    /// Signed, with the threshold the reduction measured — or a restored ring proposal, whose
+    /// ceiling is the offer's own capacity because it published no signature. Which of the two
+    /// it is shows in `ConsumptionBound::entries`: only the signed one carries a prediction.
     Measured(ConsumptionBound),
     /// CR 732.2a: a period the counting replay counted. Its take answers to the reducer and the
     /// replay's cap, never to the threshold reduction; these are the departures the count saw
@@ -5734,13 +5776,14 @@ enum ConsumptionDerivation {
 }
 
 impl ConsumptionDerivation {
-    /// CR 704.5a + CR 800.4a: the departures a drive may commit — no prediction to diverge from
-    /// for an unsigned proposal, and none at all where the signed reduction measured nothing.
+    /// CR 704.5a + CR 800.4a: the departures a drive may commit — `None` where no prediction was
+    /// published (an unsigned proposal, or the capacity-only derivation a restored ring proposal
+    /// re-derives), and `Some(&[])` where the signed reduction measured nothing.
     fn predicted(&self) -> Option<&[crate::analysis::resource::PredictedDeparture]> {
         match self {
             ConsumptionDerivation::Unsigned => None,
             ConsumptionDerivation::NoMeasurement => Some(&[]),
-            ConsumptionDerivation::Measured(bound) => Some(&bound.entries),
+            ConsumptionDerivation::Measured(bound) => bound.entries.as_deref(),
             ConsumptionDerivation::Replayed(entries) => Some(entries),
         }
     }
@@ -5764,9 +5807,13 @@ fn shortcut_consumption_bound(
         None => {
             if proposal.road == crate::analysis::loop_check::OfferRoad::Ring {
                 let capacity = proposal.effective_deliverable_capacity();
+                // CR 732.2a: the capacity is the whole statement — a restored ring proposal
+                // published no departure prediction, so a seat leaving inside the sequence is
+                // not a divergence (the `None` below), exactly as for an unsigned proposal. The
+                // empty list this used to hand over predicted nobody, which dropped the cycle.
                 return ConsumptionDerivation::Measured(ConsumptionBound {
                     ceiling: capacity,
-                    entries: Vec::new(),
+                    entries: None,
                 });
             }
             return ConsumptionDerivation::Unsigned;
@@ -5859,7 +5906,10 @@ fn shortcut_consumption_bound(
         per_cycle, template, published, &points, state, lead, ceiling,
     );
     let ceiling = representable.map_or(ceiling, |r| ceiling.min(r));
-    ConsumptionDerivation::Measured(ConsumptionBound { ceiling, entries })
+    ConsumptionDerivation::Measured(ConsumptionBound {
+        ceiling,
+        entries: Some(entries),
+    })
 }
 
 /// CR 115.2 + CR 732.2a: the per-slot published legal sets a consumption-time re-derivation has to
@@ -7643,33 +7693,38 @@ fn materialize_fixed_shortcut(
                     ConsumptionDerivation::NoMeasurement => break 'cycles,
                     // A counted period carries its period, whose take is never the ring's.
                     ConsumptionDerivation::Replayed(_) => break 'cycles,
-                    ConsumptionDerivation::Measured(bound) => {
-                        match departure_verdict(&bound.entries, &committed, &s, i + 1) {
-                            // CR 732.2a: a predicted departure is a beat the accepted count
-                            // CONTAINS. The count is bounded by this same derivation's ceiling at
-                            // the guard, so where the crossing is the last one the count contains
-                            // the `continue` IS the loop's own end and the handback below is
-                            // reached unchanged.
-                            DepartureVerdict::Predicted => {
-                                committed = *s;
-                                committed_cycles += 1;
-                                commit_repetition(
-                                    &mut result.events,
-                                    proposal.proposer,
-                                    committed_cycles,
-                                    &mut events,
-                                );
-                                continue 'cycles;
-                            }
-                            // `NoDeparture` is unreachable under this outcome's own gate, which
-                            // fires on a drop in `seats_in_game`; the arm answers it rather than
-                            // folding it into another verdict. `Unpredicted` drops the cycle
-                            // whole.
-                            DepartureVerdict::NoDeparture | DepartureVerdict::Unpredicted => {
-                                break 'cycles
+                    ConsumptionDerivation::Measured(bound) => match &bound.entries {
+                        // No prediction to diverge from: the capacity-only derivation a restored
+                        // ring proposal publishes. Commit-and-stop, exactly as `Unsigned` does.
+                        None => {}
+                        Some(entries) => {
+                            match departure_verdict(entries, &committed, &s, i + 1) {
+                                // CR 732.2a: a predicted departure is a beat the accepted count
+                                // CONTAINS. The count is bounded by this same derivation's
+                                // ceiling at the guard, so where the crossing is the last one the
+                                // count contains the `continue` IS the loop's own end and the
+                                // handback below is reached unchanged.
+                                DepartureVerdict::Predicted => {
+                                    committed = *s;
+                                    committed_cycles += 1;
+                                    commit_repetition(
+                                        &mut result.events,
+                                        proposal.proposer,
+                                        committed_cycles,
+                                        &mut events,
+                                    );
+                                    continue 'cycles;
+                                }
+                                // `NoDeparture` is unreachable under this outcome's own gate,
+                                // which fires on a drop in `seats_in_game`; the arm answers it
+                                // rather than folding it into another verdict. `Unpredicted`
+                                // drops the cycle whole.
+                                DepartureVerdict::NoDeparture | DepartureVerdict::Unpredicted => {
+                                    break 'cycles
+                                }
                             }
                         }
-                    }
+                    },
                 }
                 // THE UNSIGNED FALL-THROUGH ALONE: commit and STOP, the disposition every
                 // producer that publishes no signature shipped with.
@@ -9326,6 +9381,16 @@ fn handle_declare_shortcut(
         } else {
             offer.schema.deliverable_capacity
         };
+    // CR 732.2a: the narrowed capacity is the ceiling for THIS declaration, so an over-count is
+    // refused here rather than opening a response window whose take would then commit nothing.
+    // The earlier arm compares against the offer's PUBLISHED capacity; this one compares against
+    // the same ceiling re-derived under the declaration's own template and the board's lead.
+    if let crate::analysis::decision_template::IterationCount::Fixed(n) = &count {
+        if *n > deliverable_capacity {
+            reject_shortcut_declaration(state, &mut result);
+            return Ok(result);
+        }
+    }
     let proposal = crate::analysis::loop_check::ShortcutProposal {
         proposer: offer.proposer,
         predicted_winner: offer.predicted_winner,

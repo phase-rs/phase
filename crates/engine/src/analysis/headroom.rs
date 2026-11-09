@@ -277,21 +277,29 @@ impl PeriodExcursions {
         Self::representable_repetitions(&[cycle.clone(), cycle], state, budget)
     }
 
-    /// The player-resource excursions of iteration `iteration` of a declared period,
-    /// constructing seat life charges from `per_cycle.declared_seat_life_charges` so
-    /// declared victim relocations are accounted for in headroom analysis.
-    pub(crate) fn of_declared_iteration(
+    /// The seat-life charges a declared period states for the repetition indices `indices`
+    /// names, read ONCE per seat.
+    ///
+    /// [`crate::analysis::resource::PeriodicDelta::declared_seat_life_charges`] is a lazy
+    /// stream, and reading an index through `nth` walks every earlier repetition to reach it. A
+    /// schedule with a segment per repetition would therefore re-derive every preceding charge
+    /// for every segment — quadratic in the budget. Reading each seat's stream forward once and
+    /// keeping only the indices the segments ask for is linear.
+    fn declared_charges_at(
         per_cycle: &crate::analysis::resource::PeriodicDelta,
         declaration: Option<&crate::analysis::decision_template::DecisionTemplate>,
         observed: Option<&crate::analysis::decision_template::DecisionTemplate>,
         points: &[crate::analysis::decision_template::DecisionPoint],
         state: &GameState,
         lead: crate::analysis::resource::AnnouncedLead<'_>,
-        iteration: crate::analysis::decision_template::IterationIndex,
-    ) -> Self {
-        let mut excursions = Self::default();
+        indices: &std::collections::BTreeSet<u32>,
+    ) -> BTreeMap<(PlayerId, u32), crate::analysis::resource::DeclaredLifeCharge> {
+        let mut charges = BTreeMap::new();
+        let Some(&last) = indices.last() else {
+            return charges;
+        };
         for player in &state.players {
-            let charge = per_cycle
+            for (index, charge) in per_cycle
                 .declared_seat_life_charges(
                     player.id,
                     declaration,
@@ -301,7 +309,31 @@ impl PeriodExcursions {
                     crate::analysis::resource::ChargeBound::Ceiling,
                     lead,
                 )
-                .nth(iteration as usize)
+                .enumerate()
+                .take(last as usize + 1)
+            {
+                if indices.contains(&(index as u32)) {
+                    charges.insert((player.id, index as u32), charge);
+                }
+            }
+        }
+        charges
+    }
+
+    /// The player-resource excursions of one declared period repetition, from the seat charges
+    /// [`Self::declared_charges_at`] read for it and the period's own net life and poison deltas.
+    /// Declared victim relocations are accounted for in the charges themselves.
+    fn of_declared_iteration(
+        per_cycle: &crate::analysis::resource::PeriodicDelta,
+        charges: &BTreeMap<(PlayerId, u32), crate::analysis::resource::DeclaredLifeCharge>,
+        state: &GameState,
+        iteration: u32,
+    ) -> Self {
+        let mut excursions = Self::default();
+        for player in &state.players {
+            let charge = charges
+                .get(&(player.id, iteration))
+                .copied()
                 .unwrap_or(crate::analysis::resource::DeclaredLifeCharge { net: 0, dip: 0 });
             if charge.net != 0 || charge.dip != 0 {
                 excursions.by_scalar.insert(
@@ -410,6 +442,13 @@ impl PeriodExcursions {
         lead: crate::analysis::resource::AnnouncedLead<'_>,
         budget: u32,
     ) -> Option<u32> {
+        // The budget is a caller's own count (`own_cap` is the cascade's capacity and nothing
+        // clamps it), so it can exceed what one offer may ever drive. A take cannot pass
+        // `MAX_SHORTCUT_CYCLES`, so a larger budget answers exactly as the capped one does: a
+        // count that still fits past the cap narrows nothing, which is what `None` states. The
+        // cap is also what keeps `switch_points` finite for a template that changes at every
+        // repetition.
+        let budget = budget.min(crate::game::engine::MAX_SHORTCUT_CYCLES);
         if budget == 0 {
             return Some(0);
         }
@@ -476,31 +515,35 @@ impl PeriodExcursions {
         }
 
         let sorted_points: Vec<u32> = switch_points.into_iter().collect();
+        // Every repetition index the walk below reads a charge at: each segment's first two.
+        // Collected before the walk because the charge stream is lazy — see
+        // `declared_charges_at`.
+        let mut charge_indices = std::collections::BTreeSet::new();
+        for (i, &start_idx) in sorted_points.iter().enumerate() {
+            let next_idx = sorted_points.get(i + 1).copied().unwrap_or(budget);
+            charge_indices.insert(start_idx);
+            if next_idx > start_idx + 1 {
+                charge_indices.insert(start_idx + 1);
+            }
+        }
+        let charges = Self::declared_charges_at(
+            per_cycle,
+            declaration,
+            observed,
+            points,
+            state,
+            lead,
+            &charge_indices,
+        );
         for (i, &start_idx) in sorted_points.iter().enumerate() {
             let next_idx = sorted_points.get(i + 1).copied().unwrap_or(budget);
             let len = next_idx - start_idx;
             if len == 0 {
                 continue;
             }
-            let c0 = Self::of_declared_iteration(
-                per_cycle,
-                declaration,
-                observed,
-                points,
-                state,
-                lead,
-                start_idx,
-            );
+            let c0 = Self::of_declared_iteration(per_cycle, &charges, state, start_idx);
             let c1 = if len > 1 {
-                Self::of_declared_iteration(
-                    per_cycle,
-                    declaration,
-                    observed,
-                    points,
-                    state,
-                    lead,
-                    start_idx + 1,
-                )
+                Self::of_declared_iteration(per_cycle, &charges, state, start_idx + 1)
             } else {
                 c0.clone()
             };
@@ -683,6 +726,37 @@ mod tests {
             .player_counters
             .insert(PlayerCounterKind::Experience, u32::MAX - 4);
         assert_eq!(constant(&events, &state), Some(4));
+    }
+
+    /// A repetition the ring sampler sees only as a player-counter increment is bounded at that
+    /// counter's stored width, on the same authority and with the same control as a life gain.
+    ///
+    /// This is the poison half of `of_frames`: `PlayerScalar::Counter(Poison)` reads the
+    /// dedicated `poison_counters` field, and Poison is chained into every frame's counter kinds
+    /// whether or not any frame carries a map entry, so a ring cycle that gains a poison counter
+    /// states one last representable repetition at `u32::MAX - 1` and no limit at all below it.
+    #[test]
+    fn a_frame_measured_poison_increment_is_bounded_at_the_counter_width() {
+        let cycle = |poison: u32| {
+            let mut before = state_at(20);
+            before.players[0].poison_counters = poison;
+            let mut after = before.clone();
+            after.players[0].poison_counters = poison + 1;
+            (before, after)
+        };
+
+        let (before, after) = cycle(0);
+        assert_eq!(
+            PeriodExcursions::representable_over_frames(&[&before, &after], &before, BUDGET),
+            None,
+            "reach guard: with headroom the increment fits the whole budget"
+        );
+        let (before, after) = cycle(u32::MAX - 1);
+        assert_eq!(
+            PeriodExcursions::representable_over_frames(&[&before, &after], &before, BUDGET),
+            Some(1),
+            "one more increment fits a tally at the counter's last value"
+        );
     }
 
     /// Spending energy a repetition then restores leaves the energy total where it was, but
