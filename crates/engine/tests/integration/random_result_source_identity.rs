@@ -3006,7 +3006,11 @@ fn public_coin_keep_continuation_fixture(
     let owned = ResolvingTriggerContext {
         event: Some(owned_event.clone()),
         events: vec![owned_event],
-        match_count: Some(3),
+        // A synthetic batched subject count would outrank the die result in
+        // `EventContextAmount`, so the downstream tail would read it instead
+        // of the roll total. Leave it unset here; the caller context still
+        // carries `Some(17)` to prove the restoration channels.
+        match_count: None,
         die_result: Some(7),
     };
     state.current_trigger_event = owned.event.clone();
