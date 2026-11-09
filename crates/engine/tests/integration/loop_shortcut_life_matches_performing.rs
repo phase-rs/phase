@@ -1,19 +1,23 @@
 //! CR 732.2c + CR 119.3: a taken shortcut leaves every life total, shared total and per-turn life
-//! counter where declining it and performing the same cycles leaves them. One oracle for the whole
-//! class: each board is driven to its shortcut offer once, the state at the offer is copied, one
-//! copy takes `Fixed(n)` and the other declines and performs `n` cycles by hand, and everything a
-//! rules reader can read about life is then compared for every seat (stored field, shared total,
-//! gained and lost counters, who has left the game, how the game stands), right after the take and
-//! again after each later reader: Ancient Tomb ("{T}: Add {C}{C}. This land deals 2 damage to
-//! you."), Children of Korlis ("Sacrifice this creature: You gain life equal to the life you've
-//! lost this turn."), and the end step. The battlefield is compared too (controller, name, token,
-//! power, toughness, +1/+1 counters), for the readers whose body changes with life.
+//! counter where declining it and performing the same cycles leaves them. (One board of the class
+//! is known to differ and is not compared: a Two-Headed Giant drain whose take would end the game;
+//! see `giant_specs`.) One oracle for the whole class: each board is driven to its shortcut offer
+//! once, the state at the offer is copied, one copy takes `Fixed(n)` and the other declines and
+//! performs `n` cycles by hand, and everything a rules reader can read about life is then compared
+//! for every seat (stored field, shared total, gained and lost counters, who has left the game, how
+//! the game stands), right after the take and again after each later reader: Ancient Tomb ("{T}:
+//! Add {C}{C}. This land deals 2 damage to you."), Children of Korlis ("Sacrifice this creature:
+//! You gain life equal to the life you've lost this turn."), and the end step. The battlefield is
+//! compared too (controller, name, token, power, toughness, +1/+1 counters), for the readers whose
+//! body changes with life.
 //!
 //! The loop is Gravecrawler returned from the graveyard and sacrificed to Phyrexian Altar, with
-//! the payoffs each family names. Each family's rows put a life total at an ordinary value, near
-//! each `i32` limit and at it, and each per-turn counter at an ordinary value, near its pin and at
-//! it, so that both the batched take and the performed one are compared on either side of every
-//! limit the engine saturates at.
+//! the payoffs each family names. Across the families, the rows put a life total at an ordinary
+//! value and near and at `i32::MAX` (and, in `loss`, a drained total near and at `i32::MIN`), and
+//! a gained or lost counter near and at its pin, so that a performed take is compared on either
+//! side of every limit the engine saturates at, and a batched take, which only gains and passes
+//! no life limit, below and onto `i32::MAX` with the gained counter short of, crossing and at its
+//! pin.
 
 use std::collections::BTreeMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -511,8 +515,8 @@ impl Fork<'_> {
     }
 }
 
-/// Builds `spec`'s board and performs the one cycle that offers the shortcut. `None` where that
-/// cycle offers none or ends the game.
+/// Builds `spec`'s board and performs cycles by hand, at most three, until the shortcut is offered.
+/// `None` where none is offered within three cycles or the game ends first.
 fn offer(db: &'static CardDatabase, spec: &Spec) -> Option<Offer> {
     let mut scenario = if spec.two_headed_giant {
         GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 7)
@@ -944,7 +948,8 @@ fn gain_specs() -> Vec<Spec> {
 }
 
 /// A cycle that loses life, alone or beside a gain, in a duel. A seat that loses life on net keeps
-/// an ordinary total here; the drains with a total near a limit are [`drain_near_limit_specs`].
+/// an ordinary total here, except the seat Platinum Angel keeps in the game, which is drained down
+/// to `i32::MIN`; the drains with a total near `i32::MAX` are [`drain_near_limit_specs`].
 fn loss_specs() -> Vec<Spec> {
     let printed = Card::Printed;
     // (payoffs, P0's life levels, P1's life levels)
@@ -994,8 +999,9 @@ fn loss_specs() -> Vec<Spec> {
     specs
 }
 
-/// Boards where a seat loses life on net while a total stands near an `i32` limit: the offer's
-/// life-crossing read runs over the whole total (`analysis::resource`'s `cascade_horizon`).
+/// Boards whose cycle loses life (a drain, a loss alone, or a gain and a loss of 1 each) while a
+/// total stands near `i32::MAX`: the offer's life-crossing read runs over the whole total
+/// (`analysis::resource`'s `cascade_horizon`).
 fn drain_near_limit_specs() -> Vec<Spec> {
     let printed = Card::Printed;
     let mut specs = Vec::new();
@@ -1098,7 +1104,10 @@ fn giant_specs() -> Vec<Spec> {
     let team_b: &[(i32, i32)] = &[(20, 20), (MAX - 3, 1)];
     let counters: &[&[(usize, u32, u32)]] = &[&[], &[(0, PIN, 0)], &[(0, PIN - 3, 0)]];
     // The drain keeps to ordinary totals (see [`loss_specs`]). Team B at 8 and 1 is offered at a
-    // shared total of 7, and the take leaves it at 1 with one field below 0.
+    // shared total of 7, and the take leaves it at 1 with one field below 0. A take whose last
+    // cycle would end the game is left out: from fields 6 and 1, 7 and 1 or 5 and 2 the take stops
+    // one cycle short of the lethal cycle that performing reaches, a difference upstream `main`
+    // already has at ordinary totals, apart from this change.
     let drained_a: &[(i32, i32)] = &[(20, 20), (3, 2)];
     let drained_b: &[(i32, i32)] = &[(20, 20), (8, 1)];
     let mut specs = Vec::new();
@@ -1120,9 +1129,10 @@ fn giant_specs() -> Vec<Spec> {
     specs
 }
 
-/// Two shortcuts taken in one step, a cycle that only gains life. Two takes of three cycles and
-/// the cycles by hand between them gain at most 16, so MAX-17 stays short of the cap, MAX-16
-/// reaches it exactly and MAX-15 passes it.
+/// Two shortcuts taken in one step, a cycle that only gains life. With two Soul Wardens, the cycle
+/// by hand that offers the first take, two takes of three cycles and the cycle by hand between
+/// them gain 16, so from MAX-17 the second take stays short of the cap, from MAX-16 it reaches it
+/// exactly and from MAX-15 it passes it.
 fn twice_specs() -> Vec<Spec> {
     let counters: &[&[(usize, u32, u32)]] = &[&[], &[(0, PIN, 0)], &[(0, PIN - 9, 0)]];
     let mut specs = Vec::new();
