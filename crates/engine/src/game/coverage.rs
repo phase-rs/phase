@@ -83,6 +83,11 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // permanents. Not registry-keyed (mirrors the marker cluster).
             | StaticMode::CantBecomeSuspected
             | StaticMode::ReduceAbilityCost { .. }
+            | StaticMode::AlternativeKeywordCost {
+                keyword: crate::types::keywords::KeywordKind::Cycling
+                    | crate::types::keywords::KeywordKind::Equip,
+                ..
+            }
             // CR 116.2 + CR 118.7a: ReduceActionCost carries `action`
             // (SpecialAction), `mode`, and `amount`. Runtime enforcement is the
             // special-action cost-reduction resolver
