@@ -240,3 +240,170 @@ fn sequential_payment_snapshot_round_trips_mid_loop() {
         WaitingFor::OptionalEffectChoice { .. }
     ));
 }
+
+// No printed card yet pairs a repeated payment with a NON-modal reflexive (the
+// "any number of times" Adversary cycle is not a fixed-count parse), so these
+// fixtures use the Hawkeye/Frillback payment clause with a plain rider.
+const PAY_THEN_GAIN_ORACLE: &str =
+    "You may pay {1} up to three times. When you do, you gain 3 life.";
+const ETB_PAY_THEN_DRAW_ORACLE: &str =
+    "When this creature enters, you may pay {1} up to three times. When you do, you draw a card.";
+
+/// Four Forests for P0: one pays the {G} cast cost, the rest are available
+/// for the resolution-time {1} payments.
+fn non_modal_runtime(
+    add_card: impl FnOnce(&mut GameScenario) -> crate::types::identifiers::ObjectId,
+) -> (
+    crate::game::scenario::GameRunner,
+    crate::types::identifiers::ObjectId,
+) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+    let card = add_card(&mut scenario);
+    scenario.with_library_top(P0, &["Library A", "Library B", "Library C"]);
+    for _ in 0..4 {
+        scenario.add_basic_land(P0, crate::types::mana::ManaColor::Green);
+    }
+    (scenario.build(), card)
+}
+
+fn green_cost() -> crate::types::mana::ManaCost {
+    crate::types::mana::ManaCost::Cost {
+        generic: 0,
+        shards: vec![crate::types::mana::ManaCostShard::Green],
+    }
+}
+
+/// Pass priority until the resolving object offers its first repeated payment.
+fn pass_until_payment_offer(runner: &mut crate::game::scenario::GameRunner) {
+    for _ in 0..6 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ) {
+            return;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority toward the payment offer");
+    }
+    panic!(
+        "no repeated-payment offer reached; waiting_for = {:?}",
+        runner.state().waiting_for
+    );
+}
+
+fn tapped_lands(state: &GameState, player: PlayerId) -> usize {
+    state
+        .battlefield
+        .iter()
+        .filter(|id| state.objects[id].tapped && state.objects[id].controller == player)
+        .count()
+}
+
+fn assert_settled(state: &GameState) {
+    assert!(state.stack.is_empty(), "stack must be empty");
+    assert!(state.deferred_triggers.is_empty(), "no parked reflexive");
+    assert!(state.resolution_stack.is_empty(), "no retained frame");
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
+
+/// CR 603.12 + CR 603.12a: after two of three offered payments, a non-modal
+/// reflexive on a resolving spell triggers exactly once, reaches the stack, and
+/// resolves (issue #9555 — it used to stay parked in `deferred_triggers`
+/// behind the completed repeated-payment frame).
+#[test]
+fn spell_non_modal_reflexive_triggers_once_and_resolves() {
+    let (mut runner, spell) = non_modal_runtime(|scenario| {
+        scenario
+            .add_spell_to_hand_from_oracle(P0, "Paid Rider", false, PAY_THEN_GAIN_ORACLE)
+            .with_mana_cost(green_cost())
+            .id()
+    });
+    runner.cast(spell).commit();
+    assert_eq!(tapped_lands(runner.state(), P0), 1, "cast cost paid");
+    pass_until_payment_offer(&mut runner);
+    decide(&mut runner, true);
+    decide(&mut runner, true);
+    decide(&mut runner, false);
+    assert_eq!(tapped_lands(runner.state(), P0), 3, "two {{1}} payments");
+    // Positive reach guard: the reflexive is on the stack, not parked.
+    assert!(runner.state().deferred_triggers.is_empty());
+    assert_eq!(runner.state().stack.len(), 1, "one reflexive trigger");
+    assert_eq!(runner.state().players[0].life, 20, "not yet resolved");
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().players[0].life, 23, "gained 3 life once");
+    assert_settled(runner.state());
+}
+
+/// CR 603.12a: paying all three times still triggers the reflexive only once.
+#[test]
+fn spell_non_modal_reflexive_after_every_payment_triggers_once() {
+    let (mut runner, spell) = non_modal_runtime(|scenario| {
+        scenario
+            .add_spell_to_hand_from_oracle(P0, "Paid Rider", false, PAY_THEN_GAIN_ORACLE)
+            .with_mana_cost(green_cost())
+            .id()
+    });
+    runner.cast(spell).commit();
+    pass_until_payment_offer(&mut runner);
+    decide(&mut runner, true);
+    decide(&mut runner, true);
+    decide(&mut runner, true);
+    assert_eq!(tapped_lands(runner.state(), P0), 4, "three {{1}} payments");
+    assert_eq!(runner.state().stack.len(), 1, "one reflexive trigger");
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().players[0].life, 23);
+    assert_settled(runner.state());
+}
+
+/// CR 603.12: declining the first payment means the trigger event never
+/// occurred, so the reflexive never triggers and nothing is left parked.
+#[test]
+fn spell_non_modal_reflexive_without_payment_never_triggers() {
+    let (mut runner, spell) = non_modal_runtime(|scenario| {
+        scenario
+            .add_spell_to_hand_from_oracle(P0, "Paid Rider", false, PAY_THEN_GAIN_ORACLE)
+            .with_mana_cost(green_cost())
+            .id()
+    });
+    runner.cast(spell).commit();
+    pass_until_payment_offer(&mut runner);
+    decide(&mut runner, false);
+    runner.advance_until_stack_empty();
+    assert_eq!(tapped_lands(runner.state(), P0), 1, "only the cast cost");
+    assert_eq!(runner.state().players[0].life, 20);
+    assert_settled(runner.state());
+}
+
+/// CR 603.12a: the same reflexive created by a resolving ETB trigger (not a
+/// spell) also reaches the stack once and resolves.
+#[test]
+fn etb_trigger_non_modal_reflexive_triggers_once_and_resolves() {
+    let (mut runner, creature) = non_modal_runtime(|scenario| {
+        scenario
+            .add_creature_to_hand_from_oracle(
+                P0,
+                "Paid Rider Beast",
+                2,
+                2,
+                ETB_PAY_THEN_DRAW_ORACLE,
+            )
+            .with_mana_cost(green_cost())
+            .id()
+    });
+    runner.cast(creature).commit();
+    let hand_after_cast = runner.state().players[0].hand.len();
+    pass_until_payment_offer(&mut runner);
+    decide(&mut runner, true);
+    decide(&mut runner, false);
+    assert_eq!(tapped_lands(runner.state(), P0), 2, "one {{1}} payment");
+    assert_eq!(runner.state().stack.len(), 1, "one reflexive trigger");
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        hand_after_cast + 1,
+        "drew exactly one card"
+    );
+    assert_settled(runner.state());
+}

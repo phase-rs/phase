@@ -17199,6 +17199,21 @@ fn finish_repeated_optional_payment(
         state.cost_payment_failed_flag = false;
         resolve_ability_chain(state, reflexive, events, 1)?;
     }
+    // CR 603.12 + CR 603.12a: the completed frame outlives the loop only so a
+    // reflexive MODAL's open mode prompt can still read K as its dynamic cap.
+    // Any other reflexive was deferred (CR 603.7 delayed-trigger rules) to be
+    // put on the stack once this resolution settles; a retained frame would
+    // keep that settlement gate shut and the triggered ability would never
+    // reach the stack. Release the owner as soon as nothing can read K.
+    if !matches!(state.waiting_for, WaitingFor::AbilityModeChoice { .. })
+        && state
+            .active_repeated_optional_payment_frame()
+            .is_some_and(|frame| frame.pending.is_none())
+    {
+        state
+            .take_active_repeated_optional_payment_frame()
+            .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+    }
     Ok(())
 }
 
