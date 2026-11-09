@@ -35,8 +35,8 @@
 //!     resolving family's controller with an explicitly typed continuation
 //!     witness; that witness is not part of Mudhole's printed Oracle. A real
 //!     Aethersnatch transfer also distinguishes both from the original caster.
-//!     Current saves retain those roles; v1–v11 projections without an actual
-//!     saved family binding refuse instead of trusting the announcement entry.
+//!     Current saves keep the subject performer separate. Deployed v11 saves
+//!     preserve their recorded controller as both family and historical actor.
 //!     No supported printed card supplies this exile-destination replacement.
 //!     The nearest printed replacements are Rest in Peace and Dauthi Voidwalker,
 //!     which redirect graveyard-bound moves into exile. The fixture's optional
@@ -79,10 +79,26 @@ use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
-use engine::types::resolution::{ResolutionFrame, LEGACY_CHANGE_ZONE_CONTROLLER_RESTORE_ERROR};
+use engine::types::resolution::ResolutionFrame;
 use engine::types::zones::Zone;
 
 const P2: PlayerId = PlayerId(2);
+
+/// Unmodified Raw/Trusted output from deployed writer
+/// 82d5dfc9b86c47cd6afa7359e6177785972ff81a (wire 11), captured after public,
+/// paid Aethersnatch/Mudhole actions and the documented synthetic pause/witness.
+/// Raw SHA-256: 290548f929910b2c0950f42cc95e9d70a90b35eb9a7a8bc16587a67ce394f3a2
+/// Trusted SHA-256: 1565330bfae23056a67105f929d15037c8c00aed2598567018920157d8f8a57a
+const DEPLOYED_V11_EXILE_SAVES: [(&str, &[u8]); 2] = [
+    (
+        "Raw",
+        include_bytes!("../fixtures/exile_attribution_v11_82d5dfc9_raw.json"),
+    ),
+    (
+        "Trusted",
+        include_bytes!("../fixtures/exile_attribution_v11_82d5dfc9_trusted.json"),
+    ),
+];
 
 /// Strategic Betrayal `{1}{B}` Sorcery — verbatim Oracle text.
 const STRATEGIC_BETRAYAL: &str =
@@ -966,13 +982,6 @@ fn aethersnatch_mudhole_replacement_pause() -> (GameRunner, [ObjectId; 2], Objec
         })
         .expect("the actual resolution retains its completion witness");
     assert_eq!(continuation.chain.controller, P2);
-    assert_eq!(continuation.parent_kind, None);
-    assert_eq!(continuation.return_result_occurrence, None);
-    assert!(continuation
-        .chain
-        .context
-        .pending_forwarded_zone_result
-        .is_none());
     let retained = runner
         .state()
         .resolving_stack_entry
@@ -1147,83 +1156,9 @@ fn wire_state_mut(wire: &mut serde_json::Value) -> &mut serde_json::Value {
     }
 }
 
-/// Reconstruct the old writer, not a modern carrier with a changed version:
-/// v1–v11 stored the actor in controller and had no performed_by; v1–v6
-/// carried bare remaining ids and entry fields; v1 used independent slots.
-fn historical_subject_exile_wire(
-    runner: &GameRunner,
-    version: u64,
-    trusted: bool,
-) -> serde_json::Value {
-    assert!((1..=11).contains(&version));
-    let persisted = if trusted {
-        PersistedGameState::capture(runner.state().clone())
-    } else {
-        PersistedGameState::Raw(Box::new(runner.state().clone()))
-    };
-    let mut wire =
-        serde_json::to_value(persisted).expect("serialize the actual public replacement pause");
-    let state = wire_state_mut(&mut wire);
-    state["resolution_state_version"] = serde_json::json!(version);
-    let frames = state["resolution_frames"]["frames"]
-        .as_array_mut()
-        .expect("the current writer carries typed frames");
-    let frame = frames
-        .iter_mut()
-        .find(|frame| frame["type"] == "ChangeZone")
-        .expect("the actual pause has a ChangeZone owner");
-    let carrier = frame["data"]["pending"]
-        .as_object_mut()
-        .expect("the mass move owns a pending carrier");
-    let family_controller = carrier["controller"].clone();
-    let historical_actor = carrier.remove("performed_by").expect("the current actor");
-    assert_eq!(historical_actor, serde_json::json!(P1));
-    carrier.insert("controller".to_string(), historical_actor);
-    if version <= 6 {
-        let remaining = carrier["remaining"]
-            .as_array()
-            .expect("the mass move retains unprocessed members")
-            .iter()
-            .map(|member| member["object_id"].clone())
-            .collect();
-        carrier.insert("remaining".to_string(), serde_json::Value::Array(remaining));
-        carrier.insert("enter_tapped".to_string(), serde_json::json!(false));
-        carrier.insert("enters_attacking".to_string(), serde_json::json!(false));
-    }
-    // The old mass writer passed the same overloaded actor as the paused
-    // member's duration/link anchor, independently of the event's performer.
-    assert_eq!(
-        state["pending_replacement"]["exile_controller"],
-        family_controller
-    );
-    state["pending_replacement"]["exile_controller"] = serde_json::json!(P1);
-    if version == 1 {
-        let object = state.as_object_mut().expect("the wire state is an object");
-        let stack = object.remove("resolution_frames").expect("the typed stack");
-        for frame in stack["frames"].as_array().expect("the written frames") {
-            match frame["type"].as_str().expect("the frame discriminant") {
-                "ChangeZone" => {
-                    object.insert(
-                        "pending_change_zone_iteration".to_string(),
-                        frame["data"]["pending"].clone(),
-                    );
-                }
-                "AbilityContinuation" => {
-                    object.insert(
-                        "pending_continuation".to_string(),
-                        frame["data"]["pending"].clone(),
-                    );
-                }
-                other => panic!("unexpected family in the historical Mudhole fixture: {other}"),
-            }
-        }
-    }
-    wire
-}
-
 fn restore_public_saved_runner(wire: serde_json::Value) -> GameRunner {
     let state = serde_json::from_value::<PersistedGameState>(wire)
-        .expect("the public reader admits the historical roles")
+        .expect("the public reader accepts the saved state")
         .prepare_for_restore(PersistedRestoreFinalization::Immediate)
         .expect("the saved frame is valid for restoration")
         .finalize_immediately()
@@ -1326,175 +1261,168 @@ fn aethersnatch_mudhole_current_restore_preserves_actual_controller_and_subject(
 }
 
 #[test]
-fn aethersnatch_mudhole_historical_restore_refuses_unbound_and_stale_only_authority() {
-    let (runner, _, _, mudhole) = aethersnatch_mudhole_replacement_pause();
-    for version in (1..=11).rev() {
-        for trusted in [false, true] {
-            for keep_unbound_tail in [true, false] {
-                let mut wire = historical_subject_exile_wire(&runner, version, trusted);
-                let state = wire_state_mut(&mut wire);
-                assert_eq!(
-                    state["resolving_stack_entry"]["source_id"],
-                    serde_json::json!(mudhole)
-                );
-                assert_eq!(
-                    state["resolving_stack_entry"]["controller"],
-                    serde_json::json!(P0)
-                );
-                let continuation = if version == 1 {
-                    &state["pending_continuation"]
-                } else {
-                    &state["resolution_frames"]["frames"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .find(|frame| frame["type"] == "AbilityContinuation")
-                        .unwrap()["data"]["pending"]
-                };
-                assert_eq!(continuation["chain"]["controller"], serde_json::json!(P2));
-                assert!(continuation["parent_kind"].is_null());
-                assert!(continuation["return_result_occurrence"].is_null());
-                assert!(
-                    continuation["chain"]["context"]["pending_forwarded_zone_result"].is_null()
-                );
-                if !keep_unbound_tail {
-                    if version == 1 {
-                        state
-                            .as_object_mut()
-                            .unwrap()
-                            .remove("pending_continuation");
-                    } else {
-                        state["resolution_frames"]["frames"]
-                            .as_array_mut()
-                            .unwrap()
-                            .retain(|frame| frame["type"] != "AbilityContinuation");
-                    }
-                }
-                let error = match serde_json::from_value::<PersistedGameState>(wire) {
-                    Ok(_) => panic!(
-                        "v{version} trusted={trusted} keep_unbound_tail={keep_unbound_tail}: stale announcement authority was admitted"
-                    ),
-                    Err(error) => error.to_string(),
-                };
-                assert!(
-                    error.contains(LEGACY_CHANGE_ZONE_CONTROLLER_RESTORE_ERROR),
-                    "v{version} trusted={trusted} keep_unbound_tail={keep_unbound_tail}: {error}"
-                );
+fn deployed_v11_aethersnatch_mudhole_restore_preserves_recorded_roles_and_anchor() {
+    for (format, bytes) in DEPLOYED_V11_EXILE_SAVES {
+        let encoded: serde_json::Value =
+            serde_json::from_slice(bytes).expect("the captured old writer emitted JSON");
+        let saved = encoded.get("state").unwrap_or(&encoded);
+        assert_eq!(saved["resolution_state_version"], 11);
+        let recorded = &saved["resolution_frames"]["frames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|frame| frame["type"] == "ChangeZone")
+            .expect("the actual capture paused Mudhole's mass move")["data"]["pending"];
+        assert_eq!(recorded["controller"], serde_json::json!(P2));
+        assert!(recorded.get("performed_by").is_none());
+        assert_eq!(
+            saved["pending_replacement"]["exile_controller"],
+            serde_json::json!(P2)
+        );
+        let recorded_duration = recorded
+            .get("duration")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        // The primary compatibility proof decodes the original bytes directly:
+        // no version stamp, controller, event or continuation is rewritten.
+        let state = serde_json::from_slice::<PersistedGameState>(bytes)
+            .unwrap_or_else(|error| panic!("deployed v11 {format}: {error}"))
+            .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+            .expect("the deployed save prepares for restore")
+            .finalize_immediately()
+            .expect("the deployed save finalizes");
+        let mut restored = GameRunner::from_state(state);
+        assert!(matches!(
+            restored.state().waiting_for,
+            WaitingFor::ReplacementChoice {
+                player: P1,
+                kind: ReplacementChoiceKind::OptionalBranch,
+                ..
             }
+        ));
+        let pending = restored
+            .state()
+            .active_change_zone_frame()
+            .and_then(|frame| frame.pending.as_ref())
+            .expect("restore retains the recorded family");
+        assert_eq!(
+            serde_json::to_value(pending.controller).unwrap(),
+            recorded["controller"]
+        );
+        assert_eq!(
+            serde_json::to_value(pending.performed_by).unwrap(),
+            recorded["controller"],
+            "legacy admission copies the old recorded performer, not today's subject"
+        );
+        assert_eq!(
+            serde_json::to_value(&pending.duration).unwrap(),
+            recorded_duration
+        );
+        assert_eq!(
+            serde_json::to_value(pending.logical_zone_change_group.logical_group_id).unwrap(),
+            recorded["logical_zone_change_group"]["logical_group_id"]
+        );
+        let mudhole = pending.source_id;
+        let lands: Vec<_> = std::iter::once(
+            pending
+                .paused_current
+                .as_ref()
+                .expect("the first member is paused")
+                .member
+                .object_id,
+        )
+        .chain(pending.remaining.iter().map(|member| member.object_id))
+        .collect();
+        assert_eq!(lands.len(), 2);
+        assert_eq!(restored.state().objects[&mudhole].name, "Mudhole");
+        let replacement = restored.state().pending_replacement.as_ref().unwrap();
+        assert_eq!(
+            serde_json::to_value(replacement.exile_controller).unwrap(),
+            saved["pending_replacement"]["exile_controller"]
+        );
+        assert_eq!(
+            serde_json::to_value(&replacement.exile_duration).unwrap(),
+            saved["pending_replacement"]["exile_duration"]
+        );
+        assert_eq!(
+            restored
+                .state()
+                .resolving_stack_entry
+                .as_ref()
+                .unwrap()
+                .controller,
+            P0,
+            "the stale announcement entry never replaces the recorded P2 family"
+        );
+        for _ in &lands {
+            assert!(matches!(
+                restored.state().waiting_for,
+                WaitingFor::ReplacementChoice { player: P1, .. }
+            ));
+            restored
+                .act(GameAction::ChooseReplacement { index: 1 })
+                .expect("the actual surviving target declines the saved replacement");
         }
+        drive_to_priority(&mut restored);
+        assert_resolution_finished(&restored);
+        for land in lands {
+            assert_eq!(zone(&restored, land), Zone::Exile);
+            assert_eq!(
+                exiled_by(&restored, land),
+                Some(P2),
+                "deployed v11 attribution remains P2, unlike current v12's subject P1"
+            );
+        }
+        assert_eq!(restored.life(P2), 23, "the old saved witness finishes once");
+        assert_eq!(zone(&restored, mudhole), Zone::Graveyard);
     }
 }
 
+/// The continuation's journal cause is independently bound to its owning node.
+/// This corrupts one recorded identity, not a missing migration-era marker or a
+/// replacement effect's unrelated authorship.
 #[test]
-fn historical_subject_exile_restore_refuses_absent_unbound_or_conflicting_authority() {
-    let (mut runner, _, relic, mudhole) = mudhole_replacement_fixture(true);
-    runner.cast(mudhole).target_player(P1).resolve();
-    for version in [1, 11] {
-        for trusted in [false, true] {
-            for authority in [
-                "absent",
-                "unbound",
-                "different_source",
-                "different_group",
-                "wrong_parent",
-                "conflicting",
-                "conflicting_anchor",
-            ] {
-                let mut wire = historical_subject_exile_wire(&runner, version, trusted);
-                let state = wire_state_mut(&mut wire);
-                if matches!(authority, "conflicting" | "conflicting_anchor") {
-                    assert!(!state["resolving_stack_entry"].is_null());
-                } else {
-                    state
-                        .as_object_mut()
-                        .unwrap()
-                        .remove("resolving_stack_entry");
-                }
-                if authority == "conflicting_anchor" {
-                    state["pending_replacement"]["exile_controller"] = serde_json::json!(P2);
-                }
-                let continuation = if version == 1 {
-                    &mut state["pending_continuation"]
-                } else {
-                    &mut state["resolution_frames"]["frames"]
-                        .as_array_mut()
-                        .unwrap()
-                        .iter_mut()
-                        .find(|frame| frame["type"] == "AbilityContinuation")
-                        .expect("the actual pause retains its typed tail")["data"]["pending"]
-                };
-                match authority {
-                    "absent" => *continuation = serde_json::Value::Null,
-                    "unbound" => {}
-                    // These mutations test contradictory saved metadata, not
-                    // evidence the actual Mudhole writer ever produced.
-                    "conflicting_anchor" => {
-                        continuation["parent_kind"] = serde_json::json!("ChangeZoneAll");
-                    }
-                    "different_source" => {
-                        continuation["chain"]["source_id"] = serde_json::json!(relic);
-                    }
-                    "different_group" => {
-                        continuation["chain"]["context"]["pending_forwarded_zone_result"] = serde_json::json!({
-                            "producer": mudhole,
-                            "selected": null,
-                            "group": 999999,
-                        });
-                    }
-                    "wrong_parent" => {
-                        continuation["parent_kind"] = serde_json::json!("Draw");
-                    }
-                    "conflicting" => {
-                        continuation["parent_kind"] = serde_json::json!("ChangeZoneAll");
-                        continuation["chain"]["context"]["pending_forwarded_zone_result"] = serde_json::json!({
-                            "producer": mudhole,
-                            "selected": null,
-                            "group": 999999,
-                        });
-                    }
-                    _ => unreachable!(),
-                }
-                if version != 1 && authority == "absent" {
-                    state["resolution_frames"]["frames"]
-                        .as_array_mut()
-                        .unwrap()
-                        .retain(|frame| frame["type"] != "AbilityContinuation");
-                }
-                let error = serde_json::from_value::<PersistedGameState>(wire)
-                    .expect_err("a live source or nearby unrelated frame cannot invent authority")
-                    .to_string();
-                assert!(
-                    error.contains(LEGACY_CHANGE_ZONE_CONTROLLER_RESTORE_ERROR),
-                    "v{version} trusted={trusted} {authority}: {error}"
-                );
-            }
-        }
+fn deployed_v11_subject_exile_restore_refuses_contradictory_recorded_continuation_cause() {
+    for (_, bytes) in DEPLOYED_V11_EXILE_SAVES {
+        let mut wire: serde_json::Value =
+            serde_json::from_slice(bytes).expect("parse the untouched deployed bytes");
+        let restored = restore_public_saved_runner(wire.clone());
+        let pending = restored
+            .state()
+            .active_change_zone_frame()
+            .and_then(|frame| frame.pending.as_ref())
+            .expect("the unmodified fixture retains its family");
+        assert_eq!(pending.controller, P2);
+        assert_eq!(pending.performed_by, P2);
+        let mudhole = pending.source_id;
+        let entries = wire_state_mut(&mut wire)["resolved_rules_journal"]["entries"]
+            .as_array_mut()
+            .expect("the actual writer retains its rules journal");
+        let index = entries
+            .iter()
+            .position(|entry| {
+                let frame = &entry["command"]["FrameTransition"]["transition"]
+                    ["InsertParentOfActive"]["frame"];
+                frame["type"] == "AbilityContinuation"
+                    && frame["data"]["pending"]["chain"]["source_id"] == serde_json::json!(mudhole)
+            })
+            .expect("the actual paused continuation has its journaled insertion");
+        let node = entries[index]["node"].clone();
+        assert_eq!(entries[index]["command"]["FrameTransition"]["cause"], node);
+        let unrelated_node = entries
+            .iter()
+            .find(|entry| entry["node"] != node)
+            .expect("the real cast and payment trace recorded other causal nodes")["node"]
+            .clone();
+        entries[index]["command"]["FrameTransition"]["cause"] = unrelated_node;
+        let error = serde_json::from_value::<PersistedGameState>(wire)
+            .expect_err("the recorded continuation cause cannot contradict its owning journal node")
+            .to_string();
+        assert!(
+            error.contains("frame-transition command has an unrelated cause"),
+            "{error}"
+        );
     }
-}
-
-#[test]
-fn historical_subject_exile_restore_refuses_competing_same_source_families() {
-    let (mut runner, _, _, mudhole) = mudhole_replacement_fixture(true);
-    runner.cast(mudhole).target_player(P1).resolve();
-    let mut wire = historical_subject_exile_wire(&runner, 11, false);
-    let frames = wire_state_mut(&mut wire)["resolution_frames"]["frames"]
-        .as_array_mut()
-        .unwrap();
-    let mut other = frames
-        .iter()
-        .find(|frame| frame["type"] == "ChangeZone")
-        .expect("the actual mass family")
-        .clone();
-    other["data"]["pending"]["logical_zone_change_group"]["logical_group_id"] =
-        serde_json::json!(999999);
-    frames.push(other);
-    let error = serde_json::from_value::<PersistedGameState>(wire)
-        .expect_err("same-source families cannot be disambiguated by frame proximity")
-        .to_string();
-    assert!(
-        error.contains(LEGACY_CHANGE_ZONE_CONTROLLER_RESTORE_ERROR),
-        "{error}"
-    );
 }
 
 #[test]
@@ -1504,18 +1432,11 @@ fn subject_exile_restore_keeps_explicit_actor_and_current_missing_actor_is_stric
     let (transferred, _, _, _) = aethersnatch_mudhole_replacement_pause();
     for (runner, controller) in [(runner, P0), (transferred, P2)] {
         for version in [11, 12] {
-            let mut wire = historical_subject_exile_wire(&runner, 11, false);
+            let mut wire =
+                serde_json::to_value(PersistedGameState::Raw(Box::new(runner.state().clone())))
+                    .expect("serialize the current explicit actor");
             let state = wire_state_mut(&mut wire);
             state["resolution_state_version"] = serde_json::json!(version);
-            let carrier = &mut state["resolution_frames"]["frames"]
-                .as_array_mut()
-                .unwrap()
-                .iter_mut()
-                .find(|frame| frame["type"] == "ChangeZone")
-                .unwrap()["data"]["pending"];
-            carrier["controller"] = serde_json::json!(controller);
-            carrier["performed_by"] = serde_json::json!(P1);
-            state["pending_replacement"]["exile_controller"] = serde_json::json!(controller);
             let restored = restore_public_saved_runner(wire.clone());
             assert_restored_subject_exile_roles(&restored, controller);
             if version == 12 {

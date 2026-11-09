@@ -4884,15 +4884,13 @@ pub struct PendingChangeZoneIteration {
     pub controller: PlayerId,
     /// Instruction performer, captured independently across every pause.
     /// Required on current carriers: the controller no longer determines it.
-    /// Versioned v1–v11 admission copies the recorded controller-encoded actor
-    /// exactly. Historical mass-Exile family controllers are recovered separately
-    /// from an executing continuation with a saved source-and-family binding,
-    /// or explicitly refused when that authority is absent or conflicting. Its
-    /// saved parent-kind, occurrence or group marker must match; source equality
-    /// alone does not make an unrelated tail its family. The retained resolving
-    /// entry and baked ability predate the actual-controller rebind and cannot
-    /// supply this proof even when they agree. No live source, subject ownership,
-    /// actor fallback or default player reconstructs either role.
+    /// Versioned v1–v11 admission copies the recorded controller when this field
+    /// is absent: deployed writers used that captured player for both the family
+    /// controller and the move performer. The saved family controller, duration
+    /// and replacement anchor are preserved, not reconstructed from a live object,
+    /// resolving entry or continuation. This retains the historical attribution
+    /// even when a current instruction would name a different acting player.
+    /// An explicit actor is never overwritten.
     pub performed_by: PlayerId,
     pub origin: Option<crate::types::zones::Zone>,
     pub destination: crate::types::zones::Zone,
@@ -26280,10 +26278,6 @@ declare_game_state! {
     /// Chain-cycle optional-copy prompt is pending and later reloaded would
     /// otherwise lose the entry and silently drop the accepted copy. Mirrors
     /// `current_trigger_event`.
-    /// This is the announcement snapshot, retained before the executable spell's
-    /// actual-controller rebind. Neither its controller nor its baked ability's
-    /// controller proves who controlled the spell as resolution began; historical
-    /// ChangeZone admission must not use their agreement to reconstruct that role.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolving_stack_entry: Option<StackEntry>,
     /// Private CR 603.7 authority transferred with a delayed trigger from the
