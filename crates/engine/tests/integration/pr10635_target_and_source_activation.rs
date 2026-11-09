@@ -383,3 +383,83 @@ fn paid_beacon_keeps_its_source_after_the_mox_entry_discard() {
         WaitingFor::Priority { .. }
     ));
 }
+
+#[test]
+fn cathartic_parting_keeps_the_permanents_owner_and_the_caster_shuffles_distinct() {
+    const CATHARTIC: &str = "The owner of target artifact or enchantment an opponent controls shuffles it into their library. You may shuffle up to four target cards from your graveyard into your library.";
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let artifact = scenario
+        .add_artifact_from_oracle(P2, "Mox Pearl", "{T}: Add {W}.")
+        .controlled_by(P1)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let selected = scenario.add_land_to_graveyard(P0, "Forest").id();
+    let unselected = scenario.add_land_to_graveyard(P0, "Island").id();
+    let other_graveyard = scenario.add_land_to_graveyard(P2, "Plains").id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Cathartic Parting", false, CATHARTIC)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Green],
+        })
+        .id();
+    scenario.with_library_top(P0, &["Caster A", "Caster B"]);
+    scenario.with_library_top(P1, &["Controller A", "Controller B"]);
+    scenario.with_library_top(P2, &["Owner A", "Owner B"]);
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Colorless, ManaType::Green]
+            .into_iter()
+            .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    let outcome = runner
+        .cast(spell)
+        .target_objects(&[artifact, selected])
+        .accept_optional()
+        .resolve();
+    assert_eq!(outcome.mana_pool_total(P0), 0);
+    assert_eq!(outcome.state().objects[&artifact].owner, P2);
+    assert_eq!(outcome.state().objects[&artifact].zone, Zone::Library);
+    assert!(outcome.state().players[P2.0 as usize]
+        .library
+        .contains(&artifact));
+    assert!(!outcome.state().players[P1.0 as usize]
+        .library
+        .contains(&artifact));
+    assert_eq!(outcome.state().objects[&selected].zone, Zone::Library);
+    assert!(outcome.state().players[P0.0 as usize]
+        .library
+        .contains(&selected));
+    assert_eq!(outcome.state().objects[&unselected].zone, Zone::Graveyard);
+    assert_eq!(
+        outcome.state().objects[&other_graveyard].zone,
+        Zone::Graveyard
+    );
+    let shufflers: Vec<_> = outcome
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shufflers,
+        vec![P2, P0],
+        "the owner shuffles first, then only the caster shuffles their chosen graveyard card"
+    );
+    assert_eq!(outcome.state().objects[&spell].zone, Zone::Graveyard);
+    assert!(outcome.state().stack.is_empty());
+    assert!(outcome.state().resolution_stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
