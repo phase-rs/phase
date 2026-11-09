@@ -24105,6 +24105,22 @@ fn activation_manual_mana_payment_route(
         mana.concretize_x(0);
     }
     let activation_context = activation_payment_context(state, source_id, ability_index);
+    // CR 106.6: "Spend only mana of the chosen color to activate this ability"
+    // (Throne of Eldraine) constrains every unit spent, generic included. The
+    // route's generic capacity counts any mana, so price the leg's generic as
+    // symbols of that color, which its context-aware shard coverage checks.
+    match activation_context.mana_color_constraint {
+        ActivationManaColorConstraint::Unrestricted => {}
+        ActivationManaColorConstraint::Only(color) => {
+            if let ManaCost::Cost { shards, generic } = &mut mana {
+                shards.extend(std::iter::repeat_n(
+                    ManaCostShard::from(color),
+                    std::mem::take(generic) as usize,
+                ));
+            }
+        }
+        ActivationManaColorConstraint::Impossible => return ManualPaymentRoute::Infeasible,
+    }
     let activation_ctx = activation_context.as_payment_context();
     player_choice_mana_payment_route(
         state,
