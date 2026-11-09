@@ -9702,6 +9702,13 @@ pub(crate) fn drain_pending_cost_move_resume(
                         } | PendingCostMoveResume::ManaAbilityPayment { .. }
                             | PendingCostMoveResume::CounterCostRemovalPayment { .. }
                             | PendingCostMoveResume::TurnFaceUpCostMove { .. }
+                            // CR 614.11a + CR 118.12: an interactive draw
+                            // substitute (Abundance's land/nonland then bottom
+                            // ordering) returns to the priority boundary only
+                            // after its subtree has retired; the owning payment
+                            // still has to resume then.
+                            | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
+                            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                     )
                 )
         }
@@ -9817,18 +9824,6 @@ pub(super) fn resume_pending_continuation_if_priority(
             || state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
             || !after.is_strictly_inside(&before)
         {
-            // CR 614.17a + CR 118.12: a recovered payment committed its accepted
-            // prefix and its surviving continuation to canonical state; the
-            // printed rider runs once that continuation is finished.
-            if matches!(state.waiting_for, WaitingFor::Priority { .. })
-                && state.active_ability_continuation().is_none()
-                && state
-                    .payment_transaction
-                    .as_ref()
-                    .is_some_and(|transaction| transaction.recovered_rider.is_some())
-            {
-                payment_transaction::resume_recovered_rider(state, events)?;
-            }
             return Ok(());
         }
     }
@@ -12607,20 +12602,33 @@ fn apply_action(
     // (CR 603.6c), since no pipeline scans this action's events.
     if let GameAction::Concede { player_id } = action {
         // CR 614.17a + CR 118.12: keep the pre-departure base so a staged
-        // payment's already-accepted prefix is not re-executed under the
+        // payment's already-accepted prefix (including a synchronous leg that
+        // completed before the first prompt) is not re-executed under the
         // departure's new prohibitions (`settle_after_outside_action`).
-        let pre_action = state
-            .payment_transaction
-            .as_ref()
-            .is_some_and(|transaction| !transaction.transcript.is_empty())
-            .then(|| state.clone());
+        let pre_action = state.payment_transaction.as_ref().map(|_| state.clone());
         let mut events = Vec::new();
         super::elimination::concede(state, player_id, &mut events);
         // CR 800.4a + CR 118.12: a surviving staged payment re-materializes on
-        // the base the departure changed (`settle_after_outside_action`).
-        if let Some(settled) =
-            payment_transaction::settle_after_outside_action(state, pre_action.as_ref(), player_id)?
-        {
+        // the base the departure changed (`settle_after_outside_action`). CR
+        // 104.3a: the departure itself must survive a fallible payment recovery,
+        // so a failed rider settles the payment state away instead of rolling
+        // the concession back.
+        let settled = match payment_transaction::settle_after_outside_action(
+            state,
+            pre_action.as_ref(),
+            player_id,
+        ) {
+            Ok(settled) => settled,
+            Err(error) => {
+                tracing::debug!(
+                    ?error,
+                    "staged payment recovery failed after a concession; the departure stands"
+                );
+                payment_transaction::abandon_failed_recovery(state);
+                None
+            }
+        };
+        if let Some(settled) = settled {
             events.extend(settled.events);
             return Ok(ActionResult::applied(events, state.waiting_for.clone())
                 .with_log_entries(settled.log_entries));
@@ -30979,20 +30987,16 @@ mod cost_move_drain_priority_boundary_tests {
     use crate::types::mana::ManaCost;
     use crate::types::player::PlayerId;
 
-    /// `engine_payment_choices::resume_counter_addition_unless_payment` maps
-    /// `CostMoveDrainBoundary::PriorityBoundary` to `unreachable!`, and nothing but
-    /// this eligibility table makes that true: it admits only a Delve-commit `Cast`,
-    /// `ManaAbilityPayment`, and a counter-cost root whose replacement subtree has
-    /// retired at that boundary. Nothing else in the crate pinned that
-    /// premise, so widening the table would leave the suite green and abort a live
-    /// session instead.
+    /// CR 614.11a + CR 118.12: an interactive draw substitute returns to the
+    /// priority boundary only after its replacement subtree has retired. The
+    /// owning unless-payment must resume there rather than stay parked until a
+    /// later replacement-delivery boundary that may never arrive.
     ///
-    /// This pins the guard, not the panic. A `#[should_panic]` row would assert the
-    /// panic is *reachable*, which is the inverse of the invariant. Admitting
-    /// `CounterAdditionUnlessPayment` at `PriorityBoundary` turns this row red: the
-    /// root takes the parked continuation and panics before it can return `Ok(None)`.
+    /// The former guard pinned the opposite premise (`unreachable!` at this
+    /// boundary); the resume authority now accepts it, so this row asserts the
+    /// parked continuation is actually drained.
     #[test]
-    fn a_parked_counter_addition_unless_payment_is_never_drained_at_the_priority_boundary() {
+    fn a_parked_counter_addition_unless_payment_resumes_at_the_priority_boundary() {
         let mut state = GameState::new_two_player(42);
         state.pending_cost_move_resume =
             Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
@@ -31021,17 +31025,13 @@ mod cost_move_drain_priority_boundary_tests {
         );
 
         assert!(
-            matches!(drained, Ok(None)),
-            "the priority boundary must not drain a counter-addition unless-payment"
+            matches!(drained, Ok(Some(_))),
+            "the priority boundary must resume the parked unless-payment: {drained:?}"
         );
         assert!(
-            matches!(
-                state.pending_cost_move_resume,
-                Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
-            ),
-            "the continuation must stay parked for the replacement boundary that owns it"
+            state.pending_cost_move_resume.is_none(),
+            "the resumed continuation must not stay parked"
         );
-        assert!(events.is_empty(), "an ineligible drain must emit no events");
     }
 
     /// CR 616.1 + CR 608.2c: a counter-cost root recorded at an empty stack is

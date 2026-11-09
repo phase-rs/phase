@@ -2791,10 +2791,8 @@ pub(super) fn resume_counter_addition_unless_payment(
     // fail to compile at this site rather than silently pick a verdict.
     match boundary {
         CostMoveDrainBoundary::ReplacementDelivered { .. }
-        | CostMoveDrainBoundary::ReplacementPrevented { .. } => {}
-        CostMoveDrainBoundary::PriorityBoundary => {
-            unreachable!("counter-addition unless-payment is not eligible at the priority boundary")
-        }
+        | CostMoveDrainBoundary::ReplacementPrevented { .. }
+        | CostMoveDrainBoundary::PriorityBoundary => {}
     }
     if let Some(suffix) = unpaid_suffix {
         let UnpaidCostSuffix {

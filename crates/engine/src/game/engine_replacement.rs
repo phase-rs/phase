@@ -353,6 +353,12 @@ fn handle_replacement_choice_inner(
             "replacement choice index {index} is outside 0..{option_count}"
         )));
     }
+    // CR 614.17c: a parked replacement (optional or a mandatory ordering
+    // candidate) for a draw that can no longer happen cannot be applied. Settle
+    // the event with no replacement: the draw is clamped and its payment
+    // resumes without milling or returning the replacement's card.
+    let impossible_parked_draw =
+        super::replacement::proposed_draw_cannot_happen(state, &pending.proposed);
     let replacement_action_event_start = events.len();
     let parked_search_found_replacement = state
         .pending_replacement
@@ -475,7 +481,18 @@ fn handle_replacement_choice_inner(
         .pending_replacement
         .as_ref()
         .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::BeginPhase { .. }));
-    let result = super::replacement::continue_replacement(state, index, events);
+    let result = if impossible_parked_draw {
+        let proposed = state
+            .pending_replacement
+            .as_ref()
+            .expect("the impossible parked draw is still live")
+            .proposed
+            .clone();
+        state.pending_replacement = None;
+        super::replacement::ReplacementResult::Execute(proposed)
+    } else {
+        super::replacement::continue_replacement(state, index, events)
+    };
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
     // multiple eligible lands) re-parked the pending replacement with
@@ -1747,7 +1764,6 @@ fn handle_replacement_choice_inner(
                     waiting_for = resumed;
                 }
             }
-
             // CR 601.2h + CR 602.2b + CR 616.1: Resume a non-move cast or
             // activation cost payment paused during discard or sacrifice. Never
             // under a counter-cost root whose replacement subtree is still live:
@@ -2141,6 +2157,32 @@ fn handle_replacement_choice_inner(
                 if let Some(wf) = resume_active_draw_sequences(state, events) {
                     return Ok(wf);
                 }
+            }
+            // CR 118.11 + CR 614.11a: a skipped draw that interrupted a bare
+            // cast or activation cost payment resumes through the same authority
+            // the delivered arm uses; a prevented event still leaves the cost
+            // paid.
+            if (state.pending_cast.is_some() || state.pending_discard_for_cost.is_some())
+                && state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
+            {
+                // CR 614.11a: finish the whole draw instruction (its remaining
+                // units and their substitutes) before the interrupted payer
+                // resumes; only then does the cost count as settled.
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                if let Some(wf) = resume_active_draw_sequences(state, events) {
+                    return Ok(wf);
+                }
+                let resume_cost_event_start = state
+                    .pending_discard_for_cost
+                    .is_some()
+                    .then_some(replacement_action_event_start);
+                state.waiting_for = super::casting_costs::resume_interrupted_cost_payment(
+                    state,
+                    events,
+                    resume_cost_event_start,
+                )?;
             }
             if let Some(waiting_for) = resume_cost_move_root_after_prevention(
                 state,

@@ -16,12 +16,12 @@ use engine::game::engine::apply;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityCost, CardSelectionMode, DiscardSelfScope, Effect, QuantityExpr, ResolvedAbility,
-    TargetFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, DiscardSelfScope, Effect,
+    QuantityExpr, ResolvedAbility, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
@@ -394,6 +394,25 @@ fn discard_cost() -> AbilityCost {
     }
 }
 
+/// The concession board with two hand cards, but no Dredge source: the draw leg
+/// pays synchronously under Humility and the discard leg opens the first prompt.
+fn concession_board_draw_pays_synchronously() -> (GameRunner, engine::types::identifiers::ObjectId)
+{
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in 0..3 {
+        scenario.with_library_top(PlayerId(player), &STAGED_LIBRARY);
+    }
+    let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+    scenario.add_creature_from_oracle(P1, "Maralen of the Mornsong", 2, 3, MARALEN_ORACLE);
+    scenario.add_enchantment_from_oracle(PlayerId(2), "Humility", HUMILITY_ORACLE);
+    scenario.add_card_to_hand(P0, "Hand A");
+    scenario.add_card_to_hand(P0, "Hand B");
+    let mut runner = scenario.build();
+    evaluate_layers(runner.state_mut());
+    (runner, source)
+}
+
 fn is_dredge_prompt_for_p0(state: &GameState) -> bool {
     matches!(state.waiting_for, WaitingFor::ReplacementChoice { player, .. } if player == P0)
 }
@@ -703,7 +722,7 @@ fn a_concession_after_one_declined_replacement_keeps_the_prefix_when_a_discard_i
         "the drawn card and the setup cards are eligible"
     );
 
-    let concession = apply(
+    apply(
         state,
         PlayerId(2),
         GameAction::Concede {
@@ -711,20 +730,13 @@ fn a_concession_after_one_declined_replacement_keeps_the_prefix_when_a_discard_i
         },
     )
     .expect("a player can concede at any time");
-    assert!(
-        concession.events.iter().any(|event| matches!(
-            event,
-            GameEvent::CardDrawn { player_id, .. } if *player_id == P0
-        )),
-        "the performed prefix draw is published when the prefix commits"
-    );
 
     let state = runner.state();
     assert!(
         state
             .payment_transaction
             .as_ref()
-            .is_some_and(|transaction| transaction.recovered_rider.is_some()),
+            .is_some_and(|transaction| transaction.recovered.is_some()),
         "only the printed rider remains deferred"
     );
     assert!(
@@ -732,17 +744,12 @@ fn a_concession_after_one_declined_replacement_keeps_the_prefix_when_a_discard_i
         "the outstanding discard survives the concession"
     );
     assert_eq!(
-        hand_and_library(&runner, P0).0 - hand_before,
-        1,
-        "the performed draw is canonical, so its card is a legal discard"
-    );
-    assert_eq!(
         runner.life(P0) - life_before,
         0,
         "the rider waits for completion"
     );
 
-    apply(
+    let answer = apply(
         runner.state_mut(),
         P0,
         GameAction::SelectCards {
@@ -750,11 +757,23 @@ fn a_concession_after_one_declined_replacement_keeps_the_prefix_when_a_discard_i
         },
     )
     .expect("discard one of the eligible cards");
+    assert_eq!(
+        answer
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::CardDrawn { player_id, .. } if *player_id == P0
+            ))
+            .count(),
+        1,
+        "the preserved prefix draw is published once at completion"
+    );
 
     let state = runner.state();
     assert!(
         state.payment_transaction.is_none(),
-        "the rider carrier retires after the payment completes"
+        "the descriptor retires after the payment completes"
     );
     assert!(state.active_ability_continuation().is_none());
     assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
@@ -770,4 +789,295 @@ fn a_concession_after_one_declined_replacement_keeps_the_prefix_when_a_discard_i
         "only the performed draw left the library"
     );
     assert_eq!(runner.life(P0) - life_before, 3, "the rider ran once");
+}
+
+/// CR 614.17a + CR 118.12: a synchronously paid prefix (no transcript) must also
+/// survive a concession when another choice remains open.
+#[test]
+fn a_concession_keeps_a_synchronously_paid_prefix_when_a_discard_is_open() {
+    let (mut runner, source) = concession_board_draw_pays_synchronously();
+    let mut root = ResolvedAbility::new(
+        pay_cost(AbilityCost::Composite {
+            costs: vec![draw_cost(1), discard_cost()],
+        }),
+        vec![],
+        source,
+        P0,
+    );
+    root.sub_ability = Some(Box::new(ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    )));
+    let life_before = runner.life(P0);
+    let (hand_before, _library_before) = hand_and_library(&runner, P0);
+    let state = runner.state_mut();
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+    assert!(state.payment_transaction.is_some(), "the payment is staged");
+    assert_eq!(
+        state
+            .payment_transaction
+            .as_ref()
+            .expect("the descriptor is live")
+            .transcript
+            .len(),
+        0,
+        "the draw leg paid synchronously before the first prompt"
+    );
+    let WaitingFor::DiscardChoice { cards, .. } = &state.waiting_for else {
+        panic!(
+            "the discard leg owns the first prompt: {:?}",
+            state.waiting_for
+        );
+    };
+    let cards = cards.clone();
+    assert!(cards.len() >= 2);
+
+    apply(
+        state,
+        PlayerId(2),
+        GameAction::Concede {
+            player_id: PlayerId(2),
+        },
+    )
+    .expect("a player can concede at any time");
+
+    let state = runner.state();
+    assert!(
+        state
+            .payment_transaction
+            .as_ref()
+            .is_some_and(|transaction| transaction.recovered.is_some()),
+        "the synchronously paid prefix and the open discard are committed"
+    );
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::DiscardChoice { .. }
+    ));
+    assert_eq!(runner.life(P0) - life_before, 0);
+
+    let answer = apply(
+        runner.state_mut(),
+        P0,
+        GameAction::SelectCards {
+            cards: vec![cards[0]],
+        },
+    )
+    .expect("discard one of the eligible cards");
+    assert_eq!(
+        answer
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::CardDrawn { player_id, .. } if *player_id == P0
+            ))
+            .count(),
+        1,
+        "the synchronously performed prefix draw is published once"
+    );
+
+    let state = runner.state();
+    assert!(state.payment_transaction.is_none());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
+    assert_eq!(runner.life(P0) - life_before, 3, "the rider ran once");
+    assert_eq!(
+        hand_and_library(&runner, P0).0 - hand_before,
+        0,
+        "one card was drawn and one discarded"
+    );
+}
+
+/// CR 614.17c: accepting a parked Dredge after the draw becomes impossible must
+/// not mill or return the Imp; the draw settles clamped and the payment resumes.
+#[test]
+fn accepting_a_parked_dredge_after_the_draw_becomes_impossible_declines_it() {
+    let (mut runner, source) = concession_board();
+    let mut root = ResolvedAbility::new(pay_cost(draw_cost(1)), vec![], source, P0);
+    root.sub_ability = Some(Box::new(ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    )));
+    let life_before = runner.life(P0);
+    let (hand_before, library_before) = hand_and_library(&runner, P0);
+    let state = runner.state_mut();
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+    assert!(is_dredge_prompt_for_p0(state));
+
+    // Activate Maralen without a concession: Humility leaves the battlefield.
+    let humility = state
+        .objects
+        .values()
+        .find(|object| object.name == "Humility")
+        .map(|object| object.id)
+        .expect("Humility is on the board");
+    state.battlefield.retain(|id| *id != humility);
+    state.objects.get_mut(&humility).expect("Humility").zone =
+        engine::types::zones::Zone::Graveyard;
+    evaluate_layers(state);
+    assert!(is_dredge_prompt_for_p0(state), "the parked prompt remains");
+
+    // Accept the stale Dredge. The shared resume boundary rechecks it.
+    apply(state, P0, GameAction::ChooseReplacement { index: 0 }).expect("the stale answer settles");
+
+    let state = runner.state();
+    assert!(state.payment_transaction.is_none());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
+    let graveyard = &state.players[P0.0 as usize].graveyard;
+    assert_eq!(graveyard.len(), 1, "nothing was milled");
+    assert_eq!(state.objects[&graveyard[0]].name, "Stinkweed Imp");
+    let (hand_after, library_after) = hand_and_library(&runner, P0);
+    assert_eq!(
+        hand_after - hand_before,
+        0,
+        "the impossible draw is clamped"
+    );
+    assert_eq!(library_after, library_before, "no card left the library");
+    assert_eq!(
+        runner.life(P0) - life_before,
+        3,
+        "the payment still resumes"
+    );
+}
+
+/// CR 104.3a: a fallible payment recovery (an overflowing rider) must not undo
+/// the concession itself.
+#[test]
+fn a_failed_payment_recovery_still_commits_the_concession() {
+    let (mut runner, source) = concession_board();
+    let mut root = ResolvedAbility::new(pay_cost(draw_legs(2)), vec![], source, P0);
+    root.sub_ability = Some(Box::new(ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    )));
+    let state = runner.state_mut();
+    state.players[P0.0 as usize].life = i32::MAX;
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+    assert!(is_dredge_prompt_for_p0(state));
+    apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+        .expect("declining leg 1's Dredge accepts the draw");
+
+    apply(
+        state,
+        PlayerId(2),
+        GameAction::Concede {
+            player_id: PlayerId(2),
+        },
+    )
+    .expect("the concession stands even when the rider overflows");
+
+    let state = runner.state();
+    assert!(
+        state.eliminated_players.contains(&PlayerId(2)),
+        "the conceding player left the game"
+    );
+    assert!(
+        state.payment_transaction.is_none(),
+        "the fallible payment state is retired"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "the failed recovery publishes a valid priority boundary, got {:?}",
+        state.waiting_for
+    );
+    assert_eq!(
+        runner.life(P0),
+        i32::MAX,
+        "the overflowing rider did not apply"
+    );
+}
+
+/// Obstinate Familiar, verbatim Oracle text: an optional skip of a single draw.
+const OBSTINATE_FAMILIAR_ORACLE: &str = "If you would draw a card, you may skip that draw instead.";
+
+/// CR 118.11 + CR 614.11a: a skipped draw still pays a draw-cost activation, so
+/// the activation must reach the stack after the skip is accepted.
+#[test]
+fn accepting_a_skipped_draw_cost_activation_reaches_the_stack() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &STAGED_LIBRARY);
+    scenario.with_library_top(P1, &STAGED_LIBRARY);
+    let source = scenario
+        .add_creature(P0, "Draw Cost Source", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::EffectCost {
+                effect: Box::new(draw_effect(1)),
+            }),
+        )
+        .id();
+    scenario.add_creature_from_oracle(P0, "Obstinate Familiar", 1, 1, OBSTINATE_FAMILIAR_ORACLE);
+    let mut runner = scenario.build();
+    evaluate_layers(runner.state_mut());
+    let (hand_before, library_before) = hand_and_library(&runner, P0);
+    let life_before = runner.life(P0);
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the draw-cost activation begins");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player, .. } if player == P0
+        ),
+        "the draw cost offers Obstinate Familiar's skip: {:?}",
+        runner.state().waiting_for
+    );
+
+    // Index 0 accepts the optional skip.
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accept the skip");
+
+    let state = runner.state();
+    assert!(
+        state.pending_cast.is_none(),
+        "the activation is no longer a bare pending cast: waiting={:?} cast={} stack={}",
+        state.waiting_for,
+        state.pending_cast.is_some(),
+        state.resolution_stack.len()
+    );
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "the activation reached the stack: waiting={:?}",
+        state.waiting_for
+    );
+    assert_eq!(
+        runner.life(P0) - life_before,
+        0,
+        "the ability is on the stack, not resolved"
+    );
+    let (hand_after, library_after) = hand_and_library(&runner, P0);
+    assert_eq!(hand_after, hand_before, "the skipped draw drew nothing");
+    assert_eq!(
+        library_after, library_before,
+        "the skipped draw milled nothing"
+    );
 }

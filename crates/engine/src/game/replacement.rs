@@ -11879,7 +11879,7 @@ fn effect_overrides_controller(effect: &Effect) -> bool {
 /// only shortens can still partly happen (CR 121.2b), so it stays replaceable,
 /// while each individual draw the limit forbids can't. An empty library is
 /// not a can't: the attempted draw still happens (CR 121.4).
-fn proposed_draw_cannot_happen(state: &GameState, event: &ProposedEvent) -> bool {
+pub(crate) fn proposed_draw_cannot_happen(state: &GameState, event: &ProposedEvent) -> bool {
     match event {
         ProposedEvent::Draw {
             player_id, count, ..

@@ -23562,13 +23562,30 @@ pub struct ResolutionPaymentTransaction {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolving_trigger_context: Option<ResolvingTriggerContext>,
     /// CR 614.17a + CR 118.12: an outside action can make the original base
-    /// unreplayable after an accepted answer. When that happens the accepted
-    /// prefix is committed canonically and this descriptor keeps only the
-    /// printed rider, run once the surviving continuation reaches priority
-    /// (`payment_transaction::resume_recovered_rider`). `None` for every
-    /// ordinary transaction; older saves deserialize to `None`.
+    /// unreplayable after an accepted prefix. This hidden checkpoint holds that
+    /// prefix and its exact open cursor, re-materialized on the pre-action base
+    /// and then departure-adjusted; replay and projection start from it while
+    /// the descriptor is live. `None` for every ordinary transaction; older
+    /// saves deserialize to `None` and fall back to base replay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovered_rider: Option<Box<ResolvedAbility>>,
+    pub recovered: Option<Box<PaymentRecoveryCheckpoint>>,
+}
+
+/// CR 614.17a + CR 118.12: the accepted prefix of a staged payment, with the
+/// descriptor removed, preserved across an outside action that changed the
+/// canonical base. Hidden like the transaction itself: projections strip the
+/// whole descriptor, and only a completed settlement publishes `events`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaymentRecoveryCheckpoint {
+    pub state: Box<GameState>,
+    /// Events already emitted by the accepted prefix; published once on commit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<GameEvent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub log_entries: Vec<crate::types::log::GameLogEntry>,
+    /// Transcript entries already applied to `state`.
+    #[serde(default)]
+    pub consumed: usize,
 }
 
 /// One admitted action in a staged payment transaction. Both halves of the
@@ -59367,7 +59384,7 @@ mod restored_exact_attack_authority_tests {
                             match_count: None,
                             die_result: None,
                         }),
-                        recovered_rider: None,
+                        recovered: None,
                     }));
                     state.waiting_for.clone()
                 }
@@ -59829,7 +59846,7 @@ mod restored_exact_attack_authority_tests {
                 transcript: vec![],
                 base_waiting_for: base,
                 resolving_trigger_context: context,
-                recovered_rider: None,
+                recovered: None,
             };
         let harmless = Box::new(ResolvedAbility::new(Effect::NoOp, vec![], source_id, P0));
         let mut admitted = Vec::new();
