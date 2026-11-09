@@ -128,39 +128,6 @@ fn owner_chooses_and_top_branch_is_second_from_the_top() {
     );
 }
 
-/// CHARACTERIZATION of a PRE-EXISTING defect, not of intended behaviour.
-/// Declining the optional "up to one target creature you control" connive slot
-/// leaves the connive sub-ability inheriting the parent's target list
-/// (`targeting.rs` ~1212), and `effects/connive.rs:34-45` takes the FIRST object
-/// target (`ability.targets.iter().find_map(TargetRef::Object)`) instead of
-/// `targeting::resolved_targets(..)` as the sibling `put_on_top_or_bottom.rs:28`
-/// does. So the tucked creature itself connives: its owner draws the card above
-/// it and discards it, leaving the creature on TOP of the library - the exact
-/// outcome "second from the top" exists to prevent. Not fixed here (separate
-/// measurement); when connive.rs is fixed this assertion must flip to index 1.
-#[test]
-fn declined_connive_slot_currently_lets_the_tucked_creature_connive() {
-    let (mut runner, victim, _) =
-        cast_until_choice_with(&["Filler A", "Filler B", "Filler C"], false);
-    runner
-        .act(GameAction::ChooseTopOrBottom { top: true })
-        .expect("owner picks the top branch");
-    for _ in 0..8 {
-        if runner.state().stack.is_empty() {
-            break;
-        }
-        runner
-            .act(GameAction::PassPriority)
-            .expect("finish the chain");
-    }
-    let lib = library(&runner, P1);
-    assert_eq!(
-        lib.iter().position(|id| *id == victim),
-        Some(0),
-        "KNOWN DEFECT: victim ends on top after the mis-targeted connive, library = {lib:?}"
-    );
-}
-
 /// Reach-guard partner: the bottom branch still lands at the very bottom.
 #[test]
 fn bottom_branch_is_still_the_bottom() {
@@ -241,4 +208,26 @@ fn calim_discard_trigger_conjures_seventh_from_the_top() {
     );
     assert_eq!(&after[..6], &before[..6]);
     assert_eq!(&after[7..], &before[6..]);
+}
+
+#[test]
+fn declining_connive_target_preserves_the_owners_selected_library_slot() {
+    let (mut runner, victim, fillers) =
+        cast_until_choice_with(&["Filler A", "Filler B", "Filler C"], false);
+    let caster_library = library(&runner, P0);
+    runner
+        .act(GameAction::ChooseTopOrBottom { top: true })
+        .expect("the owner chooses second from the top");
+    assert_eq!(
+        library(&runner, P1),
+        vec![fillers[0], victim, fillers[1], fillers[2]],
+        "declining the optional connive target must not make the tucked creature connive"
+    );
+    assert_eq!(library(&runner, P0), caster_library);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
 }
