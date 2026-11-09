@@ -1839,8 +1839,9 @@ fn try_parse_source_and_other_restriction_clause(
     }
 
     let mut tentative = ctx.clone();
+    let subject_lower = subject.to_lowercase();
     let (primary_application, secondary_application) =
-        parse_source_and_target_subjects(subject, &mut tentative)?;
+        parse_source_and_target_subjects(TextPair::new(subject, &subject_lower), &mut tentative)?;
     let secondary_multi = secondary_application.multi_target.clone();
 
     let primary_clause = build_restriction_clause(primary_application.clone(), predicate)?;
@@ -1869,17 +1870,12 @@ fn try_parse_source_and_other_restriction_clause(
 /// Two independently bound conjuncts: an untargeted subject and an announced
 /// object. Callers commit their tentative context only after the predicate fits.
 fn parse_source_and_target_subjects(
-    subject: &str,
+    subject: TextPair<'_>,
     ctx: &mut ParseContext,
 ) -> Option<(SubjectApplication, SubjectApplication)> {
-    let subject_lower = subject.to_lowercase();
-    let subject_pair = TextPair::new(subject, &subject_lower);
-    let (primary_tp, secondary_tp) = subject_pair.split_around(" and ")?;
-    let (declared_text, _) = super::strip_optional_target_prefix(secondary_tp.original.trim());
-    let declared_lower = declared_text.to_lowercase();
-    parse_declared_target_prefix
-        .parse(declared_lower.as_str())
-        .ok()?;
+    let (primary_tp, secondary_tp) = subject.split_around(" and ")?;
+    let (declared_text, _) = super::strip_optional_target_prefix(secondary_tp.lower.trim());
+    parse_declared_target_prefix.parse(declared_text).ok()?;
     let primary_application = parse_subject_application_for(
         primary_tp.original.trim(),
         ctx,
@@ -1920,10 +1916,12 @@ pub(super) fn try_parse_source_and_target_phase_out(
     .ok()?;
     let mut tentative = ctx.clone();
     let subject = text[..predicate_start].trim();
-    let Some((source, selected)) = parse_source_and_target_subjects(subject, &mut tentative) else {
+    let subject_lower = subject.to_lowercase();
+    let Some((source, selected)) =
+        parse_source_and_target_subjects(TextPair::new(subject, &subject_lower), &mut tentative)
+    else {
         // The declared-target grammar deliberately declines contextual anaphors.
         // Reuse the subject authority without routing the event through ParentTarget.
-        let subject_lower = subject.to_lowercase();
         let (source, partner) = TextPair::new(subject, &subject_lower).split_around(" and ")?;
         let mut contextual = ctx.clone();
         let source = parse_subject_application(source.original.trim(), &mut contextual)?;
@@ -9514,7 +9512,11 @@ mod tests {
             parse_subject_application("that creature", &mut ctx).expect("event-context creature");
         assert_eq!(application.target, Some(TargetFilter::TriggeringSource));
         assert!(
-            parse_source_and_target_subjects("~ and that creature", &mut ctx).is_none(),
+            parse_source_and_target_subjects(
+                TextPair::new("~ and that creature", "~ and that creature"),
+                &mut ctx,
+            )
+            .is_none(),
             "an event-context binding is not an announced target"
         );
         let clause = super::super::parse_effect_clause("~ and that creature phase out.", &mut ctx);

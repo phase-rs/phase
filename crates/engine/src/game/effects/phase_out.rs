@@ -197,10 +197,31 @@ pub(super) fn collect_object_targets(
                     // population filter. CR 702.26b: only phased-in battlefield
                     // objects can join this phase-out batch.
                     TargetFilter::TriggeringSource => {
-                        crate::game::targeting::resolved_object_ids_for_filter(
-                            state, ability, filter,
+                        // CR 509.1 + CR 608.2k: in a blocking event, "that
+                        // creature" is the source's combat partner. The existing
+                        // event-only ParentTarget reader owns that orientation;
+                        // this is not an announced-target lookup.
+                        let context_filter = if matches!(
+                            state.current_trigger_event.as_ref(),
+                            Some(
+                                GameEvent::BlockersDeclared { .. }
+                                    | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
+                            )
+                        ) {
+                            &TargetFilter::ParentTarget
+                        } else {
+                            filter
+                        };
+                        crate::game::targeting::resolve_event_context_target(
+                            state,
+                            context_filter,
+                            ability.source_id,
                         )
                         .into_iter()
+                        .filter_map(|target| match target {
+                            TargetRef::Object(id) => Some(id),
+                            TargetRef::Player(_) => None,
+                        })
                         .filter(|id| {
                             state.objects.get(id).is_some_and(|object| {
                                 object.zone == crate::types::zones::Zone::Battlefield
