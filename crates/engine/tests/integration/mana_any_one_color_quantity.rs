@@ -703,6 +703,190 @@ fn toluz_keeps_a_payable_hybrid_suffix_with_ineligible_mana() {
 }
 
 #[test]
+fn conditional_counted_bundle_refills_after_its_power_condition_disappears() {
+    // CR 605.3b + CR 608.2h: Remote Farm's complete resolution sacrifices
+    // the animated land before Caryatid reads its four-power condition.
+    for depletion in [1, 2] {
+        let mut s = board();
+        let caryatid = s.add_creature_from_oracle(P0, "Ilysian Caryatid", 1, 1,
+            "{T}: Add one mana of any color. If you control a creature with power 4 or greater, add two mana of any one color instead.")
+            .with_subtypes(vec!["Plant"]).with_mana_cost(parse_mtgjson_mana_cost("{1}{G}")).id();
+        let farm = s.add_land_from_oracle(P0, "Remote Farm",
+            "This land enters tapped with two depletion counters on it.\n{T}, Remove a depletion counter from this land: Add {W}{W}. If there are no depletion counters on this land, sacrifice it.").id();
+        s.with_counter(
+            farm,
+            CounterType::Generic("depletion".to_owned()),
+            depletion,
+        );
+        let island = s.add_basic_land(P0, ManaColor::Blue);
+        let forests: Vec<_> = (0..5)
+            .map(|_| s.add_basic_land(P0, ManaColor::Green))
+            .collect();
+        let awakening = spell(&mut s, "Awakening of Vitu-Ghazi", true,
+            "Put nine +1/+1 counters on target land you control. It becomes a legendary 0/0 Elemental creature with haste named Vitu-Ghazi. It's still a land.", "{3}{G}{G}");
+        let absorb = spell(
+            &mut s,
+            "Absorb",
+            true,
+            "Counter target spell. You gain 3 life.",
+            "{W}{U}{U}",
+        );
+        let opt = s.add_spell_to_hand_from_oracle(P1, "Opt", true,
+            "Scry 1. (Look at the top card of your library. You may put that card on the bottom.)\nDraw a card.")
+            .with_mana_cost(parse_mtgjson_mana_cost("{U}")).id();
+        s.add_basic_land(P1, ManaColor::Blue);
+        let mut r = s.build();
+        // An established Farm has untapped on a later turn; its remaining
+        // depletion counters above describe either side of the last-use case.
+        r.state_mut().objects.get_mut(&farm).unwrap().tapped = false;
+        // Float only these printed Forest abilities so the setup spell cannot
+        // consume Remote Farm, Caryatid or the Island needed by the payment.
+        for forest in &forests {
+            let (_, _, grouped) = legal_actions_full(r.state());
+            let action = grouped[forest]
+                .iter()
+                .find(|action| {
+                    matches!(action,
+                GameAction::TapLandForMana { selection } if selection.mana_type == ManaType::Green)
+                })
+                .unwrap()
+                .clone();
+            r.act(action).unwrap();
+        }
+        r.cast(awakening)
+            .target_object(farm)
+            .resolve()
+            .assert_zone(&[farm], Zone::Battlefield);
+        assert_complete(&r, 0);
+        assert!(forests.iter().all(|id| r.state().objects[id].tapped));
+        assert!(r.state().objects[&farm]
+            .card_types
+            .core_types
+            .contains(&engine::types::card_type::CoreType::Creature));
+        assert_eq!(
+            r.state().objects[&farm]
+                .counters
+                .get(&CounterType::Generic("depletion".to_owned())),
+            Some(&depletion)
+        );
+        assert!(activatable_mana_source_selections(r.state(), P0)
+            .iter()
+            .any(|row| row.source.object_id == caryatid
+                && row.mana_type == ManaType::Blue
+                && row
+                    .atomic_combination
+                    .as_ref()
+                    .is_some_and(|units| units == &[ManaType::Blue, ManaType::Blue])));
+        assert!(activatable_land_mana_options(r.state(), farm, P0)
+            .iter()
+            .any(|row| row.mana_type == ManaType::White
+                && row
+                    .atomic_combination
+                    .as_ref()
+                    .is_some_and(|units| units == &[ManaType::White, ManaType::White])));
+        assert!(!r.state().objects[&island].tapped);
+        r.act(GameAction::PassPriority).unwrap();
+        let mut target = r.cast(opt).commit();
+        target.act(GameAction::PassPriority).unwrap();
+        let payment = target.cast(absorb).target_object(opt).commit();
+        assert_eq!(production_count(payment.events(), farm, ManaType::White), 2);
+        assert_eq!(
+            production_count(payment.events(), caryatid, ManaType::Blue),
+            if depletion == 1 { 1 } else { 2 }
+        );
+        assert_eq!(
+            production_count(payment.events(), island, ManaType::Blue),
+            usize::from(depletion == 1)
+        );
+        assert_eq!(payment.state().objects[&island].tapped, depletion == 1);
+        assert_eq!(
+            payment.state().objects[&farm].zone,
+            if depletion == 1 {
+                Zone::Graveyard
+            } else {
+                Zone::Battlefield
+            }
+        );
+        assert_eq!(
+            payment.state().objects[&absorb].mana_spent_to_cast_amount,
+            3
+        );
+        assert_eq!(payment.state().players[0].mana_pool.total(), 1);
+        let resolved = payment.resolve();
+        resolved.assert_zone(&[absorb, opt], Zone::Graveyard);
+        resolved.assert_life_delta(P0, 3);
+        assert_complete(&r, 1);
+    }
+}
+
+#[test]
+fn restricted_lute_alternatives_preserve_native_mountain_activation_rows() {
+    // Preservation control for mixed projected/scalar snapshots. CR 106.6:
+    // Lute's instant/sorcery-only mana cannot pay Shivan Dragon's ability.
+    let mut s = board();
+    s.add_artifact_from_oracle(P0, "Resonating Lute", LUTE)
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{U}{R}"));
+    let mountains: Vec<_> = (0..16)
+        .map(|_| s.add_basic_land(P0, ManaColor::Red))
+        .collect();
+    let dragon = s
+        .add_creature_from_oracle(
+            P0,
+            "Shivan Dragon",
+            5,
+            5,
+            "Flying\n{R}: This creature gets +1/+0 until end of turn.",
+        )
+        .with_subtypes(vec!["Dragon"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{4}{R}{R}"))
+        .id();
+    let mut r = s.build();
+    evaluate_layers(r.state_mut());
+    let rows = activatable_land_mana_options(r.state(), mountains[0], P0);
+    let native = rows
+        .iter()
+        .find(|row| {
+            row.mana_type == ManaType::Red
+                && row.atomic_combination.is_none()
+                && row.restrictions.is_empty()
+        })
+        .unwrap();
+    let granted = rows
+        .iter()
+        .find(|row| {
+            row.mana_type == ManaType::Red
+                && row
+                    .atomic_combination
+                    .as_ref()
+                    .is_some_and(|units| units.len() == 2)
+                && !row.restrictions.is_empty()
+        })
+        .unwrap();
+    assert_ne!(native.ability_index, granted.ability_index);
+    let abilities = activated_ability_definitions(r.state(), dragon);
+    assert_eq!(abilities.len(), 1);
+    let index = abilities[0].0;
+    for paid in 1..=4 {
+        let outcome = r.activate(dragon, index).resolve();
+        assert_eq!(
+            mountains
+                .iter()
+                .map(|source| production_count(outcome.events(), *source, ManaType::Red))
+                .sum::<usize>(),
+            1
+        );
+        assert_eq!(
+            mountains
+                .iter()
+                .filter(|id| r.state().objects[id].tapped)
+                .count(),
+            paid
+        );
+        assert_complete(&r, 0);
+    }
+}
+
+#[test]
 fn live_life_total_bundle_refills_only_the_actual_absorb_shortfall() {
     for life in [2, 3] {
         let mut s = board();
