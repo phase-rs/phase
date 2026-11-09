@@ -5786,7 +5786,8 @@ fn synthesized_charge_points(
 }
 
 /// Whether this engine will drive `count` repetitions of `proposal` on this board — the one
-/// authority both the responder's seam and the consumption seam ask.
+/// authority the responder's seam, the consumption seam and `ai_support`'s structural legality
+/// hatch all ask.
 ///
 /// IMPLEMENTATION BUDGET BOUND (see `MAX_SHORTCUT_CYCLES`), deliberately NOT labelled as a
 /// CR 732.2a constraint, for the same reason the declare-site arm is not: the rules place no
@@ -5802,7 +5803,14 @@ fn synthesized_charge_points(
 /// Reads `state` and `proposal.per_cycle`; never `proposal.count`. That is what lets the
 /// responder's seam ask it about the count a named place would MINT, on a proposal still
 /// carrying the count that place replaces.
-fn shortcut_count_is_drivable(
+///
+/// Three callers, and they must stay one rule: this module's `handle_respond_to_shortcut` refusal,
+/// its consumption guard, and `ai_support`'s structural legality hatch
+/// (`structurally_valid_shortcut_response`), which admits a `Shorten` without cloning the state
+/// when this answers `true` and the place is inside the proposal's own range. A second derivation in the hatch would be free to drift
+/// from the reducer in either direction: dropping a legal answer, or admitting one the reducer
+/// refuses — which is the direction that spends a clone and still returns a rejection.
+pub(crate) fn shortcut_count_is_drivable(
     state: &GameState,
     proposal: &crate::analysis::loop_check::ShortcutProposal,
     count: u32,
