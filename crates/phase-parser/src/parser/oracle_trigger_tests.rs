@@ -43304,6 +43304,26 @@ const FBLTHP_ORACLE: &str = "When one or more of your opponents are dealt combat
 /// received-damage trigger scoped to opponent players, whose "during your turn"
 /// window is part of the trigger event (EventTime), not an intervening if.
 #[test]
+fn fblthp_full_oracle_keeps_the_damage_received_trigger() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "When one or more of your opponents are dealt combat damage during your turn, draw two cards. If your library has no cards in it, you win the game. Fblthp's owner shuffles him into their library.",
+        "Fblthp, Impossibly Lost",
+        &[],
+        &["Creature".to_string()],
+        &["Homunculus".to_string()],
+    );
+    assert!(
+        parsed
+            .triggers
+            .iter()
+            .any(|trigger| trigger.mode == TriggerMode::DamageReceived),
+        "the full Oracle parse must keep the trigger: {:#?} warnings={:#?}",
+        parsed.triggers,
+        parsed.parse_warnings
+    );
+}
+
+#[test]
 fn fblthp_impossibly_lost_head_is_batched_opponent_combat_damage_with_turn_window() {
     let def = parse_trigger_line(FBLTHP_ORACLE, "Fblthp, Impossibly Lost");
     assert_eq!(def.mode, TriggerMode::DamageReceived);
@@ -43334,6 +43354,42 @@ fn fblthp_impossibly_lost_head_is_batched_opponent_combat_damage_with_turn_windo
     assert!(
         !has_unimplemented(body),
         "Fblthp body must stay fully parsed: {body:?}"
+    );
+    fn has_shuffle_target(def: &AbilityDefinition, target: &TargetFilter) -> bool {
+        matches!(&*def.effect, Effect::Shuffle { target: actual } if actual == target)
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(|sub| has_shuffle_target(sub, target))
+    }
+    fn body_effects(def: &AbilityDefinition) -> Vec<&Effect> {
+        let mut out = vec![def.effect.as_ref()];
+        if let Some(sub) = def.sub_ability.as_deref() {
+            out.extend(body_effects(sub));
+        }
+        out
+    }
+    assert!(
+        body_effects(body)
+            .iter()
+            .any(|effect| matches!(effect, Effect::Draw { .. })),
+        "Fblthp body must retain the draw instruction: {body:?}"
+    );
+    assert!(
+        body_effects(body)
+            .iter()
+            .any(|effect| matches!(effect, Effect::Shuffle { .. })),
+        "Fblthp body must retain the shuffle instruction: {body:?}"
+    );
+    // CR 400.3 + CR 701.24c: "Fblthp's owner shuffles him …" names the exact
+    // source's owner, not the owner of the combat-damage event source.
+    assert!(
+        has_shuffle_target(body, &TargetFilter::Owner),
+        "the terminal shuffle must bind the source's owner: {body:?}"
+    );
+    assert!(
+        !has_shuffle_target(body, &TargetFilter::ParentTargetOwner),
+        "the source self-move must not use the parent-target-owner binding: {body:?}"
     );
 }
 
