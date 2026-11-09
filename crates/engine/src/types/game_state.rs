@@ -4883,7 +4883,8 @@ pub struct PendingChangeZoneIteration {
     /// path still carries its chooser here, not an independently captured owner.
     pub controller: PlayerId,
     /// Instruction performer, captured independently across every pause.
-    /// Required: a missing actor cannot safely be inferred from the controller.
+    /// Required on current carriers: the controller no longer determines it.
+    /// Versioned save migration preserves historical controller-encoded actors.
     pub performed_by: PlayerId,
     pub origin: Option<crate::types::zones::Zone>,
     pub destination: crate::types::zones::Zone,
