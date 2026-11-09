@@ -3283,7 +3283,9 @@ impl SourceQualityDemand {
         let eligible = |unit: &ManaShape, color| is_eligible_color_unit(unit, color, spell);
         if self.snow == 0
             || pool
-                .first_pinned_where(pins, |unit| eligible(unit, preferred))
+                .first_pinned_where(pins, |unit| {
+                    eligible(unit, preferred) && self.preserves_after(pool, unit, spell)
+                })
                 .is_some()
         {
             return preferred;
@@ -3375,60 +3377,64 @@ fn spend_color_prefer_non_z(
     spell: Option<&PaymentContext<'_>>,
     allows: impl Fn(&ManaShape) -> bool,
 ) -> Option<ManaUnit> {
-    // CR 118.3a: a player-pinned eligible unit of this color is spent first;
-    // without pending snow, preserve the legacy non-`Z`-then-any ordering.
+    // CR 118.3a + CR 601.2h: prefer a pinned unit among choices that leave
+    // pending source-quality costs payable. The pin can pay that later cost.
+    // Without pending Snow, preserve the legacy pin/non-`Z`-then-any ordering.
     spend_selected(pool, |pool| {
-        pool.first_pinned_where(pins, |unit| unit.color == color && allows(unit))
+        pool.first_pinned_where(pins, |unit| {
+            unit.color == color
+                && allows(unit)
+                && (quality_demand.snow == 0 || quality_demand.preserves_after(pool, unit, spell))
+        })
+        .or_else(|| {
+            // CR 107.4h + CR 106.6: prefer interchangeable eligible
+            // non-snow mana while a snow cost remains. Preserve the
+            // non-Z preference within that eligible non-snow set.
+            if quality_demand.snow == 0 {
+                return None;
+            }
+            // CR 601.2h: prefer a unit only when the remaining eligible
+            // pool can still cover both kinds of source-quality costs.
+            // In particular, the sole non-snow Z unit is not interchangeable
+            // with snow U when another snow unit can pay the pending S.
+            pool.first_where(|unit| {
+                unit.color == color
+                    && !unit.is_snow()
+                    && !unit.source_could_produce_two_or_more_colors
+                    && allows(unit)
+                    && quality_demand.preserves_after(pool, unit, spell)
+            })
             .or_else(|| {
-                // CR 107.4h + CR 106.6: prefer interchangeable eligible
-                // non-snow mana while a snow cost remains. Preserve the
-                // non-Z preference within that eligible non-snow set.
-                if quality_demand.snow == 0 {
-                    return None;
-                }
-                // CR 601.2h: prefer a unit only when the remaining eligible
-                // pool can still cover both kinds of source-quality costs.
-                // In particular, the sole non-snow Z unit is not interchangeable
-                // with snow U when another snow unit can pay the pending S.
                 pool.first_where(|unit| {
                     unit.color == color
                         && !unit.is_snow()
+                        && allows(unit)
+                        && quality_demand.preserves_after(pool, unit, spell)
+                })
+            })
+            .or_else(|| {
+                pool.first_where(|unit| {
+                    unit.color == color
                         && !unit.source_could_produce_two_or_more_colors
                         && allows(unit)
                         && quality_demand.preserves_after(pool, unit, spell)
                 })
-                .or_else(|| {
-                    pool.first_where(|unit| {
-                        unit.color == color
-                            && !unit.is_snow()
-                            && allows(unit)
-                            && quality_demand.preserves_after(pool, unit, spell)
-                    })
-                })
-                .or_else(|| {
-                    pool.first_where(|unit| {
-                        unit.color == color
-                            && !unit.source_could_produce_two_or_more_colors
-                            && allows(unit)
-                            && quality_demand.preserves_after(pool, unit, spell)
-                    })
-                })
-                .or_else(|| {
-                    pool.first_where(|unit| {
-                        unit.color == color
-                            && allows(unit)
-                            && quality_demand.preserves_after(pool, unit, spell)
-                    })
-                })
             })
             .or_else(|| {
                 pool.first_where(|unit| {
                     unit.color == color
-                        && !unit.source_could_produce_two_or_more_colors
                         && allows(unit)
+                        && quality_demand.preserves_after(pool, unit, spell)
                 })
             })
-            .or_else(|| pool.first_where(|unit| unit.color == color && allows(unit)))
+        })
+        .or_else(|| pool.first_pinned_where(pins, |unit| unit.color == color && allows(unit)))
+        .or_else(|| {
+            pool.first_where(|unit| {
+                unit.color == color && !unit.source_could_produce_two_or_more_colors && allows(unit)
+            })
+        })
+        .or_else(|| pool.first_where(|unit| unit.color == color && allows(unit)))
     })
 }
 
@@ -3739,6 +3745,7 @@ fn spend_any_for_required_colors(
             required_colors.contains(&unit.color)
                 && !unit.is_convoke_payment()
                 && spell_permits_unit(spell, unit)
+                && (quality_demand.snow == 0 || quality_demand.preserves_after(pool, unit, spell))
         })
     }) {
         return Some(unit);
@@ -3749,7 +3756,9 @@ fn spend_any_for_required_colors(
         // Scan pins over the same eligible substitution set as the fallback.
         if let Some(unit) = spend_selected(pool, |pool| {
             pool.first_pinned_where(pins, |unit| {
-                !unit.is_convoke_payment() && spell_permits_unit(spell, unit)
+                !unit.is_convoke_payment()
+                    && spell_permits_unit(spell, unit)
+                    && quality_demand.preserves_after(pool, unit, spell)
             })
             .or_else(|| {
                 required_colors.iter().find_map(|color| {
@@ -4041,7 +4050,8 @@ fn spend_two_or_more_color_source_eligible(
     minimum_life: Option<usize>,
     suffix_life_payments: impl Fn(&ManaPool) -> Option<usize>,
 ) -> Option<ManaUnit> {
-    // CR 118.3a: prefer a pinned {Z}-eligible unit before the first match.
+    // CR 118.3a + CR 601.2h: a pinned {Z} unit is the preferred baseline;
+    // pending Snow still requires the executable-suffix check below.
     let select = |pool: &ManaPool| {
         // CR 107.4c + CR 118.10: a Z preference cannot consume the only
         // colorless mana for a later strict C, just as it reserves strict colors.
@@ -4051,12 +4061,10 @@ fn spend_two_or_more_color_source_eligible(
                 || eligible_color_count(pool, ManaType::Colorless, spell)
                     > demand.required_colorless as usize
         };
-        if let Some(pinned) = pool.first_pinned_where(pins, |unit| {
-            unit.source_could_produce_two_or_more_colors && spell_permits_unit(spell, unit)
-        }) {
-            return Some(pinned.0);
-        }
-        let baseline = None
+        let baseline = pool
+            .first_pinned_where(pins, |unit| {
+                unit.source_could_produce_two_or_more_colors && spell_permits_unit(spell, unit)
+            })
             .or_else(|| {
                 // Preserve Snow without consuming the sole color for a later pip.
                 // With no pending Snow, retain the existing source preference.
