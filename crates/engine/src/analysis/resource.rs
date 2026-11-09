@@ -10010,8 +10010,14 @@ mod tests {
         state.waiting_for = crate::types::WaitingFor::Priority {
             player: state.active_player,
         };
+        state.record_loop_detect_sample();
         let row = state.damage_dealt_this_turn[0].clone();
         for _ in 0..8 {
+            let prior = state
+                .loop_detect_ring
+                .back()
+                .expect("the preceding priority sample exists")
+                .clone();
             for _ in 0..32 {
                 state.damage_dealt_this_turn.push_back(row.clone());
             }
@@ -10023,7 +10029,11 @@ mod tests {
                 .expect("record the actual priority boundary")
                 .normalized;
             assert!(
-                loop_states_equal_modulo_resources(sample, &state),
+                !loop_states_equal(&prior.normalized, sample),
+                "growing full history excludes a strict candidate before ranking"
+            );
+            assert!(
+                loop_states_equal_modulo_resources(&prior.normalized, sample),
                 "no retained damage reader changes the resource position"
             );
             let sampled_visits = LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get);
