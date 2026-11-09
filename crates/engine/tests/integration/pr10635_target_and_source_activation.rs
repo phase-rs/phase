@@ -280,8 +280,7 @@ fn paid_beacon_keeps_its_source_after_the_mox_entry_discard() {
         })
         .id();
     let mox = scenario
-        .add_spell_to_graveyard(P1, "Mox Diamond", false)
-        .as_artifact()
+        .add_artifact_to_graveyard(P1, "Mox Diamond")
         .with_mana_cost(ManaCost::generic(0))
         .from_oracle_text(MOX)
         .id();
