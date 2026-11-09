@@ -10746,8 +10746,8 @@ fn parse_shuffle_library_target(
 }
 
 /// CR 701.24a: Lower a shuffle AST into a `ParsedEffectClause`.
-/// Compound forms ("shuffle X into library") produce a `ChangeZone` + `Shuffle` sub_ability
-/// chain so the library is actually randomized after the zone move.
+/// Compound forms ("shuffle X into library") move the bound subject before
+/// one terminal `Shuffle`; source placement must not auto-shuffle as well.
 pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause {
     match ast {
         ShuffleImperativeAst::ShuffleLibrary { target } => {
