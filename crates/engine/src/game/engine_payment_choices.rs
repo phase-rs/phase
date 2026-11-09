@@ -1,8 +1,8 @@
 use crate::game::filter;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, ControllerRef, Effect, EffectKind, EffectScope, ResolvedAbility,
-    SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
+    AbilityCondition, AbilityCost, ControllerRef, Effect, EffectKind, EffectScope, PlayerScope,
+    ResolvedAbility, SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
@@ -439,6 +439,49 @@ fn handle_opponent_may_choice_inner(
             } = &mut ability.effect
             {
                 typed.controller = Some(ControllerRef::ScopedPlayer);
+            }
+
+            // CR 118.12: "[A player] may [do something]. If [that player]
+            // [does], [effect]" — the offered action is a cost paid on
+            // resolution, and the rider checks whether that player chose to pay
+            // it. So an accepted "any player may pay ..." is paid by the player
+            // who accepted. Exactly as with the sacrifice rebind above, the
+            // parsed `payer` records who was OFFERED the payment (the
+            // "any player may" shell lowers to `Controller`), not who performs
+            // it. `set_scoped_player_recursive` above has already bound the
+            // scope to the promptee.
+            //
+            // CR 119.4 + CR 608.2c: the amount is likewise the accepting
+            // player's — "pay half THEIR life". A third-person possessive
+            // lowers to `PlayerScope::Target`, which is the correct encoding
+            // when the ability has a player target (Astarion's "life they lost
+            // this turn" resolves against its target, not its controller), but
+            // this class of trigger has no targets at all, so the anaphor
+            // dangles and the amount resolves to 0 — the cost becomes free and
+            // the "If that player does" rider fires for nothing. Rebind the
+            // dangling anaphor onto the scoped player, through the traversal
+            // authorities (`for_each_quantity_expr_mut` -> `each_ref_mut` ->
+            // `player_scope_mut`) rather than matching one cost shape, so every
+            // quantity-bearing cost in the class is covered. Guarded on the
+            // absence of a player target so a genuine target-relative amount is
+            // never redirected.
+            let payer_anaphor_dangles = !ability
+                .targets
+                .iter()
+                .any(|target| matches!(target, TargetRef::Player(_)));
+            if let Effect::PayCost { payer, cost, .. } = &mut ability.effect {
+                *payer = TargetFilter::ScopedPlayer;
+                if payer_anaphor_dangles {
+                    cost.for_each_quantity_expr_mut(&mut |expr| {
+                        expr.each_ref_mut(&mut |qty| {
+                            if let Some(scope) = qty.player_scope_mut() {
+                                if *scope == PlayerScope::Target {
+                                    *scope = PlayerScope::ScopedPlayer;
+                                }
+                            }
+                        });
+                    });
+                }
             }
 
             let target_selection = match &ability.effect {

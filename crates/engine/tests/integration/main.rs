@@ -317,6 +317,7 @@ mod through_the_forest_gate;
 mod resolution_progress_contract;
 
 mod ignite_memories_random_reveal;
+mod issue_8115_temporal_extortion_extra_turn;
 mod niambi_granted_trigger_once_each_turn;
 mod q_stacking_the_deck;
 mod risky_move_gain_control_trigger;
