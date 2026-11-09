@@ -275,3 +275,149 @@ fn oblation_selected_owner_draws_after_the_owner_shuffle() {
     assert!(outcome.state().stack.is_empty());
     assert!(outcome.state().resolution_stack.is_empty());
 }
+
+#[test]
+fn gemrazer_under_gandalf_delivers_both_cards_before_one_owner_shuffle_and_three_draws() {
+    // Full printed Oracle text, verified against Scryfall.
+    const GEMRAZER: &str = "Mutate {1}{G}{G} (If you cast this spell for its mutate cost, put it over or under target non-Human creature you own. They mutate into the creature on top plus all abilities from under it.)\nReach, trample\nWhenever this creature mutates, destroy target artifact or enchantment an opponent controls.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let gandalf = scenario
+        .add_creature(P0, "Gandalf, Wandering Wizard", 4, 5)
+        .with_subtypes(vec!["Avatar", "Wizard"])
+        .from_oracle_text_with_keywords(&["Ward"], GANDALF)
+        .id();
+    let gemrazer = scenario
+        .add_creature_to_hand_from_oracle(P0, "Gemrazer", 4, 4, GEMRAZER)
+        .with_subtypes(vec!["Beast"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 3,
+        })
+        .from_oracle_text_with_keywords(&["Mutate", "Reach", "Trample"], GEMRAZER)
+        .id();
+    let trickster = scenario
+        .add_creature(P1, "Cosi's Trickster", 1, 1)
+        .from_oracle_text(COSI)
+        .id();
+    scenario.with_library_top(P0, &["P0 A", "P0 B", "P0 C", "P0 D", "P0 E"]);
+    scenario.with_library_top(P1, &["P1 A", "P1 B", "P1 C", "P1 D", "P1 E"]);
+    let mut mana = vec![ManaUnit::new(ManaType::Green, ObjectId(9_999), false, vec![]); 3];
+    mana.extend(vec![
+        ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(9_999),
+            false,
+            vec![]
+        );
+        6
+    ]);
+    scenario.with_mana_pool(P0, mana);
+    let mut runner = scenario.build();
+    let original_activation = runner.state().objects[&gandalf]
+        .abilities
+        .iter()
+        .position(|ability| ability.cost.is_some())
+        .expect("Gandalf has his printed six-mana activation");
+
+    let mutated = runner
+        .cast(gemrazer)
+        .alternative_cast(engine::types::actions::AlternativeCastDecision::Alternative)
+        .target_object(gandalf)
+        .resolve();
+    assert_eq!(mutated.mana_pool_total(P0), 6, "pay the mutate cost");
+    assert!(
+        matches!(
+            mutated.final_waiting_for(),
+            WaitingFor::MutateMergeChoice { .. }
+        ),
+        "the real mutate cast must reach its over-or-under choice"
+    );
+    runner
+        .act(GameAction::ChooseMutateMergeSide {
+            side: engine::game::merge::MergeSide::Bottom,
+        })
+        .expect("put Gemrazer under Gandalf");
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&gandalf].name,
+        "Gandalf, Wandering Wizard"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+
+    let outcome = runner
+        .activate(gandalf, original_activation)
+        .accept_optional()
+        .resolve();
+    assert_eq!(outcome.mana_pool_total(P0), 0, "pay Gandalf's six mana");
+    let shuffles: Vec<_> = outcome
+        .events()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some((index, *player_id)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shuffles.len(),
+        1,
+        "components must not add their own shuffles"
+    );
+    let (shuffle_index, shuffler) = shuffles[0];
+    assert_eq!(shuffler, P0, "only the owner's library is shuffled");
+    for component in [gandalf, gemrazer] {
+        let deliveries: Vec<_> = outcome
+            .events()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                matches!(event, GameEvent::ZoneChanged {
+                    object_id, to: Zone::Library, ..
+                } if *object_id == component)
+                .then_some(index)
+            })
+            .collect();
+        assert_eq!(
+            deliveries.len(),
+            1,
+            "each physical card reaches the library"
+        );
+        assert!(
+            deliveries[0] < shuffle_index,
+            "both cards arrive before the shuffle"
+        );
+        // Either card may be drawn by the rest of the printed instruction.
+        assert_ne!(outcome.state().objects[&component].zone, Zone::Battlefield);
+    }
+    let draws: Vec<_> = outcome
+        .events()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            GameEvent::CardDrawn { player_id, .. } => Some((index, *player_id)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(draws.len(), 3, "the owner actually draws three cards");
+    for (index, drawer) in draws {
+        assert_eq!(drawer, P0);
+        assert!(shuffle_index < index, "the one shuffle precedes every draw");
+    }
+    outcome.assert_counters(trickster, CounterType::Plus1Plus1, 1);
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+    assert!(outcome.state().resolution_stack.is_empty());
+}

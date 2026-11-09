@@ -93,6 +93,7 @@ mod fixed_damage_amount_thresholds;
 mod flamerush_rider_tapped_attacking_copy;
 mod food_chain_board;
 mod format_axis_census;
+mod forwarded_source_identity;
 mod freeform_commander_deck_rules;
 mod frenzy_attacker_unblocked_pump;
 mod frostcliff_siege_anchor_word_modes;

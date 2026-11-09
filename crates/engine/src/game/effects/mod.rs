@@ -1067,12 +1067,12 @@ fn rebind_child_to_forwarded_objects(
         return Vec::new();
     }
     let attachment_candidates = attach::attachment_candidates_from_zone_change(state, child, moved);
-    // CR 201.5 + CR 400.7j: a source-naming SelfRef is not the object
-    // returned by the preceding instruction. Forward the returned referent
+    // CR 201.5 + CR 400.7j: a child's primary SelfRef names its source, not
+    // the object returned by the preceding instruction. Forward that referent
     // separately; immediate generic grants were bound to ParentTargetSlot above.
     // This also keeps CopySpell(SelfRef) on the resolving spell (CR 707.10).
-    // CR 603.7c: delayed triggers retain their creating source, and a repeat
-    // directive retains the process source used by its loop predicate.
+    // CR 603.7d + CR 603.7e: delayed triggers retain their creating source.
+    // CR 608.2c: repeat directives retain the process source for their loop predicate.
     if !matches!(child.effect.target_filter(), Some(TargetFilter::SelfRef))
         && !matches!(child.effect, Effect::CreateDelayedTrigger { .. })
         && !child.effect.is_repeat_directive()
@@ -26115,7 +26115,7 @@ fn resolve_chain_body(
             );
         }
 
-        // Apply forward_result: moved object becomes sub's source.
+        // Apply forward_result: bind moved referents without replacing a primary SelfRef source.
         //
         // CR 303.4f: Aura entering by non-spell means — controller chooses the enchanted object.
         // CR 301.5b: Equipment entering attached via "put onto the battlefield attached to" wiring.

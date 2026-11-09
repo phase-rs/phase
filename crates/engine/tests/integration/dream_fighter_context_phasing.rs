@@ -2,7 +2,9 @@
 use engine::game::ability_utils::declared_targets_in_chain;
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, GameState, PersistedGameState, WaitingFor};
 use engine::types::identifiers::{ObjectIncarnationRef, LEGACY_INCARNATION};
@@ -16,6 +18,9 @@ const CLOUDSHIFT: &str = "Exile target creature you control, then return that ca
 const MIRROR_MATCH: &str = "Cast this spell only during the declare blockers step.\nFor each creature attacking you or a planeswalker you control, create a token that's a copy of that creature and that's blocking that creature. Exile those tokens at end of combat.";
 const DRELNOCH: &str = "Whenever this creature becomes blocked, you may draw two cards.";
 const ETERNAL_OF_HARSH_TRUTHS: &str = "Afflict 2 (Whenever this creature becomes blocked, defending player loses 2 life.)\nWhenever this creature attacks and isn't blocked, draw a card.";
+const SMUGGLERS_COPTER: &str = "Flying\nWhenever this Vehicle attacks or blocks, you may draw a card. If you do, discard a card.\nCrew 1 (Tap any number of creatures you control with total power 1 or more: This Vehicle becomes an artifact creature until end of turn.)";
+const CUNNING_EVASION: &str =
+    "Whenever a creature you control becomes blocked, you may return it to its owner's hand.";
 
 fn priority_to_combat_prompt(runner: &mut GameRunner, blockers: bool) {
     for _ in 0..32 {
@@ -455,6 +460,313 @@ fn mirror_match_fires_printed_afflict_only_on_the_first_blocked_transition() {
         }
         assert_eq!(runner.life(P1), 18, "Afflict must happen exactly once");
     }
+}
+
+// CR 707.2 + CR 506.3a: crew's animation isn't copied. The resulting Vehicle
+// enters, but cannot block, trigger Cunning Evasion, or stop combat damage.
+#[test]
+fn mirror_match_noncreature_vehicle_copy_stays_unblocked_and_expires_at_end_of_combat() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let copter = scenario
+        .add_creature(P0, "Smuggler's Copter", 3, 3)
+        .as_artifact()
+        .with_subtypes(vec!["Vehicle"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        })
+        .from_oracle_text_with_keywords(&["Flying", "Crew"], SMUGGLERS_COPTER)
+        .id();
+    let pilot = scenario
+        .add_creature(P0, "Elite Vanguard", 2, 1)
+        .with_subtypes(vec!["Human", "Soldier"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        })
+        .id();
+    // A legal flying blocker keeps the real declaration window open; P1
+    // deliberately declines it before casting Mirror Match.
+    let hawk = scenario
+        .add_creature(P1, "Suntail Hawk", 1, 1)
+        .with_subtypes(vec!["Bird"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        })
+        .from_oracle_text_with_keywords(&["Flying"], "Flying")
+        .id();
+    let evasion = scenario
+        .add_enchantment_from_oracle(P0, "Cunning Evasion", CUNNING_EVASION)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 1,
+        })
+        .id();
+    let mirror = scenario
+        .add_spell_to_hand_from_oracle(P1, "Mirror Match", true, MIRROR_MATCH)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            generic: 4,
+        })
+        .id();
+    let islands: Vec<_> = (0..6)
+        .map(|_| scenario.add_basic_land(P1, ManaColor::Blue))
+        .collect();
+    // Keep a second card in hand so the printed loot requires a public discard
+    // selection rather than automatically discarding its sole drawn card.
+    let kept_card = scenario.add_land_to_hand(P0, "Island").id();
+    let drawn_card = scenario.add_land_to_library_top(P0, "Plains").id();
+    scenario.add_land_to_hand(P1, "Island");
+    scenario.add_land_to_library_top(P1, "Plains");
+    let mut runner = scenario.build();
+    assert!(
+        !runner.state().objects[&copter]
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature),
+        "the printed Artifact Vehicle must begin unanimated"
+    );
+
+    // CR 702.122a: pay the actual crew cost through the public selection prompt.
+    runner
+        .act(GameAction::CrewVehicle {
+            vehicle_id: copter,
+            creature_ids: vec![],
+        })
+        .unwrap();
+    assert!(matches!(
+        &runner.state().waiting_for,
+        WaitingFor::CrewVehicle {
+            player: P0,
+            vehicle_id,
+            eligible_creatures,
+            ..
+        } if *vehicle_id == copter && eligible_creatures.contains(&pilot)
+    ));
+    runner
+        .act(GameAction::CrewVehicle {
+            vehicle_id: copter,
+            creature_ids: vec![pilot],
+        })
+        .unwrap();
+    assert!(runner.state().objects[&pilot].tapped, "crew must be paid");
+    runner.advance_until_stack_empty();
+    assert!(
+        runner.state().objects[&copter]
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature),
+        "resolving crew must animate the original Vehicle"
+    );
+    priority_to_combat_prompt(&mut runner, false);
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(copter, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .unwrap();
+
+    let mut attack_events = Vec::new();
+    let mut accepted_attack_loot = false;
+    let mut selected_attack_discard = false;
+    for _ in 0..32 {
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareBlockers { .. } => break,
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::OptionalEffectChoice {
+                player, source_id, ..
+            } => {
+                assert_eq!(player, P0);
+                assert_eq!(source_id, copter);
+                assert!(!accepted_attack_loot, "only one attack loot is offered");
+                accepted_attack_loot = true;
+                GameAction::DecideOptionalEffect { accept: true }
+            }
+            WaitingFor::DiscardChoice {
+                player,
+                count,
+                cards,
+                ..
+            } => {
+                assert_eq!(player, P0);
+                assert_eq!(count, 1);
+                assert!(cards.contains(&drawn_card));
+                selected_attack_discard = true;
+                GameAction::SelectCards {
+                    cards: vec![drawn_card],
+                }
+            }
+            other => panic!("unexpected Copter attack prompt: {other:?}"),
+        };
+        attack_events.extend(runner.act(action).unwrap().events);
+    }
+    assert!(accepted_attack_loot && selected_attack_discard);
+    assert!(attack_events.iter().any(|event| matches!(
+        event,
+        GameEvent::CardDrawn { player_id: P0, object_id, .. } if *object_id == drawn_card
+    )));
+    assert_eq!(runner.state().objects[&drawn_card].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&kept_card].zone, Zone::Hand);
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![],
+        })
+        .unwrap();
+    if matches!(runner.state().waiting_for, WaitingFor::Priority { player, .. } if player != P1) {
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1, .. }
+    ));
+    for island in islands {
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: island,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+    }
+    drop(runner.cast(mirror).commit());
+    let mut copy_events = Vec::new();
+    let mut optional_sources = Vec::new();
+    for _ in 0..32 {
+        if runner.state().objects[&mirror].zone == Zone::Graveyard
+            && runner.state().stack.is_empty()
+            && runner.state().resolution_stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::OptionalEffectChoice { source_id, .. } => {
+                // Accept even an erroneous Cunning Evasion trigger so the
+                // pre-fix witness actually returns the original to hand.
+                optional_sources.push(source_id);
+                GameAction::DecideOptionalEffect { accept: true }
+            }
+            WaitingFor::DiscardChoice { count, cards, .. } => GameAction::SelectCards {
+                cards: cards.into_iter().take(count as usize).collect(),
+            },
+            other => panic!("unexpected Mirror Match prompt: {other:?}"),
+        };
+        copy_events.extend(runner.act(action).unwrap().events);
+    }
+    assert_eq!(runner.state().objects[&mirror].zone, Zone::Graveyard);
+    let copies: Vec<_> = copy_events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::TokenCreated {
+                object_id,
+                source_id,
+                ..
+            } if *source_id == mirror => Some(*object_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(copies.len(), 1, "the paid spell must create its token");
+    let copy = copies[0];
+    let token = &runner.state().objects[&copy];
+    assert_eq!(token.zone, Zone::Battlefield);
+    assert!(token.is_token);
+    assert_eq!(token.name, "Smuggler's Copter");
+    assert_eq!(token.controller, P1);
+    assert!(token.card_types.core_types.contains(&CoreType::Artifact));
+    assert!(token
+        .card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype == "Vehicle"));
+    assert!(
+        !token.card_types.core_types.contains(&CoreType::Creature),
+        "CR 707.2: the copy must not inherit the paid crew animation"
+    );
+    assert_eq!(
+        runner.state().objects[&copter].zone,
+        Zone::Battlefield,
+        "a noncreature copy cannot cause Cunning Evasion to return the attacker"
+    );
+    assert!(
+        !optional_sources.contains(&evasion),
+        "Cunning Evasion must not trigger without a real blocker"
+    );
+    assert!(
+        !optional_sources.contains(&copy),
+        "the entering token must not trigger its copied blocks loot"
+    );
+    assert!(
+        !copy_events.iter().any(|event| matches!(
+            event,
+            GameEvent::AttackerBecameBlockedByEffect { .. }
+                | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
+                | GameEvent::BlockersDeclared { .. }
+        )),
+        "a noncreature entrant must emit neither attacker-side nor blocker-side block events"
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+
+    let mut combat_events = Vec::new();
+    for _ in 0..32 {
+        if runner.state().phase == Phase::PostCombatMain {
+            break;
+        }
+        let phase = runner.state().phase;
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        combat_events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .unwrap()
+                .events
+                .into_iter()
+                .map(|event| (phase, event)),
+        );
+    }
+    assert_eq!(runner.state().phase, Phase::PostCombatMain);
+    assert_eq!(
+        runner.life(P1),
+        17,
+        "the unblocked original deals its normal three damage"
+    );
+    assert!(combat_events.iter().any(|(_, event)| matches!(
+        event,
+        GameEvent::DamageDealt {
+            source_id,
+            target: TargetRef::Player(P1),
+            amount: 3,
+            is_combat: true,
+            ..
+        } if *source_id == copter
+    )));
+    let expired: Vec<_> = combat_events
+        .iter()
+        .filter_map(|(phase, event)| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                to: Zone::Exile,
+                ..
+            } => Some((*phase, *object_id)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        expired,
+        vec![(Phase::EndCombat, copy)],
+        "Mirror Match must still exile exactly its nonblocking token at end of combat"
+    );
+    for id in [copter, pilot, evasion, hawk] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+    }
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
 }
 
 // CR 400.7 + CR 608.2k: a named, untargeted combat partner is the original

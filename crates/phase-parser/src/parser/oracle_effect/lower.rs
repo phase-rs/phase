@@ -2820,7 +2820,7 @@ pub(super) fn target_choice_timing_for_parsed(
 
 /// CR 303.4f: Aura entering by non-spell means — controller chooses the enchanted object.
 /// CR 301.5b: Equipment entering attached via "put onto the battlefield attached to" wiring.
-/// CR 603.7d: A delayed trigger's source/controller is the parent ability's at creation time.
+/// CR 603.7d + CR 603.7e: a delayed trigger retains its creating source/controller.
 /// CR 608.2c: Bare "it" anaphor in a later clause binds to the typed referent of an earlier clause.
 ///
 /// Walk the chain and set `forward_result: true` on every `Dig`/`ChangeZone`
@@ -2831,14 +2831,12 @@ pub(super) fn target_choice_timing_for_parsed(
 ///    said "If a[n] [type] is/was put onto the battlefield this way,
 ///    [attach it]" (Armored Skyhunter, Stonehewer Giant). The just-moved
 ///    card becomes the attaching object.
-/// 2. A non-Attach sub whose own target slot (or a nested
-///    GenericEffect/CreateDelayedTrigger inside it) is `SelfRef` — the
-///    Oracle text used a bare-"it" anaphor for the just-moved card
-///    (Emperor of Bones: "put a creature card exiled with this creature
-///    onto the battlefield […]. It gains haste. Sacrifice it at the
-///    beginning of the next end step."). The runtime forward_result branch
-///    rewrites `sub.source_id` to the moved object, so `SelfRef` in the
-///    sub naturally resolves to it.
+/// 2. A non-Attach sub that needs a `ParentTarget` referent, or an embedded
+///    generic-grant/duplicate operand that names the just-moved card. Emperor
+///    of Bones' "It gains haste. Sacrifice it at the beginning of the next end
+///    step" keeps that returned-object context separate from the ability source.
+///    A primary `SelfRef` alone names the original source and does not enable
+///    this result forwarding.
 ///
 /// Recurses through nested sub-abilities so chains of arbitrary depth
 /// (e.g. Skyhunter's Dig → Attach → PutAtLibraryPosition) are covered.
@@ -3668,43 +3666,20 @@ pub(super) fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
     }
 }
 
-/// CR 400.7j + CR 608.2c + CR 701.3a: in "<move a card to the battlefield>, then
-/// attach it to <referent>", the bare-"it" attachment operand names the card the
-/// parent instruction just moved — CR 400.7j lets the rest of that effect find the
-/// object it put into a public zone. Encode it as `SelfRef`: the runtime
-/// `forward_result` branch rebinds the sub-ability's `source_id` to the moved
-/// object, and `change_zone::resolve_forward_result_search_attach_host` gates the
-/// pre-entry host stamp on exactly that `SelfRef` encoding.
+/// CR 400.7j + CR 608.2c + CR 701.3a: the attachment operand in
+/// "<move a card to the battlefield>, then attach it to <referent>" names
+/// the moved card. This legacy `SelfRef` attachment encoding is recognized
+/// by `change_zone::resolve_forward_result_search_attach_host` when stamping
+/// the entry's host; it does not turn a primary source-naming host into the
+/// returned object.
 ///
-/// Two recipient encodings prove the attachment anaphor is the moved card:
+/// `LastCreated` proves that the host is a separately created token. Equal
+/// attachment/host anaphors instead require disambiguation before entry:
+/// self-attachment is prohibited by CR 301.5c, CR 301.6, CR 303.4d and CR 701.3b.
 ///
-/// * `LastCreated` — the recipient is a token this chain created (Ratonhnhaké꞉ton,
-///   Forum Filibuster), so the attachment cannot be it.
-/// * the SAME filter node as the attachment — the sentence's two referents
-///   collapsed onto one anaphor (Sword of the Meek). Attaching an object to
-///   itself is a guaranteed no-op whatever the operand resolves to — CR 301.5c
-///   ("An Equipment can't equip itself"), CR 301.6 (the same for Fortifications),
-///   CR 303.4d ("An Aura can't enchant itself"), and CR 701.3b for anything else
-///   — so rebinding can only turn a dead node live; it can never take working
-///   behavior away.
-///
-/// Note the delivery this rebind selects: `SelfRef` also satisfies
-/// `change_zone::resolve_forward_result_search_attach_host`'s attachment gate, so
-/// the host is stamped as `enter_attached_to` and the card enters already
-/// attached. The trailing `Attach` sub still resolves and still emits its
-/// `EffectKind::Attach`, so `TriggerMode::Attached` observers are unaffected.
-/// It is a CR 301.5c self-attach — the sub's `ParentTarget` host falls back to
-/// the source — which `attach::attachment_illegality_projected` rejects before
-/// any edit: no state change, no timestamp bump.
-///
-/// Caller-gated on the parent moving a card to the battlefield. That gate is why
-/// this cannot live in `parse_attachment_anaphor` (`imperative.rs`): the parent
-/// effect is unknown at parse time, and rebinding there would regress Stonehewer
-/// Giant / Quest for the Holy Relic / Armored Skyhunter / Adaptive Armorer, whose
-/// "it" names a searched Equipment rather than the source. The same gate keeps the
-/// equal-operand pairs under `GainControl` (Ogre Geargrabber, Thieving Skydiver)
-/// and under `CopyTokenOf` untouched: no public-zone move, so no CR 400.7j
-/// referent to rebind to.
+/// Caller-gated on a public-zone battlefield entry. Applying this rewrite
+/// without that producer would misread searched Equipment and equal-operand
+/// `GainControl`/`CopyTokenOf` instructions that have no moved-card referent.
 pub(super) fn rebind_attach_attachment_to_forwarded_source_if_anaphor_names_moved_card(
     effect: &mut Effect,
 ) -> bool {
@@ -3730,32 +3705,19 @@ pub(super) fn rebind_attach_attachment_to_forwarded_source_if_anaphor_names_move
     false
 }
 
-/// CR 608.2c: True when a sub-ability anchors on the just-moved card via
-/// the bare-"it" anaphor. Two encodings are recognized:
+/// CR 400.7j + CR 608.2c: True when a sub-ability needs the just-moved
+/// object's forwarded referent, rather than the printed source's identity.
 ///
-/// - `TargetFilter::SelfRef` — encoded when the anaphor's antecedent is
-///   the source itself; the runtime `forward_result` branch rewrites
-///   `sub.source_id` to the moved object before resolution, so `SelfRef`
-///   resolves to it.
-/// - `TargetFilter::ParentTarget` — encoded when the upstream chunk-loop
-///   anaphor rewrite (`chain_has_prior_typed_referent` →
-///   `replace_target_with_parent`) already redirected the "it" to the
-///   parent's chosen-object slot. The parent for this pattern is a
-///   `ChangeZone` whose typed target is a compound filter
-///   (`And[Typed(<type>), ExiledBySource]`) — a description, not a
-///   targeting "target" keyword — so `ability.targets` is empty at
-///   resolution time. The runtime `forward_result` branch inserts the
-///   moved object into the sub's targets so `ParentTarget` resolves to
-///   it.
+/// `ParentTarget` reads the moved object even when its producer selected a
+/// described population without an announced target. A primary `SelfRef`
+/// names the original source and does not by itself request forwarding.
 ///
-/// Walks the sub's leaf target slot, `GenericEffect`'s grant list
-/// (each `StaticDefinition.affected`), `CreateDelayedTrigger`'s inner
-/// `AbilityDefinition`, and nested `sub_ability` / `else_ability`.
+/// Legacy immediate generic grants and duplicate operands still encode the
+/// moved-card anaphor with embedded `SelfRef`; their specific binding rules
+/// handle that role separately from a primary source filter. Walk those
+/// operands, delayed-trigger bodies, and nested continuation/else links.
 fn sub_targets_moved_card(sub: &AbilityDefinition) -> bool {
-    if matches!(
-        sub.effect.target_filter(),
-        Some(TargetFilter::SelfRef | TargetFilter::ParentTarget)
-    ) {
+    if matches!(sub.effect.target_filter(), Some(TargetFilter::ParentTarget)) {
         return true;
     }
     if let Effect::Conjure { cards, .. } = &*sub.effect {
