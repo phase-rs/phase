@@ -10613,6 +10613,7 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
             } else {
                 None
             };
+            let target = super::add_inferred_origin_constraints_to_target(target, origin, lower);
             return Some(ShuffleImperativeAst::TargetedChangeZoneToLibrary {
                 target,
                 origin,
