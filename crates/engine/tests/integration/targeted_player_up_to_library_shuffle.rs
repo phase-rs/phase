@@ -8,12 +8,12 @@
 //! (Reminisce), differing only in the moved-card filter (`ChangeZone` of a
 //! typed card instead of `ChangeZoneAll`).
 
-use engine::game::scenario::{CastOutcome, GameScenario, P0, P1};
-use engine::types::ability::EffectKind;
+use engine::game::scenario::{CastCommit, CastOutcome, GameScenario, P0, P1};
+use engine::types::ability::{EffectKind, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::{GameEvent, PlayerActionKind};
-use engine::types::game_state::{ReplacementChoiceKind, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, ReplacementChoiceKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -29,6 +29,13 @@ const QUANDRIX_ORACLE: &str = "Choose two —\n• Return target creature or pla
 const COSI_ORACLE: &str =
     "Whenever an opponent shuffles their library, you may put a +1/+1 counter on this creature.";
 const STREAM_ORACLE: &str = "Target player mills four cards. You shuffle up to four cards from your graveyard into your library.\nReplicate {2}{U}{U} (When you cast this spell, copy it for each time you paid its replicate cost. You may choose new targets for the copies.)";
+
+// Full printed Oracle text, checked against Scryfall's named-card API.
+const MEMORY_ORACLE: &str = "Target player shuffles up to three target cards from their graveyard into their library.\nFlashback {G} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
+const SURGE_ORACLE: &str = "You and permanents you control gain hexproof until end of turn. Prevent all damage that black and/or red sources would deal to creatures you control this turn.";
+const GAEA_ORACLE: &str = "Target player shuffles up to three target cards from their graveyard into their library.\nDraw a card.\nWhen this card is put into your graveyard from your library, shuffle your graveyard into your library.";
+const THOUGHT_SCOUR_ORACLE: &str = "Target player mills two cards.\nDraw a card.";
+const CREMATE_ORACLE: &str = "Exile target card from a graveyard.\nDraw a card.";
 
 /// Ordered projection of who actually shuffled a library.
 fn shuffled_players(events: &[GameEvent]) -> Vec<PlayerId> {
@@ -84,6 +91,47 @@ fn assert_completed(outcome: &CastOutcome) {
         outcome.state().stack.is_empty(),
         "the stack must be empty after resolution"
     );
+}
+
+/// Respond through the ordinary cast/priority pipeline, stopping after Surge
+/// resolves so the original spell is still waiting beneath it.
+fn resolve_surge_response(original: &mut CastCommit<'_>, surge: ObjectId) -> Vec<GameEvent> {
+    assert!(matches!(
+        original.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    let mut events = original
+        .act(GameAction::PassPriority)
+        .expect("P0 passes priority so P1 can respond with Surge")
+        .events;
+    assert!(matches!(
+        original.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+
+    let mut response = original.cast(surge).commit();
+    events.extend_from_slice(response.events());
+    for _ in 0..8 {
+        if response.state().objects[&surge].zone == Zone::Graveyard {
+            break;
+        }
+        assert!(matches!(
+            response.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        events.extend(
+            response
+                .act(GameAction::PassPriority)
+                .expect("both players pass to resolve the real Surge response")
+                .events,
+        );
+    }
+    assert_eq!(response.state().objects[&surge].zone, Zone::Graveyard);
+    assert!(matches!(
+        response.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    events
 }
 
 /// CR 115.1 + CR 608.2c + CR 701.24a: casting Dwell on the Past at P1 moves
@@ -589,5 +637,284 @@ fn stream_of_thought_resolution_choice_shuffles_once_for_the_caster() {
         &outcome,
         P0,
         "resolution-time delivery must not auto-shuffle before the caster's terminal shuffle",
+    );
+}
+
+/// Memory's Journey's 2011-09-22 Wizards ruling explicitly says an illegal
+/// player prevents its effect even when the targeted graveyard cards stay legal:
+/// https://api.scryfall.com/cards/isd/66/rulings
+#[test]
+fn memorys_journey_moves_no_cards_and_neither_player_shuffles_after_surge() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let memory = scenario
+        .add_spell_to_hand_from_oracle(P0, "Memory's Journey", true, MEMORY_ORACLE)
+        .id();
+    let surge = scenario
+        .add_spell_to_hand_from_oracle(P1, "Surge of Salvation", true, SURGE_ORACLE)
+        .id();
+    let player_probe = scenario
+        .add_spell_to_hand_from_oracle(P0, "Thought Scour", true, THOUGHT_SCOUR_ORACLE)
+        .id();
+    let card_probe = scenario
+        .add_spell_to_hand_from_oracle(P0, "Cremate", true, CREMATE_ORACLE)
+        .id();
+    let selected_a = scenario
+        .add_creature_to_graveyard(P1, "Chosen Graveyard Card A", 1, 1)
+        .id();
+    let selected_b = scenario
+        .add_creature_to_graveyard(P1, "Chosen Graveyard Card B", 1, 1)
+        .id();
+    let unchosen = scenario
+        .add_creature_to_graveyard(P1, "Unchosen Graveyard Card", 1, 1)
+        .id();
+    let caster_graveyard = scenario
+        .add_creature_to_graveyard(P0, "Caster Graveyard Card", 1, 1)
+        .id();
+    let caster_library = scenario.add_card_to_library_top(P0, "Caster Library Card");
+    let target_library = scenario.add_card_to_library_top(P1, "Target Library Card");
+    let mut runner = scenario.build();
+    let mut original = runner
+        .cast(memory)
+        .target_player(P1)
+        .target_objects(&[selected_a, selected_b])
+        .commit();
+    let caster_library_before = original.state().players[P0.0 as usize].library.clone();
+    let target_library_before = original.state().players[P1.0 as usize].library.clone();
+    let mut events = resolve_surge_response(&mut original, surge);
+    assert_eq!(original.state().objects[&memory].zone, Zone::Stack);
+
+    // Observe real target offers, not stack slots or protection implementation.
+    // These announcements are withdrawn before either probe pays or resolves.
+    let card_id = original.state().objects[&player_probe].card_id;
+    events.extend(
+        original
+            .act(GameAction::CastSpell {
+                object_id: player_probe,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("P0 can announce the player-target probe above Memory's Journey")
+            .events,
+    );
+    let WaitingFor::TargetSelection {
+        target_slots,
+        selection,
+        ..
+    } = &original.state().waiting_for
+    else {
+        panic!("Thought Scour must offer its target-player choice");
+    };
+    let legal = &target_slots[selection.current_slot].legal_targets;
+    assert!(legal.contains(&TargetRef::Player(P0)));
+    assert!(
+        !legal.contains(&TargetRef::Player(P1)),
+        "Surge must actually make P1 illegal for P0's spells"
+    );
+    events.extend(
+        original
+            .act(GameAction::CancelCast)
+            .expect("withdraw Thought Scour without changing any zones")
+            .events,
+    );
+
+    let card_id = original.state().objects[&card_probe].card_id;
+    events.extend(
+        original
+            .act(GameAction::CastSpell {
+                object_id: card_probe,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("P0 can announce the graveyard-card probe")
+            .events,
+    );
+    let WaitingFor::TargetSelection {
+        target_slots,
+        selection,
+        ..
+    } = &original.state().waiting_for
+    else {
+        panic!("Cremate must offer its target-card choice");
+    };
+    let legal = &target_slots[selection.current_slot].legal_targets;
+    for card in [selected_a, selected_b] {
+        assert!(
+            legal.contains(&TargetRef::Object(card)),
+            "Surge must leave P1's graveyard cards legal targets for P0"
+        );
+    }
+    events.extend(
+        original
+            .act(GameAction::CancelCast)
+            .expect("withdraw Cremate without moving its potential targets")
+            .events,
+    );
+
+    let outcome = original.resolve();
+    events.extend_from_slice(outcome.events());
+    assert_completed(&outcome);
+    outcome.assert_zone(
+        &[selected_a, selected_b, unchosen, caster_graveyard],
+        Zone::Graveyard,
+    );
+    outcome.assert_zone(&[memory, surge], Zone::Graveyard);
+    outcome.assert_zone(&[player_probe, card_probe], Zone::Hand);
+    outcome.assert_zone(&[caster_library, target_library], Zone::Library);
+    assert_eq!(
+        outcome.state().players[P0.0 as usize].library,
+        caster_library_before
+    );
+    assert_eq!(
+        outcome.state().players[P1.0 as usize].library,
+        target_library_before
+    );
+    assert!(
+        shuffled_players(&events).is_empty(),
+        "neither the illegal target nor the caster may shuffle"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { object_id, .. }
+                if [selected_a, selected_b, unchosen, caster_graveyard].contains(object_id)
+        )),
+        "no graveyard card may move, even transiently"
+    );
+}
+
+/// The draw is a separate printed instruction. Legal card targets keep the
+/// spell resolving after Surge invalidates only the shuffle's player.
+#[test]
+fn gaeas_blessing_still_draws_when_surge_invalidates_only_the_shuffle_player() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let blessing = scenario
+        .add_spell_to_hand_from_oracle(P0, "Gaea's Blessing", false, GAEA_ORACLE)
+        .id();
+    let surge = scenario
+        .add_spell_to_hand_from_oracle(P1, "Surge of Salvation", true, SURGE_ORACLE)
+        .id();
+    let selected_a = scenario
+        .add_creature_to_graveyard(P1, "Chosen Graveyard Card A", 1, 1)
+        .id();
+    let selected_b = scenario
+        .add_creature_to_graveyard(P1, "Chosen Graveyard Card B", 1, 1)
+        .id();
+    let caster_library = scenario.add_card_to_library_top(P0, "Caster Library Card");
+    let drawn = scenario.add_card_to_library_top(P0, "Independent Draw");
+    let target_library = scenario.add_card_to_library_top(P1, "Target Library Card");
+    let mut runner = scenario.build();
+    let mut original = runner
+        .cast(blessing)
+        .target_player(P1)
+        .target_objects(&[selected_a, selected_b])
+        .commit();
+    let mut events = resolve_surge_response(&mut original, surge);
+    assert_eq!(original.state().objects[&blessing].zone, Zone::Stack);
+    let outcome = original.resolve();
+    events.extend_from_slice(outcome.events());
+
+    assert_completed(&outcome);
+    outcome.assert_zone(&[selected_a, selected_b, blessing, surge], Zone::Graveyard);
+    outcome.assert_zone(&[drawn], Zone::Hand);
+    outcome.assert_zone(&[caster_library, target_library], Zone::Library);
+    outcome.assert_hand_drawn(P0, 1);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        GameEvent::CardDrawn { player_id: P0, object_id, .. } if *object_id == drawn
+    )));
+    assert!(
+        shuffled_players(&events).is_empty(),
+        "skipping the dependent shuffle must not skip Gaea's independent draw"
+    );
+}
+
+/// Both the earlier return and later self-exile are independent of the
+/// targeted player's shuffle; neither may be swallowed by the illegal group.
+#[test]
+fn rite_of_renewal_still_returns_and_exiles_when_surge_invalidates_the_shuffle_player() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let rite = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rite of Renewal", false, RITE_ORACLE)
+        .id();
+    let surge = scenario
+        .add_spell_to_hand_from_oracle(P1, "Surge of Salvation", true, SURGE_ORACLE)
+        .id();
+    let returned = scenario
+        .add_creature_to_graveyard(P0, "Earlier Return Target", 1, 1)
+        .id();
+    let selected_a = scenario
+        .add_creature_to_graveyard(P1, "Chosen Graveyard Card A", 1, 1)
+        .id();
+    let selected_b = scenario
+        .add_creature_to_graveyard(P1, "Chosen Graveyard Card B", 1, 1)
+        .id();
+    let caster_library = scenario.add_card_to_library_top(P0, "Caster Library Card");
+    let target_library = scenario.add_card_to_library_top(P1, "Target Library Card");
+    let mut runner = scenario.build();
+    let mut original = runner
+        .cast(rite)
+        .target_objects(&[returned, selected_a, selected_b])
+        .target_player(P1)
+        .commit();
+    let mut events = resolve_surge_response(&mut original, surge);
+    assert_eq!(original.state().objects[&rite].zone, Zone::Stack);
+    let outcome = original.resolve();
+    events.extend_from_slice(outcome.events());
+
+    assert_completed(&outcome);
+    outcome.assert_zone(&[returned], Zone::Hand);
+    outcome.assert_zone(&[selected_a, selected_b, surge], Zone::Graveyard);
+    outcome.assert_zone(&[rite], Zone::Exile);
+    outcome.assert_zone(&[caster_library, target_library], Zone::Library);
+    assert!(
+        shuffled_players(&events).is_empty(),
+        "the independent return and exile do not authorize either player to shuffle"
+    );
+}
+
+/// A legal target in another selected mode still receives that mode's effect.
+#[test]
+fn quandrix_command_still_bounces_when_surge_invalidates_only_the_shuffle_player() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let command = scenario
+        .add_spell_to_hand_from_oracle(P0, "Quandrix Command", true, QUANDRIX_ORACLE)
+        .id();
+    let surge = scenario
+        .add_spell_to_hand_from_oracle(P1, "Surge of Salvation", true, SURGE_ORACLE)
+        .id();
+    let bounced = scenario.add_creature(P0, "Earlier Modal Target", 2, 2).id();
+    let selected_a = scenario
+        .add_creature_to_graveyard(P1, "Chosen Graveyard Card A", 1, 1)
+        .id();
+    let selected_b = scenario
+        .add_creature_to_graveyard(P1, "Chosen Graveyard Card B", 1, 1)
+        .id();
+    let caster_library = scenario.add_card_to_library_top(P0, "Caster Library Card");
+    let target_library = scenario.add_card_to_library_top(P1, "Target Library Card");
+    let mut runner = scenario.build();
+    let mut original = runner
+        .cast(command)
+        .modes(&[0, 3])
+        .target_objects(&[bounced, selected_a, selected_b])
+        .target_player(P1)
+        .commit();
+    let mut events = resolve_surge_response(&mut original, surge);
+    assert_eq!(original.state().objects[&command].zone, Zone::Stack);
+    let outcome = original.resolve();
+    events.extend_from_slice(outcome.events());
+
+    assert_completed(&outcome);
+    outcome.assert_zone(&[bounced], Zone::Hand);
+    outcome.assert_zone(&[selected_a, selected_b, command, surge], Zone::Graveyard);
+    outcome.assert_zone(&[caster_library, target_library], Zone::Library);
+    assert!(
+        shuffled_players(&events).is_empty(),
+        "the legal bounce mode must resolve without either player shuffling"
     );
 }
