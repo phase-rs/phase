@@ -26,7 +26,9 @@ use super::super::oracle_quantity::{
     parse_cda_quantity_with_context, parse_event_context_quantity,
 };
 use super::super::oracle_target::parse_type_phrase_folding;
-use super::super::oracle_util::{parse_mana_production, parse_number, TextPair};
+use super::super::oracle_util::{
+    parse_count_multiplier, parse_mana_production, parse_number, TextPair,
+};
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::types::ability::TargetFilter;
 
@@ -1057,14 +1059,40 @@ pub(super) fn parse_colorless_mana_production(text: &str) -> Option<(QuantityExp
     }
 }
 
-/// Parse a count prefix for mana amounts: "that much", "that many", "X", or
-/// an English/digit number.
+/// Parse a count prefix for mana amounts: "that much", "that many",
+/// "twice/three times that much|many", "X", or an English/digit number.
 ///
 /// Uses nom combinators for the "X"/"x" prefix matching, falling back to
 /// `oracle_util::parse_number` for English words and digits.
 pub(super) fn parse_mana_count_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
     let trimmed = text.trim_start();
     let lower = trimmed.to_lowercase();
+
+    // CR 603.2c + CR 608.2h + CR 106.4: "add twice that much {G}" — a
+    // multiplicative prefix over the batched trigger's event-context amount.
+    // Compose the shared multiplier grammar with the shared "that much/many"
+    // reference so every factor ("twice", "three times", "5 times") produces
+    // `Multiply { factor, inner: EventContextAmount }`. Deliberately does not
+    // recurse into arbitrary count expressions: "twice X" is not part of this
+    // grammar (no printing), and `apply_where_x_count_expression` only binds a
+    // bare `Variable { X }`, so accepting "twice X" would silently drop a
+    // trailing "where X is …" definition.
+    if let Some((factor, rest)) = nom_on_lower(trimmed, &lower, parse_count_multiplier) {
+        let rest_lower = rest.to_lowercase();
+        if let Some((qty, after)) = nom_on_lower(
+            rest,
+            &rest_lower,
+            crate::parser::oracle_nom::quantity::parse_that_much_or_many,
+        ) {
+            return Some((
+                QuantityExpr::Multiply {
+                    factor,
+                    inner: Box::new(QuantityExpr::Ref { qty }),
+                },
+                after.trim_start(),
+            ));
+        }
+    }
 
     if let Some((qty, rest)) = nom_on_lower(
         trimmed,
@@ -4302,6 +4330,74 @@ mod tests {
             }
             other => panic!("expected Effect::Mana, got {other:?}"),
         }
+    }
+
+    /// CR 603.2c + CR 608.2h + CR 106.4: "add twice that much {G}" — the
+    /// batched attack trigger's event-context amount multiplied by two.
+    /// Revert probe: without the multiplier arm in `parse_mana_count_prefix`,
+    /// the whole clause returns `None`.
+    #[test]
+    fn parse_add_twice_that_much_green_multiplies_event_context_amount() {
+        let effect = try_parse_add_mana_effect("add twice that much {G}")
+            .expect("multiplier-prefixed event-context mana clause must parse");
+        match effect {
+            Effect::Mana {
+                produced:
+                    ManaProduction::AnyOneColor {
+                        count,
+                        color_options,
+                        ..
+                    },
+                target,
+                ..
+            } => {
+                assert_eq!(color_options, vec![ManaColor::Green]);
+                assert_eq!(target, None);
+                assert_eq!(
+                    count,
+                    QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount
+                        }),
+                    }
+                );
+            }
+            other => panic!("expected green AnyOneColor Mana, got {other:?}"),
+        }
+    }
+
+    /// The multiplier is parameterized, not hardcoded: "three times" yields
+    /// factor 3 and the colorless tail still parses.
+    #[test]
+    fn parse_add_three_times_that_much_colorless_parameterizes_factor() {
+        let effect = try_parse_add_mana_effect("add three times that much {C}")
+            .expect("parameterized multiplier must parse");
+        match effect {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => assert_eq!(
+                count,
+                QuantityExpr::Multiply {
+                    factor: 3,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    }),
+                }
+            ),
+            other => panic!("expected colorless Mana, got {other:?}"),
+        }
+    }
+
+    /// The arm composes only with "that much/many"; "twice X" must decline
+    /// rather than silently drop a trailing "where X is ..." definition.
+    #[test]
+    fn parse_mana_count_prefix_declines_multiplier_over_bare_x() {
+        assert!(
+            parse_mana_count_prefix("twice X {G}").is_none(),
+            "multiplier over bare X must not parse"
+        );
     }
 
     /// CR 115.1 + CR 106.4: "Target player adds that much {C}" (Jetfire,
