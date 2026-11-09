@@ -50,6 +50,7 @@ import type {
 } from "../generated/interaction";
 import type { PhaseSocketTransport } from "../../services/openPhaseSocket";
 import type { FullTerminalDelivery } from "../../services/fullTerminalResult";
+import { decodeJsonEnvelope } from "../../network/wireEnvelope";
 
 // Minimal mock WebSocket. Latest-constructed instance is exposed via
 // `MockWebSocket.last` so tests can grab it synchronously — the adapter
@@ -5428,6 +5429,345 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
     return { settled, value: () => value };
   }
 
+  /** Authorize at the actual transport send, never when the test later bootstraps B. */
+  function strictSetupPeer(raw: MockWebSocket) {
+    const wire: string[] = [];
+    const rejected: string[] = [];
+    const envelopes: number[] = [];
+    let setup = false;
+    let receiving = Promise.resolve();
+    const receive = (text: string) => {
+      const frame = JSON.parse(text) as {
+        type: string; command_id?: number;
+        data?: { request_id?: number; request?: InteractionPreviewRequest };
+      };
+      wire.push(frame.type);
+      if (frame.type === "ClientHello") {
+        raw.dispatchSynthetic("message", CODEC_CONFIRMATION);
+        return;
+      }
+      if (frame.type === "Reconnect") {
+        setup = true;
+        return;
+      }
+      if (!["Action", "Interaction", "PreviewManaPayment", "PreviewInteraction", "ExportAuthoritativeState"].includes(frame.type)) return;
+      const reply = (value: unknown) => raw.dispatchSynthetic("message", JSON.stringify(value));
+      if (!setup) {
+        rejected.push(frame.type);
+        if (frame.type === "Action" || frame.type === "Interaction") {
+          reply({ type: "ActionRejected", command_id: frame.command_id, data: { reason: "Not in a game" } });
+        } else if (frame.type === "PreviewManaPayment") {
+          reply({ type: "ManaPaymentPreviewFailed", data: { request_id: frame.data!.request_id, message: "Not in a game" } });
+        } else if (frame.type === "PreviewInteraction") {
+          reply({ type: "InteractionPreviewFailed", data: { request_id: frame.data!.request!.requestId, message: "Not in a game" } });
+        } else {
+          reply({ type: "AuthoritativeStateExportFailed", data: { message: "Not in a game" } });
+        }
+        return;
+      }
+      if (frame.type === "Action" || frame.type === "Interaction") {
+        reply({ type: "ActionNoOp", command_id: frame.command_id, data: { full_key: REPLY_OWNERSHIP_FULL_KEY } });
+      } else if (frame.type === "PreviewManaPayment") {
+        reply({ type: "ManaPaymentPreview", data: { request_id: frame.data!.request_id, source_ids: [12] } });
+      } else if (frame.type === "PreviewInteraction") {
+        reply({ type: "InteractionPreview", data: { preview: {
+          requestId: frame.data!.request!.requestId,
+          interactionId: frame.data!.request!.interactionId,
+          status: { type: "confirmable" }, outcome: "advanced", summaries: [],
+        } } });
+      } else {
+        reply({ type: "AuthoritativeStateExport", data: { state: "authenticated B envelope" } });
+      }
+    };
+    raw.send.mockImplementation((value: string | Uint8Array) => {
+      if (typeof value === "string") receive(value);
+      else {
+        envelopes.push(value[0]);
+        // Decode in raw-send order just as the server's per-connection reader does.
+        receiving = receiving.then(async () => receive(await decodeJsonEnvelope(value)));
+      }
+    });
+    return { wire, rejected, envelopes };
+  }
+
+  it.each([
+    ["raw", "actionPendingChanged", "Action"], ["raw", "serverHello", "Interaction"],
+    ["gzip", "actionPendingChanged", "Interaction"], ["gzip", "serverHello", "Action"],
+  ] as const)(
+    "authenticates before %s %s consumers issue %s, previews and export",
+    async (transport, notification, kind) => {
+      const codec = realRuntimeCodec();
+      const { adapter, raw } = await establishCodecAdapter(codec.provider);
+      const baseline = codec.latestBaseline();
+      const request: InteractionPreviewRequest = {
+        requestId: "strict-reused-preview" as PreviewRequestId,
+        ...interactionSubmission("strict-preview-" + "x".repeat(300)),
+      };
+      const old = [
+        observe(kind === "Action" ? adapter.submitAction({ type: "PassPriority" }, 0)
+          : adapter.submitInteraction(interactionSubmission("strict-A"), 0)),
+        observe(adapter.previewManaPayment({ type: "PassPriority" }, 0)),
+        observe(adapter.previewInteraction(request, 0)),
+        observe(adapter.exportPersistenceState()),
+      ];
+      let next: PendingObservation[] = [];
+      let armed = true;
+      adapter.onEvent((event) => {
+        if (!armed || event.type !== notification) return;
+        if (event.type === "actionPendingChanged" && event.pending) return;
+        armed = false;
+        next = [
+          observe(kind === "Action" ? adapter.submitAction({ type: "PassPriority" }, 0)
+            : adapter.submitInteraction(interactionSubmission("strict-B"), 0)),
+          observe(adapter.previewManaPayment({ type: "PassPriority" }, 0)),
+          observe(adapter.previewInteraction(request, 0)),
+          observe(adapter.exportPersistenceState()),
+        ];
+      });
+      try {
+        expect(adapter.tryReconnect(session())).toBe(true);
+        await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
+        const successor = latestSocket();
+        const peer = strictSetupPeer(successor);
+        const hello = JSON.parse(CODEC_SESSION_HELLO) as { data: Record<string, unknown> };
+        if (transport === "gzip") hello.data.wire_formats = ["GzipEnvelopeV1"];
+        successor.dispatchSynthetic("message", JSON.stringify(hello));
+        await vi.waitFor(() => {
+          expect(next).toHaveLength(4);
+          expect(next[3].value()).toEqual({ resolvedWith: "authenticated B envelope" });
+        });
+        expect(peer.rejected).toEqual([]);
+        const setupIndex = peer.wire.indexOf("Reconnect");
+        expect(setupIndex).toBeGreaterThanOrEqual(0);
+        for (const type of [kind, "PreviewManaPayment", "PreviewInteraction", "ExportAuthoritativeState"]) {
+          expect(peer.wire.indexOf(type)).toBeGreaterThan(setupIndex);
+        }
+        if (transport === "gzip") expect(peer.envelopes).toContain(1);
+        expect(next[0].value()).toMatchObject({ resolvedWith: { events: [] } });
+        expect(next[1].value()).toEqual({ resolvedWith: [12] });
+        expect(next[2].value()).toMatchObject({ resolvedWith: { requestId: request.requestId } });
+        for (const outcome of old) expect(outcome.value()).toMatchObject({ code: "WS_CLOSED" });
+        for (const outcome of [...old, ...next]) expect(outcome.settled).toHaveBeenCalledOnce();
+        expect(raw.close).toHaveBeenCalledOnce();
+        expect(codec.leases[0].close).toHaveBeenCalledOnce();
+        expect(baseline.free).toHaveBeenCalledOnce();
+        deliverCodec(successor, "Full", codecGameStarted(5, 5));
+        await vi.waitFor(async () => expect((await adapter.getSnapshot()).state.turn_number).toBe(5));
+      } finally {
+        armed = false;
+        adapter.dispose();
+        codec.runtime.dispose();
+      }
+    },
+  );
+
+  it("owns a synchronous raw setup reply before a serverHello consumer submits", async () => {
+    MockWebSocket.last = null;
+    const adapter = new WebSocketAdapter(
+      "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      undefined, undefined, undefined,
+      { stateCodecSessionProvider: () => Promise.resolve(null) },
+    );
+    let command: PendingObservation | undefined;
+    adapter.onEvent((event) => {
+      if (event.type === "serverHello") command = observe(adapter.submitAction({ type: "PassPriority" }, 0));
+    });
+    const initialized = observe(adapter.initialize());
+    await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+    const raw = latestSocket();
+    const wire: string[] = [];
+    let setup = false;
+    raw.send.mockImplementation((text: string) => {
+      const frame = JSON.parse(text) as { type: string; command_id?: number };
+      wire.push(frame.type);
+      if (frame.type === "JoinGameWithPassword") {
+        setup = true;
+        raw.dispatchSynthetic("message", JSON.stringify(codecGameStarted(1, 1)));
+      } else if (frame.type === "Action") {
+        raw.dispatchSynthetic("message", JSON.stringify(setup
+          ? { type: "ActionNoOp", command_id: frame.command_id }
+          : { type: "ActionRejected", command_id: frame.command_id, data: { reason: "Not in a game" } }));
+      }
+    });
+    try {
+      raw.dispatchSynthetic("message", CORRELATED_HELLO);
+      await vi.waitFor(() => expect(initialized.value()).toEqual({ resolvedWith: undefined }));
+      expect(command?.value()).toMatchObject({ resolvedWith: { events: [] } });
+      expect(wire.indexOf("Action")).toBeGreaterThan(wire.indexOf("JoinGameWithPassword"));
+      expect((await adapter.getSnapshot()).state.turn_number).toBe(1);
+      expect(initialized.settled).toHaveBeenCalledOnce();
+      expect(command!.settled).toHaveBeenCalledOnce();
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it.each(["reply then close", "reply then throw"] as const)(
+    "discards an uncommitted raw setup bootstrap and settles initialization on %s",
+    async (ending) => {
+      MockWebSocket.last = null;
+      const codec = realRuntimeCodec();
+      const adapter = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+        undefined, undefined, undefined,
+        { stateCodecSessionProvider: codec.provider },
+      );
+      const initialized = observe(adapter.initialize());
+      const hello = vi.fn();
+      const errorRequests: PendingObservation[] = [];
+      adapter.onEvent((event) => {
+        if (event.type === "serverHello") hello();
+        if (event.type === "error") {
+          errorRequests.push(observe(adapter.submitAction({ type: "PassPriority" }, 0)));
+          throw new Error("setup error consumer failed");
+        }
+      });
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+      const raw = latestSocket();
+      raw.send.mockImplementation((text: string) => {
+        if (!text.includes('"type":"JoinGameWithPassword"')) return;
+        raw.dispatchSynthetic("message", JSON.stringify(codecGameStarted(99, 99)));
+        if (ending === "reply then close") {
+          raw.readyState = MockWebSocket.CLOSED;
+          raw.dispatchSynthetic("close");
+        } else {
+          throw new Error("setup transport failed after reply");
+        }
+      });
+      try {
+        raw.dispatchSynthetic("message", CORRELATED_HELLO);
+        await vi.waitFor(() => expect(initialized.settled).toHaveBeenCalledOnce());
+        expect(initialized.value()).not.toEqual({ resolvedWith: undefined });
+        await expect(adapter.getSnapshot()).rejects.toThrow("No game state available");
+        expect(hello).not.toHaveBeenCalled();
+        expect(submissionTypes(raw)).toEqual([]);
+        for (const request of errorRequests) {
+          expect(request.settled).toHaveBeenCalledOnce();
+          expect(request.value()).toMatchObject({ code: "ACTION_NOT_SENT" });
+        }
+        expect(codec.leases[0].close).toHaveBeenCalledOnce();
+        if (ending === "reply then throw") expect(raw.close).toHaveBeenCalledOnce();
+      } finally {
+        adapter.dispose();
+        codec.runtime.dispose();
+      }
+    },
+  );
+
+  it("settles A and leaves C owned when a failed B setup's error consumer requests work, supersedes and throws", async () => {
+    const codec = realRuntimeCodec();
+    const { adapter, raw } = await establishCodecAdapter(codec.provider);
+    const baseline = codec.latestBaseline();
+    const request: InteractionPreviewRequest = {
+      requestId: "setup-failure-preview" as PreviewRequestId,
+      ...interactionSubmission("setup-failure"),
+    };
+    const old = [
+      observe(adapter.submitAction({ type: "PassPriority" }, 0)),
+      observe(adapter.previewManaPayment({ type: "PassPriority" }, 0)),
+      observe(adapter.previewInteraction(request, 0)),
+      observe(adapter.exportPersistenceState()),
+    ];
+    let attempted: PendingObservation[] = [];
+    let initialization: PendingObservation | undefined;
+    let armed = true;
+    adapter.onEvent((event) => {
+      if (event.type !== "error" || !armed) return;
+      armed = false;
+      attempted = [
+        observe(adapter.submitInteraction(interactionSubmission("unsent-B"), 0)),
+        observe(adapter.previewManaPayment({ type: "PassPriority" }, 0)),
+        observe(adapter.previewInteraction(request, 0)),
+        observe(adapter.exportPersistenceState()),
+      ];
+      initialization = observe(adapter.initialize());
+      throw new Error("setup-error listener superseded B");
+    });
+    try {
+      expect(adapter.tryReconnect(session())).toBe(true);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
+      const failed = latestSocket();
+      failed.send.mockImplementation((text: string) => {
+        if (text.includes('"type":"Reconnect"')) throw new Error("B setup write failed");
+      });
+      failed.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+      await vi.waitFor(() => expect(initialization).toBeDefined());
+      for (const outcome of old) {
+        expect(outcome.value()).toMatchObject({ code: "WS_CLOSED" });
+        expect(outcome.settled).toHaveBeenCalledOnce();
+      }
+      for (const outcome of attempted) {
+        expect(outcome.value()).not.toBe("never settled");
+        expect(outcome.settled).toHaveBeenCalledOnce();
+      }
+      expect(submissionTypes(failed)).toEqual([]);
+      expect(raw.close).toHaveBeenCalledOnce();
+      expect(failed.close).toHaveBeenCalledOnce();
+      expect(codec.leases[0].close).toHaveBeenCalledOnce();
+      expect(codec.leases[1].close).toHaveBeenCalledOnce();
+      expect(baseline.free).toHaveBeenCalledOnce();
+      const current = await codecHandshake("JoinGameWithPassword", failed);
+      deliverCodec(current, "Full", codecGameStarted(5, 5));
+      await vi.waitFor(() => expect(initialization!.value()).toEqual({ resolvedWith: undefined }));
+      const command = observe(adapter.submitAction({ type: "PassPriority" }, 0));
+      deliverCodec(current, "Delta", codecStateUpdate(6, 6, { command_id: lastSubmissionCommandId(current) }));
+      await vi.waitFor(() => expect(command.value()).toMatchObject({ resolvedWith: { events: [] } }));
+      expect(codec.leases[2].close).not.toHaveBeenCalled();
+    } finally {
+      armed = false;
+      adapter.dispose();
+      codec.runtime.dispose();
+    }
+  });
+
+  it("clears every request and initialization owner before a synchronous close's pending listener throws", async () => {
+    MockWebSocket.last = null;
+    const adapter = new WebSocketAdapter(
+      "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      undefined, undefined, undefined,
+      { stateCodecSessionProvider: () => Promise.resolve(null) },
+    );
+    const initialized = observe(adapter.initialize());
+    const requests: PendingObservation[] = [];
+    const unsubscribe = adapter.onEvent((event) => {
+      if (event.type === "actionPendingChanged" && !event.pending) throw new Error("close listener failed");
+      if (event.type !== "serverHello") return;
+      requests.push(
+        observe(adapter.previewManaPayment({ type: "PassPriority" }, 0)),
+        observe(adapter.previewInteraction({
+          requestId: "close-boundary" as PreviewRequestId,
+          ...interactionSubmission("close-boundary"),
+        }, 0)),
+        observe(adapter.exportPersistenceState()),
+        observe(adapter.submitAction({ type: "PassPriority" }, 0)),
+      );
+    });
+    await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+    const raw = latestSocket();
+    raw.send.mockImplementation((text: string) => {
+      if (text.includes('"type":"JoinGameWithPassword"')) {
+        raw.dispatchSynthetic("message", JSON.stringify(codecGameStarted(99, 99)));
+      } else if (text.includes('"type":"Action"')) {
+        raw.readyState = MockWebSocket.CLOSED;
+        raw.dispatchSynthetic("close");
+      }
+    });
+    try {
+      raw.dispatchSynthetic("message", CORRELATED_HELLO);
+      await vi.waitFor(() => {
+        expect(initialized.settled).toHaveBeenCalledOnce();
+        expect(requests).toHaveLength(4);
+        for (const request of requests) expect(request.settled).toHaveBeenCalledOnce();
+      });
+      expect(initialized.value()).toMatchObject({ code: "WS_CLOSED" });
+      for (const request of requests) expect(request.value()).toMatchObject({ code: "WS_CLOSED" });
+      await expect(adapter.getSnapshot()).rejects.toThrow("No game state available");
+    } finally {
+      unsubscribe();
+      adapter.dispose();
+    }
+  });
+
   it.each(["Action", "Interaction"] as const)(
     "settles A's pending correlated %s before a live handoff and never consumes B's command",
     async (kind) => {
@@ -5575,8 +5915,7 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
         ];
         if (ending === "dispose") adapter.dispose();
         if (ending.startsWith("supersede")) {
-          // Permit an explicit C attachment: this listener is deliberately
-          // replacing B before its Reconnect setup has been sent.
+          // C replaces the setup-ordered B while B's notification still owns cleanup.
           initialization = observe(adapter.initialize());
         }
         if (ending.includes("throw")) throw new Error("pending listener failed");
@@ -5601,7 +5940,6 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
         expect(baseline.free).toHaveBeenCalledOnce();
         expect(abandoned.close).toHaveBeenCalledOnce();
         expect(codec.leases[1].close).toHaveBeenCalledOnce();
-        expect(abandoned.send).not.toHaveBeenCalledWith(expect.stringContaining('"type":"Reconnect"'));
         if (ending.startsWith("supersede")) {
           const current = await codecHandshake("JoinGameWithPassword", abandoned);
           deliverCodec(current, "Full", codecGameStarted(5, 5));
@@ -5766,7 +6104,6 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
         expect.soft(abandoned.close).toHaveBeenCalledOnce();
         expect.soft(prepared.close).toHaveBeenCalledOnce();
         expect.soft(baseline.free).toHaveBeenCalledOnce();
-        expect(abandoned.send).not.toHaveBeenCalledWith(expect.stringContaining('"type":"JoinGameWithPassword"'));
         abandoned.dispatchSynthetic("message", CODEC_CONFIRMATION);
         deliverCodec(abandoned, "Full", codecGameStarted(99, 99));
         expect(codec.engine.state_codec_decode).toHaveBeenCalledOnce();

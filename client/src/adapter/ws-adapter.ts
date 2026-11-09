@@ -2232,7 +2232,7 @@ export class WebSocketAdapter implements EngineAdapter {
    * listener may already submit or preview on the replacement. Initialization
    * and game-start waiters instead belong to the join/handoff, not this socket.
    */
-  private rejectSocketRequests(): void {
+  private rejectSocketRequests(notify = true): boolean {
     const dropped = this.submission.drop();
     dropped?.reject(new AdapterError("WS_CLOSED", "Connection closed during action", true));
     this.rejectPendingManaPaymentPreviews(
@@ -2248,7 +2248,8 @@ export class WebSocketAdapter implements EngineAdapter {
       new AdapterError("WS_CLOSED", "Connection closed during seat mutation", true),
     );
     this.rejectAbandon(new AdapterError("WS_CLOSED", "Connection closed while abandoning game", true));
-    if (dropped) this.emit({ type: "actionPendingChanged", pending: false });
+    if (dropped && notify) this.emit({ type: "actionPendingChanged", pending: false });
+    return dropped !== null;
   }
 
   /** Connect to a local native full server and stop once this socket has a
@@ -2413,6 +2414,9 @@ export class WebSocketAdapter implements EngineAdapter {
       return;
     }
     let closed = false;
+    let previousPending = false;
+    let settingUp = true;
+    let setupMessages: MessageEvent<string>[] | null = null;
     const closeSocket = () => {
       if (closed) return;
       closed = true;
@@ -2422,6 +2426,7 @@ export class WebSocketAdapter implements EngineAdapter {
       socket.ws.onmessage = null;
       socket.ws.onerror = null;
       socket.ws.onclose = null;
+      setupMessages = null;
       try {
         if (this.ws === socket.ws) {
           this.ws = null;
@@ -2434,7 +2439,11 @@ export class WebSocketAdapter implements EngineAdapter {
           // This continuation still owns B. A listener may have claimed B
           // before disposing, throwing, or starting C; never leave its work
           // parked when B is retired, and never touch an already-adopted C.
-          this.rejectSocketRequests();
+          previousPending = this.rejectSocketRequests(false) || previousPending;
+        }
+        if (previousPending) {
+          previousPending = false;
+          this.emit({ type: "actionPendingChanged", pending: false });
         }
       } finally {
         closeSocket();
@@ -2465,31 +2474,33 @@ export class WebSocketAdapter implements EngineAdapter {
 
       const previous = this.ws;
       const closePrevious = this.closeSocket;
-      this.ws = socket.ws;
-      this.closeSocket = closeSocket;
-      // Publish B before closing A: a synchronous predecessor close must not
-      // settle B's work or schedule another reconnect. The server's seat swap
-      // does not close A, so adoption must release its wrapper and baseline.
-      this.stateCodec.adopt(bootstrap, socket.ws);
-      this._serverInfo = socket.serverInfo;
+      // Keep the candidate private until setup has entered its transport's
+      // serialized write order. Neither an error callback nor a synchronous
+      // setup response may expose an unauthenticated replacement.
+      this.ws = null;
+      this.closeSocket = null;
+      this.stateCodec.clearRecovery();
+      if (this.pingInterval) {
+        clearInterval(this.pingInterval);
+        this.pingInterval = null;
+      }
       if (previous) {
         previous.onmessage = null;
         previous.onerror = null;
         previous.onclose = null;
         try {
-          this.rejectSocketRequests();
+          previousPending = this.rejectSocketRequests(false);
         } finally {
-          // The old lease must be released even if a pending listener throws
-          // or synchronously disposes/supersedes the adopted socket.
           closePrevious?.();
         }
       }
-      if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
-      this.emit({ type: "serverHello", info: socket.serverInfo, compatible: true });
-      if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
-      this.startPing();
+      if (this.disposed || this.stateCodecPreparation !== preparation) return;
 
       socket.ws.onmessage = (event) => {
+        if (settingUp) {
+          (setupMessages ??= []).push(event);
+          return;
+        }
         if (this.disposed || this.ws !== socket.ws) return;
         this.lastInboundAt = Date.now();
         let message: unknown;
@@ -2546,70 +2557,47 @@ export class WebSocketAdapter implements EngineAdapter {
           clearInterval(this.pingInterval);
           this.pingInterval = null;
         }
-        // Settled above the identity-rejection guard: a close that arrives
-        // while the latch is set must still settle the caller's promise, or
-        // the submission hangs forever holding the dispatch mutex.
-        const droppedSubmission = this.submission.drop();
-        if (droppedSubmission) {
-          droppedSubmission.reject(
-            new AdapterError("WS_CLOSED", "Connection closed during action", true),
-          );
-          this.emit({ type: "actionPendingChanged", pending: false });
-        }
-        // Deliberately scoped to the submission slot. The seven reject helpers
-        // below still skip on the identity-rejected path; none of them holds the
-        // dispatch mutex, so none can freeze the board the way a parked
-        // submission does. Widening the hoist is a separate judgement.
-        if (this.sessionIdentityRejected) return;
-        // Clear the "host waiting for opponent" latch on socket close —
-        // otherwise a host who received GameCreated, disconnected before
-        // GameStarted, and then reconnected through a different path would
-        // fire `opponentJoined` spuriously on the replayed GameStarted.
-        this.hostWaitingForOpponent = false;
-        this.rejectPendingManaPaymentPreviews(
-          new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
-        );
-        this.rejectAuthoritativeStateExport(
-          new AdapterError("WS_CLOSED", "Connection closed during authoritative-state export", true),
-        );
-        this.rejectPendingInteractionPreviews(
-          new AdapterError("WS_CLOSED", "Connection closed during interaction preview", true),
-        );
-        this.rejectPregameMutation(
-          new AdapterError("WS_CLOSED", "Connection closed during seat mutation", true),
-        );
-        this.rejectAbandon(new AdapterError("WS_CLOSED", "Connection closed while abandoning game", true));
-        // Admission of the initial fallback precedes the generic rejection below,
-        // and a retryable loss inside an active episode retries within the
-        // episode's own deadline: only the episode may settle the initialization.
-        if (this.admitInitialFallback(bootstrap, socket.ws)) {
-          this.attemptReconnect(true);
-          return;
-        }
-        if (this.initialFallbackActive()) {
-          this.attemptReconnect();
-          return;
-        }
-        if (this.initReject) {
-          this.initReject(
-            new AdapterError("WS_CLOSED", "Connection closed before game started", true),
-          );
-          this.initResolve = null;
-          this.initReject = null;
-        } else if (this.pregameReject) {
-          this.pregameReject(
-            new AdapterError("WS_CLOSED", "Connection closed before native seat attachment", true),
-          );
-          this.pregameResolve = null;
-          this.pregameReject = null;
-        } else if (this.gameStartedReject) {
-          this.gameStartedReject(
-            new AdapterError("WS_CLOSED", "Connection closed before game started", true),
-          );
-          this.gameStartedResolve = null;
-          this.gameStartedReject = null;
-        } else if (this.snapshot !== null || this.playerToken !== null) {
-          this.attemptReconnect();
+        // Request ownership and lifecycle settlement precede the notification:
+        // even a synchronous close listener that throws or starts C must not
+        // strand this socket's previews, export, or initialization.
+        const droppedSubmission = this.rejectSocketRequests(false);
+        try {
+          if (this.sessionIdentityRejected) return;
+          // A replayed GameStarted must not announce an already-lost opponent.
+          this.hostWaitingForOpponent = false;
+          // Initial fallback, unlike an ordinary reconnect, owns its join
+          // promise across retryable losses until its episode ends.
+          if (this.admitInitialFallback(bootstrap, socket.ws)) {
+            this.attemptReconnect(true);
+            return;
+          }
+          if (this.initialFallbackActive()) {
+            this.attemptReconnect();
+            return;
+          }
+          if (this.initReject) {
+            this.initReject(
+              new AdapterError("WS_CLOSED", "Connection closed before game started", true),
+            );
+            this.initResolve = null;
+            this.initReject = null;
+          } else if (this.pregameReject) {
+            this.pregameReject(
+              new AdapterError("WS_CLOSED", "Connection closed before native seat attachment", true),
+            );
+            this.pregameResolve = null;
+            this.pregameReject = null;
+          } else if (this.gameStartedReject) {
+            this.gameStartedReject(
+              new AdapterError("WS_CLOSED", "Connection closed before game started", true),
+            );
+            this.gameStartedResolve = null;
+            this.gameStartedReject = null;
+          } else if (this.snapshot !== null || this.playerToken !== null) {
+            this.attemptReconnect();
+          }
+        } finally {
+          if (droppedSubmission) this.emit({ type: "actionPendingChanged", pending: false });
         }
       };
 
@@ -2618,29 +2606,56 @@ export class WebSocketAdapter implements EngineAdapter {
       // source-scoped and must neither settle nor close the successor.
       if (
         this.disposed
-        || this.ws !== socket.ws
         || this.stateCodecPreparation !== preparation
         || preparation.signal.aborted
       ) return;
+      if (closed) {
+        this.rejectInitialization(new AdapterError("WS_CLOSED", "Connection closed during setup", true));
+        if (this.reconnectInFlight) this.attemptReconnect();
+        return;
+      }
 
-      if (!this.send(setupFrame)) {
-        if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
+      // Use this candidate's existing write seam, not the public socket: gzip
+      // enqueues setup before any subsequently notified consumer can enqueue
+      // a command. Raw transports can reply synchronously, so handlers above
+      // retain those replies until the send has returned successfully.
+      if (!this.send(setupFrame, socket.ws)) {
+        if (this.disposed || this.stateCodecPreparation !== preparation) return;
         if (this.initialFallbackActive()) {
           this.failInitialFallback(initialFallbackFailure());
           return;
         }
-        closeSocket();
-        // Keep the close consumer: its deferred notification owns reconnect
-        // scheduling and the normal pending-request settlement.
-        retained = true;
-        if (this.initReject) {
-          this.initReject(
-            new AdapterError("WS_CLOSED", "Failed to send setup frame", true),
-          );
-          this.initResolve = null;
-          this.initReject = null;
-        }
+        this.rejectInitialization(new AdapterError("WS_CLOSED", "Failed to send setup frame", true));
+        if (this.reconnectInFlight) this.attemptReconnect();
         return;
+      }
+      if (this.disposed || this.stateCodecPreparation !== preparation) return;
+      if (closed) {
+        this.rejectInitialization(new AdapterError("WS_CLOSED", "Connection closed during setup", true));
+        if (this.reconnectInFlight) this.attemptReconnect();
+        return;
+      }
+      this.ws = socket.ws;
+      this.closeSocket = closeSocket;
+      this.stateCodec.adopt(bootstrap, socket.ws);
+      this._serverInfo = socket.serverInfo;
+      settingUp = false;
+      if (previousPending) {
+        previousPending = false;
+        this.emit({ type: "actionPendingChanged", pending: false });
+      }
+      if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
+      this.emit({ type: "serverHello", info: socket.serverInfo, compatible: true });
+      if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
+      this.startPing();
+      // The message-handler closure can populate this during synchronous send.
+      const messages = setupMessages as MessageEvent<string>[] | null;
+      setupMessages = null;
+      if (messages) {
+        for (const message of messages) {
+          if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
+          socket.ws.onmessage?.(message);
+        }
       }
       retained = !this.disposed && this.ws === socket.ws
         && this.stateCodecPreparation === preparation;
@@ -3585,8 +3600,7 @@ export class WebSocketAdapter implements EngineAdapter {
    * throws, so callers — especially `submitAction` — can recover rather than
    * leaving the adapter wedged. Mirrors the guarded send in `PeerSession`.
    */
-  private send(msg: unknown): boolean {
-    const ws = this.ws;
+  private send(msg: unknown, ws = this.ws): boolean {
     // An active initial fallback reports through its initialization only.
     const quiet = this.initialFallbackActive();
     if (!ws || ws.readyState !== WebSocket.OPEN) {
