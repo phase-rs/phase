@@ -9817,6 +9817,18 @@ pub(super) fn resume_pending_continuation_if_priority(
             || state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
             || !after.is_strictly_inside(&before)
         {
+            // CR 614.17a + CR 118.12: a recovered payment committed its accepted
+            // prefix and its surviving continuation to canonical state; the
+            // printed rider runs once that continuation is finished.
+            if matches!(state.waiting_for, WaitingFor::Priority { .. })
+                && state.active_ability_continuation().is_none()
+                && state
+                    .payment_transaction
+                    .as_ref()
+                    .is_some_and(|transaction| transaction.recovered_rider.is_some())
+            {
+                payment_transaction::resume_recovered_rider(state, events)?;
+            }
             return Ok(());
         }
     }

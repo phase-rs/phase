@@ -15,7 +15,10 @@ use engine::game::effects::resolve_ability_chain;
 use engine::game::engine::apply;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{AbilityCost, Effect, QuantityExpr, ResolvedAbility, TargetFilter};
+use engine::types::ability::{
+    AbilityCost, CardSelectionMode, DiscardSelfScope, Effect, QuantityExpr, ResolvedAbility,
+    TargetFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -360,6 +363,37 @@ fn concession_board() -> (GameRunner, engine::types::identifiers::ObjectId) {
     (runner, source)
 }
 
+/// The concession board with two cards in P0's hand, so the discard leg of a
+/// `Composite` cost has a real choice after the draw leg.
+fn concession_board_with_hand() -> (GameRunner, engine::types::identifiers::ObjectId) {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in 0..3 {
+        scenario.with_library_top(PlayerId(player), &STAGED_LIBRARY);
+    }
+    let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+    scenario
+        .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+        .from_oracle_text(STINKWEED_IMP_ORACLE);
+    scenario.add_creature_from_oracle(P1, "Maralen of the Mornsong", 2, 3, MARALEN_ORACLE);
+    scenario.add_enchantment_from_oracle(PlayerId(2), "Humility", HUMILITY_ORACLE);
+    scenario.add_card_to_hand(P0, "Hand A");
+    scenario.add_card_to_hand(P0, "Hand B");
+    let mut runner = scenario.build();
+    evaluate_layers(runner.state_mut());
+    (runner, source)
+}
+
+/// One chosen discard by the ability's controller.
+fn discard_cost() -> AbilityCost {
+    AbilityCost::Discard {
+        count: QuantityExpr::Fixed { value: 1 },
+        filter: None,
+        selection: CardSelectionMode::Chosen,
+        self_scope: DiscardSelfScope::FromHand,
+    }
+}
+
 fn is_dredge_prompt_for_p0(state: &GameState) -> bool {
     matches!(state.waiting_for, WaitingFor::ReplacementChoice { player, .. } if player == P0)
 }
@@ -615,4 +649,125 @@ fn a_concession_after_one_declined_replacement_keeps_the_performed_draw() {
         1,
         "the rider's life gain is published exactly once"
     );
+}
+
+/// CR 104.3a + CR 800.4a + CR 614.17a + CR 118.12: the accepted prefix is
+/// followed by another open choice (the discard leg). A concession must still
+/// keep the performed draw in canonical state and resume the outstanding cursor,
+/// with the printed rider deferred until the payment actually completes.
+///
+/// Revert probe: dropping the recovered-rider carrier makes the concession fall
+/// back to the departure-adjusted replay, which loses the performed draw and
+/// cannot answer the recorded Dredge decline.
+#[test]
+fn a_concession_after_one_declined_replacement_keeps_the_prefix_when_a_discard_is_open() {
+    let (mut runner, source) = concession_board_with_hand();
+    let mut root = ResolvedAbility::new(
+        pay_cost(AbilityCost::Composite {
+            costs: vec![draw_cost(1), discard_cost()],
+        }),
+        vec![],
+        source,
+        P0,
+    );
+    root.sub_ability = Some(Box::new(ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    )));
+    let life_before = runner.life(P0);
+    let (hand_before, library_before) = hand_and_library(&runner, P0);
+    let state = runner.state_mut();
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+
+    assert!(state.payment_transaction.is_some(), "the payment is staged");
+    assert!(
+        is_dredge_prompt_for_p0(state),
+        "leg 1 raised its Dredge prompt"
+    );
+    apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+        .expect("declining leg 1's Dredge accepts the draw");
+    let WaitingFor::DiscardChoice { cards, .. } = &state.waiting_for else {
+        panic!(
+            "the discard leg owns the outstanding cursor: {:?}",
+            state.waiting_for
+        );
+    };
+    let cards = cards.clone();
+    assert!(
+        cards.len() >= 2,
+        "the drawn card and the setup cards are eligible"
+    );
+
+    let concession = apply(
+        state,
+        PlayerId(2),
+        GameAction::Concede {
+            player_id: PlayerId(2),
+        },
+    )
+    .expect("a player can concede at any time");
+    assert!(
+        concession.events.iter().any(|event| matches!(
+            event,
+            GameEvent::CardDrawn { player_id, .. } if *player_id == P0
+        )),
+        "the performed prefix draw is published when the prefix commits"
+    );
+
+    let state = runner.state();
+    assert!(
+        state
+            .payment_transaction
+            .as_ref()
+            .is_some_and(|transaction| transaction.recovered_rider.is_some()),
+        "only the printed rider remains deferred"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::DiscardChoice { .. }),
+        "the outstanding discard survives the concession"
+    );
+    assert_eq!(
+        hand_and_library(&runner, P0).0 - hand_before,
+        1,
+        "the performed draw is canonical, so its card is a legal discard"
+    );
+    assert_eq!(
+        runner.life(P0) - life_before,
+        0,
+        "the rider waits for completion"
+    );
+
+    apply(
+        runner.state_mut(),
+        P0,
+        GameAction::SelectCards {
+            cards: vec![cards[0]],
+        },
+    )
+    .expect("discard one of the eligible cards");
+
+    let state = runner.state();
+    assert!(
+        state.payment_transaction.is_none(),
+        "the rider carrier retires after the payment completes"
+    );
+    assert!(state.active_ability_continuation().is_none());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
+    assert!(!state.cost_payment_failed_flag, "the payment stays paid");
+    assert_eq!(
+        hand_and_library(&runner, P0).0 - hand_before,
+        0,
+        "one card was drawn and one discarded"
+    );
+    assert_eq!(
+        hand_and_library(&runner, P0).1,
+        library_before - 1,
+        "only the performed draw left the library"
+    );
+    assert_eq!(runner.life(P0) - life_before, 3, "the rider ran once");
 }

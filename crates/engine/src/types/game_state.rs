@@ -23561,6 +23561,14 @@ pub struct ResolutionPaymentTransaction {
     /// re-evaluates payer and quantity expressions after a pause/serde roundtrip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolving_trigger_context: Option<ResolvingTriggerContext>,
+    /// CR 614.17a + CR 118.12: an outside action can make the original base
+    /// unreplayable after an accepted answer. When that happens the accepted
+    /// prefix is committed canonically and this descriptor keeps only the
+    /// printed rider, run once the surviving continuation reaches priority
+    /// (`payment_transaction::resume_recovered_rider`). `None` for every
+    /// ordinary transaction; older saves deserialize to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovered_rider: Option<Box<ResolvedAbility>>,
 }
 
 /// One admitted action in a staged payment transaction. Both halves of the
@@ -59359,6 +59367,7 @@ mod restored_exact_attack_authority_tests {
                             match_count: None,
                             die_result: None,
                         }),
+                        recovered_rider: None,
                     }));
                     state.waiting_for.clone()
                 }
@@ -59820,6 +59829,7 @@ mod restored_exact_attack_authority_tests {
                 transcript: vec![],
                 base_waiting_for: base,
                 resolving_trigger_context: context,
+                recovered_rider: None,
             };
         let harmless = Box::new(ResolvedAbility::new(Effect::NoOp, vec![], source_id, P0));
         let mut admitted = Vec::new();

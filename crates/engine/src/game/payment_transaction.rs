@@ -13,7 +13,7 @@
 use crate::game::effects;
 use crate::game::engine::{self, EngineError};
 use crate::game::{engine_priority, triggers};
-use crate::types::ability::{EffectError, ResolvedAbility};
+use crate::types::ability::{Effect, EffectError, ResolvedAbility};
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -165,6 +165,7 @@ pub(crate) fn begin(
         transcript: Vec::new(),
         base_waiting_for: base.waiting_for.clone(),
         resolving_trigger_context,
+        recovered_rider: None,
     };
     *state = base;
     state.payment_transaction = Some(Box::new(transaction));
@@ -472,23 +473,30 @@ pub(crate) fn settle_after_outside_action(
     let Some(transaction) = state.payment_transaction.as_deref().cloned() else {
         return Ok(None);
     };
-    // CR 104.3a + CR 800.4a + CR 614.17a + CR 118.12: once a transcript answer
-    // was accepted, replaying the whole root on the departure-adjusted base
-    // would re-execute the accepted prefix under the departure's new
-    // prohibition — undoing a payment the player already chose. Re-materialize
-    // the accepted prefix on the pre-action base instead, mirror the departure
-    // there, and resume its outstanding cursor. Without a transcript the
-    // prefix is empty and the ordinary departure-adjusted replay is correct.
-    if let Some(pre_action) = pre_action.filter(|_| !transaction.transcript.is_empty()) {
-        if let Some(settled) =
-            settle_accepted_prefix_after_departure(state, pre_action, &transaction, departing)?
-        {
-            return Ok(Some(settled));
-        }
+    // A recovered transaction already committed its accepted prefix to the
+    // canonical state; the surviving continuation is ordinary resolution work.
+    if transaction.recovered_rider.is_some() {
+        return Ok(None);
     }
     let outcome = match replay(state, &transaction) {
         Ok(outcome) => outcome,
         Err(error) => {
+            // CR 104.3a + CR 800.4a + CR 614.17a + CR 118.12: once a transcript
+            // answer was accepted, a departure-adjusted base can make the
+            // transcript unreplayable and re-executing the accepted prefix
+            // would undo a payment the player already chose. Re-materialize the
+            // accepted prefix on the pre-action base instead, mirror the
+            // departure there, and resume its outstanding cursor.
+            if let Some(pre_action) = pre_action.filter(|_| !transaction.transcript.is_empty()) {
+                if let Some(settled) = settle_accepted_prefix_after_departure(
+                    state,
+                    pre_action,
+                    &transaction,
+                    departing,
+                )? {
+                    return Ok(Some(settled));
+                }
+            }
             tracing::debug!(
                 ?error,
                 "a staged payment's transcript no longer replays after an outside action"
@@ -568,7 +576,31 @@ fn settle_accepted_prefix_after_departure(
         }
     }
     if !returned_to_base_waiting(&shadow, &transaction.base_waiting_for) {
-        return Ok(None);
+        // CR 614.17a + CR 118.12: another prompt still owns the outstanding
+        // cursor. Commit the mirrored accepted prefix and that cursor to the
+        // canonical state so later answers resume it without replaying the
+        // accepted draw, and keep only the printed rider to run once the
+        // continuation reaches priority.
+        let recovered_rider = prepare_recovered_rider(&transaction.root, &mut shadow);
+        shadow.payment_transaction_replay = false;
+        shadow.payment_transaction_just_handled = false;
+        if let Some(rider) = recovered_rider {
+            let mut recovered = transaction.clone();
+            recovered.root = inert_root(transaction);
+            recovered.transcript.clear();
+            recovered.base_waiting_for = shadow.waiting_for.clone();
+            recovered.recovered_rider = Some(rider);
+            shadow.payment_transaction = Some(Box::new(recovered));
+        } else {
+            // No printed rider: the committed continuation is complete on its
+            // own, so the replay descriptor retires here.
+            shadow.payment_transaction = None;
+        }
+        let waiting_for = shadow.waiting_for.clone();
+        *state = shadow;
+        return Ok(Some(
+            ActionResult::applied(events, waiting_for).with_log_entries(log_entries),
+        ));
     }
     settle_replay_outcome(
         state,
@@ -580,6 +612,62 @@ fn settle_accepted_prefix_after_departure(
         },
     )
     .map(Some)
+}
+
+/// CR 614.17a + CR 118.12: the printed rider a recovered payment still owes.
+/// The parent context carries the same success bit `resolve_root_continuation`
+/// would set for a committed payment.
+fn prepare_recovered_rider(
+    root: &ResolvedAbility,
+    state: &mut GameState,
+) -> Option<Box<ResolvedAbility>> {
+    let sub = root.sub_ability.as_deref()?;
+    let mut parent = root.clone();
+    parent.context.optional_effect_performed = true;
+    let mut rider = sub.clone();
+    effects::apply_parent_chain_context(&mut rider, &parent, None, state);
+    Some(Box::new(rider))
+}
+
+/// A recovered descriptor is a rider carrier, not a replay root. An older
+/// reader that ignores `recovered_rider` must not re-run the accepted payment on
+/// the already-advanced canonical state, so the retained root is a no-op.
+fn inert_root(transaction: &ResolutionPaymentTransaction) -> Box<ResolvedAbility> {
+    Box::new(ResolvedAbility::new(
+        Effect::NoOp,
+        Vec::new(),
+        transaction.root.source_id,
+        transaction.root.controller,
+    ))
+}
+
+/// CR 614.17a + CR 118.12: run the printed rider of a recovered payment once its
+/// surviving continuation has completed and the game is back at priority.
+pub(crate) fn resume_recovered_rider(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    if !state
+        .payment_transaction
+        .as_ref()
+        .is_some_and(|transaction| transaction.recovered_rider.is_some())
+    {
+        return Ok(());
+    }
+    let transaction = *state
+        .payment_transaction
+        .take()
+        .expect("the recovered transaction is live");
+    state.payment_transaction_replay = false;
+    state.payment_transaction_just_handled = false;
+    let Some(rider) = transaction.recovered_rider else {
+        return Ok(());
+    };
+    restore_trigger_context(state, transaction.resolving_trigger_context.as_ref());
+    effects::resolve_ability_chain(state, &rider, events, 1).map_err(|error| {
+        EngineError::InvalidAction(format!("staged payment rider failed: {error:?}"))
+    })?;
+    Ok(())
 }
 
 /// CR 616.1: the chooser of the outstanding optional replacement prompt, when
@@ -658,6 +746,13 @@ pub(crate) fn project(state: &GameState) -> GameState {
     let Some(transaction) = state.payment_transaction.as_ref() else {
         return state.clone();
     };
+    if transaction.recovered_rider.is_some() {
+        let mut canonical = state.clone();
+        canonical.payment_transaction = None;
+        canonical.payment_transaction_replay = false;
+        canonical.payment_transaction_just_handled = false;
+        return canonical;
+    }
     match replay(state, transaction) {
         Ok(ReplayOutcome::Paused { mut shadow, .. })
         | Ok(ReplayOutcome::Completed { mut shadow, .. }) => {
@@ -792,6 +887,11 @@ pub(crate) fn owns_action(state: &GameState, action: &GameAction) -> bool {
     let Some(transaction) = state.payment_transaction.as_ref() else {
         return false;
     };
+    // A recovered transaction has no replay shadow; its surviving continuation
+    // and prompt are ordinary canonical resolution work.
+    if transaction.recovered_rider.is_some() {
+        return false;
+    }
     if is_outside_transaction(action) {
         return false;
     }
@@ -863,6 +963,7 @@ mod tests {
                 player: crate::types::player::PlayerId(0),
             },
             resolving_trigger_context: None,
+            recovered_rider: None,
         }));
         state.payment_transaction_replay = true;
         state.payment_transaction_just_handled = true;
@@ -936,6 +1037,7 @@ mod tests {
                 player: PlayerId(0),
             },
             resolving_trigger_context: None,
+            recovered_rider: None,
         }));
 
         for mut wire in [
@@ -1089,6 +1191,7 @@ mod tests {
             transcript: Vec::new(),
             base_waiting_for: state.waiting_for.clone(),
             resolving_trigger_context: None,
+            recovered_rider: None,
         }));
 
         let wire = serde_json::to_value(crate::game::derived_views::ClientGameStateRef::wrap(
@@ -1302,6 +1405,7 @@ mod tests {
             transcript: Vec::new(),
             base_waiting_for: state.waiting_for.clone(),
             resolving_trigger_context: None,
+            recovered_rider: None,
         }));
         (state, hidden_card)
     }
