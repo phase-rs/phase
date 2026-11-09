@@ -126,7 +126,7 @@ enum Limit {
 /// priority frame can sit on either side of several of them: a repetition that gains and then
 /// loses inside one resolution peaks between frames.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct PeriodExcursions {
+pub struct PeriodExcursions {
     by_scalar: BTreeMap<(PlayerId, PlayerScalar), Excursion>,
 }
 
@@ -185,6 +185,7 @@ impl PeriodExcursions {
                     .iter()
                     .flat_map(|p| p.player_counters.keys().copied())
             })
+            .chain(std::iter::once(PlayerCounterKind::Poison))
             .collect();
         let mut excursions = Self::default();
         for player in &first.players {
@@ -225,6 +226,26 @@ impl PeriodExcursions {
                         );
                         highest = highest.max(delta_gained);
                         lowest = lowest.min(-delta_lost);
+                    }
+                } else if scalar == PlayerScalar::Energy {
+                    // Conservative peak bound for energy: the total energy gained during the period
+                    // is net_change + energy_paid_or_lost_change. This captures intra-frame peaks
+                    // where energy is gained then paid within a single resolution (frame sampling
+                    // only sees the net). The peak cannot exceed start + total_gained.
+                    if let Some(last_p) = frames
+                        .last()
+                        .and_then(|last| last.players.iter().find(|p| p.id == player.id))
+                    {
+                        let delta_paid = i64::from(
+                            last_p
+                                .energy_paid_or_lost_this_turn
+                                .saturating_sub(player.energy_paid_or_lost_this_turn),
+                        );
+                        let net = last_p.energy as i64 - player.energy as i64;
+                        let total_gained = net + delta_paid;
+                        if total_gained > 0 {
+                            highest = highest.max(total_gained);
+                        }
                     }
                 }
                 let net = frames
@@ -375,6 +396,171 @@ impl PeriodExcursions {
                     .min()
             })
             .min()
+    }
+
+    /// CR 732.2a: Repetitions that `state` can represent when choices follow a schedule
+    /// (e.g. piece-wise target switches across iterations), evaluating every schedule segment
+    /// and the leading announcement so later pins cannot escape headroom bounds.
+    pub fn representable_under_schedule(
+        per_cycle: &crate::analysis::resource::PeriodicDelta,
+        declaration: Option<&crate::analysis::decision_template::DecisionTemplate>,
+        observed: Option<&crate::analysis::decision_template::DecisionTemplate>,
+        points: &[crate::analysis::decision_template::DecisionPoint],
+        state: &GameState,
+        lead: crate::analysis::resource::AnnouncedLead<'_>,
+        budget: u32,
+    ) -> Option<u32> {
+        if budget == 0 {
+            return Some(0);
+        }
+        let mut switch_points = std::collections::BTreeSet::new();
+        switch_points.insert(0);
+
+        let collect_points =
+            |template: &crate::analysis::decision_template::DecisionTemplate,
+             switches: &mut std::collections::BTreeSet<u32>| {
+                if let Some(pts) = template.resolution_change_points() {
+                    switches.extend(pts.into_iter().filter(|&p| p < budget));
+                } else {
+                    for i in 0..budget {
+                        switches.insert(i);
+                    }
+                }
+            };
+
+        if let Some(d) = declaration {
+            collect_points(d, &mut switch_points);
+        }
+        if let Some(obs) = observed {
+            if declaration != observed {
+                collect_points(obs, &mut switch_points);
+            }
+        }
+        for point in points {
+            let rep_lead = lead.repetitions(&point.slot);
+            if rep_lead > 0 && rep_lead < budget {
+                switch_points.insert(rep_lead);
+            }
+        }
+        for p in switch_points.clone() {
+            for point in points {
+                let rep_lead = lead.repetitions(&point.slot);
+                if rep_lead > 0 && p.saturating_add(rep_lead) < budget {
+                    switch_points.insert(p + rep_lead);
+                }
+            }
+        }
+
+        let mut current_values: BTreeMap<(PlayerId, PlayerScalar), i64> = BTreeMap::new();
+        let counter_kinds: std::collections::BTreeSet<_> = state
+            .players
+            .iter()
+            .flat_map(|p| p.player_counters.keys().copied())
+            .chain(std::iter::once(PlayerCounterKind::Poison))
+            .collect();
+        let scalar_templates = [
+            PlayerScalar::Life,
+            PlayerScalar::LifeGainedThisTurn,
+            PlayerScalar::LifeLostThisTurn,
+            PlayerScalar::Energy,
+            PlayerScalar::EnergyPaidOrLostThisTurn,
+        ];
+        for player in &state.players {
+            let scalars = scalar_templates
+                .iter()
+                .copied()
+                .chain(counter_kinds.iter().copied().map(PlayerScalar::Counter));
+            for scalar in scalars {
+                current_values.insert((player.id, scalar), scalar.read(player));
+            }
+        }
+
+        let sorted_points: Vec<u32> = switch_points.into_iter().collect();
+        for (i, &start_idx) in sorted_points.iter().enumerate() {
+            let next_idx = sorted_points.get(i + 1).copied().unwrap_or(budget);
+            let len = next_idx - start_idx;
+            if len == 0 {
+                continue;
+            }
+            let c0 = Self::of_declared_iteration(
+                per_cycle,
+                declaration,
+                observed,
+                points,
+                state,
+                lead,
+                start_idx,
+            );
+            let c1 = if len > 1 {
+                Self::of_declared_iteration(
+                    per_cycle,
+                    declaration,
+                    observed,
+                    points,
+                    state,
+                    lead,
+                    start_idx + 1,
+                )
+            } else {
+                c0.clone()
+            };
+
+            let scalars: std::collections::BTreeSet<_> = c0
+                .by_scalar
+                .keys()
+                .chain(c1.by_scalar.keys())
+                .copied()
+                .collect();
+
+            let mut segment_fit = len;
+            for (player, scalar) in &scalars {
+                let Some(&val) = current_values.get(&(*player, *scalar)) else {
+                    continue;
+                };
+                let [a, b] = [&c0, &c1].map(|cycle| {
+                    cycle
+                        .by_scalar
+                        .get(&(*player, *scalar))
+                        .copied()
+                        .unwrap_or_default()
+                });
+                for limit in [Limit::Ceiling, Limit::Floor] {
+                    let mut start = val;
+                    for k in 1..=len {
+                        let rep = Excursion::nth(a, b, i64::from(k), limit);
+                        if !rep.fits(start, limit, scalar.range()) {
+                            segment_fit = segment_fit.min(k - 1);
+                            break;
+                        }
+                        start = start.saturating_add(rep.net);
+                    }
+                }
+            }
+
+            if segment_fit < len {
+                return Some(start_idx + segment_fit);
+            }
+
+            // Update current_values by net change of this segment
+            for (player, scalar) in scalars {
+                let [a, b] = [&c0, &c1].map(|cycle| {
+                    cycle
+                        .by_scalar
+                        .get(&(player, scalar))
+                        .copied()
+                        .unwrap_or_default()
+                });
+                let mut net_total = 0i64;
+                for k in 1..=len {
+                    net_total = net_total
+                        .saturating_add(Excursion::nth(a, b, i64::from(k), Limit::Ceiling).net);
+                }
+                if let Some(val) = current_values.get_mut(&(player, scalar)) {
+                    *val = val.saturating_add(net_total);
+                }
+            }
+        }
+        None
     }
 }
 

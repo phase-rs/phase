@@ -14168,6 +14168,27 @@ pub(crate) fn normalize_resolution_cast_offer_allocator(
     Ok(())
 }
 
+/// CR 614.1 + CR 732.2a: Re-validates the maximum representable repetitions for an
+/// already-parked `WaitingFor::PayAmountChoice` for `PayableResource::LoopCollapse`
+/// on restore, accounting for live replacements on the restored board.
+pub fn normalize_parked_loop_collapse_max(state: &mut GameState) {
+    let controller = match &state.waiting_for {
+        WaitingFor::PayAmountChoice {
+            player,
+            resource: PayableResource::LoopCollapse { .. },
+            ..
+        } => Some(*player),
+        _ => None,
+    };
+    if let Some(player) = controller {
+        if let Some(rep) = crate::game::turns::materialization_representable_bound(state, player) {
+            if let WaitingFor::PayAmountChoice { max, .. } = &mut state.waiting_for {
+                *max = (*max).min(rep);
+            }
+        }
+    }
+}
+
 /// CR 608.2c + CR 616.1: Checks that serialized instruction-result owners
 /// still name live resolving roots across replacement choices.
 /// A parked batch is necessarily unsettled; its completion is published only
@@ -28267,6 +28288,7 @@ impl GameStateDecode {
         validate_restored_zone_change_replay_keys(&state)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
+        normalize_parked_loop_collapse_max(&mut state);
         // The PERSISTED half of the projection gate; `decode` below carries the other.
         // See the pairing comment there for why one site is not enough.
         reject_viewer_projection_as_authority(&state)?;
@@ -28310,6 +28332,7 @@ impl GameStateDecode {
         let mut state = Self::materialize_prepared(value)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
+        normalize_parked_loop_collapse_max(&mut state);
         // NO viewer-projection guard here, deliberately. This is the TRANSPORT decode
         // path as much as a restore path: `ServerMessage::GameStarted { state, .. }`
         // (`server-core/src/protocol.rs`) carries a `filter_state_for_viewer` projection
@@ -39108,6 +39131,7 @@ mod forced_cascade_window_tests {
                         road: crate::analysis::loop_check::OfferRoad::Ring,
                         counted_take: Default::default(),
                         period: Default::default(),
+                        deliverable_capacity: crate::game::engine::MAX_SHORTCUT_CYCLES,
                     },
                 },
             ),
@@ -42099,6 +42123,7 @@ mod tests {
             road: OfferRoad::Ring,
             counted_take,
             period: Default::default(),
+            deliverable_capacity: crate::game::engine::MAX_SHORTCUT_CYCLES,
         };
         let proposed = serde_json::to_value(proposal(unperformable)).unwrap();
         assert_eq!(

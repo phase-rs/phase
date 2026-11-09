@@ -320,9 +320,31 @@ pub struct ShortcutProposal {
     /// absent observation on its refusing side in both bound directions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub published_declaration: Option<DecisionTemplate>,
+    /// CR 732.2a: the highest count an accept may legally specify against this offer, copied
+    /// off `ShortcutDecisionSchema::deliverable_capacity` at declare so the proposal carries the
+    /// same resource and representability proof across declaration, response, restore, and settlement.
+    #[serde(default = "default_deliverable_capacity")]
+    pub deliverable_capacity: u32,
+}
+
+fn default_deliverable_capacity() -> u32 {
+    crate::game::engine::MAX_SHORTCUT_CYCLES
 }
 
 impl ShortcutProposal {
+    pub fn effective_deliverable_capacity(&self) -> u32 {
+        if self.deliverable_capacity > 0
+            && self.deliverable_capacity <= crate::game::engine::MAX_SHORTCUT_CYCLES
+        {
+            self.deliverable_capacity
+        } else {
+            match self.count {
+                IterationCount::Fixed(n) => n.min(crate::game::engine::MAX_SHORTCUT_CYCLES),
+                _ => crate::game::engine::MAX_SHORTCUT_CYCLES,
+            }
+        }
+    }
+
     /// CR 732.2b: every place a responder may name to shorten this proposal — "a place where
     /// they will make a game choice that's different than what's been proposed". A place at or
     /// past the proposed count names no such choice, so the range ends one below the count.
@@ -331,15 +353,18 @@ impl ShortcutProposal {
     /// return type rather than an error: the empty range's floor sits above its ceiling, and
     /// `contains` refuses every place against it, zero included.
     pub fn shortening_places(&self) -> std::ops::RangeInclusive<u32> {
+        let capacity = self.effective_deliverable_capacity();
         let places = match self.count {
             IterationCount::Fixed(iterations) => iterations
                 .checked_sub(1)
-                .map_or(std::ops::RangeInclusive::new(1, 0), |last| 0..=last),
+                .map_or(std::ops::RangeInclusive::new(1, 0), |last| {
+                    0..=last.min(capacity)
+                }),
             // CR 704.5a: the drain runs until a player loses, so the proposal names no count
             // and no place is past its end.
-            IterationCount::UntilLethal => 0..=u32::MAX,
+            IterationCount::UntilLethal => 0..=capacity,
             // CR 732.2b: a proposal with no ending point has no place past its end.
-            IterationCount::WithoutEnd => 0..=u32::MAX,
+            IterationCount::WithoutEnd => 0..=capacity,
         };
         // CR 732.2a: a counted take that performs no repetition leaves place 0 the only place.
         match self.counted_take.refusal(1) {

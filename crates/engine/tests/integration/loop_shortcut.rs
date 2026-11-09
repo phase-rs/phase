@@ -650,92 +650,82 @@ fn printed_energy_initial_confirmation_refuses_when_cycle_unrepresentable_withou
     );
 }
 
-/// CR 107.14 + CR 601.2f/h: a cast continuation with an interactive multi-step cost
-/// followed by AbilityCost::PayEnergy that overflows energy_paid_or_lost_this_turn
-/// returns EngineError::LifeChangeUnrepresentable and rolls back the cast attempt.
+const PRIMAL_PRAYERS: &str = "When this enchantment enters, you get {E}{E} (two energy counters).\nYou may cast creature spells with mana value 3 or less by paying {E} rather than paying their mana costs. If you cast a spell this way, you may cast it as though it had flash.";
+
+/// CR 107.14 + CR 118.9 + CR 601.2f/h: casting a creature spell via Primal Prayers' printed
+/// alternative cost of paying {E} when energy_paid_or_lost_this_turn overflows returns
+/// EngineError::LifeChangeUnrepresentable and rolls back the cast attempt (#10543).
 #[test]
-fn cast_continuation_paying_energy_overflow_returns_life_change_unrepresentable_and_rolls_back() {
+fn cast_paying_energy_overflow_returns_life_change_unrepresentable_and_rolls_back() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Test Draw Spell", false, "Draw a card.")
+    scenario.add_enchantment_from_oracle(P0, "Primal Prayers", PRIMAL_PRAYERS);
+    let bears = scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
         .with_mana_cost(ManaCost::Cost {
-            shards: vec![ManaCostShard::Black],
+            shards: vec![ManaCostShard::Green],
             generic: 1,
         })
         .id();
-    let fodder = scenario.add_card_to_hand(P0, "Fodder");
-    scenario.with_mana_pool(
-        P0,
-        (0..5)
-            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
-            .collect(),
-    );
     let mut runner = scenario.build();
-
-    // Replace the spell's additional cost with: Discard 1 card, then Pay 1 Energy.
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&spell)
-        .unwrap()
-        .additional_cost = Some(engine::types::AdditionalCost::Required(
-        engine::types::ability::AbilityCost::Composite {
-            costs: vec![
-                engine::types::ability::AbilityCost::Discard {
-                    count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
-                    filter: None,
-                    selection: engine::types::ability::CardSelectionMode::Chosen,
-                    self_scope: engine::types::ability::DiscardSelfScope::FromHand,
-                },
-                engine::types::ability::AbilityCost::PayEnergy {
-                    amount: engine::types::ability::QuantityExpr::Fixed { value: 1 },
-                },
-            ],
-        },
-    ));
-
     runner.state_mut().players[P0.0 as usize].energy = 5;
     runner.state_mut().players[P0.0 as usize].energy_paid_or_lost_this_turn = u32::MAX;
 
-    // Begin cast: no targets needed.
     runner
         .act(GameAction::CastSpell {
-            object_id: spell,
-            card_id: runner.state().objects[&spell].card_id,
+            object_id: bears,
+            card_id: runner.state().objects[&bears].card_id,
             targets: vec![],
             payment_mode: CastPaymentMode::Auto,
         })
-        .expect("cast begins and pauses for discard");
-
+        .expect("cast begins and prompts for optional alternative cost choice");
     assert!(matches!(
         runner.state().waiting_for,
-        WaitingFor::PayCost {
-            kind: engine::types::PayCostKind::Discard,
-            ..
-        }
+        WaitingFor::OptionalCostChoice { .. }
     ));
-
-    // Answer the discard prompt with fodder. Continuation resumes to PayEnergy, which overflows.
-    let err = runner.act(GameAction::SelectCards {
-        cards: vec![fodder],
-    });
+    let err = runner.act(GameAction::DecideOptionalCost { pay: true });
 
     assert!(
         matches!(
             err,
             Err(EngineError::LifeChangeUnrepresentable { player }) if player == P0
         ),
-        "energy payment overflow in cast continuation must return LifeChangeUnrepresentable, got {:?}",
+        "energy payment overflow paying Primal Prayers alternative cost must return LifeChangeUnrepresentable, got {:?}",
         err
     );
-
-    // Rollback: fodder and spell remain in hand, energy_paid_or_lost_this_turn untouched.
-    assert_eq!(runner.state().objects[&fodder].zone, Zone::Hand);
-    assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Hand);
     assert_eq!(
         runner.state().players[P0.0 as usize].energy_paid_or_lost_this_turn,
         u32::MAX
+    );
+}
+
+/// CR 107.14 + CR 107.1c: choosing a non-zero energy amount for a "pay any amount of {E}"
+/// resolution prompt when energy_paid_or_lost_this_turn nears u32::MAX returns
+/// EngineError::LifeChangeUnrepresentable cleanly instead of panicking on expect (#10543).
+#[test]
+fn pay_amount_energy_near_tally_limit_returns_life_change_unrepresentable_without_panicking() {
+    let mut state = GameState::new_two_player(42);
+    state.players[P0.0 as usize].energy = 5;
+    state.players[P0.0 as usize].energy_paid_or_lost_this_turn = u32::MAX;
+    state.waiting_for = WaitingFor::PayAmountChoice {
+        player: P0,
+        resource: engine::types::game_state::PayableResource::Energy,
+        min: 0,
+        max: 5,
+        accumulated: 0,
+        source_id: ObjectId(999),
+        pending_mana_ability: None,
+    };
+    let mut runner = GameRunner::from_state(state);
+    let err = runner.act(GameAction::SubmitPayAmount { amount: 1 });
+    assert!(
+        matches!(
+            err,
+            Err(EngineError::LifeChangeUnrepresentable { player }) if player == P0
+        ),
+        "paying energy near tally limit must return LifeChangeUnrepresentable without panicking, got {:?}",
+        err
     );
 }
 
@@ -1824,6 +1814,7 @@ fn loop_shortcut_acting_player_reads_proposer() {
         road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
+        deliverable_capacity: 1000,
     };
     let wf_r = WaitingFor::RespondToShortcut {
         player: P2,
@@ -5099,6 +5090,7 @@ fn respond_to_shortcut_template_redacts_a_hidden_pin_for_non_proposers() {
                 road: engine::analysis::loop_check::OfferRoad::Ring,
                 counted_take: Default::default(),
                 period: Default::default(),
+                deliverable_capacity: 3,
             },
         };
         state
@@ -6775,6 +6767,7 @@ fn a_wire_zero_frames_per_period_fails_the_load_and_a_wire_two_does_not() {
                 road: engine::analysis::loop_check::OfferRoad::Ring,
                 counted_take: Default::default(),
                 period: Default::default(),
+                deliverable_capacity: 3,
             },
         };
         v["waiting_for"] = serde_json::to_value(&waiting).expect("a WaitingFor serializes");
@@ -12157,8 +12150,33 @@ fn a_ring_take_of_the_dina_drain_near_the_life_limit_is_bounded_and_lands_on_max
     );
 }
 
+/// 2-player drain using printed-card ingress: Dina, Soul Steeper ("Whenever you gain life, each
+/// opponent loses 1 life.") and Bloodthirsty Conqueror ("Whenever an opponent loses life, you gain
+/// that much life."), with P1 holding a castable Lightning Bolt off a Mountain making the loop OPTIONAL.
+fn setup_2p_optional_dina_conqueror(
+    mode: LoopDetectionMode,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 20);
+    let dina = scenario
+        .add_creature_from_oracle(P0, "Dina, Soul Steeper", 1, 3, DRAIN_CLERIC)
+        .id();
+    scenario.add_creature_from_oracle(P0, "Bloodthirsty Conqueror", 5, 5, BLOODTHIRSTY_CONQUEROR);
+    scenario.add_basic_land(P1, ManaColor::Red);
+    let bolt = scenario.add_bolt_to_hand(P1);
+    let kickoff = scenario
+        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = mode;
+    (runner, kickoff, bolt, dina)
+}
+
 /// CR 732.2a + CR 104.2a + CR 119.3: an optional winning Ring offer evaluates representable
-/// repetitions against cycles to lethal. When representable is less than cycles needed for living
+/// repetitions against cycles to lethal using printed-card ingress (Dina, Soul Steeper and
+/// Bloodthirsty Conqueror). When representable is less than cycles needed for living
 /// opponents to cross lethal damage, the offer is withheld and played out. When representable
 /// is sufficient, the offer is made, declarations exceeding representability are refused, and
 /// an accepted take completes to GameOver (#10543).
@@ -12168,7 +12186,7 @@ fn optional_winning_ring_offer_headroom_bounds_and_plays_out_when_insufficient()
     // Loop is played out without offering shortcut.
     {
         let (mut runner, kickoff, _bolt, _cleric) =
-            setup_2p_optional_drain(LoopDetectionMode::Interactive);
+            setup_2p_optional_dina_conqueror(LoopDetectionMode::Interactive);
         runner.state_mut().players[P0.0 as usize].life = i32::MAX - 4;
         runner.state_mut().players[P1.0 as usize].life = 5;
 
@@ -12189,7 +12207,7 @@ fn optional_winning_ring_offer_headroom_bounds_and_plays_out_when_insufficient()
     // Offer is made. Fixed(3) is refused. Fixed(2) is accepted and reaches GameOver at i32::MAX.
     {
         let (mut runner, kickoff, _bolt, _cleric) =
-            setup_2p_optional_drain(LoopDetectionMode::Interactive);
+            setup_2p_optional_dina_conqueror(LoopDetectionMode::Interactive);
         runner.state_mut().players[P0.0 as usize].life = i32::MAX - 4;
         runner.state_mut().players[P1.0 as usize].life = 4;
 
@@ -13351,6 +13369,7 @@ fn restored_proposal(
         road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
+        deliverable_capacity: n,
     }
 }
 
@@ -16348,6 +16367,13 @@ fn r5_drain_retargeted_to_p2_with_near_max_life_lost_bounds_take() {
             template: Some(template),
         })
         .expect("declare Fixed(3)");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ),
+        "declaration must open RespondToShortcut window"
+    );
 
     // When opponents accept, consumption check verifies drivability on final accept and refuses Fixed(3).
     while matches!(
@@ -19103,4 +19129,279 @@ fn object_growth_self_damage_recast_is_counted() {
         panic!("the drain-free loop is not offered");
     };
     assert!(!schema.is_bounded());
+}
+
+fn r5_piecewise_pin_template(slot: DecisionSlot, p1_count: u32, p2_count: u32) -> DecisionTemplate {
+    let source = slot.source.clone();
+    let total = p1_count + p2_count;
+    let seat = |s: PlayerId| Ranking::one(AnnouncementSubject::Seat(s));
+    DecisionTemplate {
+        owner: P0,
+        decisions: vec![PinnedDecision::Targets {
+            slot,
+            targets: vec![TargetPin::Scheduled(TargetSchedule::Piecewise(vec![
+                (0, seat(P1)),
+                (p1_count, seat(P2)),
+            ]))],
+        }],
+        replay: ReplayMode::Scheduled {
+            count: IterationCount::Fixed(total),
+        },
+        key: DecisionGroupKey::from_sources(
+            std::slice::from_ref(&source),
+            DecisionKind::LoopChoice,
+        ),
+    }
+}
+
+/// CR 732.2a: evaluate representability under each piecewise schedule segment so later pins
+/// cannot escape the scalar headroom cap (#10543).
+/// In 4p Sanguine Bond drain, pinning P1 for the first 2 repetitions and P2 thereafter
+/// when P2 has only 1 headroom remaining must refuse Fixed(4) and accept Fixed(3).
+#[test]
+fn sanguine_bond_piecewise_schedule_bounds_later_pins_at_declaration_and_take() {
+    let (mut runner, slot, _bond, _hexproof_src, _l0) = r5_reach_offer();
+    // P2 has life_lost_this_turn = u32::MAX - 1 (room for only 1 loss).
+    runner.state_mut().players[P2.0 as usize].life_lost_this_turn = u32::MAX - 1;
+
+    // Piecewise schedule: P1 for 1 iteration, then P2 for 3 iterations (total 4 iterations).
+    // In repetition 0 (in-flight lead) and 1, P1 takes the losses. In repetition 2, P2 takes
+    // 1 loss (saturating P2's headroom). Repetition 3 would cause a 2nd loss to P2 and overflow.
+    let template_4 = r5_piecewise_pin_template(slot.clone(), 1, 3);
+    runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(4),
+            template: Some(template_4),
+        })
+        .expect("declare Fixed(4)");
+    let WaitingFor::RespondToShortcut { proposal, .. } = &runner.state().waiting_for else {
+        panic!(
+            "expected RespondToShortcut, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        proposal.deliverable_capacity, 3,
+        "proposal deliverable_capacity must be bounded to 3 under schedule"
+    );
+
+    // When opponents accept, consumption check refuses Fixed(4) because deliverable_capacity is 3.
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::RespondToShortcut { .. }
+    ) {
+        runner
+            .act(GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            })
+            .expect("respond to shortcut");
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "Fixed(4) must be refused at consumption because deliverable_capacity is 3; got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Fixed(3) on fresh offer: P1 for 1 iteration, P2 for 2 iterations (total 3 iterations).
+    // Repetition 0 (lead) and 1 hit P1; repetition 2 hits P2 (1 loss, fitting within headroom).
+    let (mut runner_3, slot_3, _bond, _hexproof_src, _l0) = r5_reach_offer();
+    runner_3.state_mut().players[P2.0 as usize].life_lost_this_turn = u32::MAX - 1;
+    let template_3 = r5_piecewise_pin_template(slot_3, 1, 2);
+    runner_3
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(3),
+            template: Some(template_3),
+        })
+        .expect("declare Fixed(3)");
+    let WaitingFor::RespondToShortcut {
+        proposal: proposal_3,
+        ..
+    } = &runner_3.state().waiting_for
+    else {
+        panic!("expected RespondToShortcut");
+    };
+    assert_eq!(proposal_3.deliverable_capacity, 3);
+    while matches!(
+        runner_3.state().waiting_for,
+        WaitingFor::RespondToShortcut { .. }
+    ) {
+        runner_3
+            .act(GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            })
+            .expect("respond to shortcut");
+    }
+}
+
+/// CR 732.2b + CR 732.2a: proposal carries durable deliverable_capacity so public shortening
+/// cannot shorten to an over-cap count, and restored legacy proposals safely bound capacity (#10543).
+#[test]
+fn proposal_deliverable_capacity_caps_shortening_and_restored_legacy_proposal() {
+    let mut proposal = ShortcutProposal {
+        proposer: P0,
+        predicted_winner: Some(P0),
+        count: IterationCount::Fixed(10),
+        unbounded: Vec::new(),
+        rising: Vec::new(),
+        win_kind: Some(WinKind::Advantage),
+        win_kind_at: None,
+        template: None,
+        per_cycle: None,
+        shortened_by: None,
+        published_declaration: None,
+        leading_aims: Vec::new(),
+        road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
+        period: Default::default(),
+        deliverable_capacity: 5,
+    };
+    // shortening_places must be capped by deliverable_capacity (5)
+    let places = proposal.shortening_places();
+    assert_eq!(places, 0..=5);
+
+    // Restored legacy proposal where deliverable_capacity is 0 falls back to count / MAX_SHORTCUT_CYCLES
+    proposal.deliverable_capacity = 0;
+    assert_eq!(proposal.effective_deliverable_capacity(), 10);
+}
+
+const BOON_REFLECTION: &str = "If you would gain life, you gain twice that much life instead.";
+
+/// CR 614.1 + CR 732.2a: live replacement effects (Boon Reflection) entering between
+/// shortcut mark acceptance and the boundary prompt double each cycle's gain, so the
+/// prompt's max must be re-evaluated under live replacements, submit must re-verify,
+/// and restoring an already-parked prompt must re-bound max (#10543).
+#[test]
+fn boon_reflection_before_boundary_bounds_parked_prompt_and_revalidates_on_restore() {
+    let controller = P0;
+
+    // Control: without Boon Reflection, 2 repetitions gaining 1 each fit in headroom of 2.
+    let mut control_scenario = GameScenario::new();
+    control_scenario.at_phase(Phase::PreCombatMain);
+    let mut control_runner = control_scenario.build();
+    control_runner.state_mut().players[controller.0 as usize].life = i32::MAX - 2;
+    control_runner
+        .state_mut()
+        .pending_unbounded_materialization
+        .insert(
+            controller,
+            vec![
+                engine::types::game_state::PersistentAxisMaterialization::Life {
+                    player: controller,
+                    per_cycle_delta: 1,
+                },
+            ],
+        );
+    control_runner
+        .state_mut()
+        .pending_materialization_count
+        .insert(controller, 2);
+    let bound_control = engine::game::turns::materialization_representable_bound(
+        control_runner.state(),
+        controller,
+    );
+    assert_eq!(bound_control, Some(2));
+
+    // Subject: with Boon Reflection on the battlefield, 1 per cycle becomes 2 per cycle!
+    // Headroom of 2 can only fit 1 repetition (2 life).
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(controller, "Boon Reflection", BOON_REFLECTION);
+    let mut runner = scenario.build();
+    runner.state_mut().players[controller.0 as usize].life = i32::MAX - 2;
+    runner.state_mut().pending_unbounded_materialization.insert(
+        controller,
+        vec![
+            engine::types::game_state::PersistentAxisMaterialization::Life {
+                player: controller,
+                per_cycle_delta: 1,
+            },
+        ],
+    );
+    runner
+        .state_mut()
+        .pending_materialization_count
+        .insert(controller, 2);
+
+    let bound =
+        engine::game::turns::materialization_representable_bound(runner.state(), controller);
+    assert_eq!(
+        bound,
+        Some(1),
+        "Boon Reflection must halve representable repetitions"
+    );
+
+    // Park a PayAmountChoice with stale max = 2 (as if minted before Boon Reflection).
+    runner.state_mut().waiting_for = WaitingFor::PayAmountChoice {
+        player: controller,
+        resource: engine::types::game_state::PayableResource::LoopCollapse {
+            axis: engine::types::game_state::LoopCollapseAxis::Life,
+        },
+        min: 0,
+        max: 2,
+        accumulated: 0,
+        source_id: ObjectId(0),
+        pending_mana_ability: None,
+    };
+
+    // Submitting 2 must fail at the submit boundary because it is unrepresentable under live replacement.
+    let err = runner.act(GameAction::SubmitPayAmount { amount: 2 });
+    assert!(
+        matches!(err, Err(EngineError::LifeChangeUnrepresentable { player }) if player == controller),
+        "submitting amount that overflows under live replacement must return LifeChangeUnrepresentable"
+    );
+
+    // On restore of the parked prompt, normalize_parked_loop_collapse_max must re-bound max to 1.
+    runner.state_mut().waiting_for = WaitingFor::PayAmountChoice {
+        player: controller,
+        resource: engine::types::game_state::PayableResource::LoopCollapse {
+            axis: engine::types::game_state::LoopCollapseAxis::Life,
+        },
+        min: 0,
+        max: 2,
+        accumulated: 0,
+        source_id: ObjectId(0),
+        pending_mana_ability: None,
+    };
+    engine::types::game_state::normalize_parked_loop_collapse_max(runner.state_mut());
+    let WaitingFor::PayAmountChoice { max, .. } = runner.state().waiting_for else {
+        panic!("expected PayAmountChoice");
+    };
+    assert_eq!(
+        max, 1,
+        "restored parked prompt max must be re-bounded to 1 under live replacement"
+    );
+}
+
+const PLATINUM_ANGEL: &str =
+    "Flying\nYou can't lose the game and your opponents can't win the game.";
+
+/// CR 107.14 + CR 704.5c + CR 732.2a: A protected opponent at u32::MAX poison cannot receive
+/// another poison counter without overflowing the player counter tally. Frame-based excursions
+/// include Poison in counter kinds so representable_over_frames withholds further repetitions (#10543).
+#[test]
+fn protected_opponent_at_max_poison_prevents_loop_offer() {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 20);
+    scenario.add_creature_from_oracle(P0, "Test Drain Poison Cleric", 2, 2, DRAIN_POISON_CLERIC);
+    scenario.add_creature_from_oracle(P0, "Test Blood Sipper", 2, 2, BLOOD_SIPPER);
+    // P1 controls Platinum Angel so P1 cannot lose from 10+ poison counters
+    scenario.add_creature_from_oracle(P1, "Platinum Angel", 4, 4, PLATINUM_ANGEL);
+    scenario.add_basic_land(P1, ManaColor::Red);
+    scenario.add_bolt_to_hand(P1);
+    let kickoff = scenario
+        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+
+    let _ = runner.cast(kickoff).resolve();
+    runner.state_mut().players[P1.0 as usize].poison_counters = u32::MAX;
+
+    let (_events, wf) = drive_collect(&mut runner, 500);
+    assert!(
+        !matches!(wf, WaitingFor::LoopShortcut { .. }),
+        "poison at u32::MAX must prevent loop shortcut offer from being published; got {wf:?}"
+    );
 }

@@ -1462,49 +1462,79 @@ fn scan_step_end_mana_handlers(
     entries
 }
 
-/// The largest repetition count the controller's pending unbounded materializations can represent
-/// on the live board without overflowing any player-resource scalar; `None` when no live scalar
-/// limits it.
-fn materialization_representable_bound(state: &GameState, controller: PlayerId) -> Option<u32> {
-    let items = state.pending_unbounded_materialization.get(&controller)?;
-    let mut total_life_delta_by_player: std::collections::BTreeMap<PlayerId, u64> =
-        std::collections::BTreeMap::new();
+/// CR 614.1 + CR 732.2a: Checks whether materializing `count` repetitions of the controller's
+/// pending unbounded materializations can be represented without overflowing any player-resource
+/// scalar, evaluating individual signed edits through the live replacement pipeline.
+pub fn materialization_count_is_representable(
+    state: &GameState,
+    controller: PlayerId,
+    count: u32,
+) -> bool {
+    let Some(items) = state.pending_unbounded_materialization.get(&controller) else {
+        return true;
+    };
+    if count == 0 {
+        return true;
+    }
+    let mut probe_state = state.clone();
+    let mut probe_events = Vec::new();
     for item in items {
-        match item {
-            crate::types::game_state::PersistentAxisMaterialization::Life {
-                player,
-                per_cycle_delta,
-            } => {
-                if *per_cycle_delta > 0 {
-                    *total_life_delta_by_player.entry(*player).or_default() +=
-                        u64::from(*per_cycle_delta);
+        if let crate::types::game_state::PersistentAxisMaterialization::Life {
+            player,
+            per_cycle_delta,
+        } = item
+        {
+            if *per_cycle_delta > 0 {
+                let gain = per_cycle_delta.saturating_mul(count);
+                if crate::game::effects::life::try_apply_life_gain(
+                    &mut probe_state,
+                    *player,
+                    gain,
+                    &mut probe_events,
+                )
+                .is_err()
+                {
+                    return false;
                 }
             }
-            crate::types::game_state::PersistentAxisMaterialization::Tokens(_) => {
-                // CR 111.1: Tokens are represented as engine objects on the battlefield;
-                // they do not write to fixed-width player-resource scalars.
-            }
-            crate::types::game_state::PersistentAxisMaterialization::Counters(_) => {
-                // CR 122.1: Counters are placed on permanents; permanent counter additions
-                // saturate rather than rejecting through the player-resource ingress error channel.
-            }
         }
     }
-    let mut bound: Option<u64> = None;
-    for (player, total_delta) in total_life_delta_by_player {
-        if let Some(p) = state.players.iter().find(|pl| pl.id == player) {
-            let life_headroom = (i64::from(i32::MAX) - i64::from(p.life)).max(0) as u64;
-            let gained_headroom = u64::from(u32::MAX) - u64::from(p.life_gained_this_turn);
-            if let (Some(life_fit), Some(gained_fit)) = (
-                life_headroom.checked_div(total_delta),
-                gained_headroom.checked_div(total_delta),
-            ) {
-                let fit = life_fit.min(gained_fit);
-                bound = Some(bound.map_or(fit, |b| b.min(fit)));
-            }
+    true
+}
+
+/// The largest repetition count the controller's pending unbounded materializations can represent
+/// on the live board without overflowing any player-resource scalar; `None` when no live scalar
+/// limits it. Evaluates individual signed edits through live replacements (CR 614.1).
+pub fn materialization_representable_bound(state: &GameState, controller: PlayerId) -> Option<u32> {
+    let items = state.pending_unbounded_materialization.get(&controller)?;
+    let has_life = items.iter().any(|item| {
+        matches!(
+            item,
+            crate::types::game_state::PersistentAxisMaterialization::Life {
+                per_cycle_delta,
+                ..
+            } if *per_cycle_delta > 0
+        )
+    });
+    if !has_life {
+        return None;
+    }
+    let agreed = state
+        .pending_materialization_count
+        .get(&controller)
+        .copied()
+        .unwrap_or(crate::game::engine::MAX_SHORTCUT_CYCLES);
+    let mut low = 0u32;
+    let mut high = agreed;
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        if materialization_count_is_representable(state, controller, mid) {
+            low = mid;
+        } else {
+            high = mid - 1;
         }
     }
-    bound.map(|b| b.min(u32::MAX as u64) as u32)
+    Some(low)
 }
 
 /// CR 117.3a + CR 400.7: Complete a phase entry after the per-player empty-

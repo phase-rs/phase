@@ -2882,43 +2882,58 @@ fn interactive_loop_bridge_paths(
                     MAX_SHORTCUT_CYCLES,
                 );
             // CR 704.5a / CR 704.5c: measure how many cycles are required to eliminate every
-            // non-eliminated opponent. If the engine cannot represent that many repetitions,
-            // withhold the shortcut so the loop does not offer a count that overflows before lethal.
+            // non-eliminated opponent using the lethal-crossing authority (accounting for dip and net).
+            // If the engine cannot represent that many repetitions, withhold the shortcut so the loop
+            // does not offer a count that overflows before lethal.
             let frame_wise = delta.with_frame_wise_life_loss(&period_frames);
+            let periodic = crate::analysis::resource::PeriodicDelta {
+                frames_per_period: period_frames.len() as u32,
+                delta: delta.clone(),
+                victim_slot: Vec::new(),
+                declarable_victims: Vec::new(),
+                seat_life_charge: frame_wise.seat_life_charges(&[]),
+                cleanup: None,
+            };
             let cycles_to_lethal = state
                 .players
                 .iter()
                 .filter(|p| !p.is_eliminated && p.id != winner)
                 .map(|p| {
-                    // CR 119.3 + CR 704.5a: 0 or less life loses; read frame-wise life loss.
-                    let loss = -frame_wise.life.get(&p.id).copied().unwrap_or(0);
-                    // CR 704.5c: ten or more poison counters loses.
-                    let poison_gain = delta.poison.get(&p.id).copied().unwrap_or(0);
-                    let life_cycles = if loss > 0 {
-                        if p.life <= 0 {
-                            0
-                        } else {
-                            (i64::from(p.life) + loss - 1) / loss
-                        }
+                    let life_cycles = if p.life <= 0 {
+                        0
                     } else {
-                        i64::MAX
+                        let charges = periodic.declared_seat_life_charges(
+                            p.id,
+                            None,
+                            None,
+                            &[],
+                            state,
+                            crate::analysis::resource::ChargeBound::Ceiling,
+                            crate::analysis::resource::AnnouncedLead::None,
+                        );
+                        crate::analysis::resource::PeriodicDelta::first_life_crossing(
+                            charges,
+                            i64::from(p.life),
+                            MAX_SHORTCUT_CYCLES,
+                        )
+                        .map_or(u64::MAX, u64::from)
                     };
-                    let poison_cycles = if poison_gain > 0 {
-                        let needed = 10i64.saturating_sub(i64::from(p.poison_counters));
-                        if needed <= 0 {
-                            0
-                        } else {
-                            (needed + poison_gain - 1) / poison_gain
-                        }
+                    let poison_gain = delta.poison.get(&p.id).copied().unwrap_or(0);
+                    let poison_cycles = if p.poison_counters >= 10 {
+                        0
+                    } else if poison_gain > 0 {
+                        let needed = 10u64.saturating_sub(u64::from(p.poison_counters));
+                        needed.div_ceil(poison_gain as u64)
                     } else {
-                        i64::MAX
+                        u64::MAX
                     };
                     life_cycles.min(poison_cycles)
                 })
                 .max()
                 .unwrap_or(0);
-            let cycles_to_lethal = u64::try_from(cycles_to_lethal).unwrap_or(0);
-            if representable.is_some_and(|r| u64::from(r) < cycles_to_lethal) {
+            if cycles_to_lethal == u64::MAX
+                || representable.is_some_and(|r| u64::from(r) < cycles_to_lethal)
+            {
                 return;
             }
             let schema = build_shortcut_schema(
@@ -4166,7 +4181,34 @@ fn bounded_offer_tail(
     // count exceeds the own-declaration count. Both members are legal declarations, so the max
     // keeps "the ceiling is what SOME legal declaration may specify" true and keeps
     // `deliverable_capacity >= iteration_count` true by construction rather than by luck.
-    let measured_bound = own.capacity_count().max(witness_bound);
+    //
+    // CR 732.2a: evaluate representability under each piecewise schedule segment so later pins
+    // cannot escape the scalar headroom cap.
+    let own_cap = own.capacity_count();
+    let own_representable =
+        crate::analysis::headroom::PeriodExcursions::representable_under_schedule(
+            &periodic,
+            pins.as_ref(),
+            pins.as_ref(),
+            &points,
+            state,
+            lead,
+            own_cap,
+        );
+    let own_cap = own_representable.map_or(own_cap, |r| own_cap.min(r));
+    let witness_representable = witness.as_ref().and_then(|w| {
+        crate::analysis::headroom::PeriodExcursions::representable_under_schedule(
+            &periodic,
+            Some(w),
+            pins.as_ref(),
+            &points,
+            state,
+            lead,
+            witness_bound,
+        )
+    });
+    let witness_cap = witness_representable.map_or(witness_bound, |r| witness_bound.min(r));
+    let measured_bound = own_cap.max(witness_cap);
 
     // (8) The certificate, with the two fields the bounded class states differently from
     // Path A's spelled out at the site rather than mutated after the fact.
@@ -5721,32 +5763,11 @@ fn shortcut_consumption_bound(
     let per_cycle = match proposal.per_cycle.as_ref() {
         None => {
             if proposal.road == crate::analysis::loop_check::OfferRoad::Ring {
-                if let Some((_winner, _delta, prior)) = find_live_loop_winner(state) {
-                    let start = state
-                        .loop_detect_ring
-                        .iter()
-                        .position(|sample| std::sync::Arc::ptr_eq(sample, &prior))
-                        .unwrap_or(0);
-                    let period_frames: Vec<&GameState> = state
-                        .loop_detect_ring
-                        .iter()
-                        .skip(start)
-                        .map(|sample| &sample.live)
-                        .chain(std::iter::once(state))
-                        .collect();
-                    if let Some(r) =
-                        crate::analysis::headroom::PeriodExcursions::representable_over_frames(
-                            &period_frames,
-                            state,
-                            MAX_SHORTCUT_CYCLES,
-                        )
-                    {
-                        return ConsumptionDerivation::Measured(ConsumptionBound {
-                            ceiling: r,
-                            entries: Vec::new(),
-                        });
-                    }
-                }
+                let capacity = proposal.effective_deliverable_capacity();
+                return ConsumptionDerivation::Measured(ConsumptionBound {
+                    ceiling: capacity,
+                    entries: Vec::new(),
+                });
             }
             return ConsumptionDerivation::Unsigned;
         }
@@ -5831,17 +5852,11 @@ fn shortcut_consumption_bound(
                 .filter(|entry| entry.repetition <= accepted)
                 .collect()
         });
-    let ceiling = ceiling.capacity_count();
-    let cycle_0 = crate::analysis::headroom::PeriodExcursions::of_declared_iteration(
-        per_cycle, template, published, &points, state, lead, 0,
-    );
-    let cycle_1 = crate::analysis::headroom::PeriodExcursions::of_declared_iteration(
-        per_cycle, template, published, &points, state, lead, 1,
-    );
-    let representable = crate::analysis::headroom::PeriodExcursions::representable_repetitions(
-        &[cycle_0, cycle_1],
-        state,
-        MAX_SHORTCUT_CYCLES,
+    let ceiling = ceiling
+        .capacity_count()
+        .min(proposal.effective_deliverable_capacity());
+    let representable = crate::analysis::headroom::PeriodExcursions::representable_under_schedule(
+        per_cycle, template, published, &points, state, lead, ceiling,
     );
     let ceiling = representable.map_or(ceiling, |r| ceiling.min(r));
     ConsumptionDerivation::Measured(ConsumptionBound { ceiling, entries })
@@ -9288,6 +9303,29 @@ fn handle_declare_shortcut(
         }
         crate::analysis::decision_template::IterationCount::WithoutEnd => {}
     }
+    // CR 732.2a: bind deliverable_capacity to the proposal, evaluated under the declared template
+    // and leading announcement aims so later pins cannot escape the scalar headroom cap.
+    let deliverable_capacity =
+        if let Some(crate::analysis::resource::PeriodSignature::EveryRepetition(periodic)) =
+            &offer.certificate.per_cycle
+        {
+            let leading = leading_announcement_aims(state, offer.proposer);
+            let lead = crate::analysis::resource::AnnouncedLead::LeadingRepetition(&leading);
+            let rep = crate::analysis::headroom::PeriodExcursions::representable_under_schedule(
+                periodic,
+                template.as_ref(),
+                offer.declaration,
+                &offer.schema.points,
+                state,
+                lead,
+                offer.schema.deliverable_capacity,
+            );
+            rep.map_or(offer.schema.deliverable_capacity, |r| {
+                offer.schema.deliverable_capacity.min(r)
+            })
+        } else {
+            offer.schema.deliverable_capacity
+        };
     let proposal = crate::analysis::loop_check::ShortcutProposal {
         proposer: offer.proposer,
         predicted_winner: offer.predicted_winner,
@@ -9310,6 +9348,7 @@ fn handle_declare_shortcut(
         road: offer.road,
         counted_take: offer.counted_take,
         period: offer.period.clone(),
+        deliverable_capacity,
     };
     // CR 732.2b: living opponents in APNAP turn order, starting after the proposer.
     let opps: Vec<PlayerId> = crate::game::players::apnap_order_from(
@@ -23743,6 +23782,7 @@ mod stage2_injector_tests {
             road: crate::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
+            deliverable_capacity: MAX_SHORTCUT_CYCLES,
         };
         let mut result =
             crate::types::game_state::ActionResult::applied(Vec::new(), state.waiting_for.clone());
@@ -23900,6 +23940,7 @@ mod stage2_injector_tests {
             road: crate::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
+            deliverable_capacity: MAX_SHORTCUT_CYCLES,
         };
         let mut result =
             crate::types::game_state::ActionResult::applied(Vec::new(), state.waiting_for.clone());
