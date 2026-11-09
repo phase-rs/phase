@@ -351,6 +351,19 @@ pub struct ManaSourceOption {
 }
 
 impl ManaSourceOption {
+    pub(super) fn selected_taps_for_mana(&self) -> Vec<TapsForManaSelection> {
+        self.taps_for_mana_overrides
+            .iter()
+            .map(
+                |(definition_ref, production_override)| TapsForManaSelection {
+                    source: definition_ref.source,
+                    occurrence: definition_ref.occurrence.clone(),
+                    production_override: production_override.clone(),
+                },
+            )
+            .collect()
+    }
+
     pub fn semantic_selection(&self, state: &GameState) -> Option<ManaSourceSelection> {
         let source = state.objects.get(&self.object_id)?;
         Some(ManaSourceSelection {
@@ -361,17 +374,7 @@ impl ManaSourceOption {
             atomic_combination: self.atomic_combination.clone(),
             restrictions: self.restrictions.clone(),
             penalty: self.penalty,
-            taps_for_mana: self
-                .taps_for_mana_overrides
-                .iter()
-                .map(
-                    |(definition_ref, production_override)| TapsForManaSelection {
-                        source: definition_ref.source,
-                        occurrence: definition_ref.occurrence.clone(),
-                        production_override: production_override.clone(),
-                    },
-                )
-                .collect(),
+            taps_for_mana: self.selected_taps_for_mana(),
         })
     }
 }
@@ -731,20 +734,43 @@ pub(crate) fn live_land_mana_option_for_selection(
 /// CR 605.1b + CR 605.3b: Coupled `TapsForMana` triggered mana abilities are
 /// distinct immediate resolutions. Their own live effects and restrictions are
 /// appended after the base activated ability's output.
+#[derive(Clone)]
+pub(crate) struct LiveManaOutputGroups {
+    pub base: Vec<LiveManaOutputUnit>,
+    pub triggers: Vec<(TriggerDefinitionRef, Vec<LiveManaOutputUnit>)>,
+}
+
+pub(crate) fn live_mana_output_groups_for_option(
+    state: &GameState,
+    player: PlayerId,
+    option: &ManaSourceOption,
+) -> LiveManaOutputGroups {
+    LiveManaOutputGroups {
+        base: live_base_mana_output(state, player, option),
+        triggers: option
+            .taps_for_mana_overrides
+            .iter()
+            .map(|(trigger_ref, value)| {
+                (
+                    trigger_ref.clone(),
+                    live_taps_for_mana_output(state, trigger_ref, value),
+                )
+            })
+            .collect(),
+    }
+}
+
 pub(crate) fn live_mana_output_for_option(
     state: &GameState,
     player: PlayerId,
     option: &ManaSourceOption,
 ) -> Vec<LiveManaOutputUnit> {
-    let mut output = live_base_mana_output(state, player, option);
-    for (trigger_ref, production_override) in &option.taps_for_mana_overrides {
-        output.extend(live_taps_for_mana_output(
-            state,
-            trigger_ref,
-            production_override,
-        ));
-    }
-    output
+    let groups = live_mana_output_groups_for_option(state, player, option);
+    groups
+        .base
+        .into_iter()
+        .chain(groups.triggers.into_iter().flat_map(|(_, units)| units))
+        .collect()
 }
 
 fn live_base_mana_output(
@@ -1041,12 +1067,6 @@ pub(crate) fn activate_mana_source_option_with_output(
     events: &mut Vec<GameEvent>,
     resume: ManaAbilityResume,
 ) -> Result<WaitingFor, EngineError> {
-    for (trigger_ref, production_override) in &option.taps_for_mana_overrides {
-        state
-            .pending_taps_for_mana_overrides
-            .insert(trigger_ref.clone(), production_override.clone());
-    }
-
     let waiting_for = if let Some(ability_index) = option.ability_index {
         let ability = state
             .objects
@@ -1064,7 +1084,7 @@ pub(crate) fn activate_mana_source_option_with_output(
             }
             ManaSourceOutput::DeferredColorChoice { .. } => None,
         };
-        mana_abilities::activate_mana_ability(
+        mana_abilities::activate_mana_ability_with_selected_taps(
             state,
             option.object_id,
             player,
@@ -1073,8 +1093,12 @@ pub(crate) fn activate_mana_source_option_with_output(
             events,
             resume,
             production_override,
+            option.selected_taps_for_mana(),
         )?
     } else {
+        state
+            .pending_taps_for_mana_overrides
+            .extend(option.taps_for_mana_overrides.iter().cloned());
         let tapped = super::object_state::resolve_and_apply_object_edit(
             state,
             option.object_id,
@@ -3320,8 +3344,9 @@ fn land_mana_options(
     //
     // `taps_for_mana_overrides` carries the per-aura choice so the auto-tap
     // resolver can thread the correct `ProductionOverride` into the triggered
-    // mana ability at resolution time. `atomic_combination` includes the full
-    // output (land + aura) for planner coverage checks; `production_override_for_option`
+    // mana ability at resolution time. `atomic_combination` includes one choice
+    // marker per Aura, not its produced quantity; live grouped output supplies
+    // the planner's complete units. `production_override_for_option`
     // caps it to the land's own portion when dispatching the land's own ability.
     let aura_bonus = match aura_sources {
         Some(sources) => taps_for_mana_aura_bonus_indexed(state, object_id, controller, sources),

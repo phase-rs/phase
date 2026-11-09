@@ -1189,6 +1189,17 @@ pub(crate) fn reduce_cost_by_pool(
     mana_spend_permission: Option<ManaSpendPermission>,
     demand: Option<&ColorDemand>,
 ) -> ManaCost {
+    reduce_cost_by_pool_with_fundability(pool, cost, spell, mana_spend_permission, demand, None)
+}
+
+pub(crate) fn reduce_cost_by_pool_with_fundability(
+    pool: &ManaPool,
+    cost: &ManaCost,
+    spell: Option<&PaymentContext<'_>>,
+    mana_spend_permission: Option<ManaSpendPermission>,
+    demand: Option<&ColorDemand>,
+    fundable: Option<&dyn Fn(&ManaCost) -> bool>,
+) -> ManaCost {
     let (shards, generic) = match cost {
         ManaCost::NoCost
         | ManaCost::SelfManaCost
@@ -1210,6 +1221,8 @@ pub(crate) fn reduce_cost_by_pool(
         spell,
         mana_spend_permission,
         demand,
+        &[],
+        fundable,
     )
 }
 
@@ -1390,12 +1403,15 @@ impl PaymentContinuation<'_> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn reduce_cost_by_pool_from(
     pool: &ManaPool,
     continuation: PaymentContinuation<'_>,
     spell: Option<&PaymentContext<'_>>,
     mana_spend_permission: Option<ManaSpendPermission>,
     demand: Option<&ColorDemand>,
+    residual_prefix: &[Option<ManaCostShard>],
+    fundable: Option<&dyn Fn(&ManaCost) -> bool>,
 ) -> ManaCost {
     let PaymentContinuation {
         shards,
@@ -1407,6 +1423,7 @@ fn reduce_cost_by_pool_from(
     let any_color = mana_spend_permission.is_some();
     let mut scratch = pool.clone();
     let mut residual_shards = vec![None; shards.len()];
+    residual_shards[..residual_prefix.len()].copy_from_slice(residual_prefix);
     let mut residual_generic = generic;
 
     for (position, &idx) in order.iter().enumerate().skip(next_position) {
@@ -1418,6 +1435,49 @@ fn reduce_cost_by_pool_from(
             quality_demand,
         };
         let shard = shards[idx];
+        // CR 107.4e + CR 107.4h + CR 601.2g: either eligible hybrid half
+        // may leave the Snow symbol unpaid. Ask the existing source planner
+        // about the completed whole-cost residual, retaining the old preferred
+        // residual if neither allocation is fundable. All spending is scratch.
+        let hybrid_halves = match shard_to_mana_type(shard) {
+            ShardRequirement::Hybrid(a, b) | ShardRequirement::HybridPhyrexian(a, b) => {
+                Some((a, b))
+            }
+            ShardRequirement::ColorlessHybrid(color) => Some((ManaType::Colorless, color)),
+            _ => None,
+        };
+        if let Some(((a, b), accepts)) = hybrid_halves
+            .zip(fundable)
+            .filter(|_| !any_color && quality_demand.snow > 0)
+        {
+            let preferred = remaining_payment.hybrid_color(&scratch, a, b, spell, &[]);
+            let other = if preferred == a { b } else { a };
+            let mut residuals = Vec::new();
+            for color in [preferred, other] {
+                let mut branch = scratch.clone();
+                if spend_eligible(&mut branch, color, spell, &[], quality_demand).is_none() {
+                    continue;
+                }
+                let residual = reduce_cost_by_pool_from(
+                    &branch,
+                    remaining_payment,
+                    spell,
+                    mana_spend_permission,
+                    demand,
+                    &residual_shards,
+                    fundable,
+                );
+                if !residuals.contains(&residual) {
+                    if accepts(&residual) {
+                        return residual;
+                    }
+                    residuals.push(residual);
+                }
+            }
+            if let Some(preferred_residual) = residuals.into_iter().next() {
+                return preferred_residual;
+            }
+        }
         let paid = match shard_to_mana_type(shard) {
             // CR 107.4a/f + CR 609.4b: Exact color required (any_color relaxes to any mana).
             // Phyrexian's life-payment option lives in the real payment path — at the planner
@@ -1578,6 +1638,8 @@ fn reduce_cost_by_pool_from(
                             spell,
                             mana_spend_permission,
                             demand,
+                            &[],
+                            None,
                         ) != ManaCost::NoCost
                         {
                             return None;

@@ -44,6 +44,19 @@ const MIND_STONE: &str = "{T}: Add {C}.\n{1}, {T}, Sacrifice this artifact: Draw
 const KING: &str = "({2/W} can be paid with any two mana or with {W}. This card's mana value is 10.)\nOther Scarecrow creatures you control get +1/+1.\nWhenever another Scarecrow you control enters, destroy target permanent.";
 const SPATIAL: &str =
     "({C} represents colorless mana.)\nTarget creature gets +3/-3 until end of turn.";
+const LOTUS_FIELD: &str = "Hexproof\nThis land enters tapped.\nWhen this land enters, sacrifice two lands.\n{T}: Add three mana of any one color.";
+const WILD_GROWTH: &str = "Enchant land\nWhenever enchanted land is tapped for mana, its controller adds an additional {G}.";
+const OVERGROWTH: &str = "Enchant land\nWhenever enchanted land is tapped for mana, its controller adds an additional {G}{G}.";
+const FERTILE_GROUND: &str = "Enchant land\nWhenever enchanted land is tapped for mana, its controller adds an additional one mana of any color.";
+const OWL: &str = "Flying\nRimefeather Owl's power and toughness are each equal to the number of snow permanents on the battlefield.\n{1}{S}: Put an ice counter on target permanent.\nPermanents with ice counters on them are snow.";
+const WOWZER: &str = "Whenever Wowzer, the Aspirational attacks, if you have an {E}, control a Blood, a Clue, a Food, a Map, a Powerstone, and a Treasure, are the monarch, and have the city's blessing and the initiative, you win the game.";
+const RAPTOR: &str = "Flying\n{S}{S}: This creature gains shroud until end of turn. ({S} can be paid with one mana from a snow source. A creature with shroud can't be the target of spells or abilities.)";
+const NYKTHOS: &str = "{T}: Add {C}.\n{2}, {T}: Choose a color. Add an amount of mana of that color equal to your devotion to that color. (Your devotion to a color is the number of mana symbols of that color in the mana costs of permanents you control.)";
+const SPIRAL: &str = "Draw a card. You may put a land card from your hand onto the battlefield.";
+const RUINS: &str =
+    "This land enters tapped.\n{T}: Add {R}.\n{T}, Sacrifice this land: Add {R}{R}.";
+const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
+const LEYLINE_VOID: &str = "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.";
 
 fn pay_glint_eye_with_an_enchanted_land(land_name: &str, land_text: &str, count: usize) {
     for (aura_name, aura_text) in [
@@ -486,6 +499,991 @@ fn assert_complete(r: &GameRunner, pool: usize) {
     assert!(r.state().stack.is_empty());
     assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
     assert_eq!(r.state().players[0].mana_pool.total(), pool);
+}
+
+#[test]
+fn live_life_total_bundle_refills_only_the_actual_absorb_shortfall() {
+    for life in [2, 3] {
+        let mut s = board();
+        s.with_life(P0, life);
+        let wastes = s
+            .add_land_from_oracle(
+                P0,
+                "Adarkar Wastes",
+                "{T}: Add {C}.\n{T}: Add {W} or {U}. This land deals 1 damage to you.",
+            )
+            .id();
+        let sanctum = s.add_land_from_oracle(P0, "Sanctum of the Sun",
+            "(Transforms from Azor's Gateway.)\n{T}: Add X mana of any one color, where X is your life total.").as_legendary().id();
+        let island = s.add_basic_land(P0, ManaColor::Blue);
+        let opponent_island = s.add_basic_land(P1, ManaColor::Blue);
+        let opt = s.add_spell_to_hand_from_oracle(P1, "Opt", true,
+            "Scry 1. (Look at the top card of your library. You may put that card on the bottom.)\nDraw a card.")
+            .with_mana_cost(parse_mtgjson_mana_cost("{U}")).id();
+        let absorb = spell(
+            &mut s,
+            "Absorb",
+            true,
+            "Counter target spell. You gain 3 life.",
+            "{W}{U}{U}",
+        );
+        let mut r = s.build();
+        assert!(activatable_land_mana_options(r.state(), sanctum, P0)
+            .iter()
+            .any(|row| row.mana_type == ManaType::Blue
+                && row
+                    .atomic_combination
+                    .as_ref()
+                    .is_some_and(|units| units.len() == life as usize)));
+        r.act(GameAction::PassPriority).unwrap();
+        let mut opt_cast = r.cast(opt).commit();
+        assert_eq!(opt_cast.state().stack.len(), 1);
+        opt_cast.act(GameAction::PassPriority).unwrap();
+        assert!(matches!(
+            opt_cast.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+        let payment = opt_cast.cast(absorb).target_object(opt).commit();
+        // CR 120.3a + CR 608.2h: Wastes deals its damage before Sanctum
+        // reads life. A completed live bundle triggers one residual refresh.
+        assert_eq!(payment.state().players[0].life, life - 1);
+        assert_eq!(
+            production_count(payment.events(), wastes, ManaType::White),
+            1
+        );
+        assert_eq!(
+            production_count(payment.events(), sanctum, ManaType::Blue),
+            (life - 1) as usize
+        );
+        assert_eq!(
+            production_count(payment.events(), island, ManaType::Blue),
+            usize::from(life == 2)
+        );
+        assert_eq!(
+            production_count(payment.events(), opponent_island, ManaType::Blue),
+            0
+        );
+        assert_eq!(payment.state().objects[&island].tapped, life == 2);
+        // CR 601.2h: the printed W/U/U cost is fully spent at commitment.
+        assert_eq!(
+            payment.state().objects[&absorb].mana_spent_to_cast_amount,
+            3
+        );
+        assert_eq!(
+            payment.state().objects[&absorb]
+                .mana_spent_source_snapshots
+                .len(),
+            3
+        );
+        assert_eq!(payment.state().players[0].mana_pool.total(), 0);
+        payment
+            .resolve()
+            .assert_zone(&[absorb, opt], Zone::Graveyard);
+        assert_eq!(opt_cast.state().players[0].life, life + 2);
+        drop(opt_cast);
+        assert_complete(&r, 0);
+    }
+}
+
+#[test]
+fn absorb_without_a_source_for_both_colors_is_refused_before_payment() {
+    let mut s = board();
+    s.with_life(P0, 2);
+    let sanctum = s.add_land_from_oracle(P0, "Sanctum of the Sun",
+        "(Transforms from Azor's Gateway.)\n{T}: Add X mana of any one color, where X is your life total.").as_legendary().id();
+    let island = s.add_basic_land(P0, ManaColor::Blue);
+    s.add_basic_land(P1, ManaColor::Blue);
+    let opt = s.add_spell_to_hand_from_oracle(P1, "Opt", true,
+        "Scry 1. (Look at the top card of your library. You may put that card on the bottom.)\nDraw a card.")
+        .with_mana_cost(parse_mtgjson_mana_cost("{U}")).id();
+    let absorb = spell(
+        &mut s,
+        "Absorb",
+        true,
+        "Counter target spell. You gain 3 life.",
+        "{W}{U}{U}",
+    );
+    let mut r = s.build();
+    let rows = activatable_land_mana_options(r.state(), sanctum, P0);
+    assert!([ManaType::White, ManaType::Blue]
+        .iter()
+        .all(|color| rows.iter().any(|row| row.mana_type == *color
+            && row
+                .atomic_combination
+                .as_ref()
+                .is_some_and(|units| units.len() == 2))));
+    r.act(GameAction::PassPriority).unwrap();
+    let mut opt_cast = r.cast(opt).commit();
+    opt_cast.act(GameAction::PassPriority).unwrap();
+    let result = opt_cast.cast(absorb).target_object(opt).try_resolve();
+    // CR 601.2h: two same-color Sanctum units plus one U cannot pay W/U/U.
+    assert!(result.is_err());
+    assert_eq!(opt_cast.state().stack.len(), 1);
+    assert_eq!(opt_cast.state().objects[&absorb].zone, Zone::Hand);
+    assert!([sanctum, island]
+        .iter()
+        .all(|id| !opt_cast.state().objects[id].tapped));
+    assert!(opt_cast.state().players[0].mana_pool.is_empty());
+}
+
+#[test]
+fn manual_sanctum_first_preserves_the_live_color_prompt_and_payment() {
+    let mut s = board();
+    s.with_life(P0, 2);
+    let sanctum = s.add_land_from_oracle(P0, "Sanctum of the Sun",
+        "(Transforms from Azor's Gateway.)\n{T}: Add X mana of any one color, where X is your life total.").as_legendary().id();
+    let wastes = s
+        .add_land_from_oracle(
+            P0,
+            "Adarkar Wastes",
+            "{T}: Add {C}.\n{T}: Add {W} or {U}. This land deals 1 damage to you.",
+        )
+        .id();
+    s.add_basic_land(P1, ManaColor::Blue);
+    let opt = s.add_spell_to_hand_from_oracle(P1, "Opt", true,
+        "Scry 1. (Look at the top card of your library. You may put that card on the bottom.)\nDraw a card.")
+        .with_mana_cost(parse_mtgjson_mana_cost("{U}")).id();
+    let absorb = spell(
+        &mut s,
+        "Absorb",
+        true,
+        "Counter target spell. You gain 3 life.",
+        "{W}{U}{U}",
+    );
+    let mut r = s.build();
+    r.act(GameAction::PassPriority).unwrap();
+    r.cast(opt).commit();
+    r.act(GameAction::PassPriority).unwrap();
+    let index = assert_any_one(&r, sanctum);
+    r.act(GameAction::ActivateAbility {
+        source_id: sanctum,
+        ability_index: index,
+        payment_mode: CastPaymentMode::Auto,
+    })
+    .unwrap();
+    choose_color(&mut r, ManaType::Blue);
+    // CR 608.2d + CR 608.2h: manual Sanctum-first measures two life
+    // before Wastes deals its damage. It remains a legal independent order.
+    assert_eq!(
+        r.state().players[0].mana_pool.count_color(ManaType::Blue),
+        2
+    );
+    assert_eq!(r.state().players[0].life, 2);
+    float_land(&mut r, wastes, ManaType::White);
+    assert_eq!(r.state().players[0].life, 1);
+    r.cast(absorb)
+        .target_object(opt)
+        .resolve()
+        .assert_zone(&[opt, absorb], Zone::Graveyard);
+    assert_eq!(r.state().players[0].life, 4);
+    assert_complete(&r, 0);
+}
+
+#[test]
+fn partial_snow_hybrid_pool_chooses_the_residual_the_board_can_fund() {
+    // Supplemental component-composition costs: Astrolabe's S, Familiar's
+    // W/U and Ulalek's C/U; no printing combines these with the strict U.
+    for colorless_hybrid in [false, true] {
+        for spare_kind in [0, 1, 2] {
+            for snow_first in [false, true] {
+                let mut s = board();
+                let snow = if colorless_hybrid {
+                    s.add_land_from_oracle(P0, "Faceless Haven", "{T}: Add {C}.\n{S}{S}{S}: This land becomes a 4/3 creature with vigilance and all creature types until end of turn. It's still a land. ({S} can be paid with one mana from a snow source.)").as_snow().id()
+                } else {
+                    s.add_land_from_oracle(P0, "Snow-Covered Plains", "({T}: Add {W}.)")
+                        .as_snow()
+                        .with_subtypes(vec!["Plains"])
+                        .id()
+                };
+                let island = s.add_basic_land(P0, ManaColor::Blue);
+                let spare = match spare_kind {
+                    0 => None,
+                    1 => Some(s.add_basic_land(P0, ManaColor::Blue)),
+                    _ => Some(s.add_land_from_oracle(P0, "Faceless Haven", "{T}: Add {C}.\n{S}{S}{S}: This land becomes a 4/3 creature with vigilance and all creature types until end of turn. It's still a land. ({S} can be paid with one mana from a snow source.)").as_snow().id()),
+                };
+                let symbol = if colorless_hybrid { "{C/U}" } else { "{W/U}" };
+                let cost = if snow_first {
+                    format!("{{S}}{symbol}{{U}}")
+                } else {
+                    format!("{symbol}{{S}}{{U}}")
+                };
+                let astrolabe = s.add_artifact_to_hand_from_oracle(P0, "Arcum's Astrolabe",
+                    "({S} can be paid with one mana from a snow source.)\nWhen this artifact enters, draw a card.\n{1}, {T}: Add one mana of any color.")
+                    .as_snow().with_mana_cost(parse_mtgjson_mana_cost(&cost)).id();
+                let mut r = s.build();
+                finish_snow_forest(&mut r, snow);
+                if spare_kind == 2 {
+                    finish_snow_forest(&mut r, spare.unwrap());
+                }
+                evaluate_layers(r.state_mut());
+                float_land(
+                    &mut r,
+                    snow,
+                    if colorless_hybrid {
+                        ManaType::Colorless
+                    } else {
+                        ManaType::White
+                    },
+                );
+                float_land(&mut r, island, ManaType::Blue);
+                let pool = &r.state().players[0].mana_pool;
+                assert_eq!(pool.total(), 2);
+                assert_eq!(
+                    pool.units()
+                        .filter(|unit| unit.source_id == snow
+                            && unit.supertype == Some(ManaSupertype::Snow))
+                        .count(),
+                    1
+                );
+                if let Some(spare) = spare {
+                    assert!(!r.state().objects[&spare].tapped);
+                }
+                // CR 107.4e + CR 107.4h: the legal allocation depends on
+                // the remaining source; both complementary boards must pay.
+                if let Some(spare) = spare {
+                    r.cast(astrolabe).resolve().assert_hand_drawn(P0, 1);
+                    assert_eq!(r.state().objects[&astrolabe].zone, Zone::Battlefield);
+                    assert!(r.state().objects[&spare].tapped);
+                    assert_complete(&r, 0);
+                } else {
+                    // CR 601.2h: the reached pool has only two units for
+                    // three symbols when there is no complementary source.
+                    assert!(r.cast(astrolabe).try_resolve().is_err());
+                    assert_eq!(r.state().objects[&astrolabe].zone, Zone::Hand);
+                    assert_complete(&r, 2);
+                }
+            }
+        }
+    }
+}
+
+fn float_land(
+    r: &mut GameRunner,
+    source: ObjectId,
+    color: ManaType,
+) -> Vec<engine::types::events::GameEvent> {
+    let (_, _, grouped) = legal_actions_full(r.state());
+    let action = grouped[&source]
+        .iter()
+        .find(|action| {
+            matches!(action,
+        GameAction::TapLandForMana { selection } if selection.mana_type == color)
+        })
+        .expect("the printed land offers its selected public mana action")
+        .clone();
+    r.act(action).unwrap().events
+}
+
+fn production_count(
+    events: &[engine::types::events::GameEvent],
+    source: ObjectId,
+    color: ManaType,
+) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(event,
+        engine::types::events::GameEvent::ManaAdded { source_id, mana_type, .. }
+        if *source_id == source && *mana_type == color)
+        })
+        .count()
+}
+
+#[test]
+fn scalar_counted_output_keeps_the_separate_same_color_snow_producer() {
+    for ice_land in [None, Some(false), Some(true)] {
+        let mut s = board();
+        let owl = owl(&mut s);
+        let setup_snow = s
+            .add_land_from_oracle(P0, "Snow-Covered Island", "({T}: Add {U}.)")
+            .as_snow()
+            .with_subtypes(vec!["Island"])
+            .id();
+        let setup_c = s.add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.").id();
+        let floating = [
+            s.add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.").id(),
+            s.add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.").id(),
+            s.add_basic_land(P0, ManaColor::White),
+            s.add_basic_land(P0, ManaColor::Red),
+        ];
+        let signet = s
+            .add_artifact_from_oracle(P0, "Dimir Signet", "{1}, {T}: Add {U}{B}.")
+            .with_mana_cost(parse_mtgjson_mana_cost("{2}"))
+            .id();
+        let land = s.add_land_from_oracle(P0, "Lotus Field", LOTUS_FIELD).id();
+        let aura = s
+            .add_enchantment_from_oracle(P0, "Wild Growth", WILD_GROWTH)
+            .with_subtypes(vec!["Aura"])
+            .with_mana_cost(parse_mtgjson_mana_cost("{G}"))
+            .id();
+        let wurm = s
+            .add_creature_to_hand_from_oracle(P0, "Wowzer, the Aspirational", 10, 10, WOWZER)
+            .as_legendary()
+            .as_snow()
+            .with_subtypes(vec!["Wurm"])
+            .with_mana_cost(parse_mtgjson_mana_cost("{C}{W}{U}{B}{R}{G}{S}"))
+            .id();
+        let mut r = s.build();
+        r.state_mut().objects.get_mut(&land).unwrap().tapped = false;
+        engine::game::effects::attach::attach_to(r.state_mut(), aura, land);
+        let target = ice_land.map_or(owl, |land_is_snow| if land_is_snow { land } else { aura });
+        ice_permanent(&mut r, owl, target, setup_snow, setup_c);
+        for (source, color) in floating.into_iter().zip([
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::White,
+            ManaType::Red,
+        ]) {
+            float_land(&mut r, source, color);
+        }
+        assert_eq!(r.state().players[0].mana_pool.total(), 4);
+        assert!(r.state().players[0]
+            .mana_pool
+            .units()
+            .all(|unit| unit.supertype.is_none()));
+        assert!([land, signet]
+            .iter()
+            .all(|id| !r.state().objects[id].tapped));
+        let rows = activatable_land_mana_options(r.state(), land, P0);
+        assert!(rows.iter().any(|row| row.mana_type == ManaType::Green
+            && row
+                .atomic_combination
+                .as_ref()
+                .is_some_and(|units| units == &vec![ManaType::Green; 4])
+            && row.taps_for_mana_overrides.len() == 1
+            && row.taps_for_mana_overrides[0].0.source.object_id == aura));
+        if let Some(land_is_snow) = ice_land {
+            let paid = r.cast(wurm).commit();
+            // CR 106.3 + CR 107.4h: scalar credit limits only the base
+            // output. Equal-colored Aura and Lotus mana retain their sources.
+            assert_eq!(production_count(paid.events(), land, ManaType::Green), 3);
+            assert_eq!(production_count(paid.events(), aura, ManaType::Green), 1);
+            assert_eq!(production_count(paid.events(), signet, ManaType::Blue), 1);
+            assert_eq!(production_count(paid.events(), signet, ManaType::Black), 1);
+            assert_eq!(paid.state().objects[&wurm].mana_spent_to_cast_amount, 7);
+            assert_eq!(paid.state().players[0].mana_pool.total(), 2);
+            assert!(paid.state().players[0]
+                .mana_pool
+                .units()
+                .all(|unit| unit.source_id == land
+                    && unit.color == ManaType::Green
+                    && unit.supertype == land_is_snow.then_some(ManaSupertype::Snow)));
+            paid.resolve().assert_zone(&[wurm], Zone::Battlefield);
+            assert!([land, signet].iter().all(|id| r.state().objects[id].tapped));
+            assert_complete(&r, 2);
+        } else {
+            // CR 107.4h + CR 601.2h: the paired board has every printed
+            // color and enough total mana, but neither available producer is Snow.
+            assert!(r.cast(wurm).try_resolve().is_err());
+            assert!([land, signet]
+                .iter()
+                .all(|id| !r.state().objects[id].tapped));
+            assert_eq!(r.state().objects[&wurm].zone, Zone::Hand);
+            assert_complete(&r, 4);
+        }
+    }
+}
+
+#[test]
+fn overgrowth_keeps_both_snow_units_without_tapping_the_spare() {
+    for snow_aura in [false, true] {
+        let mut s = board();
+        let owl = owl(&mut s);
+        let setup_snow = s
+            .add_land_from_oracle(P0, "Snow-Covered Island", "({T}: Add {U}.)")
+            .as_snow()
+            .with_subtypes(vec!["Island"])
+            .id();
+        let setup_c = s.add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.").id();
+        let land = s.add_land_from_oracle(P0, "Lotus Field", LOTUS_FIELD).id();
+        let aura = s
+            .add_enchantment_from_oracle(P0, "Overgrowth", OVERGROWTH)
+            .with_subtypes(vec!["Aura"])
+            .with_mana_cost(parse_mtgjson_mana_cost("{2}{G}"))
+            .id();
+        let spare = s
+            .add_land_from_oracle(P0, "Snow-Covered Island", "({T}: Add {U}.)")
+            .as_snow()
+            .with_subtypes(vec!["Island"])
+            .id();
+        let raptor = s
+            .add_creature_from_oracle(P0, "Frost Raptor", 2, 2, RAPTOR)
+            .as_snow()
+            .with_subtypes(vec!["Bird"])
+            .with_mana_cost(parse_mtgjson_mana_cost("{2}{U}"))
+            .id();
+        let mut r = s.build();
+        r.state_mut().objects.get_mut(&land).unwrap().tapped = false;
+        engine::game::effects::attach::attach_to(r.state_mut(), aura, land);
+        finish_snow_forest(&mut r, spare);
+        ice_permanent(
+            &mut r,
+            owl,
+            if snow_aura { aura } else { owl },
+            setup_snow,
+            setup_c,
+        );
+        let rows = activatable_land_mana_options(r.state(), land, P0);
+        assert!(rows.iter().any(|row| row.taps_for_mana_overrides.len() == 1
+            && row.taps_for_mana_overrides[0].0.source.object_id == aura));
+        let result = r.act(GameAction::ActivateAbility {
+            source_id: raptor,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        });
+        if snow_aura {
+            let result = result.expect("one Overgrowth producer pays both Snow symbols");
+            // CR 106.3 + CR 107.4h: one trigger has two Snow units; it
+            // must not be reduced to the one color-selection marker.
+            assert_eq!(production_count(&result.events, aura, ManaType::Green), 2);
+            assert!(!r.state().objects[&spare].tapped);
+            assert!(r.state().objects[&land].tapped);
+            assert_eq!(r.state().stack.len(), 1);
+            r.advance_until_stack_empty();
+            // CR 702.18a: the paid printed Raptor ability actually resolves.
+            assert!(
+                r.state().objects[&raptor].has_keyword(&engine::types::keywords::Keyword::Shroud)
+            );
+            assert!(r.state().players[0]
+                .mana_pool
+                .units()
+                .all(|unit| unit.source_id == land && unit.supertype.is_none()));
+            assert_complete(&r, 3);
+        } else {
+            // CR 107.4h: the lone Snow Island cannot pay two S while
+            // Overgrowth and Lotus remain ordinary producers.
+            assert!(result.is_err());
+            assert!([land, spare].iter().all(|id| !r.state().objects[id].tapped));
+            assert_complete(&r, 0);
+        }
+    }
+}
+
+#[test]
+fn distinct_same_color_aura_sources_keep_their_own_controller_and_snow_quality() {
+    let mut s = board();
+    let owl = owl(&mut s);
+    let setup_snow = s
+        .add_land_from_oracle(P0, "Snow-Covered Island", "({T}: Add {U}.)")
+        .as_snow()
+        .with_subtypes(vec!["Island"])
+        .id();
+    let setup_c = s.add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.").id();
+    let land = s.add_land_from_oracle(P0, "Lotus Field", LOTUS_FIELD).id();
+    let first = s
+        .add_enchantment_from_oracle(P0, "Wild Growth", WILD_GROWTH)
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{G}"))
+        .id();
+    let second = s
+        .add_enchantment_from_oracle(P1, "Wild Growth", WILD_GROWTH)
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{G}"))
+        .id();
+    let spare = s
+        .add_land_from_oracle(P0, "Snow-Covered Island", "({T}: Add {U}.)")
+        .as_snow()
+        .with_subtypes(vec!["Island"])
+        .id();
+    let raptor = s
+        .add_creature_from_oracle(P0, "Frost Raptor", 2, 2, RAPTOR)
+        .as_snow()
+        .with_subtypes(vec!["Bird"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{U}"))
+        .id();
+    let mut r = s.build();
+    r.state_mut().objects.get_mut(&land).unwrap().tapped = false;
+    for aura in [first, second] {
+        engine::game::effects::attach::attach_to(r.state_mut(), aura, land);
+    }
+    finish_snow_forest(&mut r, spare);
+    ice_permanent(&mut r, owl, second, setup_snow, setup_c);
+    let result = r
+        .act(GameAction::ActivateAbility {
+            source_id: raptor,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    // CR 106.3 + CR 107.4h: the opponent's Snow Aura produces for the
+    // tapped land's controller, but its own source supplies the quality.
+    assert_eq!(production_count(&result.events, first, ManaType::Green), 1);
+    assert_eq!(production_count(&result.events, second, ManaType::Green), 1);
+    assert!(r.state().players[1].mana_pool.is_empty());
+    assert!(r.state().objects[&spare].tapped);
+    r.advance_until_stack_empty();
+    // CR 702.18a: the paid printed Raptor ability actually resolves.
+    assert!(r.state().objects[&raptor].has_keyword(&engine::types::keywords::Keyword::Shroud));
+    assert_eq!(
+        r.state().players[0]
+            .mana_pool
+            .units()
+            .filter(|unit| unit.source_id == first)
+            .count(),
+        1
+    );
+    assert!(r.state().players[0]
+        .mana_pool
+        .units()
+        .all(|unit| unit.supertype.is_none()));
+    assert_complete(&r, 4);
+}
+
+fn nykthos_aura_board(
+    paused: bool,
+    wastes_count: usize,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId, Vec<ObjectId>) {
+    let mut s = board();
+    owl(&mut s);
+    let nykthos = s
+        .add_land_from_oracle(P0, "Nykthos, Shrine to Nyx", NYKTHOS)
+        .as_legendary()
+        .id();
+    let aura = s
+        .add_enchantment_from_oracle(P0, "Fertile Ground", FERTILE_GROUND)
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+        .id();
+    let funders = if paused {
+        s.add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE)
+            .with_mana_cost(parse_mtgjson_mana_cost("{1}{W}"));
+        s.add_enchantment_from_oracle(P1, "Leyline of the Void", LEYLINE_VOID)
+            .with_mana_cost(parse_mtgjson_mana_cost("{2}{B}{B}"));
+        vec![s.add_land_from_oracle(P0, "Dwarven Ruins", RUINS).id()]
+    } else {
+        (0..wastes_count)
+            .map(|_| s.add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.").id())
+            .collect()
+    };
+    let spiral = spell(&mut s, "Growth Spiral", true, SPIRAL, "{G}{U}");
+    let mut r = s.build();
+    for source in &funders {
+        r.state_mut().objects.get_mut(source).unwrap().tapped = false;
+    }
+    engine::game::effects::attach::attach_to(r.state_mut(), aura, nykthos);
+    evaluate_layers(r.state_mut());
+    // CR 700.5 + CR 608.2h: the printed Owl's two U symbols supply
+    // devotion two; Fertile Ground supplies one G. Opponent costs do not count.
+    assert!(r.state().players[0].mana_pool.is_empty());
+    let rows = activatable_land_mana_options(r.state(), nykthos, P0);
+    assert!(rows
+        .iter()
+        .any(|row| row.mana_type == ManaType::Colorless && row.taps_for_mana_overrides.len() == 1));
+    assert!(rows.iter().any(|row| row.mana_type == ManaType::Blue
+        && row.atomic_combination.as_ref()
+            == Some(&vec![ManaType::Blue, ManaType::Blue, ManaType::Green])
+        && row.taps_for_mana_overrides.len() == 1
+        && row.taps_for_mana_overrides[0].0.source.object_id == aura
+        && row.taps_for_mana_overrides[0].1
+            == engine::types::game_state::ProductionOverride::SingleColor(ManaType::Green)));
+    (r, nykthos, aura, spiral, funders)
+}
+
+fn assert_replacement_pair(r: &GameRunner) {
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidate_count,
+        candidates,
+        ..
+    } = &r.state().waiting_for
+    else {
+        panic!(
+            "the real sacrifice/finish must reach a replacement-order choice, got {:?}",
+            r.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*candidate_count, 2);
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate.source_name == "Rest in Peace"));
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate.source_name == "Leyline of the Void"));
+}
+
+fn finish_growth_spiral(r: &mut GameRunner, spiral: ObjectId, exiled: bool) {
+    let library_before = r.state().players[0].library.len();
+    assert_eq!(r.state().objects[&spiral].zone, Zone::Stack);
+    r.resolve_top();
+    // Growth Spiral may offer its optional land-put after the real draw.
+    // Handle each observed continuation explicitly, including the independent
+    // post-resolution graveyard replacement under RIP/Leyline.
+    for _ in 0..4 {
+        match &r.state().waiting_for {
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                assert_eq!(*player, P0);
+                r.act(GameAction::DecideOptionalEffect { accept: false })
+                    .unwrap();
+            }
+            WaitingFor::EffectZoneChoice {
+                player, min_count, ..
+            } => {
+                assert_eq!(*player, P0);
+                assert_eq!(*min_count, 0);
+                r.act(GameAction::SelectCards { cards: vec![] }).unwrap();
+            }
+            WaitingFor::ReplacementChoice { .. } => {
+                assert_replacement_pair(r);
+                r.act(GameAction::ChooseReplacement { index: 1 }).unwrap();
+            }
+            WaitingFor::Priority { .. } => break,
+            other => panic!("unanswered Growth Spiral continuation: {other:?}"),
+        }
+    }
+    // CR 608.2n + CR 614.1a + CR 616.1: RIP/Leyline also replace
+    // the resolved instant's graveyard move; one draw happens before that move.
+    assert_eq!(r.state().players[0].library.len(), library_before - 1);
+    assert_eq!(
+        r.state().objects[&spiral].zone,
+        if exiled { Zone::Exile } else { Zone::Graveyard }
+    );
+    assert_complete(r, 1);
+}
+
+#[test]
+fn costed_counted_source_keeps_nondefault_aura_through_actual_payment() {
+    let (mut r, nykthos, aura, spiral, funders) = nykthos_aura_board(false, 2);
+    let paid = r.cast(spiral).commit();
+    // CR 118.10 + CR 605.4a: independent C/C pays the activation once,
+    // then Nykthos produces UU and its independently chosen Aura produces G.
+    for source in &funders {
+        assert_eq!(
+            production_count(paid.events(), *source, ManaType::Colorless),
+            1
+        );
+        assert!(paid.state().objects[source].tapped);
+    }
+    assert_eq!(production_count(paid.events(), nykthos, ManaType::Blue), 2);
+    assert_eq!(production_count(paid.events(), aura, ManaType::Green), 1);
+    assert_eq!(production_count(paid.events(), aura, ManaType::White), 0);
+    assert!(paid.state().objects[&nykthos].tapped);
+    assert_eq!(
+        paid.state().objects[&aura].attached_to,
+        Some(AttachTarget::Object(nykthos))
+    );
+    // CR 601.2h: the spell spent G/U, leaving exactly one Nykthos U.
+    assert_eq!(paid.state().objects[&spiral].mana_spent_to_cast_amount, 2);
+    assert_eq!(
+        paid.state().objects[&spiral]
+            .mana_spent_source_snapshots
+            .iter()
+            .filter(|snapshot| snapshot.source_id == aura)
+            .count(),
+        1
+    );
+    assert!(paid.state().players[0]
+        .mana_pool
+        .units()
+        .all(|unit| unit.source_id == nykthos && unit.color == ManaType::Blue));
+    drop(paid);
+    finish_growth_spiral(&mut r, spiral, false);
+}
+
+#[test]
+fn costed_counted_source_cannot_fund_itself_from_future_aura_output() {
+    let (mut r, nykthos, _aura, spiral, funders) = nykthos_aura_board(false, 1);
+    let (_, _, grouped) = legal_actions_full(r.state());
+    assert!(grouped[&funders[0]].iter().any(
+        |action| matches!(action, GameAction::TapLandForMana { selection }
+        if selection.mana_type == ManaType::Colorless)
+    ));
+    // CR 118.10 + CR 601.2h: one independently available C cannot pay
+    // the two-mana activation, even though its future output could pay G/U.
+    assert!(r.cast(spiral).try_resolve().is_err());
+    assert!(!r.state().objects[&nykthos].tapped);
+    assert!(!r.state().objects[&funders[0]].tapped);
+    assert_eq!(r.state().objects[&spiral].zone, Zone::Hand);
+    assert_complete(&r, 0);
+}
+
+#[test]
+fn manual_costed_counted_source_keeps_its_independent_aura_and_base_choices() {
+    for (base_color, aura_color, base_count) in [
+        (ManaType::Blue, ManaType::Green, 2),
+        (ManaType::Green, ManaType::Blue, 1),
+    ] {
+        let (mut r, nykthos, aura, spiral, funders) = nykthos_aura_board(false, 2);
+        let selection = activatable_mana_source_selections(r.state(), P0)
+            .into_iter()
+            .find(|selection| {
+                selection.source.object_id == nykthos
+                    && matches!(
+                        selection.output,
+                        ManaSourceOutput::DeferredColorChoice { .. }
+                    )
+                    && selection.taps_for_mana.iter().any(|selected| {
+                        selected.source.object_id == aura
+                            && selected.production_override
+                                == engine::types::game_state::ProductionOverride::SingleColor(
+                                    aura_color,
+                                )
+                    })
+            })
+            .expect("the unchanged public selection carries the independent Aura color");
+        let mut events = r
+            .act(GameAction::TapLandForMana { selection })
+            .unwrap()
+            .events;
+        let WaitingFor::ChooseManaColor {
+            player,
+            choice: ManaChoicePrompt::SingleColor { options },
+            context,
+        } = &r.state().waiting_for
+        else {
+            panic!("the base choice remains mandatory after actual cost payment");
+        };
+        assert_eq!(*player, P0);
+        assert!(options.contains(&base_color));
+        let engine::types::game_state::ManaChoiceContext::ManaAbility(pending) = context else {
+            panic!("the pending activation owns the choice");
+        };
+        assert_eq!(pending.selected_taps_for_mana.len(), 1);
+        assert_eq!(
+            pending.selected_taps_for_mana[0].production_override,
+            engine::types::game_state::ProductionOverride::SingleColor(aura_color)
+        );
+        assert!(r.state().players[0].mana_pool.is_empty());
+        assert!(funders
+            .iter()
+            .all(|source| r.state().objects[source].tapped));
+        events.extend(
+            r.act(GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(base_color),
+                count: 1,
+            })
+            .unwrap()
+            .events,
+        );
+        // CR 608.2d + CR 106.3: choosing the base color neither overwrites
+        // nor defaults the independently selected triggered producer's color.
+        assert_eq!(production_count(&events, nykthos, base_color), base_count);
+        assert_eq!(production_count(&events, aura, aura_color), 1);
+        assert_eq!(production_count(&events, aura, ManaType::White), 0);
+        let paid = r.cast(spiral).commit();
+        assert_eq!(paid.state().objects[&spiral].mana_spent_to_cast_amount, 2);
+        if base_color == ManaType::Blue {
+            drop(paid);
+            finish_growth_spiral(&mut r, spiral, false);
+        } else {
+            paid.resolve().assert_hand_drawn(P0, 1);
+            assert_complete(&r, 0);
+        }
+    }
+}
+
+#[test]
+fn selected_aura_survives_prefunding_pause_roundtrip_and_terminal_siblings() {
+    use engine::types::game_state::{GameState, PendingCostMoveResume, ProductionOverride};
+    let (mut r, nykthos, aura, spiral, funders) = nykthos_aura_board(true, 0);
+    let ruins = funders[0];
+    let selected = activatable_land_mana_options(r.state(), nykthos, P0)
+        .into_iter()
+        .find(|row| {
+            row.mana_type == ManaType::Blue
+                && row.taps_for_mana_overrides.iter().any(|(trigger, value)| {
+                    trigger.source.object_id == aura
+                        && *value == ProductionOverride::SingleColor(ManaType::Green)
+                })
+        })
+        .unwrap()
+        .semantic_selection(r.state())
+        .unwrap()
+        .taps_for_mana;
+    let card_id = r.state().objects[&spiral].card_id;
+    let mut events = r
+        .act(GameAction::CastSpell {
+            object_id: spiral,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap()
+        .events;
+    assert_replacement_pair(&r);
+    assert!(r.state().objects[&ruins].tapped);
+    assert!(!r.state().objects[&nykthos].tapped);
+    assert_eq!(production_count(&events, nykthos, ManaType::Blue), 0);
+    assert_eq!(production_count(&events, aura, ManaType::Green), 0);
+    assert!(r.state().pending_taps_for_mana_overrides.is_empty());
+    let Some(PendingCostMoveResume::ManaAbilityPayment { pending, cursor }) =
+        &r.state().pending_cost_move_resume
+    else {
+        panic!("the Ruins child must park the existing mana-cost cursor");
+    };
+    assert_eq!(pending.source_id, ruins);
+    let parent = cursor
+        .parent
+        .as_ref()
+        .expect("prepared Nykthos exists before prefunding pauses");
+    assert_eq!(parent.pending.source_id, nykthos);
+    assert_eq!(
+        parent.pending.color_override,
+        Some(ProductionOverride::SingleColor(ManaType::Blue))
+    );
+    assert_eq!(parent.pending.selected_taps_for_mana, selected);
+    assert_eq!(
+        parent.pending.announced_source_incarnation,
+        Some(r.state().objects[&nykthos].incarnation)
+    );
+    assert!(
+        !parent.cursor.remaining.is_empty(),
+        "prefunding has not paid the prepared activation's costs"
+    );
+    let wire = serde_json::to_vec(r.state()).unwrap();
+    let restored: GameState = serde_json::from_slice(&wire).unwrap();
+    assert_eq!(
+        serde_json::to_value(&restored.pending_cost_move_resume).unwrap(),
+        serde_json::to_value(&r.state().pending_cost_move_resume).unwrap()
+    );
+    let mut retired = GameRunner::from_state(restored.clone());
+    let prior = serde_json::to_value(&retired.state().pending_cost_move_resume).unwrap();
+    assert!(retired.act(GameAction::CancelCast).is_err());
+    assert!(retired
+        .act(GameAction::ChooseReplacement { index: usize::MAX })
+        .is_err());
+    assert_eq!(
+        serde_json::to_value(&retired.state().pending_cost_move_resume).unwrap(),
+        prior
+    );
+    // CR 104.1 + CR 104.3a + CR 800.4a: terminal ownership cannot
+    // resume an unproduced selected activation after the player concedes.
+    let terminal = retired.act(GameAction::Concede { player_id: P0 }).unwrap();
+    assert!(matches!(
+        retired.state().waiting_for,
+        WaitingFor::GameOver { .. }
+    ));
+    assert_eq!(
+        production_count(&terminal.events, nykthos, ManaType::Blue),
+        0
+    );
+    assert_eq!(production_count(&terminal.events, aura, ManaType::Green), 0);
+    assert!(retired
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .is_err());
+    r = GameRunner::from_state(restored);
+    assert_replacement_pair(&r);
+    events.extend(
+        r.act(GameAction::ChooseReplacement { index: 1 })
+            .unwrap()
+            .events,
+    );
+    // CR 616.1 + CR 118.10 + CR 605.4a: Ruins' RR funds the
+    // activation before its UU and exact Aura G exist, once after restore.
+    assert_eq!(r.state().objects[&ruins].zone, Zone::Exile);
+    assert_eq!(production_count(&events, ruins, ManaType::Red), 2);
+    assert_eq!(production_count(&events, nykthos, ManaType::Blue), 2);
+    assert_eq!(production_count(&events, aura, ManaType::Green), 1);
+    assert_eq!(production_count(&events, aura, ManaType::White), 0);
+    assert_eq!(r.state().objects[&spiral].mana_spent_to_cast_amount, 2);
+    assert!(r.state().players[0]
+        .mana_pool
+        .units()
+        .all(|unit| unit.source_id == nykthos && unit.color == ManaType::Blue));
+    assert!(r.state().pending_taps_for_mana_overrides.is_empty());
+    finish_growth_spiral(&mut r, spiral, true);
+}
+
+#[test]
+fn manual_selected_aura_survives_actual_cost_pause_and_color_response() {
+    let (mut r, nykthos, aura, spiral, _) = nykthos_aura_board(true, 0);
+    let selection = activatable_mana_source_selections(r.state(), P0)
+        .into_iter()
+        .find(|selection| {
+            selection.source.object_id == nykthos
+                && matches!(
+                    selection.output,
+                    ManaSourceOutput::DeferredColorChoice { .. }
+                )
+                && selection.taps_for_mana.iter().any(|selected| {
+                    selected.source.object_id == aura
+                        && selected.production_override
+                            == engine::types::game_state::ProductionOverride::SingleColor(
+                                ManaType::Green,
+                            )
+                })
+        })
+        .unwrap();
+    let mut events = r
+        .act(GameAction::TapLandForMana { selection })
+        .unwrap()
+        .events;
+    assert_replacement_pair(&r);
+    let restored = serde_json::from_slice(&serde_json::to_vec(r.state()).unwrap()).unwrap();
+    r = GameRunner::from_state(restored);
+    events.extend(
+        r.act(GameAction::ChooseReplacement { index: 1 })
+            .unwrap()
+            .events,
+    );
+    let WaitingFor::ChooseManaColor {
+        context: engine::types::game_state::ManaChoiceContext::ManaAbility(pending),
+        player,
+        choice: ManaChoicePrompt::SingleColor { options },
+    } = &r.state().waiting_for
+    else {
+        panic!("resumed actual cost payment must retain the mandatory base choice");
+    };
+    assert_eq!(*player, P0);
+    assert!(options.contains(&ManaType::Blue));
+    assert_eq!(pending.selected_taps_for_mana.len(), 1);
+    assert_eq!(pending.selected_taps_for_mana[0].source.object_id, aura);
+    assert_eq!(
+        pending.selected_taps_for_mana[0].production_override,
+        engine::types::game_state::ProductionOverride::SingleColor(ManaType::Green)
+    );
+    events.extend(
+        r.act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Blue),
+            count: 1,
+        })
+        .unwrap()
+        .events,
+    );
+    // CR 608.2d + CR 605.4a: the resumed color consumer uses the same
+    // selected producer as unprompted completion, after the actual cost payer.
+    assert_eq!(production_count(&events, nykthos, ManaType::Blue), 2);
+    assert_eq!(production_count(&events, aura, ManaType::Green), 1);
+    assert_eq!(production_count(&events, aura, ManaType::White), 0);
+    r.cast(spiral).commit();
+    finish_growth_spiral(&mut r, spiral, true);
+}
+
+fn owl(s: &mut GameScenario) -> ObjectId {
+    s.add_creature_from_oracle(P0, "Rimefeather Owl", 1, 1, OWL)
+        .as_snow()
+        .with_subtypes(vec!["Bird"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{5}{U}{U}"))
+        .id()
+}
+
+fn ice_permanent(
+    r: &mut GameRunner,
+    owl: ObjectId,
+    target: ObjectId,
+    snow: ObjectId,
+    ordinary: ObjectId,
+) {
+    finish_snow_forest(r, snow);
+    evaluate_layers(r.state_mut());
+    float_land(r, snow, ManaType::Blue);
+    float_land(r, ordinary, ManaType::Colorless);
+    assert_eq!(r.state().players[0].mana_pool.total(), 2);
+    r.activate(owl, 0).target_object(target).resolve();
+    // CR 205.4g + CR 608.2h: Owl's real ice-counter effect makes this
+    // permanent Snow; the other producer does not inherit that quality.
+    assert_eq!(
+        r.state().objects[&target]
+            .counters
+            .get(&CounterType::Generic("ice".into())),
+        Some(&1)
+    );
+    assert!(r.state().objects[&target]
+        .card_types
+        .supertypes
+        .contains(&Supertype::Snow));
+    assert_complete(r, 0);
 }
 
 fn assert_any_one(r: &GameRunner, source: ObjectId) -> usize {
