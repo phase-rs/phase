@@ -2,26 +2,23 @@
 //! Suspend X remains unsupported; the full card must retain exactly that gap.
 
 use engine::game::coverage::card_face_gaps;
-use engine::game::effects::token::apply_create_token_after_replacement;
 use engine::game::layers::evaluate_layers;
-use engine::game::replacement::{replace_event, ReplacementResult};
 use engine::game::sba::check_state_based_actions;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::parser::parse_oracle_text;
-use engine::types::ability::{ContinuousModification, Effect};
+use engine::types::ability::{
+    AbilityCost, ContinuousModification, Effect, ManaProduction, QuantityExpr, ResolvedAbility,
+};
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::proposed_event::{
-    EtbTapState, ProposedEvent, TokenAttackRequest, TokenCharacteristics, TokenHostRequest,
-    TokenSpec,
-};
 use engine::types::zones::Zone;
 
 // Verbatim Scryfall Oracle text, including the deliberately unsupported Suspend X line.
@@ -42,6 +39,97 @@ fn has_dynamic_pt_static(runner: &GameRunner, id: ObjectId) -> bool {
                     | ContinuousModification::SetDynamicToughness { .. }
             )
         })
+}
+
+/// Saurian Explorer's printed token instruction, parsed with its full Oracle:
+/// https://scryfall.com/card/trk/213/saurian-explorer
+/// https://scryfall.com/card/ttrk/27/new-planet
+/// Resolve the parsed token effect at the existing production setup seam,
+/// including its quoted mana-ability grant. This does not pay {6} or exercise
+/// Saurian Explorer's activation/Landfall; no partial catalog preset is treated
+/// as a complete token definition and no token identity/ability flags are patched.
+fn create_new_planet(runner: &mut GameRunner, owner: PlayerId) -> ObjectId {
+    const SAURIAN_EXPLORER: &str = "Landfall — Whenever a land you control enters, this creature gets +2/+2 until end of turn.\n{6}: Create a tapped Planet land token named New Planet with \"{T}: Add one mana of any color.\" Activate only as a sorcery.";
+    let parsed = parse_oracle_text(
+        SAURIAN_EXPLORER,
+        "Saurian Explorer",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let creation = parsed
+        .abilities
+        .into_iter()
+        .find(|definition| {
+            matches!(
+                definition.effect.as_ref(),
+                Effect::Token { name, .. } if name == "New Planet"
+            )
+        })
+        .expect("printed Saurian Explorer must parse a New Planet token effect");
+    // The conventional setup-only source id makes no producer-activation claim.
+    let ability = ResolvedAbility::new(*creation.effect, Vec::new(), ObjectId(0), owner);
+    let mut creation_events = Vec::new();
+    engine::game::effects::token::resolve(runner.state_mut(), &ability, &mut creation_events)
+        .expect("the parsed New Planet token effect must resolve");
+    let new_planet = creation_events
+        .iter()
+        .find_map(|event| match event {
+            GameEvent::TokenCreated {
+                object_id, name, ..
+            } if name == "New Planet" => Some(*object_id),
+            _ => None,
+        })
+        .expect("production token realization must emit New Planet's TokenCreated");
+    let token = &runner.state().objects[&new_planet];
+    assert!(token.is_token);
+    assert!(!token.is_represented_by_a_card());
+    assert_eq!(token.name, "New Planet");
+    assert_eq!(token.owner, owner);
+    assert_eq!(token.controller, owner);
+    assert_eq!(token.zone, Zone::Battlefield);
+    assert!(token.tapped);
+    assert!(token.color.is_empty());
+    assert!(token.base_color.is_empty());
+    for types in [&token.card_types, &token.base_card_types] {
+        assert_eq!(types.core_types, [CoreType::Land]);
+        assert_eq!(types.subtypes, ["Planet"]);
+        assert!(!types.supertypes.contains(&Supertype::Basic));
+    }
+    // CR 111.3: the creating instruction defines the token's abilities.
+    // Verify the installed, executable grant, not just display rules text.
+    assert!(
+        token
+            .base_static_definitions
+            .iter()
+            .flat_map(|definition| &definition.modifications)
+            .any(|modification| match modification {
+                ContinuousModification::GrantAbility { definition } => {
+                    matches!(definition.cost, Some(AbilityCost::Tap))
+                        && matches!(
+                            definition.effect.as_ref(),
+                            Effect::Mana {
+                                produced: ManaProduction::AnyOneColor {
+                                    count: QuantityExpr::Fixed { value: 1 },
+                                    color_options,
+                                    ..
+                                },
+                                ..
+                            } if color_options.len() == 5
+                                && [
+                                    ManaColor::White,
+                                    ManaColor::Blue,
+                                    ManaColor::Black,
+                                    ManaColor::Red,
+                                    ManaColor::Green,
+                                ].iter().all(|color| color_options.contains(color))
+                        )
+                }
+                _ => false,
+            }),
+        "New Planet must retain its parsed tap-for-one-mana-of-any-color ability"
+    );
+    new_planet
 }
 
 /// CR 208.2 + CR 208.2a: Detritivore's printed */* is set by its CDA.
@@ -108,15 +196,53 @@ fn issue_10130_detritivore_two_headed_giant_counts_settled_opponent_graveyards()
     let second_wasteland = scenario
         .add_land_from_oracle(P0, "Wasteland", WASTELAND)
         .id();
+    let token_wasteland = scenario
+        .add_land_from_oracle(P0, "Wasteland", WASTELAND)
+        .id();
     let detritivore = scenario
         .add_creature_from_oracle(P0, "Detritivore", 0, 0, DETRITIVORE)
         .id();
     let mut runner = scenario.build();
+    let new_planet = create_new_planet(&mut runner, P2);
 
     // Both printed activated abilities occupy the normal ability vector:
     // index 0 adds mana; index 1 sacrifices Wasteland and destroys the target.
     // These actions pay costs, choose targets, and pass priority through the
     // production reducer, including its normal layer/SBA settlement.
+    let token_outcome = runner
+        .activate(token_wasteland, 1)
+        .target_object(new_planet)
+        .resolve();
+    assert_eq!(token_outcome.zone_of(token_wasteland), Zone::Graveyard);
+    assert!(
+        token_outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                to: Zone::Graveyard,
+                ..
+            } if *object_id == new_planet
+        )),
+        "Wasteland must actually move the opponent's New Planet to the graveyard"
+    );
+    assert!(
+        !token_outcome.state().objects.contains_key(&new_planet),
+        "normal action/SBA settlement must remove the token"
+    );
+    assert_eq!(token_outcome.zone_of(detritivore), Zone::Battlefield);
+    assert!(
+        !token_outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::PowerToughnessChanged { object_id, .. } if *object_id == detritivore
+        )),
+        "Wasteland destroying New Planet must not publish a false P/T event"
+    );
+    // The facade quietly flushes layers before SBA; settled P/T is this
+    // action's revert discriminator. The lower-boundary case below proves
+    // the publisher independently with token and real-card event controls.
+    assert_eq!(token_outcome.power_toughness(detritivore), (1, 1));
+
     let teammate_outcome = runner
         .activate(first_wasteland, 1)
         .target_object(teammate_land)
@@ -154,7 +280,7 @@ fn issue_10130_detritivore_two_headed_giant_counts_settled_opponent_graveyards()
 /// CR 704.5d removes it. Check the production zone-move/SBA event boundary,
 /// not just the settled snapshot; the 2HG case above covers normal activation.
 #[test]
-fn issue_10130_detritivore_excludes_everywhere_token_from_graveyard_zone_move_trace() {
+fn issue_10130_detritivore_excludes_new_planet_token_from_graveyard_zone_move_trace() {
     const COMMAND_TOWER: &str =
         "{T}: Add one mana of any color in your commander's color identity.";
 
@@ -170,87 +296,7 @@ fn issue_10130_detritivore_excludes_everywhere_token_from_graveyard_zone_move_tr
         .id();
     let mut runner = scenario.build();
 
-    // Printed witness: Overlord of the Hauntwoods (DSK 194) says:
-    // "Whenever this permanent enters or attacks, create a tapped colorless
-    // land token named Everywhere that is every basic land type."
-    // https://scryfall.com/card/dsk/194/overlord-of-the-hauntwoods
-    // https://scryfall.com/card/tdsk/16/everywhere
-    // Transcribe that token's characteristics at the existing production
-    // CreateToken setup seam; replacement processing and token realization
-    // install its identity, zones and events. Do not use the incomplete
-    // Everywhere preset or pretend this exercises Overlord's parser/Impending.
-    // The setup-only source id follows the existing token-seam fixtures;
-    // this test makes no claim about resolving the printed producing trigger.
-    let proposed = ProposedEvent::CreateToken {
-        owner: P1,
-        spec: Box::new(TokenSpec {
-            characteristics: TokenCharacteristics {
-                display_name: "Everywhere".to_string(),
-                power: None,
-                toughness: None,
-                loyalty: None,
-                core_types: vec![CoreType::Land],
-                subtypes: ["Plains", "Island", "Swamp", "Mountain", "Forest"]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect(),
-                supertypes: Vec::new(),
-                colors: Vec::new(),
-                keywords: Vec::new(),
-            },
-            script_name: "Everywhere".to_string(),
-            static_abilities: Vec::new(),
-            enter_with_counters: Vec::new(),
-            tapped: true,
-            enters_attacking: false,
-            attack_request: TokenAttackRequest::Unspecified,
-            sacrifice_at: None,
-            source_id: ObjectId(0),
-            controller: P1,
-            attach_to: TokenHostRequest::NotRequested,
-        }),
-        copy: None,
-        enter_tapped: EtbTapState::Unspecified,
-        count: 1,
-        appended: Vec::new(),
-        applied: Default::default(),
-    };
-    let mut creation_events = Vec::new();
-    match replace_event(runner.state_mut(), proposed, &mut creation_events) {
-        ReplacementResult::Execute(event) => assert!(apply_create_token_after_replacement(
-            runner.state_mut(),
-            event,
-            &mut creation_events,
-        )),
-        other => panic!("Everywhere token creation must execute, got {other:?}"),
-    }
-    let everywhere = creation_events
-        .iter()
-        .find_map(|event| match event {
-            GameEvent::TokenCreated {
-                object_id, name, ..
-            } if name == "Everywhere" => Some(*object_id),
-            _ => None,
-        })
-        .expect("production token realization must emit TokenCreated");
-    let token = &runner.state().objects[&everywhere];
-    assert!(token.is_token);
-    assert!(!token.is_represented_by_a_card());
-    assert_eq!(token.owner, P1);
-    assert_eq!(token.controller, P1);
-    assert_eq!(token.zone, Zone::Battlefield);
-    assert!(token.tapped);
-    // All five basic land *types* do not confer the Basic *supertype*.
-    for types in [&token.card_types, &token.base_card_types] {
-        assert_eq!(types.core_types, vec![CoreType::Land]);
-        assert!(!types.supertypes.contains(&Supertype::Basic));
-        let mut subtypes: Vec<_> = types.subtypes.iter().map(String::as_str).collect();
-        subtypes.sort_unstable();
-        assert_eq!(
-            subtypes,
-            ["Forest", "Island", "Mountain", "Plains", "Swamp"]
-        );
-    }
+    let new_planet = create_new_planet(&mut runner, P1);
 
     // Establish the 1/1 baseline through an ordinary production action.
     runner
@@ -275,11 +321,11 @@ fn issue_10130_detritivore_excludes_everywhere_token_from_graveyard_zone_move_tr
     let mut token_events = Vec::new();
     assert!(!move_object_for_test(
         runner.state_mut(),
-        ZoneMoveRequest::effect(everywhere, Zone::Graveyard, everywhere),
+        ZoneMoveRequest::effect(new_planet, Zone::Graveyard, new_planet),
         &mut token_events,
     ));
-    assert_eq!(runner.state().objects[&everywhere].zone, Zone::Graveyard);
-    assert!(runner.state().objects[&everywhere].is_token);
+    assert_eq!(runner.state().objects[&new_planet].zone, Zone::Graveyard);
+    assert!(runner.state().objects[&new_planet].is_token);
     assert!(runner.state().layers_dirty.is_dirty());
     check_state_based_actions(runner.state_mut(), &mut token_events);
     assert!(
@@ -290,12 +336,12 @@ fn issue_10130_detritivore_excludes_everywhere_token_from_graveyard_zone_move_tr
                 from: Some(Zone::Battlefield),
                 to: Zone::Graveyard,
                 ..
-            } if *object_id == everywhere
+            } if *object_id == new_planet
         )),
         "reach guard: the token must actually enter the opponent's graveyard"
     );
     assert!(
-        !runner.state().objects.contains_key(&everywhere),
+        !runner.state().objects.contains_key(&new_planet),
         "CR 704.5d must remove the token during the production SBA pass"
     );
     assert_eq!(
@@ -307,27 +353,22 @@ fn issue_10130_detritivore_excludes_everywhere_token_from_graveyard_zone_move_tr
         Zone::Battlefield
     );
     assert_eq!(runner.state().objects[&detritivore].zone, Zone::Battlefield);
-    let token_action_pt: Vec<_> = token_events
-        .iter()
-        .filter_map(|event| match event {
-            GameEvent::PowerToughnessChanged {
-                object_id,
-                power,
-                toughness,
-                ..
-            } if *object_id == detritivore => Some((*power, *toughness)),
-            _ => None,
-        })
-        .collect();
+    let token_action_pt = token_events.iter().find_map(|event| match event {
+        GameEvent::PowerToughnessChanged {
+            object_id,
+            power,
+            toughness,
+            ..
+        } if *object_id == detritivore => Some((*power, *toughness)),
+        _ => None,
+    });
     let token_final_pt = (
         runner.state().objects[&detritivore].power,
         runner.state().objects[&detritivore].toughness,
     );
     assert!(
-        token_action_pt
-            .iter()
-            .all(|&(power, toughness)| power <= 1 && toughness <= 1),
-        "a token must not cause even a transient CDA increase: {token_action_pt:?}"
+        token_action_pt.is_none(),
+        "New Planet must not publish even a transient CDA change: {token_action_pt:?}"
     );
     assert_eq!(token_final_pt, (Some(1), Some(1)));
 

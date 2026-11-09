@@ -7131,10 +7131,10 @@ fn scoped_players<'a>(
         // CR 800.4a takes their owned objects out of the game with them. So
         // neither their player counters (CR 122.1) nor their zone and
         // spell-cast counts may contribute to an "each player" / "each
-        // opponent" total. Same population as the `PlayerScope` aggregate
-        // authority in `resolve_per_player_scalar`, which filters
-        // `!p.is_eliminated` on its `Opponent` and `AllPlayers` arms; these
-        // two scopes are the `CountScope` mirror of those and must agree.
+        // opponent" total. Match the live-player exclusion used by
+        // `resolve_per_player_scalar`; the opponent scope additionally uses
+        // the shared team-aware relationship below. This does not redefine
+        // the separate `PlayerScope` aggregation readers.
         //
         // The single-player scopes above deliberately keep no such filter: they
         // name ONE specific player rather than ranging over a population, and
