@@ -926,3 +926,73 @@ fn quandrix_command_still_bounces_when_surge_invalidates_only_the_shuffle_player
         "the legal bounce mode must resolve without either player shuffling"
     );
 }
+
+/// CR 608.2b + CR 701.24c + CR 701.24e: losing every card target does not
+/// remove the still-legal player's instruction, even if their library is empty.
+#[test]
+fn memorys_journey_still_shuffles_when_cremate_removes_its_only_card_target() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let memory = scenario
+        .add_spell_to_hand_from_oracle(P0, "Memory's Journey", true, MEMORY_ORACLE)
+        .id();
+    let cremate = scenario
+        .add_spell_to_hand_from_oracle(P1, "Cremate", true, CREMATE_ORACLE)
+        .id();
+    let selected = scenario
+        .add_creature_to_graveyard(P1, "Chosen Graveyard Card", 1, 1)
+        .id();
+    let unchosen = scenario
+        .add_creature_to_graveyard(P1, "Unchosen Graveyard Card", 1, 1)
+        .id();
+    let caster_library = scenario.add_card_to_library_top(P0, "Caster Library Card");
+    let drawn = scenario.add_card_to_library_top(P1, "Cremate Draw");
+    let mut runner = scenario.build();
+    let mut original = runner
+        .cast(memory)
+        .target_player(P1)
+        .target_object(selected)
+        .commit();
+    let mut events = original
+        .act(GameAction::PassPriority)
+        .expect("P0 passes priority so P1 can respond")
+        .events;
+    assert!(matches!(
+        original.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    {
+        let mut response = original.cast(cremate).target_object(selected).commit();
+        events.extend_from_slice(response.events());
+        for _ in 0..8 {
+            if response.state().objects[&cremate].zone == Zone::Graveyard {
+                break;
+            }
+            assert!(matches!(
+                response.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            events.extend(
+                response
+                    .act(GameAction::PassPriority)
+                    .expect("normal priority passing resolves Cremate")
+                    .events,
+            );
+        }
+        assert_eq!(response.state().objects[&cremate].zone, Zone::Graveyard);
+        assert_eq!(response.state().objects[&selected].zone, Zone::Exile);
+        assert_eq!(response.state().objects[&drawn].zone, Zone::Hand);
+        assert!(response.state().players[P1.0 as usize].library.is_empty());
+    }
+    assert_eq!(original.state().objects[&memory].zone, Zone::Stack);
+    let outcome = original.resolve();
+    events.extend_from_slice(outcome.events());
+
+    assert_completed(&outcome);
+    outcome.assert_zone(&[selected], Zone::Exile);
+    outcome.assert_zone(&[unchosen, memory, cremate], Zone::Graveyard);
+    outcome.assert_zone(&[drawn], Zone::Hand);
+    outcome.assert_zone(&[caster_library], Zone::Library);
+    assert!(outcome.state().players[P1.0 as usize].library.is_empty());
+    assert_eq!(shuffled_players(&events).as_slice(), &[P1]);
+}
