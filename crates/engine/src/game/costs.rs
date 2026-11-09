@@ -2378,14 +2378,13 @@ fn pay_ability_cost_inner(
                 return Ok(payment_failed("Not enough energy"));
             }
             if amount > 0 {
-                state
-                    .resolve_and_apply_player_edit(
-                        player,
-                        crate::types::resolved_commands::ResolvedPlayerEdit::Energy {
-                            delta: -(amount as i32),
-                        },
-                    )
-                    .expect("preflighted energy payment must apply");
+                super::effects::life::apply_final_player_resource_edit(
+                    state,
+                    player,
+                    crate::types::resolved_commands::ResolvedPlayerEdit::Energy {
+                        delta: -(amount as i32),
+                    },
+                )?;
             }
             events.push(GameEvent::EnergyChanged {
                 player,

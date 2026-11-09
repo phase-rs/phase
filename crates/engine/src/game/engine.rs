@@ -3949,7 +3949,14 @@ fn bounded_offer_tail(
     // predicate at all. And deliberately NOT a second `loop_states_cover_modulo_growth_pinned`
     // call: that predicate refuses on BOARD facts without ever examining a choice.
     let representable = match &source {
-        FrameSource::Ring { .. } => None,
+        FrameSource::Ring { .. } => {
+            let cycle = crate::analysis::headroom::PeriodExcursions::of_frames(&period_frames);
+            crate::analysis::headroom::PeriodExcursions::representable_repetitions(
+                &[cycle.clone(), cycle],
+                state,
+                MAX_SHORTCUT_CYCLES,
+            )
+        }
         FrameSource::Replay { representable, .. } => *representable,
     };
     let (touch, recorded) = match source {
@@ -5745,10 +5752,15 @@ fn shortcut_consumption_bound(
                 .filter(|entry| entry.repetition <= accepted)
                 .collect()
         });
-    ConsumptionDerivation::Measured(ConsumptionBound {
-        ceiling: ceiling.capacity_count(),
-        entries,
-    })
+    let ceiling = ceiling.capacity_count();
+    let cycle = crate::analysis::headroom::PeriodExcursions::of_resource_vector(&per_cycle.delta);
+    let representable = crate::analysis::headroom::PeriodExcursions::representable_repetitions(
+        &[cycle.clone(), cycle],
+        state,
+        MAX_SHORTCUT_CYCLES,
+    );
+    let ceiling = representable.map_or(ceiling, |r| ceiling.min(r));
+    ConsumptionDerivation::Measured(ConsumptionBound { ceiling, entries })
 }
 
 /// CR 115.2 + CR 732.2a: the per-slot published legal sets a consumption-time re-derivation has to

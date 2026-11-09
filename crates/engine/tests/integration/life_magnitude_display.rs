@@ -8,13 +8,13 @@ use engine::analysis::decision_template::IterationCount;
 use engine::analysis::loop_check::{LoopCertificate, ShortcutResponse};
 use engine::analysis::resource::{ResourceAxis, ResourceVector};
 use engine::game::derived_views::{derive_views, DisplayMagnitude, UnboundedResourceView};
-use engine::game::scenario::GameRunner;
+use engine::game::scenario::{GameRunner, GameScenario};
 use engine::types::actions::GameAction;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
     CastPaymentMode, GameState, LoopDetectionMode, PersistentAxisMaterialization, WaitingFor,
 };
-use engine::types::mana::ManaType;
+use engine::types::mana::{ManaCost, ManaType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
@@ -23,7 +23,7 @@ use crate::loop_shortcut::{
     setup_2p_optional_drain,
 };
 use crate::play_trace::{
-    ability, activate, altar_board, cast, chooses_color, is_offer, names, place, settle,
+    ability, activate, altar_board_with, cast, chooses_color, is_offer, names, place, settle,
 };
 use crate::support::shared_card_db;
 
@@ -56,8 +56,17 @@ fn accept_every_responder(runner: &mut GameRunner) {
 /// Zombie.") and Walking Corpse (a Zombie with no rules text), with Soul Warden ("Whenever another
 /// creature enters, you gain 1 life.") under each named seat, driven to P0's loop offer.
 fn altar_offer(p0_warden: bool, p1_warden: bool) -> (GameRunner, LoopCertificate) {
+    altar_offer_with(p0_warden, p1_warden, |_| {})
+}
+
+fn altar_offer_with(
+    p0_warden: bool,
+    p1_warden: bool,
+    customize: impl FnOnce(&mut GameScenario),
+) -> (GameRunner, LoopCertificate) {
     let db = shared_card_db().expect("card db");
-    let (mut runner, altar, gravecrawler) = altar_board(p0_warden.then_some("Soul Warden"), db);
+    let (mut runner, altar, gravecrawler) =
+        altar_board_with(p0_warden.then_some("Soul Warden"), db, customize);
     if p1_warden {
         place(runner.state_mut(), P1, "Soul Warden", db);
     }
@@ -181,6 +190,104 @@ fn own_life_growth_reads_unbounded_until_the_collapse_lands() {
         "the client's life wire golden drifted from engine output — re-run with \
          UPDATE_WIRE_GOLDEN=1"
     );
+}
+
+/// CR 732.2a + CR 119.3: An accepted marked shortcut records the agreed count, but an intervening
+/// ordinary action taken during priority before the phase boundary (e.g. Chaplain's Blessing gaining
+/// 5 life) moves life closer to the limit. The boundary choice prompt re-validates the live
+/// representable headroom without exceeding the count the players agreed to (#10543).
+#[test]
+fn marked_shortcut_revalidates_representable_bound_at_boundary_after_intervening_gain() {
+    let (mut runner, certificate) = altar_offer_with(true, false, |s| {
+        s.add_spell_to_hand_from_oracle(P0, "Chaplain's Blessing", false, "You gain 5 life.")
+            .with_mana_cost(ManaCost::zero());
+    });
+    assert_eq!(certificate.unbounded, vec![ResourceAxis::Life(P0)]);
+
+    // Set P0 near the limit where exactly 10 repetitions fit (P0 life = i32::MAX - 10).
+    runner
+        .state_mut()
+        .players
+        .iter_mut()
+        .find(|p| p.id == P0)
+        .expect("P0 exists")
+        .life = i32::MAX - 10;
+
+    runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(10),
+            template: None,
+        })
+        .expect("declare 10 repetitions");
+    accept_every_responder(&mut runner);
+
+    // The accepted shortcut marks life growth and returns ordinary priority before the
+    // phase-boundary choice.
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().phase, Phase::PreCombatMain);
+    assert_eq!(
+        runner.state().pending_materialization_count.get(&P0),
+        Some(&10)
+    );
+
+    // Intervening priority: resolve Chaplain's Blessing ("You gain 5 life.").
+    let blessing = runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P0)
+        .expect("P0 exists")
+        .hand
+        .iter()
+        .copied()
+        .find(|&id| runner.state().objects[&id].name == "Chaplain's Blessing")
+        .expect("Chaplain's Blessing in hand");
+
+    cast(&mut runner, blessing, vec![], CastPaymentMode::Auto);
+    settle(&mut runner, &|_| 0);
+
+    // P0's life is now i32::MAX - 5; only 5 repetitions can now be represented.
+    assert_eq!(life(runner.state(), P0), i32::MAX - 5);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+
+    // Pass to the phase boundary. The collapse prompt must re-validate the live bound,
+    // capping max at 5 rather than the previously agreed 10.
+    pass_to_boundary(&mut runner);
+    let state = runner.state();
+    let WaitingFor::PayAmountChoice {
+        player, min, max, ..
+    } = state.waiting_for
+    else {
+        panic!(
+            "expected PayAmountChoice at boundary, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(player, P0);
+    assert_eq!(min, 0);
+    assert_eq!(max, 5);
+
+    // Attempting to submit 10 exceeds the live representable max and is rejected.
+    let over = runner.act(GameAction::SubmitPayAmount { amount: 10 });
+    assert!(
+        over.is_err(),
+        "submitting 10 when only 5 can be represented must be rejected"
+    );
+
+    // Submitting 5 succeeds and lands P0 on exactly i32::MAX without overflow.
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 5 })
+        .expect("submit live representable amount 5");
+    let state = runner.state();
+    assert_eq!(life(state, P0), i32::MAX);
+    assert!(state.unbounded_resources.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 }
 
 /// Enduring Tenacity ("Whenever you gain life, target opponent loses that much life.") and

@@ -172,6 +172,83 @@ impl PeriodExcursions {
         excursions
     }
 
+    /// The player-resource excursions of one performed repetition, read off the frames of a
+    /// period in the loop-detection ring (newest last).
+    pub(crate) fn of_frames(frames: &[&GameState]) -> Self {
+        let Some(&first) = frames.first() else {
+            return Self::default();
+        };
+        let counter_kinds: std::collections::BTreeSet<_> = frames
+            .iter()
+            .flat_map(|f| {
+                f.players
+                    .iter()
+                    .flat_map(|p| p.player_counters.keys().copied())
+            })
+            .collect();
+        let mut excursions = Self::default();
+        for player in &first.players {
+            let scalars = [
+                PlayerScalar::Life,
+                PlayerScalar::LifeGainedThisTurn,
+                PlayerScalar::LifeLostThisTurn,
+                PlayerScalar::Energy,
+                PlayerScalar::EnergyPaidOrLostThisTurn,
+            ]
+            .into_iter()
+            .chain(counter_kinds.iter().copied().map(PlayerScalar::Counter));
+            for scalar in scalars {
+                let start = scalar.read(player);
+                let mut highest = 0i64;
+                let mut lowest = 0i64;
+                for frame in frames {
+                    if let Some(p) = frame.players.iter().find(|p| p.id == player.id) {
+                        let offset = scalar.read(p) - start;
+                        highest = highest.max(offset);
+                        lowest = lowest.min(offset);
+                    }
+                }
+                let net = frames
+                    .last()
+                    .and_then(|last| last.players.iter().find(|p| p.id == player.id))
+                    .map_or(0, |last_p| scalar.read(last_p) - start);
+                if net != 0 || highest != 0 || lowest != 0 {
+                    excursions.by_scalar.insert(
+                        (player.id, scalar),
+                        Excursion {
+                            net,
+                            highest,
+                            lowest,
+                        },
+                    );
+                }
+            }
+        }
+        excursions
+    }
+
+    /// The player-resource excursions of one period, read off a [`ResourceVector`].
+    pub(crate) fn of_resource_vector(delta: &crate::analysis::resource::ResourceVector) -> Self {
+        let mut excursions = Self::default();
+        for (&player, &amount) in &delta.life {
+            excursions.step(player, PlayerScalar::Life, amount);
+            let tally = if amount > 0 {
+                PlayerScalar::LifeGainedThisTurn
+            } else {
+                PlayerScalar::LifeLostThisTurn
+            };
+            excursions.step(player, tally, amount.abs());
+        }
+        for (&player, &delta_poison) in &delta.poison {
+            excursions.step(
+                player,
+                PlayerScalar::Counter(crate::types::player::PlayerCounterKind::Poison),
+                delta_poison,
+            );
+        }
+        excursions
+    }
+
     fn step(&mut self, player: PlayerId, scalar: PlayerScalar, delta: i64) {
         if delta != 0 {
             self.by_scalar

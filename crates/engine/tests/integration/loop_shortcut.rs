@@ -542,6 +542,91 @@ fn printed_energy_activation_period_reaches_the_recorded_offer_and_replays_each_
     );
 }
 
+/// CR 107.14 + CR 732.2a: Paying energy costs records the per-turn payment in
+/// `energy_paid_or_lost_this_turn`. When this tally nears `u32::MAX`, the counting replay
+/// at `period_confirm.rs:1499–1520` probes successive payments until tally addition fails.
+/// The failure must propagate as a typed refusal (`LifeChangeUnrepresentable`) rather than
+/// panicking on `expect` in costs resolution (#10543).
+#[test]
+fn printed_energy_counting_replay_stops_on_tally_overflow_without_panicking() {
+    let (mut state, line) = setup_energy_activation_loop(false, 0);
+    let index = energy_activation_index(&state, line);
+
+    // Initial tally: 1 cycle of 3 energy is performed before the offer,
+    // so setting tally to (u32::MAX - 9) - 3 = u32::MAX - 12 brings the offer frame
+    // to exactly u32::MAX - 9, leaving room for exactly 3 counted payments (3 * 3 = 9).
+    state.players[P0.0 as usize].energy_paid_or_lost_this_turn = u32::MAX - 12;
+
+    for _ in 1..=3 {
+        energy_activation_period(&mut state, line, index);
+        if matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }) {
+            break;
+        }
+    }
+
+    let WaitingFor::LoopShortcut { road, schema, .. } = &state.waiting_for else {
+        panic!("expected LoopShortcut offer, got {:?}", state.waiting_for);
+    };
+    assert_eq!(
+        *road,
+        engine::analysis::loop_check::OfferRoad::RecordedPeriod
+    );
+    assert_eq!(
+        state.players[P0.0 as usize].energy_paid_or_lost_this_turn,
+        u32::MAX - 9,
+        "one live period paid {{E}}{{E}}{{E}} before the offer"
+    );
+    assert_eq!(
+        schema.measured_repetition_bound,
+        Some(3),
+        "the counting replay stopped on the 4th probe when u32 overflowed and bounded spend to 3"
+    );
+
+    // Taking the 3 repetitions replays the payments to the exact limit without panicking.
+    take_recorded(&mut state, 3);
+    assert_eq!(
+        state.players[P0.0 as usize].energy_paid_or_lost_this_turn,
+        u32::MAX
+    );
+}
+
+/// CR 107.14 + CR 732.2a: When `energy_paid_or_lost_this_turn` cannot fit further cycles,
+/// the payment settlement in costs propagates `EngineError::LifeChangeUnrepresentable`
+/// cleanly without panicking (#10543).
+#[test]
+fn printed_energy_initial_confirmation_refuses_when_cycle_unrepresentable_without_panicking() {
+    let (mut state, line) = setup_energy_activation_loop(false, 0);
+    let index = energy_activation_index(&state, line);
+
+    // Start near limit such that cycle 1 leaves tally at u32::MAX - 2.
+    state.players[P0.0 as usize].energy_paid_or_lost_this_turn = u32::MAX - 5;
+    energy_activation_period(&mut state, line, index);
+    assert_eq!(
+        state.players[P0.0 as usize].energy_paid_or_lost_this_turn,
+        u32::MAX - 2
+    );
+
+    // Live cycle 2 cannot even be paid (attempting to pay 3 from u32::MAX - 2 overflows).
+    // The payment check returns LifeChangeUnrepresentable instead of panicking on expect.
+    let err = apply(
+        &mut state,
+        P0,
+        GameAction::ActivateAbility {
+            source_id: line,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        },
+    );
+    assert!(
+        matches!(
+            err,
+            Err(EngineError::LifeChangeUnrepresentable { player }) if player == P0
+        ),
+        "paying {{E}}{{E}}{{E}} from u32::MAX - 2 must return LifeChangeUnrepresentable, got {:?}",
+        err
+    );
+}
+
 /// CR 107.14 + CR 601.2f + CR 732.2a/c: three printed Modules refund Assembly Line's
 /// payment, so the recorded offer is unbounded even though Hulk's cost journal keeps moving.
 /// The accepted fixed take must replay those gross payments, not merely mark token growth.
@@ -11899,6 +11984,65 @@ fn a_ring_take_of_the_dina_drain_keeps_its_first_and_last_repetition() {
             "Fixed({count})"
         );
     }
+}
+
+/// CR 732.2a + CR 119.3: the real Dina/Conqueror Ring drain near the life limit (#10543). With P0
+/// at `i32::MAX - 2` on the offer frame and opponents holding enough life for 30 repetitions,
+/// the offer bounds declaration at two representable gains; declaring three is refused, and taking
+/// two completes and lands P0 on `i32::MAX`.
+#[test]
+fn a_ring_take_of_the_dina_drain_near_the_life_limit_is_bounded_and_lands_on_max() {
+    let mut state = restore_dump(&gunzip_dump(include_bytes!(
+        "../fixtures/dina_conqueror_4p.json.gz"
+    )));
+    // P0 gains 3 life across the 19 detection beats to the offer; starting at MAX-5 lands P0 at
+    // MAX-2 on the offer frame.
+    state.players[0].life = i32::MAX - 5;
+    drive_to_bounded_offer(&mut state, 400).expect("the bounded offer");
+    let WaitingFor::LoopShortcut {
+        proposer,
+        schema,
+        period,
+        ..
+    } = &state.waiting_for
+    else {
+        unreachable!("the bounded offer")
+    };
+    assert!(period.is_empty(), "the Ring route takes an empty period");
+    assert_eq!(*proposer, P0);
+    assert_eq!(state.players[0].life, i32::MAX - 2);
+    assert_eq!(
+        schema.deliverable_capacity, 2,
+        "opponents have 30 life, but P0 can only represent 2 gains"
+    );
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(2));
+
+    // Declaring 3 is refused
+    let mut refused = state.clone();
+    let result = apply(
+        &mut refused,
+        P0,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(3),
+            template: None,
+        },
+    )
+    .expect("refused declaration does not error");
+    assert_eq!(
+        result.waiting_for,
+        WaitingFor::Priority { player: P0 },
+        "declaring past the representable count returns to priority without opening a response window"
+    );
+
+    // Declaring and taking 2 completes and lands P0 on MAX
+    let result = take_recorded(&mut state, 2);
+    assert_eq!(markers(&result.events), vec![(P0, 1), (P0, 2)], "Fixed(2)");
+    assert_eq!(state.players[0].life, i32::MAX);
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "the take completed and handed priority back, got {:?}",
+        state.waiting_for
+    );
 }
 
 /// ITEM 2 (CR 732.2a) — the ACCEPT side: an opponent's play in the window's trace must not divert

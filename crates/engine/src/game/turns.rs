@@ -1183,11 +1183,20 @@ pub(super) fn drain_pending_phase_transition_progress(
                     // registration that creates the stash, so on current code the only
                     // bound-less stash is one deserialized from a save written before the
                     // bound was tracked.
-                    max: state
-                        .pending_materialization_count
-                        .get(&controller)
-                        .copied()
-                        .unwrap_or(crate::game::engine::MAX_SHORTCUT_CYCLES),
+                    //
+                    // Live re-validation: an intervening action before this boundary may have
+                    // moved a player-resource scalar toward its limit (e.g. Chaplain's Blessing
+                    // gaining life after a marked shortcut), so re-validate the representable
+                    // range on the live board without exceeding the accepted count (#10543).
+                    max: {
+                        let agreed = state
+                            .pending_materialization_count
+                            .get(&controller)
+                            .copied()
+                            .unwrap_or(crate::game::engine::MAX_SHORTCUT_CYCLES);
+                        materialization_representable_bound(state, controller)
+                            .map_or(agreed, |rep| agreed.min(rep))
+                    },
                     accumulated: 0,
                     source_id: ObjectId(0),
                     pending_mana_ability: None,
@@ -1451,6 +1460,33 @@ fn scan_step_end_mana_handlers(
     }
 
     entries
+}
+
+/// The largest repetition count the controller's pending unbounded materializations can represent
+/// on the live board without overflowing any player-resource scalar; `None` when no live scalar
+/// limits it.
+fn materialization_representable_bound(state: &GameState, controller: PlayerId) -> Option<u32> {
+    let items = state.pending_unbounded_materialization.get(&controller)?;
+    let mut bound: Option<u64> = None;
+    for item in items {
+        if let crate::types::game_state::PersistentAxisMaterialization::Life {
+            player,
+            per_cycle_delta,
+        } = item
+        {
+            if *per_cycle_delta > 0 {
+                if let Some(p) = state.players.iter().find(|pl| pl.id == *player) {
+                    let life_fit = (i64::from(i32::MAX) - i64::from(p.life)).max(0) as u64
+                        / u64::from(*per_cycle_delta);
+                    let gained_fit = (u64::from(u32::MAX) - u64::from(p.life_gained_this_turn))
+                        / u64::from(*per_cycle_delta);
+                    let fit = life_fit.min(gained_fit);
+                    bound = Some(bound.map_or(fit, |b| b.min(fit)));
+                }
+            }
+        }
+    }
+    bound.map(|b| b.min(u32::MAX as u64) as u32)
 }
 
 /// CR 117.3a + CR 400.7: Complete a phase entry after the per-player empty-
