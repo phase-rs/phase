@@ -9604,6 +9604,370 @@ mod tests {
         }
     }
 
+    // Abstract compatibility fixtures, not printed-card support claims. Comparands
+    // are only read here; neither normalized nor projected states resume gameplay.
+    fn relational_publish_recipient_event(state: &mut GameState) {
+        let StackEntryKind::TriggeredAbility { trigger_event, .. } = &state.stack[0].kind else {
+            panic!("recipient fixture must retain its damage carrier");
+        };
+        state.current_trigger_event = Some(trigger_event.clone().unwrap());
+        assert!(state.current_trigger_events.is_empty());
+    }
+
+    fn relational_recipient_reads(state: &GameState, expected: &[ObjectId]) {
+        use crate::game::targeting::resolve_event_referent_permanents;
+        use crate::types::ability::TargetFilter;
+        let strict = state.normalize_for_loop();
+        let twice = strict.normalize_for_loop();
+        assert!(loop_states_equal(&strict, &twice), "strict idempotence");
+        let projected = project_out_resources(state);
+        let projected_strict = project_out_resources(&strict);
+        let projected_twice = project_out_resources(&twice);
+        for (label, view) in [
+            ("raw", state),
+            ("strict", &strict),
+            ("strict twice", &twice),
+            ("factory raw", &*projected),
+            ("factory strict", &*projected_strict),
+            ("factory strict twice", &*projected_twice),
+        ] {
+            assert_eq!(
+                resolve_event_referent_permanents(view, &TargetFilter::EventTarget, ObjectId(20),),
+                expected,
+                "{label}: published recipient read"
+            );
+        }
+    }
+
+    #[test]
+    fn loop_relational_recipient_reader_any_and_optional_identity_views() {
+        for source_incarnation in [Some(3), None] {
+            for live_epoch in [7, 0] {
+                let mut live = relational_recipient_frame(Some(live_epoch), false, false);
+                live.objects.get_mut(&ObjectId(21)).unwrap().incarnation = live_epoch;
+                relational_publish_recipient_event(&mut live);
+                live.for_each_trigger_event_carrier_mut(&mut |event| {
+                    if let GameEvent::DamageDealt {
+                        source_incarnation: stamp,
+                        ..
+                    } = event
+                    {
+                        *stamp = source_incarnation;
+                    }
+                });
+                live.damage_dealt_this_turn[0].source_incarnation = source_incarnation;
+                let event = live.current_trigger_event.as_ref().unwrap();
+                assert!(live.damage_dealt_this_turn[0].matches_damage_event(event));
+                relational_recipient_reads(&live, &[ObjectId(21)]);
+                let projected = project_out_resources(&live);
+                assert_eq!(projected.damage_dealt_this_turn.len(), 1);
+                assert_eq!(
+                    projected.damage_dealt_this_turn[0]
+                        .source_incarnation
+                        .is_none(),
+                    source_incarnation.is_none(),
+                    "source None is optional identity, not a projected marker"
+                );
+                assert_ne!(
+                    projected.damage_dealt_this_turn[0].target_incarnation,
+                    Some(0),
+                    "ordinary raw epoch zero ranks to a live witness before projection"
+                );
+                let mut cases = vec![
+                    (vec![], true),
+                    (vec![None], true),
+                    (vec![None, None], true),
+                    (vec![Some(live_epoch)], true),
+                    (vec![None, Some(live_epoch)], true),
+                    (vec![Some(live_epoch), None], true),
+                ];
+                // A live epoch zero has no earlier incarnation. Keep its
+                // legitimate live/legacy controls separate from past-pin cases.
+                if live_epoch != 0 {
+                    cases.extend([
+                        (vec![Some(3), Some(live_epoch)], true),
+                        (vec![Some(live_epoch), Some(3)], true),
+                        (vec![None, Some(0)], false),
+                        (vec![Some(0), None], false),
+                        (vec![None, Some(3)], false),
+                        (vec![Some(3), None], false),
+                        (vec![Some(3), Some(5), None], false),
+                    ]);
+                }
+                for (pins, accepted) in cases {
+                    let mut frame = live.clone();
+                    frame.damage_dealt_this_turn = pins
+                        .iter()
+                        .map(|pin| {
+                            let mut row = live.damage_dealt_this_turn[0].clone();
+                            row.target_incarnation = *pin;
+                            row
+                        })
+                        .collect();
+                    assert!(frame.damage_dealt_this_turn.iter().all(|row| {
+                        row.matches_damage_event(frame.current_trigger_event.as_ref().unwrap())
+                    }));
+                    relational_recipient_reads(
+                        &frame,
+                        if accepted { &[ObjectId(21)] } else { &[] },
+                    );
+                    let projected = project_out_resources(&frame);
+                    assert_eq!(
+                        projected.damage_dealt_this_turn.len(),
+                        usize::from(pins.iter().any(Option::is_some)),
+                        "missing/None-only needs no witness; mixed rows need one"
+                    );
+                    if !accepted {
+                        assert_eq!(
+                            projected.damage_dealt_this_turn[0].target_incarnation,
+                            Some(0),
+                            "None cannot erase the all-stale result"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn loop_relational_recipient_reader_exact_join_and_excess_views() {
+        for source_incarnation in [Some(3), None] {
+            let mut live = relational_recipient_frame(Some(7), false, false);
+            relational_publish_recipient_event(&mut live);
+            live.for_each_trigger_event_carrier_mut(&mut |event| {
+                if let GameEvent::DamageDealt {
+                    source_incarnation: stamp,
+                    excess,
+                    ..
+                } = event
+                {
+                    *stamp = source_incarnation;
+                    *excess = 17;
+                }
+            });
+            live.damage_dealt_this_turn[0].source_incarnation = source_incarnation;
+            let matching_live = live.damage_dealt_this_turn[0].clone();
+            let mut matching_stale = matching_live.clone();
+            matching_stale.target_incarnation = Some(5);
+            let event = live.current_trigger_event.as_ref().unwrap();
+            assert!(matching_live.matches_damage_event(event));
+            assert!(matching_stale.matches_damage_event(event));
+            relational_recipient_reads(&live, &[ObjectId(21)]);
+            let mut wrong_rows = Vec::new();
+            let mut wrong = matching_live.clone();
+            wrong.source_id = ObjectId(21);
+            wrong_rows.push(("dealer", wrong));
+            let mut wrong = matching_live.clone();
+            wrong.source_incarnation = if source_incarnation.is_some() {
+                None
+            } else {
+                Some(3)
+            };
+            wrong_rows.push(("source Option", wrong));
+            let mut wrong = matching_live.clone();
+            wrong.source_incarnation = Some(4);
+            wrong_rows.push(("source epoch", wrong));
+            let mut wrong = matching_live.clone();
+            wrong.target = TargetRef::Object(ObjectId(20));
+            wrong_rows.push(("target", wrong));
+            let mut wrong = matching_live.clone();
+            wrong.amount = 2;
+            wrong_rows.push(("amount", wrong));
+            let mut wrong = matching_live.clone();
+            wrong.is_combat = true;
+            wrong_rows.push(("combat", wrong));
+            for (field, wrong_live) in wrong_rows {
+                assert!(!wrong_live.matches_damage_event(event), "{field}");
+                assert_eq!(wrong_live.target_incarnation, Some(7));
+                for reversed in [false, true] {
+                    let mut frame = live.clone();
+                    let mut rows = vec![matching_stale.clone(), wrong_live.clone()];
+                    if reversed {
+                        rows.reverse();
+                    }
+                    frame.damage_dealt_this_turn = rows.into_iter().collect();
+                    relational_recipient_reads(&frame, &[]);
+                    frame
+                        .damage_dealt_this_turn
+                        .push_back(matching_live.clone());
+                    relational_recipient_reads(&frame, &[ObjectId(21)]);
+                }
+                let mut unmatched_only = live.clone();
+                unmatched_only.damage_dealt_this_turn = [wrong_live].into_iter().collect();
+                relational_recipient_reads(&unmatched_only, &[ObjectId(21)]);
+            }
+            let mut excess_live = matching_live;
+            excess_live.excess = 42;
+            assert!(excess_live.matches_damage_event(event));
+            live.damage_dealt_this_turn = [matching_stale, excess_live].into_iter().collect();
+            relational_recipient_reads(&live, &[ObjectId(21)]);
+        }
+    }
+
+    #[test]
+    fn loop_relational_recipient_reader_missing_and_nonobject_views() {
+        let mut live = relational_recipient_frame(Some(7), false, false);
+        relational_publish_recipient_event(&mut live);
+        relational_recipient_reads(&live, &[ObjectId(21)]);
+        let mut player = live.clone();
+        player.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::DamageDealt { target, .. } = event {
+                *target = TargetRef::Player(PlayerId(1));
+            }
+        });
+        player.damage_dealt_this_turn[0].target = TargetRef::Player(PlayerId(1));
+        player.damage_dealt_this_turn[0].target_incarnation = None;
+        relational_recipient_reads(&player, &[]);
+        assert!(project_out_resources(&player)
+            .damage_dealt_this_turn
+            .is_empty());
+        let mut unpublished = live.clone();
+        unpublished.current_trigger_event = None;
+        assert!(
+            !unpublished.stack.is_empty(),
+            "carrier is not a published event"
+        );
+        relational_recipient_reads(&unpublished, &[]);
+        let mut missing = live.clone();
+        missing.objects.remove(&ObjectId(21));
+        missing.battlefield.retain(|id| *id != ObjectId(21));
+        assert!(missing.current_trigger_event.is_some());
+        assert!(!missing.damage_dealt_this_turn.is_empty());
+        relational_recipient_reads(&missing, &[]);
+        assert!(project_out_resources(&missing)
+            .damage_dealt_this_turn
+            .is_empty());
+    }
+
+    #[test]
+    fn loop_relational_projected_multiple_recipient_witnesses_and_order() {
+        let mut frame = relational_recipient_frame(Some(100), false, false);
+        frame.objects.get_mut(&ObjectId(21)).unwrap().incarnation = 100;
+        let other = battlefield_creature(&mut frame, 22, 1);
+        frame.objects.get_mut(&other).unwrap().incarnation = 100;
+        relational_publish_recipient_event(&mut frame);
+        let mut second = frame.stack[0].clone();
+        second.id = ObjectId(101);
+        let StackEntryKind::TriggeredAbility { trigger_event, .. } = &mut second.kind else {
+            panic!("recipient fixture must retain its damage carrier");
+        };
+        let second_event = GameEvent::DamageDealt {
+            source_id: ObjectId(20),
+            source_incarnation: Some(3),
+            target: TargetRef::Object(other),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        *trigger_event = Some(second_event.clone());
+        frame.stack.push_back(second);
+        frame.current_trigger_events = vec![
+            frame.current_trigger_event.clone().unwrap(),
+            second_event.clone(),
+        ];
+        let mut stale_row = frame.damage_dealt_this_turn[0].clone();
+        stale_row.target = TargetRef::Object(other);
+        stale_row.target_incarnation = Some(3);
+        stale_row.amount = 2;
+        stale_row.is_combat = true;
+        assert!(stale_row.matches_damage_event(&second_event));
+        frame.damage_dealt_this_turn.push_back(stale_row);
+        relational_recipient_reads(&frame, &[ObjectId(21)]);
+        let projected = project_out_resources(&frame);
+        assert_eq!(
+            projected.damage_dealt_this_turn.len(),
+            2,
+            "one witness per tuple, not one total"
+        );
+        assert_eq!(
+            projected.damage_dealt_this_turn[0].target,
+            TargetRef::Object(ObjectId(21))
+        );
+        assert_eq!(
+            projected.damage_dealt_this_turn[1].target,
+            TargetRef::Object(other)
+        );
+        assert_eq!(
+            projected.damage_dealt_this_turn[0].target_incarnation,
+            Some(projected.objects[&ObjectId(21)].incarnation)
+        );
+        assert_eq!(
+            projected.damage_dealt_this_turn[1].target_incarnation,
+            Some(0)
+        );
+        let mut reversed_rows = frame.clone();
+        reversed_rows.damage_dealt_this_turn =
+            frame.damage_dealt_this_turn.iter().cloned().rev().collect();
+        relational_projection_feeds(&frame, &reversed_rows, true);
+        let mut reversed_carriers = reversed_rows.clone();
+        reversed_carriers.stack = frame.stack.iter().cloned().rev().collect();
+        reversed_carriers.current_trigger_events.reverse();
+        relational_recipient_reads(&reversed_carriers, &[ObjectId(21)]);
+        for input in [&reversed_rows, &reversed_carriers] {
+            for view in [input, &input.normalize_for_loop()] {
+                assert_eq!(
+                    projected.damage_dealt_this_turn,
+                    project_out_resources(view).damage_dealt_this_turn,
+                    "witness tuple sort ignores journal and carrier order"
+                );
+            }
+        }
+        // Stack order remains significant state; only its selected relation and
+        // pure recipient answers are asserted invariant under carrier reversal.
+        let mut pumped = frame.clone();
+        pumped.resolving_stack_entry = Some(frame.stack[0].clone());
+        for row in frame.damage_dealt_this_turn.iter() {
+            let mut unknown = row.clone();
+            unknown.target_incarnation = None;
+            pumped.damage_dealt_this_turn.push_back(unknown);
+            for epoch in 10..42 {
+                assert!(epoch < frame.objects[&ObjectId(21)].incarnation);
+                assert!(epoch < frame.objects[&other].incarnation);
+                let mut old = row.clone();
+                old.target_incarnation = Some(epoch);
+                old.source_name = format!("discarded tuple history {epoch}");
+                pumped.damage_dealt_this_turn.push_back(old.clone());
+                pumped.damage_dealt_this_turn.push_back(old);
+            }
+        }
+        let mut same_carriers = frame.clone();
+        same_carriers.resolving_stack_entry = Some(frame.stack[0].clone());
+        assert!(
+            !loop_states_equal(
+                &same_carriers.normalize_for_loop(),
+                &pumped.normalize_for_loop()
+            ),
+            "strict history is not bounded"
+        );
+        relational_projection_feeds(&same_carriers, &pumped, true);
+        relational_recipient_reads(&pumped, &[ObjectId(21)]);
+        let bounded = project_out_resources(&pumped);
+        assert_eq!(bounded.damage_dealt_this_turn.len(), 2);
+        assert_eq!(
+            bounded.damage_dealt_this_turn,
+            projected.damage_dealt_this_turn
+        );
+        assert!(loop_states_equal(
+            &bounded,
+            &project_out_resources(&bounded)
+        ));
+        let mut both_live = frame.clone();
+        both_live.damage_dealt_this_turn[1].target_incarnation = Some(100);
+        relational_recipient_reads(&both_live, &[ObjectId(21), other]);
+        relational_projection_feeds(&frame, &both_live, false);
+        let mut no_carrier = frame;
+        no_carrier.stack.clear();
+        no_carrier.current_trigger_event = None;
+        no_carrier.current_trigger_events.clear();
+        assert_eq!(no_carrier.damage_dealt_this_turn.len(), 2);
+        assert!(no_carrier.objects.contains_key(&ObjectId(21)));
+        assert!(no_carrier.objects.contains_key(&other));
+        relational_recipient_reads(&no_carrier, &[]);
+        assert!(project_out_resources(&no_carrier)
+            .damage_dealt_this_turn
+            .is_empty());
+    }
+
     /// CR 400.7 + CR 608.2k: stale, live and unknown recipients are three different futures.
     #[test]
     fn loop_relational_projected_recipient_read_classes() {

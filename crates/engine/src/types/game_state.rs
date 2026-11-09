@@ -51506,7 +51506,512 @@ mod tests {
         }
     }
 
-    // Finite carried provider tree only: no lookup API or recursive live graph fixture.
+    // Abstract normalization fixtures: no event admission or played grant history is claimed.
+    fn relational_producer_fact_frame(
+        template: &GameState,
+        host: ObjectId,
+        mut producer: TriggerGrantProducerKey,
+        shift: u64,
+    ) -> GameState {
+        use crate::types::ability::occurrence_for_grant;
+        let mut state = template.clone();
+        for (_, object) in state.objects.iter_mut() {
+            object.incarnation += shift;
+        }
+        producer.for_each_incarnation_mut(&mut |_, epoch| *epoch += shift);
+        let object = state.objects.get_mut(&host).unwrap();
+        for _ in 0..10 + shift {
+            object
+                .trigger_occurrence_state
+                .allocate_trigger_grant_instance()
+                .unwrap();
+        }
+        let generation = object
+            .trigger_occurrence_state
+            .grant_instance_for(producer.clone())
+            .unwrap();
+        let reference = TriggerDefinitionRef {
+            source: ObjectIncarnationRef::of(host, object.incarnation),
+            occurrence: occurrence_for_grant(&producer, generation),
+        };
+        assert_eq!(
+            object
+                .trigger_occurrence_state
+                .producer_for_occurrence(&reference.occurrence),
+            Some(&producer),
+            "the spent occurrence has the exact active producer, not merely its generation"
+        );
+        state.triggers_fired_this_turn.insert(reference);
+        state
+    }
+
+    fn relational_assert_current_root(state: &GameState) -> &TriggerDefinitionRef {
+        assert_eq!(state.triggers_fired_this_turn.len(), 1);
+        let reference = state.triggers_fired_this_turn.iter().next().unwrap();
+        let object = state.objects.get(&reference.source.object_id).unwrap();
+        assert_eq!(reference.source.incarnation, object.incarnation);
+        assert!(object
+            .trigger_occurrence_state
+            .producer_for_occurrence(&reference.occurrence)
+            .is_some());
+        reference
+    }
+
+    #[test]
+    fn loop_relational_strict_current_producer_scalar_facts() {
+        let (mut template, host) = records_naming(7, &[]);
+        let other_source = create_object(
+            &mut template,
+            CardId(62),
+            PlayerId(0),
+            "Other producer source".to_string(),
+            Zone::Battlefield,
+        );
+        template.objects.get_mut(&other_source).unwrap().incarnation = 7;
+        let origin = TriggerProducerOrigin::Static {
+            source: ObjectIncarnationRef::of(host, 7),
+            definition_index: 2,
+            modification_index: 3,
+        };
+        for (case, same_raw_ledger) in [
+            ("granted output", true),
+            ("keyword output", true),
+            ("keyword companion", false),
+            ("copy retained base set", false),
+            ("copy retained printed index", false),
+            ("expanded provider output", false),
+            ("static source object", true),
+            ("static source epoch", true),
+            ("static definition index", true),
+            ("static modification index", true),
+            ("transient effect id", true),
+            ("transient modification index", true),
+            ("origin variant", true),
+            ("producer variant", false),
+        ] {
+            let left_key = match case {
+                "keyword output" | "keyword companion" => {
+                    TriggerGrantProducerKey::KeywordCompanion {
+                        origin: origin.clone(),
+                        keyword_output_index: 4,
+                        companion_index: 5,
+                    }
+                }
+                "copy retained base set" | "copy retained printed index" => {
+                    TriggerGrantProducerKey::CopyRetained {
+                        origin: origin.clone(),
+                        source_base_set: TriggerBaseSetInstanceRef(6),
+                        source_printed_index: 7,
+                    }
+                }
+                "expanded provider output" => TriggerGrantProducerKey::ExpandedGrant {
+                    origin: origin.clone(),
+                    provider: Box::new(TriggerDefinitionRef {
+                        source: ObjectIncarnationRef::of(other_source, 7),
+                        occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                            base_set: TriggerBaseSetInstanceRef::INITIAL,
+                            printed_index: 0,
+                        },
+                    }),
+                    provider_output_index: 8,
+                },
+                "transient effect id" | "transient modification index" => {
+                    TriggerGrantProducerKey::Granted {
+                        origin: TriggerProducerOrigin::Transient {
+                            continuous_effect_id: 23,
+                            modification_index: 3,
+                        },
+                        output_index: 4,
+                    }
+                }
+                _ => TriggerGrantProducerKey::Granted {
+                    origin: origin.clone(),
+                    output_index: 4,
+                },
+            };
+            let mut right_key = left_key.clone();
+            match (case, &mut right_key) {
+                ("granted output", TriggerGrantProducerKey::Granted { output_index, .. }) => {
+                    *output_index += 1;
+                }
+                (
+                    "keyword output",
+                    TriggerGrantProducerKey::KeywordCompanion {
+                        keyword_output_index,
+                        ..
+                    },
+                ) => {
+                    *keyword_output_index += 1;
+                }
+                (
+                    "keyword companion",
+                    TriggerGrantProducerKey::KeywordCompanion {
+                        companion_index, ..
+                    },
+                ) => {
+                    *companion_index += 1;
+                }
+                (
+                    "copy retained base set",
+                    TriggerGrantProducerKey::CopyRetained {
+                        source_base_set, ..
+                    },
+                ) => {
+                    source_base_set.0 += 1;
+                }
+                (
+                    "copy retained printed index",
+                    TriggerGrantProducerKey::CopyRetained {
+                        source_printed_index,
+                        ..
+                    },
+                ) => {
+                    *source_printed_index += 1;
+                }
+                (
+                    "expanded provider output",
+                    TriggerGrantProducerKey::ExpandedGrant {
+                        provider_output_index,
+                        ..
+                    },
+                ) => {
+                    *provider_output_index += 1;
+                }
+                (
+                    "static source object",
+                    TriggerGrantProducerKey::Granted {
+                        origin: TriggerProducerOrigin::Static { source, .. },
+                        ..
+                    },
+                ) => {
+                    source.object_id = other_source;
+                }
+                (
+                    "static source epoch",
+                    TriggerGrantProducerKey::Granted {
+                        origin: TriggerProducerOrigin::Static { source, .. },
+                        ..
+                    },
+                ) => {
+                    source.incarnation -= 1;
+                }
+                (
+                    "static definition index",
+                    TriggerGrantProducerKey::Granted {
+                        origin:
+                            TriggerProducerOrigin::Static {
+                                definition_index, ..
+                            },
+                        ..
+                    },
+                ) => {
+                    *definition_index += 1;
+                }
+                (
+                    "static modification index",
+                    TriggerGrantProducerKey::Granted {
+                        origin:
+                            TriggerProducerOrigin::Static {
+                                modification_index, ..
+                            },
+                        ..
+                    },
+                ) => {
+                    *modification_index += 1;
+                }
+                (
+                    "transient effect id",
+                    TriggerGrantProducerKey::Granted {
+                        origin:
+                            TriggerProducerOrigin::Transient {
+                                continuous_effect_id,
+                                ..
+                            },
+                        ..
+                    },
+                ) => {
+                    *continuous_effect_id += 1;
+                }
+                (
+                    "transient modification index",
+                    TriggerGrantProducerKey::Granted {
+                        origin:
+                            TriggerProducerOrigin::Transient {
+                                modification_index, ..
+                            },
+                        ..
+                    },
+                ) => {
+                    *modification_index += 1;
+                }
+                ("origin variant", TriggerGrantProducerKey::Granted { origin, .. }) => {
+                    *origin = TriggerProducerOrigin::Transient {
+                        continuous_effect_id: 23,
+                        modification_index: 3,
+                    };
+                }
+                ("producer variant", _) => {
+                    right_key = TriggerGrantProducerKey::KeywordCompanion {
+                        origin: origin.clone(),
+                        keyword_output_index: 4,
+                        companion_index: 5,
+                    };
+                }
+                _ => unreachable!("each case changes exactly its selected typed scalar/header"),
+            }
+            let left = relational_producer_fact_frame(&template, host, left_key.clone(), 0);
+            let right = relational_producer_fact_frame(&template, host, right_key.clone(), 0);
+            relational_assert_current_root(&left);
+            relational_assert_current_root(&right);
+            assert_eq!(
+                left.triggers_fired_this_turn == right.triggers_fired_this_turn,
+                same_raw_ledger,
+                "{case}: distinguish supplemental proof from baseline raw-ledger refusal"
+            );
+            assert!(
+                !active_trigger_ledger_bindings_equal(&left, &right, |_| true),
+                "{case}: two exact ACTIVE facts differ in producer semantics"
+            );
+            let left_normalized = left.normalize_for_loop();
+            let right_normalized = right.normalize_for_loop();
+            relational_assert_current_root(&left_normalized);
+            relational_assert_current_root(&right_normalized);
+            assert!(
+                objects_content_eq(&left_normalized.objects, &right_normalized.objects),
+                "{case}: ledger-blind object content supplies no accidental refusal"
+            );
+            assert_eq!(
+                left_normalized.triggers_fired_this_turn
+                    == right_normalized.triggers_fired_this_turn,
+                same_raw_ledger,
+                "{case}: ranking must not disguise which proof the test supplies"
+            );
+            assert!(
+                !active_trigger_ledger_bindings_equal(&left_normalized, &right_normalized, |_| {
+                    true
+                }),
+                "{case}: ranked current facts still differ"
+            );
+            assert!(
+                !loop_states_equal(&left_normalized, &right_normalized),
+                "{case}"
+            );
+            for frame in [&left, &right] {
+                assert!(
+                    active_trigger_ledger_bindings_equal(frame, frame, |_| true),
+                    "{case}"
+                );
+                assert!(normalized_equal(frame, frame), "{case}: identical positive");
+            }
+            for (frame, key) in [(&left, left_key), (&right, right_key)] {
+                let shifted = relational_producer_fact_frame(&template, host, key, 40);
+                relational_assert_current_root(&shifted);
+                assert!(
+                    normalized_equal(frame, &shifted),
+                    "{case}: consistently shifted positive"
+                );
+            }
+        }
+    }
+
+    // Abstract serialized lookup graph A -> B -> A, NOT an independently played history.
+    // The carried AExpanded(BExpanded(AGranted)) tree is finite. AGranted deliberately
+    // names AExpanded's own generation, so only an exact shape lookup may stop there.
+    fn relational_cyclic_provider_frame(shift: u64, retire_b: bool) -> GameState {
+        use crate::types::ability::occurrence_for_grant;
+        let (mut state, a) = records_naming(7 + 3 * shift, &[]);
+        let b = create_object(
+            &mut state,
+            CardId(63),
+            PlayerId(0),
+            "Cyclic provider".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&b).unwrap().incarnation = 19 + 5 * shift;
+        let a_source = ObjectIncarnationRef::of(a, state.objects.get(&a).unwrap().incarnation);
+        let b_source = ObjectIncarnationRef::of(b, state.objects.get(&b).unwrap().incarnation);
+        assert_ne!(a_source.incarnation, b_source.incarnation);
+        let a_generation = TriggerGrantInstanceRef(11 + shift);
+        let b_generation = TriggerGrantInstanceRef(31 + 2 * shift);
+        assert_ne!(a_generation, b_generation, "separate allocator namespaces");
+        for (id, generation) in [(a, a_generation), (b, b_generation)] {
+            for expected in 1..generation.0 {
+                assert_eq!(
+                    state
+                        .objects
+                        .get_mut(&id)
+                        .unwrap()
+                        .trigger_occurrence_state
+                        .allocate_trigger_grant_instance()
+                        .unwrap(),
+                    TriggerGrantInstanceRef(expected)
+                );
+            }
+        }
+        let leaf = TriggerDefinitionRef {
+            source: a_source,
+            occurrence: TriggerDefinitionOccurrenceRef::Granted {
+                grant_instance: a_generation,
+            },
+        };
+        let b_key = TriggerGrantProducerKey::ExpandedGrant {
+            origin: TriggerProducerOrigin::Static {
+                source: b_source,
+                definition_index: 1,
+                modification_index: 2,
+            },
+            provider: Box::new(leaf),
+            provider_output_index: 3,
+        };
+        let b_reference = TriggerDefinitionRef {
+            source: b_source,
+            occurrence: occurrence_for_grant(&b_key, b_generation),
+        };
+        let a_key = TriggerGrantProducerKey::ExpandedGrant {
+            origin: TriggerProducerOrigin::Static {
+                source: a_source,
+                definition_index: 4,
+                modification_index: 5,
+            },
+            provider: Box::new(b_reference),
+            provider_output_index: 6,
+        };
+        let root = TriggerDefinitionRef {
+            source: a_source,
+            occurrence: occurrence_for_grant(&a_key, a_generation),
+        };
+        let wire = serde_json::to_string(&(&a_key, &b_key, &root)).unwrap();
+        let decoded: (
+            TriggerGrantProducerKey,
+            TriggerGrantProducerKey,
+            TriggerDefinitionRef,
+        ) = serde_json::from_str(&wire).unwrap();
+        let (a_key, b_key, root) = decoded;
+        for (id, key, expected) in [(a, a_key, a_generation), (b, b_key.clone(), b_generation)] {
+            let grants = &mut state.objects.get_mut(&id).unwrap().trigger_occurrence_state;
+            assert_eq!(grants.grant_instance_for(key).unwrap(), expected);
+        }
+        state.triggers_fired_this_turn.insert(root);
+        if retire_b {
+            let grants = &mut state.objects.get_mut(&b).unwrap().trigger_occurrence_state;
+            grants.retire_absent_grants(&[]);
+            assert_ne!(grants.grant_instance_for(b_key).unwrap(), b_generation);
+        }
+        state
+    }
+
+    fn relational_assert_cyclic_provider_shape(state: &GameState, b_current: bool) {
+        use crate::types::ability::occurrence_for_grant;
+        let root = relational_assert_current_root(state);
+        let TriggerDefinitionOccurrenceRef::ExpandedGrant {
+            grant_instance: a_generation,
+            provider: b_reference,
+            ..
+        } = &root.occurrence
+        else {
+            panic!("A's ledger root must be expanded");
+        };
+        let b = state.objects.get(&b_reference.source.object_id).unwrap();
+        assert_ne!(root.source.object_id, b_reference.source.object_id);
+        assert_eq!(b_reference.source.incarnation, b.incarnation);
+        assert_eq!(
+            b.trigger_occurrence_state
+                .producer_for_occurrence(&b_reference.occurrence)
+                .is_some(),
+            b_current,
+            "the nested B occurrence, not the always-current A root, is discriminating"
+        );
+        let TriggerDefinitionOccurrenceRef::ExpandedGrant { provider: leaf, .. } =
+            &b_reference.occurrence
+        else {
+            panic!("B's carried provider must be expanded");
+        };
+        assert_eq!(leaf.source, root.source);
+        assert_eq!(
+            leaf.occurrence,
+            TriggerDefinitionOccurrenceRef::Granted {
+                grant_instance: *a_generation
+            }
+        );
+        let a = state.objects.get(&leaf.source.object_id).unwrap();
+        assert_eq!(
+            a.trigger_occurrence_state
+                .producer_for_occurrence(&leaf.occurrence),
+            None,
+            "same own generation is insufficient: A's active shape is Expanded, not Granted"
+        );
+        // Even the retired-provider sibling has a valid CURRENT B cache root,
+        // whose finite provider still returns to A. The stale carried ref alone differs.
+        let (b_key, b_generation) = b.trigger_occurrence_state.active_grants().next().unwrap();
+        assert_eq!(b.trigger_occurrence_state.active_grants().count(), 1);
+        assert_eq!(
+            b.trigger_occurrence_state
+                .producer_for_occurrence(&occurrence_for_grant(b_key, b_generation)),
+            Some(b_key)
+        );
+        let TriggerGrantProducerKey::ExpandedGrant { provider, .. } = b_key else {
+            panic!("B's active key must preserve the return edge to A");
+        };
+        assert_eq!(provider.as_ref(), leaf.as_ref());
+    }
+
+    #[test]
+    fn loop_relational_strict_finite_cyclic_provider_lookup_graph() {
+        let current = relational_cyclic_provider_frame(0, false);
+        let shifted = relational_cyclic_provider_frame(17, false);
+        let retired = relational_cyclic_provider_frame(0, true);
+        let shifted_retired = relational_cyclic_provider_frame(17, true);
+        for (frame, b_current) in [
+            (&current, true),
+            (&shifted, true),
+            (&retired, false),
+            (&shifted_retired, false),
+        ] {
+            relational_assert_cyclic_provider_shape(frame, b_current);
+            let once = frame.normalize_for_loop();
+            let twice = once.normalize_for_loop();
+            relational_assert_cyclic_provider_shape(&once, b_current);
+            relational_assert_cyclic_provider_shape(&twice, b_current);
+            assert!(
+                loop_states_equal(&once, &twice),
+                "cyclic occupancy traversal reaches a fixed point"
+            );
+            assert!(active_trigger_ledger_bindings_equal(frame, frame, |_| true));
+        }
+        assert_ne!(
+            current.triggers_fired_this_turn,
+            shifted.triggers_fired_this_turn
+        );
+        assert_eq!(
+            current.triggers_fired_this_turn,
+            retired.triggers_fired_this_turn
+        );
+        assert!(
+            normalized_equal(&current, &shifted),
+            "finite carried descent preserves shifted current semantics"
+        );
+        assert!(
+            normalized_equal(&retired, &shifted_retired),
+            "shifted noncurrent B semantics"
+        );
+        assert!(
+            !active_trigger_ledger_bindings_equal(&current, &retired, |_| true),
+            "equal raw roots still distinguish current versus retired B"
+        );
+        let current_normalized = current.normalize_for_loop();
+        let retired_normalized = retired.normalize_for_loop();
+        assert!(!active_trigger_ledger_bindings_equal(
+            &current_normalized,
+            &retired_normalized,
+            |_| true
+        ));
+        assert!(
+            !loop_states_equal(&current_normalized, &retired_normalized),
+            "finite descent must not erase the nested active/noncurrent discriminator"
+        );
+    }
+
+    // Abstract finite carried-tree fixture; the cyclic lookup-graph sibling is separate.
     fn relational_nested_provider_frame(shift: u64, retired: bool) -> GameState {
         use crate::types::ability::{
             occurrence_for_grant, TriggerGrantProducerKey, TriggerProducerOrigin,

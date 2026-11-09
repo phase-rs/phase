@@ -519,7 +519,7 @@ fn matsu_pending_damage() -> (GameRunner, ObjectId, ObjectId, [ObjectId; 2], usi
 }
 
 /// Cast and pay for a real response, stopping before the underlying trigger.
-fn flicker_matsu_recipient(runner: &mut GameRunner, response: ObjectId, crow: ObjectId) {
+fn flicker_while_matsu_pending(runner: &mut GameRunner, response: ObjectId, blinked: ObjectId) {
     for _ in 0..2 {
         if matches!(
             runner.state().waiting_for,
@@ -537,7 +537,7 @@ fn flicker_matsu_recipient(runner: &mut GameRunner, response: ObjectId, crow: Ob
     ));
     assert_eq!(runner.state().stack.len(), 1);
     let pending = runner.state().stack[0].clone();
-    let old_epoch = runner.state().objects[&crow].incarnation;
+    let old_epoch = runner.state().objects[&blinked].incarnation;
     let card_id = runner.state().objects[&response].card_id;
     runner
         .act(GameAction::CastSpell {
@@ -559,12 +559,12 @@ fn flicker_matsu_recipient(runner: &mut GameRunner, response: ObjectId, crow: Ob
     assert_eq!(*player, P0);
     assert!(target_slots[selection.current_slot]
         .legal_targets
-        .contains(&TargetRef::Object(crow)));
+        .contains(&TargetRef::Object(blinked)));
     runner
         .act(GameAction::ChooseTarget {
-            target: Some(TargetRef::Object(crow)),
+            target: Some(TargetRef::Object(blinked)),
         })
-        .expect("choose the actual damage recipient for Flicker");
+        .expect("choose the creature to blink while Matsu's trigger is pending");
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
@@ -574,7 +574,7 @@ fn flicker_matsu_recipient(runner: &mut GameRunner, response: ObjectId, crow: Ob
     assert_eq!(spell.source_id, response);
     assert_eq!(
         spell.ability().unwrap().targets,
-        vec![TargetRef::Object(crow)]
+        vec![TargetRef::Object(blinked)]
     );
     assert!(matches!(
         spell.kind,
@@ -592,9 +592,9 @@ fn flicker_matsu_recipient(runner: &mut GameRunner, response: ObjectId, crow: Ob
             .expect("resolve the paid Flicker only");
     }
     assert_eq!(runner.state().objects[&response].zone, Zone::Graveyard);
-    assert_eq!(runner.state().objects[&crow].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&blinked].zone, Zone::Battlefield);
     // CR 400.7: the paid blink produced a different object.
-    assert_ne!(runner.state().objects[&crow].incarnation, old_epoch);
+    assert_ne!(runner.state().objects[&blinked].incarnation, old_epoch);
     assert_eq!(runner.state().stack.len(), 1);
     assert_eq!(
         runner.state().stack[0],
@@ -616,20 +616,70 @@ fn resolve_matsu_future(state: GameState, crow: ObjectId, freezes: bool) {
         future.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
-    // CR 608.2k + CR 400.7: the previously identified recipient is not a
-    // returned object, unless this labelled control pins the current object.
+    // CR 608.2k + CR 400.7: the selected recipient relation determines whether
+    // the object currently at this storage id is still affected.
     assert_eq!(is_tapped(&future, crow), freezes);
     // Controlled tap setup distinguishes the freeze from the immediate tap.
     future.state_mut().objects.get_mut(&crow).unwrap().tapped = true;
     advance_to_upkeep_of(&mut future, P1);
     // CR 502.3: only the bound recipient skips this untap.
     assert_eq!(is_tapped(&future, crow), freezes);
+    assert!(future.state().stack.is_empty());
+    assert!(matches!(
+        future.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn loop_relational_matsu_dealer_only_blink_preserves_recipient_tap_and_freeze() {
+    let (mut runner, sniper, crow, responses, record_index) = matsu_pending_damage();
+    let dealer_epoch = runner.state().objects[&sniper].incarnation;
+    let recipient_epoch = runner.state().objects[&crow].incarnation;
+    let selected_record = runner.state().damage_dealt_this_turn[record_index].clone();
+
+    // Flicker can target the tapped dealer: its Oracle imposes no untapped restriction.
+    assert!(is_tapped(&runner, sniper));
+    flicker_while_matsu_pending(&mut runner, responses[0], sniper);
+    assert_ne!(runner.state().objects[&sniper].incarnation, dealer_epoch);
+    assert_eq!(runner.state().objects[&crow].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&crow].incarnation, recipient_epoch);
+    assert!(
+        !is_tapped(&runner, crow),
+        "the original trigger is still pending"
+    );
+
+    // The real event and journal still select the departed dealer, not its return.
+    assert!(matches!(
+        &runner.state().stack[0].kind,
+        StackEntryKind::TriggeredAbility {
+            trigger_event: Some(GameEvent::DamageDealt {
+                source_id,
+                source_incarnation,
+                target,
+                ..
+            }),
+            ..
+        } if *source_id == sniper
+            && *source_incarnation == Some(dealer_epoch)
+            && *target == TargetRef::Object(crow)
+    ));
+    let record = &runner.state().damage_dealt_this_turn[record_index];
+    assert_eq!(record, &selected_record);
+    assert_eq!(record.source_id, sniper);
+    assert_eq!(record.source_incarnation, Some(dealer_epoch));
+    assert_eq!(record.target, TargetRef::Object(crow));
+    assert_eq!(record.target_incarnation, Some(recipient_epoch));
+
+    // CR 113.7a + CR 608.2k: source departure does not stop the independent
+    // trigger from tapping and freezing its unchanged, previously identified recipient.
+    resolve_matsu_future(runner.state().clone(), crow, true);
 }
 
 #[test]
 fn loop_relational_matsu_pending_recipient_relation_survives_resource_projection() {
     let (mut runner, _, crow, responses, record_index) = matsu_pending_damage();
-    flicker_matsu_recipient(&mut runner, responses[0], crow);
+    flicker_while_matsu_pending(&mut runner, responses[0], crow);
     let stale = runner.state().clone();
     assert_ne!(
         stale.damage_dealt_this_turn[record_index].target_incarnation,
@@ -658,7 +708,7 @@ fn loop_relational_matsu_pending_recipient_relation_survives_resource_projection
 #[test]
 fn loop_relational_matsu_legacy_unknown_and_live_pin_diverge_after_another_paid_blink() {
     let (mut runner, _, crow, responses, record_index) = matsu_pending_damage();
-    flicker_matsu_recipient(&mut runner, responses[0], crow);
+    flicker_while_matsu_pending(&mut runner, responses[0], crow);
     let mut pinned = runner.state().clone();
     pinned.damage_dealt_this_turn[record_index].target_incarnation =
         Some(pinned.objects[&crow].incarnation);
@@ -671,8 +721,8 @@ fn loop_relational_matsu_legacy_unknown_and_live_pin_diverge_after_another_paid_
 
     let mut unknown_future = GameRunner::from_state(unknown.clone());
     let mut pinned_future = GameRunner::from_state(pinned.clone());
-    flicker_matsu_recipient(&mut unknown_future, responses[1], crow);
-    flicker_matsu_recipient(&mut pinned_future, responses[1], crow);
+    flicker_while_matsu_pending(&mut unknown_future, responses[1], crow);
+    flicker_while_matsu_pending(&mut pinned_future, responses[1], crow);
     assert_eq!(
         unknown_future.state().objects[&crow].incarnation,
         pinned_future.state().objects[&crow].incarnation
