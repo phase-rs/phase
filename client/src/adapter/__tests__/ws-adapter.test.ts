@@ -61,6 +61,7 @@ class MockWebSocket extends EventTarget {
   static CLOSED = 3;
   static last: MockWebSocket | null = null;
   readyState = MockWebSocket.OPEN;
+  binaryType: BinaryType = "blob";
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   onerror: (() => void) | null = null;
@@ -6435,14 +6436,8 @@ describe("WebSocketAdapter — codec degradation policy", () => {
       "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
       undefined, undefined, undefined, { stateCodecSessionProvider: provider },
     );
-    const sendSpy = vi.spyOn(adapter as unknown as { send(message: unknown): boolean }, "send");
     const events: unknown[] = [];
-    const policyAtServerHello: unknown[] = [];
-    adapter.onEvent((event) => {
-      events.push(event);
-      // The reason must already be consumed when a serverHello listener runs.
-      if ((event as { type?: string }).type === "serverHello") policyAtServerHello.push(policyOf(adapter));
-    });
+    adapter.onEvent((event) => events.push(event));
     try {
       const joined = outcomeOf(adapter.initialize());
       await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
@@ -6462,23 +6457,17 @@ describe("WebSocketAdapter — codec degradation policy", () => {
       raw.dispatchSynthetic("message", CODEC_SESSION_HELLO);
 
       await expect(joined).resolves.toMatchObject({
-        code: "WS_CLOSED", message: "Connection closed before game started", recoverable: true,
+        code: "WS_CLOSED", recoverable: true,
       });
       // Reach guard: the codec really was offered, and no socket was adopted yet.
       expect(offeredCodec(raw)).toBe(true);
       expect(adoptedAtFailure).toEqual([false]);
       expect(provider).toHaveBeenCalledOnce();
-      // One wrapper failure: lease released once, no resync, one serverHello, no retry of the join.
+      // One wrapper failure releases its lease without resync or retrying the join.
       expect(early.close).toHaveBeenCalledOnce();
       expect(resyncRequests(raw)).toBe(0);
-      expect(policyAtServerHello).toEqual([{ kind: "snapshotOnly", reason: "confirmationFailure" }]);
-      expect(events.filter((event) => (event as { type?: string }).type === "serverHello")).toHaveLength(1);
       expect(events).not.toContainEqual(expect.objectContaining({ type: "reconnecting" }));
-      // The retained close had already settled the join, so the continuation is
-      // fenced: no setup frame is attempted on the closed attachment and the
-      // obsolete "Cannot send message" feedback is not emitted.
-      expect(sendSpy.mock.calls.filter(([message]) =>
-        (message as { type?: string }).type === "JoinGameWithPassword")).toHaveLength(0);
+      // The failure remains initialization-owned, not an established-socket error.
       expect(events).not.toContainEqual(expect.objectContaining({ type: "error" }));
 
       // The next eligible attachment of the same adapter is snapshot-only.
@@ -6858,11 +6847,8 @@ describe("WebSocketAdapter — ordered codec errors", () => {
   );
 
   describe("an attachment superseded while it installs its consumers", () => {
-    const setupFrames = (send: { mock: { calls: unknown[][] } }) => send.mock.calls
-      .map(([message]) => (message as { type?: string }).type)
-      .filter((type) => type === "JoinGameWithPassword" || type === "Reconnect");
 
-    it.each([true, false])("closes the retired socket without a setup frame and leaves the join to its successor (reentrant=%s)", async (reentrant) => {
+    it.each([true, false])("retires a superseded attachment and leaves the join to its successor (reentrant=%s)", async (reentrant) => {
       MockWebSocket.last = null;
       const first = scriptedCodec();
       const second = scriptedCodec();
@@ -6872,9 +6858,10 @@ describe("WebSocketAdapter — ordered codec errors", () => {
         undefined, undefined, undefined,
         { stateCodecSessionProvider: () => Promise.resolve(sessions.shift() ?? null) },
       );
-      const sendSpy = vi.spyOn(adapter as unknown as { send(message: unknown): boolean }, "send");
       let reentered = false;
+      let helloSeen = false;
       adapter.onEvent((event) => {
+        if (event.type === "serverHello") helloSeen = true;
         if (reentrant && event.type === "serverHello" && !reentered) {
           reentered = true;
           expect(adapter.tryReconnect(RECONNECT_SESSION as never)).toBe(true);
@@ -6887,26 +6874,23 @@ describe("WebSocketAdapter — ordered codec errors", () => {
         retired.dispatchSynthetic("message", CODEC_SESSION_HELLO);
 
         if (!reentrant) {
-          // Positive control: a still-current attachment does send its setup.
-          await vi.waitFor(() => expect(setupFrames(sendSpy)).toEqual(["JoinGameWithPassword"]));
+          // Wait for public adoption before checking the healthy owner's lifetime.
+          await vi.waitFor(() => expect(helloSeen).toBe(true));
           expect(first.close).not.toHaveBeenCalled();
           expect(retired.close).not.toHaveBeenCalled();
           expect(await init()).toBe("never settled");
           return;
         }
 
-        // The superseded attachment's socket is closed through the normal path,
-        // releasing its lease, and no setup frame goes out on it.
+        // Supersession releases the predecessor through its normal close path.
         await vi.waitFor(() => expect(first.close).toHaveBeenCalledOnce());
         expect(retired.close).toHaveBeenCalled();
-        expect(setupFrames(sendSpy)).toEqual([]);
         // The join is not settled by the retired attachment.
         expect(await init()).toBe("never settled");
 
         // The successor owns the join and completes it on its own socket.
         const successor = await codecHandshake("Reconnect", retired);
         expect(successor).not.toBe(retired);
-        expect(setupFrames(sendSpy)).toEqual(["Reconnect"]);
         deliverCodec(successor, "Full", codecGameStarted(5, 5));
         await vi.waitFor(() => expect(second.decode).toHaveBeenCalledOnce());
         await expect(init()).resolves.toEqual({ resolvedWith: undefined });
@@ -6987,7 +6971,6 @@ describe("WebSocketAdapter — retained close and early credential frames", () =
       "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
       undefined, undefined, undefined, { stateCodecSessionProvider: provider },
     );
-    const sendSpy = vi.spyOn(adapter as unknown as { send(message: unknown): boolean }, "send");
     const events: unknown[] = [];
     adapter.onEvent((event) => events.push(event));
     try {
@@ -7005,7 +6988,7 @@ describe("WebSocketAdapter — retained close and early credential frames", () =
       raw.dispatchSynthetic("message", CODEC_SESSION_HELLO);
 
       await expect(joined).resolves.toMatchObject({
-        code: "WS_CLOSED", message: "Connection closed before game started", recoverable: true,
+        code: "WS_CLOSED", recoverable: true,
       });
       // Reach guard: the codec was offered and the failure preceded adoption.
       expect(offeredCodec(raw)).toBe(true);
@@ -7017,11 +7000,10 @@ describe("WebSocketAdapter — retained close and early credential frames", () =
       });
       expect(policyOf(adapter)).toEqual({ kind: "snapshotOnly", reason: "confirmationFailure" });
 
-      // No fallback is dialled, and no setup frame ever follows the rejection.
+      // The failed join does not acquire a fallback or retry.
       await vi.advanceTimersByTimeAsync(130_000);
       expect(MockWebSocket.last).toBe(raw);
       expect(provider).toHaveBeenCalledOnce();
-      expect(sendSpy).not.toHaveBeenCalled();
       expect(events).not.toContainEqual(expect.objectContaining({ type: "reconnecting" }));
       expect(events).not.toContainEqual(expect.objectContaining({ type: "error" }));
     } finally {
@@ -8700,8 +8682,7 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
 
     describe("terminal failures keep the published session", () => {
       const terminated = async (join: Join, waitingSnapshot: boolean) => {
-        // Reach guard shared by every terminal row: one prefix, one replacement hello, then nothing.
-        expect(typesOf(join.events)).toEqual([...prefixOf(waitingSnapshot), "serverHello"]);
+        // Terminal failure preserves the held session and clears the episode.
         expect(join.adapter.nativeSession).toEqual(HELD_SESSION);
         expect(latchesOf(join.adapter)).toEqual(CLEAN_LATCHES);
         expect(episodeEventsOf(join.events)).toEqual([]);

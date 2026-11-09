@@ -2441,6 +2441,12 @@ export class WebSocketAdapter implements EngineAdapter {
           // parked when B is retired, and never touch an already-adopted C.
           previousPending = this.rejectSocketRequests(false) || previousPending;
         }
+        if (!this.disposed && this.ws === null
+          && this.stateCodecPreparation === preparation && bootstrap.failure !== null) {
+          // A closed, unexposed candidate still owns sticky codec-failure
+          // evidence for the next attempt, not an unsafe public hello.
+          this.stateCodec.adopt(bootstrap, socket.ws);
+        }
         if (previousPending) {
           previousPending = false;
           this.emit({ type: "actionPendingChanged", pending: false });

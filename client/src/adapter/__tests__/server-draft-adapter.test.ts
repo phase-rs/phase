@@ -2275,7 +2275,7 @@ describe("draft attachment settlement", () => {
   });
 
   it.each([
-    ["create", "create"], ["create", "reconnect"],
+    ["create", "create"],
     ["reconnect", "create"], ["reconnect", "reconnect"],
   ] as const)("6 supersedes %s with %s and retires its idle socket after replacement adoption", async (firstKind, nextKind) => {
     const first = start(firstKind);
@@ -2290,6 +2290,23 @@ describe("draft attachment settlement", () => {
     expect(await next()).toBe("never settled");
     reply(b, nextKind);
     expect(await next()).toEqual({ resolvedWith: undefined });
+  });
+
+  it("does not reconnect a newly created draft with the prior draft's credentials before its reply", async () => {
+    const created = start("create");
+    const candidate = await completeHandshake();
+    expect(await start("reconnect")()).toMatchObject({ code: "WS_ERROR", message: "No draft session to reconnect to" });
+    expect(MockWebSocket.last).toBe(candidate);
+    expect(await created()).toBe("never settled");
+    receive(candidate, "DraftCreated", { draft_code: "NEXT12", player_token: "next-token", seat_index: 1 });
+    expect(await created()).toEqual({ resolvedWith: undefined });
+    const reconnected = start("reconnect");
+    const replacement = await completeHandshake();
+    expect(replacement.send).toHaveBeenCalledWith(JSON.stringify({
+      type: "ReconnectDraft", data: { draft_code: "NEXT12", player_token: "next-token" },
+    }));
+    receive(replacement, "DraftStateUpdate", { view: createMockDraftView({ status: "Lobby" }) });
+    expect(await reconnected()).toEqual({ resolvedWith: undefined });
   });
 
   it("7a closes a queued successful handshake without late hello or setup", async () => {
@@ -2351,7 +2368,7 @@ describe("draft attachment settlement", () => {
   });
 
   it.each(["create", "join", "reconnect"] as const)(
-    "sends %s setup before hello and synchronous setup-reply consumers can issue authenticated requests",
+    "orders %s setup before callbacks without lending a new draft the prior match's authority",
     async (kind) => {
       enterAcceptedFullMatch(adapter, established);
       const initialized = kind === "join"
@@ -2362,6 +2379,8 @@ describe("draft attachment settlement", () => {
       let authenticated = false;
       const setupType = kind === "create" ? "CreateDraftWithSettings"
         : kind === "join" ? "JoinDraftWithPassword" : "ReconnectDraft";
+      const nextCredentials = { draft_code: "NEXT12", player_token: "next-draft-token", seat_index: 1 };
+      const nextView = createMockDraftView({ status: "Lobby" });
       candidate.send.mockImplementation((raw: string) => {
         const frame = JSON.parse(raw) as {
           type: string; command_id?: unknown;
@@ -2373,11 +2392,17 @@ describe("draft attachment settlement", () => {
           receive(candidate, "DraftTimerSync", { remaining_ms: 1234 });
           wire.push(frame.type);
           authenticated = true;
+          if (kind === "create") receive(candidate, "DraftCreated", nextCredentials);
+          else if (kind === "join") receive(candidate, "DraftJoined", { ...nextCredentials, view: nextView });
+          else receive(candidate, "DraftStateUpdate", { view: createMockDraftView({ status: "MatchInProgress" }) });
           return;
         }
         wire.push(frame.type);
         if (frame.type === "ClientHello") return;
         if (!authenticated) throw new Error(`Strict draft peer rejected unauthenticated ${frame.type}`);
+        if (kind !== "reconnect" && ["Action", "PreviewManaPayment", "PreviewInteraction"].includes(frame.type)) {
+          throw new Error(`Strict draft peer has no Full-game attachment for ${frame.type}`);
+        }
         if (frame.type === "Action") {
           candidate.dispatchSynthetic("message", JSON.stringify({
             type: "StateUpdate", command_id: frame.command_id,
@@ -2388,7 +2413,9 @@ describe("draft attachment settlement", () => {
         } else if (frame.type === "PreviewInteraction") {
           receive(candidate, "InteractionPreview", { preview: { requestId: frame.data?.request?.requestId } });
         } else if (frame.type === "DraftAction") {
-          receive(candidate, "DraftStateUpdate", { view: createMockDraftView({ status: "MatchInProgress" }) });
+          queueMicrotask(() => receive(candidate, "DraftActionRejected", {
+            reason: `invalid transition from ${kind === "reconnect" ? "MatchInProgress" : "Lobby"}: SharedStackDecision`,
+          }));
         }
       });
       let helloAction: (() => Promise<unknown>) | undefined;
@@ -2401,6 +2428,7 @@ describe("draft attachment settlement", () => {
           timerMana = trackRejection(adapter.previewManaPayment({ type: "PassPriority" }, 0));
         }
         if (event.type !== "serverHello") return;
+        expect(authenticated).toBe(true);
         helloAction = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
         helloMana = trackRejection(adapter.previewManaPayment({ type: "PassPriority" }, 0));
         helloInteraction = trackRejection(adapter.previewInteraction({
@@ -2408,9 +2436,7 @@ describe("draft attachment settlement", () => {
           interactionId: "setup-first-interaction" as InteractionId,
           response: { type: "shortcut", data: { decision: { type: "fixed", data: { iterations: 1 } }, pins: [] } },
         }, 0));
-        // A join owns the uncorrelated draft slot until its own reply. Creating
-        // or reconnecting must still allow an ordinary draft consumer here.
-        if (kind !== "join") helloDraft = trackRejection(adapter.submitSharedStackDecision(0, "Take"));
+        helloDraft = trackRejection(adapter.submitSharedStackDecision(0, "Take"));
       });
       try {
         await completeHandshake(CORRELATED_HELLO);
@@ -2420,17 +2446,34 @@ describe("draft attachment settlement", () => {
           if (index !== -1) expect(index).toBeGreaterThan(wire.indexOf(setupType));
         }
         expect(helloAction).toBeTypeOf("function");
-        expect(await helloAction!()).toMatchObject({ resolvedWith: { events: [{ marker: "hello-command" }] } });
-        expect(await helloMana!()).toEqual({ resolvedWith: [7] });
-        expect(await helloInteraction!()).toMatchObject({ resolvedWith: { requestId: "setup-first-preview" } });
-        expect(await timerMana!()).toEqual({ resolvedWith: [7] });
-        if (helloDraft) expect(await helloDraft()).toMatchObject({ resolvedWith: { status: "MatchInProgress" } });
-        if (kind === "create") reply(candidate, "create");
-        else if (kind === "join") receive(candidate, "DraftJoined", {
-          ...credentials, view: createMockDraftView({ status: "MatchInProgress" }),
-        });
-        else reply(candidate, "reconnect");
-        expect(await initialized()).toMatchObject({ resolvedWith: kind === "join" ? { status: "MatchInProgress" } : undefined });
+        if (kind === "reconnect") {
+          expect(await helloAction!()).toMatchObject({ resolvedWith: { events: [{ marker: "hello-command" }] } });
+          expect(await helloMana!()).toEqual({ resolvedWith: [7] });
+          expect(await helloInteraction!()).toMatchObject({ resolvedWith: { requestId: "setup-first-preview" } });
+          expect(await timerMana!()).toEqual({ resolvedWith: [7] });
+          expect(await helloDraft!()).toMatchObject({ code: "ACTION_REJECTED", message: "invalid transition from MatchInProgress: SharedStackDecision" });
+        } else {
+          for (const read of [helloAction, helloMana, helloInteraction, helloDraft, timerMana]) {
+            expect(await read!()).toMatchObject({ code: "PHASE_ERROR" });
+          }
+          expect(submissionTypes(candidate)).toEqual([]);
+          expect(adapter.currentPhase).toBe("lobby");
+          expect(adapter.currentMatchId).toBeNull();
+          expect(adapter.gameCode).toBeNull();
+          expect(adapter.playerId).toBeNull();
+          await expect(adapter.getSnapshot()).rejects.toMatchObject({ message: "No game state available" });
+          // A real new draft is usable after its own credentials arrive, but a
+          // decision in Lobby is refused. Both refusals must free the slot.
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const decision = trackRejection(adapter.submitSharedStackDecision(0, "Take"));
+            expect(await decision()).toMatchObject({ code: "ACTION_REJECTED", message: "invalid transition from Lobby: SharedStackDecision" });
+          }
+          expect(candidate.send).toHaveBeenCalledWith(JSON.stringify({
+            type: "DraftAction",
+            data: { draft_code: "NEXT12", action: { type: "SharedStackDecision", data: { seat: 1, pile: 0, decision: "Take" } } },
+          }));
+        }
+        expect(await initialized()).toMatchObject({ resolvedWith: kind === "join" ? nextView : undefined });
       } finally {
         off();
       }
@@ -2562,16 +2605,16 @@ describe("draft attachment settlement", () => {
     expect(await join()).toEqual({ resolvedWith: view });
   });
 
-  it.each(["success", "failure"] as const)("J2 sent join survives replacement reconnect %s", async (outcome) => {
+  it.each(["success", "failure"] as const)("J2 sent join survives replacement create %s", async (outcome) => {
     const join = trackRejection(adapter.joinDraft("NEXT12", "Alice"));
     const j = await completeHandshake();
     expect(frames(j)).toContain("JoinDraftWithPassword");
-    const read = start("reconnect");
+    const read = start("create");
     const b = await completeHandshake();
     expect(j.close).not.toHaveBeenCalled();
     if (outcome === "failure") {
-      receive(b, "Error", { message: "reconnect failed" });
-      expect(await read()).toMatchObject({ code: "WS_ERROR", message: "reconnect failed" });
+      receive(b, "Error", { message: "create failed" });
+      expect(await read()).toMatchObject({ code: "WS_ERROR", message: "create failed" });
       expect(await join()).toBe("never settled");
     }
     const view = createMockDraftView({ pick_number: 3 });
@@ -2579,7 +2622,7 @@ describe("draft attachment settlement", () => {
     expect(await join()).toEqual({ resolvedWith: view });
     if (outcome === "success") {
       expect(await read()).toBe("never settled");
-      reply(b, "reconnect");
+      reply(b, "create");
       expect(await read()).toEqual({ resolvedWith: undefined });
     }
   });
@@ -4493,6 +4536,105 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
         adapter.dispose();
         expect(leaseClose).toHaveBeenCalledOnce();
         expect(ws.close).toHaveBeenCalledOnce();
+      } finally {
+        adapter.dispose();
+        codec.runtime.dispose();
+      }
+    },
+  );
+
+  it.each([
+    ["create", "success"], ["join", "success"], ["create", "failure"], ["join", "failure"],
+  ] as const)(
+    "keeps A's request ownership while %s adopts a fresh draft with setup %s",
+    async (kind, outcome) => {
+      const { adapter, ws, provider, codec, leaseClose } = await startRuntimeDraft();
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      try {
+        await enterCodecMatch(ws, events);
+        const priorSnapshot = await adapter.getSnapshot();
+        const command = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+        const commandId = lastSubmissionCommandId(ws);
+        const candidateSession = await codec.provider();
+        if (!candidateSession) throw new Error("No fresh draft codec lease");
+        const candidateClose = vi.spyOn(candidateSession, "close");
+        provider.mockResolvedValueOnce(candidateSession);
+        const initialized = trackRejection(kind === "create" ? adapter.createDraft({
+          displayName: "Fresh host", setCodes: ["TST"], kind: "Premier", public: false,
+          tournamentFormat: "Swiss", podPolicy: "Competitive", podSize: 8,
+        }) : adapter.joinDraft("NEXT12", "Fresh guest"));
+        await drainArt();
+        const candidate = MockWebSocket.last!;
+        const hello = vi.fn();
+        let helloSnapshot: (() => Promise<unknown>) | undefined;
+        const off = adapter.onEvent((event) => {
+          if (event.type !== "serverHello") return;
+          hello();
+          helloSnapshot = trackRejection(adapter.getSnapshot());
+          expect(adapter.currentPhase).toBe("lobby");
+          expect(adapter.currentDraftView).toBeNull();
+          expect(adapter.currentMatchId).toBeNull();
+          expect(adapter.gameCode).toBeNull();
+          expect(adapter.playerId).toBeNull();
+        });
+        if (outcome === "failure") candidate.send.mockImplementation((raw: string) => {
+          const frame: { type: string } = JSON.parse(raw);
+          if (frame.type === (kind === "create" ? "CreateDraftWithSettings" : "JoinDraftWithPassword")) {
+            throw new Error("Fresh draft setup failed");
+          }
+        });
+        candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+        await drainArt();
+        off();
+        if (outcome === "failure") {
+          expect(await initialized()).toMatchObject({ code: "WS_CLOSED", message: "Failed to send setup frame" });
+          expect(hello).not.toHaveBeenCalled();
+          expect(candidateClose).toHaveBeenCalledOnce();
+          expect(await adapter.getSnapshot()).toEqual(priorSnapshot);
+          expect(adapter.currentPhase).toBe("match");
+          expect(adapter.currentMatchId).toBe("r1-t0");
+          expect(adapter.gameCode).toBe(FULL_KEY.game_code);
+        } else {
+          expect(hello).toHaveBeenCalledOnce();
+          expect(await helloSnapshot!()).toMatchObject({ message: "No game state available" });
+          expect(await initialized()).toBe("never settled");
+          candidate.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+        }
+        expect(await command()).toBe("never settled");
+        expect(leaseClose).not.toHaveBeenCalled();
+        ws.dispatchSynthetic("message", draftFrame("Delta", {
+          type: "StateUpdate", command_id: commandId,
+          data: { state: matchState("A-owned-after-fresh-draft"), events: [{ marker: "A-owned-after-fresh-draft" }], full_key: FULL_KEY },
+        }));
+        expect(await command()).toMatchObject({ resolvedWith: { events: [{ marker: "A-owned-after-fresh-draft" }] } });
+        if (outcome === "failure") {
+          expect(leaseClose).not.toHaveBeenCalled();
+          expect(adapter.currentPhase).toBe("match");
+          await completeDraftCommand(adapter, ws, "A-still-current", "codec");
+          return;
+        }
+        expect(leaseClose).toHaveBeenCalledOnce();
+        expect(codec.latestBaseline().free).toHaveBeenCalledOnce();
+        await expect(adapter.getSnapshot()).rejects.toMatchObject({ message: "No game state available" });
+        const credentials = { draft_code: "NEXT12", player_token: "next-draft-token", seat_index: 1 };
+        const view = createMockDraftView({ status: "Lobby" });
+        receive(candidate, kind === "create" ? "DraftCreated" : "DraftJoined",
+          kind === "create" ? credentials : { ...credentials, view });
+        expect(await initialized()).toMatchObject({ resolvedWith: kind === "create" ? undefined : view });
+        await expect(adapter.submitAction({ type: "PassPriority" }, 0)).rejects.toMatchObject({ code: "PHASE_ERROR" });
+        const decision = trackRejection(adapter.submitSharedStackDecision(0, "Take"));
+        expect(candidate.send).toHaveBeenCalledWith(JSON.stringify({
+          type: "DraftAction", data: {
+            draft_code: "NEXT12", action: { type: "SharedStackDecision", data: { seat: 1, pile: 0, decision: "Take" } },
+          },
+        }));
+        receive(candidate, "DraftActionRejected", { reason: "invalid transition from Lobby: SharedStackDecision" });
+        expect(await decision()).toMatchObject({ code: "ACTION_REJECTED" });
+        const reattached = await replaceRuntimeSocket(adapter, provider, codec.provider, candidate);
+        expect(reattached.ws.send).toHaveBeenCalledWith(JSON.stringify({
+          type: "ReconnectDraft", data: { draft_code: "NEXT12", player_token: "next-draft-token" },
+        }));
       } finally {
         adapter.dispose();
         codec.runtime.dispose();

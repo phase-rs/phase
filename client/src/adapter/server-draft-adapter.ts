@@ -1162,6 +1162,22 @@ export class ServerDraftAdapter implements EngineAdapter {
       // Adoption retires the previous binding only after setup is on the wire.
       this.stateCodec.adopt(bootstrap, sourceSocket);
       this.ws = sourceSocket;
+      if (initOwner?.kind !== "reconnect") {
+        // Create/Join attach a new draft seat, not the previous draft's Full
+        // game. Only replies on this attachment may establish its authority.
+        // Pending A work keeps its captured source/key until its own reply.
+        this.phase = "lobby";
+        this.draftCode = null;
+        this.draftToken = null;
+        this.seatIndex = null;
+        this.draftView = null;
+        this.clearSnapshot();
+        this._playerId = null;
+        this.activeMatchId = null;
+        this._gameCode = null;
+        this.activeFullKey = null;
+        this.acceptedFullKey = null;
+      }
       this._serverInfo = socket.serverInfo;
       this.retireIdleSockets();
       sourceSocket.onmessage = handleMessage;
