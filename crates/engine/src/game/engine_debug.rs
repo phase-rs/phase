@@ -1165,7 +1165,6 @@ fn enter_battlefield_with_etb(
                 None,
                 false,
                 crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                None,
                 events,
             ) {
                 super::effects::change_zone::ZoneDeliveryResult::Done => {}

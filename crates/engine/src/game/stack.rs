@@ -3229,9 +3229,6 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                                     exile_links: zone_pipeline::ExileLinkSpec::default(),
                                     drain:
                                         crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
-                                    // Spell resolution delivers to the battlefield
-                                    // or graveyard — never a library placement.
-                                    library_placement: None,
                                 },
                                 events,
                             ) {

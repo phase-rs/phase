@@ -19768,8 +19768,6 @@ fn commit_land_play(
                         source_id: None,
                         exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
                         drain: crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
-                        // This resume delivery is not a library placement.
-                        library_placement: None,
                     },
                     events,
                 ) {

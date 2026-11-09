@@ -732,9 +732,6 @@ pub(crate) struct DeliveryCtx {
     /// CR 614.12a: who drains `post_replacement_continuation` after this
     /// delivery (see [`PostReplacementDrainOwner`]).
     pub drain: PostReplacementDrainOwner,
-    /// Legacy caller mirror, retained for source compatibility. Terminal delivery
-    /// reads only `ApprovedZoneChange.event.library_placement`, including null.
-    pub library_placement: Option<LibraryPosition>,
 }
 
 /// CR 400.7d + CR 608.3: the cast-link family — information about the spell
@@ -1108,7 +1105,6 @@ fn move_batch_member_with_terminal(
                             ZoneDeliveryExileTracking::TrackBySource
                         ),
                         PostReplacementDrainOwner::DeliveryTail,
-                        Some(position),
                         None,
                         owner,
                         events,
@@ -1184,7 +1180,6 @@ fn move_batch_member_with_terminal(
                     exile_links.controller,
                     track_exiled_by_source,
                     PostReplacementDrainOwner::DeliveryTail,
-                    None,
                     None,
                     owner,
                     events,
@@ -1312,10 +1307,6 @@ fn move_batch_member_with_terminal(
                 source_id,
                 exile_links,
                 drain: PostReplacementDrainOwner::DeliveryTail,
-                // CR 701.24a: exempt LIBRARY placements were already delivered and
-                // returned by the placement arm above; any exempt cause reaching
-                // this generic delivery has no library placement to honor.
-                library_placement: None,
             },
             owner,
             events,
@@ -2854,7 +2845,6 @@ fn deliver_staged_members(
                 member.request.exile_tracking,
                 ZoneDeliveryExileTracking::TrackBySource
             ),
-            None,
             explicit_index,
             delivery_owner,
             events,
@@ -4654,8 +4644,6 @@ pub(crate) fn deliver_batch_member(
         ctx.exile_links.controller,
         track_exiled_by_source,
         ctx.drain,
-        // Compatibility context only: the sealed event owns placement.
-        ctx.library_placement,
         None,
         owner,
         events,
@@ -5207,7 +5195,6 @@ pub(crate) fn deliver_replaced_zone_change_with_aura_host(
     duration: Option<&Duration>,
     exile_controller: Option<PlayerId>,
     track_exiled_by_source: bool,
-    library_placement: Option<LibraryPosition>,
     explicit_library_index: Option<usize>,
     mut owner: Option<BatchMemberDeliveryOwner>,
     events: &mut Vec<GameEvent>,
@@ -5285,7 +5272,6 @@ pub(crate) fn deliver_replaced_zone_change_with_aura_host(
         exile_controller,
         track_exiled_by_source,
         PostReplacementDrainOwner::DeliveryTail,
-        library_placement,
         explicit_library_index,
         owner,
         events,
@@ -5917,7 +5903,6 @@ mod entering_aura_attachment_tests {
                 None,
                 None,
                 false,
-                None,
                 None,
                 Some(BatchMemberDeliveryOwner {
                     group,
@@ -6712,7 +6697,6 @@ pub(crate) fn deliver_replaced_zone_change(
     exile_controller: Option<PlayerId>,
     track_exiled_by_source: bool,
     drain: PostReplacementDrainOwner,
-    _legacy_library_placement: Option<LibraryPosition>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
     deliver_replaced_batch_member(
@@ -6723,7 +6707,6 @@ pub(crate) fn deliver_replaced_zone_change(
         exile_controller,
         track_exiled_by_source,
         drain,
-        _legacy_library_placement,
         None,
         None,
         events,
@@ -6739,7 +6722,6 @@ fn deliver_replaced_batch_member(
     exile_controller: Option<PlayerId>,
     track_exiled_by_source: bool,
     drain: PostReplacementDrainOwner,
-    _legacy_library_placement: Option<LibraryPosition>,
     // Exact insertion index for a grouped fixed-position library member.
     explicit_library_index: Option<usize>,
     owner: Option<BatchMemberDeliveryOwner>,
@@ -7963,7 +7945,6 @@ fn execute_zone_move_with_applied_terminal(
                 duration,
                 exile_controller,
                 track_exiled_by_source,
-                library_placement.clone(),
                 None,
                 owner,
                 events,
@@ -8342,7 +8323,6 @@ mod w3_library_placement_tests {
                             source_id: Some(card),
                             exile_links: ExileLinkSpec::default(),
                             drain: PostReplacementDrainOwner::DeliveryTail,
-                            library_placement: Some(LibraryPosition::Top),
                         },
                         &mut events
                     ),
@@ -8364,8 +8344,8 @@ mod w3_library_placement_tests {
                     );
                     assert_no_shuffle(&events);
                 } else {
-                    // Current null selects the existing placement-less delivery
-                    // convention even when the legacy caller still says Top.
+                    // A null approved placement selects the existing
+                    // placement-less auto-shuffle convention.
                     assert!(events.iter().any(|e| matches!(
                         e,
                         GameEvent::PlayerPerformedAction {
@@ -8388,7 +8368,6 @@ mod w3_library_placement_tests {
             None,
             false,
             PostReplacementDrainOwner::DeliveryTail,
-            Some(LibraryPosition::Top),
             &mut events,
         );
         assert_eq!(state.objects[&card].zone, Zone::Exile);

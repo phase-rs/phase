@@ -93,8 +93,6 @@ pub(crate) fn complete_discard_to_graveyard(
                 None,
                 false,
                 crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                // Discard delivers to the graveyard — no library placement.
-                None,
                 events,
             );
         }
@@ -437,7 +435,6 @@ pub fn resolve(
                                 None,
                                 false,
                                 crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                                None,
                                 events,
                             );
                             if discard_frame.is_none() {
@@ -1261,7 +1258,6 @@ fn route_discard(
                     None,
                     false,
                     crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                    None,
                     events,
                 );
                 if discard_frame.is_none() {

@@ -675,8 +675,12 @@ fn beacon_of_unrest_paid_mox_discard_completes_family_and_shuffle_before_priorit
 
 /// CR 614.12 + CR 800.4b: once the exact entry remains, its hypothetical
 /// battlefield back face must not shadow the surviving graveyard card.
-/// This is a latent typed DFC/return/optional-redirect witness, not a claim
-/// that a printed card has this combination of instructions.
+/// Infrastructure-only combination; no printed card has this direct-return
+/// and optional-redirect shape. Nearest transformed-return analogue: Loyal
+/// Cathar — "When this creature dies, return it to the battlefield transformed
+/// under your control at the beginning of the next end step." This fixture
+/// substitutes a direct return and synthetic optional redirect to isolate
+/// projection retirement.
 #[test]
 fn transformed_entry_departed_chooser_releases_projection_before_priority_and_save() {
     let mut scenario = GameScenario::new_n_player(3, 42);

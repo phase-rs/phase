@@ -1360,8 +1360,6 @@ fn handle_replacement_choice_inner(
                             },
                             drain:
                                 crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
-                            // The approved event carries the final placement.
-                            library_placement: None,
                         },
                         batch_member_owner,
                         events,
