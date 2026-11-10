@@ -5,8 +5,8 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 use super::{
-    anthem::*, cda::*, cost_mod::*, evasion::*, keyword_grant::*, loyalty::*, mana_transform::*,
-    restriction::*, same_is_true::*, type_change::*,
+    anthem::*, cda::*, coin_flip::*, cost_mod::*, evasion::*, keyword_grant::*, loyalty::*,
+    mana_transform::*, restriction::*, same_is_true::*, type_change::*,
 };
 use crate::parser::oracle_nom::target::{controller_phrase_among, ControllerPhrase};
 use crate::types::statics::ProhibitionScope;
@@ -947,6 +947,16 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 606.3 + CR 304.5: "You may activate [the] loyalty abilities of
+    // <subject> [on any player's turn] any time you could cast an instant"
+    // (Teferi, Master of Time / Teferi's Talent's emblem). Sibling of the
+    // conditional timing permission above, with the "of <subject>" axis the
+    // limit static below shares; the three shapes are pairwise disjoint
+    // (distinct tails), so order among them is load-free.
+    if let Some(def) = parse_loyalty_timing_permission_of_subject(&tp, &text) {
+        return Some(def);
+    }
+
     if let Some(def) = parse_tagged_ability_activation_timing_permission(&tp, &text) {
         return Some(def);
     }
@@ -1301,6 +1311,12 @@ pub(crate) fn parse_static_line_inner(
     }
 
     if let Some(result) = try_parse_unspent_mana_loss_causes_life_loss_static(&text, &lower) {
+        return Some(result);
+    }
+
+    // CR 705.3: Edgar's "the first time you flip one or more coins each turn,
+    // those coins come up heads and you win those flips."
+    if let Some(result) = try_parse_win_first_coin_flip_set_each_turn_static(&text, &lower) {
         return Some(result);
     }
 

@@ -449,7 +449,9 @@
     "done": "Listo"
   },
   "lifeTotal": {
-    "playerLabel": "J{{seat}}"
+    "playerLabel": "J{{seat}}",
+    "libraryLabel": "CARTAS",
+    "libraryTooltip": "La Horda no tiene total de vidas. El daño y la pérdida de vidas la hacen descartar cartas de su biblioteca en su lugar: es derrotada cuando su biblioteca se agota, así que este número es su verdadero reloj."
   },
   "phaseStop": {
     "untapLabel": "Paso de enderezar",
@@ -540,6 +542,7 @@
     }
   },
   "badges": {
+    "hordeRulesAriaLabel": "Reglas del mazo de la Horda",
     "monarch": "Monarca",
     "monarchTooltip": "El Monarca — roba una carta extra al final del turno",
     "initiative": "Iniciativa",
@@ -648,6 +651,9 @@
   },
   "zone": {
     "commandZone": "Zona de mando",
+    "conspiracy": "Conspiración",
+    "conspiracyTitle": "Conspiración: {{name}}",
+    "turnFaceUp": "Poner {{name}} boca arriba",
     "emblem": "Emblema",
     "emblemFallback": "Emblema",
     "commander": "Comandante",
@@ -1406,6 +1412,11 @@
     "noLegalAiDecks": {
       "withFormat": "Añade o importa un mazo legal en {{format}} para que lo use la IA.",
       "generic": "Añade o importa un mazo legal en este formato para que lo use la IA."
+    },
+    "hordeDeck": {
+      "title": "Mazo de la Horda",
+      "subtitle": "El mazo autónomo al que se enfrenta tu equipo. Lo proporciona el motor: no necesitas un mazo de IA.",
+      "selected": "Seleccionado"
     }
   },
   "cardChoice": {
@@ -1439,7 +1450,8 @@
       "cast": "Lanzar",
       "crew": "Tripular ({{power}})",
       "saddle": "Ensillar ({{power}})",
-      "station": "Estación (+{{power}})"
+      "station": "Estación (+{{power}})",
+      "destroy": "Destroy"
     },
     "buttons": {
       "confirm": "Confirmar",
@@ -1793,7 +1805,8 @@
       "counterDiscard": "Descartar {{selected}} de {{cap}}",
       "counterKeep": "Conservar {{selected}} de {{cap}}",
       "keepInstead": "Conservar en su lugar",
-      "discardInstead": "Descartar en su lugar"
+      "discardInstead": "Descartar en su lugar",
+      "counterChoose": "Choose {{selected}} of {{cap}}"
     },
     "discard": {
       "title": "Descartar",
@@ -1892,6 +1905,42 @@
       "hint": "Arrastra para reordenar · la posición 1 queda arriba de este montón",
       "moveLeft": "Mover a la izquierda",
       "moveRight": "Mover a la derecha"
+    },
+    "heroEvent": {
+      "chromeOverload": {
+        "title": "Chrome Dome's Overload",
+        "subtitle": "Choose a tapped creature you control to sacrifice"
+      },
+      "krangStratagem": {
+        "title": "Krang's Stratagem",
+        "subtitleUpTo_one": "Choose up to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleUpTo_other": "Choose up to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleMin_one": "Choose {{min}} to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleMin_other": "Choose {{min}} to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleExact_one": "Choose {{count}} card to discard",
+        "subtitleExact_other": "Choose {{count}} cards to discard"
+      },
+      "smackdown": {
+        "title": "Leatherhead's Smackdown",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "ratKingRevolution": {
+        "title": "Rat King's Revolution",
+        "subtitle": "Choose a creature you control to tap and stun"
+      },
+      "savantiCurse": {
+        "title": "Savanti Romero's Curse",
+        "subtitle_one": "Choose {{count}} creature you control to return to its owner's hand",
+        "subtitle_other": "Choose {{count}} creatures you control to return to their owners' hands"
+      },
+      "infiltration": {
+        "title": "Villain Infiltration",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "villainMayhem": {
+        "title": "Villain Mayhem!",
+        "subtitle": "As a team, choose {{count}} creatures to spare — every other creature is destroyed"
+      }
     }
   },
   "specializeColor": {
@@ -2132,13 +2181,18 @@
   "freeCastWindow": {
     "eyebrow": "Lanzamiento gratis",
     "title": "Lanza un hechizo gratis",
+    "titlePlay": "Juega cartas gratis",
     "subtitle": "Elige un hechizo para lanzar sin pagar su coste de maná ({{remaining}} restante(s)). Valor de maná total restante: {{budget}}.",
     "subtitleNoBudget": "Elige un hechizo para lanzar sin pagar su coste de maná ({{remaining}} restante(s)).",
+    "subtitlePlay": "Elige una tierra para jugar o un hechizo para lanzar sin pagar su coste de maná ({{remaining}} restante(s)). Valor de maná total restante: {{budget}}.",
+    "subtitleNoBudgetPlay": "Elige una tierra para jugar o un hechizo para lanzar sin pagar su coste de maná ({{remaining}} restante(s)).",
     "remainingAny": "cualquier cantidad",
     "castNamed": "Lanzar {{name}}",
+    "playNamed": "Jugar {{name}}",
     "castSuffix": "(sin pagar su coste de maná)",
     "done": "Listo",
-    "doneSuffix": "(deja de lanzar hechizos de esta forma)"
+    "doneSuffix": "(deja de lanzar hechizos de esta forma)",
+    "doneSuffixPlay": "(deja de jugar cartas de esta forma)"
   },
   "castingVariant": {
     "eyebrow": "Lanzar",
@@ -2221,7 +2275,8 @@
     "unitDamage": "de daño",
     "unitLife": "de vida",
     "title": "Distribuir {{total}} {{unit}}",
-    "subtitle": "Asigna al menos 1 {{unit}} a cada objetivo. Restante: {{remaining}}"
+    "subtitle": "Asigna al menos 1 {{unit}} a cada objetivo. Restante: {{remaining}}",
+    "subtitleAnyNumber": "Asigna al menos 1 {{unit}} a cada uno que elijas, entre cualquier número de ellos. Restante: {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Elegir una mazmorra",
@@ -2307,6 +2362,8 @@
       "fallback": "Toma una decisión"
     },
     "searchSubtitle": "Escribe para buscar en todas las cartas",
+    "secretAgendaTitle": "Nombra una carta en secreto ({{current}} de {{total}})",
+    "secretAgendaSubtitle": "Oculto hasta que pongas esta conspiración boca arriba",
     "searchPlaceholder": "Buscar por nombre...",
     "noCardsFound": "No se encontraron cartas",
     "buttonSubtitle": "Selecciona una opción",
@@ -2405,6 +2462,7 @@
     "cardFallback": "Card",
     "title": "Pon {{name}} en la parte superior o inferior de la biblioteca",
     "top": "Superior de la biblioteca",
+    "nthFromTop": "Position {{n}} from the top of library",
     "bottom": "Inferior de la biblioteca"
   },
   "mutateMerge": {

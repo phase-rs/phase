@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Effect::DraftFromSpellbook replaces random: bool with selection: SpellbookSelection (Draft | Chosen | Random). Payloads written before this change still decode (random true → Random, false or absent → Chosen), but a previous build ignores selection and resolves every draft as a whole-book choice, and a draft's WaitingFor::SpellbookDraft now offers three random spellbook entries, redacted for other viewers. First contact must refuse the skew."
+}

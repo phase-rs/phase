@@ -11,15 +11,19 @@
 //!
 //! Every row drives the production pipeline: targeting through a real cast
 //! (`TargetSelection` legal targets, then `CancelCast`), combat through
-//! declare-attackers / declare-blockers / the combat-damage step.
+//! declare-attackers / declare-blockers / the combat-damage step. R10 drives a
+//! Horde combat whose damage leg pauses on a CR 616.1 replacement ordering and
+//! resumes through the combat Phase C remnant.
 
 use engine::game::combat::AttackTarget;
 use engine::game::keywords::has_hexproof;
 use engine::game::layers::flush_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::move_to_zone;
 use engine::types::ability::{DamageKindFilter, TargetRef};
 use engine::types::actions::GameAction;
+use engine::types::format::{ChallengeDeck, FormatConfig};
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, ProtectionTarget};
@@ -27,6 +31,8 @@ use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
+
+use crate::support::shared_card_db;
 
 /// Verbatim Oracle text of Ruric Thar, Magecrusher (Reality Fracture).
 const RURIC_ORACLE_TEXT: &str = "This spell can't be countered.\nReach, vigilance, trample\nRuric Thar has hexproof as long as they haven't dealt combat damage yet. (They can't be the target of spells or abilities your opponents control.)";
@@ -42,9 +48,9 @@ const RABID_BITE: &str =
 /// ability).
 const PRODIGAL_PYROMANCER: &str = "{T}: This creature deals 1 damage to any target.";
 
-fn add_ruric(scenario: &mut GameScenario, power: i32) -> ObjectId {
+fn add_ruric(scenario: &mut GameScenario, controller: PlayerId, power: i32) -> ObjectId {
     scenario
-        .add_creature(P0, RURIC_NAME, power, 7)
+        .add_creature(controller, RURIC_NAME, power, 7)
         .from_oracle_text_with_keywords(RURIC_KEYWORDS, RURIC_ORACLE_TEXT)
         .id()
 }
@@ -165,7 +171,7 @@ fn assert_stores_agree(runner: &GameRunner, id: ObjectId) {
 #[test]
 fn r1_opponent_cannot_target_before_damage_controller_can() {
     let mut scenario = base_scenario();
-    let ruric = add_ruric(&mut scenario, 7);
+    let ruric = add_ruric(&mut scenario, P0, 7);
     let own_bolt = scenario.add_bolt_to_hand(P0);
     let opp_bolt = scenario.add_bolt_to_hand(P1);
     let mut runner = scenario.build();
@@ -190,7 +196,7 @@ fn r1_opponent_cannot_target_before_damage_controller_can() {
 #[test]
 fn r2_combat_damage_to_player_removes_hexproof() {
     let mut scenario = base_scenario();
-    let ruric = add_ruric(&mut scenario, 7);
+    let ruric = add_ruric(&mut scenario, P0, 7);
     let opp_bolt = scenario.add_bolt_to_hand(P1);
     let mut runner = scenario.build();
 
@@ -221,7 +227,7 @@ fn r2_combat_damage_to_player_removes_hexproof() {
 #[test]
 fn r3_combat_damage_to_creature_removes_hexproof() {
     let mut scenario = base_scenario();
-    let ruric = add_ruric(&mut scenario, 7);
+    let ruric = add_ruric(&mut scenario, P0, 7);
     let wall = scenario.add_creature(P1, "Wall", 0, 8).id();
     let opp_bolt = scenario.add_bolt_to_hand(P1);
     let mut runner = scenario.build();
@@ -251,7 +257,7 @@ fn r3_combat_damage_to_creature_removes_hexproof() {
 #[test]
 fn r4_noncombat_damage_keeps_hexproof_r5_then_combat_removes_it() {
     let mut scenario = base_scenario();
-    let ruric = add_ruric(&mut scenario, 7);
+    let ruric = add_ruric(&mut scenario, P0, 7);
     let victim = scenario.add_creature(P1, "Victim", 0, 8).id();
     let bite = scenario
         .add_spell_to_hand_from_oracle(P0, "Rabid Bite", false, RABID_BITE)
@@ -297,7 +303,7 @@ fn r4_noncombat_damage_keeps_hexproof_r5_then_combat_removes_it() {
 #[test]
 fn r6_flicker_restores_hexproof() {
     let mut scenario = base_scenario();
-    let ruric = add_ruric(&mut scenario, 7);
+    let ruric = add_ruric(&mut scenario, P0, 7);
     let opp_bolt = scenario.add_bolt_to_hand(P1);
     let mut runner = scenario.build();
 
@@ -331,8 +337,8 @@ fn r6_flicker_restores_hexproof() {
 #[test]
 fn r7_zero_power_attacker_keeps_hexproof() {
     let mut scenario = base_scenario();
-    let zero = add_ruric(&mut scenario, 0);
-    let seven = add_ruric(&mut scenario, 7);
+    let zero = add_ruric(&mut scenario, P0, 0);
+    let seven = add_ruric(&mut scenario, P0, 7);
     let opp_bolt = scenario.add_bolt_to_hand(P1);
     let mut runner = scenario.build();
 
@@ -359,8 +365,8 @@ fn r7_zero_power_attacker_keeps_hexproof() {
 #[test]
 fn r8_two_rurics_only_the_connecting_one_loses_hexproof() {
     let mut scenario = base_scenario();
-    let attacker = add_ruric(&mut scenario, 7);
-    let stay_home = add_ruric(&mut scenario, 7);
+    let attacker = add_ruric(&mut scenario, P0, 7);
+    let stay_home = add_ruric(&mut scenario, P0, 7);
     let opp_bolt = scenario.add_bolt_to_hand(P1);
     let mut runner = scenario.build();
 
@@ -377,7 +383,7 @@ fn r8_two_rurics_only_the_connecting_one_loses_hexproof() {
 #[test]
 fn r9_opponent_ability_cannot_target_before_damage() {
     let mut scenario = base_scenario();
-    let ruric = add_ruric(&mut scenario, 7);
+    let ruric = add_ruric(&mut scenario, P0, 7);
     let pyromancer = scenario
         .add_creature(P1, "Prodigal Pyromancer", 1, 1)
         .from_oracle_text(PRODIGAL_PYROMANCER)
@@ -457,4 +463,116 @@ fn w4_prevented_combat_damage_keeps_hexproof() {
         }
         assert_stores_agree(&runner, ruric);
     }
+}
+
+/// In a Horde game the Horde is P0 and the survivor is P1.
+const HORDE: PlayerId = PlayerId(0);
+const SURVIVOR: PlayerId = PlayerId(1);
+
+/// A 2-player Horde game parked at its pre-combat main (local copy of the
+/// `horde_advanced_deployment.rs` scenario, default legendary rule).
+fn horde_scenario() -> GameScenario {
+    let ruleset = ChallengeDeck::CybermanHorde.default_ruleset();
+    let mut scenario = GameScenario::new_with_format(FormatConfig::horde(ruleset), 2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+}
+
+/// Park the game at SURVIVOR's priority on SURVIVOR's pre-combat main (local
+/// copy of the `horde_advanced_deployment.rs` helper): a survivor's main fires
+/// no Horde wave.
+fn park_survivor_priority(runner: &mut GameRunner) {
+    let state = runner.state_mut();
+    state.turn_number = 4;
+    state.active_player = SURVIVOR;
+    state.phase = Phase::PreCombatMain;
+    state.priority_player = SURVIVOR;
+    state.waiting_for = WaitingFor::Priority { player: SURVIVOR };
+}
+
+/// R10 - CR 120.2a + CR 616.1: Ruric's combat damage to the Horde is turned
+/// into a mill whose graveyard move collides Rest in Peace with Leyline of the
+/// Void, so the combat damage leg pauses on the ordering prompt and completes
+/// through the combat Phase C remnant after the answer. That resumed leg never
+/// re-enters `apply_damage_after_replacement`, so it must still latch `combat`
+/// through the shared damage-history authority and end the hexproof gate.
+#[test]
+fn r10_combat_damage_resumed_after_replacement_pause_removes_hexproof() {
+    let db = shared_card_db().expect("integration card fixture must be available");
+
+    let mut scenario = horde_scenario();
+    scenario.add_real_card(SURVIVOR, "Rest in Peace", Zone::Battlefield, db);
+    scenario.add_real_card(SURVIVOR, "Leyline of the Void", Zone::Battlefield, db);
+    let ruric = add_ruric(&mut scenario, SURVIVOR, 1);
+    for _ in 0..10 {
+        scenario.add_real_card(HORDE, "Lightning Bolt", Zone::Library, db);
+    }
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    park_survivor_priority(&mut runner);
+
+    flush_layers(runner.state_mut());
+    assert!(
+        has_hexproof(&runner.state().objects[&ruric]),
+        "premise: Ruric has hexproof before any combat damage"
+    );
+
+    runner.pass_both_players();
+    runner
+        .declare_attackers(&[(ruric, AttackTarget::Player(HORDE))])
+        .expect("Ruric must be able to attack the Horde");
+    let mut mill_prompts = 0;
+    for _ in 0..40 {
+        if runner.state().phase == Phase::PostCombatMain {
+            break;
+        }
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } => runner.pass_both_players(),
+            WaitingFor::DeclareBlockers { .. } => {
+                runner
+                    .declare_blockers(&[])
+                    .expect("declaring no blockers should succeed");
+            }
+            WaitingFor::ReplacementChoice { .. } => {
+                mill_prompts += 1;
+                // Reach-guard: the combat leg really paused with its post-loss
+                // work stashed for the remnant resume.
+                let stash = runner
+                    .state()
+                    .pending_damage_post_loss
+                    .as_ref()
+                    .expect("the paused combat leg must stash its post-loss work");
+                assert!(stash.is_combat, "the stashed leg must be the combat leg");
+                assert_eq!(stash.source_id, ruric);
+                // Engine-artifact pin: nothing is recorded until the resume.
+                assert!(runner.state().objects[&ruric].dealt_damage_kinds.is_empty());
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("answer the CR 616.1 ordering prompt");
+            }
+            other => panic!("unexpected window during combat: {other:?}"),
+        }
+    }
+    assert_eq!(
+        runner.state().phase,
+        Phase::PostCombatMain,
+        "combat must complete, stuck at {:?} with {:?}",
+        runner.state().phase,
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        mill_prompts, 1,
+        "the redirected mill-1 must pause on its ordering - zero means the \
+         board stopped pausing and the test is vacuous"
+    );
+
+    assert!(dealt(&runner, ruric, DamageKindFilter::CombatOnly));
+    assert!(!dealt(&runner, ruric, DamageKindFilter::NoncombatOnly));
+    assert!(runner.state().objects_that_dealt_damage.contains(&ruric));
+    assert_stores_agree(&runner, ruric);
+    flush_layers(runner.state_mut());
+    assert!(
+        !has_hexproof(&runner.state().objects[&ruric]),
+        "the resumed combat damage must end the hexproof gate"
+    );
 }

@@ -704,6 +704,11 @@ pub enum ProtectionTarget {
     /// resolved at runtime from the source permanent's `chosen_attributes`
     /// (the `CardType` chosen as the permanent entered). Parallels `ChosenColor`.
     ChosenCardType,
+    /// CR 702.16a + CR 201.2: "Protection from the chosen card name" —
+    /// resolved at runtime from the source permanent's `chosen_attributes`
+    /// (the `CardName` chosen as the permanent entered). Parallels `ChosenColor`,
+    /// `ChosenCardType`, and `ChosenPlayer`.
+    ChosenCardName,
     /// CR 702.16k: "Protection from the chosen player" — resolved at runtime
     /// from the protected permanent's persisted player choice. Covers objects
     /// the chosen player controls and objects they own that no other player
@@ -3447,9 +3452,20 @@ pub fn parse_protection_target(s: &str) -> ProtectionTarget {
         // CR 702.16 + CR 205.2: "the chosen card type" resolves at
         // runtime from the source permanent's chosen `CardType` attribute.
         "the chosen card type" | "chosen card type" => ProtectionTarget::ChosenCardType,
+        // CR 702.16a + CR 201.2: "the chosen card name" resolves at runtime
+        // from the source permanent's chosen `CardName` attribute.
+        "the chosen card name" | "chosen card name" | "the chosen name" | "chosen name" => {
+            ProtectionTarget::ChosenCardName
+        }
         // CR 702.16: "the chosen player" resolves from the
         // protected permanent's persisted `ChosenAttribute::Player`.
         "the chosen player" | "chosen player" => ProtectionTarget::ChosenPlayer,
+        // CR 702.16k + CR 608.2c: "protection from that player" — the
+        // declared-target anaphor (Eon Frolicker). The quality is not a
+        // characteristic; it names the player targeted by the enclosing
+        // ability, so it carries a player reference and is fixed to that
+        // player when the effect is applied.
+        "that player" => ProtectionTarget::FromPlayer(super::ability::ControllerRef::TargetPlayer),
         // CR 702.16j: "protection from everything" — typed variant, not stringly-typed
         "everything" => ProtectionTarget::Everything,
         // CR 702.16k: "protection from each of your opponents" (Figure of
@@ -4425,6 +4441,30 @@ mod tests {
     use super::test_helpers::{pay_life_cost, payload_bearing_samples};
     use super::*;
 
+    /// CR 702.16k + CR 608.2c: "protection from that player" names the player
+    /// targeted by the enclosing ability, not a card type. The atomic-quality
+    /// classifier emits the typed player reference the resolver fixes to the
+    /// declared target; the neighbouring anaphors keep their own variants.
+    #[test]
+    fn parse_protection_target_player_anaphors() {
+        assert_eq!(
+            parse_protection_target("that player"),
+            ProtectionTarget::FromPlayer(super::super::ability::ControllerRef::TargetPlayer),
+        );
+        assert_eq!(
+            parse_protection_target("the chosen player"),
+            ProtectionTarget::ChosenPlayer,
+        );
+        assert_eq!(
+            parse_protection_target("each of your opponents"),
+            ProtectionTarget::FromPlayer(super::super::ability::ControllerRef::Opponent),
+        );
+        assert_eq!(
+            parse_protection_target("red"),
+            ProtectionTarget::Color(ManaColor::Red),
+        );
+    }
+
     /// Card data exported before `EntwineCost` gained its `Mana`/`NonMana` wrapper
     /// stored Entwine as a bare `ManaCost`; it must still load as `Mana`.
     #[test]
@@ -5111,6 +5151,30 @@ mod tests {
         assert_eq!(
             parse_protection_target("from artifacts"),
             ProtectionTarget::Quality("from artifacts".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_protection_target_chosen_card_name() {
+        assert_eq!(
+            parse_protection_target("the chosen card name"),
+            ProtectionTarget::ChosenCardName
+        );
+        assert_eq!(
+            parse_protection_target("chosen card name"),
+            ProtectionTarget::ChosenCardName
+        );
+        assert_eq!(
+            parse_protection_target("the chosen name"),
+            ProtectionTarget::ChosenCardName
+        );
+        assert_eq!(
+            parse_protection_target("chosen name"),
+            ProtectionTarget::ChosenCardName
+        );
+        assert_eq!(
+            Keyword::from_str("Protection:the chosen card name").unwrap(),
+            Keyword::Protection(ProtectionTarget::ChosenCardName)
         );
     }
 

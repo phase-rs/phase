@@ -321,11 +321,11 @@ fn hostile_multi_authority_non_controller_tie_blocks_trigger() {
 ///    That is the whole of this filter's regression coverage.
 /// 2. Neutralize `resolve_player_count`'s candidate-side `!p.is_eliminated` →
 ///    GREEN.
-/// 3. Delete `topology::shared_resource_members`'s `is_alive` branch → GREEN.
+/// 3. Delete `topology::shared_life_members`'s `is_alive` branch → GREEN.
 /// 4. Remove the team-life filters AND the `is_alive` branch together → RED
 ///    (P0's life reads 20, expected 23).
 ///
-/// `shared_resource_members`'s `is_alive` branch is PRE-EXISTING at
+/// `shared_life_members`'s `is_alive` branch is PRE-EXISTING at
 /// upstream/main and untouched by this diff, so this fixture stays green with
 /// this diff's entire life-axis production change reverted: it does NOT
 /// discriminate that change on its own. It is an end-to-end guard that the
