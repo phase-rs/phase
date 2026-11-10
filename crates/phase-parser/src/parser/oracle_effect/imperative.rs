@@ -10877,12 +10877,13 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
             with_shuffle_sub_ability(effect)
         }
         ShuffleImperativeAst::OwnersChangeZoneToLibrary { target } => {
-            // CR 701.24c: the declared cards may have different owners, so each
-            // owner's library is randomized by that member's own delivery tail.
-            // A single terminal Shuffle cannot cover every owner (and would
-            // double-shuffle the first one).
-            parsed_clause(Effect::ChangeZone {
-                library_shuffle: Default::default(),
+            // CR 701.24c + CR 400.3: the declared cards may share an owner or
+            // span several owners. Suppress each member's delivery shuffle and
+            // let the terminal ScopedPlayer shuffle iterate the prospective
+            // owner population: the publisher dedups owners, so one library is
+            // randomized exactly once no matter how many of its cards moved.
+            let mut clause = parsed_clause(Effect::ChangeZone {
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
                 origin: None,
                 destination: Zone::Library,
                 target,
@@ -10896,7 +10897,16 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
                 enters_modified_if: None,
-            })
+            });
+            let mut shuffle = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Shuffle {
+                    target: TargetFilter::ScopedPlayer,
+                },
+            );
+            shuffle.player_scope = Some(owner_library_shuffle_scope());
+            clause.sub_ability = Some(Box::new(shuffle));
+            clause
         }
         ShuffleImperativeAst::ChangeZoneAllToLibrary { origins } => {
             // CR 400.6 + CR 400.3: "shuffle {possessive} {zone} into {possessive}
@@ -11310,6 +11320,19 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
     // a mass move. The plural-owner subject ("the owners of those cards") uses
     // its own delivery-only lowering instead, because one terminal owner lookup
     // cannot cover multiple owners.
+    // CR 701.24a + CR 400.3: a single-target owner move ("The owner of target
+    // permanent shuffles it …") has one exact owner; the terminal
+    // `ParentTargetOwner` shuffle covers that owner, so the member delivery must
+    // not shuffle a second time. Ambiguous `ParentTarget`/`SelfRef` shapes keep
+    // their existing routing (source self-moves are handled above).
+    let single_target_owner_move = matches!(
+        &effect,
+        Effect::ChangeZone {
+            owner_library: true,
+            target,
+            ..
+        } if !matches!(target, TargetFilter::SelfRef | TargetFilter::ParentTarget)
+    );
     match &mut effect {
         // CR 701.24a + CR 701.24d: every parser-emitted compound move into a
         // library appends the terminal `Shuffle` below. Randomizing during

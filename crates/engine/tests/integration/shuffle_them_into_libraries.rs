@@ -72,3 +72,42 @@ fn turn_the_earth_puts_each_target_into_its_owners_library_then_each_owner_shuff
     assert_eq!(shuffles_for(events, P1), 1, "{events:?}");
     outcome.assert_life_delta(P0, 2);
 }
+
+/// CR 701.24c: two selected cards from the same graveyard are one owner's
+/// cards, so that owner shuffles their library exactly once, not once per card.
+#[test]
+fn turn_the_earth_same_owner_shuffles_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Turn the Earth", false, TURN_THE_EARTH)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    let first = scenario
+        .add_creature_to_graveyard(P0, "P0 First Bear", 2, 2)
+        .id();
+    let second = scenario
+        .add_creature_to_graveyard(P0, "P0 Second Bear", 2, 2)
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner
+        .cast(spell)
+        .target_objects(&[first, second])
+        .resolve();
+    let events = outcome.events();
+
+    assert_eq!(shuffles_for(events, P0), 1, "{events:?}");
+    assert_eq!(shuffles_for(events, P1), 0, "{events:?}");
+    assert!(outcome.state().players[P0.0 as usize]
+        .library
+        .contains(&first));
+    assert!(outcome.state().players[P0.0 as usize]
+        .library
+        .contains(&second));
+}

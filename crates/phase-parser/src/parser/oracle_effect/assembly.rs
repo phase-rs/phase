@@ -4822,55 +4822,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // `refuse_unenforced_aggregate_resolution_selection`.
     super::lower::refuse_unenforced_aggregate_resolution_selection(&mut result);
 
-    // CR 608.2c + CR 400.3: "This creature's owner shuffles it into their
-    // library. If that player does, they reveal …" — the reveal's "that player"
-    // is the owner the preceding Shuffle resolves. The clause parser emits
-    // `ParentTarget` for the anaphor; bind it to `Owner` so a nonowner activator
-    // does not reveal from the activator's library.
-    bind_owner_shuffle_reveal_player(&mut result);
-
     result
-}
-
-/// CR 608.2c + CR 400.3: bind a third-person reveal that follows a source-owner
-/// shuffle to the source owner, not the resolving ability's activator.
-fn bind_owner_shuffle_reveal_player(def: &mut AbilityDefinition) {
-    if matches!(
-        &*def.effect,
-        Effect::Shuffle {
-            target: TargetFilter::Owner
-        }
-    ) {
-        if let Some(sub) = def.sub_ability.as_deref_mut() {
-            // CR 608.2c: only the immediate "If that player does, they reveal…"
-            // clause belongs to this shuffle. Do not walk descendants or
-            // branches: a later RevealUntil may already have been bound to a
-            // nearer player by the subject/antecedent seam.
-            let is_reflexive_gate = matches!(
-                sub.condition,
-                Some(AbilityCondition::EffectOutcome {
-                    signal: EffectOutcomeSignal::OptionalEffectPerformed
-                })
-            );
-            if is_reflexive_gate {
-                rewrite_direct_reveal_player_to_owner(sub);
-            }
-        }
-    }
-    if let Some(sub) = def.sub_ability.as_deref_mut() {
-        bind_owner_shuffle_reveal_player(sub);
-    }
-    if let Some(otherwise) = def.else_ability.as_deref_mut() {
-        bind_owner_shuffle_reveal_player(otherwise);
-    }
-}
-
-fn rewrite_direct_reveal_player_to_owner(def: &mut AbilityDefinition) {
-    if let Effect::RevealUntil { player, .. } = &mut *def.effect {
-        if matches!(player, TargetFilter::ParentTarget) {
-            *player = TargetFilter::Owner;
-        }
-    }
 }
 
 /// CR 608.2c: validate the structural "repeat this process" directives of an
@@ -6624,71 +6576,6 @@ mod arena_tests {
                 )
             }),
             "the attached set carries the Host relation: {target:?}"
-        );
-    }
-
-    /// CR 608.2c: the owner-shuffle reveal binding is clause-local. A sibling
-    /// or branch reveal that the subject/antecedent seam already resolved must
-    /// not be rewritten by the owner-shuffle pass.
-    #[test]
-    fn owner_shuffle_reveal_binding_does_not_rewrite_branches() {
-        let mut chain = crate::parser::oracle_effect::parse_effect_chain(
-            "This creature's owner shuffles it into their library. If that player does, they reveal cards from the top of that library until a card named Mirror-Mad Phantasm is revealed.",
-            AbilityKind::Activated,
-        );
-        {
-            let shuffle = chain
-                .sub_ability
-                .as_deref_mut()
-                .expect("the parser emits the terminal owner shuffle");
-            let reveal = shuffle
-                .sub_ability
-                .as_deref_mut()
-                .expect("the reflexive reveal is the shuffle's immediate child");
-            let Effect::RevealUntil { player, .. } = &mut *reveal.effect else {
-                panic!("expected RevealUntil, got {:?}", reveal.effect);
-            };
-            *player = TargetFilter::ParentTarget;
-            let mut branch = reveal.clone();
-            let Effect::RevealUntil {
-                player: branch_player,
-                ..
-            } = &mut *branch.effect
-            else {
-                unreachable!()
-            };
-            *branch_player = TargetFilter::ParentTarget;
-            branch.sub_ability = None;
-            branch.else_ability = None;
-            reveal.else_ability = Some(Box::new(branch));
-        }
-
-        bind_owner_shuffle_reveal_player(&mut chain);
-
-        let reveal = chain
-            .sub_ability
-            .as_deref()
-            .and_then(|shuffle| shuffle.sub_ability.as_deref())
-            .expect("the reflexive reveal remains attached");
-        let Effect::RevealUntil { player, .. } = &*reveal.effect else {
-            unreachable!()
-        };
-        assert_eq!(
-            *player,
-            TargetFilter::Owner,
-            "the clause's antecedent binds to the source owner"
-        );
-        let branch = reveal
-            .else_ability
-            .as_deref()
-            .expect("the structural branch remains attached");
-        let Effect::RevealUntil { player, .. } = &*branch.effect else {
-            unreachable!()
-        };
-        assert_eq!(
-            *player,
-            TargetFilter::ParentTarget,
-            "a branch resolved by the subject/antecedent seam is not rewritten"
         );
     }
 }
