@@ -2462,7 +2462,13 @@ fn finish_action_boundary_with_lifecycle(
             Ok(advanced) => advanced,
             Err(error) => {
                 let life_failure = close_ingress_window(state, &mut prior_window);
-                if departure_committed(state, &boundary_snapshot) && life_failure.is_none() {
+                if departure_committed(state, &boundary_snapshot) {
+                    if let Some(player) = life_failure {
+                        tracing::debug!(
+                            ?player,
+                            "keeping the committed concession after a life failure"
+                        );
+                    }
                     if state.payment_transaction.is_some() {
                         payment_transaction::abandon_failed_recovery(state);
                     }
@@ -2495,10 +2501,17 @@ fn finish_action_boundary_with_lifecycle(
     if let Err(err) = reconcile_terminal_result_completing_resolution(state, &mut result, reconcile)
     {
         let life_failure = close_ingress_window(state, &mut prior_window);
-        if departure_committed(state, &boundary_snapshot) && life_failure.is_none() {
+        if departure_committed(state, &boundary_snapshot) {
             // CR 104.3a: the concession stands even when the terminal
-            // finalizer fails. Keep the committed board and hand the caller
-            // its events with a living priority continuation.
+            // finalizer or an unrepresentable life tail fails. Keep the
+            // committed board and hand the caller its events with a living
+            // priority continuation; the failed tail is logged, not published.
+            if let Some(player) = life_failure {
+                tracing::debug!(
+                    ?player,
+                    "keeping the committed concession after a life failure"
+                );
+            }
             if state.payment_transaction.is_some() {
                 payment_transaction::abandon_failed_recovery(state);
             }
@@ -11410,6 +11423,7 @@ fn priority_pass_needs_checkpoint(state: &GameState) -> bool {
         || state.pending_cost_move_resume.is_some()
         || state.pending_triggered_mana_resume.is_some()
         || state.pending_phase_transition_progress.is_some()
+        || state.pending_unless_draw_repeat.is_some()
         || triggers::is_pending_trigger_construction_active(state)
         || priority_pass_will_close_window(state)
 }

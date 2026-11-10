@@ -251,6 +251,15 @@ pub(crate) fn eliminate_players(
     } else {
         None
     };
+    // CR 702.24a + CR 800.4a: the counted repeated-payment owner is also a
+    // resolving continuation; a departing payer cannot keep owing draws.
+    if state
+        .pending_unless_draw_repeat
+        .as_ref()
+        .is_some_and(|pending| leaving_set.contains(&pending.player))
+    {
+        state.pending_unless_draw_repeat = None;
+    }
 
     // CR 800.4a: elimination can remove frozen stack entries and a session's
     // canonical representative. Restore the pre-overlay preferences before

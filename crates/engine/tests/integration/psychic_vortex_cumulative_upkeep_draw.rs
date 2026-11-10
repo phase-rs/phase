@@ -1667,3 +1667,37 @@ fn a_counted_payment_with_obstinate_familiar_fails_atomically() {
         "no partial draws were kept"
     );
 }
+
+/// CR 117.5 + CR 603.2: the draw events of a successful counted payment queue
+/// their triggers before the next priority.
+#[test]
+fn a_counted_payment_queues_its_draw_triggers() {
+    const AGE: u32 = 65;
+    const PSYCHOSIS_CRAWLER_ORACLE: &str = "Whenever you draw a card, each opponent loses 1 life.";
+    let names: Vec<String> = (0..(AGE as usize + 50))
+        .map(|index| format!("Library {index}"))
+        .collect();
+    let library: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (mut runner, vortex, ()) = vortex_board(AGE - 1, &library, |scenario| {
+        scenario
+            .add_creature(P0, "Psychosis Crawler", 1, 1)
+            .from_oracle_text(PSYCHOSIS_CRAWLER_ORACLE);
+    });
+    advance_through_upkeep(&mut runner);
+    assert_draw_cost_prompt(&runner, AGE as usize, 1);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the counted payment is legal");
+    let state = runner.state();
+    assert_eq!(
+        state.stack.len(),
+        AGE as usize,
+        "each drawn card queued its Psychosis Crawler trigger: {:?}",
+        state.waiting_for
+    );
+    assert_eq!(
+        zone_of(&runner, vortex),
+        Zone::Battlefield,
+        "the paid Vortex stays"
+    );
+}

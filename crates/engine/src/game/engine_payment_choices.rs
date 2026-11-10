@@ -2111,6 +2111,7 @@ pub(crate) fn drive_pending_unless_draw_repeat(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let payment_event_start = events.len();
     loop {
         let Some(mut pending) = state.pending_unless_draw_repeat.take() else {
             return Ok(state.waiting_for.clone());
@@ -2132,11 +2133,12 @@ pub(crate) fn drive_pending_unless_draw_repeat(
                 PaymentOutcome::Paid => {
                     pending.remaining = pending.remaining.saturating_sub(suffix_count);
                     if pending.remaining == 0 {
-                        return finish_successful_unless_payment(
+                        return finish_successful_counted_payment(
                             state,
                             pending.pending_effect.as_ref(),
                             &pending.trigger_event,
                             events,
+                            payment_event_start,
                         );
                     }
                     state.pending_unless_draw_repeat = Some(pending);
@@ -2178,11 +2180,12 @@ pub(crate) fn drive_pending_unless_draw_repeat(
             }
         }
         if pending.remaining == 0 {
-            return finish_successful_unless_payment(
+            return finish_successful_counted_payment(
                 state,
                 pending.pending_effect.as_ref(),
                 &pending.trigger_event,
                 events,
+                payment_event_start,
             );
         }
         let chunk = pending.remaining.min(REPEATED_DRAW_CHUNK);
@@ -2197,11 +2200,12 @@ pub(crate) fn drive_pending_unless_draw_repeat(
             PaymentOutcome::Paid => {
                 pending.remaining -= chunk;
                 if pending.remaining == 0 {
-                    return finish_successful_unless_payment(
+                    return finish_successful_counted_payment(
                         state,
                         pending.pending_effect.as_ref(),
                         &pending.trigger_event,
                         events,
+                        payment_event_start,
                     );
                 }
                 state.pending_unless_draw_repeat = Some(pending);
@@ -7380,4 +7384,29 @@ mod counted_draw_instruction_tests {
         let expanded = crate::game::effects::expand_per_counter(&draw(), 3);
         assert_eq!(repeated_draw_instructions(&expanded), 3);
     }
+}
+
+/// CR 117.5 + CR 603.2: a successful counted payment must route its draw
+/// events through the canonical post-action trigger collector before the next
+/// priority; the payment's own epilogue does not scan them.
+fn finish_successful_counted_payment(
+    state: &mut GameState,
+    pending_effect: &ResolvedAbility,
+    trigger_event: &Option<GameEvent>,
+    events: &mut Vec<GameEvent>,
+    event_start: usize,
+) -> Result<WaitingFor, EngineError> {
+    finish_successful_unless_payment(state, pending_effect, trigger_event, events)?;
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        let default_wf = state.waiting_for.clone();
+        state.waiting_for = engine_priority::run_post_action_pipeline_from(
+            state,
+            events,
+            event_start,
+            &default_wf,
+            false,
+            false,
+        )?;
+    }
+    Ok(state.waiting_for.clone())
 }
