@@ -19,7 +19,7 @@ use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, DiscardSelfScope, Effect,
     QuantityExpr, ResolvedAbility, TargetFilter,
 };
-use engine::types::actions::GameAction;
+use engine::types::actions::{DebugAction, GameAction};
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use engine::types::phase::Phase;
@@ -1372,5 +1372,119 @@ fn a_draw_cost_activation_resumes_after_abundance_bottom_order() {
         1,
         "the activation reaches the stack after the whole substitute settles: {:?}",
         state.waiting_for
+    );
+}
+
+/// CR 118.12: a sandbox mutation admitted while a recovered payment is parked
+/// runs on the hidden checkpoint board only, so its outcome publishes once
+/// when the payment settles; the canonical base is untouched in the meantime.
+#[test]
+fn a_sandbox_mutation_between_recovery_and_completion_publishes_once() {
+    let (mut runner, source) = concession_board_with_hand();
+    let mut root = ResolvedAbility::new(
+        pay_cost(AbilityCost::Composite {
+            costs: vec![draw_cost(1), discard_cost()],
+        }),
+        vec![],
+        source,
+        P0,
+    );
+    root.sub_ability = None;
+    let state = runner.state_mut();
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+    assert!(is_dredge_prompt_for_p0(state));
+    apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+        .expect("declining leg 1's Dredge accepts the draw");
+    let WaitingFor::DiscardChoice { .. } = &state.waiting_for else {
+        panic!("the discard leg owns the cursor: {:?}", state.waiting_for);
+    };
+    apply(
+        state,
+        PlayerId(2),
+        GameAction::Concede {
+            player_id: PlayerId(2),
+        },
+    )
+    .expect("a player can concede at any time");
+    state.debug_mode = true;
+    state.format_config.allow_debug_actions = true;
+    let canonical_life = state.players[P1.0 as usize].life;
+
+    apply(
+        state,
+        P0,
+        GameAction::Debug(DebugAction::SetLife {
+            player_id: P1,
+            life: 5,
+        }),
+    )
+    .expect("the sandbox mutation applies to the hidden checkpoint");
+    assert_eq!(
+        state.players[P1.0 as usize].life, canonical_life,
+        "the canonical base was not mutated by the hidden sandbox action"
+    );
+    let checkpoint_life = state
+        .payment_transaction
+        .as_ref()
+        .and_then(|transaction| transaction.recovered.as_ref())
+        .expect("the checkpoint is live")
+        .state
+        .players[P1.0 as usize]
+        .life;
+    assert_eq!(
+        checkpoint_life, 5,
+        "the hidden checkpoint carries the sandbox outcome"
+    );
+    assert_eq!(
+        state
+            .payment_transaction
+            .as_ref()
+            .and_then(|transaction| transaction.recovered.as_ref())
+            .expect("the checkpoint is live")
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::DebugActionUsed { .. }))
+            .count(),
+        1,
+        "the sandbox action is buffered once with the payment"
+    );
+
+    let drawn = state
+        .payment_transaction
+        .as_ref()
+        .and_then(|transaction| transaction.recovered.as_ref())
+        .expect("the checkpoint is live")
+        .events
+        .iter()
+        .find_map(|event| match event {
+            GameEvent::CardDrawn {
+                player_id,
+                object_id,
+                ..
+            } if *player_id == P0 => Some(*object_id),
+            _ => None,
+        })
+        .expect("the prefix draw");
+    let answer = apply(
+        runner.state_mut(),
+        P0,
+        GameAction::SelectCards { cards: vec![drawn] },
+    )
+    .expect("discard the prefix-drawn card");
+
+    let state = runner.state();
+    assert!(state.payment_transaction.is_none());
+    assert_eq!(
+        state.players[P1.0 as usize].life, 5,
+        "the accepted checkpoint outcome is the final state"
+    );
+    assert_eq!(
+        answer
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::DebugActionUsed { .. }))
+            .count(),
+        1,
+        "the buffered sandbox action publishes once"
     );
 }

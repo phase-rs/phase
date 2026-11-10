@@ -12436,6 +12436,19 @@ fn apply_action(
     action: GameAction,
     stack_resolution_limit: Option<u32>,
 ) -> Result<ActionResult, EngineError> {
+    // CR 118.12: a sandbox/debug mutation admitted while a recovered payment is
+    // parked belongs to the hidden checkpoint board, not the canonical base.
+    // Running it only there keeps its draw/outcome single and consistent with
+    // the accepted prefix; its events publish when the payment settles.
+    if state
+        .payment_transaction
+        .as_ref()
+        .is_some_and(|transaction| transaction.recovered.is_some())
+        && matches!(action, GameAction::Debug(_))
+    {
+        payment_transaction::mirror_checkpoint_action(state, actor, action)?;
+        return Ok(ActionResult::applied(Vec::new(), state.waiting_for.clone()));
+    }
     // Clear stale revealed_cards from the previous action.
     // RevealTop reveals (e.g. Goblin Guide) are momentary — shown for one state update.
     // RevealHand reveals (e.g. Thoughtseize) persist through the RevealChoice interaction.

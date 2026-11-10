@@ -682,6 +682,49 @@ fn checkpoint_state(shadow: &GameState) -> GameState {
     checkpoint
 }
 
+/// CR 118.12: apply a sandbox/debug action to the hidden checkpoint board only.
+/// Its events are buffered with the accepted prefix and publish once when the
+/// payment settles; the canonical base is left untouched.
+pub(crate) fn mirror_checkpoint_action(
+    state: &mut GameState,
+    actor: PlayerId,
+    action: GameAction,
+) -> Result<(), EngineError> {
+    let Some(transaction) = state.payment_transaction.as_deref() else {
+        return Ok(());
+    };
+    let Some(checkpoint) = transaction.recovered.as_deref() else {
+        return Ok(());
+    };
+    let mut shadow = (*checkpoint.state).clone();
+    shadow.payment_transaction = None;
+    shadow.payment_transaction_replay = true;
+    shadow.payment_transaction_just_handled = false;
+    // The sandbox authority is the live session's, not the checkpoint's older
+    // bytes; mirror it before the action's own preflight reads it.
+    shadow.debug_mode = state.debug_mode;
+    shadow.debug_permitted = state.debug_permitted.clone();
+    shadow.format_config = state.format_config.clone();
+    let result = engine::apply_admitted_recorded_action(&mut shadow, actor, actor, action)?;
+    shadow.payment_transaction_replay = false;
+    let mut events = checkpoint.events.clone();
+    events.extend(result.events);
+    let mut log_entries = checkpoint.log_entries.clone();
+    log_entries.extend(result.log_entries);
+    let mut updated = transaction.clone();
+    updated.recovered = Some(Box::new(PaymentRecoveryCheckpoint {
+        state: Box::new(checkpoint_state(&shadow)),
+        events,
+        log_entries,
+        consumed: updated.transcript.len(),
+    }));
+    **state
+        .payment_transaction
+        .as_mut()
+        .expect("the descriptor is live") = updated;
+    Ok(())
+}
+
 /// CR 104.3a + CR 118.12: mirror an outside, submitter-scoped action onto the
 /// recovery checkpoint. The canonical state already carries it; without this,
 /// settling the checkpoint would roll the action back (a revoked debug
@@ -980,7 +1023,14 @@ pub(crate) fn owns_action(state: &GameState, action: &GameAction) -> bool {
         .copied()
         .unwrap_or(transaction.owner);
     let actor = crate::game::turn_control::authorized_submitter_for_player(state, semantic_owner);
-    let mut probe = project(state);
+    // A recovery checkpoint is the materialized authority for actions already
+    // admitted outside the payment; probing the canonical base would reject an
+    // action whose cards were drawn into the hidden checkpoint.
+    let mut probe = if let Some(checkpoint) = transaction.recovered.as_deref() {
+        (*checkpoint.state).clone()
+    } else {
+        project(state)
+    };
     // The probe must exercise the ordinary WaitingFor/action authority on the
     // materialized shadow, not recursively re-enter this transaction or create
     // a nested descriptor. `project` has already cleared the transaction and
