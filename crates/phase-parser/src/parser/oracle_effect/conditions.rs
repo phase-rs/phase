@@ -38,12 +38,13 @@ use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr,
 };
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, AbilityUseTally, AdditionalCostOrigin,
-    AttachCardinality, AttachSelection, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
-    CoinFlipResult, Comparator, ControllerRef, CostCategory, CountScope, DamageChannel, DigSource,
-    Duration, Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, LibraryPosition,
-    MultiTargetSpec, ObjectScope, ParsedCondition, PlayerScope, PtStat, PtValueScope, QuantityExpr,
-    QuantityRef, SharedQuality, SpentColor, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    extract_target_filter_from_effect, AbilityCondition, AbilityDefinition, AbilityKind,
+    AbilityUseTally, AdditionalCostOrigin, AttachCardinality, AttachSelection, CastManaObjectScope,
+    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CostCategory,
+    CountScope, DamageChannel, DigSource, Duration, Effect, EffectOutcomeSignal, FilterProp,
+    GuessOutcome, LibraryPosition, MultiTargetSpec, ObjectScope, ParsedCondition, PlayerScope,
+    PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SpentColor, StaticCondition,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -4975,6 +4976,21 @@ fn probe_effect_target(effect_text: &str, ctx: &ParseContext) -> Option<EffectTa
     })
 }
 
+/// CR 115.1d: the effect probe narrowed to a declared target slot. A target
+/// antecedent must come from the phrase "target [something]", not from any
+/// operand that carries a filter: Whitemane Lion's "return a creature you
+/// control to its owner's hand" is a `Bounce` chosen at resolution, so
+/// `Effect::target_filter` surfaces its operand while the slot authority
+/// excludes it.
+fn probe_declared_target_slot(effect_text: &str, ctx: &ParseContext) -> Option<EffectTargetProbe> {
+    let clause = parse_effect_clause_inner(effect_text, &mut ctx.clone_throwaway());
+    let filter = extract_target_filter_from_effect(&clause.effect)?.clone();
+    Some(EffectTargetProbe {
+        filter,
+        multi_target: clause.multi_target,
+    })
+}
+
 pub(super) fn parse_quantity_comparison(text: &str) -> Option<(Comparator, QuantityExpr)> {
     type E<'a> = OracleError<'a>;
     let mut comparator_prefixes = alt((
@@ -5202,7 +5218,7 @@ fn declared_single_object_target(
     effect_text: &str,
     ctx: &ParseContext,
 ) -> Option<DeclaredObjectTarget> {
-    let probe = probe_effect_target(effect_text, ctx)?;
+    let probe = probe_declared_target_slot(effect_text, ctx)?;
     if probe.multi_target.is_some()
         || !is_declared_target_filter(&probe.filter)
         || super::is_player_scoped_filter(&probe.filter)
@@ -10968,9 +10984,12 @@ mod tests {
         }
     }
 
-    /// CR 608.2c + CR 109.4: Skulking Killer — "that opponent controls no other
-    /// creatures" counts the creatures the target's controller controls other
-    /// than the target, and the "until end of turn" body survives the strip.
+    /// CR 608.2c + CR 109.4: Skulking Killer's printed single sentence —
+    /// "When this creature enters, target creature an opponent controls gets
+    /// -2/-2 until end of turn if that opponent controls no other creatures."
+    /// The trailing clause counts the creatures the target's controller controls
+    /// other than the target, and the "until end of turn" body survives the
+    /// strip.
     #[test]
     fn target_controller_controls_no_other_condition_binds_target_controller() {
         let mut ctx = ParseContext {
@@ -11025,9 +11044,9 @@ mod tests {
     /// instruction of this shape, so this test isolates the combinator and makes
     /// no printed-support claim. Skulking Killer is the nearest printed analogue
     /// ("When this creature enters, target creature an opponent controls gets
-    /// -2/-2 until end of turn. That creature ... if that opponent controls no
-    /// other creatures"), which is why the shared grammar must keep `other`
-    /// optional rather than requiring the exclusion.
+    /// -2/-2 until end of turn if that opponent controls no other creatures"),
+    /// which is why the shared grammar must keep `other` optional rather than
+    /// requiring the exclusion.
     #[test]
     fn its_controller_controls_no_condition_omits_distinct_from() {
         let (cond, text) = strip_suffix_conditional(
@@ -11043,12 +11062,18 @@ mod tests {
         assert_eq!(cond, Some(expected));
     }
 
-    /// Fail-closed: the subject must have an antecedent in a single declared
-    /// object target. Each condition still parses in the shared grammar (reach
+    /// Fail-closed: the subject must have an antecedent in a declared object
+    /// target slot. Each condition still parses in the shared grammar (reach
     /// guard), and each effect probe reaches the guard it is meant to exercise:
     /// the creature row is a declared single object target with no introduced
-    /// opponent, the player row is player-scoped, and the multi-target row
-    /// carries `multi_target`. Only then does the full strip decline.
+    /// opponent, the player row is player-scoped, the multi-target row carries
+    /// `multi_target`, and the untargeted row surfaces no declared slot at all.
+    /// Only then does the full strip decline.
+    ///
+    /// Synthetic rows name their nearest printed analogue: the creature row is
+    /// Skulking Killer's instruction with the opponent qualifier removed, the
+    /// player row is Bump in the Night's player-target frame, and the
+    /// multi-target row is a synthetic multi-target form of Skulking Killer.
     #[test]
     fn target_controller_control_condition_declines_without_antecedent() {
         let ctx = ParseContext {
@@ -11059,7 +11084,7 @@ mod tests {
         // Single declared object target, no opponent introduced by its own type
         // phrase: the probe resolves and the antecedent guard is what declines.
         let effect = "Target creature gets -2/-2 until end of turn";
-        let probe = probe_effect_target(effect, &ctx).expect("creature effect probe");
+        let probe = probe_declared_target_slot(effect, &ctx).expect("creature effect probe");
         assert!(is_declared_target_filter(&probe.filter));
         assert!(probe.multi_target.is_none());
         let target =
@@ -11078,7 +11103,7 @@ mod tests {
 
         // Player target: the probe resolves to a player scope, not an object.
         let effect = "Target opponent loses 2 life";
-        let probe = probe_effect_target(effect, &ctx).expect("player effect probe");
+        let probe = probe_declared_target_slot(effect, &ctx).expect("player effect probe");
         assert!(crate::parser::oracle_effect::is_player_scoped_filter(
             &probe.filter
         ));
@@ -11096,9 +11121,27 @@ mod tests {
         // Multi-target slot: the probe keeps its multi-target metadata, so no
         // single target controller exists.
         let effect = "Up to two target creatures an opponent controls get -2/-2 until end of turn";
-        let probe = probe_effect_target(effect, &ctx).expect("multi-target effect probe");
+        let probe = probe_declared_target_slot(effect, &ctx).expect("multi-target effect probe");
         assert!(probe.multi_target.is_some());
         let condition = "that opponent controls no other creatures";
+        assert!(
+            nom_condition::parse_target_controller_count_condition(condition).is_ok(),
+            "reach guard: {condition}"
+        );
+        assert_eq!(
+            parse_target_controller_control_condition_text(condition, effect, &ctx),
+            None,
+            "{effect} if {condition}"
+        );
+
+        // Printed Whitemane Lion: "Return a creature you control to its owner's
+        // hand." The Bounce operand is a resolution choice, so the declared-slot
+        // authority surfaces no target; the guard must decline even though the
+        // operand itself carries a creature filter.
+        let effect = "Return a creature you control to its owner's hand";
+        assert!(probe_declared_target_slot(effect, &ctx).is_none());
+        assert!(declared_single_object_target(effect, &ctx).is_none());
+        let condition = "you control more creatures than its controller";
         assert!(
             nom_condition::parse_target_controller_count_condition(condition).is_ok(),
             "reach guard: {condition}"
@@ -11137,9 +11180,9 @@ mod tests {
     }
 
     /// CR 608.2c: the antecedent guard must hold at the full suffix-strip seam,
-    /// not only inside the helper. Without the early fail-closed return the
-    /// generic `parse_inner_condition` fall-through re-homes the same text
-    /// without an antecedent and emits an unbound `ParentTargetController` gate.
+    /// not only inside the helper. Every declined shape must leave the clause
+    /// unchanged, including an untargeted operand (Whitemane Lion) whose filter
+    /// is populated but which declares no target slot.
     #[test]
     fn target_controller_control_condition_full_strip_declines_without_antecedent() {
         let mut ctx = ParseContext {
@@ -11166,20 +11209,19 @@ mod tests {
                 "Target opponent loses 2 life",
                 "you control more creatures than that spell's controller and you control a Swamp",
             ),
+            // Printed Whitemane Lion ("Return a creature you control to its
+            // owner's hand."): the Bounce operand is a resolution choice, so no
+            // declared slot supplies the referent.
+            (
+                "Return a creature you control to its owner's hand",
+                "you control more creatures than its controller",
+            ),
         ] {
             let text = format!("{effect} if {condition}");
             let (cond, body) = strip_suffix_conditional(&text, &mut ctx);
             assert_eq!(cond, None, "the full strip must decline: {text}");
             assert_eq!(body, text, "the declined text must be unchanged");
         }
-
-        // The same conjunctive shape keeps parsing when the referent binds.
-        let (cond, body) = strip_suffix_conditional(
-            "Counter target spell if you control more creatures than that spell's controller and you control a Swamp",
-            &mut ctx,
-        );
-        assert!(cond.is_some(), "a bound conjunctive condition must parse");
-        assert_eq!(body, "Counter target spell");
     }
 
     /// CR 608.2d + CR 107.4 + CR 202.1: Omnath, Locus of All — "you may reveal

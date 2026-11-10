@@ -270,13 +270,6 @@ fn parse_single_inner_condition(input: &str) -> OracleResult<'_, StaticCondition
         // single-leaf `ManaSpentToCast == 0` gate the enters-with-only-if pipeline
         // (`replacement_condition_from_static`) needs into an unmappable `Or`.
         parse_it_wasnt_cast_or_no_mana_spent,
-        // CR 608.2c + CR 109.4: "<subject> controls no [other] <type>" and
-        // "you control more <type> than <subject>" trail an instruction whose
-        // single declared object target supplies the subject's controller
-        // (Skulking Killer, Unified Will). The recognizer lives here, once;
-        // the effect parser keeps only its antecedent guard and the typed
-        // bridge.
-        parse_target_controller_count_condition_static,
         parse_state_presence_conditions,
         parse_event_history_conditions,
         parse_resolution_context_conditions,
@@ -4793,10 +4786,12 @@ fn parse_counted_type_phrase(input: &str) -> OracleResult<'_, TypedFilter> {
 /// - "you control more <type> than <subject>" (Unified Will) → your count
 ///   exceeds that player's count.
 ///
-/// This is the single recognition authority. The effect parser calls it
-/// directly and applies its own antecedent guard to the returned referent;
-/// `parse_inner_condition` exposes the static half as a normal game-state
-/// condition.
+/// This is the single recognition authority. It deliberately is not reachable
+/// from [`parse_inner_condition`]: the referent must be bound by the caller
+/// against a declared target, and a static or trigger condition has no
+/// resolving ability to bind it. Predator's Gambit's "as long as its controller
+/// controls no other creatures" therefore stays explicitly unsupported rather
+/// than reading an unbound parent-target controller.
 pub(crate) fn parse_target_controller_count_condition(
     input: &str,
 ) -> OracleResult<'_, (TargetControllerReferent, StaticCondition)> {
@@ -4855,15 +4850,6 @@ fn parse_you_control_more_than_target_controller(
         },
     };
     Ok((rest, (referent, condition)))
-}
-
-/// The `parse_inner_condition` leaf: the same grammar with the referent
-/// discarded. The effect-side antecedent guard still applies at its own seam.
-fn parse_target_controller_count_condition_static(
-    input: &str,
-) -> OracleResult<'_, StaticCondition> {
-    let (rest, (_referent, condition)) = parse_target_controller_count_condition(input)?;
-    Ok((rest, condition))
 }
 
 /// CR 119 + CR 603.4: The " or less life" / " or more life" suffix shared by every
@@ -27850,7 +27836,7 @@ mod counters_among_condition_tests {
 /// conditions an intervening-if commonly uses, at the building-block level.
 #[cfg(test)]
 mod intervening_if_state_condition_tests {
-    use super::parse_inner_condition;
+    use super::{parse_inner_condition, parse_target_controller_count_condition};
     use crate::types::ability::{
         AggregateFunction, Comparator, FilterProp, PlayerScope, QuantityExpr, QuantityRef,
         StaticCondition, TargetFilter,
@@ -27966,19 +27952,34 @@ mod intervening_if_state_condition_tests {
             .any(|prop| matches!(prop, FilterProp::InZone { .. })));
     }
 
-    /// CR 608.2c + CR 109.4: the target-controller count grammar is recognized
-    /// by the single condition authority, not only by the effect-side strip.
+    /// CR 608.2c + CR 109.4: one recognizer owns the target-controller count
+    /// grammar, and it returns the referent rather than binding it. Only a
+    /// caller with a declared target can bind it; the static path keeps the
+    /// clause explicitly unsupported.
     #[test]
-    fn target_controller_count_conditions_parse_through_the_shared_authority() {
+    fn target_controller_count_conditions_require_a_caller_referent() {
         for condition in [
             "that opponent controls no other creatures",
             "its controller controls no creatures",
             "you control more creatures than that spell's controller",
         ] {
-            let (rest, parsed) = parse_inner_condition(condition)
+            // The shared recognizer is the single grammar, and the effect
+            // parser binds its returned referent against the instruction's
+            // declared target.
+            let (rest, (_referent, parsed)) = parse_target_controller_count_condition(condition)
                 .unwrap_or_else(|_| panic!("must parse: {condition}"));
             assert_eq!(rest, "", "{condition}");
             assert!(matches!(parsed, StaticCondition::QuantityComparison { .. }));
+
+            // No static/trigger caller can bind the referent: Predator's Gambit
+            // ("as long as its controller controls no other creatures") has no
+            // resolving target, so `parse_inner_condition` must keep the clause
+            // explicitly unsupported rather than read an unbound parent-target
+            // controller.
+            assert!(
+                parse_inner_condition(condition).is_err(),
+                "a static condition cannot bind {condition}"
+            );
         }
     }
 }
