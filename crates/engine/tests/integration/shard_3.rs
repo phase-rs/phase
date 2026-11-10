@@ -170,6 +170,7 @@ mod fall_from_favor_monarch_untap;
 mod fallaji_archaeologist_up_to_may_put;
 mod false_peace_skips_all_combat_phases;
 mod fan_out_pause_this_way;
+mod fangorn_tree_shepherd;
 mod farideh_fireball_die_branch_selection;
 mod fateful_handoff_target_mana_value_draw;
 mod fathom_seer_morph;

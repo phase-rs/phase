@@ -169,6 +169,7 @@ mod issue_836_hero_of_bladehold_battle_cry;
 mod issue_8485_maze_of_ith_defender;
 mod issue_879_obsessive_pursuit;
 mod issue_941_champions_full_party;
+mod kaalia_zenith_seeker_reveal_types_8068;
 mod karazikar_attack_scope_7189;
 mod kashi_tribe_damage_tap_freeze;
 mod kibo_uktabi_prince_defending_player_sacrifice;
