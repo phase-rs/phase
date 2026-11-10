@@ -278,13 +278,30 @@ pub struct TakeCostCounters {
     pub journal_records_examined: u64,
     pub drive_snapshots: u64,
     pub pool_entries_walked: u64,
-    /// CR 118.3a: producer-ledger rows examined while rebuilding the retained
-    /// producer facts at a step/phase boundary
-    /// (`mana_payment::retain_pooled_mana_producer_snapshots`). The boundary holds one
-    /// row per still-floating unit whose producer departed, so a per-unit scan of the
-    /// ledger charges units × rows here while an index charges units + rows; the
-    /// witness `retained_producer_facts_are_indexed_once_at_the_boundary` reads it.
+    /// CR 118.3a: producer-ledger rows examined by ANY path that reads the retained
+    /// producer facts — the step/phase boundary
+    /// (`mana_payment::retain_pooled_mana_producer_snapshots`), the payment that
+    /// spends a floating unit (`casting::mana_spent_source_snapshots`), and the
+    /// restore admission that admits a save. The boundary holds one row per
+    /// still-floating unit whose producer departed, so a per-unit scan of the ledger
+    /// charges units × rows here while an index charges units + rows; the witnesses
+    /// `retained_producer_facts_are_indexed_once_at_the_boundary` and
+    /// `the_payment_that_spends_floating_units_indexes_the_ledger_once` read it.
+    ///
+    /// The rows a batch index is BUILT from are charged here too, on purpose: a lazy
+    /// build that paid its O(rows) cost outside the probe would look free. That is why
+    /// a batch which genuinely needs the index charges its rows once for the build and
+    /// once more per unit's own lookup.
     pub pooled_producer_rows_probed: u64,
+    /// CR 118.3a: how many times a batch index over the carried producer ledger
+    /// (`mana_payment::PooledProducerLedgerIndex`) was CONSTRUCTED — one per caller
+    /// that actually needed it. The payment path builds it lazily, on the first unit
+    /// whose live object and exit last-known information cannot answer
+    /// (`casting::mana_spent_source_snapshots`), so a payment of live-land mana
+    /// charges zero builds while a payment of retained floating mana charges exactly
+    /// one; the witness `the_ledger_index_is_built_only_when_a_lookup_falls_back`
+    /// reads it.
+    pub pooled_producer_index_builds: u64,
 }
 
 #[cfg(feature = "test-support")]
@@ -303,6 +320,8 @@ impl TakeCostCounters {
             pool_entries_walked: self.pool_entries_walked - earlier.pool_entries_walked,
             pooled_producer_rows_probed: self.pooled_producer_rows_probed
                 - earlier.pooled_producer_rows_probed,
+            pooled_producer_index_builds: self.pooled_producer_index_builds
+                - earlier.pooled_producer_index_builds,
         }
     }
 }
@@ -594,6 +613,7 @@ thread_local! {
             drive_snapshots: 0,
             pool_entries_walked: 0,
             pooled_producer_rows_probed: 0,
+            pooled_producer_index_builds: 0,
         })
     };
     #[cfg(feature = "test-support")]
@@ -1286,12 +1306,20 @@ pub fn record_pool_entries_walked(entries: u64) {
     with_take_cost(|c| c.pool_entries_walked += entries);
 }
 
-/// CR 118.3a: one producer-ledger row examined while the retained producer facts are
-/// rebuilt at a step/phase boundary — see
-/// [`TakeCostCounters::pooled_producer_rows_probed`].
+/// CR 118.3a: one producer-ledger row examined by a path that reads the retained
+/// producer facts — see [`TakeCostCounters::pooled_producer_rows_probed`]. Charged both
+/// by a lookup and by the pass that BUILDS a batch index, so construction can never sit
+/// outside the probe.
 #[cfg(feature = "test-support")]
 pub fn record_pooled_producer_row_probed() {
     with_take_cost(|c| c.pooled_producer_rows_probed += 1);
+}
+
+/// CR 118.3a: one construction of a batch index over the carried producer ledger — see
+/// [`TakeCostCounters::pooled_producer_index_builds`].
+#[cfg(feature = "test-support")]
+pub fn record_pooled_producer_index_built() {
+    with_take_cost(|c| c.pooled_producer_index_builds += 1);
 }
 
 #[cfg(feature = "test-support")]

@@ -89,12 +89,12 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::visibility::filter_state_for_viewer;
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{Effect, TargetRef};
+use engine::types::ability::{Effect, FilterProp, TargetFilter, TargetRef, TypedFilter};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{
-    CastPaymentMode, GameState, ManaChoice, PersistedGameState, PersistedRestoreError,
-    StackEntryKind, WaitingFor,
+    CastPaymentMode, GameState, ManaChoice, ManaSpentSourceSnapshot, PersistedGameState,
+    PersistedRestoreError, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
@@ -4418,4 +4418,291 @@ fn a_pin_every_unit_copy_agrees_on_is_still_checked_against_the_producer_node() 
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 11 — the LIVE filter walk carries the spell's borrowed payment facts
+//
+// CR 106.3 + CR 601.2h + CR 400.7d: the clause these witnesses read is Rain of
+// Riches' own — verified against Scryfall: **Rain of Riches** `{3}{R}{R}`
+// Enchantment — "When this enchantment enters, create two Treasure tokens. / The
+// first spell you cast each turn that mana from a Treasure was spent to cast has
+// cascade." The spell being filtered is LIVE (CR 601.2f, the total-cost step, runs
+// before CR 601.2h pays anything), so its `SpellCastRecord` projection states NO
+// payment facts and the facts have to be BORROWED from the spell object. A walk
+// that carries them only as far as the top-level property — and lets `AnyOf`, `Not`
+// and the record-only delegation read the factless record instead — answers "no
+// Treasure paid" at those nodes, and a `Not` over that absence reads TRUE.
+// ---------------------------------------------------------------------------
+
+/// Rain of Riches' `affected` filter, taken from its PARSED static definition rather
+/// than rebuilt by hand, so these witnesses run the card's real clause.
+fn rain_clause_filter() -> TargetFilter {
+    let mut scenario = GameScenario::new();
+    let rain = scenario
+        .add_enchantment_from_oracle(P0, "Rain of Riches", RAIN_OF_RICHES)
+        .id();
+    let runner = scenario.build();
+    let filter = runner.state().objects[&rain]
+        .static_definitions
+        .iter_all()
+        .find(|definition| {
+            matches!(definition.mode, StaticMode::CastWithKeyword { .. })
+                && definition.affected.is_some()
+        })
+        .and_then(|definition| definition.affected.clone())
+        .expect("reach: Rain of Riches' cascade grant carries an affected spell filter");
+    let TargetFilter::Typed(typed) = &filter else {
+        panic!("reach: the clause must project to a typed spell filter, got {filter:?}")
+    };
+    assert!(
+        typed
+            .properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::ManaSpentFromSource { .. })),
+        "reach: the parsed clause must ask the payment question, got {typed:?}"
+    );
+    filter
+}
+
+/// The `ManaSpentFromSource` property inside [`rain_clause_filter`], the node these
+/// witnesses nest under `AnyOf` and `Not`.
+fn rain_clause_property(filter: &TargetFilter) -> FilterProp {
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("reach: Rain of Riches' clause is a typed spell filter, got {filter:?}")
+    };
+    typed
+        .properties
+        .iter()
+        .find(|prop| matches!(prop, FilterProp::ManaSpentFromSource { .. }))
+        .cloned()
+        .expect("reach: the clause carries the payment property")
+}
+
+/// A LIVE spell on the stack whose recorded payment spent one Treasure's mana, beside
+/// the static source that would ask about it — the state a live keyword-grant or
+/// cost-modifier walk sees at CR 601.2f. Returns `(state, spell, source)`.
+fn live_treasure_paid_spell() -> (GameState, ObjectId, ObjectId) {
+    let mut state = GameState::new_two_player(7);
+    let treasure = create_object(
+        &mut state,
+        CardId(1),
+        P0,
+        "Treasure".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let token = state
+            .objects
+            .get_mut(&treasure)
+            .expect("the Treasure exists");
+        token.card_types.core_types.push(CoreType::Artifact);
+        token.card_types.subtypes.push("Treasure".to_string());
+    }
+    let source = create_object(
+        &mut state,
+        CardId(2),
+        P0,
+        "Rain of Riches".to_string(),
+        Zone::Battlefield,
+    );
+    let spell = create_object(
+        &mut state,
+        CardId(3),
+        P0,
+        BEARS_NAME.to_string(),
+        Zone::Stack,
+    );
+    let lki = state.objects[&treasure].snapshot_for_mana_spent();
+    let obj = state.objects.get_mut(&spell).expect("the spell exists");
+    obj.card_types.core_types.push(CoreType::Creature);
+    obj.mana_spent_source_snapshots = vec![ManaSpentSourceSnapshot {
+        source_id: treasure,
+        lki,
+    }];
+    (state, spell, source)
+}
+
+/// CR 106.3 + CR 601.2h + CR 400.7d: the LIVE spell-filter entry — the one that holds
+/// the spell object and no source context — answers Rain of Riches' clause from the
+/// spell's BORROWED payment facts.
+///
+/// This is the seam that lost them: the live projection states no facts
+/// (`CastPaymentFacts::LivePrePayment`), and a walk that resolves them only from a
+/// `SpellFilterContext` has none here, so the clause answered false for a spell whose
+/// payment spent a Treasure.
+#[test]
+fn the_live_spell_entry_answers_rains_clause_from_its_borrowed_payment_facts() {
+    let (state, spell, _source) = live_treasure_paid_spell();
+    let spell_obj = state.objects.get(&spell).expect("the live spell object");
+    let filter = rain_clause_filter();
+
+    assert!(
+        spell_obj
+            .mana_spent_source_snapshots
+            .iter()
+            .any(|snapshot| snapshot.lki.subtypes.iter().any(|s| s == "Treasure")),
+        "reach-guard: the live spell carries the Treasure-spent fact the clause asks about, \
+         got {:?}",
+        spell_obj.mana_spent_source_snapshots
+    );
+
+    assert!(
+        engine::game::filter::spell_object_matches_filter_from(
+            &state,
+            spell_obj,
+            spell_obj.zone,
+            P0,
+            &filter,
+            P0,
+            &state.all_creature_types,
+        ),
+        "CR 106.3 + CR 601.2h: the live spell-filter entry must answer Rain of Riches' clause \
+         TRUE for a spell whose payment spent a Treasure's mana — the record states no facts, \
+         so the walk must borrow the object's"
+    );
+    assert!(
+        engine::game::filter::spell_object_matches_filter(
+            &state,
+            spell_obj,
+            P0,
+            &filter,
+            P0,
+            &state.all_creature_types,
+        ),
+        "CR 106.3 + CR 601.2h: the same answer through the zone-from-object sibling entry"
+    );
+}
+
+/// CR 106.3 + CR 601.2h + CR 400.7d: the same borrowed facts reach a payment question
+/// nested inside `FilterProp::AnyOf` — the record-only path the walk delegates to must
+/// be given them, because the record states none on a live seam.
+#[test]
+fn a_payment_question_nested_in_any_of_keeps_the_live_facts() {
+    let (state, spell, source) = live_treasure_paid_spell();
+    let spell_obj = state.objects.get(&spell).expect("the live spell object");
+    let clause = rain_clause_filter();
+    let payment = rain_clause_property(&clause);
+    let matches = |filter: &TargetFilter| {
+        engine::game::filter::spell_object_matches_filter_from_state(
+            &state,
+            spell_obj,
+            spell_obj.zone,
+            P0,
+            filter,
+            source,
+            &state.all_creature_types,
+        )
+    };
+
+    // Reach-guard: the clause itself answers TRUE through this (state-aware) entry, so a
+    // nested leg that answers differently is a defect of the nested branch, not of the
+    // entry.
+    assert!(
+        matches(&clause),
+        "reach-guard: the parsed clause answers TRUE at the top level of this entry"
+    );
+
+    // The nested `AnyOf` can only be satisfied by the payment branch: the spell has no
+    // colors, so `HasColor { Blue }` is false.
+    let nested_any_of =
+        TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::AnyOf {
+            props: vec![
+                FilterProp::HasColor {
+                    color: ManaColor::Blue,
+                },
+                payment,
+            ],
+        }]));
+    assert!(
+        matches(&nested_any_of),
+        "CR 106.3 + CR 601.2h: a payment question nested in `AnyOf` must see the live \
+         spell's borrowed facts and answer TRUE"
+    );
+}
+
+/// CR 608.2c + CR 106.3 + CR 400.7d: a nested `Not` inverts the payment ANSWER, not an
+/// absent fact.
+///
+/// This is the leg that reads as a wrong answer rather than a missing one: pre-fix, the
+/// nested payment question was asked of a record that states nothing, answered false, and
+/// the `Not` turned that absence into `true` — "this spell was NOT cast with Treasure
+/// mana" for a spell that was.
+#[test]
+fn a_payment_question_under_not_inverts_a_real_answer() {
+    let (state, spell, source) = live_treasure_paid_spell();
+    let spell_obj = state.objects.get(&spell).expect("the live spell object");
+    let clause = rain_clause_filter();
+    let payment = rain_clause_property(&clause);
+    let matches = |filter: &TargetFilter| {
+        engine::game::filter::spell_object_matches_filter_from_state(
+            &state,
+            spell_obj,
+            spell_obj.zone,
+            P0,
+            filter,
+            source,
+            &state.all_creature_types,
+        )
+    };
+
+    assert!(
+        matches(&clause),
+        "reach-guard: the parsed clause answers TRUE at the top level of this entry"
+    );
+
+    let nested_not = TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Not {
+        prop: Box::new(payment),
+    }]));
+    assert!(
+        !matches(&nested_not),
+        "CR 608.2c + CR 106.3: `Not` must invert the payment ANSWER, not a missing fact — \
+         this spell's mana came from a Treasure, so its negation is FALSE"
+    );
+
+    let filter_not = TargetFilter::Not {
+        filter: Box::new(clause),
+    };
+    assert!(
+        !matches(&filter_not),
+        "CR 608.2c: the target-filter negation around the whole clause inverts the same \
+         answer"
+    );
+}
+
+/// Control: the same live spell answers ordinary filters exactly as before. Nothing here
+/// reads payment facts, so the fix must not move any of these answers.
+#[test]
+fn an_ordinary_live_spell_filter_answer_is_unchanged() {
+    let (state, spell, source) = live_treasure_paid_spell();
+    let spell_obj = state.objects.get(&spell).expect("the live spell object");
+    let matches = |filter: &TargetFilter| {
+        engine::game::filter::spell_object_matches_filter_from_state(
+            &state,
+            spell_obj,
+            spell_obj.zone,
+            P0,
+            filter,
+            source,
+            &state.all_creature_types,
+        )
+    };
+
+    assert!(
+        matches(&TargetFilter::Typed(TypedFilter::creature())),
+        "control: a creature spell still matches \"creature\""
+    );
+    assert!(
+        !matches(&TargetFilter::Typed(TypedFilter::land())),
+        "control: a creature spell still does not match \"land\""
+    );
+    let not_blue = TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Not {
+        prop: Box::new(FilterProp::HasColor {
+            color: ManaColor::Blue,
+        }),
+    }]));
+    assert!(
+        matches(&not_blue),
+        "control: a colorless spell still satisfies \"not blue\", inverted from a REAL answer"
+    );
 }

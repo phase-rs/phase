@@ -24808,11 +24808,20 @@ pub(crate) fn mana_spent_source_snapshots(
     // CR 118.3a: the retained producer ledger answers for ONE unit at a time, and a
     // payment asks it for EVERY unit it spends — so the ledger is indexed once for
     // the batch rather than searched once per unit (which is quadratic in the pool a
-    // single payment can drain). The index is built even when no unit needs it: an
-    // empty ledger indexes to an empty map, and the alternative is a second
-    // reachability rule about when the fact can be owed.
-    let pooled_index =
-        super::mana_payment::PooledProducerLedgerIndex::new(&state.pooled_mana_producer_snapshots);
+    // single payment can drain).
+    //
+    // CR 118.3a + CR 400.7: but the ledger is the LAST resort of each unit's read, so
+    // the index is built by the first unit that actually falls back to it and not
+    // before. Most payments never fall back — mana tapped and spent out of a live
+    // source is answered by that source's own live object — while under Upwelling
+    // ("Players don't lose unspent mana as steps and phases end.") the ledger can hold
+    // a row for every unit the pool still floats, carried for as long as the mana
+    // lasts. Indexing that up front charged every payment for facts a live or
+    // exit-cache answer already settled; the lazy index keeps the batch linear when the
+    // fallback IS reached and free when it is not.
+    let pooled_index = super::mana_payment::LazyPooledProducerLedgerIndex::new(
+        &state.pooled_mana_producer_snapshots,
+    );
     units
         .iter()
         .filter_map(|unit| mana_spent_source_snapshot(state, &pooled_index, unit))
@@ -24834,12 +24843,13 @@ pub(crate) fn mana_spent_source_snapshots(
 /// information (`exit_lki_for_incarnation`) does, then the producer fact a
 /// floating unit carries across a step/phase boundary
 /// (`mana_payment::pooled_mana_producer_snapshot`, read through the batch index
-/// the caller built), and only then is the fact unprovable. A unit that predates
-/// the pin (legacy payload, synthetic pool fixture) keeps the historical
+/// the caller holds — built lazily by this very call, so the two answers above
+/// cost no indexing at all), and only then is the fact unprovable. A unit that
+/// predates the pin (legacy payload, synthetic pool fixture) keeps the historical
 /// live-then-`lki_cache` read, so no answer that was already reachable changes.
 fn mana_spent_source_snapshot(
     state: &GameState,
-    pooled_index: &super::mana_payment::PooledProducerLedgerIndex<'_>,
+    pooled_index: &super::mana_payment::LazyPooledProducerLedgerIndex<'_>,
     unit: &crate::types::mana::ManaUnit,
 ) -> Option<crate::types::game_state::ManaSpentSourceSnapshot> {
     use crate::game::game_object::ObjectIncarnationRefExt as _;
