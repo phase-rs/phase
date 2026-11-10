@@ -5841,6 +5841,8 @@ mod tests {
     /// {2} exceeds the single {C} the sacrifice makes, even in a manual payment's
     /// CR 601.2g window, so it is absent from the flat list — proving the hold
     /// flows through the case-2 followup gate, not the flat meaningful-action path.
+    /// The engine is an enchantment: an artifact engine could itself be
+    /// sacrificed for one {C} and the altar for another (CR 113.7a), making {2}.
     #[test]
     fn sac_for_mana_holds_with_downstream_mana_costed_activated_ability() {
         let mut state = GameState::new_two_player(42);
@@ -5864,7 +5866,7 @@ mod tests {
         );
         {
             let obj = state.objects.get_mut(&engine).unwrap();
-            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Enchantment);
             Arc::make_mut(&mut obj.abilities).push(
                 AbilityDefinition::new(
                     AbilityKind::Activated,
