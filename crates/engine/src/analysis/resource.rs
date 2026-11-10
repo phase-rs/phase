@@ -2729,9 +2729,11 @@ impl ResourceVector {
     /// one, and where they do not, `self`'s entries, which sum to `t`, stand. So the
     /// win-kind reader answers for the result as it answers for `self`, and the unbounded-axis
     /// reader names a life axis for each total that grows and can be attributed, and no drain
-    /// axis. Where no entry of `self` is negative and a total's counters are read, a member gets a
-    /// positive entry only if it gained and its total grows. How a total's change is split across
-    /// its members beyond that does not reach the result's readers, which read only signs.
+    /// axis. Where no entry of `self` is negative and a total's counters are read and attribute its
+    /// change, a member gets a positive entry only if it gained and its total grows; where they are
+    /// read but do not (as where a loss held at `i32::MIN` precedes a gain that spills), `self`'s
+    /// entries stand, a teammate's spilled gain included. How a total's change is split across its
+    /// members beyond that does not reach the result's readers, which read only signs.
     pub(crate) fn with_life_attributed(
         &self,
         prior: &GameState,
