@@ -1088,23 +1088,55 @@ mod tests {
         assert_eq!(state.players[0].life, 30);
     }
 
+    /// Beacon of Immortality's verbatim Oracle text (not in the test fixture).
+    const BEACON_OF_IMMORTALITY: &str = "Double target player's life total. Shuffle Beacon of \
+                                         Immortality into its owner's library.";
+
+    /// Beacon of Immortality's spell ability, parsed from its Oracle text,
+    /// targeting P0. This module's `resolve` runs its head effect, the
+    /// doubling; the shuffle is its sub-ability and does not run here.
+    fn beacon_of_immortality_targeting_p0() -> ResolvedAbility {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            BEACON_OF_IMMORTALITY,
+            "Beacon of Immortality",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let spell = parsed
+            .abilities
+            .first()
+            .expect("Beacon of Immortality's spell ability parses");
+        assert!(
+            matches!(
+                &*spell.effect,
+                Effect::Double {
+                    target_kind: DoubleTarget::LifeTotal,
+                    ..
+                }
+            ),
+            "reach guard: Beacon of Immortality's head effect doubles a life total, got {:?}",
+            spell.effect
+        );
+        crate::game::ability_utils::build_resolved_from_def_with_targets(
+            spell,
+            ObjectId(100),
+            PlayerId(0),
+            vec![TargetRef::Player(PlayerId(0))],
+        )
+    }
+
     /// CR 701.10d: doubling a negative life total loses its magnitude, so the
-    /// new total is twice the old one. The printed card is Beacon of
-    /// Immortality ("Double target player's life total. Shuffle Beacon of
-    /// Immortality into its owner's library."); the ability here doubles its
-    /// controller's total.
+    /// new total is twice the old one. The ability is Beacon of Immortality's
+    /// ("Double target player's life total. Shuffle Beacon of Immortality into
+    /// its owner's library."), targeting P0.
     #[test]
     fn double_negative_life_total_loses_its_magnitude() {
         let mut state = GameState::default();
         state.players[0].life = -7;
 
         let mut events = Vec::new();
-        let ability = make_double_ability(
-            DoubleTarget::LifeTotal,
-            TargetFilter::Controller,
-            PlayerId(0),
-            vec![],
-        );
+        let ability = beacon_of_immortality_targeting_p0();
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
@@ -1117,10 +1149,10 @@ mod tests {
 
     /// CR 701.10d: the magnitude of a life total of `i32::MIN` is 2^31, which
     /// does not fit `i32`; doubling takes it as a `u32` instead of overflowing
-    /// on negation, and the effect resolves. The printed card is Beacon of
-    /// Immortality ("Double target player's life total. Shuffle Beacon of
-    /// Immortality into its owner's library."), which `life_total_saturation.rs`
-    /// casts on a player at `i32::MIN` in
+    /// on negation, and the effect resolves. The ability is Beacon of
+    /// Immortality's ("Double target player's life total. Shuffle Beacon of
+    /// Immortality into its owner's library."), targeting P0;
+    /// `life_total_saturation.rs` casts the card on a player at `i32::MIN` in
     /// `doubling_a_life_total_at_i32_min_reports_the_saturated_loss`.
     #[test]
     fn double_life_total_at_i32_min_takes_the_magnitude_without_overflow() {
@@ -1128,12 +1160,7 @@ mod tests {
         state.players[0].life = i32::MIN;
 
         let mut events = Vec::new();
-        let ability = make_double_ability(
-            DoubleTarget::LifeTotal,
-            TargetFilter::Controller,
-            PlayerId(0),
-            vec![],
-        );
+        let ability = beacon_of_immortality_targeting_p0();
 
         assert_eq!(resolve(&mut state, &ability, &mut events), Ok(()));
         assert_eq!(state.players[0].life, i32::MIN);

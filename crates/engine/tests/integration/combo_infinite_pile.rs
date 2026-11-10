@@ -36,6 +36,7 @@ use engine::game::derived_views::{derive_views, FamilyCollapseState, UnboundedFa
 use engine::game::engine::{apply, start_game};
 use engine::game::layers::{flush_layers, mark_layers_full};
 use engine::game::scenario::{GameRunner, GameScenario};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::{add_to_zone, create_object, remove_from_zone};
 use engine::types::ability::{Effect, TriggerDefinition};
 use engine::types::actions::{GameAction, MulliganChoice};
@@ -3490,14 +3491,16 @@ fn low3_restored_life_stash_collapse_ends_where_a_seat_can_act_at_both_ends() {
 /// is driven — the one-object difference between this rig's arms.
 ///
 /// `Present` is the hostile arm for the axis condition of `life_beside_deferred_growth`
-/// (engine.rs's `PeriodGrowth::collapse_is_replay`): it makes `board_has_functioning_etb_trigger`
-/// TRUE while the loop stays mana-only, so only a conjunct that reads the take's own `Tokens` /
-/// `Counters` items, rather than the board's triggers, keeps the take on the Mark route.
+/// (engine.rs's `PeriodGrowth::collapse_is_replay`): its printed Soul Warden ("Whenever another
+/// creature enters, you gain 1 life.") makes `board_has_functioning_etb_trigger` TRUE while the
+/// loop stays mana-only, so only a conjunct that reads the take's own `Tokens` / `Counters` items,
+/// rather than the board's triggers, keeps the take on the Mark route.
 ///
 /// `CastPresent` is the hostile arm for `cast_sourced`, the one route disjunct with NO axis-shaped
-/// conjunct. It makes `board_has_functioning_cast_trigger` TRUE, which flips this same mana+life
-/// loop onto the `Replay` route, so the take performs the period. One arm rather than a parallel
-/// enum: the question is "which board graft", and the arms are leaf-level variants of it.
+/// conjunct. Its grafted cast trigger makes `board_has_functioning_cast_trigger` TRUE, which flips
+/// this same mana+life loop onto the `Replay` route, so the take performs the period. One arm
+/// rather than a parallel enum: the question is "which board trigger", and the arms are
+/// leaf-level variants of it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Low3BoardEtbTrigger {
     Absent,
@@ -3505,32 +3508,7 @@ enum Low3BoardEtbTrigger {
     CastPresent,
 }
 
-/// A minimal functioning battlefield-entry life trigger (the Prosperous Innkeeper shape, built
-/// directly because this fixture is synthetic and loads no card pool). Its EFFECT is deliberately
-/// `GainLife`: that is the production shape that double-pays when a `Tokens` collapse mints real
-/// CR 603.6a entries, and it is NOT a life OBSERVER — `life_growth_is_observed` keys on
-/// `TriggerEventKey::LifeChanged` / `ReplacementEvent::GainLife`, never on `EnterBattlefield` — so
-/// installing it cannot flip `life_observed` and mask what this arm is measuring.
-fn low3_board_etb_life_trigger() -> TriggerDefinition {
-    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TargetFilter};
-    use engine::types::triggers::TriggerMode;
-
-    let mut def = TriggerDefinition::new(TriggerMode::ChangesZone);
-    def.destination = Some(Zone::Battlefield);
-    def.trigger_zones = vec![Zone::Battlefield];
-    def.execute = Some(Box::new(AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::GainLife {
-            amount: QuantityExpr::Fixed { value: 1 },
-            player: TargetFilter::Controller,
-        },
-    )));
-    def.description =
-        Some("Whenever another creature you control enters, you gain 1 life.".to_string());
-    def
-}
-
-/// Build the LOW-3 mana+life engine, optionally graft a functioning board ETB trigger, and drive
+/// Build the LOW-3 mana+life engine with `etb`'s functioning board trigger, if any, and drive
 /// one certified period, stopping at the surfaced offer (take it with [`low3_accept`]). Shared so
 /// every arm inherits the same non-vacuity reach-guards (3-step period, surfaced offer) — the only
 /// difference between them is `etb`.
@@ -3549,27 +3527,34 @@ fn low3_life_engine_offered(etb: Low3BoardEtbTrigger) -> GameRunner {
             "{T}: Add {C}.\n{0}: You gain 1 life.\n{0}: Untap Lifedynamo.",
         )
         .id();
+    // Placed BEFORE the drive so the board is identical every cycle (a permanent that never
+    // changes cannot perturb the modulo-resources loop cover), and so the predicate the accept
+    // reads is the one this board really has. Nothing enters the battlefield during the mana+life
+    // period, so Soul Warden's trigger never actually fires — `board_has_functioning_etb_trigger`
+    // is a board-shape question, not a fired-this-cycle one. Soul Warden has no trigger on its
+    // own entry, and `add_real_card` puts it on the battlefield before the drive starts. Its
+    // trigger gains life but is NOT a life OBSERVER — `life_growth_is_observed` keys on
+    // `TriggerEventKey::LifeChanged` / `ReplacementEvent::GainLife`, never on `EnterBattlefield` —
+    // so it cannot flip `life_observed` and mask what this arm is measuring.
+    let soul_warden = (etb == Low3BoardEtbTrigger::Present).then(|| {
+        let db = shared_card_db().expect("the Present arm's Soul Warden is in the card fixture");
+        scenario.add_real_card(P0, "Soul Warden", Zone::Battlefield, db)
+    });
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
-    if etb == Low3BoardEtbTrigger::Present {
-        // Grafted BEFORE the drive so the board is identical every cycle (a permanent that never
-        // changes cannot perturb the modulo-resources loop cover), and so the predicate the accept
-        // reads is the one this board really has. Nothing enters the battlefield during the
-        // mana+life period, so the trigger never actually fires — `board_has_functioning_etb_trigger`
-        // is a board-shape question, not a fired-this-cycle one.
-        let host = create_life_gainer(runner.state_mut(), P0, "Grafted Innkeeper");
-        graft_trigger(runner.state_mut(), host, low3_board_etb_life_trigger());
-        // Reach-guard: the graft must survive the layer rebuild and be ACTIVE (CR 113.6) on a
-        // battlefield permanent. Without this the arm would pass VACUOUSLY — a dropped graft leaves
-        // `board_has_functioning_etb_trigger` false, which is the `Absent` arm wearing a new name.
+    if let Some(soul_warden) = soul_warden {
+        // Reach-guard: Soul Warden's battlefield-entry trigger must be ACTIVE (CR 113.6) on the
+        // battlefield permanent. Without this the arm would pass VACUOUSLY — an inactive trigger
+        // leaves `board_has_functioning_etb_trigger` false, which is the `Absent` arm wearing a
+        // new name.
         let state = runner.state();
-        let host_obj = &state.objects[&host];
+        let warden_obj = &state.objects[&soul_warden];
         assert!(
-            engine::game::functioning_abilities::active_trigger_definitions(state, host_obj).any(
+            engine::game::functioning_abilities::active_trigger_definitions(state, warden_obj).any(
                 |active| active.definition.destination == Some(Zone::Battlefield)
                     && active.definition.mode == engine::types::triggers::TriggerMode::ChangesZone
             ),
-            "reach-guard: the grafted battlefield-entry trigger must be ACTIVE on the host"
+            "reach-guard: Soul Warden's battlefield-entry trigger must be ACTIVE"
         );
     }
     if etb == Low3BoardEtbTrigger::CastPresent {
@@ -3687,18 +3672,16 @@ fn low3_accept(runner: &mut GameRunner, n: u32) -> Vec<engine::types::events::Ga
 /// never the board's triggers.
 ///
 /// Same mana-only Lifedynamo loop as the sibling test above, but with a functioning
-/// battlefield-entry trigger grafted onto the board. A mana-only take batches no `Tokens` item
+/// battlefield-entry trigger on the board. A mana-only take batches no `Tokens` item
 /// (`current_period_fodder` returns `None`) and no `Counters` item, so it stays on the MARK route
 /// and its life lands at the take, whatever ETB trigger the board holds. A mana engine mints
 /// nothing, so there is no double-pay and the O(N) replay would be pure cost.
 ///
 /// REAL CARDS: the Lifedynamo is synthetic; the doc of
 /// [`low3_unobserved_life_growth_accept_applies_its_batched_life_at_the_take`] says why no
-/// printed card fits and quotes the nearest printed board. The grafted trigger,
-/// [`low3_board_etb_life_trigger`], is built in code in the shape of Prosperous Innkeeper's
-/// "Whenever another creature you control enters, you gain 1 life." without its "another
-/// creature you control" filter, on a 1/1 host with no rules text; nothing enters during the
-/// period, so it never fires.
+/// printed card fits and quotes the nearest printed board. The battlefield-entry trigger is the
+/// printed Soul Warden's ("Whenever another creature enters, you gain 1 life."); nothing enters
+/// during the period, so it never fires.
 ///
 /// REVERT-PROBE: replace the axis condition with a board-shape one
 /// (`res::board_has_functioning_etb_trigger(state)`, the pre-change gate's) ⇒ this test's
@@ -3931,11 +3914,20 @@ fn batched_and_replay_routes_converge_on_the_same_life_total() {
     );
 
     // ── ARM 1 (primary): an ETB-sourced life axis ⇒ performed at the take, paid exactly once. ──
+    let db = shared_card_db().expect("integration card fixture must load");
     let mut state = offer_state();
     strip_life_conditional_cost_static(&mut state);
-    let etb_life = innkeeper_etb_life_trigger(&state);
-    let host = create_life_gainer(&mut state, P0, "Grafted Innkeeper");
-    graft_trigger(&mut state, host, etb_life);
+    // Prosperous Innkeeper, placed without entering, so its own "When this creature enters,
+    // create a Treasure token." does not fire.
+    place_card(
+        &mut state,
+        P0,
+        "Prosperous Innkeeper",
+        Zone::Battlefield,
+        db,
+    );
+    mark_layers_full(&mut state);
+    flush_layers(&mut state);
 
     let life_before = life_of(&state, P0);
     let minted = take_at(&mut state, N);
@@ -3947,7 +3939,7 @@ fn batched_and_replay_routes_converge_on_the_same_life_total() {
     );
     // (2) DISCRIMINATOR: one Saproling ETB per driven cycle × 1 life each = exactly N. A batched
     //     take pays N at the take AND N again when the real ETBs drain ⇒ 2N.
-    let life_per_cycle = 1i32; // the single grafted ETB gainer on P0's battlefield
+    let life_per_cycle = 1i32; // Prosperous Innkeeper, P0's one ETB life gainer
     assert_eq!(
         life_of(&state, P0) - life_before,
         N as i32 * life_per_cycle,
@@ -4001,20 +3993,25 @@ fn mixed_cause_life_axis_routes_to_replay() {
 #[test]
 fn opponents_etb_life_gainer_does_not_suppress_your_axis() {
     const N: u32 = 5;
+    let db = shared_card_db().expect("integration card fixture must load");
     let mut state = offer_state();
     strip_life_conditional_cost_static(&mut state);
-    let etb_life = innkeeper_etb_life_trigger(&state);
 
-    // P0's own gainer ("another creature YOU control enters").
-    let p0_host = create_life_gainer(&mut state, P0, "Grafted Innkeeper");
-    graft_trigger(&mut state, p0_host, etb_life.clone());
+    // P0's own gainer, Prosperous Innkeeper ("another creature YOU control enters"), placed
+    // without entering, so its own Treasure trigger does not fire.
+    place_card(
+        &mut state,
+        P0,
+        "Prosperous Innkeeper",
+        Zone::Battlefield,
+        db,
+    );
 
-    // P1 gets a Soul-Warden-shaped copy: the same parsed GainLife trigger with the `You`
-    // controller narrowing dropped, so P0's tokens feed P1's life too.
-    let mut soul_warden = etb_life;
-    soul_warden.valid_card = None;
-    let p1_host = create_life_gainer(&mut state, P1, "Grafted Soul Warden");
-    graft_trigger(&mut state, p1_host, soul_warden);
+    // P1's Soul Warden ("Whenever another creature enters, you gain 1 life.") gains for P0's
+    // tokens too.
+    place_card(&mut state, P1, "Soul Warden", Zone::Battlefield, db);
+    mark_layers_full(&mut state);
+    flush_layers(&mut state);
 
     let p0_before = life_of(&state, P0);
     let p1_before = life_of(&state, P1);

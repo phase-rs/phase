@@ -1657,23 +1657,36 @@ fn assert_landing(name: &str, events: &[GameEvent], cycles: u32, landing: Landin
 
 /// CR 616.1 + CR 616.1f + CR 119.3: Dazzling Reflection ("You gain life equal
 /// to target creature's power. The next time that creature would deal damage
-/// this turn, prevent that damage.") on a creature of power `i32::MAX`, doubled
-/// by Boon Reflection ("If you would gain life, you gain twice that much life
-/// instead."): alone it doubles the gain to 4,294,967,294, which the gained
-/// counter holds exactly; with Rhox Faithmender (the same doubler), in either
-/// order, the gain passes `u32` and lands on `u32::MAX`. The total stops at
-/// `i32::MAX`, and the rest of the spell resolves. The control at power 100
-/// with both doublers gains 400.
+/// this turn, prevent that damage.") on Ouroboroid ("At the beginning of combat
+/// on your turn, put X +1/+1 counters on each creature you control, where X is
+/// this creature's power.") at power `i32::MAX` (`u32::MAX` +1/+1 counters),
+/// doubled by Boon Reflection ("If you would gain life, you gain twice that
+/// much life instead."): alone it doubles the gain to 4,294,967,294, which the
+/// gained counter holds exactly; with Rhox Faithmender (the same doubler), in
+/// either order, the gain passes `u32` and lands on `u32::MAX`. The total stops
+/// at `i32::MAX`, and the rest of the spell resolves. The control at power 100
+/// (99 counters) with both doublers gains 400. The cast is in the main phase,
+/// so Ouroboroid's combat trigger does not fire.
 #[test]
 fn boon_reflection_doubles_a_gain_past_u32_and_the_total_saturates() {
     let Some(db) = crate::support::shared_card_db() else {
         return;
     };
-    // (doublers, power, ordering answer, life after, gained after, event amount)
-    type Row = (&'static [&'static str], i32, Option<usize>, i32, u32, i32);
+    // (doublers, +1/+1 counters, power, ordering answer, life after, gained
+    // after, event amount)
+    type Row = (
+        &'static [&'static str],
+        u32,
+        i32,
+        Option<usize>,
+        i32,
+        u32,
+        i32,
+    );
     let rows: [Row; 4] = [
         (
             &["Boon Reflection"],
+            u32::MAX,
             i32::MAX,
             None,
             i32::MAX,
@@ -1682,6 +1695,7 @@ fn boon_reflection_doubles_a_gain_past_u32_and_the_total_saturates() {
         ),
         (
             &["Rhox Faithmender", "Boon Reflection"],
+            u32::MAX,
             i32::MAX,
             Some(0),
             i32::MAX,
@@ -1690,6 +1704,7 @@ fn boon_reflection_doubles_a_gain_past_u32_and_the_total_saturates() {
         ),
         (
             &["Rhox Faithmender", "Boon Reflection"],
+            u32::MAX,
             i32::MAX,
             Some(1),
             i32::MAX,
@@ -1698,6 +1713,7 @@ fn boon_reflection_doubles_a_gain_past_u32_and_the_total_saturates() {
         ),
         (
             &["Rhox Faithmender", "Boon Reflection"],
+            99,
             100,
             Some(0),
             420,
@@ -1705,17 +1721,30 @@ fn boon_reflection_doubles_a_gain_past_u32_and_the_total_saturates() {
             400,
         ),
     ];
-    for (doublers, power, answer, life_after, gained_after, amount) in rows {
+    for (doublers, counters, power, answer, life_after, gained_after, amount) in rows {
         let label = format!("{doublers:?} power {power} answer {answer:?}");
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         for doubler in doublers {
             scenario.add_real_card(P0, doubler, Zone::Battlefield, db);
         }
-        let creature = scenario.add_creature(P0, "Test Behemoth", power, 1).id();
+        let creature = scenario.add_real_card(P0, "Ouroboroid", Zone::Battlefield, db);
         let spell = scenario.add_real_card(P0, "Dazzling Reflection", Zone::Hand, db);
         scenario.with_mana_pool(P0, vec![mana(ManaType::White), mana(ManaType::White)]);
         let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&creature)
+            .expect("Ouroboroid is on the battlefield")
+            .counters
+            .insert(CounterType::Plus1Plus1, counters);
+        engine::game::layers::evaluate_layers(runner.state_mut());
+        assert_eq!(
+            runner.state().objects[&creature].power,
+            Some(power),
+            "reach guard: Ouroboroid's power with {counters} counters"
+        );
 
         // Both of the spell's target slots name the creature.
         let outcome = runner

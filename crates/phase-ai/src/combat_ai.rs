@@ -4206,14 +4206,14 @@ mod tests {
     #[test]
     fn race_clock_at_i32_max_life_is_ceiling_division() {
         let mut state = setup();
-        add_creature(&mut state, PlayerId(0), "Attacker", 2, 2, vec![]);
+        add_creature(&mut state, PlayerId(0), "Grizzly Bears", 2, 2, vec![]);
 
         state.players[1].life = i32::MAX;
         assert_eq!(race_clock(&state, PlayerId(0), PlayerId(1)), 1_073_741_824);
 
         // In-range controls.
         let mut state = setup();
-        add_creature(&mut state, PlayerId(0), "Attacker", 3, 3, vec![]);
+        add_creature(&mut state, PlayerId(0), "Hill Giant", 3, 3, vec![]);
         state.players[1].life = 20;
         assert_eq!(race_clock(&state, PlayerId(0), PlayerId(1)), 7);
         state.players[1].life = 1;
@@ -4227,8 +4227,8 @@ mod tests {
     fn attack_objective_reads_race_clock_against_i32_max_life() {
         let objective_at = |my_life: i32| {
             let mut state = setup();
-            let attacker = add_creature(&mut state, PlayerId(0), "Attacker", 3, 3, vec![]);
-            add_creature(&mut state, PlayerId(1), "Defender", 2, 2, vec![]);
+            let attacker = add_creature(&mut state, PlayerId(0), "Hill Giant", 3, 3, vec![]);
+            add_creature(&mut state, PlayerId(1), "Grizzly Bears", 2, 2, vec![]);
             state.players[0].life = my_life;
             state.players[1].life = i32::MAX;
             determine_attack_objective(

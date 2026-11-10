@@ -23294,6 +23294,7 @@ mod stage2_injector_tests {
         DecisionTemplate, IterationCount, PinnedDecision, ReplayMode, TargetPin, TargetSchedule,
     };
     use crate::game::scenario::GameScenario;
+    use crate::game::scenario_db::GameScenarioDbExt;
     use crate::types::game_state::{LoopDetectionMode, YieldTarget};
 
     const P0: PlayerId = PlayerId(0);
@@ -23471,30 +23472,48 @@ mod stage2_injector_tests {
         );
     }
 
-    /// The two-drainer 3p rig: two `TARGET_DRAIN` sources pinned at DIFFERENT opponents, a
-    /// `FEEDBACK` engine, and both opponents seated at equal LOW life so the driven cycle
-    /// carries them past CR 704.5a at different beats. Returns the last committed board, the
-    /// recurrence boundary, the per-source template and the beat cap — the four inputs both
+    /// The feedback engine on [`two_drainer_rig_with`]'s board.
+    #[derive(Clone, Copy)]
+    enum FeedbackEngine {
+        /// The printed Exquisite Blood ("Whenever an opponent loses life, you gain that much
+        /// life.").
+        ExquisiteBlood,
+        /// "Energy Feedback Engine", a name no printed card has: an enchantment, the type of its
+        /// nearest printed card Exquisite Blood, carrying the synthetic `FEEDBACK_ENERGY`.
+        EnergyFeedbackEngine,
+    }
+
+    /// The two-drainer 3p rig: two printed Sanguine Bonds ("Whenever you gain life, target
+    /// opponent loses that much life.") pinned at DIFFERENT opponents, the printed Exquisite
+    /// Blood as the feedback engine, and both opponents seated at equal LOW life so the driven
+    /// cycle carries them past CR 704.5a at different beats. Returns the last committed board,
+    /// the recurrence boundary, the per-source template and the beat cap — the four inputs both
     /// `drive_one_shortcut_cycle` and `apply_until_lethal_shortcut` need — so the rows below
     /// build one board from one authority instead of two copies.
     fn two_drainer_rig() -> (GameState, GameState, DecisionTemplate, usize) {
-        two_drainer_rig_with(FEEDBACK)
+        two_drainer_rig_with(FeedbackEngine::ExquisiteBlood)
     }
 
-    /// [`two_drainer_rig`] with `feedback` as the feedback engine's Oracle text.
-    fn two_drainer_rig_with(feedback: &str) -> (GameState, GameState, DecisionTemplate, usize) {
+    /// [`two_drainer_rig`] with `feedback` as the feedback engine.
+    fn two_drainer_rig_with(
+        feedback: FeedbackEngine,
+    ) -> (GameState, GameState, DecisionTemplate, usize) {
+        let db = crate::test_support::shared_card_db();
         let mut scenario = GameScenario::new_n_player(3, 7);
         scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
         scenario.with_life(P0, 20);
         scenario.with_life(P1, 400);
         scenario.with_life(P2, 400);
-        let drainer_a = scenario
-            .add_creature_from_oracle(P0, "Drainer A", 1, 4, TARGET_DRAIN)
-            .id();
-        let drainer_b = scenario
-            .add_creature_from_oracle(P0, "Drainer B", 2, 2, TARGET_DRAIN)
-            .id();
-        scenario.add_creature_from_oracle(P0, "Feedback", 3, 4, feedback);
+        let drainer_a = scenario.add_real_card(P0, "Sanguine Bond", Zone::Battlefield, db);
+        let drainer_b = scenario.add_real_card(P0, "Sanguine Bond", Zone::Battlefield, db);
+        match feedback {
+            FeedbackEngine::ExquisiteBlood => {
+                scenario.add_real_card(P0, "Exquisite Blood", Zone::Battlefield, db);
+            }
+            FeedbackEngine::EnergyFeedbackEngine => {
+                scenario.add_enchantment_from_oracle(P0, "Energy Feedback Engine", FEEDBACK_ENERGY);
+            }
+        }
         let kickoff = scenario
             .add_spell_to_hand_from_oracle(P0, "Kickoff", false, KICKOFF)
             .id();
@@ -23596,11 +23615,11 @@ mod stage2_injector_tests {
     /// Attach a ring-road proposal to the existing real two-drainer board and keep all
     /// declaration validation live by publishing the template's two target points.
     fn two_drainer_ring_offer() -> (GameState, DecisionTemplate) {
-        two_drainer_ring_offer_with(FEEDBACK)
+        two_drainer_ring_offer_with(FeedbackEngine::ExquisiteBlood)
     }
 
     /// [`two_drainer_ring_offer`] on [`two_drainer_rig_with`]`(feedback)`.
-    fn two_drainer_ring_offer_with(feedback: &str) -> (GameState, DecisionTemplate) {
+    fn two_drainer_ring_offer_with(feedback: FeedbackEngine) -> (GameState, DecisionTemplate) {
         use crate::analysis::decision_template::{DecisionPoint, DecisionPointKind};
         use crate::types::ability::TargetRef;
 
@@ -23670,14 +23689,13 @@ mod stage2_injector_tests {
     /// take has one less unit of loss-counter headroom than that cycle consumes; the counter
     /// saturates at `u32::MAX` and the take settles like the control.
     ///
-    /// The board is [`two_drainer_rig`]'s, which other rows in this module share. Its "Drainer
-    /// A" and "Drainer B" carry Sanguine Bond's verbatim text ("Whenever you gain life, target
-    /// opponent loses that much life.") and its "Feedback" carries Exquisite Blood's ("Whenever
-    /// an opponent loses life, you gain that much life."), each on a test creature rather than
-    /// the printed enchantment. Its "Kickoff", "You gain 1 life.", is synthetic: no printed
-    /// spell's whole text is that. The nearest printed card is Blessed Wine ("You gain 1 life."
-    /// / "Draw a card at the beginning of the next turn's upkeep."), the same gain with a
-    /// delayed draw.
+    /// The board is [`two_drainer_rig`]'s, which other rows in this module share. Its drainers
+    /// are two printed Sanguine Bonds ("Whenever you gain life, target opponent loses that much
+    /// life.") and its feedback engine is the printed Exquisite Blood ("Whenever an opponent
+    /// loses life, you gain that much life."). Its "Kickoff", "You gain 1 life.", is synthetic:
+    /// no printed spell's whole text is that. The nearest printed card is Blessed Wine ("You
+    /// gain 1 life." / "Draw a card at the beginning of the next turn's upkeep."), the same gain
+    /// with a delayed draw.
     #[test]
     fn public_ring_take_saturates_the_lost_counter_like_the_control() {
         let (mut control, control_template) = two_drainer_ring_offer();
@@ -23745,14 +23763,15 @@ mod stage2_injector_tests {
     /// through an Abort/fallback. This is a single-cycle probe; later-cycle whole-action
     /// rollback is covered by the recorded Replay row.
     ///
-    /// The board is [`two_drainer_rig_with`]`(FEEDBACK_ENERGY)`. Its "Drainer A" and "Drainer B"
-    /// carry Sanguine Bond's verbatim text ("Whenever you gain life, target opponent loses that
-    /// much life.") on test creatures rather than the printed enchantment. Its "Feedback"
-    /// carries the synthetic `FEEDBACK_ENERGY`, Exquisite Blood's text ("Whenever an opponent
-    /// loses life, you gain that much life.") with an energy gain added; its doc says why no
-    /// printed card fits. Its "Kickoff", "You gain 1 life.", is synthetic: no printed spell's
-    /// whole text is that. The nearest printed card is Blessed Wine ("You gain 1 life." / "Draw
-    /// a card at the beginning of the next turn's upkeep."), the same gain with a delayed draw.
+    /// The board is [`two_drainer_rig_with`]`(FeedbackEngine::EnergyFeedbackEngine)`. Its
+    /// drainers are two printed Sanguine Bonds ("Whenever you gain life, target opponent loses
+    /// that much life."). Its feedback engine is the synthetic "Energy Feedback Engine", an
+    /// enchantment carrying `FEEDBACK_ENERGY`, Exquisite Blood's text ("Whenever an opponent
+    /// loses life, you gain that much life.") with an energy gain added; `FEEDBACK_ENERGY`'s doc
+    /// says why no printed card fits. Its "Kickoff", "You gain 1 life.", is synthetic: no printed
+    /// spell's whole text is that. The nearest printed card is Blessed Wine ("You gain 1 life." /
+    /// "Draw a card at the beginning of the next turn's upkeep."), the same gain with a delayed
+    /// draw.
     #[test]
     fn public_ring_take_rejects_unrepresentable_energy_before_fallback() {
         let energy = |state: &GameState| {
@@ -23764,7 +23783,8 @@ mod stage2_injector_tests {
                 .energy
         };
 
-        let (mut control, control_template) = two_drainer_ring_offer_with(FEEDBACK_ENERGY);
+        let (mut control, control_template) =
+            two_drainer_ring_offer_with(FeedbackEngine::EnergyFeedbackEngine);
         let energy_before = energy(&control);
         declare_ring_take(&mut control, control_template, 1);
         accept_ring_take_until_done(&mut control)
@@ -23775,7 +23795,8 @@ mod stage2_injector_tests {
             "reach guard: the real cycle gives P0 energy"
         );
 
-        let (mut hostile, hostile_template) = two_drainer_ring_offer_with(FEEDBACK_ENERGY);
+        let (mut hostile, hostile_template) =
+            two_drainer_ring_offer_with(FeedbackEngine::EnergyFeedbackEngine);
         hostile
             .players
             .iter_mut()

@@ -10701,9 +10701,17 @@ mod tests {
         );
     }
 
-    /// The number latched on a permanent (e.g. "pay any amount of life" as it
-    /// enters) is a `u32`; read as an `i32` quantity it saturates at
-    /// `i32::MAX` instead of wrapping negative.
+    /// The number latched on a permanent is a `u32`; read as an `i32` quantity
+    /// it saturates at `i32::MAX` instead of wrapping negative. The number is
+    /// the one Minion of the Wastes latches ("As this creature enters, pay any
+    /// amount of life. Minion of the Wastes's power and toughness are each
+    /// equal to the life paid as it entered."), whose power and toughness read
+    /// it. This is the quantity reader's unit seam: the object here is named
+    /// for the Minion but carries none of its text, and the latch is set by
+    /// hand. The printed twin, in which the Minion enters and its controller
+    /// pays the life, is
+    /// `two_headed_giant_pays_life_above_i32_max_as_minion_of_the_wastes_enters`
+    /// in `life_total_saturation.rs`.
     #[test]
     fn chosen_number_above_i32_max_saturates() {
         let mut state = GameState::new_two_player(7);

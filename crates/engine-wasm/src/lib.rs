@@ -4339,10 +4339,42 @@ mod restored_card_db_requirements_tests {
     use super::*;
     use engine::types::phase::Phase;
 
+    /// The one activated ability of the printed artifact `name` whose effect
+    /// `is_wanted` picks, parsed from its verbatim Oracle text `oracle` (these
+    /// tests load an empty card database).
+    fn printed_artifact_ability(
+        name: &str,
+        oracle: &str,
+        is_wanted: impl Fn(&engine::types::ability::Effect) -> bool,
+    ) -> engine::types::ability::AbilityDefinition {
+        let parsed = engine::parser::oracle::parse_oracle_text(
+            oracle,
+            name,
+            &[],
+            &["Artifact".to_string()],
+            &[],
+        );
+        let mut wanted = parsed
+            .abilities
+            .into_iter()
+            .filter(|ability| is_wanted(ability.effect.as_ref()));
+        let ability = wanted
+            .next()
+            .unwrap_or_else(|| panic!("reach guard: {name}'s ability parses"));
+        assert!(
+            wanted.next().is_none(),
+            "reach guard: {name} has exactly one such ability"
+        );
+        ability
+    }
+
     /// A trusted legacy Resolve All Ready host state whose stack entry is P0's
-    /// ability with `effect`, after `preset` adjusts P0.
+    /// activation of the printed `ability`, after `preset` adjusts P0. The
+    /// entry's source is on no zone of the snapshot: CR 113.7a, an ability on
+    /// the stack exists independently of its source, so the printed card's
+    /// other abilities are not on the board.
     fn legacy_ready_effect_state_json(
-        effect: engine::types::ability::Effect,
+        ability: &engine::types::ability::AbilityDefinition,
         preset: impl FnOnce(&mut engine::types::player::Player),
     ) -> String {
         let mut state = legacy_ready_state();
@@ -4355,9 +4387,8 @@ mod restored_card_db_requirements_tests {
         entry.controller = PlayerId(0);
         entry.kind = engine::types::game_state::StackEntryKind::ActivatedAbility {
             source_id: source,
-            ability: Box::new(engine::types::ability::ResolvedAbility::new(
-                effect,
-                vec![],
+            ability: Box::new(engine::game::ability_utils::build_resolved_from_def(
+                ability,
                 source,
                 PlayerId(0),
             )),
@@ -4367,23 +4398,29 @@ mod restored_card_db_requirements_tests {
             .expect("trusted host state serializes")
     }
 
+    /// The Ready entry is Fountain of Youth's "{2}, {T}: You gain 1 life."
     fn legacy_ready_gain_state_json(life_gained_this_turn: u32) -> String {
-        legacy_ready_effect_state_json(
-            engine::types::ability::Effect::GainLife {
-                amount: engine::types::ability::QuantityExpr::Fixed { value: 1 },
-                player: engine::types::ability::TargetFilter::Controller,
-            },
-            |player| player.life_gained_this_turn = life_gained_this_turn,
-        )
+        let gain = printed_artifact_ability(
+            "Fountain of Youth",
+            "{2}, {T}: You gain 1 life.",
+            |effect| matches!(effect, engine::types::ability::Effect::GainLife { .. }),
+        );
+        legacy_ready_effect_state_json(&gain, |player| {
+            player.life_gained_this_turn = life_gained_this_turn
+        })
     }
 
+    /// The Ready entry is Fabrication Module's "{4}, {T}: You get {E}." The
+    /// Module's trigger ("Whenever you get one or more {E} (energy counters),
+    /// put a +1/+1 counter on target creature you control.") is not on the
+    /// board, since the entry's source is not.
     fn legacy_ready_energy_state_json(energy: u32) -> String {
-        legacy_ready_effect_state_json(
-            engine::types::ability::Effect::GainEnergy {
-                amount: engine::types::ability::QuantityExpr::Fixed { value: 1 },
-            },
-            |player| player.energy = energy,
-        )
+        let gain = printed_artifact_ability(
+            "Fabrication Module",
+            "Whenever you get one or more {E} (energy counters), put a +1/+1 counter on target creature you control.\n{4}, {T}: You get {E}.",
+            |effect| matches!(effect, engine::types::ability::Effect::GainEnergy { .. }),
+        );
+        legacy_ready_effect_state_json(&gain, |player| player.energy = energy)
     }
 
     /// The AI session the cache holds for `state` now.

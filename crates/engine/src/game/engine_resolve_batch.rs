@@ -1075,9 +1075,8 @@ mod tests {
 
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, CopyRetargetPermission,
-        DelayedTriggerCondition, Effect, ManaContribution, ManaProduction, QuantityExpr,
-        ResolvedAbility, TargetFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, CopyRetargetPermission, Effect,
+        ManaContribution, ManaProduction, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
     };
     use crate::types::actions::{ResolveAllConsentDecision, ResolveAllScope};
     use crate::types::card_type::{CardType, CoreType};
@@ -1112,85 +1111,98 @@ mod tests {
         }
     }
 
+    /// `controller`'s stack entry `id` activating the ability of the printed
+    /// card `name` whose effect `is_wanted` picks, read from the card data, with
+    /// `targets`. The entry's source, `ObjectId(id)`, is on no zone: CR 113.7a,
+    /// an ability on the stack exists independently of its source.
+    fn printed_activation_entry(
+        id: u64,
+        controller: PlayerId,
+        name: &str,
+        is_wanted: impl Fn(&Effect) -> bool,
+        targets: Vec<TargetRef>,
+    ) -> StackEntry {
+        let face = crate::test_support::shared_card_db()
+            .get_face_by_name(name)
+            .unwrap_or_else(|| panic!("{name} is in the card data"));
+        let mut wanted = face
+            .abilities
+            .iter()
+            .filter(|ability| is_wanted(ability.effect.as_ref()));
+        let ability = wanted
+            .next()
+            .unwrap_or_else(|| panic!("reach guard: {name}'s ability is in the card data"));
+        assert!(
+            wanted.next().is_none(),
+            "reach guard: {name} has exactly one such ability"
+        );
+        let object_id = ObjectId(id);
+        StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: Box::new(
+                    crate::game::ability_utils::build_resolved_from_def_with_targets(
+                        ability, object_id, controller, targets,
+                    ),
+                ),
+            },
+        }
+    }
+
+    /// Mishra's Bauble's "{T}, Sacrifice this artifact: Look at the top card of
+    /// target player's library. Draw a card at the beginning of the next turn's
+    /// upkeep.", targeting `controller`: its resolution installs the delayed
+    /// draw.
     fn delayed_trigger_entry(id: u64, controller: PlayerId) -> StackEntry {
-        let object_id = ObjectId(id);
-        StackEntry {
-            id: object_id,
-            source_id: object_id,
+        printed_activation_entry(
+            id,
             controller,
-            kind: StackEntryKind::ActivatedAbility {
-                source_id: object_id,
-                ability: Box::new(ResolvedAbility::new(
-                    Effect::CreateDelayedTrigger {
-                        condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-                        effect: Box::new(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
-                        uses_tracked_set: false,
-                    },
-                    vec![],
-                    object_id,
-                    controller,
-                )),
-            },
-        }
+            "Mishra's Bauble",
+            |effect| matches!(effect, Effect::Dig { .. }),
+            vec![TargetRef::Player(controller)],
+        )
     }
 
-    fn life_gain_entry(id: u64, controller: PlayerId, amount: u32) -> StackEntry {
-        let object_id = ObjectId(id);
-        StackEntry {
-            id: object_id,
-            source_id: object_id,
+    /// Spike Feeder's "Remove a +1/+1 counter from this creature: You gain 2
+    /// life."
+    fn life_gain_entry(id: u64, controller: PlayerId) -> StackEntry {
+        printed_activation_entry(
+            id,
             controller,
-            kind: StackEntryKind::ActivatedAbility {
-                source_id: object_id,
-                ability: Box::new(ResolvedAbility::new(
-                    Effect::GainLife {
-                        amount: QuantityExpr::Fixed {
-                            value: amount as i32,
-                        },
-                        player: TargetFilter::Controller,
-                    },
-                    vec![],
-                    object_id,
-                    controller,
-                )),
-            },
-        }
+            "Spike Feeder",
+            |effect| matches!(effect, Effect::GainLife { .. }),
+            Vec::new(),
+        )
     }
 
-    fn life_batch_entries(amount: u32) -> Vec<StackEntry> {
+    fn life_batch_entries() -> Vec<StackEntry> {
         // Stack entries are stored bottom-to-top: the delayed-trigger install is
         // the first successful item, followed by the later life-gain boundary.
         vec![
-            life_gain_entry(22, PlayerId(0), amount),
+            life_gain_entry(22, PlayerId(0)),
             delayed_trigger_entry(21, PlayerId(0)),
         ]
     }
 
-    fn energy_gain_entry(id: u64, controller: PlayerId, amount: i32) -> StackEntry {
-        let object_id = ObjectId(id);
-        StackEntry {
-            id: object_id,
-            source_id: object_id,
+    /// Fabrication Module's "{4}, {T}: You get {E}."
+    fn energy_gain_entry(id: u64, controller: PlayerId) -> StackEntry {
+        printed_activation_entry(
+            id,
             controller,
-            kind: StackEntryKind::ActivatedAbility {
-                source_id: object_id,
-                ability: Box::new(ResolvedAbility::new(
-                    Effect::GainEnergy {
-                        amount: QuantityExpr::Fixed { value: amount },
-                    },
-                    vec![],
-                    object_id,
-                    controller,
-                )),
-            },
-        }
+            "Fabrication Module",
+            |effect| matches!(effect, Effect::GainEnergy { .. }),
+            Vec::new(),
+        )
     }
 
-    fn energy_batch_entries(amount: i32) -> Vec<StackEntry> {
+    fn energy_batch_entries() -> Vec<StackEntry> {
         // As `life_batch_entries`, with an energy gain as the later boundary: an
         // energy total past `u32::MAX` is still unrepresentable.
         vec![
-            energy_gain_entry(22, PlayerId(0), amount),
+            energy_gain_entry(22, PlayerId(0)),
             delayed_trigger_entry(21, PlayerId(0)),
         ]
     }
@@ -1762,7 +1774,7 @@ mod tests {
 
     #[test]
     fn ready_prefix_saturates_a_later_life_counter_and_merges_prefix_lifecycle_facts() {
-        let mut state = ready_state(life_batch_entries(2));
+        let mut state = ready_state(life_batch_entries());
         state.players[0].life_gained_this_turn = u32::MAX - 1;
         let parent = super::super::lifecycle::enter_action_frame();
 
@@ -1780,8 +1792,8 @@ mod tests {
 
     #[test]
     fn ready_prefix_rejects_a_later_energy_overflow_and_discards_prefix_lifecycle_facts() {
-        let mut state = ready_state(energy_batch_entries(2));
-        state.players[0].energy = u32::MAX - 1;
+        let mut state = ready_state(energy_batch_entries());
+        state.players[0].energy = u32::MAX;
         let entry = state.clone();
         let parent = super::super::lifecycle::enter_action_frame();
 
@@ -1807,7 +1819,7 @@ mod tests {
 
     #[test]
     fn ready_prefix_merges_lifecycle_facts_for_a_representable_pair() {
-        let mut state = ready_state(life_batch_entries(2));
+        let mut state = ready_state(life_batch_entries());
         state.players[0].life_gained_this_turn = u32::MAX - 3;
         let parent = super::super::lifecycle::enter_action_frame();
 
@@ -1825,7 +1837,7 @@ mod tests {
 
     #[test]
     fn fast_forward_saturates_a_later_life_counter_and_merges_prefix_lifecycle_facts() {
-        let mut state = priority_state(PlayerId(0), life_batch_entries(2));
+        let mut state = priority_state(PlayerId(0), life_batch_entries());
         state.players[0].life_gained_this_turn = u32::MAX - 1;
         let parent = super::super::lifecycle::enter_action_frame();
 
@@ -1841,8 +1853,8 @@ mod tests {
 
     #[test]
     fn fast_forward_rejects_a_later_energy_overflow_and_discards_prefix_lifecycle_facts() {
-        let mut state = priority_state(PlayerId(0), energy_batch_entries(2));
-        state.players[0].energy = u32::MAX - 1;
+        let mut state = priority_state(PlayerId(0), energy_batch_entries());
+        state.players[0].energy = u32::MAX;
         let entry = state.clone();
         let parent = super::super::lifecycle::enter_action_frame();
 
@@ -1866,7 +1878,7 @@ mod tests {
 
     #[test]
     fn fast_forward_merges_lifecycle_facts_for_a_representable_pair() {
-        let mut state = priority_state(PlayerId(0), life_batch_entries(2));
+        let mut state = priority_state(PlayerId(0), life_batch_entries());
         state.players[0].life_gained_this_turn = u32::MAX - 3;
         let parent = super::super::lifecycle::enter_action_frame();
 
@@ -1885,9 +1897,9 @@ mod tests {
         for legacy in [false, true] {
             let make_state = || {
                 if legacy {
-                    ready_state(life_batch_entries(2))
+                    ready_state(life_batch_entries())
                 } else {
-                    active_restored_state(life_batch_entries(2))
+                    active_restored_state(life_batch_entries())
                 }
             };
             let expected_class = if legacy {
@@ -1930,9 +1942,9 @@ mod tests {
         for legacy in [false, true] {
             let make_state = || {
                 if legacy {
-                    ready_state(energy_batch_entries(2))
+                    ready_state(energy_batch_entries())
                 } else {
-                    active_restored_state(energy_batch_entries(2))
+                    active_restored_state(energy_batch_entries())
                 }
             };
             let expected_class = if legacy {
@@ -1946,7 +1958,7 @@ mod tests {
                 classify_restored_stack_automation(&rejected),
                 expected_class
             );
-            rejected.players[0].energy = u32::MAX - 1;
+            rejected.players[0].energy = u32::MAX;
             let entry = rejected.clone();
             let parent = super::super::lifecycle::enter_action_frame();
             let error = resume_restored_stack_automation(&mut rejected)
@@ -1965,7 +1977,7 @@ mod tests {
             assert_no_delayed_installation(parent, "restored-resume energy overflow");
 
             let mut control = make_state();
-            control.players[0].energy = u32::MAX - 3;
+            control.players[0].energy = u32::MAX - 2;
             let parent = super::super::lifecycle::enter_action_frame();
             resume_restored_stack_automation(&mut control)
                 .expect("the adjacent energy value is representable");

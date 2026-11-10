@@ -365,19 +365,33 @@ mod tests {
     /// CR 510.2 + CR 119.3: previewing the pass that deals combat damage from
     /// two `i32::MAX`-power attackers to a player at `i32::MAX` life reports a
     /// loss of 2^32 - 2, saturated at `i32::MIN`. The real pass applies each
-    /// source's loss separately (MAX, then 0, then -MAX).
+    /// source's loss separately (MAX, then 0, then -MAX). The attackers are two
+    /// Grizzly Bears (a vanilla 2/2) with `u32::MAX` +1/+1 counters each, whose
+    /// power saturates at `i32::MAX`.
     #[test]
     fn combat_preview_life_delta_past_i32_saturates() {
         use crate::game::combat::AttackTarget;
         use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::counter::CounterType;
         use crate::types::phase::Phase;
 
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         scenario.with_life(P1, i32::MAX);
-        let first = scenario.add_vanilla(P0, i32::MAX, 1);
-        let second = scenario.add_vanilla(P0, i32::MAX, 1);
+        let first = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let second = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        for bears in [first, second] {
+            scenario.with_counter(bears, CounterType::Plus1Plus1, u32::MAX);
+        }
         let mut runner = scenario.build();
+        crate::game::layers::evaluate_layers(runner.state_mut());
+        for bears in [first, second] {
+            assert_eq!(
+                runner.state().objects[&bears].power,
+                Some(i32::MAX),
+                "reach guard: Grizzly Bears' power with u32::MAX counters"
+            );
+        }
         runner.advance_to_combat();
         runner
             .declare_attackers(&[

@@ -3036,9 +3036,13 @@ mod tests {
 
         /// Casts Dazzling Reflection ("You gain life equal to target creature's
         /// power. The next time that creature would deal damage this turn,
-        /// prevent that damage.") on a P0 creature of `power` with `doublers` in
-        /// play; any ordering prompt is answered with index 0 and must be
-        /// accepted. Returns the runner, the cast's events and the spell.
+        /// prevent that damage.") on P0's Ouroboroid ("At the beginning of combat
+        /// on your turn, put X +1/+1 counters on each creature you control, where
+        /// X is this creature's power."), a 1/3 given `power - 1` +1/+1 counters
+        /// so its power is `power`, with `doublers` in play. The cast is in the
+        /// main phase, so Ouroboroid's combat trigger does not fire. Any ordering
+        /// prompt is answered with index 0 and must be accepted. Returns the
+        /// runner, the cast's events and the spell.
         fn cast_dazzling_reflection(
             power: i32,
             doublers: &[&str],
@@ -3057,7 +3061,12 @@ mod tests {
             for doubler in doublers {
                 add_card(&mut scenario, P0, doubler);
             }
-            let creature = scenario.add_creature(P0, "Test Behemoth", power, 1).id();
+            let creature = add_card(&mut scenario, P0, "Ouroboroid");
+            scenario.with_counter(
+                creature,
+                crate::types::counter::CounterType::Plus1Plus1,
+                u32::try_from(power - 1).expect("the callers' powers are above 1"),
+            );
             let spell = scenario.add_real_card(
                 P0,
                 "Dazzling Reflection",
@@ -3066,6 +3075,13 @@ mod tests {
             );
             scenario.with_mana_pool(P0, vec![mana(ManaType::White), mana(ManaType::White)]);
             let mut runner = scenario.build();
+            crate::game::layers::evaluate_layers(runner.state_mut());
+            assert_eq!(
+                runner.state().objects[&creature].power,
+                Some(power),
+                "reach guard: Ouroboroid's power with {} counters",
+                power - 1
+            );
             let cast = runner
                 .cast(spell)
                 // Both of the spell's target slots name the same creature; with

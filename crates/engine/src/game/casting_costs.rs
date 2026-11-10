@@ -32420,33 +32420,76 @@ its replicate cost was paid.)\nDraw a card.";
         assert_eq!(runner.state().waiting_for, before);
     }
 
+    /// The two printed "pay X life" costs, read from the card data: Toxic
+    /// Deluge's additional cost ("As an additional cost to cast this spell, pay
+    /// X life.") and Krumar Initiate's whole activation cost ("{X}{B}, {T}, Pay
+    /// X life: This creature endures X. Activate only as a sorcery.").
+    fn printed_pay_x_life_costs() -> (AbilityCost, AbilityCost) {
+        let db = crate::test_support::shared_card_db();
+        let deluge = db
+            .get_face_by_name("Toxic Deluge")
+            .expect("Toxic Deluge is in the card data");
+        let Some(AdditionalCost::Required(bare)) = deluge.additional_cost.clone() else {
+            panic!(
+                "reach guard: Toxic Deluge has a required additional cost, got {:?}",
+                deluge.additional_cost
+            );
+        };
+        assert!(
+            matches!(&bare, AbilityCost::PayLife { amount } if amount.contains_x()),
+            "reach guard: Toxic Deluge's additional cost pays X life, got {bare:?}"
+        );
+        let krumar = db
+            .get_face_by_name("Krumar Initiate")
+            .expect("Krumar Initiate is in the card data");
+        let composite = krumar
+            .abilities
+            .first()
+            .and_then(|ability| ability.cost.clone())
+            .expect("Krumar Initiate's activated ability has a cost");
+        assert!(
+            matches!(
+                &composite,
+                AbilityCost::Composite { costs } if matches!(
+                    costs.as_slice(),
+                    [
+                        AbilityCost::Mana { .. },
+                        AbilityCost::Tap,
+                        AbilityCost::PayLife {
+                            amount: QuantityExpr::Ref {
+                                qty: QuantityRef::Variable { name },
+                            },
+                        },
+                    ] if name == "X"
+                )
+            ),
+            "reach guard: Krumar Initiate's cost is {{X}}{{B}}, {{T}}, Pay X life, got {composite:?}"
+        );
+        (bare, composite)
+    }
+
     /// CR 107.3a + CR 601.2b + CR 119.4a: every "pay X life" announcement — a
     /// bare cost, a composite cost (the smallest component bound), and a
     /// per-counter cost — stops at `i32::MAX`, while the cast/activation
     /// payable-life predicate and budget stay exact. The bare row is Toxic
     /// Deluge's additional cost ("As an additional cost to cast this spell, pay
-    /// X life."), and the composite row is Krumar Initiate's activation cost
-    /// without its mana ("{X}{B}, {T}, Pay X life: This creature endures X.
-    /// Activate only as a sorcery."). No printed card pays X life for each
-    /// counter: every printed per-counter life cost is a fixed amount. The
-    /// nearest printed card, whose cost parses to `PerCounter`, is Inner
-    /// Sanctum ("Cumulative upkeep—Pay 2 life.").
+    /// X life."), and the composite row is Krumar Initiate's whole activation
+    /// cost ("{X}{B}, {T}, Pay X life: This creature endures X. Activate only as
+    /// a sorcery."), both read from the card data; its mana and tap components
+    /// add no bound in `additional_cost_x_max` (a real activation caps X by the
+    /// mana it can pay separately), so the composite's bound here is its life
+    /// payment's. No printed card pays X life for each counter: every printed
+    /// per-counter life cost is a fixed amount. The nearest printed card, whose
+    /// cost parses to `PerCounter`, is Inner Sanctum ("Cumulative upkeep—Pay 2
+    /// life.").
     #[test]
     fn pay_x_life_announcement_cap_stops_at_i32_max_while_affordability_stays_exact() {
         use crate::types::format::FormatConfig;
 
-        let life_x = AbilityCost::PayLife {
-            amount: QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "X".to_string(),
-                },
-            },
-        };
+        let (life_x, composite) = printed_pay_x_life_costs();
         let shapes = [
             life_x.clone(),
-            AbilityCost::Composite {
-                costs: vec![AbilityCost::Tap, life_x.clone()],
-            },
+            composite,
             AbilityCost::PerCounter {
                 counter: CounterType::Plus1Plus1,
                 target: TargetFilter::SelfRef,
@@ -32501,32 +32544,35 @@ its replicate cost was paid.)\nDraw a card.";
 
     /// CR 107.3a: the concretized "pay X life" cost reads the announced X
     /// through the same saturating conversion the spell's effects use, so no X
-    /// turns into a negative (zero-life) payment.
+    /// turns into a negative (zero-life) payment. The bare cost is Toxic
+    /// Deluge's additional cost and the composite Krumar Initiate's activation
+    /// cost, both read from the card data; the `{X}{B}` passes through
+    /// unconcretized.
     #[test]
     fn concretize_chosen_x_pay_life_never_wraps_an_announced_x() {
-        let life_x = AbilityCost::PayLife {
-            amount: QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "X".to_string(),
-                },
-            },
-        };
+        let (life_x, composite) = printed_pay_x_life_costs();
         let capped = AbilityCost::PayLife {
             amount: QuantityExpr::Fixed { value: i32::MAX },
         };
         for x in [i32::MAX as u32, 2_147_483_648, 3_000_000_000, u32::MAX] {
             assert_eq!(concretize_chosen_x_cost(&life_x, x), capped, "x = {x}");
         }
+        let AbilityCost::Composite { costs } = &composite else {
+            panic!("Krumar Initiate's cost is a composite, got {composite:?}");
+        };
+        // The printed composite with only its life payment capped.
+        let expected = AbilityCost::Composite {
+            costs: costs
+                .iter()
+                .map(|cost| match cost {
+                    AbilityCost::PayLife { .. } => capped.clone(),
+                    printed => printed.clone(),
+                })
+                .collect(),
+        };
         assert_eq!(
-            concretize_chosen_x_cost(
-                &AbilityCost::Composite {
-                    costs: vec![AbilityCost::Tap, life_x],
-                },
-                3_000_000_000
-            ),
-            AbilityCost::Composite {
-                costs: vec![AbilityCost::Tap, capped],
-            }
+            concretize_chosen_x_cost(&composite, 3_000_000_000),
+            expected
         );
     }
 

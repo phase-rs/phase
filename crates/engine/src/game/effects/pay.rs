@@ -694,10 +694,13 @@ mod tests {
     /// CR 119.4a + CR 810.9a: the "pay any amount of life" prompt offers the
     /// team's EXACT total even when it exceeds `i32::MAX`: two members at
     /// `i32::MAX` offer 4,294,967,294, not a saturated or wrapped reading.
-    /// The hand-built `PayCost` is the payment Plunge into Darkness's second
-    /// mode parses to ("Pay any amount of life, then look at that many cards
-    /// from the top of your library. Put one of those cards into your hand and
-    /// exile the rest.").
+    /// The payment is Plunge into Darkness's mode 2 ("Pay any amount of life,
+    /// then look at that many cards from the top of your library. Put one of
+    /// those cards into your hand and exile the rest."), read from the card
+    /// data; the test resolves only that payment, up to its amount prompt. The
+    /// printed twin, which casts the spell and pays past `i32::MAX`, is
+    /// `pay_any_amount_of_life_above_i32_max_reads_the_amount_paid` in
+    /// `life_total_saturation.rs`.
     #[test]
     fn pay_any_amount_life_max_is_the_exact_team_total_at_the_cap() {
         let mut state =
@@ -705,17 +708,27 @@ mod tests {
         state.players[0].life = i32::MAX;
         state.players[1].life = i32::MAX;
 
-        let ability = make_ability(Effect::PayCost {
-            cost: AbilityCost::PayLife {
-                amount: QuantityExpr::Ref {
-                    qty: QuantityRef::Variable {
-                        name: "X".to_string(),
+        let plunge = crate::test_support::shared_card_db()
+            .get_face_by_name("Plunge into Darkness")
+            .expect("Plunge into Darkness is in the card data");
+        let mode_two = &plunge.abilities[1];
+        assert!(
+            matches!(
+                &*mode_two.effect,
+                Effect::PayCost {
+                    cost: AbilityCost::PayLife {
+                        amount: QuantityExpr::Ref {
+                            qty: QuantityRef::Variable { name },
+                        },
                     },
-                },
-            },
-            scale: None,
-            payer: TargetFilter::Controller,
-        });
+                    ..
+                } if name == "X"
+            ),
+            "reach guard: Plunge into Darkness's mode 2 pays any amount of life, got {:?}",
+            mode_two.effect
+        );
+        let ability =
+            crate::game::ability_utils::build_resolved_from_def(mode_two, ObjectId(1), PlayerId(0));
         let mut events = Vec::new();
         assert!(resolve(&mut state, &ability, &mut events).is_ok());
         match &state.waiting_for {
