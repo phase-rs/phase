@@ -48,13 +48,9 @@ describe("Arena background lifecycle", () => {
   });
 
   it("keeps the painting when the scene fails to start, without rejecting unhandled", async () => {
-    // three.js throws out of `new WebGLRenderer()` when WebGL is unavailable, and
-    // a chunk fetch can reject outright mid-deploy. Both settle the lazy-import
-    // chain with a rejection that nothing else is going to handle, so an
-    // unhandled rejection takes down the whole process even though this
-    // component's contract is that the painting simply stays up.
+    // Throw after the module loads to exercise rejection from scene startup.
     scene.create.mockImplementation(() => {
-      throw new Error("WebGL unavailable");
+      throw new Error("Scene startup failed");
     });
     const rejections: unknown[] = [];
     const onRejection = (reason: unknown) => rejections.push(reason);
