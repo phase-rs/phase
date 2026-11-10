@@ -51178,3 +51178,19 @@ mod spellbook_selection_serde_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod object_role_tests {
+    use super::*;
+
+    /// CR 115.1a: a player role is not an object antecedent; a mixed list keeps
+    /// only the object role for the single-object cardinality.
+    #[test]
+    fn object_roles_drops_player_roles_and_keeps_objects() {
+        let roles = object_roles(vec![
+            TargetFilter::Player,
+            TargetFilter::Typed(TypedFilter::creature()),
+        ]);
+        assert_eq!(roles, vec![TargetFilter::Typed(TypedFilter::creature())]);
+    }
+}
