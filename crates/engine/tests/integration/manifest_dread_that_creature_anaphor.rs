@@ -726,7 +726,7 @@ fn deathrender_flickered_before_its_trigger_resolves_equips_nothing() {
         .cast(flicker)
         .target_objects(&[deathrender, bystander])
         .commit();
-    let (_, offered) = settle(&mut runner, true, &[ogre]);
+    let (events, offered) = settle(&mut runner, true, &[ogre]);
 
     assert_ne!(
         runner.state().objects[&deathrender].incarnation,
@@ -737,6 +737,17 @@ fn deathrender_flickered_before_its_trigger_resolves_equips_nothing() {
     assert_eq!(runner.state().objects[&ogre].zone, Zone::Battlefield);
     assert_eq!(runner.state().objects[&deathrender].zone, Zone::Battlefield);
     assert_eq!(host_of(&runner, deathrender), None);
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Attach,
+                subject: None,
+                ..
+            }
+        )),
+        "the attach resolved as a no-op"
+    );
 }
 
 const IRON_MAN: &str = "Flying, haste\nAt the beginning of combat on your turn, you may put an artifact card from your hand onto the battlefield. If it's an Equipment, attach it to The Invincible Iron Man.";

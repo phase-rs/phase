@@ -322,6 +322,16 @@ fn resolve_bound_attachment_operation(
     let attachment_ids =
         resolve_attachment_ids(state, ability, attachment_filter, &mut target_slots);
     if attachment_ids.is_empty() {
+        // CR 400.7: a source that left play is a new object, so "attach ~" attaches
+        // nothing and the instruction still resolved.
+        if matches!(attachment_filter, TargetFilter::OriginalSource) {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id,
+                subject: None,
+            });
+            return Ok(AttachResolutionOutcome::Completed);
+        }
         return Err(EffectError::MissingParam(
             "No attachment for Attach".to_string(),
         ));
