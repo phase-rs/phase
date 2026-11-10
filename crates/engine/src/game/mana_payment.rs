@@ -630,6 +630,13 @@ mod pooled_producer_ledger_index_tests {
     /// unit's own row (the triangular sum, 78 here) and a filtered walk that sees
     /// every row (the full product, 144 here).
     const PROBE_SCAN: u64 = PROBE_UNITS * PROBE_UNITS;
+    /// What ONE indexed batch charges when every one of its units falls back to the
+    /// ledger: the rows the index is BUILT from (one per carried row) plus the pip's own
+    /// row per unit's lookup. Construction is inside the bound on purpose — an index
+    /// whose build sat outside the probe would look free while still scanning the whole
+    /// ledger — and the total stays far below [`PROBE_SCAN`], which is what keeps the
+    /// assertion able to tell an index from a per-unit search.
+    const PROBE_INDEXED_ONCE: u64 = PROBE_UNITS + PROBE_UNITS;
 
     fn probe_board() -> GameState {
         let (state, source, incarnation) = carried_ledger(PROBE_UNITS);
@@ -648,9 +655,7 @@ mod pooled_producer_ledger_index_tests {
         perf_counters::reset();
         let before = perf_counters::take_cost_snapshot();
         retain_pooled_mana_producer_snapshots(&mut state);
-        let probes = perf_counters::take_cost_snapshot()
-            .since(before)
-            .pooled_producer_rows_probed;
+        let charged = perf_counters::take_cost_snapshot().since(before);
 
         assert_eq!(
             state.pooled_mana_producer_snapshots.len(),
@@ -658,12 +663,18 @@ mod pooled_producer_ledger_index_tests {
             "reach-guard: every floating unit of the departed tenure keeps its fact — carried \
              from the ledger, since the exit cache is gone"
         );
+        assert_eq!(
+            charged.pooled_producer_index_builds, 1,
+            "CR 118.3a: the boundary needs the ledger for every surviving unit, so it builds \
+             the index exactly once for the batch"
+        );
         assert!(
-            probes <= PROBE_UNITS,
+            charged.pooled_producer_rows_probed <= PROBE_INDEXED_ONCE,
             "CR 118.3a: one index of the carried rows serves every surviving unit, so the \
-             boundary examines at most one row per unit — it examined {probes} rows for \
-             {PROBE_UNITS} units, which is the signature of a search of the whole ledger per \
-             unit (up to {PROBE_SCAN} rows)"
+             boundary examines one row per unit plus the single build — it examined {} rows \
+             for {PROBE_UNITS} units, which is the signature of a search of the whole ledger \
+             per unit (up to {PROBE_SCAN} rows)",
+            charged.pooled_producer_rows_probed
         );
     }
 
@@ -692,9 +703,7 @@ mod pooled_producer_ledger_index_tests {
         perf_counters::reset();
         let before = perf_counters::take_cost_snapshot();
         let facts = crate::game::casting::mana_spent_source_snapshots(&state, &units);
-        let probes = perf_counters::take_cost_snapshot()
-            .since(before)
-            .pooled_producer_rows_probed;
+        let charged = perf_counters::take_cost_snapshot().since(before);
 
         assert_eq!(
             facts.len(),
@@ -702,12 +711,18 @@ mod pooled_producer_ledger_index_tests {
             "reach-guard: every spent unit's producer is answered from the carried ledger — the \
              exit cache is gone and the storage id now holds a later object (CR 400.7)"
         );
+        assert_eq!(
+            charged.pooled_producer_index_builds, 1,
+            "CR 118.3a: every unit of this batch falls back to the ledger, so the payment builds \
+             the index exactly once — not once per unit"
+        );
         assert!(
-            probes <= PROBE_UNITS,
+            charged.pooled_producer_rows_probed <= PROBE_INDEXED_ONCE,
             "CR 118.3a: one index of the carried rows serves the whole PAYMENT batch, so the \
-             spend examines at most one row per spent unit — it examined {probes} rows for \
-             {PROBE_UNITS} units, which is the signature of a search of the whole ledger per \
-             unit (up to {PROBE_SCAN} rows)"
+             spend examines one row per spent unit plus the single build — it examined {} rows \
+             for {PROBE_UNITS} units, which is the signature of a search of the whole ledger per \
+             unit (up to {PROBE_SCAN} rows)",
+            charged.pooled_producer_rows_probed
         );
     }
 
@@ -721,16 +736,156 @@ mod pooled_producer_ledger_index_tests {
         state
             .bind_or_reject_floating_mana_provenance()
             .expect("the carried facts agree with the pins this save's units carry");
-        let probes = perf_counters::take_cost_snapshot()
-            .since(before)
-            .pooled_producer_rows_probed;
+        let charged = perf_counters::take_cost_snapshot().since(before);
 
+        assert_eq!(
+            charged.pooled_producer_index_builds, 1,
+            "CR 118.3a: admission needs the ledger for every admitted unit, so it builds the \
+             index exactly once for the batch"
+        );
         assert!(
-            probes <= PROBE_UNITS,
+            charged.pooled_producer_rows_probed <= PROBE_INDEXED_ONCE,
             "CR 118.3a: one index of the carried rows serves the whole ADMISSION batch, so \
-             admission examines at most the pip's own rows for each unit — it examined \
-             {probes} rows for {PROBE_UNITS} units, which is the signature of a search of the \
-             whole ledger per unit (up to {PROBE_SCAN} rows)"
+             admission examines one row per unit plus the single build — it examined {} rows \
+             for {PROBE_UNITS} units, which is the signature of a search of the whole ledger per \
+             unit (up to {PROBE_SCAN} rows)",
+            charged.pooled_producer_rows_probed
+        );
+    }
+
+    /// `units` floating units of ONE LIVE tenure — the producer is still on the
+    /// battlefield, so the live object answers every one of them — beside `unrelated`
+    /// carried rows keyed to OTHER pips: the board Upwelling's retained pool leaves
+    /// beside a live land's mana.
+    fn live_producer_board(units: u64, unrelated: u64) -> (GameState, Vec<ManaUnit>) {
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mox Jet".to_string(),
+            Zone::Battlefield,
+        );
+        let incarnation = state.objects[&source].incarnation;
+        let mut batch = Vec::new();
+        for index in 1..=units {
+            let mut unit = ManaUnit::new(ManaType::Black, source, false, vec![]);
+            unit.pip_id = ManaPipId(index);
+            unit.source_incarnation = Some(incarnation);
+            state.players[PlayerId(0).0 as usize]
+                .mana_pool
+                .add(unit.clone());
+            batch.push(unit);
+        }
+        let lki = state.objects[&source].snapshot_public_characteristics();
+        state.pooled_mana_producer_snapshots = (0..unrelated)
+            .map(|offset| PooledManaProducerSnapshot {
+                // CR 400.7: an earlier tenure of the same storage id — a fact about units
+                // this batch does not hold.
+                pip_id: ManaPipId(10_000 + offset),
+                source_id: source,
+                source_incarnation: incarnation.wrapping_sub(1),
+                lki: lki.clone(),
+            })
+            .collect();
+        (state, batch)
+    }
+
+    /// CR 118.3a + CR 400.7: the carried ledger's index is built by the first read that
+    /// actually FALLS BACK to it, and by nothing else.
+    ///
+    /// A producer-fact read is answered by the unit's live producing object while that
+    /// object still IS the pinned incarnation, and by the epoch's exit last-known
+    /// information once it departs; the carried ledger is only the THIRD answer. Under
+    /// Upwelling ("Players don't lose unspent mana as steps and phases end.") the ledger
+    /// keeps a row per still-floating unit across every step and phase, so a payment an
+    /// earlier answer settles must not index it — that is
+    /// `casting::mana_spent_source_snapshots` charging one live-land payment for facts
+    /// of unrelated carried units.
+    ///
+    /// Both non-fallback legs spend against a ledger that is ALREADY full of rows the
+    /// read never consults, so a leg that indexed it would say so; the fallback leg must
+    /// build it exactly once, because one build serves the whole batch.
+    #[test]
+    fn the_ledger_index_is_built_only_when_a_lookup_falls_back() {
+        // Leg 1 — the LIVE producer answers.
+        let (state, units) = live_producer_board(PROBE_UNITS, PROBE_UNITS * 4);
+        perf_counters::reset();
+        let before = perf_counters::take_cost_snapshot();
+        let facts = crate::game::casting::mana_spent_source_snapshots(&state, &units);
+        let charged = perf_counters::take_cost_snapshot().since(before);
+        assert_eq!(
+            facts.len(),
+            PROBE_UNITS as usize,
+            "reach-guard: the live producing object answers for every unit, so no unit of this \
+             batch owes its fact to the carried ledger"
+        );
+        assert_eq!(
+            charged.pooled_producer_index_builds, 0,
+            "CR 118.3a: no unit fell back to the carried ledger, so the payment must not build \
+             an index over it — a live-land payment charged for unrelated carried facts"
+        );
+        assert_eq!(
+            charged.pooled_producer_rows_probed,
+            0,
+            "CR 118.3a: with no fallback, not one carried row is examined — for {PROBE_UNITS} \
+             live units beside {} unrelated rows",
+            PROBE_UNITS * 4
+        );
+
+        // Leg 2 — the EXIT cache answers: the producer departed, its LKI survived.
+        let (mut state, source, incarnation) = carried_ledger(PROBE_UNITS);
+        let exit_lki = state.objects[&source].snapshot_public_characteristics();
+        state
+            .lki_by_incarnation
+            .insert(source, [(incarnation, exit_lki)].into_iter().collect());
+        assert!(
+            crate::game::filter::exit_lki_for_incarnation(&state, source, incarnation).is_some(),
+            "reach-guard: the departing epoch's last-known information is the second answer"
+        );
+        let units: Vec<ManaUnit> = state.players[PlayerId(0).0 as usize]
+            .mana_pool
+            .units()
+            .collect();
+        perf_counters::reset();
+        let before = perf_counters::take_cost_snapshot();
+        let facts = crate::game::casting::mana_spent_source_snapshots(&state, &units);
+        let charged = perf_counters::take_cost_snapshot().since(before);
+        assert_eq!(
+            facts.len(),
+            PROBE_UNITS as usize,
+            "reach-guard: the exit fact answers every unit, so the carried ledger is not consulted"
+        );
+        assert_eq!(
+            charged.pooled_producer_index_builds, 0,
+            "CR 118.3a: the exit cache answered every unit, so the payment must not build an \
+             index over the ledger it did not read"
+        );
+        assert_eq!(
+            charged.pooled_producer_rows_probed, 0,
+            "CR 118.3a: with no fallback, not one carried row is examined"
+        );
+
+        // Leg 3 — the carried ledger is the only answer left: built ONCE for the batch.
+        let state = probe_board();
+        let units: Vec<ManaUnit> = state.players[PlayerId(0).0 as usize]
+            .mana_pool
+            .units()
+            .collect();
+        perf_counters::reset();
+        let before = perf_counters::take_cost_snapshot();
+        let facts = crate::game::casting::mana_spent_source_snapshots(&state, &units);
+        let charged = perf_counters::take_cost_snapshot().since(before);
+        assert_eq!(
+            facts.len(),
+            PROBE_UNITS as usize,
+            "reach-guard: every unit's fact comes from the carried ledger — the live object is a \
+             later incarnation and the exit cache is gone (CR 400.7)"
+        );
+        assert_eq!(
+            charged.pooled_producer_index_builds, 1,
+            "CR 118.3a: the first fallback builds the index and every later unit of the batch \
+             reuses it — one build, not one per unit"
         );
     }
 }
@@ -772,7 +927,21 @@ pub(crate) struct PooledProducerLedgerIndex<'a> {
 
 impl<'a> PooledProducerLedgerIndex<'a> {
     /// Index every row of `rows` under the pip it describes — one pass, once.
+    ///
+    /// CR 118.3a: the pass examines every row, so it charges the probe one row per
+    /// indexed row (beside the build itself). A batch that builds the index therefore
+    /// reports its construction cost instead of hiding it behind the lookups that
+    /// follow — callers that only *sometimes* need the ledger should reach it through
+    /// [`LazyPooledProducerLedgerIndex`], which builds on the first fallback and not
+    /// before.
     pub(crate) fn new(rows: &'a [crate::types::game_state::PooledManaProducerSnapshot]) -> Self {
+        #[cfg(feature = "test-support")]
+        {
+            crate::game::perf_counters::record_pooled_producer_index_built();
+            for _row in rows {
+                crate::game::perf_counters::record_pooled_producer_row_probed();
+            }
+        }
         let mut by_pip: std::collections::HashMap<
             crate::types::mana::ManaPipId,
             Vec<&'a crate::types::game_state::PooledManaProducerSnapshot>,
@@ -828,11 +997,61 @@ impl<'a> PooledProducerLedgerIndex<'a> {
     }
 }
 
+/// CR 118.3a + CR 400.7: a [`PooledProducerLedgerIndex`] built on the FIRST read that
+/// actually needs it, for a caller whose reads usually do not.
+///
+/// The ledger is only the LAST resort of a producer-fact read: a spell's spent unit is
+/// answered by its live producing object while that object still IS the pinned
+/// incarnation, then by the epoch's exit last-known information, and only then by the
+/// carried ledger. Most payments never reach the last step — a land tapped and spent in
+/// the same step answers from the live object every time — while the ledger itself is
+/// not small: with Upwelling ("Players don't lose unspent mana as steps and phases
+/// end.") it grows one row per floating unit and persists for as long as the mana does.
+/// Building an index over it before knowing whether any unit falls back charges every
+/// payment for facts a later step may never ask about.
+///
+/// So the rows are held, not indexed, and the index is built by the first `lki_for` that
+/// arrives — once, since one payment can ask about many units and the build serves them
+/// all. Reads go through [`Self::lki_for`], the same pip-keyed question
+/// [`PooledProducerLedgerIndex::lki_for`] answers, so a lazy read and an eager one cannot
+/// disagree.
+pub(crate) struct LazyPooledProducerLedgerIndex<'a> {
+    rows: &'a [crate::types::game_state::PooledManaProducerSnapshot],
+    index: std::cell::OnceCell<PooledProducerLedgerIndex<'a>>,
+}
+
+impl<'a> LazyPooledProducerLedgerIndex<'a> {
+    /// Hold `rows` without indexing them.
+    pub(crate) fn new(rows: &'a [crate::types::game_state::PooledManaProducerSnapshot]) -> Self {
+        Self {
+            rows,
+            index: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// The producer fact retained for ONE floating unit, building the index on the
+    /// first read that asks. `None` means the ledger holds no entry for THIS unit.
+    pub(crate) fn lki_for(
+        &self,
+        unit: &crate::types::mana::ManaUnit,
+    ) -> Option<&'a crate::types::game_state::LKISnapshot> {
+        self.index
+            .get_or_init(|| PooledProducerLedgerIndex::new(self.rows))
+            .lki_for(unit)
+    }
+}
+
 /// CR 106.3 + CR 400.7: the producer fact the retained ledger holds for `unit`,
 /// read through an index the caller built ONCE for its whole batch (see
 /// [`PooledProducerLedgerIndex`]). The single spend-side read authority.
+///
+/// The index is the LAZY one: a caller whose units are answered by their live object or
+/// their exit last-known information never builds it (see
+/// [`LazyPooledProducerLedgerIndex`]). The fact is unchanged by that — the first read
+/// that reaches the ledger pays for one index, and every later read of the batch reuses
+/// it.
 pub(crate) fn pooled_mana_producer_snapshot<'a>(
-    index: &PooledProducerLedgerIndex<'a>,
+    index: &LazyPooledProducerLedgerIndex<'a>,
     unit: &crate::types::mana::ManaUnit,
 ) -> Option<&'a crate::types::game_state::LKISnapshot> {
     index.lki_for(unit)

@@ -8361,6 +8361,12 @@ pub fn spell_record_matches_filter(
     state: &GameState,
     ctx: &FilterContext<'_>,
 ) -> bool {
+    // CR 106.3 + CR 601.2h: a history record is the whole answer on this path — it states
+    // its own payment facts, and there is no live spell object to borrow from (`&[]` for a
+    // legacy payload that states none). Resolved here, once, and handed to every property
+    // so a source-qualified question answers the same at the top level and below
+    // `AnyOf` / `Not`.
+    let payment_facts = spell_payment_facts(record, None);
     match filter {
         TargetFilter::Any => true,
         TargetFilter::Typed(TypedFilter {
@@ -8423,9 +8429,9 @@ pub fn spell_record_matches_filter(
             // load-bearing on both the object and the player axis (#8508).
             type_filters.iter().all(|type_filter| {
                 spell_record_matches_type_filter(record, type_filter, &state.all_creature_types)
-            }) && properties
-                .iter()
-                .all(|prop| spell_record_matches_property(record, prop, state, ctx))
+            }) && properties.iter().all(|prop| {
+                spell_record_matches_property(record, prop, state, ctx, payment_facts)
+            })
         }
         TargetFilter::Or { filters } => filters
             .iter()
@@ -8578,6 +8584,12 @@ pub fn spell_object_matches_filter_from_for(
     fused: bool,
 ) -> bool {
     let record = spell_cast_record_from_object_for(spell_obj, fused);
+    // CR 106.3 + CR 601.2h: this entry holds no `SpellFilterContext`, but it does hold
+    // the spell being filtered — so the walk borrows that object's own payment facts
+    // rather than answering source-qualified properties from the (factless) live
+    // projection. Resolution is the entry's job precisely so no branch has to redo it
+    // (see [`spell_payment_facts`]).
+    let payment_facts = spell_payment_facts(&record, Some(spell_obj));
     spell_object_matches_filter_inner(
         &record,
         origin_zone,
@@ -8586,6 +8598,7 @@ pub fn spell_object_matches_filter_from_for(
         source_controller,
         all_creature_types,
         state,
+        payment_facts,
         None,
     )
 }
@@ -8667,6 +8680,10 @@ pub(crate) fn spell_object_matches_filter_with_announced_x(
     if let Some(x) = announced_x {
         record.mana_value = spell_obj.spell_mana_value_with_announced_x(fused, x);
     }
+    // CR 106.3 + CR 601.2h: the announced-X rewrite touches only the mana value, so
+    // the facts resolve exactly as they do on the other live entries — from the
+    // spell object this walk is filtering.
+    let payment_facts = spell_payment_facts(&record, Some(spell_obj));
     spell_object_matches_filter_inner(
         &record,
         origin_zone,
@@ -8675,6 +8692,7 @@ pub(crate) fn spell_object_matches_filter_with_announced_x(
         source_obj.controller,
         all_creature_types,
         state,
+        payment_facts,
         Some(SpellFilterContext {
             state,
             source_id,
@@ -8715,6 +8733,37 @@ fn spell_cast_record_from_object_for(spell_obj: &GameObject, fused: bool) -> Spe
     crate::game::restrictions::live_spell_cast_record_for(spell_obj, spell_obj.zone, fused)
 }
 
+/// CR 106.3 + CR 601.2h + CR 400.7d: the payment facts ONE spell-filter walk may
+/// answer a source-qualified question from, resolved ONCE at the walk's entry.
+///
+/// The walk carries this slice into every branch it reaches — the type/property
+/// conjunction, `AnyOf`, `Not`, and the record-only delegation — because a branch
+/// that read the record alone would answer "no such source paid" for a spell whose
+/// record states nothing, and a `Not` over that answer would invert a fact it never
+/// saw. Rain of Riches' "The first spell you cast each turn that mana from a
+/// Treasure was spent to cast has cascade." is exactly that question, asked of the
+/// spell being cast (CR 601.2f, before CR 601.2h), so the fact has to travel with
+/// the walk rather than be re-derived per branch.
+///
+/// A record that STATES its facts — a completed cast in the turn history — answers
+/// from them, because the objects that paid may be gone (CR 400.7). A record that
+/// states none is a live pre-payment projection
+/// (`restrictions::CastPaymentFacts::LivePrePayment`); the spell OBJECT's own facts
+/// are then the answer, borrowed here for the duration of the walk and never copied
+/// into the record. With neither — a legacy payload, and no live object — the
+/// answer is an empty slice: an empty vector cannot prove a source-qualified
+/// payment, so it answers false rather than inventing a payer.
+fn spell_payment_facts<'a>(
+    record: &'a SpellCastRecord,
+    live_spell: Option<&'a GameObject>,
+) -> &'a [ManaSpentSourceSnapshot] {
+    record
+        .mana_spent_source_snapshots
+        .as_deref()
+        .or_else(|| live_spell.map(|spell| spell.mana_spent_source_snapshots.as_slice()))
+        .unwrap_or(&[])
+}
+
 #[derive(Clone, Copy)]
 struct SpellFilterContext<'a> {
     state: &'a GameState,
@@ -8741,6 +8790,7 @@ fn spell_object_matches_filter_inner(
     source_controller: PlayerId,
     all_creature_types: &[String],
     state: &GameState,
+    payment_facts: &[ManaSpentSourceSnapshot],
     context: Option<SpellFilterContext<'_>>,
 ) -> bool {
     match filter {
@@ -8785,6 +8835,7 @@ fn spell_object_matches_filter_inner(
                     prop,
                     all_creature_types,
                     state,
+                    payment_facts,
                     context,
                 )
             })
@@ -8798,6 +8849,7 @@ fn spell_object_matches_filter_inner(
                 source_controller,
                 all_creature_types,
                 state,
+                payment_facts,
                 context,
             )
         }),
@@ -8810,9 +8862,13 @@ fn spell_object_matches_filter_inner(
                 source_controller,
                 all_creature_types,
                 state,
+                payment_facts,
                 context,
             )
         }),
+        // CR 608.2c: the negation is of the branch's ANSWER under the same facts —
+        // never of an absent fact, which would make "not cast with mana from a
+        // Treasure" true for a spell the walk merely failed to see the payment of.
         TargetFilter::Not { filter: inner } => !spell_object_matches_filter_inner(
             record,
             zone,
@@ -8821,6 +8877,7 @@ fn spell_object_matches_filter_inner(
             source_controller,
             all_creature_types,
             state,
+            payment_facts,
             context,
         ),
         TargetFilter::None
@@ -8893,6 +8950,7 @@ fn spell_object_matches_property(
     prop: &FilterProp,
     all_creature_types: &[String],
     state: &GameState,
+    payment_facts: &[ManaSpentSourceSnapshot],
     context: Option<SpellFilterContext<'_>>,
 ) -> bool {
     match prop {
@@ -9033,34 +9091,14 @@ fn spell_object_matches_property(
         // state-free entry-point family is what lets the delegation answer instead.
         // `FilterContext::neutral()` is the honest context for the `None` branch: no
         // ability, trigger or source object is in scope at that entry point.
-        // CR 106.3 + CR 601.2h: a record that STATES its payment facts (a completed
-        // cast in the turn history) answers from them, as before — the objects that
-        // paid may be gone (CR 400.7). A record that states NONE is a live
-        // pre-payment projection (`restrictions::CastPaymentFacts::LivePrePayment`):
-        // CR 601.2f runs before CR 601.2h, so the spell being filtered has paid
-        // nothing, and the object that will pay is still in hand — the live object's
-        // own facts are BORROWED here, and only when a filter actually asks. Copying
-        // them into the record instead charged every live projection a deep clone of
-        // a payment snapshot no filter on that seam reads. A record stating none with
-        // no live object left (a legacy payload) still answers from `&[]`: an empty
-        // vector cannot prove a source-qualified payment.
-        FilterProp::ManaSpentFromSource { source_filter }
-            if record.mana_spent_source_snapshots.is_none() =>
-        {
-            let borrowed: &[crate::types::game_state::ManaSpentSourceSnapshot] = context
-                .and_then(|ctx| ctx.spell_object_id)
-                .and_then(|spell_id| state.objects.get(&spell_id))
-                .map(|spell| spell.mana_spent_source_snapshots.as_slice())
-                .unwrap_or(&[]);
-            mana_spent_from_source(
-                state,
-                borrowed,
-                source_filter,
-                &context.map_or_else(FilterContext::neutral, |c| {
-                    FilterContext::from_source_with_controller(c.source_id, c.source_controller)
-                }),
-            )
-        }
+        //
+        // CR 106.3 + CR 601.2h + CR 400.7d: the delegation also carries
+        // `payment_facts` — resolved ONCE at the walk's entry, never re-derived here
+        // (see [`spell_payment_facts`]). That is what lets the source-qualified arm
+        // answer below `AnyOf` and `Not` exactly as it does at the top level: the
+        // facts are a property of the spell being filtered, not of the node that
+        // happens to ask. Copying them into the live projection instead charged every
+        // live spell a deep clone of a payment snapshot no filter on that seam reads.
         _ => spell_record_matches_property(
             record,
             prop,
@@ -9068,6 +9106,7 @@ fn spell_object_matches_property(
             &context.map_or_else(FilterContext::neutral, |c| {
                 FilterContext::from_source_with_controller(c.source_id, c.source_controller)
             }),
+            payment_facts,
         ),
     }
 }
@@ -9117,11 +9156,21 @@ fn spell_record_matches_type_filter(
     }
 }
 
+/// CR 106.3 + CR 601.2h + CR 400.7d: the record-only property matcher, given the
+/// `payment_facts` the enclosing walk resolved at its entry
+/// ([`spell_payment_facts`]).
+///
+/// The slice — not the record — is the authority for
+/// [`FilterProp::ManaSpentFromSource`], so this matcher answers a source-qualified
+/// question identically at the top level and below `AnyOf` / `Not`. For a history
+/// path the slice IS the record's own stated facts; for a live path it is the spell
+/// object's borrowed ones.
 fn spell_record_matches_property(
     record: &SpellCastRecord,
     prop: &FilterProp,
     state: &GameState,
     ctx: &FilterContext<'_>,
+    payment_facts: &[ManaSpentSourceSnapshot],
 ) -> bool {
     match prop {
         FilterProp::WithKeyword { value } => record.keywords.iter().any(|k| k == value),
@@ -9147,9 +9196,13 @@ fn spell_record_matches_property(
                 || record.core_types.contains(&CoreType::Artifact)
                 || record.subtypes.iter().any(|s| s == "Saga")
         }
-        FilterProp::NotHistoric => {
-            !spell_record_matches_property(record, &FilterProp::Historic, state, ctx)
-        }
+        FilterProp::NotHistoric => !spell_record_matches_property(
+            record,
+            &FilterProp::Historic,
+            state,
+            ctx,
+            payment_facts,
+        ),
         FilterProp::ColorCount { comparator, count } => {
             comparator.evaluate(record.colors.len() as i32, i32::from(*count))
         }
@@ -9180,11 +9233,15 @@ fn spell_record_matches_property(
         // the stack; this is distinct from casting the Adventure face.
         FilterProp::HasAdventure => record.has_adventure,
         FilterProp::WasKicked => record.was_kicked,
-        // CR 106.3 + CR 601.2h + CR 400.7d: the record persists the payment-time
-        // source snapshots, so this answers exactly as the live object did. An empty
-        // vector cannot prove a source-qualified payment and answers false.
+        // CR 106.3 + CR 601.2h + CR 400.7d: answered from the facts the walk resolved
+        // at its entry — the record's own for a completed cast (the objects that paid
+        // may be gone), the live spell object's borrowed ones for a live projection.
+        // Reading `record.mana_source_snapshots()` HERE instead is what lost the
+        // borrowed facts below `AnyOf` / `Not`: the record states none on a live seam,
+        // so every nested branch answered false and a `Not` inverted that absence. An
+        // empty slice still cannot prove a source-qualified payment and answers false.
         FilterProp::ManaSpentFromSource { source_filter } => {
-            mana_spent_from_source(state, record.mana_source_snapshots(), source_filter, ctx)
+            mana_spent_from_source(state, payment_facts, source_filter, ctx)
         }
         // CR 115.1 + CR 601.2c: the record carries the cast's declared targets as the
         // cast committed them, so "the first spell you cast … that targets [something]"
@@ -9214,12 +9271,19 @@ fn spell_record_matches_property(
         // CR 113.1 + CR 113.3: Spell-cast records snapshot keywords but not
         // all ability lists, so "no abilities" cannot be proven here.
         | FilterProp::HasNoAbilities => false,
-        // Disjunctive composite: recurse into inner props under the same snapshot.
+        // Disjunctive composite: recurse into inner props under the same snapshot AND
+        // the same payment facts, so a source-qualified branch answers exactly as it
+        // would at the top level.
         FilterProp::AnyOf { props } => props
             .iter()
-            .any(|p| spell_record_matches_property(record, p, state, ctx)),
-        // CR 608.2c: Logical negation — recurse under the same snapshot and invert.
-        FilterProp::Not { prop } => !spell_record_matches_property(record, prop, state, ctx),
+            .any(|p| spell_record_matches_property(record, p, state, ctx, payment_facts)),
+        // CR 608.2c: Logical negation — recurse under the same snapshot and facts, and
+        // invert that ANSWER. An absent fact is not a negative answer: with the facts
+        // carried here, a live spell that paid with a Treasure negates to false
+        // instead of the true that "no fact seen" used to produce.
+        FilterProp::Not { prop } => {
+            !spell_record_matches_property(record, prop, state, ctx, payment_facts)
+        }
         // CR 111.1: Spell-cast records only track cast spells. Tokens are
         // permanents, so token identity is false and nontoken identity is true
         // for this snapshot shape.
@@ -24616,13 +24680,15 @@ mod tests {
     }
 
     /// Property-level twin of [`record_matches_no_state`]: the property matcher now
-    /// takes the same state and context, and a record-only property ignores both.
+    /// takes the same state, context and entry-resolved payment facts — these history
+    /// fixtures assert record snapshots, so the record's own facts are the answer.
     fn record_property_no_state(record: &SpellCastRecord, prop: &FilterProp) -> bool {
         spell_record_matches_property(
             record,
             prop,
             &GameState::default(),
             &FilterContext::neutral(),
+            spell_payment_facts(record, None),
         )
     }
 
