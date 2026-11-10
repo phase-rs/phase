@@ -50,6 +50,7 @@ use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::move_to_zone;
 use engine::types::ability::{Effect, TapStateChange, TargetRef};
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
 use engine::types::counter::parse_counter_type;
 use engine::types::game_state::{
     AutoPassMode, AutoPassRequest, CastPaymentMode, ExileLink, ExileLinkKind, LoopDetectionMode,
@@ -590,19 +591,20 @@ fn a_flickered_source_is_not_the_untaps_object() {
     }
 }
 
-/// The hold reads the top entry and its source only: with forty more queued
-/// untaps below it and sixty Treasures beside it, it copies the game once, for
-/// Monolith's one {T} mana row, and neither scans the battlefield for mana
-/// triggers nor takes a readiness or legality copy.
-#[test]
-fn the_untap_hold_reads_only_the_top_and_its_source() {
-    let Some(db) = shared_card_db() else { return };
+/// Basalt Monolith's untap on top, Monolith untapped, `queued` more of the same
+/// untap below it and `treasures` Treasures beside it. Returns the work the
+/// hold's recommendation does: its game copies and the engine's own counters.
+fn untap_hold_work(
+    db: &CardDatabase,
+    queued: u64,
+    treasures: usize,
+) -> (u64, perf_counters::PerfCounterSnapshot) {
     let mut scenario = main_phase_scenario();
     let monolith = scenario.add_real_card(P0, "Basalt Monolith", Zone::Battlefield, db);
     let mountains: Vec<_> = (0..3)
         .map(|_| scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db))
         .collect();
-    for _ in 0..60 {
+    for _ in 0..treasures {
         scenario.add_artifact_from_oracle(P0, "Treasure", TREASURE);
     }
     let mut runner = scenario.build();
@@ -611,34 +613,84 @@ fn the_untap_hold_reads_only_the_top_and_its_source() {
     }
     let untap = untap_ability_index(&runner, monolith);
     activate(&mut runner, monolith, untap, &[]);
-    let queued = runner.state().stack.back().expect("the untap").clone();
-    for id in 0..40 {
+    let top = runner.state().stack.back().expect("the untap").clone();
+    for id in 0..queued {
         runner.state_mut().stack.push_front(StackEntry {
             id: ObjectId(90_000 + id),
-            ..queued.clone()
+            ..top.clone()
         });
     }
 
     let state = runner.state();
     let actions = legal_actions(state);
     perf_counters::reset();
-    assert!(!auto_pass_recommended(state, &actions));
-    assert_eq!(perf_counters::untap_repeat_probe_snapshot().state_clones, 1);
-    let work = perf_counters::snapshot();
+    assert!(!auto_pass_recommended(state, &actions), "the window holds");
+    (
+        perf_counters::untap_repeat_probe_snapshot().state_clones,
+        perf_counters::snapshot(),
+    )
+}
+
+/// The hold reads the top entry and its source, and plays one tap, the passes
+/// and the untap's resolution on one copy. Forty more queued untaps below it and
+/// sixty Treasures beside it change none of that work: one copy, for Monolith's
+/// one {T} mana row, and every engine counter as on the bare board.
+#[test]
+fn the_untap_hold_reads_only_the_top_and_its_source() {
+    let Some(db) = shared_card_db() else { return };
+    let (bare_copies, bare) = untap_hold_work(db, 0, 0);
+    let (wide_copies, wide) = untap_hold_work(db, 40, 60);
+    assert_eq!((bare_copies, wide_copies), (1, 1));
     assert_eq!(
-        work.mana_aura_trigger_scans, 0,
-        "an artifact's mana rows read no battlefield trigger scan"
+        wide, bare,
+        "the stack's depth and the board's width add no work"
     );
-    assert_eq!(
+}
+
+/// Ashaya, Soul of the Wild, verbatim.
+const ASHAYA: &str = "Ashaya's power and toughness are each equal to the number of lands you control.\nNontoken creatures you control are Forest lands in addition to their other types. (They're still affected by summoning sickness.)";
+
+/// Devoted Druid under Ashaya is a Forest, so its mana comes through the land
+/// rows, which read the mana triggers. Its own untap on top, with sixty
+/// Treasures beside it, does the same work as on a bare board.
+#[test]
+fn a_land_source_reads_no_more_of_a_wide_board() {
+    let Some(db) = shared_card_db() else { return };
+    let work = |treasures: usize| {
+        let mut scenario = main_phase_scenario();
+        scenario.add_creature_from_oracle(P0, "Ashaya, Soul of the Wild", 0, 0, ASHAYA);
+        let druid = scenario
+            .add_creature_from_oracle(P0, "Devoted Druid", 0, 2, DEVOTED_DRUID)
+            .id();
+        for _ in 0..treasures {
+            scenario.add_artifact_from_oracle(P0, "Treasure", TREASURE);
+        }
+        let mut runner = scenario.build();
+        flush_layers(runner.state_mut());
+        clear_summoning_sickness(&mut runner, druid);
+        assert!(
+            runner.state().objects[&druid]
+                .card_types
+                .core_types
+                .contains(&CoreType::Land),
+            "Ashaya makes the Druid a land"
+        );
+        let untap = untap_ability_index(&runner, druid);
+        activate(&mut runner, druid, untap, &[]);
+        assert_eq!(top_source_name(&runner).as_deref(), Some("Devoted Druid"));
+        let state = runner.state();
+        let actions = legal_actions(state);
+        perf_counters::reset();
+        assert!(!auto_pass_recommended(state, &actions), "the window holds");
         (
-            work.state_clone_for_legality,
-            work.grouped_mana_readiness_state_clones,
-            work.strict_fast_path_mana_readiness_state_clones,
-            work.priority_cast_probe_state_clones,
-        ),
-        (0, 0, 0, 0),
-        "no readiness or legality copy beyond the probe's own"
-    );
+            perf_counters::untap_repeat_probe_snapshot().state_clones,
+            perf_counters::snapshot(),
+        )
+    };
+    let (bare_copies, bare) = work(0);
+    let (wide_copies, wide) = work(60);
+    assert_eq!(bare_copies, wide_copies);
+    assert_eq!(wide, bare, "the board's width adds no work");
 }
 
 /// Staff of Compleation, verbatim.
@@ -712,17 +764,7 @@ fn a_mana_ability_is_read_after_its_color_and_rider() {
             .map(|_| scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db))
             .collect();
         let mut runner = scenario.build();
-        for exiled_id in exiled {
-            move_to_zone(runner.state_mut(), exiled_id, Zone::Exile, &mut Vec::new());
-            runner.state_mut().exile_links.push(ExileLink {
-                exiled_id,
-                source_id: welder,
-                kind: ExileLinkKind::TrackedBySource,
-            });
-        }
-        runner.state_mut().layers_dirty.mark_full();
-        flush_layers(runner.state_mut());
-        clear_summoning_sickness(&mut runner, welder);
+        lend_to_welder(&mut runner, welder, &exiled);
         runner.state_mut().players[0].life = life;
         for mountain in mountains {
             tap_for_mana(&mut runner, mountain);
@@ -738,6 +780,110 @@ fn a_mana_ability_is_read_after_its_color_and_rider() {
             !recommends_pass(&runner),
             holds,
             "{life} life: whether the untap window holds"
+        );
+    }
+}
+
+/// Exiles `cards` with Myr Welder ("This creature has all activated abilities of
+/// all cards exiled with it."), so it has their activated abilities, and readies
+/// it to tap.
+fn lend_to_welder(runner: &mut GameRunner, welder: ObjectId, cards: &[ObjectId]) {
+    for &exiled_id in cards {
+        move_to_zone(runner.state_mut(), exiled_id, Zone::Exile, &mut Vec::new());
+        runner.state_mut().exile_links.push(ExileLink {
+            exiled_id,
+            source_id: welder,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+    }
+    runner.state_mut().layers_dirty.mark_full();
+    flush_layers(runner.state_mut());
+    clear_summoning_sickness(runner, welder);
+}
+
+/// CR 104.2a + CR 800.4a: with three players, Cryptolith Fragment's "Each player
+/// loses 1 life." at 2 life puts one opponent at 0. That player leaves, and the
+/// game goes on with the Welder's controller at 1, who can use it again, so the
+/// window holds. With two players the same use ends the game, and the pass
+/// stays.
+#[test]
+fn a_use_that_ends_only_one_opponents_game_still_holds() {
+    let Some(db) = shared_card_db() else { return };
+    for (players, holds) in [(2, false), (3, true)] {
+        let mut scenario = GameScenario::new_n_player(players, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let welder = scenario.add_real_card(P0, "Myr Welder", Zone::Battlefield, db);
+        let exiled = [
+            scenario
+                .add_artifact_to_hand_from_oracle(P0, "Staff of Compleation", STAFF_OF_COMPLEATION)
+                .id(),
+            scenario
+                .add_artifact_to_hand_from_oracle(P0, "Cryptolith Fragment", CRYPTOLITH_FRAGMENT)
+                .id(),
+        ];
+        let mountains: Vec<_> = (0..5)
+            .map(|_| scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db))
+            .collect();
+        let mut runner = scenario.build();
+        lend_to_welder(&mut runner, welder, &exiled);
+        runner.state_mut().players[0].life = 2;
+        runner.state_mut().players[1].life = 1;
+        for mountain in mountains {
+            tap_for_mana(&mut runner, mountain);
+        }
+        let untap = untap_ability_index(&runner, welder);
+        activate(&mut runner, welder, untap, &[]);
+        assert_eq!(top_source_name(&runner).as_deref(), Some("Myr Welder"));
+        assert!(mana_action(&runner, welder).is_some() && !is_tapped(&runner, welder));
+        assert_eq!(
+            !recommends_pass(&runner),
+            holds,
+            "{players} players: whether the untap window holds"
+        );
+    }
+}
+
+/// Soliton, verbatim.
+const SOLITON: &str = "{U}: Untap this creature.";
+/// Celestial Prism, verbatim.
+const CELESTIAL_PRISM: &str = "{2}, {T}: Add one mana of any color.";
+
+/// CR 601.2h + CR 605.3a: Myr Welder with Soliton and Celestial Prism exiled
+/// with it. After paying Soliton's {U}, two floating mana pay the Prism's {2}
+/// once, and its one mana can't pay it again, so the pass stays. With three,
+/// the Prism's mana and the one left over pay it again, and the window holds.
+#[test]
+fn a_second_use_needs_mana_left_to_pay_for_it() {
+    let Some(db) = shared_card_db() else { return };
+    for (islands, holds) in [(3, false), (4, true)] {
+        let mut scenario = main_phase_scenario();
+        let welder = scenario.add_real_card(P0, "Myr Welder", Zone::Battlefield, db);
+        let exiled = [
+            scenario
+                .add_creature_to_hand_from_oracle(P0, "Soliton", 3, 4, SOLITON)
+                .id(),
+            scenario
+                .add_artifact_to_hand_from_oracle(P0, "Celestial Prism", CELESTIAL_PRISM)
+                .id(),
+        ];
+        let islands: Vec<_> = (0..islands)
+            .map(|_| scenario.add_real_card(P0, "Island", Zone::Battlefield, db))
+            .collect();
+        let mut runner = scenario.build();
+        lend_to_welder(&mut runner, welder, &exiled);
+        let floating = islands.len() - 1;
+        for island in islands {
+            tap_for_mana(&mut runner, island);
+        }
+        let untap = untap_ability_index(&runner, welder);
+        activate(&mut runner, welder, untap, &[]);
+        assert_eq!(top_source_name(&runner).as_deref(), Some("Myr Welder"));
+        assert_eq!(mana_in_pool(&runner, ManaType::Blue), floating);
+        assert!(mana_action(&runner, welder).is_some() && !is_tapped(&runner, welder));
+        assert_eq!(
+            !recommends_pass(&runner),
+            holds,
+            "{floating} floating: whether the untap window holds"
         );
     }
 }
@@ -897,9 +1043,10 @@ fn printed_ability_index(runner: &GameRunner, source: ObjectId) -> usize {
 /// CR 608.2c: an untap behind a condition is read as the ability resolves, on
 /// the copy after the creature's mana use (each has Cryptolith Rite's "{T}: Add
 /// one mana of any color."). Eater of the Dead's "If this creature is tapped" is
-/// then true, so the window holds. Civilized Scholar, untapped by Vitalize in
-/// response, untaps only "If a creature card is discarded this way", which
-/// the copy never does, so the pass stays.
+/// then true, so the window holds, until its only target is gone. Civilized
+/// Scholar, untapped by Vitalize in response, untaps only "If a creature card
+/// is discarded this way", and the copy can't choose the player's discard, so
+/// the pass stays.
 #[test]
 fn a_conditional_untap_holds_only_when_its_condition_is_met() {
     let Some(db) = shared_card_db() else { return };
@@ -923,6 +1070,11 @@ fn a_conditional_untap_holds_only_when_its_condition_is_met() {
         "Eater: tapping it meets the condition"
     );
 
+    // CR 608.2b: with its only target gone from the graveyard the ability
+    // doesn't resolve, so there is no untap to wait for.
+    move_to_zone(runner.state_mut(), corpse, Zone::Exile, &mut Vec::new());
+    assert!(recommends_pass(&runner), "Eater: its target is gone");
+
     let mut scenario = main_phase_scenario();
     scenario.add_enchantment_from_oracle(P0, "Cryptolith Rite", CRYPTOLITH_RITE);
     let scholar = scenario
@@ -932,6 +1084,7 @@ fn a_conditional_untap_holds_only_when_its_condition_is_met() {
         .add_spell_to_hand_from_oracle(P0, "Vitalize", true, VITALIZE)
         .with_mana_cost(ManaCost::zero())
         .id();
+    scenario.add_real_card(P0, "Island", Zone::Library, db);
     let mut runner = scenario.build();
     clear_summoning_sickness(&mut runner, scholar);
     let loot = printed_ability_index(&runner, scholar);

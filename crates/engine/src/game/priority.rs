@@ -492,39 +492,21 @@ fn resolution_untaps_ready_mana_source(
         | StackEntryKind::KeywordAction { .. }
         | StackEntryKind::CombatDamage { .. } => return false,
     };
-    let mut gated = Vec::new();
-    let Some(source) = untapped_source(state, ability, &mut gated) else {
+    // The copy plays the stack from its top, so only the top's window is read.
+    if state.stack.back().map(|entry| entry.id) != Some(top.id) {
         return false;
-    };
-    // CR 608.2c: a condition on the way to the untap is read as the ability
-    // resolves, so it is read on the copy once the source has been tapped for
-    // mana there: Eater of the Dead's "If this creature is tapped" then holds,
-    // and Civilized Scholar's "If a creature card is discarded this way" doesn't,
-    // since the copy discards nothing.
-    let untap_is_reached = |copy: &GameState| {
-        gated.iter().all(|node| {
-            node.condition
-                .as_ref()
-                .is_none_or(|condition| super::effects::evaluate_condition(condition, copy, node))
-        })
-    };
-    mana_sources::untap_repeats_mana(state, player, source, untap_is_reached)
+    }
+    untapped_source(state, ability)
+        .is_some_and(|source| mana_sources::untap_repeats_mana(state, player, top.id, source))
 }
 
 /// The object a "Untap this artifact." / "Untap this creature." instruction in
-/// `ability`'s chain untaps, bound as its resolver binds it
+/// `ability`'s chain would untap, bound as its resolver binds it
 /// (`ResolvedAbility::self_ref_binding`): none once the source has left the
-/// battlefield, even if it came back (CR 400.7). The walk follows the root and
-/// its sub-instructions, not an `else` branch, and collects in `gated` each node
-/// on the way whose condition decides whether the untap is reached.
-fn untapped_source<'a>(
-    state: &GameState,
-    ability: &'a ResolvedAbility,
-    gated: &mut Vec<&'a ResolvedAbility>,
-) -> Option<ObjectId> {
-    if ability.condition.is_some() {
-        gated.push(ability);
-    }
+/// battlefield, even if it came back (CR 400.7). Whether resolution reaches the
+/// instruction (a condition, a target gone illegal) is the resolver's answer,
+/// read by `untap_repeats_mana` on its copy.
+fn untapped_source(state: &GameState, ability: &ResolvedAbility) -> Option<ObjectId> {
     let untaps_its_source = matches!(
         ability.effect,
         Effect::SetTapState {
@@ -537,10 +519,10 @@ fn untapped_source<'a>(
         .then(|| ability.self_ref_binding(state))
         .flatten()
         .or_else(|| {
-            ability
-                .sub_ability
-                .as_deref()
-                .and_then(|sub| untapped_source(state, sub, gated))
+            [&ability.sub_ability, &ability.else_ability]
+                .into_iter()
+                .flatten()
+                .find_map(|branch| untapped_source(state, branch))
         })
 }
 
@@ -1543,11 +1525,13 @@ mod tests {
         }
 
         /// CR 701.26b: the untap does nothing to a permanent that is already
-        /// untapped, so the window is held until it has been tapped.
+        /// untapped, so the window is held until it has been tapped. The untap
+        /// is on the stack, where the hold plays it out on a copy.
         #[test]
         fn own_activated_untap_holds_only_while_its_object_can_tap_for_mana() {
             let (mut state, forest, _) = board();
             let untap = activated_top(PlayerId(0), forest, untap_itself(forest, PlayerId(0)));
+            state.stack.push_back(untap.clone());
             assert_eq!(verdict(&state, &untap), StandingPriorityPass::Held);
 
             state.objects.get_mut(&forest).unwrap().tapped = true;
@@ -1579,8 +1563,9 @@ mod tests {
         /// player act, so the same untap keeps the pass.
         #[test]
         fn own_triggered_untap_keeps_the_pass_while_its_object_can_tap_for_mana() {
-            let (state, forest, _) = board();
+            let (mut state, forest, _) = board();
             let activated = activated_top(PlayerId(0), forest, untap_itself(forest, PlayerId(0)));
+            state.stack.push_back(activated.clone());
             assert_eq!(verdict(&state, &activated), StandingPriorityPass::Held);
 
             let triggered = top(PlayerId(0), forest, untap_itself(forest, PlayerId(0)));
