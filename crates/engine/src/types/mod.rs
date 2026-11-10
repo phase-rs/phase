@@ -18,7 +18,6 @@ pub mod interaction;
 /// Test-only migrations for committed capture fixtures; see the module docs.
 #[cfg(any(test, feature = "test-support"))]
 pub mod legacy_capture_fixture;
-pub mod legacy_compat;
 /// Legacy-compat tripwire arithmetic; see `docs/LEGACY-COMPAT.md`.
 pub mod log;
 pub mod mana;

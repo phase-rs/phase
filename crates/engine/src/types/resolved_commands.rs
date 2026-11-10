@@ -4247,32 +4247,20 @@ impl ResolvedRulesJournal {
 /// (`d247cee56`, July 2026) and every released build wrote it WITHOUT this field, so
 /// the older shape is on the wire. What is new is the field, not the record.
 ///
-/// The tripwire below fails to COMPILE once the workspace version crosses the removal
-/// boundary, so the fallback cannot outlive it by inattention. Removing it means
-/// answering `None` as "this payload states no settlement" instead of inferring one,
-/// and deleting both this const and its `docs/LEGACY-COMPAT.md` entry.
+/// The shim's deadline is documented, not compiled: it must be removed once a
+/// release above 0.137.0 ships (`+14` releases from the version that ships it),
+/// and removing it means answering `None` as "this payload states no settlement" instead of inferring one — a payload that omits the field then becomes a
+/// refused contradiction rather than the legacy shape. Removing the shim means
+/// deleting both this const and its `docs/LEGACY-COMPAT.md` entry.
 ///
-/// Grep token: `LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4`. See
-/// `docs/LEGACY-COMPAT.md`.
+/// The const carries only the grep token on purpose. An earlier revision asserted the
+/// deadline against `CARGO_PKG_VERSION_*` at compile time: that is a new
+/// environment-variable read the intake policy requires a maintainer to review, and it
+/// turned every release bump into a compile failure for `main` and every open PR.
+///
+/// Grep token: `LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4`. See `docs/LEGACY-COMPAT.md`.
 #[allow(dead_code)]
-const _LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4: () = {
-    // Ships in 0.123.0; the `+14`-release window closes after 0.137.0.
-    const SHIPPED_IN: (u32, u32, u32) = (0, 123, 0);
-    const BOUNDARY: (u32, u32, u32) =
-        crate::types::legacy_compat::legacy_removal_boundary(SHIPPED_IN);
-    let now = (
-        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_MAJOR")),
-        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_MINOR")),
-        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_PATCH")),
-    );
-    assert!(
-        crate::types::legacy_compat::within_legacy_window(BOUNDARY, now),
-        "LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4: remove the pip-inference \
-         fallback in ResolvedRulesJournal::node_settled (the `None => \
-         !node.produced_pips.is_empty()` arm) and this tripwire once we ship past \
-         0.137.0. See docs/LEGACY-COMPAT.md."
-    );
-};
+const _LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4: () = ();
 
 /// CR 605.2 + CR 605.3b: what a retained settlement node's own record states about
 /// whether it resolved. See [`ResolvedRulesJournal::node_settlement`].

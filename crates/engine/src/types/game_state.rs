@@ -11988,33 +11988,20 @@ impl PendingManaAbility {
 /// and the occurrence field only since 0.123, so an occurrence-less save is an
 /// older save, not a contradiction.
 ///
-/// The tripwire below fails to COMPILE once the workspace version crosses the removal
-/// boundary. Removing it means requiring the occurrence on every parked activation (a
-/// payload that omits it then becomes a refused contradiction rather than the legacy
-/// shape), and deleting both this const and its `docs/LEGACY-COMPAT.md` entry.
+/// The shim's deadline is documented, not compiled: it must be removed once a
+/// release above 0.137.0 ships (`+14` releases from the version that ships it),
+/// and removing it means requiring the occurrence on every parked activation — a payload that omits the field then becomes a
+/// refused contradiction rather than the legacy shape. Removing the shim means
+/// deleting both this const and its `docs/LEGACY-COMPAT.md` entry.
 ///
-/// Grep token: `LEGACY_PARKED_ACTIVATION_OCCURRENCE_ABSENT_2026Q4`. See
-/// `docs/LEGACY-COMPAT.md`.
+/// The const carries only the grep token on purpose. An earlier revision asserted the
+/// deadline against `CARGO_PKG_VERSION_*` at compile time: that is a new
+/// environment-variable read the intake policy requires a maintainer to review, and it
+/// turned every release bump into a compile failure for `main` and every open PR.
+///
+/// Grep token: `LEGACY_PARKED_ACTIVATION_OCCURRENCE_ABSENT_2026Q4`. See `docs/LEGACY-COMPAT.md`.
 #[allow(dead_code)]
-const _LEGACY_PARKED_ACTIVATION_OCCURRENCE_ABSENT_2026Q4: () = {
-    // Ships in 0.123.0; the `+14`-release window closes after 0.137.0.
-    const SHIPPED_IN: (u32, u32, u32) = (0, 123, 0);
-    const BOUNDARY: (u32, u32, u32) =
-        crate::types::legacy_compat::legacy_removal_boundary(SHIPPED_IN);
-    let now = (
-        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_MAJOR")),
-        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_MINOR")),
-        crate::types::legacy_compat::parse_version_component(env!("CARGO_PKG_VERSION_PATCH")),
-    );
-    assert!(
-        crate::types::legacy_compat::within_legacy_window(BOUNDARY, now),
-        "LEGACY_PARKED_ACTIVATION_OCCURRENCE_ABSENT_2026Q4: remove the \
-         occurrence-absent arm in \
-         PendingManaAbility::activation_producer_evidence (the `None => \
-         ParkedActivationConflict::SettledWithoutOccurrence` branch) and this \
-         tripwire once we ship past 0.137.0. See docs/LEGACY-COMPAT.md."
-    );
-};
+const _LEGACY_PARKED_ACTIVATION_OCCURRENCE_ABSENT_2026Q4: () = ();
 
 /// CR 605.3b + CR 113.7: the producer evidence a parked mana activation's own
 /// recorded execution node carries, once the journal has been asked what that

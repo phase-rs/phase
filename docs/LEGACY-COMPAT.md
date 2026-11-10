@@ -14,18 +14,20 @@ tripwire const in the source.
 Each entry MUST include:
 
 - **Grep token** — a unique `LEGACY_*` constant name that appears verbatim both
-  in the source tripwire const and in this index.
+  in the source const and in this index.
 - **What it covers** — the on-disk shape being accepted in addition to the
   current one.
 - **Added in** — workspace version when the shim landed.
-- **Removal trigger** — the version boundary at which the tripwire `assert!`
-  fires (usually `+14` releases as a soft window for downstream catch-up).
-  Releases here bump the MINOR component only (`v0.121.0`, `v0.122.0`, ...), so the
-  window is counted in minor releases: a shim authored at 0.122.0 stays legal
-  through 0.136.0 and its tripwire fires at 0.137.0. Counting the window in patch
-  positions instead collapses it to the single next release and breaks the build for
-  `main` and every open PR whenever a release lands.
-- **Source** — file:line of the tripwire const.
+- **Removal trigger** — the version boundary past which the shim must be removed
+  (usually `+14` releases as a soft window for downstream catch-up). Releases here
+  bump the MINOR component only (`v0.121.0`, `v0.122.0`, ...), so the window is
+  counted in minor releases: a shim shipping in 0.123.0 must go once a release above
+  0.137.0 ships. The boundary is DOCUMENTED, not compiled — the source const carries
+  only the grep token. An earlier revision asserted it against
+  `CARGO_PKG_VERSION_*` in a `const` block; that is a new environment-variable read
+  the intake policy reserves for maintainer review, and it also turned every release
+  bump into a compile failure for `main` and every open PR.
+- **Source** — file:line of the grep-token const.
 
 ## Active shims
 
@@ -41,10 +43,10 @@ Each entry MUST include:
   `"settled"` occurrences) and must keep restoring. What is new is the field, not
   the record.
 - **Added in:** 0.123.0.
-- **Removal trigger:** the tripwire `assert!` fires once a release above 0.137.0
-  ships (`+14` releases from the shipping version). Removing the shim means
-  answering `None` as "this payload states no settlement" rather than inferring one.
-- **Source:** `crates/engine/src/types/resolved_commands.rs:4223` (tripwire const);
+- **Removal trigger:** must be removed once a release above 0.137.0 ships (`+14`
+  releases from the shipping version). Removing the shim means answering `None` as
+  "this payload states no settlement" rather than inferring one.
+- **Source:** `crates/engine/src/types/resolved_commands.rs:4223` (grep-token const);
   the shimmed arm is `ResolvedRulesJournal::node_settled`.
 
 ### `LEGACY_PARKED_ACTIVATION_OCCURRENCE_ABSENT_2026Q4` — ACTIVE
@@ -59,10 +61,10 @@ Each entry MUST include:
   and this field only by 0.123, so an occurrence-less save is an older save, not a
   contradiction.
 - **Added in:** 0.123.0.
-- **Removal trigger:** the tripwire `assert!` fires once a release above 0.137.0
-  ships (`+14` releases from the shipping version). Removing the shim means
-  requiring the occurrence on every parked activation.
-- **Source:** `crates/engine/src/types/game_state.rs:11930` (tripwire const); the
+- **Removal trigger:** must be removed once a release above 0.137.0 ships (`+14`
+  releases from the shipping version). Removing the shim means requiring the
+  occurrence on every parked activation.
+- **Source:** `crates/engine/src/types/game_state.rs:11930` (grep-token const); the
   shimmed `None` arm is `PendingManaAbility::activation_producer_evidence`.
 
 ### Not a shim: `PendingCast::assist_contributed_units` absence
