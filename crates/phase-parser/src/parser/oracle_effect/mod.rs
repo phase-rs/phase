@@ -32409,12 +32409,12 @@ fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter, draw_inherit
         // actor authority; bind it here, at the clause that resolves the
         // subject, instead of rewriting the completed ability tree.
         Effect::RevealUntil { player, .. }
-            if matches!(
-                *player,
-                TargetFilter::ParentTarget
-                    | TargetFilter::Controller
-                    | TargetFilter::ParentTargetController
-            ) =>
+            if matches!(*player, TargetFilter::ParentTarget | TargetFilter::Player)
+                || (draw_inherits_anchor
+                    && matches!(
+                        *player,
+                        TargetFilter::Controller | TargetFilter::ParentTargetController
+                    )) =>
         {
             *player = anchor.clone();
         }

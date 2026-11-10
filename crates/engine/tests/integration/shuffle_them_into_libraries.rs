@@ -8,7 +8,7 @@ use engine::types::ability::{
 };
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
@@ -186,4 +186,105 @@ fn turn_the_earth_replaced_deliveries_still_shuffle_the_owner() {
         "the owner is still shuffled exactly once: {events:?}"
     );
     assert_eq!(shuffles_for(events, P1), 0, "{events:?}");
+}
+
+/// CR 701.24c + CR 400.3: "shuffle that card into its owner's library" (the
+/// Malfegor Avatar / Mephidross Slime shape) captures the moved card's owner
+/// before delivery. The printed Malfegor trigger's "if it was unearthed"
+/// condition is unsupported, so this exercises the same supported trigger and
+/// effect shape: one exiled card, one owner, exactly one shuffle.
+#[test]
+fn exile_trigger_shuffle_that_card_shuffles_its_owner_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let trigger_source = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Exile Shuffler",
+            1,
+            1,
+            "Whenever a creature you control is exiled, shuffle that card into its owner's library.",
+        )
+        .id();
+    let victim = scenario.add_creature(P0, "Exiled Bear", 2, 2).id();
+    let swords = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Swords to Plowshares",
+            true,
+            "Exile target creature. Its controller gains life equal to its power.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::White],
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::White, swords, false, vec![])],
+    );
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(swords).target_object(victim).resolve();
+    let events = outcome.events();
+
+    assert_eq!(
+        outcome.state().objects[&victim].zone,
+        Zone::Library,
+        "the exiled card is shuffled into its owner's library"
+    );
+    assert_eq!(
+        shuffles_for(events, P0),
+        1,
+        "one card, one owner, exactly one shuffle: {events:?}"
+    );
+    assert_eq!(shuffles_for(events, P1), 0, "{events:?}");
+    assert!(
+        outcome.state().objects.contains_key(&trigger_source),
+        "reach guard: the trigger source stayed on the battlefield"
+    );
+}
+
+/// CR 701.24c + CR 400.3: Serene Remembrance shuffles itself and cards from one
+/// graveyard into their owners' libraries. The source's owner and the selected
+/// cards' owner can differ, so the compound move settles once for each owner,
+/// not through a first-owner terminal.
+#[test]
+fn serene_remembrance_settles_once_for_each_compound_owner() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Serene Remembrance",
+            false,
+            "Shuffle Serene Remembrance and up to three target cards from a single graveyard into their owners' libraries.",
+        )
+        .id();
+    let first = scenario
+        .add_creature_to_graveyard(P1, "P1 First Relic", 1, 1)
+        .id();
+    let second = scenario
+        .add_creature_to_graveyard(P1, "P1 Second Relic", 1, 1)
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner
+        .cast(spell)
+        .target_objects(&[first, second])
+        .resolve();
+    let events = outcome.events();
+
+    assert_eq!(outcome.state().objects[&spell].zone, Zone::Library);
+    assert_eq!(outcome.state().objects[&first].zone, Zone::Library);
+    assert_eq!(outcome.state().objects[&second].zone, Zone::Library);
+    assert_eq!(
+        shuffles_for(events, P0),
+        1,
+        "the source's owner shuffles once: {events:?}"
+    );
+    assert_eq!(
+        shuffles_for(events, P1),
+        1,
+        "the selected cards' owner shuffles once: {events:?}"
+    );
 }
