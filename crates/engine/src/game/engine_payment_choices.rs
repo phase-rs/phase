@@ -2103,6 +2103,8 @@ fn finish_unless_payment(
 /// after their replacement post-effects finish, because the mana and life
 /// components were committed before the replacement choice opened.
 const REPEATED_DRAW_CHUNK: u32 = 64;
+/// CR 702.24a: one chunk per public action; the next action resumes the rest.
+const REPEATED_DRAW_CHUNKS_PER_ACTION: u32 = 1;
 
 /// CR 702.24a + CR 118.12: pay a compact repeated draw unless-cost through a
 /// counted cursor. Each chunk materializes at most `REPEATED_DRAW_CHUNK`
@@ -2115,6 +2117,18 @@ pub(crate) fn drive_pending_unless_draw_repeat(
         let Some(mut pending) = state.pending_unless_draw_repeat.take() else {
             return Ok(state.waiting_for.clone());
         };
+        if state.unless_draw_chunks_this_action >= REPEATED_DRAW_CHUNKS_PER_ACTION {
+            // The player already chose to pay; hand a live priority boundary
+            // so the next action resumes the next chunk instead of re-asking
+            // the same unless cost.
+            state.pending_unless_draw_repeat = Some(pending);
+            if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+            }
+            return Ok(state.waiting_for.clone());
+        }
         if pending.paused_draw_pending {
             // The open replacement prompt has settled, so its draw committed.
             pending.paused_draw_pending = false;
@@ -2131,6 +2145,7 @@ pub(crate) fn drive_pending_unless_draw_repeat(
             )? {
                 PaymentOutcome::Paid => {
                     pending.remaining = pending.remaining.saturating_sub(suffix_count);
+                    state.unless_draw_chunks_this_action += 1;
                     if pending.remaining == 0 {
                         return finish_successful_unless_payment(
                             state,
@@ -2196,6 +2211,7 @@ pub(crate) fn drive_pending_unless_draw_repeat(
         )? {
             PaymentOutcome::Paid => {
                 pending.remaining -= chunk;
+                state.unless_draw_chunks_this_action += 1;
                 if pending.remaining == 0 {
                     return finish_successful_unless_payment(
                         state,

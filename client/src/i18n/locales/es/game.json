@@ -1310,7 +1310,10 @@
         "Ticket": "ticket"
       },
       "generic": "un coste",
-      "pay": "Pagar {{cost}}"
+      "pay": "Pagar {{cost}}",
+      "draw": "draw a card",
+      "drawCount_one": "draw {{count}} card",
+      "drawCount_other": "draw {{count}} cards"
     },
     "unlessPayment": {
       "defaultEffect": "Contrarrestar a menos que pagues",

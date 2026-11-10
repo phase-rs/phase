@@ -1310,7 +1310,10 @@
         "Ticket": "biletu"
       },
       "generic": "koszt",
-      "pay": "Zapłać {{cost}}"
+      "pay": "Zapłać {{cost}}",
+      "draw": "draw a card",
+      "drawCount_one": "draw {{count}} card",
+      "drawCount_other": "draw {{count}} cards"
     },
     "unlessPayment": {
       "defaultEffect": "Skontruj, chyba że zapłacisz",

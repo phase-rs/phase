@@ -1532,6 +1532,17 @@ fn a_large_age_count_accepts_through_the_counted_cursor() {
     runner
         .act(GameAction::PayUnlessCost { pay: true })
         .expect("paying a large cumulative upkeep is legal");
+    // CR 702.24a: one bounded chunk per public action; priority between them.
+    while runner.state().pending_unless_draw_repeat.is_some() {
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing between counted chunks is legal");
+            }
+            other => panic!("expected priority between counted chunks, got {other:?}"),
+        }
+    }
     let after = ZoneSizes::of(&runner, P0);
     assert_eq!(after.hand, before.hand + AGE as usize);
     assert_eq!(after.library, before.library - AGE as usize);
@@ -1563,14 +1574,27 @@ fn a_counted_chunk_pause_retains_the_unpaid_draws() {
     runner
         .act(GameAction::PayUnlessCost { pay: true })
         .expect("paying a large cumulative upkeep is legal");
-    for instruction in 1..=AGE {
-        assert_replacement_choice(&runner, &format!("Dredge pauses draw {instruction}"));
-        runner
-            .act(GameAction::ChooseReplacement {
-                index: DECLINE_REPLACEMENT,
-            })
-            .expect("declining Dredge is legal");
+    let mut declines = 0u32;
+    while runner.state().pending_unless_draw_repeat.is_some() {
+        match &runner.state().waiting_for {
+            WaitingFor::ReplacementChoice { .. } => {
+                declines += 1;
+                assert_replacement_choice(&runner, &format!("Dredge pauses draw {declines}"));
+                runner
+                    .act(GameAction::ChooseReplacement {
+                        index: DECLINE_REPLACEMENT,
+                    })
+                    .expect("declining Dredge is legal");
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing between counted chunks is legal");
+            }
+            other => panic!("unexpected counted-draw prompt: {other:?}"),
+        }
     }
+    assert_eq!(declines, AGE, "every printed draw paused on its own Dredge");
     let after = ZoneSizes::of(&runner, P0);
     assert_eq!(
         after.hand,

@@ -1436,6 +1436,8 @@ fn apply_action_boundary_core(
     authorize_actor: bool,
 ) -> Result<RawActionApplication, EngineError> {
     let lifecycle = super::lifecycle::enter_action_frame();
+    // CR 702.24a: bound counted-draw work to one chunk per public action.
+    state.unless_draw_chunks_this_action = 0;
     if let Err(error) = mana_sources::preflight_tap_land_action(state, authenticated_actor, &action)
     {
         lifecycle.discard();

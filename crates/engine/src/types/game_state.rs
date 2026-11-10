@@ -25854,6 +25854,10 @@ declare_game_state! {
     /// is allocated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_unless_draw_repeat: Option<Box<PendingUnlessDrawRepeat>>,
+    /// CR 702.24a: bounded work per public action; the next chunk waits for a
+    /// fresh action boundary. Runtime-only (never persisted).
+    #[serde(skip)]
+    pub unless_draw_chunks_this_action: u32,
     /// CR 608.2c + CR 701.9a: a discard instruction parked by a
     /// replacement-application choice. See [`PendingDiscardBatch`], whose doc
     /// records why CR 616.1 does not govern this path.
@@ -34364,6 +34368,7 @@ impl GameState {
             pending_player_scope_sacrifice_choice: None,
             pending_player_scope_unless_payment: None,
             pending_unless_draw_repeat: None,
+            unless_draw_chunks_this_action: 0,
             pending_discard_batch: None,
             pending_hero_event: None,
             pending_horde_reveal: None,
@@ -38497,6 +38502,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_player_scope_sacrifice_choice: _,
         pending_player_scope_unless_payment: _,
         pending_unless_draw_repeat: _,
+        unless_draw_chunks_this_action: _,
         pending_discard_batch: _,
         pending_hero_event: _,
         pending_horde_reveal: _,

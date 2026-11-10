@@ -1343,7 +1343,10 @@
         "Ticket": "チケット"
       },
       "generic": "コスト",
-      "pay": "{{cost}}を支払う"
+      "pay": "{{cost}}を支払う",
+      "draw": "draw a card",
+      "drawCount_one": "draw {{count}} card",
+      "drawCount_other": "draw {{count}} cards"
     },
     "unlessPayment": {
       "defaultEffect": "支払わなければ打ち消す",

@@ -1310,7 +1310,10 @@
         "Ticket": "ticket"
       },
       "generic": "un costo",
-      "pay": "Paga {{cost}}"
+      "pay": "Paga {{cost}}",
+      "draw": "draw a card",
+      "drawCount_one": "draw {{count}} card",
+      "drawCount_other": "draw {{count}} cards"
     },
     "unlessPayment": {
       "defaultEffect": "Neutralizza a meno che non paghi",
