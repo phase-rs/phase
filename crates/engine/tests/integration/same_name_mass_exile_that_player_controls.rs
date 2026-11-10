@@ -17,7 +17,7 @@ use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -67,6 +67,12 @@ tokens that player controls with the same name as that permanent.";
 const LEGIONS_END: &str = "Exile target creature an opponent controls with mana value 2 or less \
 and all other creatures that player controls with the same name as that creature. Then that \
 player reveals their hand and exiles all cards with that name from their hand and graveyard.";
+
+// Verbatim Oracle text (Scryfall), mana cost {1}{W}{U}.
+const DETENTION_SPHERE: &str = "When this enchantment enters, you may exile target nonland \
+permanent not named Detention Sphere and all other permanents with the same name as that \
+permanent.\nWhen this enchantment leaves the battlefield, return the exiled cards to the \
+battlefield under their owner's control.";
 
 const DEPUTY_OF_DETENTION: &str = "When this creature enters, exile target nonland permanent an \
 opponent controls and all other nonland permanents that player controls with the same name as \
@@ -1134,4 +1140,134 @@ fn mass_exile_that_exiles_its_own_source_still_satisfies_if_you_do() {
         "victim moved"
     );
     assert_eq!(hand_size(runner.state(), P0), hand_before + 1, "one draw");
+}
+
+/// CR 201.2 + CR 115.1: Detention Sphere's ETB target is "a nonland permanent
+/// not named Detention Sphere" — another Detention Sphere is not a legal
+/// target. CR 201.2a: the mass conjunct exiles every other permanent with the
+/// target's name regardless of controller, and CR 607.2a + CR 607.3: the
+/// leaves-the-battlefield trigger returns all of them, not just the target.
+#[test]
+fn detention_sphere_exiles_same_named_permanents_and_returns_them_all() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let twin = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let mine = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let other_name = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+    let rival_sphere = scenario
+        .add_enchantment_from_oracle(P1, "Detention Sphere", DETENTION_SPHERE)
+        .id();
+
+    let sphere = scenario
+        .add_spell_to_hand(P0, "Detention Sphere", false)
+        .as_enchantment()
+        .from_oracle_text(DETENTION_SPHERE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::White, ManaCostShard::Blue],
+        })
+        .id();
+    let disenchant = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Disenchant",
+            true,
+            "Destroy target artifact or enchantment.",
+        )
+        .with_mana_cost(free())
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::White, ManaType::Blue, ManaType::Colorless]
+            .into_iter()
+            .map(|mana| ManaUnit::new(mana, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+
+    let mut runner = scenario.build();
+    let _ = runner.cast(sphere).commit();
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        0,
+        "Detention Sphere's {{1}}{{W}}{{U}} must be paid"
+    );
+
+    let mut legal_targets = None;
+    let mut accepted = false;
+    for _ in 0..48 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::TriggerTargetSelection { target_slots, .. } => {
+                legal_targets = Some(target_slots[0].legal_targets.clone());
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(victim)),
+                    })
+                    .expect("choose the ETB target");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                accepted = true;
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept the exile");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            other => panic!("resolution halted at {other:?}"),
+        }
+    }
+    assert!(on_battlefield(runner.state(), sphere), "the Sphere entered");
+    assert!(accepted, "the \"you may\" exile must be offered");
+
+    // CR 201.2: the name restriction removes the other Sphere from the target
+    // set while the rest of the nonland permanents stay legal.
+    let legal_targets = legal_targets.expect("the ETB must prompt for its target");
+    assert!(
+        legal_targets.contains(&TargetRef::Object(victim))
+            && legal_targets.contains(&TargetRef::Object(other_name)),
+        "nonland permanents not named Detention Sphere are legal: {legal_targets:?}"
+    );
+    assert!(
+        !legal_targets.contains(&TargetRef::Object(rival_sphere)),
+        "a permanent named Detention Sphere must not be a legal target: {legal_targets:?}"
+    );
+
+    // CR 201.2a: every permanent named Grizzly Bears is exiled, including the
+    // Sphere controller's own; a differently named permanent stays.
+    let state = runner.state();
+    for (id, label) in [
+        (victim, "target"),
+        (twin, "opponent's twin"),
+        (mine, "own twin"),
+    ] {
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Exile,
+            "{label} must be exiled"
+        );
+    }
+    assert!(on_battlefield(state, other_name), "Runeclaw Bear must stay");
+    assert!(
+        on_battlefield(state, rival_sphere),
+        "the other Sphere must stay"
+    );
+
+    // CR 607.2a + CR 607.3: the leaves-the-battlefield trigger returns every
+    // card the enters trigger exiled, under each owner's control.
+    let _ = runner.cast(disenchant).target_object(sphere).commit();
+    settle(&mut runner);
+    assert_eq!(runner.state().objects[&sphere].zone, Zone::Graveyard);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(named_on_battlefield(runner.state(), P1, "Grizzly Bears"), 2);
+    assert_eq!(named_on_battlefield(runner.state(), P0, "Grizzly Bears"), 1);
 }

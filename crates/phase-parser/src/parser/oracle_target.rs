@@ -706,6 +706,31 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     (filter, rest)
 }
 
+/// CR 201.2 + CR 115.1: "target <type> not named <card name>" restricts the
+/// target slot by name ("target nonland permanent not named Detention Sphere",
+/// "target permanent not named Clever Conjurer"). It names a card, not the
+/// source object, so every object with that name is excluded — CR 201.5 binds
+/// only a self-reference. The shared combinator ends the name at the named-filter
+/// clause boundary and leaves any trailing conjunct ("and all other permanents
+/// …", "from a graveyard") in the remainder for the caller. Scoped to the target
+/// keyword: search filters keep their own `SharesQuality` lowering, which their
+/// "different names" suffix reads.
+fn parse_target_not_named_suffix(filter: TargetFilter, rest: &str) -> (TargetFilter, &str) {
+    let TargetFilter::Typed(mut typed) = filter else {
+        return (filter, rest);
+    };
+    let lower = rest.to_lowercase();
+    match nom_on_lower(rest, &lower, |input| {
+        preceded(multispace0, nom_filter::parse_not_named_suffix).parse(input)
+    }) {
+        Some((prop, after)) => {
+            typed.properties.push(prop);
+            (TargetFilter::Typed(typed), after)
+        }
+        None => (TargetFilter::Typed(typed), rest),
+    }
+}
+
 /// CR 115.10a + CR 608.2h: Bind an untargeted "each other" population to the
 /// immediate instruction's sole object target, never to a target-selection slot.
 pub(crate) fn parse_parent_target_controller_population<'a>(
@@ -1481,6 +1506,7 @@ pub fn parse_target_with_syntax<'a>(
         // — it pushes `IsCommander` and composes uniformly with the existing
         // suffix machinery (ownership, control, counters, "with X", etc.).
         let (filter, rest) = parse_type_phrase_folding_with_ctx(&text[target_offset..], ctx);
+        let (filter, rest) = parse_target_not_named_suffix(filter, rest);
         // CR 115.1: an object-headed coordinated list whose later leg is a
         // player ("creature token, player, or planeswalker") is still one
         // target slot. Extend only when a player leg actually appears, so
@@ -2617,6 +2643,11 @@ fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<Ora
         value((), tag(" that ")),
         value((), tag(" with ")),
         value((), tag(" without ")),
+        // CR 201.2a: a coordinated mass conjunct opens a new noun phrase after
+        // the name ("not named Detention Sphere and all other permanents with
+        // the same name as that permanent"). Bare " and " stays inside the name
+        // ("Gisa and Geralf").
+        value((), tag(" and all other ")),
         // CR 201.2 + CR 400.1: origin-zone suffixes are outside the literal
         // card name ("card named X from your graveyard"). Require a real zone
         // suffix after "from" so names like "Extract from Darkness" stay whole.
