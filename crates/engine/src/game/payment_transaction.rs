@@ -693,6 +693,13 @@ fn checkpoint_state(shadow: &GameState) -> GameState {
     checkpoint.payment_transaction = None;
     checkpoint.payment_transaction_replay = false;
     checkpoint.payment_transaction_just_handled = false;
+    // CR 706.1a: a roll or shuffle sampled on the shadow advances its stream;
+    // stamp the serialized high-water so the recorded position travels with
+    // the checkpoint even when the resolver did not capture it explicitly.
+    let sampled = checkpoint.rng.get_word_pos();
+    if sampled > checkpoint.rng_word_pos {
+        checkpoint.rng_word_pos = sampled;
+    }
     checkpoint
 }
 
@@ -831,6 +838,9 @@ pub(crate) fn retire_terminal_transaction(state: &mut GameState) {
         state.payment_transaction = None;
         state.payment_transaction_replay = false;
         state.payment_transaction_just_handled = false;
+        // CR 104.1: a finished game has no resolving payment owner; a counted
+        // repeated-payment cursor must not survive into the results view.
+        state.pending_unless_draw_repeat = None;
     }
 }
 
@@ -844,10 +854,13 @@ fn carry_runtime_authorities(shadow: &mut GameState, live: &GameState) {
     shadow.booster_shelf = live.booster_shelf.clone();
     shadow.all_card_names = live.all_card_names.clone();
     shadow.log_player_names = live.log_player_names.clone();
-    // CR 706.1a + CR 118.12: the completed shadow carries the accepted
-    // entropy (seed, word cursor, and any recorded shuffle permutation).
-    // Overwriting it with the live stream would rewind the randomness that
-    // produced the accepted outcome.
+    // CR 706.1a + CR 118.12: the accepted prefix's outcomes (including any
+    // recorded shuffle permutation) are already in the shadow's state; the
+    // future stream belongs to the restored host, whose fresh reseed must not
+    // be overwritten by the checkpoint's older cursor.
+    shadow.rng = live.rng.clone();
+    shadow.rng_seed = live.rng_seed;
+    shadow.rng_word_pos = live.rng_word_pos;
     // Session/authority state is not part of the accepted payment: a restored
     // or revoked capability decision belongs to the live session, not to the
     // checkpoint snapshot.

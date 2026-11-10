@@ -1404,6 +1404,19 @@ pub fn create_debug_cards(
     if request.count == 0 {
         return Ok(ActionResult::applied(vec![], state.waiting_for.clone()));
     }
+    // CR 118.12: a source-bound creation materialized on the live board would
+    // be discarded by the accepted checkpoint at settlement. Own the invariant
+    // at the shared creation boundary, not only in the transports. The
+    // zero-count projection above stays a no-op.
+    if state
+        .payment_transaction
+        .as_ref()
+        .is_some_and(|transaction| transaction.recovered.is_some())
+    {
+        return Err(EngineError::InvalidAction(
+            "sandbox card creation is unavailable while a recovered payment is parked".to_string(),
+        ));
+    }
     let description = debug_action.describe(state);
     let before = state.clone();
     let DebugCardCreateRequest {

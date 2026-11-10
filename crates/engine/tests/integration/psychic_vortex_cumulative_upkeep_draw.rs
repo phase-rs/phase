@@ -1627,3 +1627,43 @@ fn a_counted_payment_with_an_empty_library_fails_atomically() {
         "no partial draws were kept"
     );
 }
+
+/// CR 117.2e + CR 121.4 + CR 702.24a: with 65 counters, an empty library and
+/// Obstinate Familiar, the first draw's replacement is offered; declining it
+/// fails the payment atomically without parking a cursor or a priority.
+#[test]
+fn a_counted_payment_with_obstinate_familiar_fails_atomically() {
+    const AGE: u32 = 65;
+    let (mut runner, vortex, ()) = vortex_board(AGE - 1, &[], |scenario| {
+        scenario
+            .add_creature(P0, "Obstinate Familiar", 1, 1)
+            .from_oracle_text(OBSTINATE_FAMILIAR_ORACLE);
+    });
+    advance_through_upkeep(&mut runner);
+    assert_draw_cost_prompt(&runner, AGE as usize, 1);
+    let before = ZoneSizes::of(&runner, P0);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the choice is admitted or refused");
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseReplacement {
+                index: DECLINE_REPLACEMENT,
+            })
+            .expect("declining the skip is legal");
+    }
+    let state = runner.state();
+    assert!(
+        state.pending_unless_draw_repeat.is_none(),
+        "no partially paid counted cursor survives the resolution"
+    );
+    assert_ne!(zone_of(&runner, vortex), Zone::Battlefield);
+    assert_eq!(
+        ZoneSizes::of(&runner, P0).hand,
+        before.hand,
+        "no partial draws were kept"
+    );
+}

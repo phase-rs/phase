@@ -16634,9 +16634,9 @@ impl GameState {
 
         validate_ability(&transaction.root, &valid)?;
         if let Some(checkpoint) = transaction.recovered.as_deref() {
-            if checkpoint.consumed > transaction.transcript.len() {
+            if checkpoint.consumed != transaction.transcript.len() {
                 return Err(format!(
-                    "recovery checkpoint consumed {} of {} transcript entries",
+                    "recovery checkpoint cursor {} does not match the {} accepted transcript entries",
                     checkpoint.consumed,
                     transaction.transcript.len()
                 ));
