@@ -5239,6 +5239,22 @@ fn is_object_role(filter: &TargetFilter) -> bool {
     !filter.is_context_ref() && !super::is_player_scoped_filter(filter)
 }
 
+/// CR 115.1 + CR 608.2c: the single object antecedent in declaration order.
+/// `ParentTargetController` reads the FIRST announced target, so the object
+/// role must be first and the only object role; a player first (a redirection)
+/// or a second object (Fight, Fate Transfer) has no faithful binding.
+fn single_object_antecedent(announced: &[TargetFilter]) -> Option<&TargetFilter> {
+    if announced.first().is_none_or(|first| !is_object_role(first)) {
+        return None;
+    }
+    let mut object_roles = announced.iter().filter(|filter| is_object_role(filter));
+    let filter = object_roles.next()?;
+    if object_roles.next().is_some() {
+        return None;
+    }
+    Some(filter)
+}
+
 /// CR 115.1: the instruction `effect_text` lowers to declares exactly one
 /// object target (not a context reference, the untyped `Any` fallback, a
 /// player, or a multi-role/multi-target slot). Parsed on a throwaway context so
@@ -5252,25 +5268,7 @@ fn declared_single_object_target(
     if probe.multi_target.is_some() {
         return None;
     }
-    // CR 115.1 + CR 608.2c: `ParentTargetController` reads the FIRST announced
-    // target. The object antecedent must therefore be the first role and the
-    // only object role; a player first (a redirection) or a second object
-    // (Fight, Fate Transfer) cannot be represented faithfully.
-    if probe
-        .declared_slots
-        .first()
-        .is_none_or(|first| !is_object_role(first))
-    {
-        return None;
-    }
-    let mut object_roles = probe
-        .declared_slots
-        .iter()
-        .filter(|filter| is_object_role(filter));
-    let filter = object_roles.next()?;
-    if object_roles.next().is_some() {
-        return None;
-    }
+    let filter = single_object_antecedent(&probe.declared_slots)?;
     if !is_declared_target_filter(filter) || super::is_player_scoped_filter(filter) {
         return None;
     }
@@ -11389,6 +11387,30 @@ mod tests {
             "the printed Unified Will condition must parse"
         );
         assert_eq!(body, "Counter target spell");
+    }
+
+    /// CR 115.1 + CR 608.2c: first-announced order decides the object
+    /// antecedent; a player first or a second object has no faithful binding.
+    #[test]
+    fn single_object_antecedent_requires_the_first_announced_role() {
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        assert_eq!(
+            single_object_antecedent(std::slice::from_ref(&creature)),
+            Some(&creature)
+        );
+        assert_eq!(
+            single_object_antecedent(&[TargetFilter::Player, creature.clone()]),
+            None
+        );
+        assert_eq!(
+            single_object_antecedent(&[creature.clone(), TargetFilter::Player]),
+            Some(&creature)
+        );
+        assert_eq!(
+            single_object_antecedent(&[creature.clone(), creature.clone()]),
+            None
+        );
+        assert_eq!(single_object_antecedent(&[TargetFilter::Player]), None);
     }
 
     /// CR 608.2d + CR 107.4 + CR 202.1: Omnath, Locus of All — "you may reveal
