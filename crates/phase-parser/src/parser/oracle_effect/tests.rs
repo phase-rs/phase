@@ -49125,7 +49125,7 @@ fn perpetual_they_subject_binds_last_created_after_conjure() {
 }
 
 /// SHAPE (V1/A2 mechanism pin): a choose-then-grant SUBJECT shape binds
-/// `ParentTarget` (the tracked chosen set) via `pending_tracked_set_origin`.
+/// `ParentTarget` (the tracked chosen set) via `pending_tracked_set`.
 /// The singular head + plural anaphor is deliberately non-card-text: it pins
 /// the A2 gate mechanism (Racketeer Boss's own "choose up to two ... and/or
 /// ..." head does not parse to `ChooseFromZone`, so its production rider
@@ -50251,11 +50251,11 @@ fn conjure_of_your_choice_from_spellbook_onto_battlefield() {
         Effect::DraftFromSpellbook {
             destination,
             tapped,
-            random,
+            selection,
         } => {
             assert_eq!(destination, Zone::Battlefield);
             assert!(!tapped);
-            assert!(!random);
+            assert_eq!(selection, SpellbookSelection::Chosen);
         }
         other => panic!("expected DraftFromSpellbook, got: {other:?}"),
     }
@@ -50273,7 +50273,7 @@ fn conjure_of_your_choice_from_spellbook_apostrophe_source() {
         Effect::DraftFromSpellbook {
             destination: Zone::Battlefield,
             tapped: false,
-            random: false
+            selection: SpellbookSelection::Chosen
         }
     ));
 }
@@ -50287,7 +50287,7 @@ fn conjure_of_your_choice_from_spellbook_into_library() {
         Effect::DraftFromSpellbook {
             destination: Zone::Library,
             tapped: false,
-            random: false
+            selection: SpellbookSelection::Chosen
         }
     ));
 }
@@ -50295,14 +50295,14 @@ fn conjure_of_your_choice_from_spellbook_into_library() {
 #[test]
 fn conjure_a_random_card_from_spellbook_onto_battlefield() {
     // "conjure a random card from [X] spellbook" is the engine-picks wording of
-    // draft-from-spellbook: same Effect::DraftFromSpellbook, with random = true.
+    // draft-from-spellbook: same Effect::DraftFromSpellbook, with `SpellbookSelection::Random`.
     let e = parse_effect("conjure a random card from the Slivers Spellbook onto the battlefield");
     assert!(matches!(
         e,
         Effect::DraftFromSpellbook {
             destination: Zone::Battlefield,
             tapped: false,
-            random: true
+            selection: SpellbookSelection::Random
         }
     ));
 }
@@ -50315,7 +50315,7 @@ fn conjure_a_random_card_from_spellbook_into_hand() {
         Effect::DraftFromSpellbook {
             destination: Zone::Hand,
             tapped: false,
-            random: true
+            selection: SpellbookSelection::Random
         }
     ));
 }
@@ -50396,18 +50396,18 @@ fn conjure_named_into_top_n_each_players_library_at_random() {
 #[test]
 fn conjure_random_from_spellbook_into_top_n_library_at_random() {
     // The top-N-library destination composes with the random draft-from-spellbook wording,
-    // which parses to DraftFromSpellbook (random) rather than Conjure.
+    // which parses to DraftFromSpellbook (`SpellbookSelection::Random`) rather than Conjure.
     let e = parse_effect(
         "conjure a random card from the Slivers Spellbook into the top five cards of your library at random",
     );
     match e {
         Effect::DraftFromSpellbook {
             destination,
-            random,
+            selection,
             ..
         } => {
             assert_eq!(destination, Zone::Library);
-            assert!(random);
+            assert_eq!(selection, SpellbookSelection::Random);
         }
         other => panic!("expected DraftFromSpellbook, got: {other:?}"),
     }
@@ -50448,7 +50448,7 @@ fn conjure_random_from_spellbook_into_exile() {
         Effect::DraftFromSpellbook {
             destination: Zone::Exile,
             tapped: false,
-            random: true
+            selection: SpellbookSelection::Random
         }
     ));
 }

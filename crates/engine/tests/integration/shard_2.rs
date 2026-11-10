@@ -247,6 +247,7 @@ mod compound_ward_cost_pays_every_part;
 mod condition_gates_fail_closed;
 mod conditional_cost_reduction_3223;
 mod conditional_entry_gate_projection;
+mod confirmed_misparse_coverage;
 mod connecting_the_dots_return_exiled_with;
 mod connive_draw_pause_tail_completion;
 mod connive_trigger_msh_wave1;

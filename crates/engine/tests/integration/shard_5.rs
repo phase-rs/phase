@@ -162,6 +162,7 @@ mod spell_controller_is_derived;
 mod spell_queller_ltb_owner_cast;
 mod spell_resolution_child_boundary;
 mod spell_resolution_final_part_after_paused_instruction;
+mod spellbook_draft_real_cards;
 mod spellstutter_sprite_counter_with_x;
 mod spelunking_shockland_order;
 mod sphinx_of_uthuun_etb_pile_separation;
