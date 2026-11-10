@@ -16689,36 +16689,51 @@ fn parse_threshold_comparator(input: &str) -> Option<Comparator> {
     .map(|(c, _)| c)
 }
 
+/// CR 109.5: the library possessor is a printed part of the reveal instruction.
+/// "your" fixes the activator; "their/that/..." leaves the actor to the
+/// subject/antecedent context.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RevealLibraryPossessor {
+    Controller,
+    Context,
+}
+
 /// CR 701.20a: Shared prefix `"reveal[s] cards from the top of <possessive> library until "`.
-/// Returns the input positioned at the first token after `"until "`.
+/// Returns the possessor and the input positioned at the first token after
+/// `"until "`.
 /// Used by both the active-form and passive-form `RevealUntil` parsers so that
 /// any future possessive arm addition only needs to be made in one place.
-fn parse_reveal_cards_from_library_until(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+fn parse_reveal_cards_from_library_until(
+    input: &str,
+) -> nom::IResult<&str, RevealLibraryPossessor, OracleError<'_>> {
     // CR 701.20a: verb form — bare imperative ("reveal") or third-person ("reveals")
     let (input, _) = alt((tag("reveals "), tag("reveal "))).parse(input)?;
     let (input, _) = tag("cards from the top of ").parse(input)?;
     // CR 109.5: possessive determiner identifying the library owner. Both English
     // possessive forms ("your"/"their"/"his"/"her"/"its") map to the same parsed
     // structure; the actual player is supplied by the caller via subject context.
-    let (input, _) = alt((
-        tag("your "),
-        tag("their "),
-        tag("his "),
-        tag("her "),
-        tag("its "),
+    let (input, possessor) = alt((
+        value(RevealLibraryPossessor::Controller, tag("your ")),
+        value(RevealLibraryPossessor::Context, tag("their ")),
+        value(RevealLibraryPossessor::Context, tag("his ")),
+        value(RevealLibraryPossessor::Context, tag("her ")),
+        value(RevealLibraryPossessor::Context, tag("its ")),
         // CR 109.5: "top of that library" — Mirror-Mad Phantasm class
-        tag("that "),
+        value(RevealLibraryPossessor::Context, tag("that ")),
     ))
     .parse(input)?;
-    value((), tag("library until ")).parse(input)
+    let (input, _) = tag("library until ").parse(input)?;
+    Ok((input, possessor))
 }
 
 /// CR 701.20a: Parse the active-voice prefix `"reveal[s] cards from the top of
 /// <possessive> library until <pronoun> reveal[s] "`, stopping *before* the
 /// count/article. The caller parses the count (article → `Fixed(1)`, or a
 /// number / `X` for "reveal X [filter] cards") and the filter phrase.
-fn parse_reveal_until_prefix(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
-    let (input, _) = parse_reveal_cards_from_library_until(input)?;
+fn parse_reveal_until_prefix(
+    input: &str,
+) -> nom::IResult<&str, RevealLibraryPossessor, OracleError<'_>> {
+    let (input, possessor) = parse_reveal_cards_from_library_until(input)?;
     // Active-voice pronoun + matching verb form.
     let (input, _) = alt((
         tag("you reveal "),
@@ -16728,7 +16743,7 @@ fn parse_reveal_until_prefix(input: &str) -> nom::IResult<&str, (), OracleError<
         tag("it reveals "),
     ))
     .parse(input)?;
-    Ok((input, ()))
+    Ok((input, possessor))
 }
 
 /// CR 701.20a + CR 608.2c: Parse the count phrase that follows
@@ -16779,7 +16794,9 @@ fn parse_reveal_until_count(input: &str) -> OracleResult<'_, QuantityExpr> {
 /// the function body.
 ///
 /// Covers: Indomitable Creativity, Blessed Reincarnation, Tunnel Vision.
-fn parse_reveal_until_passive_prefix(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+fn parse_reveal_until_passive_prefix(
+    input: &str,
+) -> nom::IResult<&str, RevealLibraryPossessor, OracleError<'_>> {
     parse_reveal_cards_from_library_until(input)
 }
 
@@ -17066,6 +17083,16 @@ fn distribute_shared_card_qualifier(disjuncts: &[&str], filters: &mut [TargetFil
 /// in both active voice (`"until <pronoun> reveal[s] a <filter>"`) and
 /// passive voice (`"until a/an <filter> [card] is revealed [and exiles that card]"`).
 /// Builds [`Effect::RevealUntil`] with `player` identifying whose library is revealed.
+fn reveal_player_for_possessor(
+    player: TargetFilter,
+    possessor: RevealLibraryPossessor,
+) -> TargetFilter {
+    match possessor {
+        RevealLibraryPossessor::Controller => TargetFilter::Controller,
+        RevealLibraryPossessor::Context => player,
+    }
+}
+
 fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEffectClause> {
     // CR 701.20a + CR 608.2c: strip a trailing "where X is …" binding first so a
     // dynamic count ("reveal X [filter] cards, where X is the number of colors
@@ -17077,7 +17104,8 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
     // CR 701.20a: Active-voice form — "…until they reveal a <filter>" (count =
     // Fixed(1)) or "…until you reveal X [filter] cards" (dynamic count).
     let active_result = nom_on_lower(count_tp.original, count_tp.lower, parse_reveal_until_prefix);
-    if let Some((_, rest_orig)) = active_result {
+    if let Some((possessor, rest_orig)) = active_result {
+        let player = reveal_player_for_possessor(player, possessor);
         let rest_lower = &count_tp.lower[count_tp.lower.len() - rest_orig.len()..];
         let (after_count_lower, raw_count) = parse_reveal_until_count(rest_lower).ok()?;
         let (_, filter_text) = parse_reveal_until_active_filter_text(after_count_lower).ok()?;
@@ -17113,7 +17141,9 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
     // [and exiles that card]" (Indomitable Creativity, Blessed Reincarnation,
     // Tunnel Vision). Passive prefix stops before the article; extract article,
     // filter phrase, and optional exile suffix here.
-    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, parse_reveal_until_passive_prefix)?;
+    let (possessor, rest_orig) =
+        nom_on_lower(tp.original, tp.lower, parse_reveal_until_passive_prefix)?;
+    let player = reveal_player_for_possessor(player, possessor);
     let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
 
     // Consume the article ("a" / "an").
@@ -25758,7 +25788,13 @@ fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<Pars
         destination: Zone::Library,
         target: second,
         owner_library,
-        library_shuffle: Default::default(),
+        // CR 701.24c: the compound instruction settles both legs through one
+        // terminal owner population; neither leg may shuffle its own delivery.
+        library_shuffle: if owner_library {
+            crate::types::ability::LibraryShuffleMode::TerminalShuffle
+        } else {
+            Default::default()
+        },
         enter_transformed: false,
         enters_under: None,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -25772,6 +25808,17 @@ fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<Pars
     let sub_clause = imperative::with_shuffle_sub_ability(sub_effect);
     let mut sub_def = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
     sub_def.sub_ability = sub_clause.sub_ability;
+    if owner_library {
+        // The second leg's terminal constructor would scope a typed target to a
+        // single owner; the compound instruction must settle every owner from
+        // both legs, so replace it with the tracked-owner ScopedPlayer shuffle.
+        if let Some(terminal) = sub_def.sub_ability.as_deref_mut() {
+            terminal.effect = Box::new(Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            });
+            terminal.player_scope = Some(imperative::owner_library_shuffle_scope());
+        }
+    }
     // CR 115.6 + CR 701.24a: the SECOND subject is a clause of its own ("up to
     // three target cards from a single graveyard" — Serene Remembrance), but the
     // compound-shuffle producer builds its `AbilityDefinition` directly from the
@@ -25782,14 +25829,30 @@ fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<Pars
         sub_def.multi_target = extract_optional_target_multi_target(second_text, &sub_def.effect);
     }
 
-    // Build ChangeZone for the first subject as the primary effect
+    // Build ChangeZone for the first subject as the primary effect. A
+    // "this creature/permanent" source names a permanent only while it is on
+    // the battlefield (CR 400.7); a sacrificed/removed source must not be moved
+    // from its graveyard. A "~" source can be a spell still on the stack (Serene
+    // Remembrance), so it keeps the unconstrained origin.
+    let first_origin = if matches!(first, TargetFilter::SelfRef)
+        && (scan_contains_phrase(&lower, "this creature")
+            || scan_contains_phrase(&lower, "this permanent"))
+    {
+        Some(Zone::Battlefield)
+    } else {
+        None
+    };
     let primary_effect = Effect::ChangeZone {
         actor: crate::types::ability::LibraryInstructionActor::Controller,
-        origin: None,
+        origin: first_origin,
         destination: Zone::Library,
         target: first,
         owner_library,
-        library_shuffle: Default::default(),
+        library_shuffle: if owner_library {
+            crate::types::ability::LibraryShuffleMode::TerminalShuffle
+        } else {
+            Default::default()
+        },
         enter_transformed: false,
         enters_under: None,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -32383,25 +32446,27 @@ fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter, draw_inherit
         return;
     }
     let slot_anchor = matches!(anchor, TargetFilter::DeclaredPlayer { .. });
+    let owner_anchor = matches!(anchor, TargetFilter::Owner);
     match effect {
         Effect::Shuffle { target }
-            if matches!(
-                *target,
-                TargetFilter::Controller
-                    | TargetFilter::Player
-                    | TargetFilter::ParentTargetController
-            ) || (slot_anchor
-                && matches!(
+            if !owner_anchor
+                && (matches!(
                     *target,
-                    TargetFilter::TriggeringPlayer | TargetFilter::ParentTarget
-                )) =>
+                    TargetFilter::Controller
+                        | TargetFilter::Player
+                        | TargetFilter::ParentTargetController
+                ) || (slot_anchor
+                    && matches!(
+                        *target,
+                        TargetFilter::TriggeringPlayer | TargetFilter::ParentTarget
+                    ))) =>
         {
             *target = anchor.clone();
         }
         Effect::SearchLibrary {
             target_player: tp @ None,
             ..
-        } => {
+        } if !owner_anchor => {
             *tp = Some(anchor.clone());
         }
         // CR 608.2c: "If that player does, they reveal …" after a source-owner
@@ -32427,11 +32492,12 @@ fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter, draw_inherit
             destination: Zone::Library,
             target,
             ..
-        } if *target == TargetFilter::Controller => {
+        } if !owner_anchor && *target == TargetFilter::Controller => {
             *target = anchor.clone();
         }
         Effect::ChangeZoneAll { target, .. }
-            if !matches!(anchor, TargetFilter::ParentTarget)
+            if !owner_anchor
+                && !matches!(anchor, TargetFilter::ParentTarget)
                 && *target == TargetFilter::Controller =>
         {
             *target = anchor.clone();

@@ -2082,15 +2082,6 @@ pub(crate) enum ShuffleImperativeAst {
         target: TargetFilter,
         owner_library: bool,
     },
-    /// CR 400.3 + CR 701.24c: "the owners of those cards shuffle them into
-    /// their libraries" / "those permanents' owners shuffle them into their
-    /// libraries" (Turn the Earth, Guff Rewrites History). Unlike a single
-    /// owner-routed move, the declared set can span several owners; each
-    /// member's own delivery shuffle is the instruction's randomization, so no
-    /// single terminal `Shuffle` is chained.
-    OwnersChangeZoneToLibrary {
-        target: TargetFilter,
-    },
     ChangeZoneAllToLibrary {
         origins: Vec<Zone>,
     },
