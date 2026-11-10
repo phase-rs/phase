@@ -14675,6 +14675,64 @@ mod tests {
         state
     }
 
+    /// The parsed replacements of the printed card `name`, from the card data
+    /// (`shared_card_db`). Reach guard: the card is there and has one.
+    fn printed_replacements(name: &str) -> &'static [ReplacementDefinition] {
+        let face = crate::test_support::shared_card_db()
+            .get_face_by_name(name)
+            .unwrap_or_else(|| panic!("reach guard: {name} is in the card data"));
+        assert!(
+            !face.replacements.is_empty(),
+            "reach guard: {name} has a parsed replacement"
+        );
+        &face.replacements
+    }
+
+    /// Puts one P0 battlefield object named `name` into `state`, carrying the
+    /// printed card's parsed replacements (`printed_replacements`) on its live and
+    /// base definitions, as `engine_debug.rs`'s `add_bloodletters` builds a
+    /// Bloodletter of Aclazotz. Returns its id.
+    fn add_printed_replacement_source(state: &mut GameState, name: &str) -> ObjectId {
+        let replacements = printed_replacements(name);
+        let card_id = CardId(state.next_object_id);
+        let id = crate::game::zones::create_object(
+            state,
+            card_id,
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.replacement_definitions = replacements.to_vec().into();
+        object.base_replacement_definitions = std::sync::Arc::new(replacements.to_vec());
+        id
+    }
+
+    /// Reach guard: Bloodletter of Aclazotz's one replacement in the card data,
+    /// "If an opponent would lose life during your turn, they lose twice that much
+    /// life instead.", is a `LoseLife` `Times { 2 }` for an opponent's loss during
+    /// its controller's turn.
+    fn assert_bloodletter_parse() {
+        let [bloodletter] = printed_replacements("Bloodletter of Aclazotz") else {
+            panic!("reach guard: Bloodletter of Aclazotz has one replacement");
+        };
+        assert!(
+            bloodletter.event == ReplacementEvent::LoseLife
+                && bloodletter.quantity_modification
+                    == Some(QuantityModification::Times { factor: 2 })
+                && bloodletter.valid_player == Some(ReplacementPlayerScope::Opponent)
+                && matches!(
+                    bloodletter.condition,
+                    Some(ReplacementCondition::OnlyIfQuantity {
+                        active_player_req: Some(ControllerRef::You),
+                        ..
+                    })
+                ),
+            "Bloodletter of Aclazotz parses to an opponent's doubled loss during your turn: \
+             {bloodletter:?}"
+        );
+    }
+
     fn reset_indexed_replacement_consults() {
         INDEXED_OBJECT_REPLACEMENT_CANDIDATE_CONSULTS.with(|consults| consults.set(0));
     }
@@ -17350,7 +17408,21 @@ mod tests {
         u32,
         Option<crate::types::game_state::ReplacementQuantityOverflow>,
     ) {
-        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, defs);
+        replace_life_amount_in(
+            test_state_with_object(ObjectId(10), Zone::Battlefield, defs),
+            event,
+        )
+    }
+
+    /// Runs `event` through `replace_event` on `state`; returns the resulting
+    /// amount and the overflow record.
+    fn replace_life_amount_in(
+        mut state: GameState,
+        event: ProposedEvent,
+    ) -> (
+        u32,
+        Option<crate::types::game_state::ReplacementQuantityOverflow>,
+    ) {
         let mut events = Vec::new();
         let result = replace_event(&mut state, event, &mut events);
         let (ReplacementResult::Execute(ProposedEvent::LifeGain { amount, .. })
@@ -17517,8 +17589,8 @@ mod tests {
     /// records: `add_counter_applier_player_and_energy_overflow_is_recorded_not_clamped`).
     /// Results within `u32` are exact.
     ///
-    /// The replacements are built in code. `branch2` is the form the parser gives Boon Reflection
-    /// ("If you would gain life, you gain twice that much life instead."); `times` and `plus` are
+    /// The Branch 2 rows run Boon Reflection ("If you would gain life, you gain twice that much
+    /// life instead.") from the card data, on an object named for it; `times` and `plus` are
     /// that doubling and Angel of Vitality's plus 1 ("If you would gain life, you gain that much
     /// life plus 1 instead.") in Branch 1's `Times` / `Plus` form, which no printed card parses to
     /// (both cards parse to Branch 2), and the test needs that form to pin Branch 1's saturation.
@@ -17534,17 +17606,30 @@ mod tests {
                 QuantityModification::Plus { value: 1 },
             )
         };
-        let branch2 = || {
-            ReplacementDefinition::new(ReplacementEvent::GainLife).execute(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::GainLife {
-                    amount: QuantityExpr::Multiply {
-                        factor: 2,
-                        inner: Box::new(event_amount_expr()),
-                    },
-                    player: TargetFilter::Controller,
-                },
-            ))
+        // Reach guard: Boon Reflection's one replacement in the card data is
+        // Branch 2's parsed `GainLife { Multiply { 2, EventContextAmount } }`.
+        let [boon_reflection] = printed_replacements("Boon Reflection") else {
+            panic!("reach guard: Boon Reflection has one replacement");
+        };
+        assert!(
+            boon_reflection.event == ReplacementEvent::GainLife
+                && boon_reflection
+                    .execute
+                    .as_deref()
+                    .is_some_and(|ability| matches!(
+                        &*ability.effect,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Multiply { factor: 2, inner },
+                            ..
+                        } if **inner == event_amount_expr()
+                    )),
+            "Boon Reflection parses to Branch 2's doubled gain: {boon_reflection:?}"
+        );
+        // P0 controls Boon Reflection and `life_gain_event` is P0's, so "you" holds.
+        let boon_reflection_state = || {
+            let mut state = GameState::new_two_player(42);
+            add_printed_replacement_source(&mut state, "Boon Reflection");
+            state
         };
 
         // Branch 1, Times: 2^31 x 2 does not fit a u32.
@@ -17567,19 +17652,20 @@ mod tests {
             replace_life_amount(vec![plus()], life_gain_event(u32::MAX - 1)),
             (u32::MAX, None)
         );
-        // Branch 2 (parsed `Multiply { 2, EventContextAmount }`): 2.4e9 > i32::MAX.
+        // Branch 2 (Boon Reflection's `Multiply { 2, EventContextAmount }`):
+        // 2.4e9 > i32::MAX.
         assert_eq!(
-            replace_life_amount(vec![branch2()], life_gain_event(1_200_000_000)),
+            replace_life_amount_in(boon_reflection_state(), life_gain_event(1_200_000_000)),
             (2_400_000_000, None)
         );
         assert_eq!(
-            replace_life_amount(vec![branch2()], life_gain_event(1_000_000_000)),
+            replace_life_amount_in(boon_reflection_state(), life_gain_event(1_000_000_000)),
             (2_000_000_000, None)
         );
         // Branch 2 on an event amount that is itself above i32::MAX: the old
         // `as i32` wrapped it into a silent 0 gain.
         assert_eq!(
-            replace_life_amount(vec![branch2()], life_gain_event(3_000_000_000)),
+            replace_life_amount_in(boon_reflection_state(), life_gain_event(3_000_000_000)),
             (u32::MAX, None)
         );
         // Siblings: `Half` and `Minus` never record.
@@ -17614,15 +17700,25 @@ mod tests {
 
     /// Loss twin of the gain row, including Branch 3 (`LoseLife { Multiply }`).
     ///
-    /// The replacements are built in code. `times` is the form the parser gives Bloodletter of
-    /// Aclazotz ("If an opponent would lose life during your turn, they lose twice that much life
-    /// instead."), here for any player at any time; `branch3` is the same doubling in Branch 3's
-    /// `LoseLife` execute form, which Bloodletter does not parse to, and the test needs it to pin
-    /// that branch's saturation. `plus` is synthetic: no printed card adds to a life loss. The
-    /// nearest printed card is Bloodletter of Aclazotz.
+    /// The `times` rows run Bloodletter of Aclazotz ("If an opponent would lose life during your
+    /// turn, they lose twice that much life instead.") from the card data, on an object named for
+    /// it, during its controller's turn against an opponent's loss; on the opponent's turn it does
+    /// not apply. `branch3` is the same doubling in Branch 3's `LoseLife` execute form, which no
+    /// printed card parses to (Bloodletter parses to a `Times { 2 }` quantity modification, and
+    /// the parser does not yet read the replacement of Selenia, the Cursed Heart's Curse token),
+    /// and the test needs it to pin that branch's saturation. `plus` is synthetic: no printed card
+    /// adds to a life loss. The nearest printed card is Bloodletter of Aclazotz.
     #[test]
     fn lose_life_applier_saturates_past_u32_and_records_nothing() {
-        let times = || life_qmod_def(ReplacementEvent::LoseLife, QuantityModification::DOUBLE);
+        assert_bloodletter_parse();
+        // P0 controls Bloodletter and `life_loss_event` is P1's, so "an
+        // opponent" holds; `active` decides "during your turn".
+        let bloodletter_state = |active: PlayerId| {
+            let mut state = GameState::new_two_player(42);
+            state.active_player = active;
+            add_printed_replacement_source(&mut state, "Bloodletter of Aclazotz");
+            state
+        };
         let plus = || {
             life_qmod_def(
                 ReplacementEvent::LoseLife,
@@ -17646,13 +17742,29 @@ mod tests {
             repl
         };
 
+        // The `times` rows, on P0's turn: 2^31 x 2 does not fit a u32.
         assert_eq!(
-            replace_life_amount(vec![times()], life_loss_event(2_147_483_648)),
+            replace_life_amount_in(
+                bloodletter_state(PlayerId(0)),
+                life_loss_event(2_147_483_648)
+            ),
             (u32::MAX, None)
         );
         assert_eq!(
-            replace_life_amount(vec![times()], life_loss_event(2_000_000_000)),
+            replace_life_amount_in(
+                bloodletter_state(PlayerId(0)),
+                life_loss_event(2_000_000_000)
+            ),
             (4_000_000_000, None)
+        );
+        // On P1's turn Bloodletter does not apply; the rows above are its reach
+        // guard.
+        assert_eq!(
+            replace_life_amount_in(
+                bloodletter_state(PlayerId(1)),
+                life_loss_event(2_000_000_000)
+            ),
+            (2_000_000_000, None)
         );
         assert_eq!(
             replace_life_amount(vec![plus()], life_loss_event(u32::MAX)),
@@ -17955,16 +18067,17 @@ mod tests {
     /// an amount past `i32::MAX` stamps `i32::MAX`, never a wrapped value, on
     /// both the gain and the loss applier.
     ///
-    /// The gain substitute is Nefarious Lich's, parsed from its verbatim line
-    /// "If you would gain life, draw that many cards instead." (Lich prints the
-    /// same line). The loss substitute is that draw built in code on a life
-    /// loss, and is synthetic: no printed card replaces every life loss with an
-    /// effect that reads the amount lost, and the test needs one so the loss
-    /// applier's stamp is checked as the gain applier's is. The nearest printed
-    /// card is Ashiok, Wicked Manipulator, whose "If you would pay life while
-    /// your library has at least that many cards in it, exile that many cards
-    /// from the top of your library instead." replaces a payment of life, which
-    /// is a loss (CR 119.4), and which the parser does not read yet.
+    /// The gain substitute is Nefarious Lich's "If you would gain life, draw
+    /// that many cards instead." (Lich prints the same line), from the card
+    /// data, on an object named for it. The loss substitute is that draw built
+    /// in code on a life loss, and is synthetic: no printed card replaces every
+    /// life loss with an effect that reads the amount lost, and the test needs
+    /// one so the loss applier's stamp is checked as the gain applier's is. The
+    /// nearest printed card is Ashiok, Wicked Manipulator, whose "If you would
+    /// pay life while your library has at least that many cards in it, exile
+    /// that many cards from the top of your library instead." replaces a
+    /// payment of life, which is a loss (CR 119.4), and which the parser does
+    /// not read yet.
     #[test]
     fn life_substitution_stamps_saturate_into_i32() {
         let draw_that_many = || {
@@ -17976,34 +18089,39 @@ mod tests {
                 },
             )
         };
-        let nefarious_lich = crate::parser::oracle_replacement::parse_replacement_line(
-            "If you would gain life, draw that many cards instead.",
-            "Nefarious Lich",
-        )
-        .expect("Nefarious Lich's life-gain replacement parses");
+        // Nefarious Lich's life-gain replacement, selected by its event.
+        let lich_gain_index = printed_replacements("Nefarious Lich")
+            .iter()
+            .position(|replacement| replacement.event == ReplacementEvent::GainLife)
+            .expect("reach guard: Nefarious Lich has a life-gain replacement");
+        let nefarious_lich = &printed_replacements("Nefarious Lich")[lich_gain_index];
         // Reach guard: the printed line parses to the draw substitute the loss
         // half builds, with no quantity modification ahead of it.
         assert!(
-            nefarious_lich.event == ReplacementEvent::GainLife
-                && nefarious_lich.quantity_modification.is_none()
+            nefarious_lich.quantity_modification.is_none()
                 && nefarious_lich
                     .execute
                     .as_deref()
                     .is_some_and(|ability| *ability.effect == *draw_that_many().effect),
             "Nefarious Lich parses to a draw substitute: {nefarious_lich:?}"
         );
-        let rid = ReplacementId {
+        let loss_rid = ReplacementId {
             source: ObjectId(10),
             index: 0,
         };
         for (amount, stamp) in [(3_000_000_000u32, i32::MAX), (7, 7)] {
-            let mut state = test_state_with_object(
-                ObjectId(10),
-                Zone::Battlefield,
-                vec![nefarious_lich.clone()],
+            let mut state = GameState::new_two_player(42);
+            let lich = add_printed_replacement_source(&mut state, "Nefarious Lich");
+            let gain_rid = ReplacementId {
+                source: lich,
+                index: lich_gain_index,
+            };
+            let result = gain_life_applier(
+                life_gain_event(amount),
+                gain_rid,
+                &mut state,
+                &mut Vec::new(),
             );
-            let result =
-                gain_life_applier(life_gain_event(amount), rid, &mut state, &mut Vec::new());
             assert!(
                 matches!(result, ApplyResult::Prevented),
                 "gain {amount}: {result:?}"
@@ -18014,8 +18132,12 @@ mod tests {
                 ReplacementDefinition::new(ReplacementEvent::LoseLife).execute(draw_that_many());
             loss_def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
             let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![loss_def]);
-            let result =
-                lose_life_applier(life_loss_event(amount), rid, &mut state, &mut Vec::new());
+            let result = lose_life_applier(
+                life_loss_event(amount),
+                loss_rid,
+                &mut state,
+                &mut Vec::new(),
+            );
             assert!(
                 matches!(result, ApplyResult::Prevented),
                 "loss {amount}: {result:?}"
@@ -18068,28 +18190,24 @@ mod tests {
         assert_eq!(state.replacement_quantity_overflow, None);
     }
 
-    /// One source carries three `Times { 30000 }` loss multipliers (commuting,
-    /// so no ordering prompt): 100,000 becomes 3,000,000,000, and the second
-    /// application passes `u32` and lands on `u32::MAX`; every replacement
-    /// applies and nothing is recorded (CR 119.3 + CR 616.1f). The x30,000
-    /// multipliers are synthetic: no printed card multiplies a life loss by more
-    /// than two, and the test needs a factor that carries a 100,000 loss past
-    /// `u32` in two applications. The nearest printed card is Bloodletter of
-    /// Aclazotz ("If an opponent would lose life during your turn, they lose
-    /// twice that much life instead.").
+    /// Fourteen Bloodletter of Aclazotz ("If an opponent would lose life during
+    /// your turn, they lose twice that much life instead."), each from the card
+    /// data on its own P0 object named for it, apply on P0's turn to P1's loss
+    /// of 1,000,000 (their `Times { 2 }` quantity modifications commute, so no
+    /// ordering prompt): doubled twelve times it is 4,096,000,000, the
+    /// thirteenth doubling passes `u32` and lands on `u32::MAX`, and the
+    /// fourteenth applies there; every replacement applies and nothing is
+    /// recorded (CR 119.3 + CR 616.1f).
     #[test]
     fn lose_life_times_saturates_and_applies_every_replacement() {
-        let defs: Vec<_> = (0..3)
-            .map(|_| {
-                life_qmod_def(
-                    ReplacementEvent::LoseLife,
-                    QuantityModification::Times { factor: 30_000 },
-                )
-            })
-            .collect();
-        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, defs);
+        assert_bloodletter_parse();
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        for _ in 0..14 {
+            add_printed_replacement_source(&mut state, "Bloodletter of Aclazotz");
+        }
         let mut events = Vec::new();
-        let result = replace_event(&mut state, life_loss_event(100_000), &mut events);
+        let result = replace_event(&mut state, life_loss_event(1_000_000), &mut events);
         let ReplacementResult::Execute(ProposedEvent::LifeLoss {
             amount, applied, ..
         }) = result
@@ -18097,37 +18215,37 @@ mod tests {
             panic!("expected Execute of the LifeLoss, got {result:?}");
         };
         assert_eq!(amount, u32::MAX, "the loss saturates at `u32::MAX`");
-        assert_eq!(applied.len(), 3, "every replacement applies");
+        assert_eq!(applied.len(), 14, "every replacement applies");
         assert_eq!(state.replacement_quantity_overflow, None);
     }
 
     /// CR 122.1 + CR 107.14: the engine-capacity guard stops the loop at the
-    /// replacement whose player-counter or energy count is unrepresentable. One
-    /// source carries three `Times { 30000 }` count multipliers (commuting, so no
-    /// ordering prompt and the pipeline applies them in turn); the first takes
-    /// 100,000 to 3,000,000,000 (fits a `u32`), the second overflows and is the
-    /// last one applied (it is marked applied before its applier runs), and the
-    /// third never applies. Its production twin is
+    /// replacement whose player-counter or energy count is unrepresentable.
+    /// Fourteen Innkeeper's Talents at level 3 ("If you would put one or more
+    /// counters on a permanent or player, put twice that many of each of those
+    /// kinds of counters on that permanent or player instead."; the Talent is
+    /// not legendary), each from the card data on its own P0 object named for
+    /// it, double P0's 1,000,000 (their `Times { 2 }` quantity modifications
+    /// commute, so no ordering prompt and the pipeline applies them in turn):
+    /// twelve take it to 4,096,000,000 (fits a `u32`), the thirteenth overflows
+    /// and is the last one applied (it is marked applied before its applier
+    /// runs), and the fourteenth never applies, so the loop stops at the
+    /// overflow, not at the depth limit. Its production twin is
     /// `r6_a_scaler_answer_past_u32_stops_before_the_remaining_replacements`.
-    /// The x30,000 count multipliers are synthetic: no printed card multiplies
-    /// counters put on a player by more than two, and the test needs a factor
-    /// that carries a 100,000 count past `u32` in two applications. The nearest
-    /// printed card is Vorinclex, Monstrous Raider, whose "If you would put one
-    /// or more counters on a permanent or player, put twice that many of each of
-    /// those kinds of counters on that permanent or player instead." doubles
-    /// them.
     #[test]
     fn player_and_energy_times_overflow_stops_the_loop_at_the_overflowing_replacement() {
-        for event in [energy_counter_event(100_000), player_counter_event(100_000)] {
-            let defs: Vec<_> = (0..3)
+        for event in [
+            energy_counter_event(1_000_000),
+            player_counter_event(1_000_000),
+        ] {
+            let mut state = GameState::new_two_player(42);
+            let talents: Vec<ObjectId> = (0..14)
                 .map(|_| {
-                    life_qmod_def(
-                        ReplacementEvent::AddCounter,
-                        QuantityModification::Times { factor: 30_000 },
-                    )
+                    let talent = add_printed_replacement_source(&mut state, "Innkeeper's Talent");
+                    state.objects.get_mut(&talent).unwrap().class_level = Some(3);
+                    talent
                 })
                 .collect();
-            let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, defs);
             let mut events = Vec::new();
             let result = replace_event(&mut state, event, &mut events);
             let ReplacementResult::Execute(ProposedEvent::AddCounter { count, applied, .. }) =
@@ -18136,17 +18254,36 @@ mod tests {
                 panic!("expected Execute of the unchanged AddCounter, got {result:?}");
             };
             assert_eq!(
-                count, 3_000_000_000,
-                "the event as left by the one representable application"
+                count, 4_096_000_000,
+                "the event as left by the twelve representable applications"
             );
             assert_eq!(
                 applied.len(),
-                2,
-                "the overflowing second is marked applied, the third never is"
+                13,
+                "the overflowing thirteenth is marked applied, the fourteenth never is"
+            );
+            let applied_sources: HashSet<ObjectId> = applied
+                .iter()
+                .filter_map(|key| match key {
+                    AppliedReplacementKey::Object { source, .. } => Some(*source),
+                    _ => None,
+                })
+                .collect();
+            let overflow = state
+                .replacement_quantity_overflow
+                .as_ref()
+                .map(|overflow| overflow.source);
+            assert!(
+                overflow.is_some_and(|source| applied_sources.contains(&source)),
+                "the overflow names an applied Talent: {overflow:?}"
             );
             assert_eq!(
-                state.replacement_quantity_overflow,
-                overflow_from(ObjectId(10))
+                talents
+                    .iter()
+                    .filter(|talent| !applied_sources.contains(talent))
+                    .count(),
+                1,
+                "exactly one Talent never applies"
             );
         }
     }

@@ -4383,41 +4383,28 @@ mod tests {
         }
 
         /// Puts one P0 permanent per entry of `factors` in play, each carrying a
-        /// `Multiply { factor, EventContextAmount }` replacement execute of
-        /// `event` (the shape Boon Reflection's gain doubler parses to, with a
-        /// chosen factor; Bloodletter of Aclazotz's loss doubler parses to a
-        /// `Times` quantity modification instead, see
+        /// `LoseLife { Multiply { factor, EventContextAmount } }` replacement
+        /// execute that applies to any player's life loss. No printed card
+        /// parses to this shape: Bloodletter of Aclazotz's loss doubler parses to
+        /// a `Times` quantity modification (see
         /// `debug_lose_large_multipliers_saturate_at_i32_min`). Distinct objects
         /// with an execute body are order-material, so every application but the
-        /// last is a CR 616.1 ordering prompt. The factors let a few candidates
-        /// reach what a dozen doubling cards would. Returns the permanents' ids in
+        /// last is a CR 616.1 ordering prompt. Returns the permanents' ids in
         /// `factors` order.
-        fn add_life_multipliers(
-            runner: &mut GameRunner,
-            event: ReplacementEvent,
-            factors: &[i32],
-        ) -> Vec<ObjectId> {
+        fn add_life_multipliers(runner: &mut GameRunner, factors: &[i32]) -> Vec<ObjectId> {
             use crate::types::ability::{QuantityRef, ReplacementPlayerScope};
             let mut ids = Vec::with_capacity(factors.len());
             for (index, factor) in factors.iter().enumerate() {
-                let amount = QuantityExpr::Multiply {
-                    factor: *factor,
-                    inner: Box::new(QuantityExpr::Ref {
-                        qty: QuantityRef::EventContextAmount,
-                    }),
-                };
-                let effect = match event {
-                    ReplacementEvent::GainLife => Effect::GainLife {
-                        amount,
-                        player: TargetFilter::Controller,
+                let effect = Effect::LoseLife {
+                    amount: QuantityExpr::Multiply {
+                        factor: *factor,
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount,
+                        }),
                     },
-                    ReplacementEvent::LoseLife => Effect::LoseLife {
-                        amount,
-                        target: None,
-                    },
-                    _ => panic!("add_life_multipliers supports GainLife and LoseLife only"),
+                    target: None,
                 };
-                let mut definition = ReplacementDefinition::new(event.clone())
+                let mut definition = ReplacementDefinition::new(ReplacementEvent::LoseLife)
                     .execute(AbilityDefinition::new(AbilityKind::Spell, effect));
                 definition.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
                 let id = create_object(
@@ -4435,29 +4422,40 @@ mod tests {
             ids
         }
 
-        /// Puts Ajani's Pridemate ("Whenever you gain life, put a +1/+1 counter
-        /// on this creature.") and a chain of `doublers` printed life-gain
-        /// doublers under P0 on a debug runner: Rhox Faithmender, Alhammarret's
-        /// Archive and `doublers - 2` copies of Boon Reflection. The Archive is
-        /// legendary, so a chain holds one (the legend rule, CR 704.5j); Boon
-        /// Reflection repeats. Each doubler's replacement is an order-material
-        /// execute on its own object, so every application but the last is a
-        /// CR 616.1 ordering prompt to P0. Returns the runner, the Pridemate's
-        /// id and the doublers' ids.
-        fn printed_gain_doubler_chain(doublers: usize) -> (GameRunner, ObjectId, Vec<ObjectId>) {
+        /// Puts a chain of `doublers` printed life-gain doublers under P0, each
+        /// printing "If you would gain life, you gain twice that much life
+        /// instead.": Rhox Faithmender, Alhammarret's Archive and `doublers - 2`
+        /// copies of Boon Reflection. The Archive is legendary, so a chain holds
+        /// one (the legend rule, CR 704.5j); Boon Reflection repeats. Each
+        /// doubler's replacement is an order-material execute on its own object,
+        /// so every application but the last is a CR 616.1 ordering prompt to
+        /// P0. Returns the doublers' ids.
+        fn add_printed_gain_doublers(
+            scenario: &mut GameScenario,
+            doublers: usize,
+        ) -> Vec<ObjectId> {
             assert!(
                 doublers >= 2,
                 "the chain holds Rhox Faithmender and Alhammarret's Archive"
             );
-            let mut scenario = scenario();
-            let mate = add_card(&mut scenario, P0, "Ajani's Pridemate");
             let mut ids = vec![
-                add_card(&mut scenario, P0, "Rhox Faithmender"),
-                add_card(&mut scenario, P0, "Alhammarret's Archive"),
+                add_card(scenario, P0, "Rhox Faithmender"),
+                add_card(scenario, P0, "Alhammarret's Archive"),
             ];
             for _ in 2..doublers {
-                ids.push(add_card(&mut scenario, P0, "Boon Reflection"));
+                ids.push(add_card(scenario, P0, "Boon Reflection"));
             }
+            ids
+        }
+
+        /// Puts Ajani's Pridemate ("Whenever you gain life, put a +1/+1 counter
+        /// on this creature.") and a chain of `doublers` printed life-gain
+        /// doublers (`add_printed_gain_doublers`) under P0 on a debug runner.
+        /// Returns the runner, the Pridemate's id and the doublers' ids.
+        fn printed_gain_doubler_chain(doublers: usize) -> (GameRunner, ObjectId, Vec<ObjectId>) {
+            let mut scenario = scenario();
+            let mate = add_card(&mut scenario, P0, "Ajani's Pridemate");
+            let ids = add_printed_gain_doublers(&mut scenario, doublers);
             (debug_runner(scenario), mate, ids)
         }
 
@@ -4663,22 +4661,21 @@ mod tests {
         }
 
         /// CR 614.1a + CR 614.6: Tainted Remedy ("If an opponent would gain life,
-        /// that player loses that much life instead.") next to a x3,000 gain
-        /// multiplier on P0's requested 1,000,000. P0 orders them (CR 616.1).
-        /// Multiplier first: the gain becomes 3,000,000,000 and Tainted Remedy
-        /// turns it into a loss of "that much"; the `i32` stamp carries
-        /// `i32::MAX`, so "that much" is 2,147,483,647, not the 3,000,000,000 the
-        /// rules name (as with the `LifeChanged` amount). Tainted Remedy first:
-        /// the gain is replaced by a loss of 1,000,000, so the multiplier, a
-        /// life-gain replacement, never applies. Either way P0 loses (CR 704.5a).
-        /// The x3,000 multiplier is synthetic: no printed card multiplies a life
-        /// gain by more than two, and the test needs one replacement that takes
-        /// the gain past `i32::MAX` on its own, so P0 orders exactly two
-        /// candidates. The nearest printed card is Boon Reflection ("If you
-        /// would gain life, you gain twice that much life instead.").
+        /// that player loses that much life instead.") under P1 next to twelve
+        /// printed doublers under P0 (Rhox Faithmender, Alhammarret's Archive and
+        /// ten Boon Reflections, each "If you would gain life, you gain twice
+        /// that much life instead.") on P0's requested 1,000,000. P0 orders them
+        /// (CR 616.1), and after each application the choice repeats among the
+        /// effects still applicable (CR 616.1f). Doublers first: the gain becomes
+        /// 1,000,000 x 2^12 = 4,096,000,000 and Tainted Remedy turns it into a
+        /// loss of "that much"; the `i32` stamp carries `i32::MAX`, so "that
+        /// much" is 2,147,483,647, not the 4,096,000,000 the rules name (as with
+        /// the `LifeChanged` amount). Tainted Remedy first: the gain is replaced
+        /// by a loss of 1,000,000, so no doubler, each a life-gain replacement,
+        /// applies. Either way P0 loses (CR 704.5a).
         #[test]
         fn a_gain_past_i32_substituted_by_tainted_remedy_reads_the_saturated_stamp() {
-            // (answer the multiplier first, P0 life, P0 lost, stamp, LifeChanged amount)
+            // (answer the doublers first, P0 life, P0 lost, stamp, LifeChanged amount)
             type Case = (bool, i32, u32, i32, i32);
             let cases: [Case; 2] = [
                 (
@@ -4690,12 +4687,16 @@ mod tests {
                 ),
                 (false, -999_980, 1_000_000, 1_000_000, -1_000_000),
             ];
-            for (multiplier_first, p0_life, p0_lost, stamp, amount) in cases {
+            for (doublers_first, p0_life, p0_lost, stamp, amount) in cases {
+                let label = if doublers_first {
+                    "doublers first"
+                } else {
+                    "Tainted Remedy first"
+                };
                 let mut scenario = scenario();
                 let remedy = add_card(&mut scenario, P1, "Tainted Remedy");
+                let doublers = add_printed_gain_doublers(&mut scenario, 12);
                 let mut runner = debug_runner(scenario);
-                let multiplier =
-                    add_life_multipliers(&mut runner, ReplacementEvent::GainLife, &[3_000])[0];
                 let mut events = act_ok(&mut runner, gain(P0, MAX_DEBUG_LIFE_AMOUNT)).events;
                 let WaitingFor::ReplacementChoice {
                     player, candidates, ..
@@ -4712,27 +4713,55 @@ mod tests {
                     .map(|candidate| candidate.source_id)
                     .collect();
                 sources.sort();
-                let mut expected = vec![remedy, multiplier];
+                let mut expected: Vec<ObjectId> =
+                    doublers.iter().copied().chain([remedy]).collect();
                 expected.sort();
-                assert_eq!(sources, expected);
-                let chosen = if multiplier_first { multiplier } else { remedy };
-                let index = candidates
-                    .iter()
-                    .position(|candidate| candidate.source_id == chosen)
-                    .expect("the chosen candidate is offered");
-                events.extend(
-                    runner
-                        .act(GameAction::ChooseReplacement { index })
-                        .expect("the answer must be accepted")
-                        .events,
+                assert_eq!(
+                    sources, expected,
+                    "{label}: Tainted Remedy and the doublers"
                 );
-                events.extend(answer_to_completion(&mut runner));
-
-                let label = if multiplier_first {
-                    "multiplier first"
-                } else {
-                    "Tainted Remedy first"
+                // Doublers first: a doubler is answered at each prompt, from
+                // thirteen candidates down to two, and Tainted Remedy then
+                // applies itself. Tainted Remedy first: one answer.
+                let chosen = |source: ObjectId| {
+                    if doublers_first {
+                        doublers.contains(&source)
+                    } else {
+                        source == remedy
+                    }
                 };
+                let answers = if doublers_first { doublers.len() } else { 1 };
+                for answered in 0..answers {
+                    assert_eq!(
+                        pending_candidate_count(&runner),
+                        Some(doublers.len() + 1 - answered),
+                        "{label}: an ordering prompt over the effects still applicable"
+                    );
+                    let WaitingFor::ReplacementChoice { candidates, .. } =
+                        &runner.state().waiting_for
+                    else {
+                        panic!(
+                            "{label}: expected the ordering prompt, got {:?}",
+                            runner.state().waiting_for
+                        );
+                    };
+                    let index = candidates
+                        .iter()
+                        .position(|candidate| chosen(candidate.source_id))
+                        .unwrap_or_else(|| panic!("{label}: the chosen candidate is offered"));
+                    events.extend(
+                        runner
+                            .act(GameAction::ChooseReplacement { index })
+                            .expect("the answer must be accepted")
+                            .events,
+                    );
+                }
+                assert!(
+                    !replacement_prompt_open(&runner),
+                    "{label}: no prompt remains, got {:?}",
+                    runner.state().waiting_for
+                );
+
                 assert_eq!(life(&runner, P0), p0_life, "{label}");
                 assert_eq!(
                     runner.state().players[0].life_lost_this_turn,
@@ -4959,7 +4988,7 @@ mod tests {
             let mut scenario = scenario();
             let mate = add_card(&mut scenario, P0, "Ajani's Pridemate");
             let mut runner = debug_runner(scenario);
-            add_life_multipliers(&mut runner, ReplacementEvent::LoseLife, &[10, 10, 1_000]);
+            add_life_multipliers(&mut runner, &[10, 10, 1_000]);
             let mut events = act_ok(&mut runner, lose(P1, MAX_DEBUG_LIFE_AMOUNT)).events;
             assert!(
                 replacement_prompt_open(&runner),
@@ -6611,37 +6640,47 @@ mod tests {
                 assert_eq!(p1p1(&runner, bears), 0);
             }
 
-            /// P0 gives P1 1,000,000 of `resource` with both Vorinclex and a P0
-            /// any-player count scaler (`Times { factor }`) in play, and asserts
-            /// the parked CR 616.1 prompt: P1's, over exactly the three, stamped
-            /// for rejection, with nothing placed yet. Returns the runner, the
-            /// scaler, P0's Vorinclex (doubler) and P1's Vorinclex (halver). The
-            /// scaler is synthetic: no printed card multiplies placed counters
-            /// by more than two, and the tests need a factor that carries a
-            /// 1,000,000 give past `u32` among three replacements. The nearest
-            /// printed card is Vorinclex, Monstrous Raider, whose "If you would
-            /// put one or more counters on a permanent or player, put twice that
-            /// many of each of those kinds of counters on that permanent or
-            /// player instead." doubles them.
+            /// P0 gives P1 1,000,000 of `resource` with both Vorinclex and
+            /// `talents` P0 Innkeeper's Talents at level 3 in play, and asserts
+            /// the parked CR 616.1 prompt: P1's, over exactly the Talents and both
+            /// Vorinclex, stamped for rejection, with nothing placed yet. At level
+            /// 3 each Talent has "If you would put one or more counters on a
+            /// permanent or player, put twice that many of each of those kinds of
+            /// counters on that permanent or player instead."; it is not
+            /// legendary, so P0 keeps every copy (the legend rule, CR 704.5j, does
+            /// not apply to it). P1's halver does not commute with a doubling, so
+            /// P1 is asked for the order. Returns the runner, the Talents, P0's
+            /// Vorinclex (doubler) and P1's Vorinclex (halver).
             fn scaled_pair_give(
                 resource: Resource,
-                factor: u32,
-            ) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
-                let (scenario, p0_vorinclex, p1_vorinclex) = vorinclex_pair();
+                talents: usize,
+            ) -> (GameRunner, Vec<ObjectId>, ObjectId, ObjectId) {
+                let (mut scenario, p0_vorinclex, p1_vorinclex) = vorinclex_pair();
+                let talent_ids: Vec<ObjectId> = (0..talents)
+                    .map(|_| add_card(&mut scenario, P0, "Innkeeper's Talent"))
+                    .collect();
                 let mut runner = debug_runner(scenario);
-                let scaler = add_counter_quantity_source(
-                    &mut runner,
-                    P0,
-                    QuantityModification::Times { factor },
-                );
+                for talent in &talent_ids {
+                    runner
+                        .state_mut()
+                        .objects
+                        .get_mut(talent)
+                        .unwrap()
+                        .class_level = Some(3);
+                }
                 let result = give_ok(&mut runner, P0, resource.give(P1, MAX_DEBUG_COUNTER_AMOUNT));
                 assert!(
                     resource.deltas(&result.events, P1).is_empty(),
                     "{}: nothing is placed before the ordering is answered",
                     resource.label()
                 );
-                assert_order_prompt(&runner, P1, &[scaler, p0_vorinclex, p1_vorinclex]);
-                (runner, scaler, p0_vorinclex, p1_vorinclex)
+                let sources: Vec<ObjectId> = talent_ids
+                    .iter()
+                    .copied()
+                    .chain([p0_vorinclex, p1_vorinclex])
+                    .collect();
+                assert_order_prompt(&runner, P1, &sources);
+                (runner, talent_ids, p0_vorinclex, p1_vorinclex)
             }
 
             /// R5, CR 616.1e: a count replacement's own arithmetic past `u32`
@@ -6649,13 +6688,15 @@ mod tests {
             /// pipeline and rejects the answer; the prompt stays answerable (the
             /// counter and energy vehicle for the resumed record, which a life
             /// gain no longer reaches). P1's halver first: 1,000,000 → 500,000,
-            /// and the x5,000 scaler and P0's doubler then pass `u32` in either
-            /// order. Control: a x2,000 scaler lands on 2,000,000,000.
+            /// which thirteen Talents and P0's Vorinclex then double with no
+            /// further prompt (doublings commute), passing `u32` at the
+            /// fourteenth doubling (500,000 x 2^14 = 8,192,000,000). Control:
+            /// with eleven Talents the twelve doublings land on 2,048,000,000.
             #[test]
             fn r5_count_overflow_after_the_order_answer_rejects_and_stays_answerable() {
                 for resource in [Resource::Experience, Resource::Energy] {
                     let label = resource.label();
-                    let (mut runner, _, _, p1_vorinclex) = scaled_pair_give(resource, 5_000);
+                    let (mut runner, _, _, p1_vorinclex) = scaled_pair_give(resource, 13);
                     let halver = candidate_index(&runner, p1_vorinclex);
                     let before = counter_rollback_set(&runner);
                     for attempt in ["first", "repeated"] {
@@ -6671,24 +6712,26 @@ mod tests {
                         assert!(replacement_prompt_open(&runner), "{label}: {attempt}");
                     }
 
-                    let (mut runner, _, _, p1_vorinclex) = scaled_pair_give(resource, 2_000);
+                    let (mut runner, _, _, p1_vorinclex) = scaled_pair_give(resource, 11);
                     let halver = candidate_index(&runner, p1_vorinclex);
                     let result = runner
                         .act(GameAction::ChooseReplacement { index: halver })
                         .expect("a representable resume must be accepted");
-                    assert_eq!(resource.get(&runner, P1), 2_000_000_000, "{label}");
+                    assert_eq!(resource.get(&runner, P1), 2_048_000_000, "{label}");
                     assert_eq!(
                         resource.deltas(&result.events, P1),
-                        vec![2_000_000_000],
+                        vec![2_048_000_000],
                         "{label}"
                     );
                     assert_priority_with_empty_stack(&runner);
                 }
             }
 
-            /// R6, CR 616.1f + CR 122.1: answering the x5,000 count scaler first
-            /// takes 1,000,000 to 5,000,000,000, past `u32`, while both Vorinclex
-            /// replacements remain. The overflow stops the replacement loop there
+            /// R6, CR 616.1f + CR 122.1: P1 answers a Talent at each of twelve
+            /// prompts; each answer is accepted and re-parks the prompt, since
+            /// P1's halver remains, and the twelve doublings take 1,000,000 to
+            /// 4,096,000,000. The thirteenth Talent answer passes `u32` while
+            /// both Vorinclex replacements remain. The overflow stops the replacement loop there
             /// instead of applying the remaining two and re-parking, so the answer
             /// is rejected and the prompt stays answerable at three candidates.
             /// This is the production vehicle for the loop-head stop, which a life
@@ -6699,14 +6742,44 @@ mod tests {
             fn r6_a_scaler_answer_past_u32_stops_before_the_remaining_replacements() {
                 for resource in [Resource::Experience, Resource::Energy] {
                     let label = resource.label();
-                    let (mut runner, scaler, _, _) = scaled_pair_give(resource, 5_000);
+                    let (mut runner, talents, _, _) = scaled_pair_give(resource, 13);
+                    let (last, accepted) = talents.split_last().expect("thirteen Talents");
+                    for (answered, talent) in accepted.iter().enumerate() {
+                        let index = candidate_index(&runner, *talent);
+                        let result = runner
+                            .act(GameAction::ChooseReplacement { index })
+                            .expect("a representable Talent answer must be accepted");
+                        assert!(
+                            resource.deltas(&result.events, P1).is_empty(),
+                            "{label}: nothing is placed while the halver remains"
+                        );
+                        assert_eq!(
+                            pending_candidate_count(&runner),
+                            Some(talents.len() + 1 - answered),
+                            "{label}: the prompt re-parks over the replacements left"
+                        );
+                    }
+                    let parked = runner
+                        .state()
+                        .pending_replacement
+                        .as_ref()
+                        .map(|pending| &pending.proposed);
+                    assert!(
+                        matches!(
+                            parked,
+                            Some(crate::types::proposed_event::ProposedEvent::AddCounter {
+                                count: 4_096_000_000,
+                                ..
+                            })
+                        ),
+                        "{label}: reach guard: twelve doublings park 4,096,000,000, got \
+                         {parked:?}"
+                    );
                     let before = counter_rollback_set(&runner);
                     for attempt in ["first", "repeated"] {
-                        let scaler_first = candidate_index(&runner, scaler);
+                        let last_talent = candidate_index(&runner, *last);
                         let error = runner
-                            .act(GameAction::ChooseReplacement {
-                                index: scaler_first,
-                            })
+                            .act(GameAction::ChooseReplacement { index: last_talent })
                             .expect_err("the overflowing answer must be rejected");
                         assert_unrepresentable_for(&error, P1);
                         assert_eq!(
