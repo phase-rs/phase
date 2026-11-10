@@ -21,7 +21,8 @@
 //! `a_gain_past_i32_substituted_by_tainted_remedy_reads_the_saturated_stamp`
 //! pin. Set/exchange/redistribute land exactly across the whole range, and a
 //! change to a shared life total, a Two-Headed Giant team's (CR 810.4) or the
-//! Archenemy Commander heroes' (CR 904.13b), caps that total (CR 810.9).
+//! Archenemy Commander heroes' (CR 904.13b), is applied to that total
+//! (CR 810.9), which stops at the same `i32` limit.
 //! A life replacement quantity past
 //! `u32` lands on `u32::MAX`. A mandatory life-gain loop at the cap is drawn
 //! (CR 104.4b + CR 732.4), as are a mandatory loop that drains a seat held at
