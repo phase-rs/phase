@@ -490,3 +490,39 @@ fn the_encode_offer_survives_a_paused_post_replacement_draw_pair() {
         "accepting the offer must encode Last Thoughts on the selected host"
     );
 }
+
+/// CR 608.2c: "you may A, then you may B" — B states its own "may", so declining A still
+/// asks B.
+#[test]
+fn declining_the_first_tap_still_offers_the_second() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario.add_creature(P0, "First Permanent", 2, 2).id();
+    let second = scenario.add_creature(P1, "Second Permanent", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Hidden Strings", true, HIDDEN_STRINGS_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(spell).target_objects(&[first, second]).commit();
+
+    let mut offered = 0;
+    for _ in 0..40 {
+        let action = match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::OptionalEffectChoice { .. } => {
+                offered += 1;
+                GameAction::DecideOptionalEffect {
+                    accept: offered > 1,
+                }
+            }
+            WaitingFor::ChooseOneOfBranch { .. } => GameAction::ChooseBranch { index: 0 },
+            other => panic!("unexpected prompt: {}", other.variant_name()),
+        };
+        runner.act(action).expect("a legal answer");
+    }
+
+    assert_eq!(offered, 2, "both \"you may\" questions are asked");
+    assert!(runner.state().objects[&second].tapped, "the accepted tap");
+    assert!(!runner.state().objects[&first].tapped, "the declined tap");
+}

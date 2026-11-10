@@ -29854,6 +29854,26 @@ fn chain_source_becomes_attachment(clauses: &[ClauseIr]) -> bool {
     })
 }
 
+/// CR 400.7j: the most recent emitted clause put a card onto the battlefield.
+fn prior_clause_moves_to_battlefield(clauses: &[ClauseIr]) -> bool {
+    clauses
+        .iter()
+        .rev()
+        .find(|c| !matches!(c.disposition, ClauseDisposition::Continue { .. }))
+        .is_some_and(|c| {
+            matches!(
+                &c.parsed.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Battlefield,
+                    ..
+                } | Effect::Dig {
+                    destination: Some(Zone::Battlefield),
+                    ..
+                }
+            )
+        })
+}
+
 /// The player-declaring clauses of one chain being parsed, by clause index, with
 /// the group each node is tagged with. The chain's local `groups` counter mints
 /// the ids (`ChosenGroupId::declared_player`).
@@ -46199,24 +46219,7 @@ fn parse_effect_chain_ir_body(
         // folds this into the put's `sub_ability`; `rewire_result_anchored_subchain`
         // then re-affirms `forward_result` (moved card -> Attach source; original
         // source -> injected target).
-        let prev_moves_to_battlefield = builder
-            .clauses()
-            .iter()
-            .rev()
-            .find(|c| !matches!(c.disposition, ClauseDisposition::Continue { .. }))
-            .is_some_and(|c| {
-                matches!(
-                    &c.parsed.effect,
-                    Effect::ChangeZone {
-                        destination: Zone::Battlefield,
-                        ..
-                    } | Effect::Dig {
-                        destination: Some(Zone::Battlefield),
-                        ..
-                    }
-                )
-            });
-        if prev_moves_to_battlefield {
+        if prior_clause_moves_to_battlefield(builder.clauses()) {
             if let Some((condition, attach, is_optional)) =
                 try_parse_moved_card_subtype_attach_followup(normalized_text)
             {
@@ -48763,6 +48766,7 @@ fn parse_effect_chain_ir_body(
             // into an Aura/Equipment (the Licid class). Nothing else in the
             // chain is attachable, so the pronoun cannot name the chosen target.
             source_becomes_attachment_in_chain: chain_source_becomes_attachment(builder.clauses()),
+            prior_clause_moves_to_battlefield: prior_clause_moves_to_battlefield(builder.clauses()),
             effect_chain_full_lower: ctx.effect_chain_full_lower.clone(),
             parent_target_is_chosen,
             // CR 608.2c + CR 601.2a: carry the chosen-target filter (with its
@@ -48888,6 +48892,20 @@ fn parse_effect_chain_ir_body(
                 leading_subject_application.as_ref().map(|s| &s.affected),
                 Some(TargetFilter::Controller)
             ) || (is_optional && opponent_may_scope.is_none() && player_scope.is_none());
+        // CR 608.2c: in a printed "you may A, then <subject> B" the "may" scopes A
+        // alone, because B states its own subject or "may"; B is the next instruction.
+        let printed_then_before = chunk_idx
+            .checked_sub(1)
+            .and_then(|prev_idx| chunks.get(prev_idx))
+            .is_some_and(|prev_chunk| prev_chunk.boundary_after == Some(ClauseBoundary::Then));
+        if printed_then_before && (leading_subject_application.is_some() || is_optional) {
+            if let Some(prev) = builder
+                .last_mut()
+                .filter(|prev| prev.is_optional && prev.boundary == Some(ClauseBoundary::Then))
+            {
+                prev.boundary = Some(ClauseBoundary::Sentence);
+            }
+        }
         // CR 608.2c: a subjectless conjugated verb ("draws", not the imperative
         // "draw") continues the previous chunk's subject.
         let continues_elided_subject = leading_subject_application.is_none()

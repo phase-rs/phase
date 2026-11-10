@@ -1070,12 +1070,19 @@ fn rebind_child_to_forwarded_objects(
     {
         child.source_id = moved[0];
     }
-    if let Effect::Attach { target, .. } = &child.effect {
+    if let Effect::Attach {
+        attachment: attachment @ TargetFilter::OriginalSource,
+        ..
+    } = &mut child.effect
+    {
+        // CR 400.7j + CR 701.3a: the source is the attachment, so the moved card is the host; the empty target list lets the forwarded result bind it.
+        *attachment = TargetFilter::SpecificObject { id: producer };
+    } else if let Effect::Attach { target, .. } = &child.effect {
         let attach_target_is_last_created = matches!(target, TargetFilter::LastCreated);
         // CR 608.2c: ParentTarget hosts inherit an explicit parent
         // choice when present (Necrotic Plague). When none was chosen,
         // fall back to the ability source as host — CR 301.5b +
-        // CR 701.3a put→attach-to-~ (Iron Man, Armored Skyhunter).
+        // CR 701.3a put→attach-it-to-~, where the moved card is the attachment (Iron Man).
         // Do not append the source on top of an already-bound host:
         // that would let ParentTarget resolve to the returned Aura.
         let attach_target_is_parent = matches!(target, TargetFilter::ParentTarget);

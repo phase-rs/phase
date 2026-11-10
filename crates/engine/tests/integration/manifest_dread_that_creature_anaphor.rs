@@ -23,6 +23,8 @@
 //! A bare "it" host after cloak, manifest or manifest dread binds the same
 //! referent, and a source attach joined by a bare "and" gets its own clause.
 //!
+//! "Put/return a card onto the battlefield and attach ~ to it" makes the moved card the host (Deathrender, Pre-War Formalwear, Last Voyage of the _____).
+//!
 //! Cards are built from Oracle text (CI has no card database). The Equipment
 //! subtype is stamped explicitly: without it CR 301.5 makes the attachment
 //! illegal and state-based actions unattach it again, which would make every
@@ -32,6 +34,7 @@
 use engine::game::combat::has_cant_be_blocked_static;
 use engine::game::layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::types::ability::EffectKind;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
@@ -552,4 +555,268 @@ fn nim_deathmantle_equips_the_creature_it_returned() {
     );
     assert_eq!(runner.state().objects[&bear].zone, Zone::Battlefield);
     assert_eq!(host_of(&runner, nim), Some(bear));
+}
+
+const DEATHRENDER: &str = "Equipped creature gets +2/+2.\nWhenever equipped creature dies, you may put a creature card from your hand onto the battlefield and attach this Equipment to it.\nEquip {2}";
+
+const PRE_WAR_FORMALWEAR: &str = "When this Equipment enters, return target creature card with mana value 3 or less from your graveyard to the battlefield and attach this Equipment to it.\nEquipped creature gets +2/+2 and has vigilance.\nEquip {3}";
+
+const MAGNETIC_SNUFFLER: &str = "When this creature enters, return target Equipment card from your graveyard to the battlefield attached to this creature.\nWhenever you sacrifice an artifact, put a +1/+1 counter on this creature.";
+
+const LAST_VOYAGE: &str = "When this enchantment enters, you may put a name sticker on it, then it becomes an Aura with enchant creature. Return a creature card from your graveyard to the battlefield and attach this Aura to it.\nEnchanted creature gets +2/+0 for each name sticker on this Aura with seven or fewer letters.\nWhen this Aura leaves the battlefield, sacrifice enchanted creature.";
+
+/// Answers every prompt until priority with an empty stack; returns the events and the
+/// number of optional prompts offered.
+fn settle(runner: &mut GameRunner, accept: bool, pick: &[ObjectId]) -> (Vec<GameEvent>, usize) {
+    let mut events = Vec::new();
+    let mut offered = 0;
+    for _ in 0..64 {
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
+                return (events, offered);
+            }
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::OptionalEffectChoice { .. } => {
+                offered += 1;
+                GameAction::DecideOptionalEffect { accept }
+            }
+            WaitingFor::ChooseOneOfBranch { .. } => GameAction::ChooseBranch { index: 0 },
+            WaitingFor::ChooseFromZoneChoice { .. } | WaitingFor::EffectZoneChoice { .. } => {
+                GameAction::SelectCards {
+                    cards: pick.to_vec(),
+                }
+            }
+            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
+                let result = runner.choose_first_legal_target().expect("a legal target");
+                events.extend(result.events);
+                continue;
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        };
+        events.extend(runner.act(action).expect("a legal answer").events);
+    }
+    panic!("the prompts did not settle");
+}
+
+/// A Bear equipped with Deathrender, plus `hand` creature cards; the Bear is bolted.
+/// Returns the runner, Deathrender, the hand cards, the Bear, and the cast events.
+fn deathrender_board(
+    hand: &[&str],
+) -> (
+    GameRunner,
+    ObjectId,
+    Vec<ObjectId>,
+    ObjectId,
+    Vec<GameEvent>,
+) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario.add_creature(P0, "Bear", 1, 1).id();
+    let deathrender = scenario
+        .add_artifact_from_oracle(P0, "Deathrender", DEATHRENDER)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let hand: Vec<ObjectId> = hand
+        .iter()
+        .map(|name| scenario.add_creature_to_hand(P0, name, 3, 3).id())
+        .collect();
+    let bolt = scenario.add_bolt_to_hand(P0);
+    let mut runner = scenario.build();
+    engine::game::effects::attach::attach_to(runner.state_mut(), deathrender, bear);
+    let outcome = runner
+        .cast(bolt)
+        .target_object(bear)
+        .commit()
+        .stop_at_optional()
+        .resolve();
+    let events = outcome.events().to_vec();
+    (runner, deathrender, hand, bear, events)
+}
+
+fn died(events: &[GameEvent], object: ObjectId) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            GameEvent::ZoneChanged { object_id, to: Zone::Graveyard, .. } if *object_id == object
+        )
+    })
+}
+
+/// CR 400.7j + CR 701.3a: Deathrender equips the creature card it put onto the battlefield.
+#[test]
+fn deathrender_equips_the_creature_it_put_from_hand() {
+    let (mut runner, deathrender, hand, bear, mut events) = deathrender_board(&["Hand Ogre"]);
+    let ogre = hand[0];
+    events.extend(settle(&mut runner, true, &[ogre]).0);
+
+    assert!(died(&events, bear), "reach guard: the equipped Bear died");
+    assert_eq!(runner.state().objects[&ogre].zone, Zone::Battlefield);
+    assert_eq!(host_of(&runner, deathrender), Some(ogre));
+}
+
+/// CR 608.2d + CR 400.7j: declining, or a hand with no creature card, moves nothing, so
+/// Deathrender stays unattached rather than equipping the dead Bear or itself.
+#[test]
+fn deathrender_that_moves_nothing_equips_nothing() {
+    let (mut runner, deathrender, hand, bear, mut events) = deathrender_board(&["Hand Ogre"]);
+    let (settled, offered) = settle(&mut runner, false, &hand);
+    events.extend(settled);
+    assert!(died(&events, bear), "reach guard: the equipped Bear died");
+    assert_eq!(offered, 1, "reach guard: the optional put was offered");
+    assert_eq!(host_of(&runner, deathrender), None);
+    assert_eq!(runner.state().objects[&deathrender].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&hand[0]].zone, Zone::Hand);
+
+    let (mut runner, deathrender, _, bear, mut events) = deathrender_board(&[]);
+    events.extend(settle(&mut runner, true, &[]).0);
+    assert!(died(&events, bear), "reach guard: the equipped Bear died");
+    assert_eq!(host_of(&runner, deathrender), None);
+    assert_eq!(runner.state().objects[&deathrender].zone, Zone::Battlefield);
+}
+
+/// CR 400.7j: with two creature cards in hand, Deathrender equips the one chosen.
+#[test]
+fn deathrender_equips_the_chosen_creature_card() {
+    let (mut runner, deathrender, hand, _, _) = deathrender_board(&["Hand Ogre", "Hand Troll"]);
+    let (first, second) = (hand[0], hand[1]);
+    settle(&mut runner, true, &[second]);
+
+    assert_eq!(host_of(&runner, deathrender), Some(second));
+    assert_eq!(runner.state().objects[&first].zone, Zone::Hand);
+}
+
+/// CR 400.7j + CR 701.3a: Pre-War Formalwear equips the creature card it returned, not
+/// itself.
+#[test]
+fn pre_war_formalwear_equips_the_creature_it_returned() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let grave_bear = scenario
+        .add_creature_to_graveyard(P0, "Grave Bear", 2, 2)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let formalwear = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Pre-War Formalwear", PRE_WAR_FORMALWEAR)
+        .with_subtypes(vec!["Equipment"])
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+
+    runner
+        .cast(formalwear)
+        .commit()
+        .stop_at_optional()
+        .resolve();
+    settle(&mut runner, true, &[grave_bear]);
+
+    assert_eq!(runner.state().objects[&grave_bear].zone, Zone::Battlefield);
+    assert_eq!(host_of(&runner, formalwear), Some(grave_bear));
+}
+
+/// CR 701.3a: the "attached to this creature" family keeps the entering creature as host.
+#[test]
+fn magnetic_snuffler_returns_the_equipment_attached_to_itself() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let equipment = scenario
+        .add_creature_to_graveyard(P0, "Grave Sword", 0, 0)
+        .as_artifact()
+        .with_subtypes(vec!["Equipment"])
+        .from_oracle_text("Equipped creature gets +2/+0.\nEquip {1}")
+        .id();
+    let snuffler = scenario
+        .add_creature_to_hand_from_oracle(P0, "Magnetic Snuffler", 4, 4, MAGNETIC_SNUFFLER)
+        .as_artifact_creature()
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(snuffler).commit().stop_at_optional().resolve();
+    settle(&mut runner, true, &[equipment]);
+
+    assert_eq!(host_of(&runner, equipment), Some(snuffler));
+}
+
+/// Casts Last Voyage of the _____ with a sticker sheet selected and a creature card in the
+/// graveyard, answering the sticker prompt with `accept`.
+fn last_voyage(accept: bool) -> (GameRunner, ObjectId, ObjectId, Vec<GameEvent>, usize) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let grave_bear = scenario
+        .add_creature_to_graveyard(P0, "Grave Bear", 2, 2)
+        .id();
+    let voyage = {
+        let mut builder = scenario.add_spell_to_hand(P0, "Last Voyage of the _____", false);
+        builder
+            .as_enchantment()
+            .from_oracle_text(LAST_VOYAGE)
+            .with_mana_cost(ManaCost::generic(0));
+        builder.id()
+    };
+    let mut runner = scenario.build();
+    engine::game::stickers::set_player_sticker_sheets(
+        runner.state_mut(),
+        P0,
+        &["Ancestral Hot Dog Minotaur".into()],
+    );
+
+    let outcome = runner.cast(voyage).commit().stop_at_optional().resolve();
+    let mut events = outcome.events().to_vec();
+    let (settled, offered) = settle(&mut runner, accept, &[grave_bear]);
+    events.extend(settled);
+    (runner, voyage, grave_bear, events, offered)
+}
+
+fn assert_voyage_enchants(
+    runner: &GameRunner,
+    voyage: ObjectId,
+    grave_bear: ObjectId,
+    events: &[GameEvent],
+) {
+    let resolved = |kind: EffectKind| {
+        events
+            .iter()
+            .any(|event| matches!(event, GameEvent::EffectResolved { kind: k, .. } if *k == kind))
+    };
+    assert!(
+        resolved(EffectKind::GenericEffect),
+        "reach guard: the becomes-Aura step resolved"
+    );
+    assert!(
+        resolved(EffectKind::Attach),
+        "reach guard: the attach resolved"
+    );
+    assert_eq!(runner.state().objects[&grave_bear].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&voyage].zone, Zone::Battlefield);
+    assert_eq!(host_of(runner, voyage), Some(grave_bear));
+    let state = after_layer_pass(runner);
+    assert_eq!(
+        state.objects[&voyage].card_types.subtypes,
+        vec!["Aura".to_string()]
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, GameEvent::Unattached { .. })),
+        "CR 704.5p must not unattach a non-Aura"
+    );
+}
+
+/// CR 608.2c + CR 400.7j: Last Voyage of the _____ becomes an Aura whether or not a sticker
+/// is put on it, and enchants the creature it returned.
+#[test]
+fn last_voyage_without_a_sticker_enchants_the_creature_it_returned() {
+    let (runner, voyage, grave_bear, events, offered) = last_voyage(false);
+    assert_eq!(offered, 1, "reach guard: the sticker prompt was offered");
+    assert_eq!(runner.state().objects[&voyage].stickers.len(), 0);
+    assert_voyage_enchants(&runner, voyage, grave_bear, &events);
+}
+
+/// CR 608.2c + CR 400.7j: with a sticker placed, Last Voyage still enchants the returned
+/// creature.
+#[test]
+fn last_voyage_with_a_sticker_enchants_the_creature_it_returned() {
+    let (runner, voyage, grave_bear, events, _) = last_voyage(true);
+    assert_eq!(runner.state().objects[&voyage].stickers.len(), 1);
+    assert_voyage_enchants(&runner, voyage, grave_bear, &events);
 }

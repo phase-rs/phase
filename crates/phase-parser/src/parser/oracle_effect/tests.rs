@@ -39859,6 +39859,63 @@ fn for_each_opponent_who_doesnt_lowers_decline_consequence() {
     }
 }
 
+/// CR 608.2c: "you may A, then it B" — B states its own subject, so it follows the optional A as the next instruction.
+#[test]
+fn may_then_own_subject_clause_is_sequential_sibling() {
+    use crate::types::ability::SubAbilityLink;
+    let parsed = parse_oracle_text(
+        "When this enchantment enters, you may put a name sticker on it, then it becomes an Aura with enchant creature. Return a creature card from your graveyard to the battlefield and attach this Aura to it.\nEnchanted creature gets +2/+0 for each name sticker on this Aura with seven or fewer letters.\nWhen this Aura leaves the battlefield, sacrifice enchanted creature.",
+        "Last Voyage of the _____",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let root = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("ETB trigger");
+    assert!(matches!(*root.effect, Effect::PutSticker { .. }));
+    assert!(root.optional, "the sticker is the optional A");
+    let becomes = root.sub_ability.as_deref().expect("becomes-Aura step");
+    assert!(matches!(*becomes.effect, Effect::GenericEffect { .. }));
+    assert_eq!(becomes.sub_link, SubAbilityLink::SequentialSibling);
+    let ret = becomes.sub_ability.as_deref().expect("return step");
+    assert!(matches!(*ret.effect, Effect::ChangeZone { .. }));
+    assert_eq!(ret.sub_link, SubAbilityLink::SequentialSibling);
+    let attach = ret.sub_ability.as_deref().expect("attach step");
+    assert!(matches!(*attach.effect, Effect::Attach { .. }));
+}
+
+/// CR 608.2c: "you may A, then return that card" — a bare verb phrase stays a step of the optional A.
+#[test]
+fn may_then_bare_verb_clause_stays_continuation_step() {
+    use crate::types::ability::SubAbilityLink;
+    let parsed = parse_oracle_text(
+        "At the beginning of your end step, you may exile target creature you control, then return that card to the battlefield under your control.",
+        "Conjurer's Closet",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    let root = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("end-step trigger");
+    assert!(matches!(*root.effect, Effect::ChangeZone { .. }));
+    assert!(root.optional, "the exile is the optional A");
+    let ret = root.sub_ability.as_deref().expect("return step");
+    assert!(matches!(
+        *ret.effect,
+        Effect::ChangeZone {
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ));
+    assert_eq!(ret.sub_link, SubAbilityLink::ContinuationStep);
+}
+
 /// CR 118.12 + CR 608.2d + CR 109.5: Wernog, Rider's Chaplain — subject-only
 /// OPTIONAL-decline tail. "each opponent may investigate. Each opponent who
 /// doesn't loses 1 life. You investigate." must lower clause 2 as a
@@ -61323,15 +61380,9 @@ fn attach_just_moved_negative_distinct_anaphors_are_not_rebound() {
     );
 }
 
-/// Negative sibling for the mirrored family: an explicit "attach **this
-/// Equipment** to it" already lowers the attachment to `SelfRef`, so the parse
-/// must survive the rebind untouched. This documents the shape the hoisted
-/// allow-list protects; it does not discriminate the hoist itself, because
-/// every `SelfRef`/`SelfRef` parent in today's corpus already carries
-/// `forward_result` — `rebind_rejects_self_ref_attachment_operand` below is the
-/// test that pins the hoist.
+/// CR 400.7j + CR 701.3a: after a battlefield move, a printed "attach this Equipment to it" lowers its attachment to `OriginalSource`.
 #[test]
-fn attach_just_moved_negative_self_ref_attachment_is_not_rebound() {
+fn attach_just_moved_printed_source_attachment_is_original_source() {
     let parsed = parse_oracle_text(
         PRE_WAR_FORMALWEAR_ORACLE,
         "Pre-War Formalwear",
@@ -61354,13 +61405,13 @@ fn attach_just_moved_negative_self_ref_attachment_is_not_rebound() {
     assert_eq!(
         &*attach.effect,
         &Effect::Attach {
-            attachment: TargetFilter::SelfRef,
+            attachment: TargetFilter::OriginalSource,
             target: TargetFilter::ParentTarget,
             selection: AttachSelection::AtResolution {
                 count: AttachCardinality::One,
             },
         },
-        "an explicit self attachment must survive the rebind unchanged"
+        "the printed source stays the attachment through the forward_result rebind"
     );
 }
 

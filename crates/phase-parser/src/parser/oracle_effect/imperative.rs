@@ -7835,6 +7835,15 @@ pub(super) fn parse_utility_imperative_ast(
             };
             let (attachment, _attachment_rem) = parse_attachment_anaphor(&attachment_text, ctx);
             let (target, _target_rem) = parse_attach_recipient(&target_text, ctx);
+            // CR 400.7j + CR 701.3a: after a battlefield move, "attach ~ to it" makes the moved card the host; `OriginalSource` keeps the source as the attachment through the forward_result rebind.
+            let attachment = match (attachment, &target) {
+                (TargetFilter::SelfRef, TargetFilter::ParentTarget)
+                    if ctx.prior_clause_moves_to_battlefield =>
+                {
+                    TargetFilter::OriginalSource
+                }
+                (attachment, _) => attachment,
+            };
             // CR 115.6 + CR 601.2c: the HOST operand's zero-target authority is
             // its own printed quantifier, independent of whether the ATTACHMENT
             // operand claimed an announced slot. "attach target Equipment you
@@ -32022,6 +32031,84 @@ mod tests {
             );
             node = def.sub_ability.as_deref();
         }
+    }
+
+    /// The first trigger's Attach operands, with whether its parent carries `forward_result`.
+    fn first_trigger_attach(
+        oracle: &str,
+        name: &str,
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> (bool, TargetFilter, TargetFilter) {
+        let strings = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            oracle,
+            name,
+            &[],
+            &strings(types),
+            &strings(subtypes),
+        );
+        let mut parent_forwards = false;
+        let mut node = parsed.triggers.iter().find_map(|t| t.execute.as_deref());
+        while let Some(def) = node {
+            assert!(
+                !matches!(*def.effect, Effect::Unimplemented { .. }),
+                "{name}: {:?}",
+                def.effect
+            );
+            if let Effect::Attach {
+                attachment, target, ..
+            } = &*def.effect
+            {
+                return (parent_forwards, attachment.clone(), target.clone());
+            }
+            parent_forwards = def.forward_result;
+            node = def.sub_ability.as_deref();
+        }
+        panic!("{name}: no Attach under its trigger");
+    }
+
+    /// CR 400.7j + CR 701.3a: "attach ~ to it" after a battlefield move keeps the source as
+    /// the attachment (`OriginalSource`) and the moved card as the host.
+    #[test]
+    fn attach_source_to_moved_card_is_original_source_attachment() {
+        for (name, types, subtypes, oracle) in [
+            (
+                "Deathrender",
+                &["Artifact"][..],
+                &["Equipment"][..],
+                "Equipped creature gets +2/+2.\nWhenever equipped creature dies, you may put a creature card from your hand onto the battlefield and attach this Equipment to it.\nEquip {2}",
+            ),
+            (
+                "Last Voyage of the _____",
+                &["Enchantment"][..],
+                &[][..],
+                "When this enchantment enters, you may put a name sticker on it, then it becomes an Aura with enchant creature. Return a creature card from your graveyard to the battlefield and attach this Aura to it.\nEnchanted creature gets +2/+0 for each name sticker on this Aura with seven or fewer letters.\nWhen this Aura leaves the battlefield, sacrifice enchanted creature.",
+            ),
+            (
+                "Scythe of the Wretched",
+                &["Artifact"][..],
+                &["Equipment"][..],
+                "Equipped creature gets +2/+2.\nWhenever a creature dealt damage by equipped creature this turn dies, return that card to the battlefield under your control. Attach this Equipment to that creature.\nEquip {4}",
+            ),
+        ] {
+            let (parent_forwards, attachment, target) = first_trigger_attach(oracle, name, types, subtypes);
+            assert!(parent_forwards, "{name}: the move forwards its result");
+            assert_eq!(attachment, TargetFilter::OriginalSource, "{name}");
+            assert_eq!(target, TargetFilter::ParentTarget, "{name}");
+        }
+
+        let (_, attachment, _) = first_trigger_attach(
+            "Enchant creature\nEnchanted creature can't attack or block, and its activated abilities can't be activated.\nWhenever a creature an opponent controls enters, you may attach this Aura to that creature.",
+            "Prison Term",
+            &["Enchantment"],
+            &["Aura"],
+        );
+        assert_eq!(
+            attachment,
+            TargetFilter::SelfRef,
+            "no prior move: the Aura stays SelfRef"
+        );
     }
 }
 
