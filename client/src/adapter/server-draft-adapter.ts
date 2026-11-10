@@ -225,6 +225,8 @@ export class ServerDraftAdapter implements EngineAdapter {
   private snapshot: EngineSnapshot | null = null;
   /** The transport whose frame produced {@link snapshot}; null when there is none. */
   private snapshotSource: PhaseSocketTransport | null = null;
+  /** Newest applied server state revision; an older Full must not replace it. */
+  private cachedStateRevision: number | null = null;
   private _playerId: PlayerId | null = null;
   private activeMatchId: string | null = null;
   private _gameCode: string | null = null;
@@ -553,6 +555,7 @@ export class ServerDraftAdapter implements EngineAdapter {
   private clearSnapshot(): void {
     this.snapshot = null;
     this.snapshotSource = null;
+    this.cachedStateRevision = null;
   }
 
   /** Turn a state-bearing payload into the pair {@link cacheSnapshot} stores. */
@@ -844,11 +847,14 @@ export class ServerDraftAdapter implements EngineAdapter {
   }
 
   /**
-   * Draft broadcasts are not acknowledgements. Every socket must show the
-   * requested new instance in inventory, backed by the complete selection the
-   * engine offered when it was sent. Counter/phase changes and reply ownership
-   * alone cannot identify a pick outcome. The wire cannot distinguish a timer
-   * selecting that same instance from acceptance of this request.
+   * Draft broadcasts are not acknowledgements. A pick completes when its
+   * inventory proves the exact newly selected instance. A request backed by the
+   * complete selection offered in the original view can complete from any
+   * source with the captured draft identity; a request without that authority
+   * can only be completed by its own sending socket, which is the
+   * request-scoped receipt and never a replacement's snapshot.
+   * Counter/phase changes and reply ownership alone are not outcome evidence.
+   * The wire cannot distinguish a timer selecting that same instance.
    */
   private settleDraftView(
     view: DraftPlayerView,
@@ -857,12 +863,16 @@ export class ServerDraftAdapter implements EngineAdapter {
   ): void {
     if (this.draftActionStage !== "AwaitingReply") return;
     const pick = this.draftPick;
-    if (pick && (!pick.completeSelection
-      || !view.pool.some((card) => card.instance_id === pick.instanceId)
-      || (this.draftActionSocket !== sourceSocket
-        && (initOwner?.kind !== "reconnect"
-          || initOwner.draftCode !== pick.draftCode
-          || initOwner.playerToken !== pick.playerToken)))) return;
+    if (pick) {
+      if (!view.pool.some((card) => card.instance_id === pick.instanceId)) return;
+      const ownsAction = this.draftActionSocket === sourceSocket;
+      if (!ownsAction) {
+        const sameDraft = initOwner?.kind === "reconnect"
+          && initOwner.draftCode === pick.draftCode
+          && initOwner.playerToken === pick.playerToken;
+        if (!pick.completeSelection || !sameDraft) return;
+      }
+    }
     // Non-pick actions retain the legacy current-stream completion semantics;
     // retired frames have already been restricted to their own pending reply.
     this.settleDraftAction(view);
@@ -1192,17 +1202,20 @@ export class ServerDraftAdapter implements EngineAdapter {
         && this.draftResolve === attachment.owner.resolve && this.draftReject === attachment.owner.reject) {
         this.draftActionSocket = sourceSocket;
       }
-      // A terminal codec failure may have arrived during ClientHello. Consume
-      // that binding's sticky delivery policy even though no setup-safe hello
-      // can be exposed for this closed candidate.
-      if (bootstrap.failure !== null) {
-        this.stateCodec.adopt(bootstrap, sourceSocket);
-        this.ws = sourceSocket;
-        this.retireIdleSockets();
-      }
       if (!this.ownsAttachment(attachment) || !this.sockets.has(sourceSocket)) {
+        // A terminal codec failure may have arrived during ClientHello. Consume
+        // that binding's sticky delivery policy without displacing an incumbent
+        // peer: this candidate never owned a setup-capable attachment.
+        if (!this.disposed && bootstrap.failure !== null) {
+          this.stateCodec.adopt(bootstrap, sourceSocket);
+        }
         this.abandonSocket(socket);
         return;
+      }
+      // Same policy consumption for a live candidate; the incumbent socket and
+      // its credentials stay current until this candidate's setup is on the wire.
+      if (bootstrap.failure !== null) {
+        this.stateCodec.adopt(bootstrap, sourceSocket);
       }
       // Address the local candidate, not the still-current previous socket.
       if (!this.send(setupFrame, sourceSocket)) {
@@ -1264,7 +1277,12 @@ export class ServerDraftAdapter implements EngineAdapter {
           ? new AdapterError("WS_ERROR", String(error), true)
           : error instanceof Error ? error : new Error(String(error));
       this.rejectAttachment(attachment.owner, failure);
-      if (socket) this.abandonSocket(socket);
+      if (socket) {
+        if (!this.disposed && bootstrap.failure !== null) {
+          this.stateCodec.adopt(bootstrap, socket.ws);
+        }
+        this.abandonSocket(socket);
+      }
       if (error instanceof HandshakeError
         && error.kind === "protocol_mismatch" && error.serverInfo
         && this.unfinishedAttachment === attachment && !attachment.controller.signal.aborted) {
@@ -1377,6 +1395,7 @@ export class ServerDraftAdapter implements EngineAdapter {
                 "The draft match changed before this command completed",
                 true,
               ));
+              this.emit({ type: "actionPendingChanged", pending: false });
             }
           }
           this.clearSnapshot();
@@ -1452,6 +1471,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         const data = msg.data as {
           state: GameState;
           your_player: PlayerId;
+          state_revision?: number;
           legal_actions?: GameAction[];
           auto_pass_recommended?: boolean;
           end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"];
@@ -1474,6 +1494,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.acceptedFullKey = data.full_key ?? null;
         const started = ServerDraftAdapter.snapshotPair(data);
         const startedSnapshot = this.cacheSnapshot(started.state, started.legalResult, sourceSocket);
+        this.cachedStateRevision = data.state_revision ?? null;
         this._playerId = data.your_player;
         this.acceptedGameSocket = sourceSocket;
         // Accepted after the match/player/full-key guards above and after the
@@ -1492,6 +1513,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         const data = msg.data as {
           state: GameState;
           events: GameEvent[];
+          state_revision?: number;
           legal_actions?: GameAction[];
           auto_pass_recommended?: boolean;
           end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"];
@@ -1507,8 +1529,22 @@ export class ServerDraftAdapter implements EngineAdapter {
         if (!fullSessionKeysEqual(data.full_key, this.acceptedFullKey)) {
           break;
         }
+        if (this.cachedStateRevision !== null && typeof data.state_revision === "number"
+          && data.state_revision < this.cachedStateRevision) {
+          // A decoded recovery Full older than the applied revision must not
+          // replace it, and it is not an accepted bootstrap: the codec recovery
+          // gate stays closed until a current revision arrives. It may still
+          // answer this socket's own correlated command.
+          const stale = this.takeSubmission(sourceSocket, msg.command_id);
+          if (stale) {
+            stale.resolve({ events: data.events, log_entries: data.log_entries });
+            this.emit({ type: "actionPendingChanged", pending: false });
+          }
+          break;
+        }
         const updated = ServerDraftAdapter.snapshotPair(data);
         const updateSnapshot = this.cacheSnapshot(updated.state, updated.legalResult, sourceSocket);
+        this.cachedStateRevision = data.state_revision ?? this.cachedStateRevision;
         // A peer's StateUpdate is not an acknowledgement of our command.
         const pending = this.takeSubmission(sourceSocket, msg.command_id);
         if (pending) {

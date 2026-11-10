@@ -3687,6 +3687,56 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
     },
   );
 
+  it("does not accept a same-key recovery Full older than the applied revision", async () => {
+    const session = draftCodecSession(decodeEnvelope);
+    const { adapter, ws } = await startCodecDraft(session.session, true);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    // Test-only probe: the recovery gate has no public surface.
+    const internals = adapter as unknown as { stateCodec: { assertNotRecovering(): void } };
+    const gateOpen = () => {
+      try {
+        internals.stateCodec.assertNotRecovering();
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    ws.dispatchSynthetic("message", draftFrame("Delta", {
+      type: "StateUpdate",
+      data: { state: matchState("revision-10"), events: [], full_key: FULL_KEY, state_revision: 10 },
+    }));
+    await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+      type: "gameStateUpdated", state: expect.objectContaining({ label: "revision-10" }),
+    })));
+    // A rejected Delta opens recovery.
+    session.decode.mockResolvedValueOnce({ kind: "resyncRequired" });
+    ws.dispatchSynthetic("message", draftFrame("Delta", {
+      type: "StateUpdate",
+      data: { state: matchState("rejected-delta"), events: [], full_key: FULL_KEY, state_revision: 11 },
+    }));
+    await vi.waitFor(() => expect(gateOpen()).toBe(false));
+    // A same-key recovery Full at an older revision is not accepted as recovery
+    // evidence: it must not apply, and the codec declines the delivery instead
+    // of completing recovery against a backwards snapshot.
+    const beforeStale = events.length;
+    ws.dispatchSynthetic("message", draftFrame("Full", {
+      type: "StateUpdate",
+      data: { state: matchState("stale-9"), events: [], full_key: FULL_KEY, state_revision: 9 },
+    }));
+    await vi.waitFor(() => expect(events.slice(beforeStale)).toContainEqual(
+      expect.objectContaining({ type: "disconnected" }),
+    ));
+    expect(events.slice(beforeStale)).not.toContainEqual(expect.objectContaining({
+      type: "gameStateUpdated",
+    }));
+    expect(await adapter.getSnapshot().catch(() => null)).not.toMatchObject({
+      state: expect.objectContaining({ label: "stale-9" }),
+    });
+    adapter.dispose();
+  });
+
   it.each([
     ["Action", true], ["Interaction", true], ["Action", false], ["Interaction", false],
   ] as const)("recovers an established %s (correlated=%s), gating new submissions until Full", async (kind, correlated) => {
@@ -5479,12 +5529,10 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
         expect(await observed()).toBe("never settled");
         expect(ws.close).not.toHaveBeenCalled();
         expect(leaseClose).not.toHaveBeenCalled();
-        // A's ownership also cannot turn inventory into a complete-source pick
-        // outcome when the submitted request had no such engine authority.
+        // The replacement cannot settle it, but the request-scoped receipt is
+        // the sending socket's own inventory: the supported settlement path.
         receive(ws, "DraftStateUpdate", { view: selected });
-        expect(await observed()).toBe("never settled");
-        receive(ws, "DraftActionRejected", { reason: "original selection rejected" });
-        await expect(pick).rejects.toMatchObject({ message: "original selection rejected" });
+        await expect(pick).resolves.toEqual(selected);
         expect(ws.close).toHaveBeenCalledOnce();
         expect(leaseClose).toHaveBeenCalledOnce();
       } finally {
