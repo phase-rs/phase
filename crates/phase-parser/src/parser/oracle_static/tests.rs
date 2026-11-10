@@ -42891,12 +42891,31 @@ fn repaired_grammar_neighbours_parse_to_their_meaning_or_an_explicit_gap() {
 //
 // Three printed members of the class are asserted on the filter the cost pipeline
 // actually receives (Head of the Class, Killian, Ink Duelist, Strong Back), plus
-// the shaper's positive and negative boundaries. A census over
-// `client/public/card-data.json` measures eight affected cards, named here with
-// two caveats: "The Destined" has no Scryfall match (asserted nowhere here), and
-// only the entries named above were confirmed against Scryfall — Esior, Wardwing
-// Familiar; Kasmina, Enigmatic Mentor; Kopala, Warden of Waves (cast and activate
-// lines); Professor Hojo; The Destined.
+// the shaper's positive and negative boundaries.
+//
+// SCOPE, measured rather than claimed. Regenerating `card-data.json` with the
+// parser on each side of this change and diffing the coverage parse signatures
+// at head `7711e457e` reports EIGHT cards over ten signatures — the two seams
+// this shaper feeds (`parse_cost_modifier_target_filter` for cast costs,
+// `cost_mod::split_ability_target_restriction` for activation costs):
+//
+//   Head of the Class · Killian, Ink Duelist · Strong Back · The Destined
+//     — cast-cost seam; Strong Back also on the activation seam
+//   Esior, Wardwing Familiar · Kasmina, Enigmatic Mentor
+//     — cast-cost seam, raise direction
+//   Kopala, Warden of Waves — BOTH seams (cast and activate lines)
+//   Professor Hojo — activation seam
+//
+// That count is only visible once `coverage::static_details` exports the
+// qualifier fields (`spell_filter`, `targets`, `activator`, `exemption`,
+// `frequency`): the same parser delta diffed through the pre-change export
+// reports ONE card, Head of the Class, and only because its gate is mirrored
+// into a `conditional` that the exporter already rendered. The other seven were
+// invisible, which is why earlier scope estimates for this change disagreed.
+//
+// One caveat: "The Destined" has no Scryfall match (searched by exact name,
+// 404), so its row is a parse-side data point and is asserted nowhere here.
+// Every other name above was confirmed against Scryfall.
 #[test]
 fn cost_modifier_bare_type_target_qualifier_carries_battlefield_scope() {
     use crate::parser::oracle_target::scope_type_phrase_to_the_battlefield;
@@ -42990,7 +43009,8 @@ fn cost_modifier_bare_type_target_qualifier_carries_battlefield_scope() {
     );
 
     // The ACTIVATION-side arm: the same bare-type qualifier on an
-    // activated-ability cost modifier — Professor Hojo (Scryfall lci/224),
+    // activated-ability cost modifier — Professor Hojo (Scryfall fic/69, one of
+    // its two printings, both in Final Fantasy Commander),
     // verbatim: "The first activated ability you activate during your turn that
     // targets a creature you control costs {2} less to activate." This line
     // reaches its filter through `split_ability_target_restriction`, not through
@@ -43059,4 +43079,213 @@ fn cost_modifier_bare_type_target_qualifier_carries_battlefield_scope() {
             "CR 109.2a/109.2b: {phrase:?} names its own zone and must not gain the battlefield scope"
         );
     }
+}
+
+// CR 109.2 + CR 115.9b: an ACTIVATED-ABILITY cost modifier's "… that targets
+// <phrase>" qualifier names the object a qualifying activation must have
+// announced as a target. A bare type description — no zone, and none of the
+// words "card"/"spell"/"source"/"scheme" — means a permanent of that type ON THE
+// BATTLEFIELD. The controller axis spelled inside the phrase ("you control",
+// "an opponent controls", or no restriction at all) narrows WHICH battlefield
+// permanents qualify; it neither replaces the scope nor widens it past the
+// battlefield.
+//
+// Asserted on the grammar rather than on one card: each of the three controller
+// spellings is driven through BOTH printed shapes of the modifier — the
+// untagged "… abilities you activate that target <X> cost {N} less to activate"
+// form and the once-per-turn "The first activated ability you activate during
+// your turn that targets <X> costs {N} less to activate" form (Professor Hojo,
+// Scryfall fic/69) — because both reach the filter through the one seam,
+// `cost_mod::split_ability_target_restriction`, and must agree.
+#[test]
+fn activated_ability_cost_modifier_target_qualifier_scopes_every_controller_axis() {
+    /// The `targets` gate of an activated-ability cost modifier — the field the
+    /// coverage signature export surfaces as `targets`.
+    fn activation_targets(line: &str) -> TargetFilter {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("line must parse: {line}"));
+        let StaticMode::ReduceAbilityCost { targets, .. } = def.mode else {
+            panic!(
+                "expected an activated-ability cost modifier for {line}, got {:?}",
+                def.mode
+            );
+        };
+        targets.unwrap_or_else(|| panic!("expected the target qualifier for {line}"))
+    }
+
+    let battlefield = FilterProp::InZone {
+        zone: Zone::Battlefield,
+    };
+
+    // "a creature you control" — Professor Hojo's own phrase.
+    let you_control = TargetFilter::Typed(
+        TypedFilter::creature()
+            .controller(ControllerRef::You)
+            .properties(vec![battlefield.clone()]),
+    );
+    for line in [
+        "Equip abilities you activate that target a creature you control cost {1} less to activate.",
+        "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.",
+    ] {
+        assert_eq!(
+            activation_targets(line),
+            you_control,
+            "CR 109.2: 'a creature you control' is a bare type description, so it means a \
+             battlefield permanent — {line}"
+        );
+    }
+
+    // "a creature an opponent controls" — the same bare type description with the
+    // opposing controller. The controller axis narrows the scope, it does not
+    // lift the target off the battlefield.
+    let opponent_control = TargetFilter::Typed(
+        TypedFilter::creature()
+            .controller(ControllerRef::Opponent)
+            .properties(vec![battlefield.clone()]),
+    );
+    for line in [
+        "Equip abilities you activate that target a creature an opponent controls cost {1} less to activate.",
+        "The first activated ability you activate during your turn that targets a creature an opponent controls costs {2} less to activate.",
+    ] {
+        assert_eq!(
+            activation_targets(line),
+            opponent_control,
+            "CR 109.2: 'a creature an opponent controls' is still a bare type description — {line}"
+        );
+    }
+
+    // Unrestricted control — "a creature" places no controller restriction on the
+    // target, so the battlefield scope is the only property the qualifier adds.
+    let unrestricted = TargetFilter::Typed(TypedFilter::creature().properties(vec![battlefield]));
+    for line in [
+        "Equip abilities you activate that target a creature cost {1} less to activate.",
+        "The first activated ability you activate during your turn that targets a creature costs {2} less to activate.",
+    ] {
+        assert_eq!(
+            activation_targets(line),
+            unrestricted,
+            "CR 109.2: an unrestricted 'a creature' qualifier means a battlefield permanent — {line}"
+        );
+    }
+}
+
+// The qualifier axes of an activated-ability cost modifier are parse-significant
+// but invisible to the `ReduceAbilityCost(<sign><keyword>,<amount>)` Display
+// label, which is why the coverage signature export emits them as
+// `targets`/`activator`/`exemption`/`frequency`. Pinned here so a silent change to
+// any of them moves the coverage parse-diff instead of hiding behind the label.
+//
+// Professor Hojo (Scryfall fic/69; set "Final Fantasy Commander", collector 69),
+// verbatim: "The first activated ability you activate during your turn that
+// targets a creature you control costs {2} less to activate." The second
+// sentence of the card ("Whenever one or more creatures you control become the
+// target of an activated ability, draw a card. This ability triggers only once
+// each turn.") is a separate triggered ability and is deliberately not this
+// line.
+//
+// The "of an artifact" leg proves the SOURCE qualifier and the TARGET qualifier
+// stay in their own slots when both are present.
+#[test]
+fn activated_ability_cost_modifier_qualifier_axes_stay_in_their_slots() {
+    let hojo = parse_static_line(
+        "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.",
+    )
+    .expect("Professor Hojo's line must parse");
+
+    let StaticMode::ReduceAbilityCost {
+        mode,
+        keyword,
+        amount,
+        targets,
+        activator,
+        exemption,
+        frequency,
+        ..
+    } = hojo.mode
+    else {
+        panic!(
+            "expected an activated-ability cost modifier, got {:?}",
+            hojo.mode
+        );
+    };
+
+    assert_eq!(mode, CostModifyMode::Reduce, "CR 118.7: the line reduces");
+    assert_eq!(
+        keyword, "activated",
+        "the modifier covers every activated ability, not a tagged class"
+    );
+    assert_eq!(amount, 2, "CR 118.7a: two generic");
+    assert_eq!(
+        exemption,
+        ActivationExemption::None,
+        "CR 605.1a: the line carves out no mana abilities"
+    );
+    assert_eq!(
+        activator,
+        Some(PlayerFilter::Controller),
+        "CR 602.2: 'abilities YOU activate' is the activator axis"
+    );
+    assert_eq!(
+        frequency,
+        Some(CastFrequency::OncePerTurn),
+        "CR 118.7 + CR 602.2b: 'the FIRST … during your turn' is the frequency axis"
+    );
+    assert_eq!(
+        hojo.condition,
+        Some(StaticCondition::DuringYourTurn),
+        "CR 500.5: 'during your turn' stays a condition on the static"
+    );
+    assert_eq!(
+        hojo.affected, None,
+        "the card scopes no ability sources, so `affected` stays empty"
+    );
+    assert_eq!(
+        targets,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Battlefield
+                }])
+        )),
+        "CR 109.2 + CR 115.9b: the target qualifier is the battlefield-scoped filter"
+    );
+
+    // Both qualifiers present at once: "of an artifact" scopes the SOURCES and
+    // "that targets a creature an opponent controls" scopes the TARGET. Neither
+    // may migrate into the other's slot, and the target keeps its scope.
+    let sourced = parse_static_line(
+        "The first activated ability of an artifact you activate each turn that targets a creature an opponent controls costs {1} less to activate.",
+    )
+    .expect("the sourced once-per-turn form must parse");
+    let StaticMode::ReduceAbilityCost { targets, .. } = sourced.mode else {
+        panic!(
+            "expected an activated-ability cost modifier, got {:?}",
+            sourced.mode
+        );
+    };
+    assert_eq!(
+        targets,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::Opponent)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Battlefield
+                }])
+        )),
+        "CR 109.2: the target qualifier still scopes to the battlefield when a source \
+         qualifier rides along"
+    );
+    let Some(TargetFilter::Typed(source)) = &sourced.affected else {
+        panic!(
+            "the 'of an artifact' subject must scope the sources: {:?}",
+            sourced.affected
+        );
+    };
+    assert!(
+        source
+            .type_filters
+            .iter()
+            .any(|f| matches!(f, TypeFilter::Artifact)),
+        "the source qualifier must stay on `affected`, not migrate into the target: {source:?}"
+    );
 }
