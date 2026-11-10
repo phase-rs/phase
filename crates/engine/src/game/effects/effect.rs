@@ -2269,6 +2269,91 @@ mod tests {
         );
     }
 
+    /// CR 109.5 + CR 702.11c: a top-level `Or` affected union is SPLIT and each member is
+    /// recursed as its own transient effect. This executes the `bind_transient_effect` split
+    /// the recipient-read gate is built on: the player member binds to its controller, and
+    /// the `EventTarget` member resolves against the trigger event's damage recipient.
+    #[test]
+    fn transient_effect_split_binds_each_union_member_including_event_target() {
+        use crate::types::game_state::DamageRecord;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Union Source".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Union Recipient".to_string(),
+            Zone::Battlefield,
+        );
+        for _ in 0..3 {
+            state.objects.get_mut(&source).unwrap().bump_incarnation();
+        }
+        let source_epoch = state.objects[&source].incarnation;
+        let recipient_epoch = state.objects[&recipient].incarnation;
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: source,
+            source_incarnation: Some(source_epoch),
+            target: TargetRef::Object(recipient),
+            target_incarnation: Some(recipient_epoch),
+            amount: 2,
+            is_combat: true,
+            ..Default::default()
+        });
+        state.current_trigger_event = Some(GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Object(recipient),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+            source_incarnation: Some(source_epoch),
+        });
+
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::Or {
+                filters: vec![TargetFilter::Controller, TargetFilter::EventTarget],
+            })
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }]);
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let affected: Vec<_> = state
+            .transient_continuous_effects
+            .iter()
+            .map(|effect| effect.affected.clone())
+            .collect();
+        assert!(
+            affected.contains(&TargetFilter::SpecificPlayer { id: PlayerId(0) }),
+            "the controller member binds through its player arm: {affected:?}"
+        );
+        assert!(
+            affected.contains(&TargetFilter::SpecificObject { id: recipient }),
+            "the event-recipient member binds through the split to the damage recipient: \
+             {affected:?}"
+        );
+    }
+
     #[test]
     fn forwarded_result_context_rejects_a_new_object_incarnation() {
         let mut state = GameState::new_two_player(42);

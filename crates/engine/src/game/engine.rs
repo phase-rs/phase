@@ -23515,6 +23515,14 @@ mod stage2_injector_tests {
 
         // `None`: this row is about the injector arm on a board-recurring targeted loop, so
         // it drives under the same no-signature delimiter every pre-bounded offer uses.
+        //
+        // Cost through the FIXED-CYCLE caller: every settle comparison the drive performs
+        // projects each side once. A strict boundary adds two whole-journal passes per
+        // comparison, so the per-comparison bound below is the revert discriminator for this
+        // caller (a cycle visit touches at most three seats per iteration).
+        let rows = committed.damage_dealt_this_turn.len();
+        use crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS;
+        LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
         let outcome = drive_one_shortcut_cycle(
             &committed,
             &boundary,
@@ -23525,6 +23533,7 @@ mod stage2_injector_tests {
             DepartureStop::EndsRepetition,
         )
         .expect("the fixture's shortcut cycle is representable");
+        let drive_visits = LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get);
         let CycleOutcome::SeatLeft { state, .. } = outcome else {
             panic!(
                 "CR 800.4a: a staggered wipe stops at the FIRST removal, not at the second; \
@@ -23563,9 +23572,17 @@ mod stage2_injector_tests {
             WaitingFor::Priority {
                 player: state.active_player
             },
-            "the removal is observed at the ACTIVE player's own beat on this rig, which is \
+            "the removal is observed at the ACTIVE PLAYER's own beat on this rig, which is \
              what makes the new arm's position ahead of the settle arm observable: demoted \
              below it, the drive returns one beat later at the next opponent window"
+        );
+        // Both drainers are `DealDamage` carriers that read no recipient, so the
+        // fixed-cycle caller's settle comparisons must do no journal work at all on this
+        // rig; a strict boundary would walk all {rows} rows on each projection.
+        assert_eq!(
+            drive_visits, 0,
+            "{drive_visits} journal visits through the fixed-cycle drive ({rows} rows, \
+             cap {cap}) on a rig whose retained carriers cannot read the recipient"
         );
     }
 
@@ -31710,12 +31727,27 @@ mod damage_history_priority_cost_tests {
         // projected side plus a bounded witness rank. A strict boundary would add its own
         // two journal passes, so the bound discriminates that revert.
         LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
-        let _ = settle_recurs(&boundary, &state);
+        let settled = settle_recurs(&boundary, &state);
         let whole_path = LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get);
+        assert!(
+            settled,
+            "the settle beat settles against its own boundary through the public comparator"
+        );
         assert!(
             whole_path <= 2 * ROWS + 16,
             "{whole_path} visits from boundary construction through the first settle \
              comparison for {ROWS} rows; a strict boundary would add two more passes"
+        );
+        // A REAL board modification must not settle: the comparison is not vacuous.
+        let mut modified = state.clone();
+        modified
+            .objects
+            .get_mut(&recipient)
+            .expect("the fixture keeps its recipient")
+            .tapped = true;
+        assert!(
+            !settle_recurs(&boundary, &modified),
+            "tapping the recipient is a real change the settle comparison must observe"
         );
     }
 

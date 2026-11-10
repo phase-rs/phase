@@ -5714,19 +5714,45 @@ pub(crate) fn ability_reads_sibling_mutable(ability: &ResolvedAbility) -> bool {
 /// the generic matcher and read no journal row, so only the four effect positions that
 /// read it exactly are consulted — their RAW fields, not `Effect::target_filter()`, which
 /// answers `None` for the `All` scope those same effects still read.
-pub(crate) fn ability_reads_event_target(ability: &ResolvedAbility) -> bool {
-    fn node_reads(node: &Effect) -> bool {
+/// CR 608.2k + CR 400.7: which reader class this ability chain can use for the event
+/// recipient — Referent for the four plain referent readers, Pinned when the prevention
+/// reader additionally consults the CAPTURED pin (prevent_damage.rs:601, target_pin_is_current),
+/// which loop normalization erases and therefore cannot represent in a reduced comparand.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum EventTargetRead {
+    None,
+    Referent,
+    Pinned,
+}
+
+pub(crate) fn ability_event_target_read(ability: &ResolvedAbility) -> EventTargetRead {
+    fn node_reads(node: &Effect) -> EventTargetRead {
         match node {
             Effect::SetTapState { target, .. }
             | Effect::BecomePrepared { target, .. }
-            | Effect::BecomeUnprepared { target, .. }
-            | Effect::PreventDamage { target, .. } => *target == TargetFilter::EventTarget,
+            | Effect::BecomeUnprepared { target, .. } => {
+                if *target == TargetFilter::EventTarget {
+                    EventTargetRead::Referent
+                } else {
+                    EventTargetRead::None
+                }
+            }
+            // CR 400.7 + CR 608.2k: both resolvers consult the captured pin
+            // (`prevent_damage.rs::target_pin_is_current`, `sacrifice.rs` retaining only
+            // `target_pin_is_current` targets), which loop normalization erases.
+            Effect::PreventDamage { target, .. } | Effect::Sacrifice { target, .. } => {
+                if *target == TargetFilter::EventTarget {
+                    EventTargetRead::Pinned
+                } else {
+                    EventTargetRead::None
+                }
+            }
             Effect::GenericEffect {
                 target,
                 static_abilities,
                 ..
             } => {
-                // `bind_transient_effect` SPLITS a top-level `Or`/`And` union and recurses
+                // `bind_transient_effect` SPLITS a top-level `Or` union and recurses
                 // with each member as the application filter, so a member `EventTarget`
                 // reaches the same exact-match arm as a whole-filter one. Use the
                 // recursive event-subject test here (a superset) so such a member cannot
@@ -5737,10 +5763,15 @@ pub(crate) fn ability_reads_event_target(ability: &ResolvedAbility) -> bool {
                         &TargetFilter::EventTarget,
                     )
                 };
-                target.as_ref().is_some_and(names_recipient)
+                if target.as_ref().is_some_and(names_recipient)
                     || static_abilities
                         .iter()
                         .any(|d| d.affected.as_ref().is_some_and(names_recipient))
+                {
+                    EventTargetRead::Referent
+                } else {
+                    EventTargetRead::None
+                }
             }
             // Exhaustive on purpose: a new variant must state whether it can hand an exact
             // `EventTarget` to the runtime reader, so a future reader cannot default to
@@ -5763,7 +5794,6 @@ pub(crate) fn ability_reads_event_target(ability: &ResolvedAbility) -> bool {
             | Effect::GainLife { .. }
             | Effect::LoseLife { .. }
             | Effect::RemoveCounter { .. }
-            | Effect::Sacrifice { .. }
             | Effect::DiscardCard { .. }
             | Effect::Mill { .. }
             | Effect::Scry { .. }
@@ -5978,33 +6008,33 @@ pub(crate) fn ability_reads_event_target(ability: &ResolvedAbility) -> bool {
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
-            | Effect::Unimplemented { .. } => false,
+            | Effect::Unimplemented { .. } => EventTargetRead::None,
         }
     }
-    let mut reads = false;
+    let mut reads = EventTargetRead::None;
     let _ = crate::types::ability_visit::visit_effect(&ability.effect, &mut |node: &Effect| {
-        reads |= node_reads(node);
+        reads = reads.max(node_reads(node));
         std::ops::ControlFlow::Continue(())
     });
-    reads
-        || ability
-            .child_links()
-            .any(|(_, child)| ability_reads_event_target(child))
-        || {
-            let mut modes = false;
-            for def in &ability.mode_abilities {
-                let _ = crate::types::ability_visit::visit_ability_def(
-                    def,
-                    &mut |node: &Effect| {
-                        modes |= node_reads(node);
-                        std::ops::ControlFlow::Continue(())
-                    },
-                );
-            }
-            modes
-        }
+    for (_, child) in ability.child_links() {
+        reads = reads.max(ability_event_target_read(child));
+    }
+    for def in &ability.mode_abilities {
+        let _ = crate::types::ability_visit::visit_ability_def(def, &mut |node: &Effect| {
+            reads = reads.max(node_reads(node));
+            std::ops::ControlFlow::Continue(())
+        });
+    }
+    if ability.unless_pay.is_some() {
         // Conservative: an unless-pay cost effect is not paired by the child walk.
-        || ability.unless_pay.is_some()
+        reads = reads.max(EventTargetRead::Referent);
+    }
+    reads
+}
+
+/// The journal-scan gate: true when any reader class applies.
+pub(crate) fn ability_reads_event_target(ability: &ResolvedAbility) -> bool {
+    ability_event_target_read(ability) != EventTargetRead::None
 }
 
 /// Axis 3 on a bare trigger fire-time `condition` (CR 603.4 intervening-if) —
@@ -8196,6 +8226,66 @@ mod tests {
     use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+
+    /// The `EventTarget` gate is a closed classification: every variant whose runtime
+    /// resolver reads the recipient journal answers with its reader class, and the
+    /// `GenericEffect` union member is caught recursively. A new variant breaks
+    /// compilation of the match rather than silently classifying `None`.
+    #[test]
+    fn event_target_read_classification_matches_the_runtime_readers() {
+        use crate::types::ability::{
+            Effect, EffectScope, PreventionAmount, PreventionScope, ResolvedAbility,
+            TapStateChange, TargetFilter,
+        };
+
+        let classify = |effect: Effect| {
+            ability_event_target_read(&ResolvedAbility::new(
+                effect,
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            ))
+        };
+        assert!(
+            classify(Effect::SetTapState {
+                target: TargetFilter::EventTarget,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            }) == EventTargetRead::Referent
+        );
+        assert!(
+            classify(Effect::PreventDamage {
+                amount: PreventionAmount::Next(1),
+                amount_dynamic: None,
+                target: TargetFilter::EventTarget,
+                recipient_scope: EffectScope::Single,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            }) == EventTargetRead::Pinned,
+            "the prevention reader consults the captured pin"
+        );
+        assert!(
+            classify(Effect::GenericEffect {
+                static_abilities: vec![],
+                duration: None,
+                target: Some(TargetFilter::Or {
+                    filters: vec![TargetFilter::Controller, TargetFilter::EventTarget],
+                }),
+                end_cost: None,
+            }) == EventTargetRead::Referent,
+            "the transient split reaches a union member"
+        );
+        assert!(classify(Effect::Investigate) == EventTargetRead::None);
+        assert!(
+            classify(Effect::GenericEffect {
+                static_abilities: vec![],
+                duration: None,
+                target: Some(TargetFilter::Controller),
+                end_cost: None,
+            }) == EventTargetRead::None
+        );
+    }
 
     /// U-a. CR 603.2: `OpponentAttacked { EventAttackers }` reads the trigger event,
     /// like `TriggeringPlayer`; the controller's own attacks read no event.

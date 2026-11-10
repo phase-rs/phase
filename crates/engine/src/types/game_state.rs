@@ -53112,9 +53112,27 @@ mod tests {
         for case in RANKED_CARRIERS {
             for built in [(case.split)(3), (case.merge)(5, 8)] {
                 let once = built.normalize_for_loop();
+                let twice = once.normalize_for_loop();
+                // Compare the two outputs DIRECTLY: `loop_states_equal` ranks its
+                // arguments, which would hide a second pass that changed anything.
                 assert!(
-                    loop_states_equal(&once.normalize_for_loop(), &once),
+                    projected_states_equal(&once, &twice),
                     "normalizing a normalized state changed {}",
+                    case.name
+                );
+                // ... with the live incarnation anchors, which the object-comparison
+                // conjunct deliberately omits.
+                let anchors = |state: &GameState| {
+                    state
+                        .objects
+                        .iter()
+                        .map(|(id, object)| (*id, object.incarnation))
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(
+                    anchors(&once),
+                    anchors(&twice),
+                    "normalizing twice moved a live incarnation anchor for {}",
                     case.name
                 );
             }
