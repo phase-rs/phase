@@ -18352,11 +18352,13 @@ fn finalize_mana_payment_with_resume(
         pending_for_restore = pending.clone();
         // CR 702.132a + CR 118.3a: the units the helper spent are part of THIS spell's
         // payment, and the payment below records them. `pending_cast` is owned here, so
-        // the units it captured at the spend boundary are handed to the finalizers on
-        // the same transient channel the caster's pin hints use — re-established from
-        // the restored root on every re-entry, so a pause between the helper's spend and
-        // the recording loses nothing.
-        state.active_assist_contributed_units = pending.assist_contributed_units.clone();
+        // the contribution claim it captured at the spend boundary — helper, paid amount
+        // and exact units, together — is handed to the finalizers on the same transient
+        // channel the caster's pin hints use, re-established from the restored root on
+        // every re-entry so a pause between the helper's spend and the recording loses
+        // nothing. The claim is typed so the finalizer can REFUSE one that does not
+        // describe the payment it asserts rather than splice whatever is there.
+        state.active_assist_contribution = pending.assist_contribution().map(Box::new);
 
         if let Some(ability_index) = pending.activation_ability_index {
             super::casting::require_locked_activation_cost(
@@ -18688,7 +18690,7 @@ fn finalize_mana_payment_with_resume(
     })();
     // CR 118.3a: the transient is self-contained — cleared on Ok and Err alike.
     state.active_payment_pins.clear();
-    state.active_assist_contributed_units.clear();
+    state.active_assist_contribution = None;
     state.active_casting_permission_index = None;
     state.active_graveyard_permission_latch = None;
     state.active_spend_only_on_x_count = None;
@@ -18812,11 +18814,13 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         pending_for_restore = pending.clone();
         // CR 702.132a + CR 118.3a: the units the helper spent are part of THIS spell's
         // payment, and the payment below records them. `pending_cast` is owned here, so
-        // the units it captured at the spend boundary are handed to the finalizers on
-        // the same transient channel the caster's pin hints use — re-established from
-        // the restored root on every re-entry, so a pause between the helper's spend and
-        // the recording loses nothing.
-        state.active_assist_contributed_units = pending.assist_contributed_units.clone();
+        // the contribution claim it captured at the spend boundary — helper, paid amount
+        // and exact units, together — is handed to the finalizers on the same transient
+        // channel the caster's pin hints use, re-established from the restored root on
+        // every re-entry so a pause between the helper's spend and the recording loses
+        // nothing. The claim is typed so the finalizer can REFUSE one that does not
+        // describe the payment it asserts rather than splice whatever is there.
+        state.active_assist_contribution = pending.assist_contribution().map(Box::new);
 
         if let Some(ability_index) = pending.activation_ability_index {
             super::casting::require_locked_activation_cost(
@@ -19159,7 +19163,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
     })();
     // CR 118.3a: the transient is self-contained — cleared on Ok and Err alike.
     state.active_payment_pins.clear();
-    state.active_assist_contributed_units.clear();
+    state.active_assist_contribution = None;
     state.active_casting_permission_index = None;
     state.active_graveyard_permission_latch = None;
     state.active_spend_only_on_x_count = None;

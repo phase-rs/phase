@@ -506,6 +506,46 @@ pub enum AssistState {
     Paid { helper: PlayerId, generic: u32 },
 }
 
+/// CR 702.132a + CR 118.3a: one paid Assist contribution, as the typed CLAIM the
+/// payment finalizers record and the restore boundary binds or refuses.
+///
+/// The claim exists so the units and the payment they belong to cannot travel
+/// apart. `AssistState::Paid` alone states an amount and no units; the units alone
+/// state no payer. Carried together with the cast they were spent on, they are one
+/// statement that can be checked: this helper removed these units from its pool to
+/// pay this much of this spell's generic mana.
+///
+/// Held on [`crate::types::game_state::GameState::active_assist_contribution`] for
+/// the duration of a finalize spend (the `PendingCast` is owned by value there), and
+/// rebuilt from `PendingCast::assist_state` + `PendingCast::assist_contributed_units`
+/// by [`crate::types::game_state::PendingCast::assist_contribution`] on every
+/// re-entry, so a pause between the helper's spend and the recording loses nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssistContribution {
+    /// CR 702.132a: the cast this contribution paid toward. A claim is only ever
+    /// about the spell it was captured for, so a claim that names another cast is
+    /// not this cast's and must not be recorded on it.
+    pub source_id: ObjectId,
+    /// The helper that paid (the helper `AssistState::Paid` names).
+    pub helper: PlayerId,
+    /// The generic amount the helper committed to pay, and therefore the number of
+    /// units its spend must have removed.
+    pub generic: u32,
+    /// CR 118.3a: the exact units that helper's spend removed from its mana pool,
+    /// in the order they were removed. These are mana spent to cast `source_id`.
+    pub units: Vec<ManaUnit>,
+}
+
+impl AssistContribution {
+    /// CR 702.132a + CR 118.3a: a helper that pays `generic` generic mana removes
+    /// exactly `generic` units from its pool — one unit per point of generic cost —
+    /// so a contribution whose unit count disagrees with its amount is not the
+    /// payment it claims to be.
+    pub fn is_backed_by_its_units(&self) -> bool {
+        self.units.len() as u32 == self.generic
+    }
+}
+
 /// CR 500.11 + CR 614.10a: One pending "[player] skips their next combat phase"
 /// (Revenant Patriarch, Stonehorn Dignitary, Blinding Angel, Moment of Silence).
 /// It is a virtual replacement of that player's combat phase beginning, used up
@@ -10237,6 +10277,35 @@ impl PendingCast {
         self
     }
 
+    /// CR 702.132a + CR 118.3a: the paid Assist contribution this cast carries, as
+    /// ONE typed claim — which helper paid, how much generic mana it committed, and
+    /// the exact units its spend removed.
+    ///
+    /// `None` for every cast no helper paid for (`NotOffered`, `Offered`, and the
+    /// cancellable `Committed`/`PaymentStarted` checkpoints, whose helper resources
+    /// are untouched). `Some` only for [`AssistState::Paid`], the single checkpoint
+    /// stamped immediately after the helper's spend, so the claim exists exactly
+    /// when the units do.
+    ///
+    /// The payment finalizers consume the claim rather than the bare unit list, so
+    /// they can refuse a contribution that does not describe the payment it
+    /// asserts — paying `generic` mana removes exactly `generic` units (CR 118.3a),
+    /// and a claim captured for another cast is not this cast's.
+    pub fn assist_contribution(&self) -> Option<AssistContribution> {
+        match self.assist_state {
+            AssistState::Paid { helper, generic } => Some(AssistContribution {
+                source_id: self.object_id,
+                helper,
+                generic,
+                units: self.assist_contributed_units.clone(),
+            }),
+            AssistState::NotOffered
+            | AssistState::Offered
+            | AssistState::Committed { .. }
+            | AssistState::PaymentStarted { .. } => None,
+        }
+    }
+
     /// CR 602.2b: the root of an in-flight ACTIVATED ability. Every activation
     /// root is built here, so each one must name its cost-modifier carrier
     /// (`None` only for the mana-free loyalty fast path and legacy callers) —
@@ -12107,6 +12176,124 @@ impl std::fmt::Display for ParkedActivationConflict {
                 f,
                 "it names no producer epoch for {source_id:?}; refusing to price its mana from \
                  whatever object holds that storage id now (CR 400.7)"
+            ),
+        }
+    }
+}
+
+/// CR 702.132a + CR 118.3a: why a parked cast's Assist contribution cannot be bound
+/// to the payment it claims. Produced by
+/// [`GameState::bind_or_reject_assist_contribution_provenance`], the one rule that
+/// decides admission for both directions of the contradiction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssistContributionConflict {
+    /// CR 118.3a: the cast carries units a helper spent, but no helper is recorded
+    /// as having paid. The units are a payment with no payer, so nothing names whose
+    /// mana they were — and a cast that records them would credit mana to a spell
+    /// whose `AssistState` never reached the paid checkpoint. This is the inverse of
+    /// [`Self::PaidGenericUnproven`] and equally inadmissible.
+    UnitsWithoutPaidHelper { state: AssistState },
+    /// CR 118.3a: the helper is recorded as having paid `generic` generic mana, but
+    /// the units the save carries do not number that amount. Paying `generic` mana
+    /// removes exactly `generic` units, so the two statements disagree about one
+    /// payment and neither side is preferred.
+    UnitCountDisagreesWithPaidGeneric {
+        helper: PlayerId,
+        generic: u32,
+        saved: usize,
+    },
+    /// CR 702.132a + CR 118.3a: the save's units and the journal's own record of the
+    /// same helper's spend on the same spell are different payments. Both are
+    /// evidence the game itself wrote, so this boundary refuses rather than
+    /// overwriting one with the other.
+    JournalDisagreesWithSavedUnits {
+        helper: PlayerId,
+        journal: usize,
+        saved: usize,
+    },
+    /// CR 702.132a + CR 118.3a: the cast names a paid helper and an amount, but
+    /// neither the save nor the journal carries the units that payment removed. The
+    /// payment is unprovable, and reading its absence as "the helper spent nothing"
+    /// would drop mana the helper really spent — the exact loss a source-qualified
+    /// cast predicate (Rain of Riches' cascade) reads.
+    PaidGenericUnproven {
+        helper: PlayerId,
+        generic: u32,
+        /// The journal recorded this many units for the helper on this spell, which
+        /// disagreed with the amount it is recorded as having paid. `None` when the
+        /// journal records no spend by the helper on this cast at all.
+        journal: Option<usize>,
+    },
+    /// CR 702.132a + CR 118.3a: the journal DOES prove the payment, but the save holds
+    /// the cast in a carrier this admission boundary cannot rewrite, so the recovered
+    /// units could not be put back. Refused instead of admitted half-completed: a
+    /// recovered contribution that never reaches the carrier is, at the finalizer, the
+    /// same "the helper spent nothing" payment this rule exists to reject.
+    UnwritableRecoveryCarrier {
+        helper: PlayerId,
+        generic: u32,
+        /// The units the journal proved for this helper on this spell.
+        journal: usize,
+    },
+}
+
+impl std::fmt::Display for AssistContributionConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnitsWithoutPaidHelper { state } => write!(
+                f,
+                "it carries mana units a helper is said to have spent, but its Assist state is \
+                 {state:?} — no helper is recorded as having paid"
+            ),
+            Self::UnitCountDisagreesWithPaidGeneric {
+                helper,
+                generic,
+                saved,
+            } => write!(
+                f,
+                "it records {helper:?} as having paid {generic} generic mana (CR 118.3a: that is \
+                 {generic} units removed from their pool) but carries {saved} spent units"
+            ),
+            Self::JournalDisagreesWithSavedUnits {
+                helper,
+                journal,
+                saved,
+            } => write!(
+                f,
+                "it carries {saved} units for {helper:?} while the resolved-rules journal records \
+                 {journal} units that helper spent on the same spell, so the two disagree about \
+                 one payment"
+            ),
+            Self::PaidGenericUnproven {
+                helper,
+                generic,
+                journal: Some(journal),
+            } => write!(
+                f,
+                "it records {helper:?} as having paid {generic} generic mana but carries no \
+                 units, and the journal records {journal} units for that helper on this spell \
+                 instead of {generic}"
+            ),
+            Self::PaidGenericUnproven {
+                helper,
+                generic,
+                journal: None,
+            } => write!(
+                f,
+                "it records {helper:?} as having paid {generic} generic mana but carries no \
+                 units, and the resolved-rules journal records no spend by that helper on this \
+                 spell — reading that absence as `spent nothing` would drop mana the helper \
+                 spent (CR 118.3a)"
+            ),
+            Self::UnwritableRecoveryCarrier {
+                helper,
+                generic,
+                journal,
+            } => write!(
+                f,
+                "it records {helper:?} as having paid {generic} generic mana with no units, and \
+                 although the journal proves {journal} units for that helper on this spell, this \
+                 save holds the cast in a carrier admission cannot rewrite"
             ),
         }
     }
@@ -18083,6 +18270,194 @@ impl GameState {
             .and_then(|proven| epochs.next().is_none().then_some(proven))
     }
 
+    /// CR 702.132a + CR 118.3a: bind a parked cast's Assist contribution to the
+    /// payment it claims — or refuse the save.
+    ///
+    /// A committed Assist helper's units are mana spent to cast the spell
+    /// (CR 702.132a: the helper pays "before you begin to pay the total cost", and
+    /// CR 118.3a: paying mana is removing the indicated mana from a player's pool),
+    /// so the cast's payment snapshot owes them exactly as much as the caster's own.
+    /// `PendingCast::assist_contributed_units` carries them, `AssistState::Paid`
+    /// records the amount the helper paid, and the resolved-rules journal records the
+    /// same spend as a payment command naming the payer, the recipient and the units
+    /// ([`ResolvedRulesJournal::spent_units_for_payer_and_recipient`]).
+    ///
+    /// Those three are one payment stated up to three times, which makes admission a
+    /// single question asked in both directions:
+    ///
+    /// * **The save states units.** Then a helper must be recorded as having paid
+    ///   for this cast, and the units must number exactly the generic mana the helper
+    ///   committed (CR 118.3a: one unit per point). Where the journal also recorded
+    ///   the same payer's spend on the same spell, it must name the same units — two
+    ///   records of one payment that disagree are refused, never reconciled, because
+    ///   both are evidence the game itself wrote.
+    /// * **The save states no units but the cast is `Paid`.** Then the units must be
+    ///   RECOVERED from the journal, which recorded them at the spend boundary. They
+    ///   are admitted only when the journal proves exactly the recorded amount for
+    ///   this helper on this spell; otherwise the save is refused
+    ///   ([`AssistContributionConflict::PaidGenericUnproven`]) rather than defaulted
+    ///   to "the helper spent nothing", which is the loss this boundary exists to
+    ///   stop — a source-qualified cast predicate (Rain of Riches' cascade) reads the
+    ///   very pips that default would delete.
+    ///
+    /// A `Paid` helper who paid 0 generic mana is not a gap: nothing was removed from
+    /// anyone's pool, so the empty unit list is the payment.
+    ///
+    /// Every carrier that can hold a parked cast is checked — the assertion-free
+    /// enumeration [`Self::pending_cast_owners`], because this runs on untrusted input.
+    /// A recovery is written back onto the two carriers a paused cast is actually
+    /// parked in (the external payment root and the current prompt). A carrier this
+    /// boundary cannot rewrite is refused rather than admitted half-completed: a
+    /// recovered contribution that could not be put back is exactly the "the helper
+    /// spent nothing" shape this rule exists to reject.
+    ///
+    /// Refusals are made here, at the single chokepoint every production restore
+    /// funnels through ([`Self::prepare_for_restore`]), so resume and admission cannot
+    /// disagree about whether a contribution exists.
+    pub(crate) fn bind_or_reject_assist_contribution_provenance(
+        &mut self,
+    ) -> Result<(), PersistedRestoreError> {
+        // Read pass on an unmodified state: deciding borrows `self` (the parked casts
+        // and the journal), and the write-back below needs it mutably.
+        let mut recoveries: Vec<(PendingCastOwner, Vec<ManaUnit>)> = Vec::new();
+        for owner in self.pending_cast_owners() {
+            let Some(pending) = self.pending_cast_at(owner) else {
+                continue;
+            };
+            if let Some(units) = self.proven_assist_contribution_units(pending)? {
+                recoveries.push((owner, units));
+            }
+        }
+        for (owner, units) in recoveries {
+            // CR 118.3a: the journal-bound units are the payment the helper actually
+            // made, so admission restores them verbatim — the same units the spend
+            // boundary captured and the finalizers record.
+            let restored = match owner {
+                PendingCastOwner::External => self
+                    .pending_cast
+                    .as_deref_mut()
+                    .map(|pending| &mut pending.assist_contributed_units),
+                PendingCastOwner::Prompt => self
+                    .waiting_for
+                    .pending_cast_mut()
+                    .map(|pending| &mut pending.assist_contributed_units),
+                PendingCastOwner::DeferredLifeCost
+                | PendingCastOwner::CostMove
+                | PendingCastOwner::DiscardForCost => None,
+            };
+            let Some(field) = restored else {
+                // Every carrier holding a cast the engine parked through the spend
+                // boundary is either the external root or the current prompt; the rest
+                // hold casts that have not reached it, so a paid-but-absent contribution
+                // there is a save this boundary cannot complete. Refuse it, naming the
+                // cast, rather than admit a payment whose units were dropped.
+                let Some(pending) = self.pending_cast_at(owner) else {
+                    continue;
+                };
+                let AssistState::Paid { helper, generic } = pending.assist_state else {
+                    // A recovery is decided only for a paid contribution.
+                    continue;
+                };
+                return Err(PersistedRestoreError::ContradictoryAssistContribution {
+                    source_id: pending.object_id,
+                    reason: AssistContributionConflict::UnwritableRecoveryCarrier {
+                        helper,
+                        generic,
+                        journal: units.len(),
+                    },
+                });
+            };
+            *field = units;
+        }
+        Ok(())
+    }
+
+    /// CR 702.132a + CR 118.3a: the units this save proves for the parked cast's paid
+    /// Assist contribution. `Ok(None)` means the save's own units stand (they were
+    /// present and consistent); `Ok(Some(units))` is the journal-bound recovery the
+    /// caller must write back onto the cast.
+    fn proven_assist_contribution_units(
+        &self,
+        pending: &PendingCast,
+    ) -> Result<Option<Vec<ManaUnit>>, PersistedRestoreError> {
+        let source_id = pending.object_id;
+        let saved = &pending.assist_contributed_units;
+        let (helper, generic) = match pending.assist_state {
+            AssistState::Paid { helper, generic } => (helper, generic),
+            // CR 702.132a: the helper's units are captured at the spend boundary and
+            // `Paid` is stamped in the same step, so nothing short of `Paid` can have
+            // produced them. Units with no payer are a payment that names nobody.
+            state => {
+                if saved.is_empty() {
+                    return Ok(None);
+                }
+                return Err(PersistedRestoreError::ContradictoryAssistContribution {
+                    source_id,
+                    reason: AssistContributionConflict::UnitsWithoutPaidHelper { state },
+                });
+            }
+        };
+        // The spell object is still on the stack under the same storage id, so the
+        // recipient the spend recorded is the live object's own incarnation — the
+        // value `mana_payment_recipient` built at the spend boundary.
+        let recipient = self.mana_payment_recipient(source_id, helper);
+        let journal = self
+            .resolved_rules_journal
+            .spent_units_for_payer_and_recipient(helper, &recipient);
+        if saved.is_empty() {
+            // CR 702.132a: a helper that paid 0 generic mana removed nothing, so the
+            // empty list is the payment and no recovery is owed.
+            if generic == 0 {
+                return Ok(None);
+            }
+            // CR 118.3a: the payment's units must come from the journal's own record
+            // of THIS helper's spend on THIS spell, at exactly the recorded amount.
+            return match journal {
+                Some(units) if units.len() as u32 == generic => Ok(Some(units)),
+                other => Err(PersistedRestoreError::ContradictoryAssistContribution {
+                    source_id,
+                    reason: AssistContributionConflict::PaidGenericUnproven {
+                        helper,
+                        generic,
+                        journal: other.map(|units| units.len()),
+                    },
+                }),
+            };
+        }
+        // CR 118.3a: `generic` generic mana is paid with exactly that many units.
+        if saved.len() as u32 != generic {
+            return Err(PersistedRestoreError::ContradictoryAssistContribution {
+                source_id,
+                reason: AssistContributionConflict::UnitCountDisagreesWithPaidGeneric {
+                    helper,
+                    generic,
+                    saved: saved.len(),
+                },
+            });
+        }
+        // CR 118.3a + CR 702.132a: where the journal ALSO recorded this helper's spend
+        // on this spell, the two records must name the same units. They are one
+        // payment, and neither record is preferred over the other.
+        if let Some(journal) = journal {
+            let same = journal.len() == saved.len()
+                && journal
+                    .iter()
+                    .zip(saved.iter())
+                    .all(|(recorded, carried)| recorded.pip_id == carried.pip_id);
+            if !same {
+                return Err(PersistedRestoreError::ContradictoryAssistContribution {
+                    source_id,
+                    reason: AssistContributionConflict::JournalDisagreesWithSavedUnits {
+                        helper,
+                        journal: journal.len(),
+                        saved: saved.len(),
+                    },
+                });
+            }
+        }
+        Ok(None)
+    }
+
     /// CR 601.2 / CR 602.2: at most one announcement is in flight, so every live
     /// `PendingCast` owner names the same cast.
     ///
@@ -18630,6 +19005,27 @@ pub enum PersistedRestoreError {
         source_id: ObjectId,
         reason: ParkedActivationConflict,
     },
+
+    /// CR 702.132a + CR 118.3a: a parked cast's Assist contribution is not bound to
+    /// the payment it claims, so admitting the save would record mana spent to cast
+    /// the spell that the game never established — or omit mana the helper really
+    /// did spend. Both directions are covered: units on the cast with no paid helper
+    /// ([`AssistContributionConflict::UnitsWithoutPaidHelper`]), and a paid helper
+    /// whose units the save does not carry and the journal does not prove
+    /// ([`AssistContributionConflict::PaidGenericUnproven`]).
+    ///
+    /// CR 118.3a is what makes the two one fact: paying mana IS removing the
+    /// indicated mana from a player's pool, so the units and the amount are the same
+    /// payment stated twice. A save that states one and not the other has not
+    /// recorded a payment, and this boundary will not invent the missing half — the
+    /// journal recovers it where the journal recorded the payer, the recipient and
+    /// the units, and the save is refused where the paid root is contradictory or
+    /// unprovable.
+    #[error("persisted Assist contribution to spell {source_id:?} cannot be restored: {reason}")]
+    ContradictoryAssistContribution {
+        source_id: ObjectId,
+        reason: AssistContributionConflict,
+    },
 }
 
 impl PreparedPersistedGameState {
@@ -18847,6 +19243,12 @@ impl PersistedGameState {
         state.reject_contradictory_parked_activation_evidence()?;
         state.reject_conflicting_pending_cast_owners()?;
         state.reject_unknown_pending_target_facts()?;
+        // CR 702.132a + CR 118.3a: a parked cast's Assist contribution is bound to
+        // the payment it claims (or recovered from the journal's own record of that
+        // payment) before any finalizer can read it. Refusing here — the chokepoint
+        // every production restore funnels through — means resume and admission can
+        // never disagree about whether the helper's units exist.
+        state.bind_or_reject_assist_contribution_provenance()?;
         crate::game::effects::choose_from_zone::migrate_legacy_per_player_frame_on_restore(
             &mut state,
         )
@@ -25818,16 +26220,24 @@ declare_game_state! {
     /// state equality — it is empty outside the synchronous finalize window.
     #[serde(skip)]
     pub active_payment_pins: Vec<ManaPipId>,
-    /// CR 702.132a: transient carrier for a committed Assist helper's spent units
-    /// during a single finalize spend. `finalize_mana_payment` owns the `PendingCast`
-    /// by value, so the units it captured at the spend boundary
-    /// (`PendingCast::assist_contributed_units`) are moved here for the duration of the
-    /// payment and cleared immediately after — the same handoff, for the same reason,
-    /// as `active_payment_pins`. A PAUSE re-establishes it from the restored root, so a
+    /// CR 702.132a: transient carrier for a committed Assist helper's PAID
+    /// CONTRIBUTION (the helper, the generic amount it committed, the exact units it
+    /// spent, and the cast they were spent on) during a single finalize spend.
+    /// `finalize_mana_payment` owns the `PendingCast` by value, so the claim it
+    /// captured at the spend boundary is moved here for the duration of the payment
+    /// and cleared immediately after — the same handoff, for the same reason, as
+    /// `active_payment_pins`. A PAUSE re-establishes it from the restored root, so a
     /// replacement choice between the helper's spend and the recording loses nothing.
+    ///
+    /// The claim is typed rather than a bare unit list because the finalizers must be
+    /// able to REFUSE a contribution that does not describe the payment it asserts:
+    /// units with no paid helper, or a paid helper whose units are missing, are both
+    /// shapes that would silently omit (or fabricate) mana spent to cast the spell.
+    /// Boxed: `GameState` has a stack budget (`game_state_size`), and this claim is
+    /// populated only inside a synchronous finalize window.
     /// Never serialized and never part of state equality.
     #[serde(skip)]
-    pub active_assist_contributed_units: Vec<ManaUnit>,
+    pub active_assist_contribution: Option<Box<AssistContribution>>,
     /// The synchronous rules-execution scope receiving newly produced mana.
     /// It is empty outside an activation or inline trigger and is never wire
     /// authority on its own.
@@ -36012,7 +36422,7 @@ impl GameState {
             resolved_rules_journal: ResolvedRulesJournal::default(),
             ability_onset_record: AbilityOnsetRecord::Recorded,
             active_payment_pins: Vec::new(),
-            active_assist_contributed_units: Vec::new(),
+            active_assist_contribution: None,
             active_rules_execution_node: None,
             active_casting_permission_index: None,
             active_graveyard_permission_latch: None,
@@ -40088,7 +40498,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolved_rules_journal: _,
         ability_onset_record: _,
         active_payment_pins: _,
-        active_assist_contributed_units: _,
+        active_assist_contribution: _,
         active_rules_execution_node: _,
         active_casting_permission_index: _,
         active_graveyard_permission_latch: _,

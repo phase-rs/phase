@@ -8727,6 +8727,898 @@ fn a_committed_assist_records_the_helpers_units_on_the_cast() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// CR 702.132a + CR 118.3a: a restored parked Assist contribution is BOUND to the
+// payment it claims — recovered from the journal, or refused.
+//
+// The board is the maintainer's: printed **Bring Down** and printed **Rain of
+// Riches**, not a synthetic spell.
+//
+// Oracle (verified against Scryfall):
+//
+// * **Bring Down** `{3}{W}` Sorcery (`bbd` 26) — "Assist (Another player can pay up
+//   to {3} of this spell's cost.) / Destroy target creature with power 4 or greater."
+// * **Rain of Riches** `{3}{R}{R}` Enchantment (`otc` 177 / `clb` 34 / `stx` 1) —
+//   "When this enchantment enters, create two Treasure tokens. / The first spell you
+//   cast each turn that mana from a Treasure was spent to cast has cascade."
+//
+// Bring Down's printed Cascade-free text is the point: the cascade the witness reads
+// is GRANTED by Rain of Riches because a Treasure's unit was spent to cast it, so the
+// assertion can only pass if the HELPER's pip reached the cast's payment snapshot.
+// ---------------------------------------------------------------------------
+
+/// Printed Bring Down (`bbd` 26), verbatim from Scryfall.
+const BRING_DOWN: &str = "Assist (Another player can pay up to {3} of this spell's cost.)\nDestroy target creature with power 4 or greater.";
+
+/// Printed Rain of Riches (`otc` 177 / `clb` 34 / `stx` 1), verbatim from Scryfall.
+const RAIN_OF_RICHES: &str = "When this enchantment enters, create two Treasure tokens.\nThe first spell you cast each turn that mana from a Treasure was spent to cast has cascade.";
+
+/// Bring Down's printed `{3}{W}`.
+fn bring_down_cost() -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![ManaCostShard::White],
+        generic: 3,
+    }
+}
+
+/// CR 702.132a: the generic amount Bring Down's printed Assist lets another player pay.
+const BRING_DOWN_ASSIST_GENERIC: u32 = 3;
+
+struct BringDownBoard {
+    runner: GameRunner,
+    /// The printed `{3}{W}` Assist sorcery in P0's hand.
+    bring_down: ObjectId,
+    /// A power-4 creature, the only thing Bring Down's printed restriction admits.
+    victim: ObjectId,
+    /// The three Treasures the HELPER pays with: one unit per point of generic mana.
+    helper_treasures: Vec<ObjectId>,
+    /// P0's own pausing white source — the pause the contribution must survive.
+    caster_source: ObjectId,
+    /// A second, deliberately cheap spell for the once-per-turn cascade gate.
+    second_spell: ObjectId,
+}
+
+/// PreCombatMain, P0 active: printed Bring Down in hand, printed Rain of Riches on the
+/// battlefield, a power-4 victim for Bring Down, three Treasures owned by the HELPER
+/// (P1), and a white source owned by the caster whose own cost move pauses for a
+/// replacement — so the save point sits BETWEEN the helper's spend and the recording,
+/// which is the window the contribution has to survive.
+fn bring_down_board() -> BringDownBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Cascade exiles from the top until a nonland card with lesser mana value, so the
+    // library needs cards to look at; the witness declines the free cast either way.
+    scenario.with_library_top(P0, &["Card A", "Card B", "Card C"]);
+    scenario.add_enchantment_from_oracle(P0, "Rain of Riches", RAIN_OF_RICHES);
+    let victim = scenario.add_creature(P1, "Power Four Witness", 4, 4).id();
+    let caster_source = scenario
+        .add_creature(P0, "Caster Pausing White Source", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::White],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Exile {
+                        count: 1,
+                        zone: None,
+                        filter: Some(TargetFilter::SelfRef),
+                    },
+                ],
+            }),
+        )
+        .id();
+    // CR 616.1: two applicable redirects, so the replacement pipeline parks on an
+    // ordering choice instead of applying the single mandatory candidate silently.
+    for name in ["Caster Exile Redirect One", "Caster Exile Redirect Two"] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Exile, Zone::Graveyard));
+    }
+    // The printed keyword is declared the way this harness states a card's keywords
+    // (`from_oracle_text_with_keywords`); the Oracle TEXT stays the printed one.
+    let bring_down = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bring Down", false, BRING_DOWN)
+        .from_oracle_text_with_keywords(&["Assist"], BRING_DOWN)
+        .with_mana_cost(bring_down_cost())
+        .id();
+    let second_spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Second Treasure Spell Witness",
+            false,
+            "You gain 2 life.",
+        )
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    let mut runner = scenario.build();
+    let helper_treasures = (0..BRING_DOWN_ASSIST_GENERIC)
+        .map(|offset| treasure_for(runner.state_mut(), P1, 9410 + u64::from(offset)))
+        .collect();
+    BringDownBoard {
+        runner,
+        bring_down,
+        victim,
+        helper_treasures,
+        caster_source,
+        second_spell,
+    }
+}
+
+/// Drive printed Bring Down to its committed-Helper payment step: declare the power-4
+/// target (CR 601.2c), choose the helper (CR 702.132a), and commit the whole generic.
+/// Returns the `max_generic` the offer advertised.
+fn announce_bring_down_with_helper(
+    runner: &mut GameRunner,
+    bring_down: ObjectId,
+    victim: ObjectId,
+    generic: u32,
+) -> u32 {
+    let card_id = runner.state().objects[&bring_down].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: bring_down,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("printed Bring Down is announced");
+    let mut max_generic = None;
+    for _ in 0..8 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(victim)),
+                    })
+                    .expect("declare the power-4 target");
+            }
+            WaitingFor::AssistChoosePlayer { .. } => {
+                runner
+                    .act(GameAction::ChooseAssistPlayer { player: Some(P1) })
+                    .expect("choose the helper");
+            }
+            WaitingFor::AssistPayment {
+                max_generic: bound, ..
+            } => {
+                runner
+                    .act(GameAction::CommitAssistPayment { generic })
+                    .expect("commit the helper's contribution");
+                max_generic = Some(bound);
+            }
+            other => panic!("unexpected prompt while announcing Bring Down: {other:?}"),
+        }
+        if let Some(bound) = max_generic {
+            return bound;
+        }
+    }
+    panic!("Bring Down never reached its Assist payment step");
+}
+
+/// The `PendingCast` a paused Bring Down cast parks, as the save carries it.
+fn parked_bring_down(runner: &GameRunner) -> &PendingCast {
+    runner
+        .state()
+        .pending_cast
+        .as_deref()
+        .expect("the cast is parked mid-payment")
+}
+
+/// CR 702.132a + CR 118.3a: the recipient the spend boundary recorded for this cast —
+/// the spell's own object epoch — so a test can ask the journal the same question the
+/// restore boundary asks.
+fn assist_payment_recipient(
+    state: &GameState,
+    spell: ObjectId,
+    helper: engine::types::player::PlayerId,
+) -> engine::types::resolved_commands::ManaPaymentRecipient {
+    state
+        .objects
+        .get(&spell)
+        .map(engine::game::game_object::ObjectIncarnationRefExt::from_object)
+        .map(engine::types::resolved_commands::ManaPaymentRecipient::Object)
+        .unwrap_or(engine::types::resolved_commands::ManaPaymentRecipient::Player(helper))
+}
+
+/// Drive the announced+committed Bring Down to the pause its caster's source causes.
+/// Whether the engine finalizes on the commit itself or waits for the caster's
+/// confirmation, the pause is the same `ReplacementChoice`.
+fn drive_to_caster_source_pause(runner: &mut GameRunner) {
+    let mut seen = Vec::new();
+    for _ in 0..8 {
+        seen.push(runner.state().waiting_for.clone());
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { .. } => return,
+            WaitingFor::ManaPayment { .. } | WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("the caster confirms payment and the source pauses");
+            }
+            other => {
+                panic!("unexpected prompt while reaching the caster's source pause: {other:?}")
+            }
+        }
+    }
+    panic!("the cast never reached the caster's source pause; prompts seen: {seen:#?}");
+}
+
+/// Finish the parked Bring Down cast: answer the replacement choice the caster's source
+/// raises and confirm the payment through whatever prompts the finalize then needs, until
+/// the spell is on the stack (its payment snapshot and trigger collection already written).
+fn finish_bring_down(runner: &mut GameRunner, bring_down: ObjectId) {
+    for _ in 0..16 {
+        if runner.state().objects[&bring_down].zone == Zone::Stack {
+            return;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("apply the redirect the caster's source move parked on");
+            }
+            WaitingFor::ManaPayment { .. } | WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("confirm the caster's payment");
+            }
+            other => panic!("unexpected prompt while finishing Bring Down: {other:?}"),
+        }
+    }
+    panic!("the assisted cast never reached the stack");
+}
+
+/// CR 702.132a + CR 118.3a: the helper pip, the GRANTED cascade, and the consumed
+/// once-per-turn gate all survive a save/restore taken between the helper's spend and
+/// the caster's recording.
+#[test]
+fn restored_assist_contribution_records_the_helper_pip_and_grants_rains_cascade() {
+    let BringDownBoard {
+        mut runner,
+        bring_down,
+        victim,
+        helper_treasures,
+        caster_source,
+        second_spell,
+    } = bring_down_board();
+
+    // Reach guards: the printed text really parsed, and the granted cascade is GATED
+    // (Rain of Riches' first-qualifying-spell condition), not an unconditional keyword.
+    assert!(
+        runner.state().objects[&bring_down]
+            .keywords
+            .contains(&Keyword::Assist),
+        "reach-guard: printed Bring Down carries Assist"
+    );
+    assert!(
+        !runner.state().objects[&bring_down]
+            .keywords
+            .contains(&Keyword::Cascade),
+        "reach-guard: printed Bring Down has NO printed cascade — the trigger below must be \
+         Rain of Riches' grant"
+    );
+    assert!(
+        runner
+            .state()
+            .objects
+            .values()
+            .any(|object| object.name == "Rain of Riches" && object.zone == Zone::Battlefield),
+        "reach-guard: Rain of Riches is on the battlefield"
+    );
+
+    let advertised =
+        announce_bring_down_with_helper(&mut runner, bring_down, victim, BRING_DOWN_ASSIST_GENERIC);
+    assert_eq!(
+        advertised, BRING_DOWN_ASSIST_GENERIC,
+        "reach-guard: printed Bring Down's Assist offers its whole {{3}} generic component"
+    );
+
+    // CR 702.132a: the caster's own {W} comes from a source whose cost move pauses for a
+    // replacement, so finalization stops AFTER the helper has paid and BEFORE the cast's
+    // payment snapshot is written.
+    drive_to_caster_source_pause(&mut runner);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "reach-guard: the pause is the replacement choice the caster's source moves on, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // The save point. CR 702.132a + CR 118.3a: the helper HAS paid by now, so the parked
+    // cast records the paid amount and the exact units its spend removed.
+    {
+        let parked = parked_bring_down(&runner);
+        assert_eq!(
+            parked.assist_state,
+            engine::types::game_state::AssistState::Paid {
+                helper: P1,
+                generic: BRING_DOWN_ASSIST_GENERIC,
+            },
+            "reach-guard: the helper's contribution reached its paid checkpoint before the pause"
+        );
+        assert_eq!(
+            parked.assist_contributed_units.len(),
+            BRING_DOWN_ASSIST_GENERIC as usize,
+            "reach-guard: and the spend boundary captured one unit per point of generic mana"
+        );
+        assert!(
+            parked
+                .assist_contributed_units
+                .iter()
+                .all(|unit| { helper_treasures.contains(&unit.source_id) }),
+            "reach-guard: the captured units name the helper's Treasures, got {:?}",
+            parked
+                .assist_contributed_units
+                .iter()
+                .map(|unit| unit.source_id)
+                .collect::<Vec<_>>()
+        );
+    }
+    assert!(
+        helper_treasures
+            .iter()
+            .all(|treasure| runner.state().objects[treasure].zone == Zone::Graveyard),
+        "reach-guard: all three helper Treasures were sacrificed to pay the generic"
+    );
+    assert_eq!(
+        runner.state().objects[&caster_source].zone,
+        Zone::Battlefield,
+        "reach-guard: the caster's source has not left the battlefield — its exile cost is \
+         still parked on the replacement choice"
+    );
+    assert_eq!(
+        runner.state().objects[&bring_down].zone,
+        Zone::Hand,
+        "reach-guard: and the cast has not finished paying, so its snapshot is still unwritten"
+    );
+
+    // --- The real round trip: the authoritative save, then the checked restore.
+    let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the paused assisted cast serializes");
+    let restored: PersistedGameState =
+        serde_json::from_str(&saved).expect("the paused assisted cast deserializes");
+    let restored = restored
+        .into_game_state()
+        .expect("a consistent Assist contribution is admitted by the checked restore");
+    let mut runner = GameRunner::from_state(restored);
+    assert_eq!(
+        parked_bring_down(&runner).assist_contributed_units.len(),
+        BRING_DOWN_ASSIST_GENERIC as usize,
+        "CR 702.132a + CR 118.3a: the restored cast still carries the helper's units"
+    );
+
+    finish_bring_down(&mut runner, bring_down);
+
+    // (1) The helper's pip is in the cast's payment snapshot (CR 601.2h).
+    assert_eq!(
+        runner.state().objects[&bring_down].zone,
+        Zone::Stack,
+        "reach-guard: the assisted cast reached the stack"
+    );
+    let spell = &runner.state().objects[&bring_down];
+    assert_eq!(
+        spell.mana_spent_to_cast_amount, 4,
+        "CR 702.132a + CR 118.3a: the cast records the helper's three units BESIDE the \
+         caster's one — {{3}}{{W}} is four units of mana spent"
+    );
+    let helper_pips = spell
+        .mana_spent_source_snapshots
+        .iter()
+        .filter(|snapshot| helper_treasures.contains(&snapshot.source_id))
+        .count();
+    assert_eq!(
+        helper_pips,
+        BRING_DOWN_ASSIST_GENERIC as usize,
+        "CR 702.132a + CR 106.3: every unit the helper spent stamps the Treasure that \
+         produced it, got {:?}",
+        spell
+            .mana_spent_source_snapshots
+            .iter()
+            .map(|snapshot| snapshot.source_id)
+            .collect::<Vec<_>>()
+    );
+
+    // (2) Rain of Riches GRANTED cascade off that Treasure mana (CR 702.85a + 611.3b).
+    assert!(
+        runner.state().objects[&bring_down]
+            .cast_spell_keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Cascade)),
+        "CR 611.3b: the restored cast spent mana from a Treasure, so Rain of Riches grants \
+         it cascade; got {:?}",
+        runner.state().objects[&bring_down].cast_spell_keywords
+    );
+    let cascade_triggers = runner
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| {
+            entry.source_id == bring_down
+                && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+                && entry
+                    .ability()
+                    .is_some_and(|ability| matches!(ability.effect, Effect::Cascade))
+        })
+        .count();
+    assert_eq!(
+        cascade_triggers, 1,
+        "CR 702.85a: the granted cascade enqueued exactly one Cascade trigger off the cast"
+    );
+
+    // (3) The once-per-turn gate is CONSUMED: a second spell paid with Treasure mana this
+    // turn gets no cascade. Empty the stack first, declining the cascade's free cast.
+    for _ in 0..128 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority on the resolving stack");
+            }
+            WaitingFor::CastOffer { .. } => {
+                runner
+                    .act(GameAction::CascadeChoice {
+                        choice: engine::types::actions::CastChoice::Decline,
+                    })
+                    .expect("decline the cascade's free cast");
+            }
+            WaitingFor::DeclareAttackers { .. } => {
+                runner
+                    .act(GameAction::DeclareAttackers {
+                        attacks: Vec::new(),
+                        bands: Vec::new(),
+                    })
+                    .expect("declare no attackers");
+            }
+            WaitingFor::DeclareBlockers { .. } => {
+                runner
+                    .act(GameAction::DeclareBlockers {
+                        assignments: Vec::new(),
+                    })
+                    .expect("declare no blockers");
+            }
+            WaitingFor::ReplacementChoice { .. } => {
+                // The caster's source exile move parks a second ordering choice after the
+                // payment; either redirect is the same effect, so apply the first.
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("apply the caster's source redirect");
+            }
+            other => panic!("unexpected prompt while emptying the stack: {other:?}"),
+        }
+    }
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach-guard: the assisted cast and its granted cascade resolved"
+    );
+    assert_eq!(
+        runner.state().objects[&victim].zone,
+        Zone::Graveyard,
+        "reach-guard: Bring Down destroyed the power-4 creature"
+    );
+
+    // The gate's witness: a Treasure of the caster's own, so the second spell also spends
+    // mana from a Treasure — and still gets nothing.
+    let caster_treasure = treasure_for(runner.state_mut(), P0, 9420);
+    let card_id = runner.state().objects[&second_spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: second_spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the second Treasure-funded spell is announced");
+    for _ in 0..8 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ManaPayment { .. } | WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("confirm the second spell's payment");
+            }
+            other => panic!("unexpected prompt while casting the second spell: {other:?}"),
+        }
+        if runner.state().objects[&second_spell].zone == Zone::Stack {
+            break;
+        }
+    }
+    assert_eq!(
+        runner.state().objects[&second_spell].zone,
+        Zone::Stack,
+        "reach-guard: the second spell resolved its payment"
+    );
+    assert_eq!(
+        runner.state().objects[&caster_treasure].zone,
+        Zone::Graveyard,
+        "reach-guard: the second spell's mana really did come from a Treasure"
+    );
+    assert!(
+        !runner.state().objects[&second_spell]
+            .cast_spell_keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Cascade)),
+        "CR 702.85a + 611.3b: Rain of Riches grants cascade to the FIRST qualifying spell each \
+         turn only, and the assisted cast spent that gate; got {:?}",
+        runner.state().objects[&second_spell].cast_spell_keywords
+    );
+    assert!(
+        !runner.state().stack.iter().any(|entry| {
+            entry.source_id == second_spell
+                && entry
+                    .ability()
+                    .is_some_and(|ability| matches!(ability.effect, Effect::Cascade))
+        }),
+        "and no cascade trigger is enqueued for the second spell"
+    );
+}
+
+/// CR 702.132a + CR 118.3a: a save that says the helper PAID but carries no units and has
+/// no journal record to recover them from is refused, not read as "the helper spent
+/// nothing".
+#[test]
+fn restore_refuses_a_paid_assist_contribution_with_no_provable_units() {
+    let BringDownBoard {
+        mut runner,
+        bring_down,
+        victim,
+        ..
+    } = bring_down_board();
+    announce_bring_down_with_helper(&mut runner, bring_down, victim, BRING_DOWN_ASSIST_GENERIC);
+
+    // The helper has committed but nothing has been paid yet, so the journal holds no
+    // spend by P1 on this spell: the shape below is unprovable by construction.
+    assert_eq!(
+        parked_bring_down(&runner).assist_contributed_units,
+        Vec::new(),
+        "reach-guard: no units have been captured at the offer step"
+    );
+    let recipient = assist_payment_recipient(runner.state(), bring_down, P1);
+    assert!(
+        runner
+            .state()
+            .resolved_rules_journal
+            .spent_units_for_payer_and_recipient(P1, &recipient)
+            .is_none(),
+        "reach-guard: the journal records no spend by the helper on this spell"
+    );
+
+    let mut state = runner.state().clone();
+    let mut pending = state
+        .pending_cast
+        .take()
+        .expect("the cast is parked mid-payment");
+    // The save an older build wrote: `AssistState::Paid` with the units field absent
+    // (it deserialized to the empty default) and no journal entry behind them.
+    pending.assist_state = engine::types::game_state::AssistState::Paid {
+        helper: P1,
+        generic: BRING_DOWN_ASSIST_GENERIC,
+    };
+    pending.assist_contributed_units.clear();
+    state.pending_cast = Some(pending);
+
+    let error = PersistedGameState::capture(state)
+        .into_game_state()
+        .expect_err("a paid contribution with no provable units cannot be admitted");
+    match error {
+        engine::types::game_state::PersistedRestoreError::ContradictoryAssistContribution {
+            source_id,
+            reason:
+                engine::types::game_state::AssistContributionConflict::PaidGenericUnproven {
+                    helper,
+                    generic,
+                    journal,
+                },
+        } => {
+            assert_eq!(
+                source_id, bring_down,
+                "the refusal names the cast it is about"
+            );
+            assert_eq!(helper, P1, "and the helper whose payment is unproven");
+            assert_eq!(generic, BRING_DOWN_ASSIST_GENERIC);
+            assert_eq!(journal, None, "and that the journal records nothing for it");
+        }
+        other => {
+            panic!("expected a typed PaidGenericUnproven refusal naming the cast, got {other:?}")
+        }
+    }
+}
+
+/// CR 118.3a: the inverse — units a helper is said to have spent, with no paid helper to
+/// own them — is refused too. A payment with no payer names nobody's mana.
+#[test]
+fn restore_refuses_assist_units_without_a_paid_helper() {
+    let BringDownBoard {
+        mut runner,
+        bring_down,
+        victim,
+        helper_treasures,
+        ..
+    } = bring_down_board();
+    announce_bring_down_with_helper(&mut runner, bring_down, victim, BRING_DOWN_ASSIST_GENERIC);
+
+    let mut state = runner.state().clone();
+    let mut pending = state
+        .pending_cast
+        .take()
+        .expect("the cast is parked mid-payment");
+    assert_eq!(
+        pending.assist_state,
+        engine::types::game_state::AssistState::Committed {
+            helper: P1,
+            generic: BRING_DOWN_ASSIST_GENERIC,
+        },
+        "reach-guard: the helper is committed, not paid"
+    );
+    pending.assist_contributed_units = vec![engine::types::mana::ManaUnit::new(
+        ManaType::Green,
+        helper_treasures[0],
+        false,
+        vec![],
+    )];
+    state.pending_cast = Some(pending);
+
+    let error = PersistedGameState::capture(state)
+        .into_game_state()
+        .expect_err("units with no paid helper cannot be admitted");
+    match error {
+        engine::types::game_state::PersistedRestoreError::ContradictoryAssistContribution {
+            source_id,
+            reason:
+                engine::types::game_state::AssistContributionConflict::UnitsWithoutPaidHelper { state },
+        } => {
+            assert_eq!(
+                source_id, bring_down,
+                "the refusal names the cast it is about"
+            );
+            assert_eq!(
+                state,
+                engine::types::game_state::AssistState::Committed {
+                    helper: P1,
+                    generic: BRING_DOWN_ASSIST_GENERIC,
+                },
+                "and the Assist state that says nobody paid"
+            );
+        }
+        other => panic!("expected a typed UnitsWithoutPaidHelper refusal, got {other:?}"),
+    }
+}
+
+/// CR 702.132a + CR 118.3a: a paid contribution whose units the save does not carry is
+/// RECOVERED from the journal's own record of the helper's spend (payer, recipient and
+/// units), and the recovered units reach the cast's payment snapshot — so the Treasure
+/// pip Rain of Riches reads is not lost.
+#[test]
+fn restore_recovers_a_paid_assist_contribution_from_the_journal() {
+    let BringDownBoard {
+        mut runner,
+        bring_down,
+        victim,
+        helper_treasures,
+        ..
+    } = bring_down_board();
+    announce_bring_down_with_helper(&mut runner, bring_down, victim, BRING_DOWN_ASSIST_GENERIC);
+    drive_to_caster_source_pause(&mut runner);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "reach-guard: the helper has paid by the time of the pause"
+    );
+
+    // The journal is the record that survives: it names the payer, the recipient and the
+    // exact units. Save it before the payload is stripped so the test can prove the
+    // recovery came from there and not from the save's own list.
+    let recipient = assist_payment_recipient(runner.state(), bring_down, P1);
+    let journal_units = runner
+        .state()
+        .resolved_rules_journal
+        .spent_units_for_payer_and_recipient(P1, &recipient)
+        .expect("the journal recorded the helper's spend at the spend boundary");
+    assert_eq!(
+        journal_units.len(),
+        BRING_DOWN_ASSIST_GENERIC as usize,
+        "reach-guard: the journal proves one unit per point of generic mana"
+    );
+    assert!(
+        journal_units
+            .iter()
+            .all(|unit| helper_treasures.contains(&unit.source_id)),
+        "reach-guard: and the units it proves are the helper's Treasures"
+    );
+
+    let mut state = runner.state().clone();
+    let mut pending = state
+        .pending_cast
+        .take()
+        .expect("the cast is parked mid-payment");
+    // An older save: paid, but the units field predates it.
+    pending.assist_contributed_units.clear();
+    state.pending_cast = Some(pending);
+
+    // The checked restore RECOVERS rather than refusing.
+    let restored = PersistedGameState::capture(state)
+        .into_game_state()
+        .expect("a paid contribution the journal proves is admitted with its recovered units");
+    let mut runner = GameRunner::from_state(restored);
+    let recovered = parked_bring_down(&runner).assist_contributed_units.clone();
+    assert_eq!(
+        recovered.len(),
+        BRING_DOWN_ASSIST_GENERIC as usize,
+        "the recovered contribution carries the journal's units"
+    );
+    assert_eq!(
+        recovered.iter().map(|unit| unit.pip_id).collect::<Vec<_>>(),
+        journal_units
+            .iter()
+            .map(|unit| unit.pip_id)
+            .collect::<Vec<_>>(),
+        "and they are the journal's own units, in the order that payment removed them"
+    );
+
+    finish_bring_down(&mut runner, bring_down);
+    assert_eq!(
+        runner.state().objects[&bring_down].zone,
+        Zone::Stack,
+        "reach-guard: the recovered cast reached the stack"
+    );
+    let spell = &runner.state().objects[&bring_down];
+    assert_eq!(
+        spell
+            .mana_spent_source_snapshots
+            .iter()
+            .filter(|snapshot| helper_treasures.contains(&snapshot.source_id))
+            .count(),
+        BRING_DOWN_ASSIST_GENERIC as usize,
+        "CR 702.132a + CR 106.3: the RECOVERED units reach the cast's payment snapshot, so \
+         every unit the helper spent still names its Treasure"
+    );
+    assert!(
+        spell
+            .cast_spell_keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Cascade)),
+        "CR 611.3b: and Rain of Riches still grants cascade off the recovered Treasure mana; \
+         got {:?}",
+        spell.cast_spell_keywords
+    );
+    assert!(
+        runner.state().stack.iter().any(|entry| {
+            entry.source_id == bring_down
+                && entry
+                    .ability()
+                    .is_some_and(|ability| matches!(ability.effect, Effect::Cascade))
+        }),
+        "CR 702.85a: the granted cascade still enqueues its trigger"
+    );
+}
+
+/// CR 702.132a: the ORDINARY cast path is untouched — a non-Assist spell records exactly
+/// its own units, never a helper's, and its parked state is admitted by the same restore
+/// boundary without an Assist refusal.
+#[test]
+fn ordinary_cast_without_assist_records_only_its_own_units() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victim = scenario.add_vanilla(P1, 1, 1);
+    let plain = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Ordinary Removal Witness",
+            false,
+            "Destroy target creature.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 1,
+        })
+        .id();
+    // Real sources, so the control's `mana_spent_source_snapshots` names the lands that
+    // paid instead of the synthetic pool units' `NO_PRODUCING_OBJECT`.
+    let swamp_a = scenario.add_basic_land(P0, ManaColor::Black);
+    let swamp_b = scenario.add_basic_land(P0, ManaColor::Black);
+    let mut runner = scenario.build();
+
+    let card_id = runner.state().objects[&plain].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: plain,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the ordinary spell is announced");
+    for _ in 0..8 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(victim)),
+                    })
+                    .expect("declare the creature target");
+            }
+            WaitingFor::ManaPayment { .. } | WaitingFor::Priority { .. } => {
+                // The parked cast is what the restore boundary sees.
+                assert!(
+                    runner.state().pending_cast.is_some()
+                        || runner.state().objects[&plain].zone == Zone::Stack,
+                    "reach-guard: the cast is either parked or complete"
+                );
+                if let Some(pending) = runner.state().pending_cast.as_deref() {
+                    assert_eq!(
+                        pending.assist_state,
+                        engine::types::game_state::AssistState::NotOffered,
+                        "reach-guard: a spell without Assist is never offered it"
+                    );
+                    assert_eq!(
+                        pending.assist_contribution(),
+                        None,
+                        "reach-guard: and carries no contribution claim"
+                    );
+                }
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("confirm the ordinary payment");
+            }
+            other => panic!("unexpected prompt while casting the ordinary spell: {other:?}"),
+        }
+        if runner.state().objects[&plain].zone == Zone::Stack {
+            break;
+        }
+    }
+
+    let spell = &runner.state().objects[&plain];
+    assert_eq!(
+        spell.zone,
+        Zone::Stack,
+        "reach-guard: the ordinary spell reached the stack"
+    );
+    assert_eq!(
+        spell.mana_spent_to_cast_amount, 2,
+        "CR 601.2h: the ordinary cast records exactly its own two units"
+    );
+    assert_eq!(
+        spell.mana_spent_source_snapshots.len(),
+        2,
+        "CR 601.2h: and the cast records exactly the two lands that paid — nothing was \
+         spliced in front of them"
+    );
+    assert!(
+        [swamp_a, swamp_b].iter().all(|swamp| spell
+            .mana_spent_source_snapshots
+            .iter()
+            .any(|snapshot| snapshot.source_id == *swamp)),
+        "and the two snapshots are those lands, got {:?}",
+        spell
+            .mana_spent_source_snapshots
+            .iter()
+            .map(|snapshot| snapshot.source_id)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        spell.cast_spell_keywords.is_empty(),
+        "and no cast-keyword grant landed on it, got {:?}",
+        spell.cast_spell_keywords
+    );
+}
+
 #[test]
 fn committed_assist_retries_remaining_sources_after_serialized_ordinary_pause() {
     let (mut runner, spell, helper_sources) =
