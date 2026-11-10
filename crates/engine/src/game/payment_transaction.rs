@@ -694,10 +694,10 @@ pub(crate) fn mirror_outside_action(state: &mut GameState, actor: PlayerId, acti
         log_entries: checkpoint.log_entries.clone(),
         consumed: updated.transcript.len(),
     }));
-    *state
+    **state
         .payment_transaction
         .as_mut()
-        .expect("the descriptor is live") = Box::new(updated);
+        .expect("the descriptor is live") = updated;
 }
 
 /// CR 614.17c: a parked replacement for a draw that can no longer happen
