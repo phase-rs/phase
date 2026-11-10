@@ -10664,7 +10664,7 @@ fn pass_priority_once_with_pipeline(
     // CR 732.2a: sample the loop-detection ring ONLY when the user-controllable
     // combo-detector is enabled. With `loop_detection == Off` (the default) the ring
     // is never populated, so the engine pays none of the per-resolution
-    // `normalize_for_loop` clone cost and the reconcile-seam shortcut (which guards on
+    // `normalize_for_loop_sample` clone cost and the reconcile-seam shortcut (which guards on
     // a non-empty ring AND the same flag) cannot fire. `samples()` is true for both `On`
     // and `Interactive`.
     if resolved_this_beat && !in_simulation_probe() && state.loop_detection.samples() {

@@ -9201,8 +9201,9 @@ fn project_out_resources(state: &GameState) -> ResourceProjectedFrame {
     // CR 500.1 + CR 500.8: the per-step tally an extra-phase loop pumps.
     s.steps_started_this_turn.clear();
 
-    // CR 104.4b / CR 732.2a — MODULO LAYER ONLY. The strict `loop_states_equal` /
-    // `normalize_for_loop` are deliberately NOT changed; they never call this fn.
+    // CR 104.4b / CR 732.2a — MODULO LAYER ONLY. This projection never calls the strict
+    // `loop_states_equal` or `normalize_for_loop`; the strict comparator's semantics are
+    // not widened here (it ranks the candidate pair itself).
     //
     // A triggered/activated ability placed on the stack takes a FRESH
     // `entry_id = ObjectId(next_object_id++)` every time, and `StackEntry`/`GameState`
@@ -21171,9 +21172,9 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────────────────────
 
     /// A ring whose frame `i` gives seat `s` the life `lives[i][s]`, everything else held
-    /// identical, so the frame-deltas are exactly the successive differences. Both halves are
-    /// built the way `record_loop_detect_sample` builds them, so the fixture cannot diverge
-    /// from production's construction.
+    /// identical, so the frame-deltas are exactly the successive differences. Samples are
+    /// captured in the strict form (this fixture only feeds rank-insensitive consumers);
+    /// production records the sample form, and that deferred path has its own regression.
     fn c1_ring(lives: &[&[i32]]) -> GameState {
         let mut state = bound_board(lives[0]);
         for frame_lives in lives {

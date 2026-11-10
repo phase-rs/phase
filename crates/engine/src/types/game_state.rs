@@ -22206,7 +22206,7 @@ pub enum PriorityPassingMode {
 /// CR 732.2a: user-controllable gate for the live combo (infinite-loop) detector.
 ///
 /// `Off` (the default) restores EXACT pre-detector behavior: the engine records
-/// no loop-detection samples (no per-resolution `normalize_for_loop` clone), never
+/// no loop-detection samples (no per-resolution `normalize_for_loop_sample` clone), never
 /// fires the mandatory-loop game-ending shortcut (CR 732.2a / CR 732.5 / CR 704.5a),
 /// and never marks `∞` unbounded resources from a detected loop. `On` enables the
 /// detector. New game-changing functionality is opt-in so it can be developed
@@ -23233,8 +23233,11 @@ impl<'de> Deserialize<'de> for PendingLiminalEntryResume {
 ///
 /// `normalized` is the **CR 104.4b comparand** — the only half
 /// `loop_states_equal_modulo_resources` / `loop_states_cover_modulo_growth*` /
-/// `ring_delta_signature` may read. It is byte-identical to the frame the ring held
-/// before the split, because [`GameState::normalize_for_loop`] is unchanged.
+/// `ring_delta_signature` may read. It is the transient-pruned
+/// [`GameState::normalize_for_loop_sample`] form: identical to the strict form except that
+/// allocator-derived identity ranks are deferred, because [`loop_states_equal`] supplies
+/// that rank for a confirmed candidate pair and the per-beat sample must not walk the
+/// row-unbounded damage journal.
 ///
 /// `live` is the **CR 732.2a evaluable** — the same beat un-normalized, and the only
 /// half the period-touch consumers may read. Normalization zeroes `next_object_id` and
