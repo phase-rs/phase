@@ -20,7 +20,9 @@ use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::{EtbTapState, Zone};
+use engine::types::TriggerDefinition;
 
 const P2: PlayerId = PlayerId(2);
 
@@ -151,7 +153,11 @@ fn liliana_vess_concession_resumes_family_through_sba_before_triggers() {
     assert_eq!(state.objects[&clone].zone, Zone::Exile);
     assert_eq!(state.objects[&liliana].zone, Zone::Battlefield);
     assert!(state.pending_replacement.is_none());
-    assert!(state.resolution_stack.is_empty());
+    assert!(
+        state.resolution_stack.is_empty(),
+        "stack={:?}",
+        state.resolution_stack
+    );
     assert!(state.resolving_stack_entry.is_none());
     assert_eq!(result.waiting_for, state.waiting_for);
 
@@ -283,7 +289,11 @@ fn liliana_vess_departed_clone_chooser_completes_family_before_priority() {
         );
     }
     assert!(state.pending_replacement.is_none());
-    assert!(state.resolution_stack.is_empty());
+    assert!(
+        state.resolution_stack.is_empty(),
+        "stack={:?}",
+        state.resolution_stack
+    );
     assert!(state.resolving_stack_entry.is_none());
     assert!(state.stack.is_empty());
     assert_eq!(result.waiting_for, state.waiting_for);
@@ -406,7 +416,11 @@ fn beacon_of_unrest_departed_mox_discard_payer_completes_family_before_priority(
     assert_eq!(state.objects[&mox].controller, P1);
     assert!(state.players[P1.0 as usize].graveyard.contains(&mox));
     assert!(state.pending_replacement.is_none());
-    assert!(state.resolution_stack.is_empty());
+    assert!(
+        state.resolution_stack.is_empty(),
+        "stack={:?}",
+        state.resolution_stack
+    );
     assert!(state.resolving_stack_entry.is_none());
     assert!(state.stack.is_empty());
     assert_eq!(result.waiting_for, state.waiting_for);
@@ -512,7 +526,11 @@ fn open_the_vaults_paid_mox_discard_completes_family_before_priority() {
     assert_eq!(state.objects[&vaults].zone, Zone::Graveyard);
     assert!(state.players[P0.0 as usize].graveyard.contains(&vaults));
     assert!(state.pending_replacement.is_none());
-    assert!(state.resolution_stack.is_empty());
+    assert!(
+        state.resolution_stack.is_empty(),
+        "stack={:?}",
+        state.resolution_stack
+    );
     assert!(state.resolving_stack_entry.is_none());
     assert!(state.stack.is_empty());
     assert_eq!(result.waiting_for, WaitingFor::Priority { player: P0 });
@@ -818,7 +836,11 @@ fn open_the_vaults_aura_host_chooser_concession_resumes_surviving_member() {
     assert_eq!(state.objects[&ingot].controller, P2);
     assert!(state.battlefield.contains(&ingot));
     assert!(state.pending_replacement.is_none());
-    assert!(state.resolution_stack.is_empty());
+    assert!(
+        state.resolution_stack.is_empty(),
+        "stack={:?}",
+        state.resolution_stack
+    );
     assert!(state.stack.is_empty());
     assert_eq!(state.objects[&vaults].zone, Zone::Graveyard);
     assert!(
@@ -907,15 +929,21 @@ fn olivia_entry_attack_chooser_concession_resumes_parked_family() {
         ),
         "the returned attacker must park on its defender pick"
     );
-    assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
-    assert!(runner.state().objects[&bears].tapped);
+    assert_eq!(
+        runner.state().objects[&bears].zone,
+        Zone::Graveyard,
+        "CR 508.4: the defender choice is inside the delivery boundary, so the card has not moved"
+    );
+    assert!(!runner.state().objects[&bears].tapped);
+    let paused = runner
+        .state()
+        .active_change_zone_frame()
+        .and_then(|frame| frame.pending.as_ref())
+        .and_then(|pending| pending.paused_current.as_ref())
+        .expect("the return family stays parked behind the defender pick");
     assert!(
-        runner
-            .state()
-            .active_change_zone_frame()
-            .and_then(|frame| frame.pending.as_ref())
-            .is_some(),
-        "the return family stays parked behind the defender pick"
+        paused.terminal_completion.is_none(),
+        "an undelivered pause carries no terminal outcome"
     );
 
     let result = runner
@@ -926,10 +954,19 @@ fn olivia_entry_attack_chooser_concession_resumes_parked_family() {
     assert_eq!(
         state.objects[&bears].zone,
         Zone::Exile,
-        "P0's returned creature leaves the game with its owner (CR 800.4a)"
+        "the entry never settled (CR 800.4b), then the owner left the game (CR 800.4a)"
+    );
+    assert_eq!(
+        move_count(&result.events, bears, Zone::Graveyard, Zone::Battlefield),
+        0,
+        "no entry event is produced for a delivery that never settled"
     );
     assert!(state.pending_replacement.is_none());
-    assert!(state.resolution_stack.is_empty());
+    assert!(
+        state.resolution_stack.is_empty(),
+        "stack={:?}",
+        state.resolution_stack
+    );
     assert!(state.stack.is_empty());
     assert!(
         matches!(state.waiting_for, WaitingFor::Priority { .. }),
@@ -937,4 +974,198 @@ fn olivia_entry_attack_chooser_concession_resumes_parked_family() {
         state.waiting_for
     );
     assert_eq!(result.waiting_for, state.waiting_for);
+}
+
+/// CR 800.4b + CR 508.4: a card owned by a surviving player, returned under the
+/// conceding controller's control, must stay in its origin zone when the entry
+/// attacker choice is never answered. The choice is inside the delivery
+/// boundary, so no entry event exists and the controller sweep cannot exile the
+/// survivor's card.
+#[test]
+fn entry_attack_chooser_concession_keeps_surviving_owners_card_in_origin() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let bears = scenario
+        .add_creature_to_graveyard(P1, "Grizzly Bears", 2, 2)
+        .id();
+    // Latent attack trigger, not a printed card: return P1's graveyard creature
+    // under P0's control, tapped and attacking.
+    let raider = scenario
+        .add_creature(P0, "Latent Raider", 2, 2)
+        .with_trigger_definition(TriggerDefinition::new(TriggerMode::Attacks).execute(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    library_shuffle: Default::default(),
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::SpecificObject { id: bears },
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: Some(ControllerRef::You),
+                    enter_tapped: EtbTapState::Tapped,
+                    enters_attacking: true,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            ),
+        ))
+        .id();
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(raider, AttackTarget::Player(P1))])
+        .expect("the latent attacker attacks P1");
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::EntryAttackTargetChoice {
+                player, object_id, ..
+            } if player == P0 && object_id == bears => break,
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order the latent attack trigger");
+            }
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(bears)),
+                    })
+                    .expect("choose the surviving player's graveyard creature");
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority toward the return trigger");
+            }
+            other => panic!("unexpected state before the entry attack choice: {other:?}"),
+        }
+    }
+    assert_eq!(
+        runner.state().objects[&bears].zone,
+        Zone::Graveyard,
+        "the entry has not settled, so the card is still in its origin zone"
+    );
+
+    let result = runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("the entry chooser concedes");
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&bears].zone,
+        Zone::Graveyard,
+        "CR 800.4b: the surviving owner's card remains in its current zone"
+    );
+    assert_eq!(state.objects[&bears].owner, P1);
+    assert_eq!(
+        move_count(&result.events, bears, Zone::Graveyard, Zone::Battlefield),
+        0
+    );
+    assert!(state.pending_replacement.is_none());
+    assert!(
+        state.resolution_stack.is_empty(),
+        "stack={:?}",
+        state.resolution_stack
+    );
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
+
+/// CR 508.4: answering the entry-attacker choice delivers the paused entry with
+/// the chosen defender — the move happens inside the resume, not before the
+/// prompt, and the family completes before priority.
+#[test]
+fn entry_attack_choice_answer_delivers_with_chosen_defender() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let bears = scenario
+        .add_creature_to_graveyard(P1, "Grizzly Bears", 2, 2)
+        .id();
+    let raider = scenario
+        .add_creature(P0, "Latent Raider", 2, 2)
+        .with_trigger_definition(TriggerDefinition::new(TriggerMode::Attacks).execute(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    library_shuffle: Default::default(),
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::SpecificObject { id: bears },
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: Some(ControllerRef::You),
+                    enter_tapped: EtbTapState::Tapped,
+                    enters_attacking: true,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            ),
+        ))
+        .id();
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(raider, AttackTarget::Player(P1))])
+        .expect("the latent attacker attacks P1");
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::EntryAttackTargetChoice {
+                player, object_id, ..
+            } if player == P0 && object_id == bears => break,
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order the latent attack trigger");
+            }
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(bears)),
+                    })
+                    .expect("choose the graveyard creature");
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority toward the return trigger");
+            }
+            other => panic!("unexpected state before the entry attack choice: {other:?}"),
+        }
+    }
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
+
+    let result = runner
+        .act(GameAction::ChooseEntryAttackTarget {
+            target: AttackTarget::Player(PlayerId(2)),
+        })
+        .expect("the chooser picks the second defender");
+    let state = runner.state();
+    assert_eq!(state.objects[&bears].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&bears].owner, P1);
+    assert_eq!(state.objects[&bears].controller, P0);
+    assert!(state.objects[&bears].tapped);
+    assert_eq!(
+        move_count(&result.events, bears, Zone::Graveyard, Zone::Battlefield),
+        1,
+        "the paused entry is delivered exactly once on the answer"
+    );
+    let combat = state.combat.as_ref().expect("combat remains active");
+    let attack = combat
+        .attackers
+        .iter()
+        .find(|attacker| attacker.object_id == bears)
+        .expect("the returned creature is attacking");
+    assert_eq!(attack.defending_player, PlayerId(2));
+    assert!(state.pending_replacement.is_none());
+    assert!(state.resolution_stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 }

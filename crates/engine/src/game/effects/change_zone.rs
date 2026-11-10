@@ -857,22 +857,44 @@ pub(crate) use crate::game::zone_pipeline::{
 /// Records the identity/proposal boundary before an Aura or copy-target prompt
 /// returns control after delivery. Replacement-ordering pauses replace this
 /// anticipated event with the authoritative `PendingReplacement` proposal.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn anticipated_zone_change_delivery(
     state: &GameState,
     object_id: ObjectId,
     destination: Zone,
     source_id: ObjectId,
     face_down_in_exile: crate::types::ability::ExileConcealment,
+    controller_override: Option<PlayerId>,
+    enter_tapped: EtbTapState,
+    enters_attacking: bool,
+    enter_transformed: bool,
+    enter_with_counters: &[(crate::types::counter::CounterType, u32)],
+    face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
+    attach_to: Option<AttachTarget>,
 ) -> Option<PendingZoneChangeDelivery> {
     let object = state.objects.get(&object_id)?;
     let mut expected_event =
         ProposedEvent::zone_change(object_id, object.zone, destination, Some(source_id));
     if let ProposedEvent::ZoneChange {
         face_down_in_exile: conceal,
+        controller_override: ctrl,
+        enter_tapped: tap,
+        enters_attacking: attacking,
+        enter_transformed: transformed,
+        enter_with_counters: counters,
+        face_down_profile: profile,
+        attach_to: attach,
         ..
     } = &mut expected_event
     {
         *conceal = face_down_in_exile;
+        *ctrl = controller_override;
+        *tap = enter_tapped;
+        *attacking = enters_attacking;
+        *transformed = enter_transformed;
+        *counters = enter_with_counters.to_vec();
+        *profile = face_down_profile.cloned().map(Box::new);
+        *attach = attach_to;
     }
     Some(PendingZoneChangeDelivery::new(
         ObjectIncarnationRef::from_object(object),
@@ -1873,6 +1895,13 @@ pub fn resolve(
             ctx.destination,
             ctx.source_id,
             ctx.face_down_in_exile,
+            ctx.enters_under_player,
+            member.enter_tapped,
+            member.enters_attacking,
+            ctx.enter_transformed,
+            &member.enter_with_counters,
+            ctx.face_down_profile.as_ref(),
+            ctx.enter_attached_to,
         );
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
@@ -1942,44 +1971,47 @@ pub fn resolve(
                     &events[logical_group_event_start..],
                 )
                 .expect("paused ChangeZone retains its explicit delivery prefix");
+                let replacement_boundary = state.pending_zone_change_delivery_from_replacement();
+                let paused_current = Some(
+                    replacement_boundary
+                        .clone()
+                        .or_else(|| {
+                            anticipated_pause.map(|mut boundary| {
+                                boundary.append_delivery_events(&events[delivery_start..]);
+                                boundary
+                            })
+                        })
+                        .expect("zone-change pause must retain its exact boundary"),
+                );
+                let iteration = crate::types::game_state::PendingChangeZoneIteration {
+                    pending_return_result_producer: None,
+                    logical_zone_change_group,
+                    paused_current,
+                    remaining: members[i + 1..].to_vec(),
+                    source_id: ctx.source_id,
+                    controller: ctx.controller,
+                    performed_by: ctx.performed_by,
+                    origin: ctx.origin,
+                    destination: ctx.destination,
+                    enter_transformed: ctx.enter_transformed,
+                    enters_under_player: ctx.enters_under_player,
+                    duration: ctx.duration.clone(),
+                    track_exiled_by_source: ctx.track_exiled_by_source,
+                    face_down_in_exile: ctx.face_down_in_exile,
+                    // CR 608.2c: carry the running count so the drain stamps
+                    // `last_effect_count` with the full targeted-move total
+                    // when the resumed iteration completes.
+                    moved_count: Some(moved_count),
+                    // CR 708.2a + CR 708.3: preserve the face-down profile so
+                    // the resumed members of a paused face-down return still
+                    // enter face down.
+                    face_down_profile: ctx.face_down_profile.clone(),
+                    library_placement: ctx.library_placement,
+                    enter_attached_to: ctx.enter_attached_to,
+                    effect_kind: EffectKind::from(&ability.effect),
+                };
                 state.push_change_zone_iteration_after_child(
-                    crate::types::game_state::PendingChangeZoneIteration {
-                        pending_return_result_producer: None,
-                        logical_zone_change_group,
-                        paused_current: Some(
-                            state
-                                .pending_zone_change_delivery_from_replacement()
-                                .or_else(|| {
-                                    anticipated_pause.map(|mut boundary| {
-                                        boundary.append_delivery_events(&events[delivery_start..]);
-                                        boundary
-                                    })
-                                })
-                                .expect("zone-change pause must retain its exact boundary"),
-                        ),
-                        remaining: members[i + 1..].to_vec(),
-                        source_id: ctx.source_id,
-                        controller: ctx.controller,
-                        performed_by: ctx.performed_by,
-                        origin: ctx.origin,
-                        destination: ctx.destination,
-                        enter_transformed: ctx.enter_transformed,
-                        enters_under_player: ctx.enters_under_player,
-                        duration: ctx.duration.clone(),
-                        track_exiled_by_source: ctx.track_exiled_by_source,
-                        face_down_in_exile: ctx.face_down_in_exile,
-                        // CR 608.2c: carry the running count so the drain stamps
-                        // `last_effect_count` with the full targeted-move total
-                        // when the resumed iteration completes.
-                        moved_count: Some(moved_count),
-                        // CR 708.2a + CR 708.3: preserve the face-down profile so
-                        // the resumed members of a paused face-down return still
-                        // enter face down.
-                        face_down_profile: ctx.face_down_profile.clone(),
-                        library_placement: ctx.library_placement,
-                        enter_attached_to: ctx.enter_attached_to,
-                        effect_kind: EffectKind::from(&ability.effect),
-                    },
+                    iteration,
                     stack_depth_before_zone_move,
                 );
                 // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
@@ -3458,6 +3490,13 @@ pub fn resolve_all(
             dest_zone,
             ability.source_id,
             ability.context.face_down_in_exile,
+            enters_under_player,
+            enter_tapped,
+            enters_attacking,
+            false,
+            &enter_with_counters,
+            face_down_profile.as_ref(),
+            None,
         );
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
@@ -3506,18 +3545,19 @@ pub fn resolve_all(
                 }
             }
             crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsChoice(player) => {
-                let entry_target_choice = matches!(
-                    state.waiting_for,
-                    crate::types::game_state::WaitingFor::EntryAttackTargetChoice { .. }
-                );
                 // CR 614.12a + CR 614.13: a Devour as-enters sacrifice surfaced its
-                // own `EffectZoneChoice` (or a counter-pause replacement choice).
-                // Stash the unprocessed co-entering members so
+                // own `EffectZoneChoice` (or a counter-pause replacement choice),
+                // or CR 508.4 paused the entry on its defender choice before the
+                // move. Stash the unprocessed co-entering members so
                 // `drain_pending_change_zone_iteration` resumes the mass move after
                 // the player resolves this choice — without the stash, every member
                 // after the first NeedsChoice would be silently dropped (issue #535
                 // class). The drain owns the single trailing EffectResolved, so we do
                 // NOT emit it here (mirrors the targeted loop's contract).
+                //
+                // The paused delivery keeps its exact boundary. Before the move it
+                // carries no delivery events, so a departure at the prompt records
+                // `Remained` and a surviving owner's card never moves (CR 800.4b).
                 //
                 // CR 708.2a + CR 708.3: carry the face-down profile through the
                 // resume carrier so resumed members of a face-down mass entry (the
@@ -3529,50 +3569,53 @@ pub fn resolve_all(
                     &events[logical_group_event_start..],
                 )
                 .expect("paused ChangeZoneAll retains its explicit delivery prefix");
-                state.push_change_zone_iteration_after_child(
-                    crate::types::game_state::PendingChangeZoneIteration {
-                        pending_return_result_producer: None,
-                        logical_zone_change_group,
-                        paused_current: (!entry_target_choice).then(|| {
-                            state
-                                .pending_zone_change_delivery_from_replacement()
-                                .or_else(|| {
-                                    anticipated_pause.map(|mut boundary| {
-                                        boundary.append_delivery_events(&events[delivery_start..]);
-                                        boundary
-                                    })
-                                })
-                                .expect("replacement pause must retain its exact boundary")
-                        }),
-                        // CR 122.1h: resumed members of a paused mass return still
-                        // receive their counters (Shilgengar's finality counter).
-                        // ChangeZoneAll carries no entry gate, so every member's
-                        // entry is the unconditional one.
-                        remaining: matching[i + 1..]
-                            .iter()
-                            .map(|&object_id| ChangeZoneMemberEntry {
-                                object_id,
-                                enter_with_counters: enter_with_counters.clone(),
-                                enter_tapped,
-                                enters_attacking,
+                let replacement_boundary = state.pending_zone_change_delivery_from_replacement();
+                let paused_current = Some(
+                    replacement_boundary
+                        .clone()
+                        .or_else(|| {
+                            anticipated_pause.map(|mut boundary| {
+                                boundary.append_delivery_events(&events[delivery_start..]);
+                                boundary
                             })
-                            .collect(),
-                        source_id: ability.source_id,
-                        controller: ability.controller,
-                        performed_by: performer,
-                        origin: None,
-                        destination: dest_zone,
-                        enter_transformed: false,
-                        enters_under_player,
-                        duration: ability.duration.clone(),
-                        track_exiled_by_source,
-                        face_down_in_exile: ability.context.face_down_in_exile,
-                        moved_count: Some(moved_count + i32::from(entry_target_choice)),
-                        face_down_profile: face_down_profile.clone(),
-                        library_placement: member_library_placement.clone(),
-                        enter_attached_to: None,
-                        effect_kind: EffectKind::from(&ability.effect),
-                    },
+                        })
+                        .expect("replacement pause must retain its exact boundary"),
+                );
+                let iteration = crate::types::game_state::PendingChangeZoneIteration {
+                    pending_return_result_producer: None,
+                    logical_zone_change_group,
+                    paused_current,
+                    // CR 122.1h: resumed members of a paused mass return still
+                    // receive their counters (Shilgengar's finality counter).
+                    // ChangeZoneAll carries no entry gate, so every member's
+                    // entry is the unconditional one.
+                    remaining: matching[i + 1..]
+                        .iter()
+                        .map(|&object_id| ChangeZoneMemberEntry {
+                            object_id,
+                            enter_with_counters: enter_with_counters.clone(),
+                            enter_tapped,
+                            enters_attacking,
+                        })
+                        .collect(),
+                    source_id: ability.source_id,
+                    controller: ability.controller,
+                    performed_by: performer,
+                    origin: None,
+                    destination: dest_zone,
+                    enter_transformed: false,
+                    enters_under_player,
+                    duration: ability.duration.clone(),
+                    track_exiled_by_source,
+                    face_down_in_exile: ability.context.face_down_in_exile,
+                    moved_count: Some(moved_count),
+                    face_down_profile: face_down_profile.clone(),
+                    library_placement: member_library_placement.clone(),
+                    enter_attached_to: None,
+                    effect_kind: EffectKind::from(&ability.effect),
+                };
+                state.push_change_zone_iteration_after_child(
+                    iteration,
                     stack_depth_before_zone_move,
                 );
                 crate::game::replacement::park_waiting_for(state, player);

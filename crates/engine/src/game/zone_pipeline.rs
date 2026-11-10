@@ -3857,6 +3857,62 @@ pub(crate) fn deliver_replaced_zone_change(
     library_placement: Option<LibraryPosition>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
+    deliver_replaced_zone_change_inner(
+        state,
+        event,
+        source_id,
+        duration,
+        exile_controller,
+        track_exiled_by_source,
+        drain,
+        library_placement,
+        None,
+        events,
+    )
+}
+
+/// CR 508.4: deliver a paused battlefield entry with its defender already chosen,
+/// so the required entry choice stays inside the delivery boundary.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn deliver_replaced_zone_change_with_entry_attack_target(
+    state: &mut GameState,
+    event: ProposedEvent,
+    source_id: Option<ObjectId>,
+    duration: Option<&Duration>,
+    exile_controller: Option<PlayerId>,
+    track_exiled_by_source: bool,
+    drain: PostReplacementDrainOwner,
+    library_placement: Option<LibraryPosition>,
+    entry_attack_target: crate::types::attack_target::AttackTarget,
+    events: &mut Vec<GameEvent>,
+) -> ZoneDeliveryResult {
+    deliver_replaced_zone_change_inner(
+        state,
+        event,
+        source_id,
+        duration,
+        exile_controller,
+        track_exiled_by_source,
+        drain,
+        library_placement,
+        Some(entry_attack_target),
+        events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deliver_replaced_zone_change_inner(
+    state: &mut GameState,
+    event: ProposedEvent,
+    source_id: Option<ObjectId>,
+    duration: Option<&Duration>,
+    exile_controller: Option<PlayerId>,
+    track_exiled_by_source: bool,
+    drain: PostReplacementDrainOwner,
+    library_placement: Option<LibraryPosition>,
+    entry_attack_target: Option<crate::types::attack_target::AttackTarget>,
+    events: &mut Vec<GameEvent>,
+) -> ZoneDeliveryResult {
     if let ProposedEvent::ZoneChange {
         object_id,
         from,
@@ -4067,6 +4123,41 @@ pub(crate) fn deliver_replaced_zone_change(
         // redundant check below skip re-marking `Full`. `false` for both the
         // library-placement branch and the merge-survivor branch, neither of
         // which is analyzed by that carve-out.
+        // CR 508.4: the entering creature's defender is chosen as it enters, so
+        // the required choice belongs inside the delivery boundary. Pausing here
+        // leaves the object in its origin zone; if the intended controller leaves
+        // before answering, the pre-delivery departure guard makes the entry
+        // Remained (CR 800.4b) and a surviving owner's card never moves. A
+        // resumed delivery carries the chosen defender instead.
+        if enters_attacking
+            && to == Zone::Battlefield
+            && from != Zone::Battlefield
+            && split_component_survivor.is_none()
+            && entry_attack_target.is_none()
+        {
+            let controller = ctrl_override
+                .or_else(|| {
+                    state
+                        .entering_or_live_object(object_id)
+                        .map(|object| object.controller)
+                })
+                .expect("an entering battlefield object exists");
+            if crate::game::players::is_alive(state, controller) {
+                let valid_targets = crate::game::combat::valid_entry_attack_targets(
+                    state,
+                    controller,
+                    &crate::types::ability::EntryAttackDestination::AnyDefender,
+                );
+                if valid_targets.len() > 1 {
+                    state.waiting_for = WaitingFor::EntryAttackTargetChoice {
+                        player: controller,
+                        object_id,
+                        valid_targets,
+                    };
+                    return ZoneDeliveryResult::NeedsChoice(controller);
+                }
+            }
+        }
         let took_plain_zone_transfer;
         match (to, library_placement.as_ref()) {
             (Zone::Library, Some(position)) => {
@@ -4524,7 +4615,18 @@ pub(crate) fn deliver_replaced_zone_change(
                 .get(&object_id)
                 .map(|object| object.controller)
                 .expect("a settled battlefield entrant must exist");
-            if let Some(player) = crate::game::combat::choose_entry_attack_target_or_enter(
+            if let Some(target) = entry_attack_target {
+                if let Some(defending_player) =
+                    crate::game::combat::entry_attack_target_defender(state, controller, target)
+                {
+                    crate::game::combat::enter_attacking_at_target(
+                        state,
+                        object_id,
+                        defending_player,
+                        target,
+                    );
+                }
+            } else if let Some(player) = crate::game::combat::choose_entry_attack_target_or_enter(
                 state, object_id, controller,
             ) {
                 return ZoneDeliveryResult::NeedsChoice(player);
@@ -4533,6 +4635,120 @@ pub(crate) fn deliver_replaced_zone_change(
         return result;
     }
     ZoneDeliveryResult::Done
+}
+
+/// CR 508.4: answer an entry-attacker choice that paused inside the delivery
+/// boundary. The object was never moved, so the approved event is delivered here
+/// with the chosen defender; the parked delivery then records its terminal
+/// outcome exactly once for the family (Remained if the pre-delivery departure
+/// guard refuses the entry, CR 800.4b).
+pub(crate) fn resume_paused_entry_attack_choice(
+    state: &mut GameState,
+    object_id: ObjectId,
+    target: crate::types::attack_target::AttackTarget,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, crate::game::engine::EngineError> {
+    let player = match &state.waiting_for {
+        WaitingFor::EntryAttackTargetChoice { player, .. } => *player,
+        _ => {
+            return Err(crate::game::engine::EngineError::InvalidAction(
+                "entry attack choice is not pending".to_string(),
+            ));
+        }
+    };
+    let mut batch_drain = false;
+    let change_zone_pause = state
+        .active_change_zone_frame()
+        .and_then(|frame| frame.pending.as_ref())
+        .and_then(|pending| {
+            pending
+                .paused_current
+                .as_ref()
+                .filter(|paused| {
+                    paused.member.object_id == object_id && paused.terminal_completion.is_none()
+                })
+                .map(|paused| {
+                    (
+                        paused.member,
+                        paused.expected_event.clone(),
+                        pending.source_id,
+                        pending.controller,
+                        pending.duration.clone(),
+                        pending.track_exiled_by_source,
+                        pending.library_placement.clone(),
+                    )
+                })
+        });
+    let (member, expected_event, source_id, controller, duration, track, library_placement) =
+        if let Some(pause) = change_zone_pause {
+            pause
+        } else {
+            // CR 603.10a: a Dig/Draw batch can park the same pre-delivery
+            // entering-attacker choice (Winota). Its paused member is settled
+            // by the same approved event, then the batch tail drains.
+            let pending = state.active_batch_delivery().cloned().ok_or_else(|| {
+                crate::game::engine::EngineError::InvalidAction(
+                    "entry attack choice has no parked family".to_string(),
+                )
+            })?;
+            let paused = pending
+                .paused_current
+                .as_ref()
+                .filter(|paused| {
+                    paused.member.object_id == object_id && paused.terminal_completion.is_none()
+                })
+                .ok_or_else(|| {
+                    crate::game::engine::EngineError::InvalidAction(
+                        "entry attack choice has no undelivered member".to_string(),
+                    )
+                })?;
+            batch_drain = true;
+            (
+                paused.member,
+                paused.expected_event.clone(),
+                pending.source_id.unwrap_or(object_id),
+                player,
+                None,
+                matches!(
+                    pending.exile_tracking,
+                    crate::types::game_state::ZoneDeliveryExileTracking::TrackBySource
+                ),
+                pending.library_placement.clone(),
+            )
+        };
+    let delivery_start = events.len();
+    // The move never happened (the pause precedes it), so deliver the approved
+    // event here with the chosen defender; every earlier modifier rides on it.
+    let _ = player;
+    let result = deliver_replaced_zone_change_with_entry_attack_target(
+        state,
+        expected_event.clone(),
+        Some(source_id),
+        duration.as_ref(),
+        Some(controller),
+        track,
+        PostReplacementDrainOwner::DeliveryTail,
+        library_placement,
+        target,
+        events,
+    );
+    if !matches!(result, ZoneDeliveryResult::NeedsChoice(_)) {
+        let completion = PendingZoneChangeDelivery::completion_from_delivery_events(
+            member,
+            &events[delivery_start..],
+        );
+        let _ = state.capture_resumed_paused_zone_change_delivery(
+            member,
+            &expected_event,
+            &events[delivery_start..],
+            completion,
+        );
+    }
+    if batch_drain && !matches!(result, ZoneDeliveryResult::NeedsChoice(_)) {
+        state.waiting_for = WaitingFor::Priority { player };
+        drain_pending_batch_deliveries(state, events);
+    }
+    Ok(state.waiting_for.clone())
 }
 
 fn replacement_pause_delivery_result(state: &GameState) -> ZoneDeliveryResult {

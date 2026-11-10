@@ -2719,21 +2719,19 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                     return;
                 }
                 crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsChoice(player) => {
-                    let entry_target_choice = matches!(
-                        state.waiting_for,
-                        WaitingFor::EntryAttackTargetChoice { .. }
-                    );
-                    let paused_current = (!entry_target_choice).then(|| {
-                        state
-                            .pending_zone_change_delivery_from_replacement()
+                    let replacement_boundary =
+                        state.pending_zone_change_delivery_from_replacement();
+                    let paused_current = Some(
+                        replacement_boundary
+                            .clone()
                             .or_else(|| {
                                 anticipated_pause.map(|mut boundary| {
                                     boundary.append_delivery_events(&events[delivery_start..]);
                                     boundary
                                 })
                             })
-                            .expect("replacement pause must retain its exact boundary")
-                    });
+                            .expect("replacement pause must retain its exact boundary"),
+                    );
                     let trigger_events: Vec<GameEvent> = events[events_before_drain..]
                         .iter()
                         .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
@@ -2745,31 +2743,31 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                         &trigger_events,
                     )
                     .expect("re-paused ChangeZone retains its explicit delivery segment");
+                    let iteration = crate::types::game_state::PendingChangeZoneIteration {
+                        logical_zone_change_group,
+                        pending_return_result_producer,
+                        paused_current,
+                        remaining: remaining[i + 1..].to_vec(),
+                        source_id: ctx.source_id,
+                        controller: ctx.controller,
+                        performed_by: ctx.performed_by,
+                        origin: ctx.origin,
+                        destination: ctx.destination,
+                        enter_transformed: ctx.enter_transformed,
+                        enters_under_player: ctx.enters_under_player,
+                        duration: ctx.duration.clone(),
+                        track_exiled_by_source: ctx.track_exiled_by_source,
+                        face_down_in_exile: ctx.face_down_in_exile,
+                        moved_count,
+                        // CR 708.2a + CR 708.3: preserve the face-down profile
+                        // across a further pause so resumed members stay face down.
+                        face_down_profile: ctx.face_down_profile.clone(),
+                        library_placement: ctx.library_placement.clone(),
+                        enter_attached_to: ctx.enter_attached_to,
+                        effect_kind,
+                    };
                     state.replace_active_change_zone_iteration_after_child(
-                        crate::types::game_state::PendingChangeZoneIteration {
-                            logical_zone_change_group,
-                            pending_return_result_producer,
-                            paused_current,
-                            remaining: remaining[i + 1..].to_vec(),
-                            source_id: ctx.source_id,
-                            controller: ctx.controller,
-                            performed_by: ctx.performed_by,
-                            origin: ctx.origin,
-                            destination: ctx.destination,
-                            enter_transformed: ctx.enter_transformed,
-                            enters_under_player: ctx.enters_under_player,
-                            duration: ctx.duration.clone(),
-                            track_exiled_by_source: ctx.track_exiled_by_source,
-                            face_down_in_exile: ctx.face_down_in_exile,
-                            moved_count: moved_count
-                                .map(|count| count + i32::from(entry_target_choice)),
-                            // CR 708.2a + CR 708.3: preserve the face-down profile
-                            // across a further pause so resumed members stay face down.
-                            face_down_profile: ctx.face_down_profile.clone(),
-                            library_placement: ctx.library_placement.clone(),
-                            enter_attached_to: ctx.enter_attached_to,
-                            effect_kind,
-                        },
+                        iteration,
                         stack_depth_before_zone_move,
                     );
                     // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice

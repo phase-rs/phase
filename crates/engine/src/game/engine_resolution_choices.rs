@@ -2272,25 +2272,59 @@ pub(super) fn handle_resolution_choice(
             GameAction::ChooseEntryAttackTarget { target },
         ) => {
             // CR 508.4: the entering creature's controller chooses one of the
-            // engine-issued defending players, planeswalkers, or battles.
-            // `entry_attack_target_defender` applies CR 508.4a if it went stale.
+            // engine-issued defending players, planeswalkers, or battles. The
+            // move itself was paused before delivery, so the approved event is
+            // delivered here with the chosen defender.
             if !valid_targets.contains(&target) {
                 return Err(EngineError::InvalidAction(
                     "entry attack target is not one of the offered destinations".to_string(),
                 ));
             }
-            state.waiting_for = WaitingFor::Priority { player };
-            if let Some(defending_player) =
-                crate::game::combat::entry_attack_target_defender(state, player, target)
-            {
-                crate::game::combat::enter_attacking_at_target(
-                    state,
-                    object_id,
-                    defending_player,
-                    target,
-                );
+            // CR 508.4: a zone-change delivery paused before the move keeps
+            // its family so the approved event carries every entry modifier.
+            // Token and other direct entries have no parked family; they
+            // attach the attacker exactly as before.
+            let has_parked_family = state
+                .active_change_zone_frame()
+                .and_then(|frame| frame.pending.as_ref())
+                .and_then(|pending| pending.paused_current.as_ref())
+                .is_some_and(|paused| {
+                    paused.member.object_id == object_id && paused.terminal_completion.is_none()
+                })
+                || state
+                    .active_batch_delivery()
+                    .and_then(|pending| pending.paused_current.as_ref())
+                    .is_some_and(|paused| {
+                        paused.member.object_id == object_id && paused.terminal_completion.is_none()
+                    });
+            if !has_parked_family {
+                state.waiting_for = WaitingFor::Priority { player };
+                if let Some(defending_player) =
+                    crate::game::combat::entry_attack_target_defender(state, player, target)
+                {
+                    crate::game::combat::enter_attacking_at_target(
+                        state,
+                        object_id,
+                        defending_player,
+                        target,
+                    );
+                }
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    finish_with_continuation(state, player, events),
+                ));
             }
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            let waiting = crate::game::zone_pipeline::resume_paused_entry_attack_choice(
+                state, object_id, target, events,
+            )?;
+            if matches!(waiting, WaitingFor::EntryAttackTargetChoice { .. }) {
+                // The resumed delivery completed without surfacing a new
+                // prompt: return to the ordinary boundary.
+                state.waiting_for = WaitingFor::Priority { player };
+                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            } else {
+                // The resumed delivery parked again (nested replacement/host).
+                ResolutionChoiceOutcome::WaitingFor(waiting)
+            }
         }
         (
             WaitingFor::ScryChoice { player, cards },
@@ -7522,6 +7556,13 @@ pub(super) fn handle_resolution_choice(
                                 ctx.destination,
                                 ctx.source_id,
                                 ctx.face_down_in_exile,
+                                ctx.enters_under_player,
+                                member.enter_tapped,
+                                member.enters_attacking,
+                                ctx.enter_transformed,
+                                &member.enter_with_counters,
+                                ctx.face_down_profile.as_ref(),
+                                ctx.enter_attached_to,
                             );
                         let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move_with_terminal(
@@ -8047,6 +8088,13 @@ pub(super) fn handle_resolution_choice(
                                 ctx.destination,
                                 ctx.source_id,
                                 ctx.face_down_in_exile,
+                                ctx.enters_under_player,
+                                member.enter_tapped,
+                                member.enters_attacking,
+                                ctx.enter_transformed,
+                                &member.enter_with_counters,
+                                ctx.face_down_profile.as_ref(),
+                                ctx.enter_attached_to,
                             );
                         let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move_with_terminal(
