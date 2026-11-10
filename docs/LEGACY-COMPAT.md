@@ -35,13 +35,31 @@ Each entry MUST include:
 
 - **Covers:** a `SettlementNode` payload stating no `settled` record, from which
   `ResolvedRulesJournal::node_settled` infers settlement off `produced_pips`.
+- **Scope:** the reading is admitted only for a payload that is UNIFORMLY older. The
+  format is decided once per payload at the restore boundary
+  (`GameState::bind_or_reject_settlement_custody`) from the markers only this build
+  writes — whether any node states a settlement record, and whether any parked
+  mana-ability activation states an `activated_mana_occurrence`. A payload carrying
+  either marker cannot contain a settlement-recording node that states none: that is
+  `PersistedRestoreError::ContradictorySettlementCustody`, not this shim. For a
+  uniformly older payload the pip-derived answer is bound INTO the record
+  (`ResolvedRulesJournal::bind_legacy_settlement_records`) at that boundary, so the
+  save the resumed game writes next states its settlements and the mixed shape (old
+  nodes without a record beside newly allocated nodes with one) cannot arise.
 - **Why it is genuine:** `SettlementNode` has been persisted since 0.85
   (`d247cee56`, 2026-07-22) and every released build wrote it WITHOUT this field —
   `git tag --contains d247cee56` lists shipped tags, and `upstream/main`'s copy of
   the struct has no such field. The committed capture
   `crates/engine/tests/fixtures/dina_conqueror_4p.json.gz` is one such payload (zero
-  `"settled"` occurrences) and must keep restoring. What is new is the field, not
-  the record.
+  `"settled"` and zero `activated_mana_occurrence` occurrences) and must keep
+  restoring. What is new is the field, not the record. All 27 committed `.json.gz`
+  captures are this uniform shape.
+- **Spoofing:** deleting the settlement key from one node of a current save does not
+  reach this shim — the payload's other settlement records (or the parked activation's
+  occurrence) still mark it current, so the deletion is refused. Stripping EVERY
+  current-format marker fabricates a payload this build never wrote, which is by
+  construction the uniform older shape above; that residual ambiguity is the whole
+  reason the shim exists.
 - **Added in:** 0.123.0.
 - **Removal trigger:** must be removed once a release above 0.137.0 ships (`+14`
   releases from the shipping version). Removing the shim means answering `None` as
@@ -74,7 +92,14 @@ serde default (empty). That shape is NOT admitted silently: the restore boundary
 binds a restored contribution to the payment it claims
 (`bind_or_reject_assist_contribution_provenance`) — recovering the units the journal
 records for that helper on that spell, and refusing a paid-but-unprovable root and a
-unit list with no paid helper alike. Removing the field's `#[serde(default)]` instead
+unit list with no paid helper alike. A POSITIVE contribution is admitted only when the
+journal records the helper's spend on that spell: a correctly sized unit list that no
+journal record backs is refused
+(`AssistContributionConflict::JournalRecordsNoSpendForSavedUnits`) rather than read as
+agreement, because CR 118.3a makes the journal's removal record the payment and the
+save's list only a claim about it. The one gap that needs no journal is a `Paid`
+helper who paid 0 generic: nothing was removed, so the empty list is the payment.
+Removing the field's `#[serde(default)]` instead
 would fail the whole payload at decode time and foreclose the journal recovery, which
 is the behaviour the maintainer asked for.
 
