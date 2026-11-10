@@ -3969,7 +3969,10 @@ function UnlessPaymentPanel() {
     return <SayPhrasePanel phrase={waitingFor.data.cost.phrase} effect={effect} />;
   }
 
-  const costDisplay = formatUnlessCost(waitingFor.data.cost, t);
+  const repeat = waitingFor.data.repeat;
+  const baseCostDisplay = formatUnlessCost(waitingFor.data.cost, t);
+  const costDisplay =
+    repeat && repeat > 1 ? `${baseCostDisplay} × ${repeat}` : baseCostDisplay;
 
   return (
     <AnimatePresence>

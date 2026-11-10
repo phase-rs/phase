@@ -481,15 +481,26 @@ fn settle_replay_outcome(
             *state = shadow;
             // The payment is committed. Continue the printed rider through the
             // ordinary chain walker, now outside the transaction, so a later
-            // pause/failure cannot restore the pre-payment base.
-            resolve_root_continuation(
+            // pause/failure cannot restore the pre-payment base. CR 104.3a:
+            // when the rider or the canonical tail fails, the committed
+            // payment, its events and the departure must still leave this
+            // boundary together.
+            let rider = resolve_root_continuation(
                 state,
                 &transaction.root,
                 true,
                 transaction.resolving_trigger_context.as_ref(),
                 &mut events,
-            )?;
-            settle_canonical_tail(state, &mut events, continuation_event_start, carrier)?;
+            )
+            .and_then(|()| {
+                settle_canonical_tail(state, &mut events, continuation_event_start, carrier)
+            });
+            if let Err(error) = rider {
+                tracing::debug!(
+                    ?error,
+                    "the committed payment's rider failed; publishing the accepted payment"
+                );
+            }
             let waiting_for = state.waiting_for.clone();
             Ok(ActionResult::applied(events, waiting_for).with_log_entries(log_entries))
         }
@@ -751,6 +762,12 @@ fn carry_runtime_authorities(shadow: &mut GameState, live: &GameState) {
     shadow.rng = live.rng.clone();
     shadow.rng_seed = live.rng_seed;
     shadow.rng_word_pos = live.rng_word_pos;
+    // Session/authority state is not part of the accepted payment: a restored
+    // or revoked capability decision belongs to the live session, not to the
+    // checkpoint snapshot.
+    shadow.debug_mode = live.debug_mode;
+    shadow.debug_permitted = live.debug_permitted.clone();
+    shadow.format_config = live.format_config.clone();
 }
 
 /// CR 614.17c: a parked replacement for a draw that can no longer happen
