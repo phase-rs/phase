@@ -9838,6 +9838,28 @@ pub(crate) fn drain_pending_cost_move_resume(
 /// `resume_due_counter_cost_root`; the cost-move drain admits it at
 /// `PriorityBoundary`). A repeat needs the position to strictly decrease, so
 /// the loop ends.
+/// CR 118.11 + CR 614.11a: only a bare activation whose own cost is the draw
+/// instruction may resume at the common boundary; a cast or activation paused
+/// on an unrelated choice keeps its existing owner.
+fn pending_cast_is_draw_cost_activation(
+    state: &GameState,
+    pending: &crate::types::game_state::PendingCast,
+) -> bool {
+    let Some(index) = pending.activation_ability_index else {
+        return false;
+    };
+    crate::game::casting::activated_ability_definitions(state, pending.object_id)
+        .into_iter()
+        .find(|(candidate, _)| *candidate == index)
+        .is_some_and(|(_, definition)| {
+            matches!(
+                definition.cost,
+                Some(crate::types::ability::AbilityCost::EffectCost { effect })
+                    if matches!(effect.as_ref(), crate::types::ability::Effect::Draw { .. })
+            )
+        })
+}
+
 pub(super) fn resume_pending_continuation_if_priority(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -9853,9 +9875,13 @@ pub(super) fn resume_pending_continuation_if_priority(
             // CR 614.11a + CR 118.11: a bare cast/activation whose draw cost
             // paused on an interactive substitute must resume once the whole
             // draw instruction and its substitute subtree have finished.
+            let draw_cost_activation = state
+                .pending_cast
+                .as_deref()
+                .is_some_and(|pending| pending_cast_is_draw_cost_activation(state, pending));
             if matches!(state.waiting_for, WaitingFor::Priority { .. })
                 && state.active_ability_continuation().is_none()
-                && (state.pending_cast.is_some() || state.pending_discard_for_cost.is_some())
+                && draw_cost_activation
                 && super::engine_replacement::resume_active_draw_sequences(state, events).is_none()
             {
                 state.waiting_for =
