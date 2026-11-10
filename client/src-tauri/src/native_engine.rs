@@ -591,6 +591,18 @@ pub(crate) fn native_engine_bridge_sender(
     state.bridges.get(&bridge_id).map(BridgeHandle::outbound)
 }
 
+/// Marks every frame still queued for this bridge as cancelled. The writer
+/// acknowledges those frames without transmitting them.
+pub(crate) fn abandon_native_engine_bridge(bridge_id: u64) -> bool {
+    let Ok(state) = engine_state().lock() else {
+        return false;
+    };
+    state.bridges.get(&bridge_id).is_some_and(|bridge| {
+        bridge.abandoned().store(true, Ordering::Relaxed);
+        true
+    })
+}
+
 pub(crate) fn close_native_engine_bridge(bridge_id: u64) -> bool {
     engine_state()
         .lock()

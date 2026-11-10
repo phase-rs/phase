@@ -9,6 +9,10 @@ use futures_util::{
     future::{AbortHandle, AbortRegistration, Abortable},
     SinkExt, StreamExt,
 };
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tauri::{ipc::Channel, WebviewWindow};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use tokio::sync::{
@@ -69,11 +73,22 @@ pub(crate) type OutboundReceiver = UnboundedReceiver<OutboundFrame>;
 pub(crate) struct BridgeHandle {
     abort: AbortHandle,
     outbound: OutboundSender,
+    /// Cancellation admitted at the writer: frames still queued for a retired
+    /// candidate are acknowledged as cancelled and never written.
+    abandoned: Arc<AtomicBool>,
 }
 
 impl BridgeHandle {
     pub(crate) fn new(abort: AbortHandle, outbound: OutboundSender) -> Self {
-        Self { abort, outbound }
+        Self {
+            abort,
+            outbound,
+            abandoned: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub(crate) fn abandoned(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.abandoned)
     }
 
     pub(crate) fn abort(&self) {
@@ -83,7 +98,11 @@ impl BridgeHandle {
     /// Drops the queue's last long-lived sender, so the forwarder sends what is
     /// already queued and then a Close frame; the watchdog bounds that drain.
     pub(crate) fn close(self) {
-        let Self { abort, outbound } = self;
+        let Self {
+            abort,
+            outbound,
+            abandoned: _,
+        } = self;
         drop(outbound);
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(CLOSE_DRAIN_TIMEOUT).await;
@@ -104,19 +123,19 @@ pub async fn connect_native_engine(
 ) -> Result<u64, NativeEngineBridgeError> {
     let (outbound, receiver) = mpsc::unbounded_channel();
     let (abort, registration) = AbortHandle::new_pair();
-    let (bridge_id, port, origin) = native_engine::register_native_engine_bridge(
-        BridgeHandle::new(abort, outbound),
-    )
-    .map_err(|error| match error {
-        native_engine::NativeBridgeRegistryError::NotRunning => {
-            NativeEngineBridgeError::NotRunning {
-                detail: "no native engine is running".to_owned(),
+    let handle = BridgeHandle::new(abort, outbound);
+    let abandoned = handle.abandoned();
+    let (bridge_id, port, origin) =
+        native_engine::register_native_engine_bridge(handle).map_err(|error| match error {
+            native_engine::NativeBridgeRegistryError::NotRunning => {
+                NativeEngineBridgeError::NotRunning {
+                    detail: "no native engine is running".to_owned(),
+                }
             }
-        }
-        native_engine::NativeBridgeRegistryError::Internal(detail) => {
-            NativeEngineBridgeError::internal(detail)
-        }
-    })?;
+            native_engine::NativeBridgeRegistryError::Internal(detail) => {
+                NativeEngineBridgeError::internal(detail)
+            }
+        })?;
 
     let request = match bridge_request(port, origin) {
         Ok(request) => request,
@@ -144,6 +163,7 @@ pub async fn connect_native_engine(
             bridge_id,
             socket,
             receiver,
+            abandoned,
             registration,
             on_event,
             text_delivery,
@@ -200,6 +220,19 @@ async fn await_written(
 }
 
 /// Closes a shell-pinned bridge and forwards a close event to JS.
+/// Marks a bridge's queued frames as cancelled: the writer acknowledges them
+/// without transmitting, which retires a candidate's setup before admission.
+#[tauri::command]
+pub fn native_engine_bridge_abandon(id: u64) -> Result<(), NativeEngineBridgeError> {
+    if native_engine::abandon_native_engine_bridge(id) {
+        Ok(())
+    } else {
+        Err(NativeEngineBridgeError::UnknownBridge {
+            detail: format!("native engine bridge {id} is not open"),
+        })
+    }
+}
+
 #[tauri::command]
 pub fn native_engine_bridge_close(id: u64) -> Result<(), NativeEngineBridgeError> {
     if native_engine::close_native_engine_bridge(id) {
@@ -273,13 +306,14 @@ async fn forward_bridge(
     bridge_id: u64,
     socket: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
     outbound: OutboundReceiver,
+    abandoned: Arc<AtomicBool>,
     registration: AbortRegistration,
     on_event: Channel<BridgeEvent>,
     text_delivery: Option<BridgeTextDelivery>,
     remove: fn(u64),
 ) {
     let result = Abortable::new(
-        run_bridge(socket, outbound, on_event.clone(), text_delivery),
+        run_bridge(socket, outbound, abandoned, on_event.clone(), text_delivery),
         registration,
     )
     .await;
@@ -299,6 +333,7 @@ async fn forward_bridge(
 async fn run_bridge(
     socket: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
     mut outbound: OutboundReceiver,
+    abandoned: Arc<AtomicBool>,
     on_event: Channel<BridgeEvent>,
     text_delivery: Option<BridgeTextDelivery>,
 ) -> (Option<String>, Option<(u16, String)>) {
@@ -311,6 +346,12 @@ async fn run_bridge(
         tokio::select! {
             outgoing = outbound.recv(), if !closing => match outgoing {
                 Some(frame) => {
+                    if abandoned.load(Ordering::Relaxed) {
+                        if let Some(ack) = frame.ack {
+                            let _ = ack.send(Err("cancelled before the writer admitted the frame".to_owned()));
+                        }
+                        continue;
+                    }
                     let written = write.send(frame.message).await;
                     if let Some(ack) = frame.ack {
                         // Report the sink result, not queue admission.
@@ -661,6 +702,13 @@ pub async fn connect_lan_server(
         );
         id
     };
+    let abandoned = lan_bridges()
+        .lock()
+        .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?
+        .bridges
+        .get(&id)
+        .map(|bridge| bridge.handle.abandoned())
+        .unwrap_or_default();
     let connection = tokio::time::timeout(Duration::from_secs(5), dial(request)).await;
     let socket = match connection {
         Ok(Ok((socket, _))) if !dial_abort.is_aborted() => socket,
@@ -680,6 +728,7 @@ pub async fn connect_lan_server(
             id,
             socket,
             receiver,
+            abandoned,
             registration,
             on_event,
             text_delivery,
@@ -742,6 +791,14 @@ impl LanBridges {
         Ok(written)
     }
 
+    fn abandon(&self, id: u64, client: &LanClient) -> Result<(), NativeEngineBridgeError> {
+        self.owned_bridge(id, client)?
+            .handle
+            .abandoned()
+            .store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
     fn close(&mut self, id: u64, client: &LanClient) -> Result<(), NativeEngineBridgeError> {
         self.owned_bridge(id, client)?;
         if let Some(bridge) = self.bridges.remove(&id) {
@@ -763,6 +820,15 @@ pub async fn lan_bridge_send(
         .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?
         .enqueue(id, &client, Message::Text(text.into()))?;
     await_written(written).await
+}
+
+#[tauri::command]
+pub fn lan_bridge_abandon(window: WebviewWindow, id: u64) -> Result<(), NativeEngineBridgeError> {
+    let client = invoking_lan_client(&window)?;
+    lan_bridges()
+        .lock()
+        .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?
+        .abandon(id, &client)
 }
 
 #[tauri::command]
@@ -973,6 +1039,44 @@ mod tests {
     }
 
     #[test]
+    fn abandoned_bridge_acknowledges_queued_frames_without_writing_them() {
+        tauri::async_runtime::block_on(async {
+            let (listener, port) = bound_listener().await;
+            let peer = tauri::async_runtime::spawn(accept_until_close(listener));
+            let (socket, _) = dial(format!("ws://127.0.0.1:{port}/")).await.unwrap();
+            let (outbound, receiver) = mpsc::unbounded_channel();
+            let (ack, written) = oneshot::channel();
+            outbound
+                .send(OutboundFrame {
+                    message: Message::Text("setup".into()),
+                    ack: Some(ack),
+                })
+                .unwrap();
+            let (_abort, registration) = AbortHandle::new_pair();
+            let (on_event, _events) = capture_events();
+            let abandoned = Arc::new(AtomicBool::new(true));
+            let forwarder = tauri::async_runtime::spawn(forward_bridge(
+                1,
+                socket,
+                receiver,
+                abandoned,
+                registration,
+                on_event,
+                None,
+                |_| {},
+            ));
+            let result = written.await.unwrap();
+            assert!(matches!(result, Err(ref detail) if detail.contains("cancelled")));
+            drop(outbound);
+            let _ = tokio::time::timeout(Duration::from_secs(5), forwarder).await;
+            let (received, _peer_socket) = peer.await.unwrap();
+            assert!(!received
+                .iter()
+                .any(|message| matches!(message, Message::Text(_))));
+        });
+    }
+
+    #[test]
     fn a_graceful_close_is_aborted_once_it_outlasts_the_watchdog() {
         let (outbound, _receiver) = mpsc::unbounded_channel();
         let (abort, registration) = AbortHandle::new_pair();
@@ -1036,6 +1140,7 @@ mod tests {
             1,
             socket,
             receiver,
+            Arc::new(AtomicBool::new(false)),
             registration,
             on_event,
             None,
@@ -1182,6 +1287,7 @@ mod tests {
                     1,
                     socket,
                     receiver,
+                    Arc::new(AtomicBool::new(false)),
                     registration,
                     on_event,
                     Some(BridgeTextDelivery::Fragments),
@@ -1245,6 +1351,7 @@ mod tests {
                     1,
                     socket,
                     receiver,
+                    Arc::new(AtomicBool::new(false)),
                     registration,
                     on_event,
                     Some(BridgeTextDelivery::Fragments),
@@ -1324,7 +1431,16 @@ mod tests {
             let (_abort, registration) = AbortHandle::new_pair();
             tokio::time::timeout(
                 Duration::from_secs(30),
-                forward_bridge(1, socket, receiver, registration, on_event, None, |_| {}),
+                forward_bridge(
+                    1,
+                    socket,
+                    receiver,
+                    Arc::new(AtomicBool::new(false)),
+                    registration,
+                    on_event,
+                    None,
+                    |_| {},
+                ),
             )
             .await
             .unwrap();

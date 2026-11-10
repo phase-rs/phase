@@ -46,6 +46,12 @@ export class NativeEngineSocket {
   private pendingText = "";
   private bridgeId: number | null = null;
   private _readyState = NativeEngineSocket.CONNECTING;
+  /**
+   * Serialized admission: every write waits for the previous shell command to
+   * settle, so ClientHello, setup, ordinary frames and close are admitted to
+   * the Rust bridge FIFO in program order rather than task-scheduling order.
+   */
+  private writeQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly destination?: { type: "lan"; url: string; origin: string }) {
     // Match the browser WebSocket lifecycle: construction returns while the
@@ -89,11 +95,9 @@ export class NativeEngineSocket {
     if (this.readyState !== NativeEngineSocket.OPEN || this.bridgeId === null) {
       throw new DOMException("WebSocket is not open.", "InvalidStateError");
     }
-    void this.invokeDesktop(this.destination ? "lan_bridge_send" : "native_engine_bridge_send", { id: this.bridgeId, text }).catch(
-      (error) => {
-        this.handleBridgeFailure(error);
-      },
-    );
+    void this.enqueueAdmission(text).catch((error) => {
+      this.handleBridgeFailure(error);
+    });
   }
 
   /**
@@ -105,10 +109,9 @@ export class NativeEngineSocket {
     if (this.readyState !== NativeEngineSocket.OPEN || this.bridgeId === null || signal?.aborted === true) {
       return Promise.reject(new DOMException("WebSocket is not open.", "InvalidStateError"));
     }
-    return this.invokeDesktop(
-      this.destination ? "lan_bridge_send" : "native_engine_bridge_send",
-      { id: this.bridgeId, text },
-    ).then(
+    const abandonOnAbort = () => this.abandonQueuedWrites();
+    signal?.addEventListener("abort", abandonOnAbort, { once: true });
+    return this.enqueueAdmission(text, signal).then(
       () => {
         if (signal?.aborted === true) throw new Error("native bridge write was abandoned");
       },
@@ -116,7 +119,45 @@ export class NativeEngineSocket {
         this.handleBridgeFailure(error);
         throw error;
       },
-    );
+    ).finally(() => {
+      signal?.removeEventListener("abort", abandonOnAbort);
+    });
+  }
+
+  /**
+   * Retires the bridge's still-queued frames at the writer. Aborting a setup
+   * write therefore cannot leave a candidate's frame in the writer after the
+   * client declined to adopt it.
+   */
+  private abandonQueuedWrites(): void {
+    const bridgeId = this.bridgeId;
+    if (bridgeId === null) return;
+    void this.invokeDesktop(
+      this.destination ? "lan_bridge_abandon" : "native_engine_bridge_abandon",
+      { id: bridgeId },
+    ).catch(() => undefined);
+  }
+
+  /**
+   * Admits one frame after every earlier write has settled. Cancellation is
+   * checked at the admission point, which is the latest instant the client can
+   * decline to hand a queued setup frame to the writer.
+   */
+  private enqueueAdmission(text: string, signal?: AbortSignal): Promise<void> {
+    const write = this.writeQueue.then(async () => {
+      if (this.readyState !== NativeEngineSocket.OPEN || this.bridgeId === null) {
+        throw new DOMException("WebSocket is not open.", "InvalidStateError");
+      }
+      if (signal?.aborted === true) {
+        throw new Error("native bridge write was cancelled before admission");
+      }
+      await this.invokeDesktop(
+        this.destination ? "lan_bridge_send" : "native_engine_bridge_send",
+        { id: this.bridgeId, text },
+      );
+    });
+    this.writeQueue = write.catch(() => undefined);
+    return write;
   }
 
   close(): void {
@@ -127,8 +168,14 @@ export class NativeEngineSocket {
       return;
     }
     this._readyState = NativeEngineSocket.CLOSING;
-    if (this.bridgeId !== null) {
-      this.closeBridge(this.bridgeId);
+    const bridgeId = this.bridgeId;
+    if (bridgeId !== null) {
+      // The close is admitted after every already-queued write, never before.
+      const afterWrites = this.writeQueue.then(
+        () => undefined,
+        () => undefined,
+      );
+      void afterWrites.then(() => this.closeBridge(bridgeId));
     }
   }
 

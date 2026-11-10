@@ -63,6 +63,70 @@ beforeEach(() => {
 });
 
 describe("NativeEngineSocket", () => {
+  it("admits hello, setup and close in program order even while a write is unsettled", async () => {
+    const connection = deferred<number>();
+    invokeMock.mockImplementationOnce(() => connection.promise);
+    const socket = new NativeEngineSocket();
+    await resolveConnection(connection);
+    await vi.waitFor(() => expect(socket.readyState).toBe(NativeEngineSocket.OPEN));
+    const first = deferred<void>();
+    const second = deferred<void>();
+    const admitted: string[] = [];
+    invokeMock.mockImplementation((command: string, args: { text?: string }) => {
+      if (command !== "native_engine_bridge_send") return Promise.resolve(undefined);
+      admitted.push(args.text ?? "");
+      return admitted.length === 1 ? first.promise : second.promise;
+    });
+    socket.send("hello");
+    const setup = socket.sendReceipt("setup");
+    // Admission is serialized: setup waits for hello to settle.
+    await vi.waitFor(() => expect(admitted).toEqual(["hello"]));
+    await Promise.resolve();
+    expect(admitted).toEqual(["hello"]);
+    first.resolve();
+    await vi.waitFor(() => expect(admitted).toEqual(["hello", "setup"]));
+
+    const closed: number[] = [];
+    invokeMock.mockImplementation((command: string, args: { id?: number }) => {
+      if (command === "native_engine_bridge_close") closed.push(args.id ?? -1);
+      return Promise.resolve(undefined);
+    });
+    socket.close();
+    expect(closed).toEqual([]);
+    second.resolve();
+    await setup;
+    await vi.waitFor(() => expect(closed).toEqual([7]));
+  });
+
+  it("cancels a queued setup before admission when its signal aborts", async () => {
+    const connection = deferred<number>();
+    invokeMock.mockImplementationOnce(() => connection.promise);
+    const socket = new NativeEngineSocket();
+    await resolveConnection(connection);
+    await vi.waitFor(() => expect(socket.readyState).toBe(NativeEngineSocket.OPEN));
+    const first = deferred<void>();
+    const admitted: string[] = [];
+    invokeMock.mockImplementation((command: string, args: { text?: string }) => {
+      if (command !== "native_engine_bridge_send") return Promise.resolve(undefined);
+      admitted.push(args.text ?? "");
+      return admitted.length === 1 ? first.promise : Promise.resolve(undefined);
+    });
+    socket.send("hello");
+    const controller = new AbortController();
+    const setup = socket.sendReceipt("setup", controller.signal);
+    await vi.waitFor(() => expect(admitted).toEqual(["hello"]));
+    controller.abort();
+    first.resolve();
+    await expect(setup).rejects.toThrow("cancelled before admission");
+    expect(admitted).toEqual(["hello"]);
+    // The writer is told to retire any frame the client can no longer own.
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
+      "native_engine_bridge_abandon",
+      { id: 7 },
+    ));
+  });
+
+
   it("does not construct a channel or invoke commands outside desktop Tauri", async () => {
     isDesktopTauriMock.mockReturnValue(false);
     const socket = new NativeEngineSocket();
@@ -252,6 +316,7 @@ describe("NativeEngineSocket", () => {
     });
     const socket = new NativeEngineSocket();
     await resolveConnection(connection);
+    await vi.waitFor(() => expect(socket.readyState).toBe(NativeEngineSocket.OPEN));
     // OPEN before emitting: `handleBridgeEvent` buffers while CONNECTING, and a
     // buffered event is flushed asynchronously from inside `connect()`, where
     // the throw would never reach this call site.

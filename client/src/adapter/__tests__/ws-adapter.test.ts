@@ -5986,6 +5986,44 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
     }
   });
 
+  it("does not let a stale retry timer settle a successor's unfinished handshake", async () => {
+    const codec = scriptedCodec();
+    const provider = vi.fn(() => Promise.resolve(codec.session));
+    const { adapter, raw, events } = await establishCodecAdapter(provider);
+    const initialization = { current: Promise.resolve<unknown>(undefined) };
+    try {
+      // Attempt one fails before hello, scheduling its retry timer.
+      expect(adapter.tryReconnect(session() as never)).toBe(true);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
+      const failed = latestSocket();
+      failed.readyState = 3;
+      failed.dispatchSynthetic("close");
+      await vi.waitFor(() => expect(events).toContainEqual(
+        expect.objectContaining({ type: "reconnecting" }),
+      ));
+
+      // A successor handshake starts while that timer is still pending.
+      initialization.current = adapter.initialize().catch(() => undefined);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(failed));
+      const successor = latestSocket();
+      // Long enough to fire the retry backoff, short of the handshake timeout.
+      await vi.advanceTimersByTimeAsync(1000);
+      // The stale timer belongs to attempt one: it must not settle the
+      // successor's episode or replace its socket.
+      expect(MockWebSocket.last).toBe(successor);
+      expect(successor.close).not.toHaveBeenCalled();
+
+      // The successor fails before hello; the episode must still own a retry.
+      successor.readyState = 3;
+      successor.dispatchSynthetic("close");
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(successor));
+    } finally {
+      void initialization.current;
+      adapter.dispose();
+    }
+  });
+
   it("clears every request and initialization owner before a synchronous close's pending listener throws", async () => {
     MockWebSocket.last = null;
     const adapter = new WebSocketAdapter(

@@ -1967,8 +1967,14 @@ export class WebSocketAdapter implements EngineAdapter {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectStartedAt: number | null = null;
   private socketOpening = false;
-  /** A candidate's setup frame is awaiting its ordered write receipt. */
-  private setupWriteInFlight = false;
+  /**
+   * The attachment whose setup frame is awaiting its ordered write receipt.
+   * Tracked by identity so a superseded candidate's write cannot block its
+   * successor's retry scheduling.
+   */
+  private setupWritePreparation: AbortController | null = null;
+  /** Monotonic attach identity: a retry timer belongs to the attempt that scheduled it. */
+  private attachGeneration = 0;
   private socketDiagnostics: SocketDiagnosticObserver | null = null;
   private readonly pendingDiagnosticLosses = new Set<string>();
   private sessionLifecycleListening = false;
@@ -2326,6 +2332,7 @@ export class WebSocketAdapter implements EngineAdapter {
    */
   private async attachSocket(setupFrame: unknown): Promise<void> {
     if (this.disposed) return;
+    this.attachGeneration += 1;
     this.socketOpening = true;
     this.stateCodecPreparation?.abort();
     const preparation = new AbortController();
@@ -2625,12 +2632,12 @@ export class WebSocketAdapter implements EngineAdapter {
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = null;
       }
-      this.setupWriteInFlight = true;
+      this.setupWritePreparation = preparation;
       let written: boolean;
       try {
         written = await this.writeSetupFrame(socket.ws, setupFrame, preparation.signal);
       } finally {
-        this.setupWriteInFlight = false;
+        if (this.setupWritePreparation === preparation) this.setupWritePreparation = null;
       }
       if (!written) {
         if (this.disposed || this.stateCodecPreparation !== preparation) return;
@@ -3042,7 +3049,7 @@ export class WebSocketAdapter implements EngineAdapter {
     );
     this.rejectAbandon(new AdapterError("WS_CLOSED", "Adapter disposed while abandoning game", true));
     this.reconnectInFlight = false;
-    this.setupWriteInFlight = false;
+    this.setupWritePreparation = null;
     this._serverInfo = null;
     this.receivedGameStarted = false;
     this.stateCodec.release();
@@ -3088,7 +3095,9 @@ export class WebSocketAdapter implements EngineAdapter {
 
   private attemptReconnect(immediate = false): void {
     if (this.disposed || this.gameEnded || this.sessionIdentityRejected) return;
-    if (this.reconnectTimer !== null || this.socketOpening || this.setupWriteInFlight) return;
+    const writingCurrent = this.setupWritePreparation !== null
+      && this.setupWritePreparation === this.stateCodecPreparation;
+    if (this.reconnectTimer !== null || this.socketOpening || writingCurrent) return;
     const session = this.currentSession();
     const policy = this.reconnectPolicy;
     this.reconnectStartedAt ??= Date.now();
@@ -3121,8 +3130,12 @@ export class WebSocketAdapter implements EngineAdapter {
         maxAttempts: Number.isFinite(policy.budgetMs) ? 0 : this.maxReconnectAttempts,
       });
     }
+    const scheduledGeneration = this.attachGeneration;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
+      // A newer attachment owns the episode now: this timer belongs to the
+      // attempt that scheduled it and must neither settle nor replace it.
+      if (this.attachGeneration !== scheduledGeneration) return;
       if (Date.now() - this.reconnectStartedAt! >= policy.budgetMs) {
         this.failReconnect();
       } else {
