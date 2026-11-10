@@ -37,6 +37,7 @@ use crate::types::ability::{
     PropertyAggregate, QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation,
     StaticCondition, TargetFilter, TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
 };
+use crate::types::card_type::CoreType;
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::event_kinds::PlayerActionKind;
 use crate::types::game_state_kinds::DayNight;
@@ -4810,12 +4811,74 @@ fn typed_slot_type_axis_matches(
         TargetFilter::Typed(tf) => tf
             .type_filters
             .iter()
-            .any(|type_filter| type_filter_or_any_of(type_filter, predicate)),
-        _ => false,
+            .any(|type_filter| type_filter_every_branch_matches(type_filter, predicate)),
+        // Every non-`Typed` shape names no type axis this projection can
+        // classify, so it fails closed. Listed explicitly rather than with a
+        // wildcard so a new variant requires a compiler-checked decision.
+        TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::Not { .. }
+        | TargetFilter::Or { .. }
+        | TargetFilter::And { .. }
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::ExiledBySource
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
     }
 }
 
-fn type_filter_or_any_of(
+fn type_filter_every_branch_matches(
     type_filter: &TypeFilter,
     predicate: impl Fn(&TypeFilter) -> bool + Copy,
 ) -> bool {
@@ -4825,22 +4888,36 @@ fn type_filter_or_any_of(
         // "that creature" antecedent.
         TypeFilter::AnyOf(inner) => inner
             .iter()
-            .all(|inner| type_filter_or_any_of(inner, predicate)),
+            .all(|inner| type_filter_every_branch_matches(inner, predicate)),
         other => predicate(other),
     }
 }
 
+/// CR 205.1 + CR 205.2: a typed axis is permanent when its core type is one of
+/// the permanent card types; `TypeFilter::Permanent` is the direct spelling.
 fn type_filter_is_permanent(type_filter: &TypeFilter) -> bool {
-    matches!(
-        type_filter,
-        TypeFilter::Creature
-            | TypeFilter::Land
-            | TypeFilter::Artifact
-            | TypeFilter::Enchantment
-            | TypeFilter::Planeswalker
-            | TypeFilter::Battle
-            | TypeFilter::Permanent
-    )
+    matches!(type_filter, TypeFilter::Permanent)
+        || type_filter_core_type(type_filter).is_some_and(CoreType::is_permanent_type)
+}
+
+fn type_filter_core_type(type_filter: &TypeFilter) -> Option<CoreType> {
+    match type_filter {
+        TypeFilter::Creature => Some(CoreType::Creature),
+        TypeFilter::Land => Some(CoreType::Land),
+        TypeFilter::Artifact => Some(CoreType::Artifact),
+        TypeFilter::Enchantment => Some(CoreType::Enchantment),
+        TypeFilter::Instant => Some(CoreType::Instant),
+        TypeFilter::Sorcery => Some(CoreType::Sorcery),
+        TypeFilter::Planeswalker => Some(CoreType::Planeswalker),
+        TypeFilter::Battle => Some(CoreType::Battle),
+        TypeFilter::Kindred => Some(CoreType::Kindred),
+        TypeFilter::Permanent
+        | TypeFilter::Card
+        | TypeFilter::Any
+        | TypeFilter::Non(_)
+        | TypeFilter::Subtype(_)
+        | TypeFilter::AnyOf(_) => None,
+    }
 }
 
 /// CR 109.4: the permanents the declared target's controller controls.
@@ -28072,6 +28149,20 @@ mod intervening_if_state_condition_tests {
                 "a static condition cannot bind {condition}"
             );
         }
+    }
+
+    /// CR 115.1: the spell noun requires a spell slot; a typed creature slot
+    /// does not satisfy it.
+    #[test]
+    fn referent_noun_spell_requires_a_spell_slot() {
+        assert!(referent_noun_matches_slot(
+            ObjectReferentNoun::Spell,
+            &TargetFilter::StackSpell
+        ));
+        assert!(!referent_noun_matches_slot(
+            ObjectReferentNoun::Spell,
+            &TargetFilter::Typed(TypedFilter::creature())
+        ));
     }
 
     /// CR 115.1 + CR 205.2a: a disjunctive type axis can name the referent's
