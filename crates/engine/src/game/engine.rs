@@ -5267,11 +5267,11 @@ fn apply_confirmed_shortcut(
         || proposal
             .predicted_winner
             .is_some_and(|winner| !crate::game::players::is_alive(state, winner))
-        // CR 732.2a + CR 603.5: `template.owner` decides WHOSE CR 603.5 choice a pin may
-        // answer. The two live ingresses bind it at declare; a RESTORED `WaitingFor::RespondToShortcut` is plain serde and
+        // CR 732.2a + CR 603.5: The two live ingresses bind `template.owner` to the
+        // proposer at declare; a RESTORED `WaitingFor::RespondToShortcut` is plain serde and
         // the untrusted-restore scrubber rewrites only the two PRE-CAST waits, so it never
         // ran that firewall. Re-validate the SAME invariant at the one point every drive
-        // passes through, so the seat guard is meaningful on every ingress and not only the
+        // passes through, so the binding holds on every ingress and not only the
         // two live ones. Refusing (rather than forcing `owner = proposer`) keeps the
         // fail-closed direction every other conjunct at this seam uses: forcing would make a
         // tampered proposal runnable under a rewritten owner.
@@ -6971,8 +6971,8 @@ fn elide_middle_repetitions(events: &mut Vec<GameEvent>) {
 /// CR 732.2a: perform a confirmed period `n` times through real `apply()` at the take, committing
 /// each period atomically — observers (Heliod / Corpsejack) fire each cycle, so an OBSERVED loop's
 /// N-cycle result is exact where a single batched N×δ would be wrong. The simulation guard is HELD
-/// across the whole drive so the injector's internal `apply_action` never recurses into the
-/// shortcut offer/detection hooks (`in_simulation_probe` gates those only).
+/// across the whole drive so `period_confirm::perform_cycle`'s internal `apply_action` never
+/// recurses into the shortcut offer/detection hooks (`in_simulation_probe` gates those only).
 ///
 /// **What the abort implements.** CR 732.2a bounds a
 /// proposal to choices "that may be legally taken based on the current game state and the
@@ -7380,9 +7380,8 @@ fn handle_declare_shortcut(
     // restored save may carry `None`.
     let template = template.or_else(|| offer.schema.suggestion(offer.declaration).cloned());
     // CR 732.2a + CR 603.5: the declared template's `owner` is CLIENT-SUPPLIED — the
-    // `GameAction::DeclareShortcut { template }` payload arrives here verbatim — and it
-    // decides WHOSE CR 603.5 choice a pin may answer. Bind it to the engine-issued seat here,
-    // at declare, or that seat guard compares an attacker-chosen value against itself. `offer.proposer` is engine state,
+    // `GameAction::DeclareShortcut { template }` payload arrives here verbatim. Bind it to
+    // the engine-issued seat here, at declare. `offer.proposer` is engine state,
     // copied from `WaitingFor::LoopShortcut { proposer }`.
     //
     // Runs on EVERY resolved declaration, whatever the schema published, and it is the SOLE
@@ -21380,7 +21379,7 @@ mod bounded_declaration_tests {
     }
 }
 
-/// PR-7 Combo-UI Stage 2: the mid-drive pin injector (item 4) + the drive-period seam (item 6).
+/// PR-7 Combo-UI Stage 2: the pin slots a bounded offer publishes and the declare firewall.
 #[cfg(test)]
 mod stage2_injector_tests {
     use super::*;
@@ -23126,10 +23125,6 @@ mod stage2_injector_tests {
     /// A board parked on a REAL CR 603.5 resolution-time prompt. `asked` is the seat the
     /// resolver is asking, and the suspended optional ability is THAT seat's, so taking the
     /// choice gains `asked` exactly `U4_MAY_LIFE` life.
-    ///
-    /// The life delta is the observable that separates "the pinned `DecideOptionalEffect` was
-    /// dispatched" from "the injector returned `Ok(())` having done nothing": an empty board
-    /// would answer `Ok(())` just as happily.
     ///
     /// The pinned source is a BATTLEFIELD object because `slot_source_prompted` asks
     /// `resolve_ability_instance`, whose zone set is {Battlefield, Command} at the pinned

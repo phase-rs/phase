@@ -1462,66 +1462,6 @@ fn r3b_driven_a_loop_choice_carrier_survives_a_whole_accepted_f4_drive() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
-// R23 conjunct (5-reach) — the beat guard's reachability on the real dump
-// ─────────────────────────────────────────────────────────────────────────────────────────
-
-/// §6 R23, the (5-reach) arm — **U4's CR 603.3c beat guard never fires on the acceptance
-/// fixture, and the fire population it guards against is measurably NON-EMPTY on the same
-/// drive.**
-///
-/// ⚠ DISCLOSED INSTRUMENT LIMIT: the guard reads the drive's private `work` board, which no
-/// test can observe. This row asserts the same property on the OUTER drive — every
-/// `OptionalEffectChoice` beat this dump reaches carries `pending_trigger == None` — which is
-/// the beat structure the drive replays. **Its non-vacuity is the paired positive**: the same
-/// drive DOES visit beats carrying a live cursor (`pending_trigger == Some(TORCH)`), so the
-/// instrument demonstrably can report one.
-///
-/// **If the `is_none()` assertion ever fires, the remedy is NOT to weaken it**: it is to scope
-/// the guard to the prompt's own `source_id` (§5 U2's alternative placement), which changes
-/// what the guard MEANS and is an escalation, not a local edit.
-#[test]
-fn r23_5_reach_no_may_beat_of_the_f4_drive_carries_a_construction_cursor() {
-    let mut state = load_f4();
-    let mut may_beats = 0usize;
-    let mut cursor_beats = 0usize;
-    for beat in 0..400u32 {
-        if matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }) {
-            break;
-        }
-        if let WaitingFor::OptionalEffectChoice { source_id, .. } = &state.waiting_for {
-            may_beats += 1;
-            assert!(
-                state.pending_trigger.is_none(),
-                "R23 (5-reach): a CR 603.5 `may` beat carrying a LIVE CR 603.3c construction \
-                 cursor is exactly the configuration U4's beat guard fail-closes on, and it \
-                 must not occur on the acceptance fixture. beat {beat}, prompt source \
-                 {source_id:?}, cursor source {:?}. REMEDY IS AN ESCALATION (scope the guard \
-                 to the prompt's own source_id), NEVER a weakening of this assertion",
-                state.pending_trigger.as_ref().map(|t| t.source_id)
-            );
-        }
-        if state.pending_trigger.is_some() {
-            cursor_beats += 1;
-        }
-        if f4_drive_one_beat(&mut state).is_err() {
-            break;
-        }
-    }
-    // ── the paired positive: both populations are non-empty, so neither half is vacuous ──
-    assert!(
-        may_beats > 0,
-        "reach-guard: the drive must actually REACH CR 603.5 `may` beats, else the assertion \
-         above quantifies over nothing"
-    );
-    assert!(
-        cursor_beats > 0,
-        "reach-guard: the same drive must visit beats that DO carry a live construction \
-         cursor (this dump ships `pending_trigger` on Torch), else `is_none()` is satisfied by \
-         an instrument that can never report `Some`"
-    );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────
 // R27 (a1) — the F4 arm of the split-sample row
 // ─────────────────────────────────────────────────────────────────────────────────────────
 

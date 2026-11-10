@@ -502,11 +502,8 @@ fn natural_balance_collects_two_local_x_searches_before_one_shuffle_each() {
 /// assertion reads `runner.state().waiting_for` once, after the drive, so it says the drive does
 /// not END on a `WaitingFor::LoopShortcut`. It CANNOT exclude an offer minted and cleared at an
 /// earlier beat — no intermediate beat is sampled. The offer-level claim is
-/// therefore unmeasured in either direction and this row does not make it. The pair key is
-/// DEFENSE IN DEPTH PLUS A CODE DELETION, not a live-bug fix: the pin injector already
-/// aborts a replay whose prompt recipient differs from the template owner, so a
-/// source-only key's two harms are firewalled downstream even on a board that reached
-/// them. What this row proves is the storage invariant, on a production path.
+/// therefore unmeasured in either direction and this row does not make it. What this row
+/// proves is the storage invariant, on a production path.
 ///
 /// # Discrimination
 ///

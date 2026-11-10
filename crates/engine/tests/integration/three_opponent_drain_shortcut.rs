@@ -7,11 +7,8 @@
 //! S (`exquisite_blood_tenacity_three_opponents_4p.json.gz`) is a saved game standing at the
 //! recorded offer reached by answering P1 then P2; the answer-pattern rows decline it and drive on.
 //!
-//! Regenerate F-C (`exquisite_blood_tenacity_alternating_offer_4p.json.gz`, gzipped by the writer)
-//! with
-//! `PHASE_REGENERATE_FIXTURES=1 cargo nextest run -p phase-engine --features test-support --test integration --run-ignored only -E 'test(/regenerate_alternating_offer_fixture/)'`.
-
-use std::io::Write;
+//! F-C (`exquisite_blood_tenacity_alternating_offer_4p.json.gz`) is a committed save standing one
+//! repetition before R0's offer; nothing regenerates it.
 
 use engine::analysis::decision_template::{
     AnnouncementSubject, DecisionPointKind, DecisionSlot, DecisionTemplate, IterationCount,
@@ -28,7 +25,7 @@ use engine::game::scenario::GameScenario;
 use engine::game::visibility::filter_state_for_viewer;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{GameState, LoopDetectionMode, PersistedGameState, WaitingFor};
+use engine::types::game_state::{GameState, LoopDetectionMode, WaitingFor};
 use engine::types::interaction::{
     AmountAssignment, InteractionChoiceId, InteractionId, InteractionOpportunityResponse,
     InteractionReasonCode, InteractionResponse, InteractionResponseSpec, InteractionSessionId,
@@ -925,21 +922,4 @@ fn latched_triggers_buried_under_the_chain_do_not_lead() {
     assert_eq!(at(1), vec![(1, -2)], "the in-drive announcement hits P1");
     assert_eq!(at(7), vec![(1, -4), (2, -6), (3, -4)]);
     assert_every_opponent_eliminated(&accept_suggested(&state), "buried");
-}
-
-#[test]
-#[ignore = "writes F-C; run with PHASE_REGENERATE_FIXTURES=1"]
-fn regenerate_alternating_offer_fixture() {
-    let state = drive_to_offer(load_s(), &[P1, P2, P1], 0);
-    if std::env::var("PHASE_REGENERATE_FIXTURES").as_deref() != Ok("1") {
-        return;
-    }
-    let envelope = serde_json::json!({
-        "gameState": serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
-            .expect("serializable"),
-    });
-    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
-    gz.write_all(&serde_json::to_vec(&envelope).expect("json"))
-        .expect("gzip");
-    std::fs::write(fc_path(), gz.finish().expect("gzip")).expect("write F-C");
 }

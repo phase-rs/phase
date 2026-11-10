@@ -24159,15 +24159,9 @@ declare_game_state! {
     /// fill another's slot, and no two seats can manufacture a false disagreement. The
     /// seat authority lives in the key type rather than in a consumer-side guard.
     ///
-    /// STATED SO IT IS NOT OVER-READ: this is DEFENSE IN DEPTH PLUS A CODE DELETION, NOT
-    /// A LIVE-BUG FIX. Both harms a source-only key could produce are already firewalled
-    /// downstream — the pin injector reads the recipient off the prompt in hand and aborts
-    /// the replay when it does not match the template owner (`game::engine`'s
-    /// `WaitingFor::OptionalEffectChoice` arm, `if *player != template.owner`). NO BOARD
-    /// HAS BEEN MEASURED on which the seat component changes an offer; the multi-seat
-    /// board that does exist journals two seats and mints no offer at all
-    /// (`tests/integration/natural_balance.rs`). The claim this key earns is "cannot be
-    /// worse, and removes a runtime guard", not "prevents a reachable wrong declaration".
+    /// NO BOARD HAS BEEN MEASURED on which the seat component changes an offer; the
+    /// multi-seat board that does exist journals two seats and mints no offer at all
+    /// (`tests/integration/natural_balance.rs`).
     ///
     /// TRANSIENT DERIVED STATE with `loop_detect_ring`'s exact treatment — same
     /// `#[serde(skip, default)]`, same omission from `impl PartialEq for GameState`

@@ -12509,12 +12509,8 @@ fn r28_nonempty_schema_offer(runner: &mut GameRunner, slot: DecisionSlot) {
 /// another seat is refused AT DECLARE.**
 ///
 /// `template.owner` arrives VERBATIM from the client (`GameAction::DeclareShortcut { template }`
-/// is forwarded whole) and it is the comparand the drive's seat guard uses to decide whose
-/// CR 603.5 choice a pin may answer. Without a declare-time binding to the engine-issued
-/// `LoopShortcutOffer.proposer`, that guard compares an attacker-chosen value against itself:
-/// a declaration carrying `owner: <other seat>` satisfies `*player != template.owner` exactly
-/// when the prompt's recipient IS that other seat, and the proposer's pinned value is
-/// dispatched as the other seat's `GameAction::DecideOptionalEffect`.
+/// is forwarded whole) and only the declare-time binding to the engine-issued
+/// `LoopShortcutOffer.proposer` refuses a foreign owner.
 ///
 /// **(a′) is the reach-guard**: the byte-identical declaration with `owner = P0` builds the
 /// proposal and opens APNAP, proving the fixture reaches the firewall and that (a) is keyed to
