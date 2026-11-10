@@ -38,13 +38,13 @@ use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr,
 };
 use crate::types::ability::{
-    extract_target_filter_from_effect, fight_declared_slot_filters, AbilityCondition,
-    AbilityDefinition, AbilityKind, AbilityUseTally, AdditionalCostOrigin, AttachCardinality,
-    AttachSelection, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, CoinFlipResult,
-    Comparator, ControllerRef, CostCategory, CountScope, DamageChannel, DigSource, Duration,
-    Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, LibraryPosition, MultiTargetSpec,
-    ObjectScope, ParsedCondition, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-    SharedQuality, SpentColor, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    effect_object_target_roles, AbilityCondition, AbilityDefinition, AbilityKind, AbilityUseTally,
+    AdditionalCostOrigin, AttachCardinality, AttachSelection, CastManaObjectScope,
+    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CostCategory,
+    CountScope, DamageChannel, DigSource, Duration, Effect, EffectOutcomeSignal, FilterProp,
+    GuessOutcome, LibraryPosition, MultiTargetSpec, ObjectScope, ParsedCondition, PlayerScope,
+    PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SpentColor, StaticCondition,
+    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -4979,22 +4979,6 @@ fn probe_effect_target(effect_text: &str, ctx: &ParseContext) -> Option<EffectTa
     })
 }
 
-/// CR 115.1a + CR 601.2c: the effect's announced object roles. `Fight` is the
-/// multi-role shape `extract_target_filter_from_effect` cannot express (its
-/// subject and target are separate announced targets); every other effect has
-/// the one filtered role that authority returns.
-fn effect_declared_slot_filters(effect: &Effect) -> Vec<TargetFilter> {
-    if let Effect::Fight { subject, target } = effect {
-        return fight_declared_slot_filters(subject, target)
-            .cloned()
-            .collect();
-    }
-    extract_target_filter_from_effect(effect)
-        .cloned()
-        .into_iter()
-        .collect()
-}
-
 /// CR 115.1d: the effect probe narrowed to a declared target slot. A target
 /// antecedent must come from the phrase "target [something]", not from any
 /// operand that carries a filter: Whitemane Lion's "return a creature you
@@ -5004,7 +4988,20 @@ fn effect_declared_slot_filters(effect: &Effect) -> Vec<TargetFilter> {
 /// (`try_parse_two_targets`), so a two-role instruction is distinguishable.
 fn probe_declared_target_slot(effect_text: &str, ctx: &ParseContext) -> Option<EffectTargetProbe> {
     let clause = parse_effect_clause_inner(effect_text, &mut ctx.clone_throwaway());
-    let declared_slots = effect_declared_slot_filters(&clause.effect);
+    // CR 115.1d + CR 115.10a: the timing decision runs before any slot is
+    // read. A resolution-time recipient (Prize Wall's sticker target, an
+    // untargeted bounce) announces no target and cannot supply the antecedent.
+    let timing = super::lower::target_choice_timing_for_parsed(
+        &clause,
+        effect_text,
+        None,
+        clause.multi_target.is_some(),
+        TargetSelectionMode::Chosen,
+    );
+    if timing != TargetChoiceTiming::Stack {
+        return None;
+    }
+    let declared_slots = effect_object_target_roles(&clause.effect);
     if declared_slots.is_empty() {
         return None;
     }
@@ -11070,6 +11067,18 @@ mod tests {
         assert_eq!(cond, Some(expected));
     }
 
+    /// CR 109.2b + CR 115.1: "that spell's controller" accepts a typed spell
+    /// slot ("Counter target creature spell" lowers to And([StackSpell, Typed])).
+    #[test]
+    fn you_control_more_than_a_typed_spell_target_controller() {
+        let (cond, text) = strip_suffix_conditional(
+            "Counter target creature spell if you control more creatures than that spell's controller",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(text, "Counter target creature spell");
+        assert!(cond.is_some(), "the typed spell slot must satisfy the noun");
+    }
+
     /// Grammar-only discriminator for the optional `other` axis. The phrase is a
     /// synthetic exception to the real-card test contract: the checked
     /// AtomicCards corpus has no printed "controls no creatures" destroy-artifact
@@ -11221,6 +11230,34 @@ mod tests {
             None,
             "{effect} if {condition}"
         );
+        // Printed Prize Wall: "You may put a sticker on a nonland permanent you
+        // own." The sticker recipient is a resolution-time choice, so the
+        // timing decision leaves no announced slot.
+        let effect = "Put a sticker on a nonland permanent you own";
+        assert!(probe_declared_target_slot(effect, &ctx).is_none());
+        let condition = "you control more creatures than that permanent's controller";
+        assert_eq!(
+            parse_target_controller_control_condition_text(condition, effect, &ctx),
+            None,
+            "{effect} if {condition}"
+        );
+
+        // Printed Fate Transfer: "Move all counters from target creature onto
+        // another target creature." Two announced roles, so "that creature"
+        // names neither uniquely.
+        let effect = "Move all counters from target creature onto another target creature";
+        let probe = probe_declared_target_slot(effect, &ctx).expect("fate transfer probe");
+        assert_eq!(
+            probe.declared_slots.len(),
+            2,
+            "both counters roles must be announced"
+        );
+        let condition = "you control more creatures than that creature's controller";
+        assert_eq!(
+            parse_target_controller_control_condition_text(condition, effect, &ctx),
+            None,
+            "{effect} if {condition}"
+        );
     }
 
     /// CR 109.4 + CR 608.2c: a counted population that already carries a
@@ -11296,6 +11333,16 @@ mod tests {
             // one of them.
             (
                 "Target creature you control fights target creature an opponent controls",
+                "you control more creatures than that creature's controller",
+            ),
+            // Prize Wall: a resolution-time sticker recipient announces no slot.
+            (
+                "Put a sticker on a nonland permanent you own",
+                "you control more creatures than that permanent's controller",
+            ),
+            // Fate Transfer: two announced roles.
+            (
+                "Move all counters from target creature onto another target creature",
                 "you control more creatures than that creature's controller",
             ),
         ] {

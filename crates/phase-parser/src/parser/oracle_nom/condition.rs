@@ -4785,6 +4785,24 @@ pub(crate) fn parse_target_controller_referent(
     .parse(input)
 }
 
+/// CR 109.2b: a "that spell" referent names a spell on the stack. A typed
+/// spell restriction ("target creature spell") lowers to
+/// `And([StackSpell, Typed(Creature)])`, so the stack-spell kind is matched
+/// through the typed restriction. A disjunction that admits a non-spell branch
+/// ("target spell or ability") does not guarantee the noun and declines.
+fn filter_is_spell_slot(filter: &TargetFilter) -> bool {
+    if let TargetFilter::StackSpell = filter {
+        return true;
+    }
+    if let TargetFilter::And { filters } = filter {
+        return filters.iter().any(filter_is_spell_slot);
+    }
+    if let TargetFilter::Or { filters } = filter {
+        return filters.iter().all(filter_is_spell_slot);
+    }
+    false
+}
+
 /// CR 115.1: whether the declared target slot can be the object the referent
 /// names. "That spell" requires a spell slot; "that creature" and "that
 /// permanent" require a typed slot on the corresponding type axis. Fail closed
@@ -4793,7 +4811,7 @@ pub(crate) fn parse_target_controller_referent(
 pub(crate) fn referent_noun_matches_slot(noun: ObjectReferentNoun, filter: &TargetFilter) -> bool {
     match noun {
         ObjectReferentNoun::Pronoun => true,
-        ObjectReferentNoun::Spell => matches!(filter, TargetFilter::StackSpell),
+        ObjectReferentNoun::Spell => filter_is_spell_slot(filter),
         ObjectReferentNoun::Creature => {
             typed_slot_type_axis_matches(filter, |t| matches!(t, TypeFilter::Creature))
         }

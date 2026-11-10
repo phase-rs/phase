@@ -26754,6 +26754,90 @@ pub fn effect_stack_target_declaration_matching(
             && extract_target_filter_from_effect(effect).is_some_and(predicate))
 }
 
+/// CR 115.1 + CR 601.2c: the object roles this effect announces as targets, in
+/// declaration order, using the same authorities as
+/// [`effect_stack_target_declaration_matching`]. Player-only roles are omitted:
+/// this list answers "how many announced OBJECT roles exist", and a player
+/// target is not an object antecedent for a "that <noun>'s controller" suffix.
+///
+/// The timing decision stays separate (`target_choice_timing_for_parsed`): a
+/// role listed here still binds at resolution when that authority says so.
+pub fn effect_object_target_roles(effect: &Effect) -> Vec<TargetFilter> {
+    let mut roles: Vec<TargetFilter> = Vec::new();
+    if let Some(damage_roles) = damage_replacement_target_roles(effect) {
+        roles.extend(damage_roles.into_iter().map(|role| role.filter().clone()));
+        return roles;
+    }
+    if let Some(filter) = damage_replacement_source_slot_filter(effect) {
+        roles.push(filter.clone());
+        return roles;
+    }
+    if paired_subject_filters(effect).is_some() {
+        roles.extend(paired_subject_slot_filters(effect).cloned());
+        return roles;
+    }
+    if let Effect::Fight { subject, target } = effect {
+        roles.extend(fight_declared_slot_filters(subject, target).cloned());
+        return roles;
+    }
+    if let Effect::MoveCounters {
+        source,
+        target,
+        selection,
+        ..
+    } = effect
+    {
+        roles.extend(
+            move_counter_stack_target_filters(source, target, *selection)
+                .into_iter()
+                .filter(|filter| !filter.is_context_ref())
+                .cloned(),
+        );
+        return roles;
+    }
+    if let Some(role) = mana_multi_role(effect) {
+        roles.extend(role.surfaced_filters().map(|(_, filter)| filter.clone()));
+        return roles;
+    }
+    if let Effect::Attach {
+        attachment,
+        target,
+        selection,
+    } = effect
+    {
+        if attach_attachment_claims_announcement_slot(attachment, selection) {
+            roles.push(attachment.clone());
+        }
+        if attach_host_filter_needs_target_slot(target) {
+            roles.push(target.clone());
+        }
+        return roles;
+    }
+    if let Effect::EachDealsDamageEqualToPower { recipient, .. } = effect {
+        roles.push(recipient.clone());
+        return roles;
+    }
+    if effect_needs_target_creature_quantity_slot(effect)
+        && !one_sided_fight_source_supplies_quantity_creature(effect)
+    {
+        if let Some(slot) = effect_target_slot_filter(effect) {
+            roles.push(slot.filter.clone());
+        }
+    }
+    if effect_needs_parent_target_combat_relation_slot(effect) {
+        roles.push(parent_target_combat_relation_slot_filter());
+    }
+    if let Some(filter) = become_copy_recipient_slot_filter(effect) {
+        roles.push(filter.clone());
+    }
+    if !effect_target_filter_references_chosen_player(effect) {
+        if let Some(filter) = extract_target_filter_from_effect(effect) {
+            roles.push(filter.clone());
+        }
+    }
+    roles
+}
+
 /// CR 115.1 + CR 601.2c: the `Effect::BecomeCopy` RECIPIENT filter that must be
 /// announced as its own target slot, or `None` when the recipient needs no
 /// announcement (`crate::types::ability::CopyRecipient::Source`, or an untargeted CR 611.2c set).
