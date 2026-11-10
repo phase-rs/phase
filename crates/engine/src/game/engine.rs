@@ -10976,7 +10976,8 @@ fn stack_resolution_session_priority_decision(
                 }
                 StackResolutionPolicy::Committed => {
                     if !session.representatives.contains(&canonical_holder)
-                        && priority_player_has_meaningful_action(state)
+                        && (priority_player_has_meaningful_action(state)
+                            || window_held_for_mana(state, canonical_holder))
                     {
                         return StackResolutionSessionPriorityDecision::Pause;
                     }
@@ -10993,6 +10994,17 @@ fn stack_resolution_session_priority_decision(
             StackResolutionSessionPriorityDecision::Pause
         }
     }
+}
+
+/// CR 117.1d + CR 605.3a + CR 117.3d: whether `player`'s own window over the
+/// top of the stack is `Held` for a mana activation. Another player's consent to
+/// resolve the stack doesn't pass it: the meaningful-action check never counts a
+/// mana activation, so it can't see that window.
+fn window_held_for_mana(state: &GameState, player: PlayerId) -> bool {
+    state.stack.back().is_some_and(|top| {
+        priority::standing_priority_pass(state, player, Some(top))
+            == priority::StandingPriorityPass::Held
+    })
 }
 
 /// CR 117.3b + CR 117.3d + CR 117.4 + CR 732.2b: whether `participant` has
@@ -11304,7 +11316,9 @@ fn run_auto_pass_loop(
                                 {
                                     break;
                                 }
-                                if priority_player_has_meaningful_action(state) {
+                                if priority_player_has_meaningful_action(state)
+                                    || window_held_for_mana(state, player)
+                                {
                                     break;
                                 }
                             }

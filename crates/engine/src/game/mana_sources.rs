@@ -639,7 +639,7 @@ pub(crate) fn activatable_mana_source_selections_for_object(
     player: PlayerId,
     object_id: ObjectId,
 ) -> Vec<ManaSourceSelection> {
-    let aura_sources = taps_for_mana_trigger_sources(state);
+    let aura_sources = object_taps_for_mana_trigger_sources(state, object_id);
     let gates = mana_abilities::ManaActivationGates::compute(state);
     let mut selections = Vec::new();
     push_object_mana_source_selections(
@@ -652,6 +652,22 @@ pub(crate) fn activatable_mana_source_selections_for_object(
     );
     selections.sort_by(|left, right| left.cmp_stable(right));
     selections
+}
+
+/// The `TapsForMana` trigger sources [`current_mana_source_options`] reads for
+/// `object_id`: every one on the battlefield for a land, whose rows add an
+/// aura's or a global trigger's mana, and none for any other source, whose rows
+/// don't read them, so nothing is scanned for it.
+fn object_taps_for_mana_trigger_sources(state: &GameState, object_id: ObjectId) -> Vec<ObjectId> {
+    let is_land = state
+        .objects
+        .get(&object_id)
+        .is_some_and(|object| object.card_types.core_types.contains(&CoreType::Land));
+    if is_land {
+        taps_for_mana_trigger_sources(state)
+    } else {
+        Vec::new()
+    }
 }
 
 fn push_object_mana_source_selections(
@@ -815,15 +831,11 @@ pub(crate) fn live_mana_source_option_for_selection(
     player: PlayerId,
     selection: &ManaSourceSelection,
 ) -> Result<ManaSourceOption, EngineError> {
-    if !activatable_mana_source_selections(state, player).contains(selection) {
-        return Err(EngineError::ActionNotAllowed(
-            "Mana source selection is stale or no longer legal".to_string(),
-        ));
-    }
-
-    let aura_sources = taps_for_mana_trigger_sources(state);
-    let gates = mana_abilities::ManaActivationGates::compute(state);
+    // Only the selected object's rows can name the selection, so they are the
+    // only ones rebuilt: none of them matching is the stale case below.
     let object_id = selection.source.object_id;
+    let aura_sources = object_taps_for_mana_trigger_sources(state, object_id);
+    let gates = mana_abilities::ManaActivationGates::compute(state);
     let options = current_mana_source_options(state, player, object_id, &aura_sources, &gates);
     let mut matches = options
         .into_iter()

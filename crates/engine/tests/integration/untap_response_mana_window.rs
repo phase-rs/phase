@@ -52,8 +52,8 @@ use engine::types::ability::{Effect, TapStateChange, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::parse_counter_type;
 use engine::types::game_state::{
-    CastPaymentMode, ExileLink, ExileLinkKind, LoopDetectionMode, PriorityPassingMode, StackEntry,
-    StackEntryKind, WaitingFor,
+    AutoPassRequest, CastPaymentMode, ExileLink, ExileLinkKind, LoopDetectionMode,
+    PriorityPassingMode, StackEntry, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType};
@@ -592,7 +592,8 @@ fn a_flickered_source_is_not_the_untaps_object() {
 
 /// The hold reads the top entry and its source only: with forty more queued
 /// untaps below it and sixty Treasures beside it, it copies the game once, for
-/// Monolith's one {T} mana row.
+/// Monolith's one {T} mana row, and neither scans the battlefield for mana
+/// triggers nor takes a readiness or legality copy.
 #[test]
 fn the_untap_hold_reads_only_the_top_and_its_source() {
     let Some(db) = shared_card_db() else { return };
@@ -620,9 +621,24 @@ fn the_untap_hold_reads_only_the_top_and_its_source() {
 
     let state = runner.state();
     let actions = legal_actions(state);
-    perf_counters::reset_untap_repeat_probe_counters();
+    perf_counters::reset();
     assert!(!auto_pass_recommended(state, &actions));
     assert_eq!(perf_counters::untap_repeat_probe_snapshot().state_clones, 1);
+    let work = perf_counters::snapshot();
+    assert_eq!(
+        work.mana_aura_trigger_scans, 0,
+        "an artifact's mana rows read no battlefield trigger scan"
+    );
+    assert_eq!(
+        (
+            work.state_clone_for_legality,
+            work.grouped_mana_readiness_state_clones,
+            work.strict_fast_path_mana_readiness_state_clones,
+            work.priority_cast_probe_state_clones,
+        ),
+        (0, 0, 0, 0),
+        "no readiness or legality copy beyond the probe's own"
+    );
 }
 
 /// Staff of Compleation, verbatim.
@@ -792,6 +808,54 @@ fn an_ai_opponents_pass_leaves_the_original_its_window() {
     assert!(rig.runner.state().stack_resolution_session.is_some());
     assert!(!rig.monolith_tapped(), "the copy untapped Monolith");
     assert!(!recommends_pass(&rig.runner));
+}
+
+/// Grim Monolith, verbatim.
+const GRIM_MONOLITH: &str = "This artifact doesn't untap during your untap step.\n{T}: Add {C}{C}{C}.\n{4}: Untap this artifact.";
+
+/// CR 117.3d: the opponent's Resolve All is their consent, not P0's. Grim
+/// Monolith's untap and its Rings copy are on the stack, and the opponent asks
+/// to resolve the stack. The copy untaps Monolith, and P0, who has no other
+/// action ({4} is more than Monolith's {C}{C}{C}), still gets the window over
+/// the original to tap it.
+#[test]
+fn another_players_resolve_all_leaves_the_untap_window_held() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = main_phase_scenario();
+    let monolith = scenario
+        .add_artifact_from_oracle(P0, "Grim Monolith", GRIM_MONOLITH)
+        .id();
+    scenario.add_real_card(P0, "Rings of Brighthearth", Zone::Battlefield, db);
+    let mountains: Vec<_> = (0..3)
+        .map(|_| scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db))
+        .collect();
+    let mut runner = scenario.build();
+    tap_for_mana(&mut runner, monolith);
+    tap_for_mana(&mut runner, mountains[0]);
+    let untap = untap_ability_index(&runner, monolith);
+    activate(&mut runner, monolith, untap, &[]);
+    client_drive(&mut runner, Rings::Pay, original_and_copy);
+    assert!(is_tapped(&runner, monolith));
+    assert!(recommends_pass(&runner));
+
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    );
+    runner
+        .act(GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        })
+        .expect("the opponent asks to resolve the stack");
+
+    assert!(
+        p0_has_priority(&runner),
+        "P0 gets the window over the original"
+    );
+    assert_eq!(runner.state().stack.len(), 1);
+    assert!(!is_tapped(&runner, monolith), "the copy untapped Monolith");
+    assert!(!recommends_pass(&runner));
 }
 
 /// CR 603.2 + CR 603.3: a trigger goes on the stack with no player act, so
