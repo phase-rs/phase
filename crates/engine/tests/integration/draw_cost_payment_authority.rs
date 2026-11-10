@@ -748,13 +748,33 @@ fn a_concession_after_one_declined_replacement_keeps_the_prefix_when_a_discard_i
         0,
         "the rider waits for completion"
     );
+    // CR 614.17a: the card discarded here is exactly the one drawn during the
+    // accepted prefix, not a later or substitute card.
+    let drawn = state
+        .payment_transaction
+        .as_ref()
+        .and_then(|transaction| transaction.recovered.as_ref())
+        .expect("the recovery checkpoint is live")
+        .events
+        .iter()
+        .find_map(|event| match event {
+            GameEvent::CardDrawn {
+                player_id,
+                object_id,
+                ..
+            } if *player_id == P0 => Some(*object_id),
+            _ => None,
+        })
+        .expect("the accepted prefix published its draw");
+    assert!(
+        cards.contains(&drawn),
+        "the drawn card is one of the discard choices"
+    );
 
     let answer = apply(
         runner.state_mut(),
         P0,
-        GameAction::SelectCards {
-            cards: vec![cards[0]],
-        },
+        GameAction::SelectCards { cards: vec![drawn] },
     )
     .expect("discard one of the eligible cards");
     assert_eq!(
@@ -859,13 +879,28 @@ fn a_concession_keeps_a_synchronously_paid_prefix_when_a_discard_is_open() {
         WaitingFor::DiscardChoice { .. }
     ));
     assert_eq!(runner.life(P0) - life_before, 0);
+    let drawn = state
+        .payment_transaction
+        .as_ref()
+        .and_then(|transaction| transaction.recovered.as_ref())
+        .expect("the recovery checkpoint is live")
+        .events
+        .iter()
+        .find_map(|event| match event {
+            GameEvent::CardDrawn {
+                player_id,
+                object_id,
+                ..
+            } if *player_id == P0 => Some(*object_id),
+            _ => None,
+        })
+        .expect("the synchronously paid prefix published its draw");
+    assert!(cards.contains(&drawn));
 
     let answer = apply(
         runner.state_mut(),
         P0,
-        GameAction::SelectCards {
-            cards: vec![cards[0]],
-        },
+        GameAction::SelectCards { cards: vec![drawn] },
     )
     .expect("discard one of the eligible cards");
     assert_eq!(
@@ -964,6 +999,7 @@ fn a_failed_payment_recovery_still_commits_the_concession() {
         source,
         P0,
     )));
+    let (hand_before, _) = hand_and_library(&runner, P0);
     let state = runner.state_mut();
     state.players[P0.0 as usize].life = i32::MAX;
     resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
@@ -998,6 +1034,11 @@ fn a_failed_payment_recovery_still_commits_the_concession() {
         runner.life(P0),
         i32::MAX,
         "the overflowing rider did not apply"
+    );
+    assert_eq!(
+        hand_and_library(&runner, P0).0 - hand_before,
+        1,
+        "the accepted prefix draw survives the fallible rider"
     );
 }
 
@@ -1080,4 +1121,77 @@ fn accepting_a_skipped_draw_cost_activation_reaches_the_stack() {
         library_after, library_before,
         "the skipped draw milled nothing"
     );
+}
+
+/// CR 104.3a + CR 118.12: a submitter-scoped capability change admitted while a
+/// recovered payment is parked must survive settlement; the checkpoint must not
+/// roll it back.
+#[test]
+fn a_revoked_debug_capability_survives_payment_settlement() {
+    let (mut runner, source) = concession_board_with_hand();
+    {
+        let state = runner.state_mut();
+        state.format_config.allow_debug_actions = true;
+        state.debug_mode = true;
+        state.debug_permitted = [P0, P1, PlayerId(2)].into_iter().collect();
+    }
+    let mut root = ResolvedAbility::new(
+        pay_cost(AbilityCost::Composite {
+            costs: vec![draw_cost(1), discard_cost()],
+        }),
+        vec![],
+        source,
+        P0,
+    );
+    root.targets = Vec::new();
+    let state = runner.state_mut();
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+    assert!(is_dredge_prompt_for_p0(state));
+    apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+        .expect("declining leg 1's Dredge accepts the draw");
+    let WaitingFor::DiscardChoice { cards, .. } = &state.waiting_for else {
+        panic!("the discard leg owns the cursor: {:?}", state.waiting_for);
+    };
+    let cards = cards.clone();
+
+    apply(
+        state,
+        PlayerId(2),
+        GameAction::Concede {
+            player_id: PlayerId(2),
+        },
+    )
+    .expect("a player can concede at any time");
+    assert!(state
+        .payment_transaction
+        .as_ref()
+        .is_some_and(|transaction| transaction.recovered.is_some()));
+
+    apply(
+        state,
+        P0,
+        GameAction::RevokeDebugPermission { player_id: P1 },
+    )
+    .expect("the host revokes the other seat's debug capability");
+    assert!(!state.debug_permitted.contains(&P1));
+
+    apply(
+        runner.state_mut(),
+        P0,
+        GameAction::SelectCards {
+            cards: vec![cards[0]],
+        },
+    )
+    .expect("discard one of the eligible cards");
+
+    let state = runner.state();
+    assert!(
+        state.payment_transaction.is_none(),
+        "the payment settles after the answer"
+    );
+    assert!(
+        !state.debug_permitted.contains(&P1),
+        "the revoked capability was not restored by the checkpoint"
+    );
+    assert!(state.debug_permitted.contains(&P0));
 }

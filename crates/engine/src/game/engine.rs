@@ -1589,6 +1589,15 @@ fn apply_action_boundary_core(
     // snapshot above still holds it on its `PendingCast`, so every restore path
     // below returns it there.
     super::announcement_triggers::begin_action(state);
+    // CR 104.3a + CR 118.12: a submitter-scoped action admitted outside the
+    // parked payment must stay authoritative in the recovery checkpoint too.
+    let mirror_source = (state
+        .payment_transaction
+        .as_ref()
+        .is_some_and(|transaction| transaction.recovered.is_some())
+        && action.is_submitter_scoped()
+        && !matches!(action, GameAction::Concede { .. }))
+    .then(|| (action.clone(), authenticated_actor));
     let mut result = match if payment_transaction::owns_action(state, &action) {
         // All staged-payment actions enter through this admission point. The
         // authenticated actor is recorded for deterministic replay; the
@@ -1707,6 +1716,9 @@ fn apply_action_boundary_core(
             preserve_interaction,
             lifecycle,
         });
+    }
+    if let Some((mirror_action, mirror_actor)) = mirror_source {
+        payment_transaction::mirror_outside_action(state, mirror_actor, &mirror_action);
     }
     // CR 400.7 + CR 403.3 + CR 614.12a: an as-enters choice (and any continuation it raises) can
     // span an arbitrary number of client round-trips of ANY `WaitingFor` shape, so realization of a

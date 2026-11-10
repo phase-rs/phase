@@ -470,19 +470,23 @@ fn settle_replay_outcome(
             shadow.payment_transaction_just_handled = false;
             let carrier = shadow.resolving_stack_entry.as_ref().map(|entry| entry.id);
             let continuation_event_start = events.len();
+            // CR 104.3a + CR 118.12: the accepted payment (and any departure
+            // already mirrored into it) commits BEFORE the fallible rider and
+            // canonical tail run, so an error in either cannot erase the paid
+            // work or restore a player who left the game.
+            *state = shadow;
             // The payment is committed. Continue the printed rider through the
             // ordinary chain walker, now outside the transaction, so a later
             // pause/failure cannot restore the pre-payment base.
             resolve_root_continuation(
-                &mut shadow,
+                state,
                 &transaction.root,
                 true,
                 transaction.resolving_trigger_context.as_ref(),
                 &mut events,
             )?;
-            settle_canonical_tail(&mut shadow, &mut events, continuation_event_start, carrier)?;
-            let waiting_for = shadow.waiting_for.clone();
-            *state = shadow;
+            settle_canonical_tail(state, &mut events, continuation_event_start, carrier)?;
+            let waiting_for = state.waiting_for.clone();
             Ok(ActionResult::applied(events, waiting_for).with_log_entries(log_entries))
         }
     }
@@ -592,6 +596,12 @@ fn settle_accepted_prefix_after_departure(
     shadow.payment_transaction = None;
     shadow.payment_transaction_replay = true;
     shadow.payment_transaction_just_handled = false;
+    if transaction.transcript.is_empty() {
+        // CR 603.2: a synchronously paid prefix has no ActionResult scan, so its
+        // draw/other events must be collected here before the checkpoint parks.
+        collect_initial_payment_events(&mut shadow, &events);
+        shadow.consumed_before_priority_trigger_events.clear();
+    }
     let mut mirrored = Vec::new();
     crate::game::elimination::concede(&mut shadow, departing, &mut mirrored);
     restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
@@ -655,6 +665,39 @@ fn checkpoint_state(shadow: &GameState) -> GameState {
     checkpoint.payment_transaction_replay = false;
     checkpoint.payment_transaction_just_handled = false;
     checkpoint
+}
+
+/// CR 104.3a + CR 118.12: mirror an outside, submitter-scoped action onto the
+/// recovery checkpoint. The canonical state already carries it; without this,
+/// settling the checkpoint would roll the action back (a revoked debug
+/// capability, for example). The action's events were published canonically and
+/// are not duplicated into the checkpoint's buffer.
+pub(crate) fn mirror_outside_action(state: &mut GameState, actor: PlayerId, action: &GameAction) {
+    let Some(transaction) = state.payment_transaction.as_deref() else {
+        return;
+    };
+    let Some(checkpoint) = transaction.recovered.as_deref() else {
+        return;
+    };
+    let mut shadow = (*checkpoint.state).clone();
+    shadow.payment_transaction = None;
+    shadow.payment_transaction_replay = true;
+    shadow.payment_transaction_just_handled = false;
+    if engine::apply_admitted_recorded_action(&mut shadow, actor, actor, action.clone()).is_err() {
+        return;
+    }
+    shadow.payment_transaction_replay = false;
+    let mut updated = transaction.clone();
+    updated.recovered = Some(Box::new(PaymentRecoveryCheckpoint {
+        state: Box::new(checkpoint_state(&shadow)),
+        events: checkpoint.events.clone(),
+        log_entries: checkpoint.log_entries.clone(),
+        consumed: updated.transcript.len(),
+    }));
+    *state
+        .payment_transaction
+        .as_mut()
+        .expect("the descriptor is live") = Box::new(updated);
 }
 
 /// CR 614.17c: a parked replacement for a draw that can no longer happen
@@ -1062,6 +1105,55 @@ mod tests {
                 .expect_err("restore must reject an out-of-range payment owner");
             assert!(error.to_string().contains("payment transaction is invalid"));
         }
+    }
+
+    #[test]
+    fn persisted_recovery_checkpoint_rejects_a_cursor_beyond_its_transcript() {
+        let mut state = GameState::new_two_player(7);
+        let mut checkpoint_state = GameState::new_two_player(7);
+        checkpoint_state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.payment_transaction = Some(Box::new(ResolutionPaymentTransaction {
+            wire_version: 1,
+            owner: PlayerId(0),
+            root: Box::new(crate::types::ability::ResolvedAbility::new(
+                crate::types::ability::Effect::NoOp,
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )),
+            transcript: vec![ResolutionPaymentTranscriptEntry {
+                authenticated_actor: PlayerId(0),
+                semantic_owner: PlayerId(0),
+                action: GameAction::PassPriority,
+            }],
+            base_waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            resolving_trigger_context: None,
+            recovered: Some(Box::new(PaymentRecoveryCheckpoint {
+                state: Box::new(checkpoint_state),
+                events: Vec::new(),
+                log_entries: Vec::new(),
+                consumed: 2,
+            })),
+        }));
+        let restored = serde_json::from_value::<PersistedGameState>(
+            serde_json::to_value(PersistedGameState::capture(state))
+                .expect("the trusted shape serializes"),
+        )
+        .expect("the wire shape remains decodable");
+        let error = restored
+            .into_game_state()
+            .expect_err("restore must reject a checkpoint cursor beyond its transcript");
+        assert!(
+            error.to_string().contains("recovery checkpoint"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

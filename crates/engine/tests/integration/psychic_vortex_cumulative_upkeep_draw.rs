@@ -184,9 +184,21 @@ fn advance_through_upkeep(runner: &mut GameRunner) {
 /// after its behavioural rows.
 fn unless_prompt_cost(runner: &GameRunner) -> AbilityCost {
     match &runner.state().waiting_for {
-        WaitingFor::UnlessPayment { player, cost, .. } => {
+        WaitingFor::UnlessPayment {
+            player,
+            cost,
+            repeat,
+            ..
+        } => {
             assert_eq!(*player, P0, "Psychic Vortex's controller pays its upkeep");
-            cost.clone()
+            // CR 702.24a: a repeated draw upkeep is carried compactly as the
+            // printed instruction plus its age-counter count.
+            match repeat {
+                Some(count) if *count > 0 => AbilityCost::Composite {
+                    costs: vec![cost.clone(); *count as usize],
+                },
+                _ => cost.clone(),
+            }
         }
         other => panic!("expected Psychic Vortex's cumulative-upkeep prompt, got {other:?}"),
     }
@@ -1469,4 +1481,34 @@ fn a_counter_prohibition_at_the_prompt_refuses_the_mixed_payment() {
         .act(GameAction::PayUnlessCost { pay: false })
         .expect("declining stays legal");
     assert_eq!(zone_of(&runner, vortex), Zone::Graveyard);
+}
+
+/// CR 702.24a: a large age count reaches the decline without expanding one
+/// boxed cost per leg; the prompt carries the printed draw instruction and the
+/// count.
+#[test]
+fn a_large_age_count_declines_without_expanding_every_leg() {
+    const AGE: u32 = 10_000;
+    let (mut runner, vortex, ()) = vortex_board(AGE - 1, &STAGED_LIBRARY, |_| ());
+    advance_through_upkeep(&mut runner);
+    let WaitingFor::UnlessPayment { cost, repeat, .. } = &runner.state().waiting_for else {
+        panic!(
+            "expected the cumulative-upkeep prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*repeat, Some(AGE));
+    assert!(
+        matches!(
+            cost,
+            AbilityCost::EffectCost { effect } if matches!(effect.as_ref(), Effect::Draw { .. })
+        ),
+        "the prompt keeps the printed instruction instead of {AGE} boxed legs"
+    );
+    let before = ZoneSizes::of(&runner, P0);
+    runner
+        .act(GameAction::PayUnlessCost { pay: false })
+        .expect("declining the upkeep is legal");
+    assert_eq!(zone_of(&runner, vortex), Zone::Graveyard);
+    assert_eq!(ZoneSizes::of(&runner, P0).hand, before.hand);
 }

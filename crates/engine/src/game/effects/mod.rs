@@ -23538,7 +23538,13 @@ fn resolve_chain_body(
             // CR 118.4 + CR 107.3c: Resolve a dynamic-generic mana cost into a
             // fixed `Mana { cost }` BEFORE entering the prompt — the runtime
             // payment site only handles static AbilityCost variants.
-            let resolved_cost = resolved_unless_cost(state, ability, &unless_pay.cost);
+            let (resolved_cost, repeat) = resolved_unless_cost(state, ability, &unless_pay.cost);
+            // CR 121.2b + CR 614.17b: judge the whole repeated payment, not
+            // just the compact first instruction, before offering it.
+            let checked_cost = match repeat {
+                Some(count) if count > 0 => expand_per_counter(&resolved_cost, count),
+                _ => resolved_cost.clone(),
+            };
             // CR 118.6 + CR 202.1b: A cost based on the mana cost of an object
             // that has no mana cost (lands, tokens, other costless permanents)
             // is UNPAYABLE — attempting to pay it is an illegal action. No
@@ -23556,18 +23562,24 @@ fn resolve_chain_body(
                     !crate::game::costs::resolution_cost_includes_impossible_event(
                         state,
                         *p,
-                        &resolved_cost,
+                        &checked_cost,
                         ability,
                     ) && !crate::game::un_actions::cost_requires_unavailable_speech(
                         state,
                         *p,
-                        &resolved_cost,
+                        &checked_cost,
                     )
                 })
                 .and_then(|head| unless_payers[head..].split_first())
             {
-                state.waiting_for =
-                    unless_payment_prompt(state, ability, payer, remaining_payers, resolved_cost);
+                state.waiting_for = unless_payment_prompt(
+                    state,
+                    ability,
+                    payer,
+                    remaining_payers,
+                    resolved_cost,
+                    repeat,
+                );
                 return Ok(ResolutionProgress::Waiting);
             }
         }
@@ -26854,8 +26866,8 @@ fn resolved_unless_cost(
     state: &GameState,
     ability: &ResolvedAbility,
     cost: &AbilityCost,
-) -> AbilityCost {
-    let expanded = match cost {
+) -> (AbilityCost, Option<u32>) {
+    let (expanded, repeat) = match cost {
         AbilityCost::PerCounter {
             counter,
             target,
@@ -26887,7 +26899,20 @@ fn resolved_unless_cost(
                     0
                 }
             };
-            expand_per_counter(base, n)
+            // CR 702.24a: a Draw base stays one instruction per age counter.
+            // Keep the printed base plus the count compact here and expand
+            // only at payment time, so declining a large upkeep never
+            // allocates every leg.
+            if n > 0
+                && matches!(
+                    base.as_ref(),
+                    AbilityCost::EffectCost { effect } if matches!(effect.as_ref(), Effect::Draw { .. })
+                )
+            {
+                (base.as_ref().clone(), Some(n))
+            } else {
+                (expand_per_counter(base, n), None)
+            }
         }
         AbilityCost::ManaDynamic { quantity } => {
             // CR 107.3a: thread ResolvedAbility.chosen_x so the announced
@@ -26897,11 +26922,14 @@ fn resolved_unless_cost(
             // of the announced X.
             let amount =
                 crate::game::quantity::resolve_quantity_with_targets(state, quantity, ability);
-            AbilityCost::Mana {
-                cost: ManaCost::generic(amount.max(0) as u32),
-            }
+            (
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(amount.max(0) as u32),
+                },
+                None,
+            )
         }
-        other => other.clone(),
+        other => (other.clone(), None),
     };
     // CR 118.12 + CR 202.1: "unless you pay its mana cost" — materialize
     // the ability source's OWN printed mana cost at resolution time. The
@@ -26911,7 +26939,12 @@ fn resolved_unless_cost(
     // resolves to `ManaCost::NoCost`, which CR 118.6 / CR 202.1b define
     // as an UNPAYABLE cost; the dedicated unpayable branch in `resolve_chain_body` handles
     // it (kept distinct from a payable `{0}`).
-    crate::game::keywords::resolve_self_mana_in_ability_cost(state, ability.source_id, &expanded)
+    let expanded = crate::game::keywords::resolve_self_mana_in_ability_cost(
+        state,
+        ability.source_id,
+        &expanded,
+    );
+    (expanded, repeat)
 }
 
 /// The prompt an unless-cost puts to `payer`, with `remaining_payers` next in line.
@@ -26923,6 +26956,7 @@ fn unless_payment_prompt(
     payer: PlayerId,
     remaining_payers: &[PlayerId],
     resolved_cost: AbilityCost,
+    repeat: Option<u32>,
 ) -> WaitingFor {
     let mut pending = ability.clone();
     pending.unless_pay = None;
@@ -26947,6 +26981,7 @@ fn unless_payment_prompt(
                     trigger_event: state.current_trigger_event.clone(),
                     effect_description: ability.description.clone(),
                     remaining: remaining_payers.to_vec(),
+                    repeat,
                 }
             } else {
                 WaitingFor::UnlessPaymentChooseCost {
@@ -27007,6 +27042,7 @@ fn unless_payment_prompt(
             trigger_event: state.current_trigger_event.clone(),
             effect_description: ability.description.clone(),
             remaining: remaining_payers.to_vec(),
+            repeat,
         },
     }
 }
@@ -28881,7 +28917,7 @@ fn resolve_unless_payers(
 /// (CR 118.3a), which is still asked (CR 118.5). `OneOf`
 /// unfolds into a `Composite` of N independent disjunctive choices
 /// (CR 702.24a: each choice is made separately).
-fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
+pub(crate) fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
     if n == 0 {
         return AbilityCost::Mana {
             cost: ManaCost::zero(),
@@ -43034,7 +43070,7 @@ mod tests {
             ],
         };
         assert_eq!(
-            resolved_unless_cost(&state, &ability, &cost),
+            resolved_unless_cost(&state, &ability, &cost).0,
             AbilityCost::Composite {
                 costs: vec![
                     AbilityCost::Mana {

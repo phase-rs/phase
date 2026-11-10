@@ -10766,6 +10766,9 @@ pub enum ManaAbilityResume {
         /// mana ability mid-payment.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remaining: Vec<PlayerId>,
+        /// CR 702.24a: compact repeated draw count carried across the pause.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repeat: Option<u32>,
     },
     /// CR 508.1d + CR 508.1h + CR 509.1c + CR 509.1d + CR 605.4a: A combat
     /// declaration whose locked-in tax payment suspended before spending on a
@@ -16600,6 +16603,38 @@ impl GameState {
         }
 
         validate_ability(&transaction.root, &valid)?;
+        if let Some(checkpoint) = transaction.recovered.as_deref() {
+            if checkpoint.consumed > transaction.transcript.len() {
+                return Err(format!(
+                    "recovery checkpoint consumed {} of {} transcript entries",
+                    checkpoint.consumed,
+                    transaction.transcript.len()
+                ));
+            }
+            if checkpoint.state.payment_transaction.is_some()
+                || checkpoint.state.payment_transaction_replay
+                || checkpoint.state.payment_transaction_just_handled
+            {
+                return Err("recovery checkpoint carries a live transaction".to_string());
+            }
+            if checkpoint.state.players.len() != self.players.len() {
+                return Err("recovery checkpoint seat count differs".to_string());
+            }
+            if checkpoint
+                .state
+                .players
+                .iter()
+                .zip(self.players.iter())
+                .any(|(checkpoint_player, live_player)| checkpoint_player.id != live_player.id)
+            {
+                return Err("recovery checkpoint seats differ".to_string());
+            }
+            if checkpoint.state.waiting_for != self.waiting_for {
+                return Err(
+                    "recovery checkpoint prompt does not match the canonical prompt".to_string(),
+                );
+            }
+        }
         for (index, entry) in transaction.transcript.iter().enumerate() {
             if crate::game::payment_transaction::is_outside_transaction(&entry.action) {
                 return Err(format!(
@@ -19044,7 +19079,10 @@ pub enum WaitingFor {
         /// CR 118.12: The cost to pay. Stored as the unified `AbilityCost`
         /// taxonomy. Forward-compatible deserialization accepts the legacy
         /// `UnlessCost` JSON shape (see `deserialize_ability_cost_compat` in
-        /// `types/ability.rs`).
+        /// `types/ability.rs`). For a compact cumulative-upkeep draw this is
+        /// the printed instruction and `repeat` carries the age-counter count.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repeat: Option<u32>,
         #[serde(deserialize_with = "crate::types::ability::deserialize_ability_cost_compat")]
         cost: AbilityCost,
         /// The effect to execute if the player declines to pay.
@@ -50661,6 +50699,7 @@ mod tests {
                     }),
                     effect_description: None,
                     remaining: Vec::new(),
+                    repeat: None,
                 },
                 cost_move_resume: None,
                 chosen_tappers: None,
@@ -59253,6 +59292,7 @@ mod restored_exact_attack_authority_tests {
                             trigger_event: trigger_event.clone(),
                             effect_description: None,
                             remaining: vec![],
+                            repeat: None,
                         },
                     ))),
                 },
@@ -59855,6 +59895,7 @@ mod restored_exact_attack_authority_tests {
             trigger_event: trigger_event.clone(),
             effect_description: None,
             remaining: vec![],
+            repeat: None,
         };
         let transaction =
             |root: Box<ResolvedAbility>, base, context| ResolutionPaymentTransaction {

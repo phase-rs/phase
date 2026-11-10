@@ -6510,6 +6510,7 @@ mod tests {
                     trigger_event: Some(event.clone()),
                     effect_description: None,
                     remaining: Vec::new(),
+                    repeat: None,
                 },
             ),
             (
@@ -7031,6 +7032,7 @@ mod tests {
             trigger_event: Some(fixture.event.clone()),
             effect_description: None,
             remaining: Vec::new(),
+            repeat: None,
         };
         pending.cost_move_resume = Some(ManaAbilityResume::EffectPayCost {
             payer: fixture.owner,
@@ -7096,6 +7098,7 @@ mod tests {
                     trigger_event: None,
                     effect_description: None,
                     remaining: Vec::new(),
+                    repeat: None,
                 }),
             ),
             (
@@ -8089,6 +8092,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            repeat: None,
         };
 
         let filtered = filter_state_for_viewer(&state, PlayerId(1));
