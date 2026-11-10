@@ -3,12 +3,16 @@
 //! where they were.
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, TargetFilter,
+};
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::zones::Zone;
+use engine::types::replacements::ReplacementEvent;
+use engine::types::zones::{EtbTapState, Zone};
 
 /// Printed Oracle text of Turn the Earth (MTGJSON AtomicCards).
 const TURN_THE_EARTH: &str = "Choose up to three target cards in graveyards. The owners of those cards shuffle them into their libraries. You gain 2 life.\nFlashback {1}{G} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
@@ -110,4 +114,76 @@ fn turn_the_earth_same_owner_shuffles_once() {
     assert!(outcome.state().players[P0.0 as usize]
         .library
         .contains(&second));
+}
+
+/// CR 701.24c: the owner is captured before delivery, so the library is
+/// shuffled even when every eligible move is replaced and no card reaches it.
+#[test]
+fn turn_the_earth_replaced_deliveries_still_shuffle_the_owner() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Turn the Earth", false, TURN_THE_EARTH)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    let redirect = ReplacementDefinition::new(ReplacementEvent::Moved)
+        .destination_zone(Zone::Library)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                library_shuffle: Default::default(),
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        ));
+    scenario
+        .add_creature(P1, "Library Redirector", 1, 1)
+        .with_replacement_definition(redirect)
+        .id();
+    let first = scenario
+        .add_creature_to_graveyard(P0, "P0 Replaced Bear", 2, 2)
+        .id();
+    let second = scenario
+        .add_creature_to_graveyard(P0, "P0 Replaced Bear Two", 2, 2)
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner
+        .cast(spell)
+        .target_objects(&[first, second])
+        .resolve();
+    let events = outcome.events();
+
+    assert_eq!(
+        outcome.state().objects[&first].zone,
+        Zone::Exile,
+        "the replacement redirected the first delivery"
+    );
+    assert_eq!(
+        outcome.state().objects[&second].zone,
+        Zone::Exile,
+        "the replacement redirected the second delivery"
+    );
+    assert_eq!(
+        shuffles_for(events, P0),
+        1,
+        "the owner is still shuffled exactly once: {events:?}"
+    );
+    assert_eq!(shuffles_for(events, P1), 0, "{events:?}");
 }
