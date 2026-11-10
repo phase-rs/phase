@@ -1193,6 +1193,7 @@ pub(super) fn handle_unless_payment(
 
     let mut payment_failed = !pay;
     let post_action_event_start = None;
+    let payment_event_start = events.len();
     if pay {
         // CR 702.24a: a large compact repeated draw is paid in bounded chunks
         // through one counted cursor; a small cost keeps the ordinary concrete
@@ -1982,6 +1983,7 @@ pub(super) fn handle_unless_payment(
                 pending_effect.as_ref(),
                 &trigger_event,
                 events,
+                Some(payment_event_start),
             )?;
             return Ok(action_result(events, waiting_for));
         }
@@ -2264,6 +2266,7 @@ pub(crate) fn finish_successful_unless_payment(
     pending_effect: &ResolvedAbility,
     trigger_event: &Option<GameEvent>,
     events: &mut Vec<GameEvent>,
+    payment_event_start: Option<usize>,
 ) -> Result<WaitingFor, EngineError> {
     // CR 118.12: a completed successful payment owns this result even when
     // a previous instruction failed. Clear before every child/no-child route.
@@ -2345,6 +2348,18 @@ pub(crate) fn finish_successful_unless_payment(
             false,
             false,
         )?;
+    } else if let Some(payment_start) = payment_event_start {
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            let default_wf = state.waiting_for.clone();
+            state.waiting_for = engine_priority::run_post_action_pipeline_from(
+                state,
+                events,
+                payment_start,
+                &default_wf,
+                false,
+                false,
+            )?;
+        }
     }
     Ok(state.waiting_for.clone())
 }
@@ -3041,7 +3056,7 @@ pub(super) fn resume_counter_addition_unless_payment(
             }
         }
     }
-    finish_successful_unless_payment(state, &pending_effect, &trigger_event, events)
+    finish_successful_unless_payment(state, &pending_effect, &trigger_event, events, None)
 }
 
 /// CR 701.9b + CR 118.12 + CR 616.1: Resume a RANDOM unless-discard after the
@@ -3127,7 +3142,7 @@ pub(super) fn resume_random_discard_unless_payment(
     // silently skips `EffectResolved`, the `IfAPlayerDoes` alternative-outcome
     // sub, and the `SequentialSibling` chain. Balduvian Horde has none of
     // those, which is exactly why that mistake was invisible in its tests.
-    finish_successful_unless_payment(state, &pending_effect, &trigger_event, events)
+    finish_successful_unless_payment(state, &pending_effect, &trigger_event, events, None)
 }
 
 pub(super) fn handle_ward_sacrifice_choice(
@@ -7396,17 +7411,11 @@ fn finish_successful_counted_payment(
     events: &mut Vec<GameEvent>,
     event_start: usize,
 ) -> Result<WaitingFor, EngineError> {
-    finish_successful_unless_payment(state, pending_effect, trigger_event, events)?;
-    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        let default_wf = state.waiting_for.clone();
-        state.waiting_for = engine_priority::run_post_action_pipeline_from(
-            state,
-            events,
-            event_start,
-            &default_wf,
-            false,
-            false,
-        )?;
-    }
-    Ok(state.waiting_for.clone())
+    finish_successful_unless_payment(
+        state,
+        pending_effect,
+        trigger_event,
+        events,
+        Some(event_start),
+    )
 }

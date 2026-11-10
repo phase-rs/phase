@@ -1701,3 +1701,28 @@ fn a_counted_payment_queues_its_draw_triggers() {
         "the paid Vortex stays"
     );
 }
+
+/// CR 603.2: the small (uncounted) payment also queues every draw trigger.
+#[test]
+fn a_small_payment_queues_its_draw_triggers() {
+    const AGE: u32 = 3;
+    const PSYCHOSIS_CRAWLER_ORACLE: &str = "Whenever you draw a card, each opponent loses 1 life.";
+    let names: Vec<String> = (0..(AGE as usize + 5))
+        .map(|index| format!("Library {index}"))
+        .collect();
+    let library: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (mut runner, _vortex, ()) = vortex_board(AGE - 1, &library, |scenario| {
+        scenario
+            .add_creature(P0, "Psychosis Crawler", 1, 1)
+            .from_oracle_text(PSYCHOSIS_CRAWLER_ORACLE);
+    });
+    advance_through_upkeep(&mut runner);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the small payment is legal");
+    assert_eq!(
+        runner.state().stack.len(),
+        AGE as usize,
+        "each drawn card queued its trigger once"
+    );
+}

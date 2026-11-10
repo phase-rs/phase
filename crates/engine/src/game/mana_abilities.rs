@@ -4207,6 +4207,7 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
                     pending_effect.as_ref(),
                     &trigger_event,
                     events,
+                    None,
                 ),
             }
         }
