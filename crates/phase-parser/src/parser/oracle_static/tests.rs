@@ -43339,7 +43339,7 @@ fn static_ordinary_cost_modifier_carries_no_target_scope() {
     // the qualifier rather than on every cost modifier.
     let def = parse_static_line("Instant and sorcery spells you cast cost {1} less to cast.")
         .expect("an ordinary cost modifier must parse");
-    let StaticMode::ModifyCost { .. } = def.mode else {
+    let StaticMode::ModifyCost { spell_filter, .. } = &def.mode else {
         panic!("expected a cast-cost modifier, got {:?}", def.mode);
     };
     let Some(TargetFilter::Typed(tf)) = &def.affected else {
@@ -43353,5 +43353,23 @@ fn static_ordinary_cost_modifier_carries_no_target_scope() {
         )),
         "an ordinary cost modifier names no target, so no target scope may be added; got {:?}",
         tf.properties
+    );
+
+    // CR 601.2f: the PRICING filter — the one the discount actually reads — must
+    // carry Baral's printed restriction ("Instant and sorcery spells…") and must
+    // NOT gain any target scope the Oracle text never asks for. Asserting only the
+    // affected filter would leave the value the price reads unchecked.
+    let pricing = spell_filter
+        .as_ref()
+        .expect("Baral's discount must carry a pricing filter");
+    let rendered = format!("{pricing:?}");
+    assert!(
+        rendered.contains("Instant") && rendered.contains("Sorcery"),
+        "the pricing filter must keep Baral's printed instant-or-sorcery restriction, got {rendered}"
+    );
+    assert!(
+        !rendered.contains("Targets") && !rendered.contains("InZone"),
+        "an untargeted cost modifier must not gain a target or zone scope on its PRICING \
+         filter either; got {rendered}"
     );
 }
