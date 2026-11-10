@@ -6236,7 +6236,14 @@ pub fn matches_target_filter_on_lki_snapshot(
     ctx: &FilterContext<'_>,
 ) -> bool {
     matches_target_filter_on_lki_snapshot_with_incarnation(
-        state, object_id, lki, filter, ctx, None, None,
+        state,
+        object_id,
+        lki,
+        filter,
+        ctx,
+        None,
+        None,
+        EpochReading::Projection,
     )
 }
 
@@ -6277,6 +6284,9 @@ pub(crate) fn matches_target_filter_on_announced_lki(
         ctx,
         None,
         zone.zone(),
+        // CR 115.9: a committed target is read as it was WHEN IT WAS SELECTED —
+        // the one reading whose uncaptured leaves refuse (see `CapturedEpoch`).
+        EpochReading::SelectionTime,
     )
 }
 
@@ -6383,6 +6393,9 @@ pub fn matches_target_filter_on_departed_battlefield_lki(
         ctx,
         None,
         Some(Zone::Battlefield),
+        // A departed subject is a look-back over the snapshot the caller holds,
+        // not a CR 115.9 selection-time reading of a chosen target.
+        EpochReading::Projection,
     )
 }
 
@@ -6518,6 +6531,9 @@ pub(crate) fn source_incarnation_matches_filter(
 /// left alone: no arm on the record-matching path reads it (`to_zone` is read
 /// only by the LIVE `FilterProp::ZoneChangedThisTurn` arm), so it makes no
 /// semantic claim about where the target went and must not be read as one.
+///
+/// `reading` states which CR 115.9 reading this projection answers — see
+/// [`EpochReading`].
 fn matches_target_filter_on_lki_snapshot_with_incarnation(
     state: &GameState,
     object_id: ObjectId,
@@ -6526,6 +6542,7 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
     ctx: &FilterContext<'_>,
     entered_incarnation: Option<u64>,
     snapshot_zone: Option<Zone>,
+    reading: EpochReading,
 ) -> bool {
     let record = ZoneChangeRecord {
         object_id,
@@ -6586,12 +6603,13 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         was_prepared: lki.was_prepared,
         departure: crate::types::game_state::ZoneDeparture::Moved,
     };
-    // CR 115.9 + CR 608.2h: `lki` IS the selection-time epoch for this subject,
-    // so the counter set and tap status it captured answer for it — not the live
+    // CR 115.9 + CR 608.2h: `lki` IS the epoch this projection answers for, so
+    // the counter set and tap status it captured answer from it — not the live
     // object and not the ObjectId-keyed exit cache. Token identity is the one
     // leaf the snapshot cannot state, so it answers from what the engine DID
     // capture for this object (`captured_token_identity`) or from a zone that
-    // proves non-token-ness, and otherwise refuses.
+    // proves non-token-ness; where neither holds, `reading` decides between
+    // refusing and the projection's own conservative bit (see `token_identity`).
     let epoch = CapturedEpoch {
         counters: &lki.counters,
         tapped: lki.tapped,
@@ -6601,6 +6619,7 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
             // exist, so a target announced elsewhere is certainly not one.
             Some(_) => Some(false),
         },
+        reading,
     };
     zone_change_filter_inner_with_epoch(state, &record, record.from_zone, filter, ctx, Some(epoch))
 }
@@ -6860,6 +6879,9 @@ pub fn matches_zone_change_event_object_filter(
                 ctx,
                 record.entered_incarnation,
                 origin,
+                // A departed battlefield subject is a look-back over the
+                // snapshot the record holds, not a selection-time reading.
+                EpochReading::Projection,
             )
         } else {
             // No exit LKI cached (defensive — a battlefield exit always caches
@@ -7824,6 +7846,11 @@ fn captured_token_identity(state: &GameState, object_id: ObjectId) -> Option<boo
 ///
 /// A fact this carrier cannot state is answered by REFUSING the leaf, never by
 /// falling back to the present: a missing captured fact is not a live answer.
+///
+/// The one exception is [`EpochReading::Projection`], which is a look-back over
+/// a snapshot for some other epoch rather than a CR 115.9 selection-time reading
+/// of a chosen target; there the projection's own conservative answer stands.
+/// See [`CapturedEpoch::token_identity`].
 #[derive(Clone, Copy)]
 struct CapturedEpoch<'a> {
     /// CR 122.1: the counters the subject had when it was selected.
@@ -7835,8 +7862,52 @@ struct CapturedEpoch<'a> {
     /// at its last zone change ([`captured_token_identity`]), or a zone the
     /// subject was announced in that is not the battlefield (a token in any
     /// other zone ceases to exist, so such a subject is certainly not a token).
-    /// `None` means neither capture holds it, and both of its leaves refuse.
+    /// `None` means neither capture holds it; [`Self::token_identity`] decides
+    /// what that means for the reading being answered.
     is_token: Option<bool>,
+    /// CR 115.9: which reading of this capture is being answered.
+    reading: EpochReading,
+}
+
+/// CR 115.9 + CR 608.2h: which reading of a captured snapshot an evaluation is
+/// answering.
+///
+/// CR 115.9 gives an effect three readings of another spell or ability's targets
+/// — the current state, the state at the time they were selected, or both. A
+/// `Projection` is neither a selection-time reading nor a live one: it is the
+/// snapshot a caller holds for some other epoch (a subject that has departed, a
+/// mana source that was spent, a tracked-set member), answered from the snapshot
+/// the caller has.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EpochReading {
+    /// "The state of the targets at the time they were selected" (CR 115.9) —
+    /// the announced-target reading. Answered from the capture only: a leaf the
+    /// capture cannot state refuses rather than reporting the present.
+    SelectionTime,
+    /// A look-back projection of a snapshot for another epoch. Leaves the
+    /// snapshot states answer from it; token identity keeps the projection's
+    /// conservative bit, which is not a live read.
+    Projection,
+}
+
+impl CapturedEpoch<'_> {
+    /// CR 111.1 + CR 108.2 + CR 115.9: token identity as this epoch may state
+    /// it. `None` means the leaf must refuse.
+    ///
+    /// A capture that states the bit answers with it. One that does not may
+    /// stand as "not a token" only in a [`EpochReading::Projection`], where that
+    /// is the conservative bit a projected record already carries
+    /// (`is_token: false`) — the same fail-closed answer
+    /// `spell_record_matches_property` gives a cast record, and not a read of
+    /// any live object. A [`EpochReading::SelectionTime`] reading refuses
+    /// instead: there the question is what the target WAS when it was chosen,
+    /// and "presumably not a token" is not that answer.
+    fn token_identity(self) -> Option<bool> {
+        self.is_token.or(match self.reading {
+            EpochReading::SelectionTime => None,
+            EpochReading::Projection => Some(false),
+        })
+    }
 }
 
 /// The epoch-free door: a real zone-change record answers from its own capture.
@@ -8422,10 +8493,10 @@ fn zone_change_record_matches_type_filter(
         // cessation when the original departure record is the only authority.
         // CR 111.1 + CR 115.9: a historical subject answers from its captured
         // epoch — the token bit of the record the engine captured for this
-        // object, or a zone that proves non-token-ness (CR 111.7). Where
-        // neither capture exists the leaf refuses.
+        // object, a zone that proves non-token-ness (CR 111.7), or, in a
+        // look-back projection only, the projection's own conservative bit.
         TypeFilter::Card => match epoch {
-            Some(epoch) => epoch.is_token == Some(false),
+            Some(epoch) => epoch.token_identity() == Some(false),
             None => !record.is_token,
         },
         TypeFilter::Any => true,
@@ -11650,11 +11721,13 @@ fn zone_change_record_matches_property(
     // cannot answer refuses rather than reporting the present.
     if let Some(epoch) = epoch {
         match prop {
-            // CR 111.1: token identity, from the captured record the engine holds
-            // for this object's own life or from a zone that proves it. Neither
-            // the live token bit nor an absence may answer.
-            FilterProp::Token => return epoch.is_token == Some(true),
-            FilterProp::NonToken => return epoch.is_token == Some(false),
+            // CR 111.1 + CR 115.9: token identity, from the captured record the
+            // engine holds for this object's own life, from a zone that proves
+            // it, or — in a look-back projection only — as the projection's own
+            // conservative bit. Neither the live token bit nor an absence may
+            // answer.
+            FilterProp::Token => return epoch.token_identity() == Some(true),
+            FilterProp::NonToken => return epoch.token_identity() == Some(false),
             // CR 122.1: the counter set captured at selection time.
             FilterProp::Counters {
                 counters,
@@ -23907,6 +23980,7 @@ mod tests {
                 &ctx,
                 Some(3),
                 None,
+                EpochReading::Projection,
             ),
             "the original triggering incarnation is not another object"
         );
@@ -23919,6 +23993,7 @@ mod tests {
                 &ctx,
                 Some(4),
                 None,
+                EpochReading::Projection,
             ),
             "a later incarnation at the same storage id is another object"
         );
@@ -24586,6 +24661,81 @@ mod tests {
             }),
             &ctx,
         ));
+    }
+
+    /// CR 608.2h + CR 115.9 + CR 108.2: the PROJECTION reading is not the
+    /// selection-time reading. A look-back over a snapshot the caller holds for
+    /// another epoch — a tracked-set member, a departed subject, a spent mana
+    /// source — answers the leaves the snapshot states from it, and token
+    /// identity from the projection's own conservative bit ("a card, not a
+    /// token"). Refusing there instead would drop every tracked-set aggregate
+    /// whose member filter is a card noun (`TypedFilter::card()`), which is what
+    /// `tracked_set_anaphor_source` pins end-to-end.
+    ///
+    /// The same subject read as a SELECTED TARGET still refuses `NonToken`: that
+    /// is the reading CR 115.9 asks about the target as it was when chosen.
+    ///
+    /// Revert-probe: routing the projection through the selection-time refusal
+    /// (`epoch.is_token == Some(false)`) makes the first three assertions fail.
+    #[test]
+    fn projection_reading_keeps_the_conservative_token_bit() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Projection Source");
+        let member = add_creature(&mut state, PlayerId(0), "Projection Member");
+        // No captured on-move record: the member is where it always was.
+        let ctx = FilterContext::from_source(&state, source);
+        let lki = epoch_snapshot(&[], false);
+
+        assert!(
+            super::matches_target_filter_on_lki_snapshot(
+                &state,
+                member,
+                &lki,
+                &prop_filter(FilterProp::NonToken),
+                &ctx,
+            ),
+            "a projection keeps the conservative 'not a token' bit"
+        );
+        assert!(
+            !super::matches_target_filter_on_lki_snapshot(
+                &state,
+                member,
+                &lki,
+                &prop_filter(FilterProp::Token),
+                &ctx,
+            ),
+            "and never claims token-ness it cannot prove"
+        );
+        assert!(
+            super::matches_target_filter_on_lki_snapshot(
+                &state,
+                member,
+                &lki,
+                &TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Card],
+                    ..TypedFilter::default()
+                }),
+                &ctx,
+            ),
+            "a card noun on a projection member still matches (CR 108.2b)"
+        );
+
+        // The contrast: the SAME subject, read as a target selected on the
+        // battlefield, refuses the bit the capture does not hold.
+        let selected = ActivationTargetFact::Object {
+            id: member,
+            lki: Box::new(epoch_snapshot(&[], false)),
+            zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+        };
+        assert!(
+            !declared_target_facts_match(
+                &state,
+                std::slice::from_ref(&selected),
+                &prop_filter(FilterProp::NonToken),
+                &ctx,
+            ),
+            "a selection-time reading refuses what the capture cannot state"
+        );
     }
 
     /// CR 208.4b + CR 613.4b + CR 603.10a: `FilterProp::PtComparison` on a
