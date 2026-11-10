@@ -36269,6 +36269,42 @@ fn die_roll_trigger_bodies_bind_a_bare_it_to_the_source() {
             assert_eq!(stat["affected"], self_ref, "{grant:?}");
         }
     }
+    // CR 706.2 + CR 608.2c: "If the roll was N or higher" gates only its own
+    // grant, on the triggering roll's result, and the gated "it" keeps the
+    // source the trigger condition pinned.
+    let roll_at_least = |value: i32| {
+        serde_json::json!({
+            "type": "QuantityComparison",
+            "lhs": { "type": "Ref", "qty": { "type": "EventContextAmount" } },
+            "comparator": "GE",
+            "rhs": { "type": "Fixed", "value": value },
+        })
+    };
+    let gate_of = |keyword: &str| {
+        let grant = grants
+            .iter()
+            .find(|grant| grant["static_abilities"][0]["modifications"][0]["keyword"] == keyword)
+            .unwrap_or_else(|| panic!("a {keyword} grant: {grants:?}"));
+        grant["static_abilities"][0]["condition"].clone()
+    };
+    assert_eq!(gate_of("FirstStrike"), serde_json::Value::Null);
+    assert_eq!(gate_of("Menace"), roll_at_least(4));
+    assert_eq!(gate_of("Lifelink"), roll_at_least(5));
+    let monoxa = parse_oracle_text(
+        MONOXA,
+        "Monoxa, Midway Manager",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        !monoxa.parse_warnings.iter().any(|warning| matches!(
+            warning,
+            OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+        )),
+        "{:?}",
+        monoxa.parse_warnings
+    );
 
     // Siblings that keep `TriggeringSource`.
     const BLASTRONAUTS: &str = "When this creature enters, open an Attraction.\nWhenever you roll a 6, you may copy the spell, ability, or Attraction visit that caused you to roll that die. You may choose new targets for the copy.";
@@ -36296,6 +36332,59 @@ fn die_roll_trigger_bodies_bind_a_bare_it_to_the_source() {
     effects_of_type(&json, "PutCounter", &mut spell_puts);
     assert_eq!(spell_puts.len(), 1);
     assert_eq!(spell_puts[0]["target"], triggering);
+}
+
+/// CR 608.2c: the die-roll pin survives only a guard that compares the
+/// triggering event's amount. An intervening-if upkeep returner (verbatim,
+/// MTGJSON) also pins its bare "it" to the source, but its "If you do" guard is
+/// the optional outcome, not an event-amount comparison, so "return it to your
+/// hand" keeps the parent-target rewrite it has always had.
+#[test]
+fn an_if_you_do_guard_does_not_keep_an_intervening_if_pin() {
+    const RETURNERS: [(&str, &[&str], &[&str], &str); 3] = [
+        (
+            "Pyre Zombie",
+            &[],
+            &["Zombie"],
+            "At the beginning of your upkeep, if this card is in your graveyard, you may pay {1}{B}{B}. If you do, return it to your hand.\n{1}{R}{R}, Sacrifice this creature: It deals 2 damage to any target.",
+        ),
+        (
+            "Ghastly Remains",
+            &["Amplify"],
+            &["Zombie"],
+            "Amplify 1 (As this creature enters, put a +1/+1 counter on it for each Zombie card you reveal in your hand.)\nAt the beginning of your upkeep, if this card is in your graveyard, you may pay {B}{B}{B}. If you do, return it to your hand.",
+        ),
+        (
+            "Master of Death",
+            &["Surveil"],
+            &["Zombie", "Wizard"],
+            "When this creature enters, surveil 2. (Look at the top two cards of your library, then put any number of them into your graveyard and the rest on top of your library in any order.)\nAt the beginning of your upkeep, if this card is in your graveyard, you may pay 1 life. If you do, return it to your hand.",
+        ),
+    ];
+    for (name, keywords, subtypes, oracle) in RETURNERS {
+        let strings = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let parsed = parse_oracle_text(
+            oracle,
+            name,
+            &strings(keywords),
+            &["Creature".to_string()],
+            &strings(subtypes),
+        );
+        let upkeep = parsed
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::Phase)
+            .unwrap_or_else(|| panic!("{name}: an upkeep trigger, got {:?}", parsed.triggers));
+        let json = serde_json::to_value(&upkeep.execute).expect("serializable trigger body");
+        let mut bounces = Vec::new();
+        effects_of_type(&json, "Bounce", &mut bounces);
+        assert_eq!(bounces.len(), 1, "{name}: reach: the return, {json}");
+        assert_eq!(
+            bounces[0]["target"],
+            serde_json::json!({ "type": "ParentTarget" }),
+            "{name}"
+        );
+    }
 }
 
 /// CR 202.3 + CR 601.3a: the FIXED odd/even mana-value conjunct must reach

@@ -31005,14 +31005,6 @@ impl GameState {
         }
     }
 
-    /// Re-park the active BatchDelivery owner after another replacement pause.
-    pub fn replace_active_batch_delivery(
-        &mut self,
-        pending: PendingBatchDeliveries,
-    ) -> Result<(), ResolutionStackError> {
-        self.resolution_stack.replace_active_batch_delivery(pending)
-    }
-
     /// Consume exactly the active BatchDelivery owner after its one logical
     /// settlement.
     pub fn take_active_batch_delivery(

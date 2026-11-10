@@ -680,6 +680,100 @@ fn quantity_expr_reads_source_counters(expr: &QuantityExpr) -> bool {
     }
 }
 
+/// CR 608.2c + CR 706.2: whether `condition` only compares the triggering
+/// event's amount, against itself or a constant ("If the roll was 4 or
+/// higher"). Such a guard names no object, so it introduces no antecedent for a
+/// bare "it" in the clause it gates. Only `QuantityCheck` can qualify, and only
+/// when each operand is the event amount or a constant and at least one is the
+/// event amount; a wrapped or composite operand never qualifies.
+fn condition_compares_only_event_amount(condition: &AbilityCondition) -> bool {
+    /// `Some(true)` for the triggering event's amount, `Some(false)` for a
+    /// constant, `None` for any other operand.
+    fn leaf(expr: &QuantityExpr) -> Option<bool> {
+        match expr {
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            } => Some(true),
+            QuantityExpr::Ref { .. } => None,
+            QuantityExpr::Fixed { .. } => Some(false),
+            QuantityExpr::DivideRounded { .. }
+            | QuantityExpr::Offset { .. }
+            | QuantityExpr::ClampMin { .. }
+            | QuantityExpr::Multiply { .. }
+            | QuantityExpr::Sum { .. }
+            | QuantityExpr::Max { .. }
+            | QuantityExpr::UpTo { .. }
+            | QuantityExpr::Power { .. }
+            | QuantityExpr::Difference { .. } => None,
+        }
+    }
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => matches!(
+            (leaf(lhs), leaf(rhs)),
+            (Some(lhs_is_amount), Some(rhs_is_amount)) if lhs_is_amount || rhs_is_amount
+        ),
+        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::TriggerEventTargetExploitedBySource
+        | AbilityCondition::AdditionalCostPaid { .. }
+        | AbilityCondition::AdditionalCostPaidInstead
+        | AbilityCondition::AlternativeManaCostPaid
+        | AbilityCondition::EffectOutcome { .. }
+        | AbilityCondition::EventOutcomeWon
+        | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::ChosenLabelIs { .. }
+        | AbilityCondition::WhenYouDo
+        | AbilityCondition::WasCast { .. }
+        | AbilityCondition::CastDuringPhase { .. }
+        | AbilityCondition::CurrentPhaseIs { .. }
+        | AbilityCondition::CastTimingPermission { .. }
+        | AbilityCondition::ManaColorSpent { .. }
+        | AbilityCondition::RevealedHasCardType { .. }
+        | AbilityCondition::ObjectsShareQuality { .. }
+        | AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. }
+        | AbilityCondition::SourceEnteredThisTurn
+        | AbilityCondition::CastVariantPaid { .. }
+        | AbilityCondition::CastVariantPaidInstead { .. }
+        | AbilityCondition::QuantityQuality { .. }
+        | AbilityCondition::PreviousEffectAmount { .. }
+        | AbilityCondition::HasMaxSpeed
+        | AbilityCondition::IsMonarch
+        | AbilityCondition::IsInitiative
+        | AbilityCondition::HasCityBlessing
+        | AbilityCondition::HasEnduringStory
+        | AbilityCondition::ControlsCommander { .. }
+        | AbilityCondition::DiscardedCardMatchesFilter { .. }
+        | AbilityCondition::IsRingBearer
+        | AbilityCondition::CompletedDungeon { .. }
+        | AbilityCondition::TargetHasKeywordInstead { .. }
+        | AbilityCondition::TargetMatchesFilter { .. }
+        | AbilityCondition::HasObjectTarget
+        | AbilityCondition::TriggeringSpellTargetsFilter { .. }
+        | AbilityCondition::SourceMatchesFilter { .. }
+        | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
+        | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
+        | AbilityCondition::ControllerControlsMatching { .. }
+        | AbilityCondition::ControllerControlledMatchingAsCast { .. }
+        | AbilityCondition::IsYourTurn
+        | AbilityCondition::WasStartingPlayer { .. }
+        | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+        | AbilityCondition::FirstCombatPhaseOfTurn
+        | AbilityCondition::FirstEndStepOfTurn
+        | AbilityCondition::ZoneChangedThisWay { .. }
+        | AbilityCondition::CostPaidObjectMatchesFilter { .. }
+        | AbilityCondition::SourceIsTapped
+        | AbilityCondition::SourceAttachedToCreature
+        | AbilityCondition::ConditionInstead { .. }
+        | AbilityCondition::And { .. }
+        | AbilityCondition::Or { .. }
+        | AbilityCondition::Not { .. }
+        | AbilityCondition::DayNightIsNeither
+        | AbilityCondition::DayNightIs { .. }
+        | AbilityCondition::AbilityUseCountThisTurn { .. }
+        | AbilityCondition::SourceLacksKeyword { .. }
+        | AbilityCondition::ScopedPlayerMatches { .. } => false,
+    }
+}
+
 fn condition_refs_source_object(condition: &AbilityCondition) -> bool {
     match condition {
         AbilityCondition::SourceMatchesFilter { .. }
@@ -49939,6 +50033,18 @@ fn parse_effect_chain_ir_body(
             // binding; a mis-scoped bare "it" over a prior typed target
             // (Revelation of Power) still rewrites to the parent target here.
             && !binds_source_counter_pronoun
+            // CR 608.2c + CR 706.2: a guard that only compares the triggering
+            // event's amount ("If the roll was 4 or higher") introduces no object,
+            // so a bare "it" in the clause it gates keeps the referent the trigger
+            // condition pinned to the ability's own source (the die-roll pin in
+            // `trigger_object_pronoun_ref_for_condition`). The pin is withheld
+            // whenever this chain introduced its own typed referent
+            // (`prior_typed_referent`), so a nearer antecedent still takes the
+            // parent-target rewrite.
+            && !(matches!(ctx.object_pronoun_ref, Some(TargetFilter::SelfRef))
+                && condition
+                    .as_ref()
+                    .is_some_and(condition_compares_only_event_amount))
             && !builder.is_empty()
             && has_anaphoric_reference(&recipient_anaphor_lower)
             && !matches!(if_you_do_anchor, Some(TargetFilter::SelfRef))

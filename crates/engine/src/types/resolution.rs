@@ -2057,23 +2057,6 @@ impl ResolutionStack {
         self.push_inner(ResolutionFrame::BatchDelivery(Box::new(pending)));
     }
 
-    /// Re-park the active BatchDelivery owner after another replacement pause.
-    pub fn replace_active_batch_delivery(
-        &mut self,
-        pending: PendingBatchDeliveries,
-    ) -> Result<(), ResolutionStackError> {
-        match self.last() {
-            Some(ResolutionFrame::BatchDelivery(_)) => {
-                self.replace_active(ResolutionFrame::BatchDelivery(Box::new(pending)))
-            }
-            None => Err(ResolutionStackError::Empty),
-            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
-                expected: FrameKind::BatchDelivery,
-                actual: frame.kind(),
-            }),
-        }
-    }
-
     /// Returns the CounterMoves queue only when its typed frame owns the stack
     /// top. A buried counter queue is a parent dependency, never a fallback.
     pub fn active_counter_moves(&self) -> Option<&PendingCounterMoveQueue> {

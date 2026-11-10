@@ -1356,16 +1356,6 @@ enum BatchDeliveryResult {
     NeedsChoice(crate::types::game_state::ParkedBatchOwner),
 }
 
-/// Whether a delivery loop began a new child batch or resumed its active owner.
-/// This is structural state, not a boolean: a new batch must not overwrite an
-/// outer BatchDelivery parent, while a resumed batch must replace its exact
-/// owner in place when it pauses again.
-#[derive(Clone, Copy)]
-enum BatchDeliveryParking {
-    NewChild,
-    ReparkActive,
-}
-
 /// CR 603.10a batch entry: move many objects to one destination through the
 /// pipeline as a single simultaneous departure batch (the mill / mass-bounce /
 /// SBA pattern). Each object runs through `move_object`, so per-object `Moved`
@@ -1443,13 +1433,7 @@ fn deliver_simultaneous_batch(
     let logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &ids);
     let destination = reqs.first().map(|r| r.to);
-    match deliver_batch(
-        state,
-        reqs,
-        logical_zone_change_group,
-        BatchDeliveryParking::NewChild,
-        events,
-    ) {
+    match deliver_batch(state, reqs, logical_zone_change_group, events) {
         BatchDeliveryResult::Done(mut logical_zone_change_group) => {
             crate::game::triggers::complete_logical_zone_trigger_collection(
                 state,
@@ -1691,7 +1675,6 @@ fn deliver_batch(
     state: &mut GameState,
     reqs: Vec<ZoneMoveRequest>,
     mut logical_zone_change_group: LogicalZoneChangeGroup,
-    parking: BatchDeliveryParking,
     events: &mut Vec<GameEvent>,
 ) -> BatchDeliveryResult {
     let segment_start = events.len();
@@ -1743,7 +1726,6 @@ fn deliver_batch(
                     queue.collect(),
                     destination,
                     Some(paused_current),
-                    parking,
                     member_stack_start,
                 );
                 return BatchDeliveryResult::NeedsChoice(parked);
@@ -1784,7 +1766,6 @@ fn deliver_batch(
                     queue.collect(),
                     destination,
                     paused_current,
-                    parking,
                     member_stack_start,
                 );
                 return BatchDeliveryResult::NeedsChoice(parked);
@@ -1805,7 +1786,6 @@ fn stash_batch_tail(
     tail: Vec<ZoneMoveRequest>,
     destination: Zone,
     paused_current: Option<PendingZoneChangeDelivery>,
-    parking: BatchDeliveryParking,
     member_stack_start: crate::types::resolution::ChildStackDepth,
 ) -> crate::types::game_state::ParkedBatchOwner {
     let source_id = tail
@@ -1847,17 +1827,11 @@ fn stash_batch_tail(
         zone_change_record_start: state.zone_changes_this_turn.len(),
         deferred_events: Vec::new(),
     };
-    match parking {
-        BatchDeliveryParking::NewChild => {
-            state.park_batch_delivery_for_paused_member(pending, member_stack_start)
-        }
-        BatchDeliveryParking::ReparkActive => {
-            state
-                .replace_active_batch_delivery(pending)
-                .expect("re-paused batch delivery must own the active frame");
-            crate::types::game_state::ParkedBatchOwner::Active
-        }
-    }
+    // CR 616.1f + CR 706.6 + CR 614.12a: the next member's replacement choices
+    // are made as the process repeats; the rest of the batch waits where a first
+    // member's pause would put it. A first delivery and a resumed one park
+    // through the same placement authority.
+    state.park_batch_delivery_for_paused_member(pending, member_stack_start)
 }
 
 /// Captures the pre-delivery identity and the proposed event a batch member is
@@ -1915,20 +1889,22 @@ fn anticipated_zone_change_delivery(
 /// parks after the first one already parked and was resumed"): everything a batch
 /// needs to finish identically across an arbitrary number of sequential parks is
 /// held in the active `BatchDelivery` frame — not in the resuming caller — so
-/// each park can replace that exact owner for the next one:
+/// each resume detaches that exact owner and re-parks it through
+/// `park_batch_delivery_for_paused_member` for the next one:
 ///   * the **undelivered tail** (`remaining`) — `deliver_batch` re-stashes the
 ///     still-undelivered suffix on every re-park, so no object is ever dropped;
 ///   * the **exact request context** (`requests`) — every undelivered request
 ///     retains its own destination, cause, entry mods, placement, exile links,
 ///     and applied replacements;
 ///   * the **post-loop `completion`** — taken out here, then re-attached via
-///     `ensure_batch_record` on the `NeedsChoice` arm so it survives the second
-///     pause boundary and still runs EXACTLY ONCE, the moment the final tail
-///     empties (never early, never twice).
+///     `parked_batch_record` on the `NeedsChoice` arm, to the owner wherever it
+///     was re-parked, so it survives the second pause boundary and still runs
+///     EXACTLY ONCE, the moment the final tail empties (never early, never
+///     twice).
 ///
 /// Because all of this lives on the parked record (not in `route_rest_partition`
 /// or any synchronous caller frame), a second, third, … park is just another
-/// `deliver_batch` → re-stash cycle. The contract is pinned by
+/// detach → `deliver_batch` → re-park cycle. The contract is pinned by
 /// `mill_double_redirect_choice_continuation` (two sequential parks, no
 /// completion) and `surveil_rest_pile_redirect_continuation` (two sequential
 /// parks WITH a completion that must fire once after the second park drains).
@@ -2038,13 +2014,16 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 .record_delivery_completion(paused_current.member.object_id, terminal_completion)
                 .expect("resumed batch member records its exact terminal outcome");
         }
-        match deliver_batch(
-            state,
-            reqs,
-            logical_zone_change_group,
-            BatchDeliveryParking::ReparkActive,
-            events,
-        ) {
+        // Detach the owner this drain cloned: it is still the top frame, since
+        // nothing above has pushed one. The tail is delivered as a first delivery
+        // is, so a member that pauses again re-parks the owner through
+        // `park_batch_delivery_for_paused_member`, beneath that member's child
+        // stack when one of its frames owns the prompt.
+        state
+            .take_active_batch_delivery()
+            .expect("a resumed batch delivery owns the active frame")
+            .expect("a resumed batch delivery frame exists");
+        match deliver_batch(state, reqs, logical_zone_change_group, events) {
             BatchDeliveryResult::Done(mut logical_zone_change_group) => {
                 crate::game::triggers::complete_logical_zone_trigger_collection(
                     state,
@@ -2068,10 +2047,6 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                     &logical_zone_change_group,
                     events,
                 );
-                state
-                    .take_active_batch_delivery()
-                    .expect("settled batch delivery must own the active frame")
-                    .expect("settled batch delivery frame must exist");
                 // CR 603.10a + CR 616.1: logical settlement has completed before
                 // the one post-batch cleanup can run.
                 if let (Some(_), Some(audiences)) = (
@@ -2104,13 +2079,14 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                     let _ = run_batch_completion(state, completion, events);
                 }
             }
-            // A resumed batch re-parks its active owner in place
-            // (`BatchDeliveryParking::ReparkActive`).
-            BatchDeliveryResult::NeedsChoice(_) => {
+            // A resumed batch re-parks its detached owner where the paused
+            // member's prompt puts it (`park_batch_delivery_for_paused_member`).
+            BatchDeliveryResult::NeedsChoice(parked) => {
                 // `deliver_batch` already re-parked the exact same owner,
                 // including a pause on its final member. Re-attach only the
-                // completion and external output; never replace that owner.
-                let reparking = ensure_batch_record(state, destination);
+                // completion and external output to the owner `parked` names;
+                // never replace that owner.
+                let reparking = parked_batch_record(state, parked, destination);
                 reparking.completion = completion;
                 reparking.attempted = attempted;
                 reparking.zone_change_record_start = zone_change_record_start;
@@ -8699,6 +8675,8 @@ mod simultaneous_entry_tests {
     //! and the read of a parked owner's change from its frame.
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::EntryAttackDestination;
+    use crate::types::game_state::{LiminalEntrant, LiminalEntry, MeldSelection, TokenProjection};
     use crate::types::identifiers::CardId;
     use crate::types::resolution::ResolutionFrame;
 
@@ -8776,11 +8754,6 @@ mod simultaneous_entry_tests {
     /// them, and outside one there are none.
     #[test]
     fn only_a_token_liminal_entry_names_its_entrants_from_its_creating_effect() {
-        use crate::types::ability::EntryAttackDestination;
-        use crate::types::game_state::{
-            LiminalEntrant, LiminalEntry, MeldSelection, TokenProjection,
-        };
-
         let mut state = GameState::new_two_player(42);
         let [a, b, c] = [1, 2, 3].map(|n| {
             create_object(

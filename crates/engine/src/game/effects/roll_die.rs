@@ -246,8 +246,10 @@ pub(crate) fn resolve_step(
     // replacement-prevented roll (CR 614.6, which keeps `None`), the
     // instruction's result is a determined zero, so a later "equal to the
     // total of those results" reader cannot fall through to another channel.
+    // CR 608.2c: that zero is published like every instruction result, so a
+    // continuation drain keeps it.
     if count == 0 {
-        state.die_result_this_resolution = Some(0);
+        publish_die_result(state, Some(0));
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::RollDie,
             source_id: ability.source_id,

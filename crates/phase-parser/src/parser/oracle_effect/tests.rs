@@ -40447,6 +40447,87 @@ fn resolve_it_pronoun_any_subject() {
     assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::SelfRef);
 }
 
+/// CR 608.2c + CR 706.2: `condition_compares_only_event_amount` holds for a
+/// comparison of the triggering event's amount with a constant, on either side,
+/// and for nothing else: another quantity, a wrapped event amount, a constant
+/// against a constant, and every non-comparison condition (including a negated
+/// or conjoined event-amount check) name no event amount alone.
+#[test]
+fn condition_compares_only_event_amount_names_a_bare_event_amount_comparison() {
+    let amount = || QuantityExpr::Ref {
+        qty: QuantityRef::EventContextAmount,
+    };
+    let fixed = |value| QuantityExpr::Fixed { value };
+    let check = |lhs, rhs| AbilityCondition::QuantityCheck {
+        lhs,
+        comparator: Comparator::GE,
+        rhs,
+    };
+    assert!(condition_compares_only_event_amount(&check(
+        amount(),
+        fixed(4)
+    )));
+    assert!(condition_compares_only_event_amount(&check(
+        fixed(4),
+        amount()
+    )));
+    assert!(condition_compares_only_event_amount(&check(
+        amount(),
+        amount()
+    )));
+
+    assert!(!condition_compares_only_event_amount(&check(
+        fixed(1),
+        fixed(4)
+    )));
+    assert!(!condition_compares_only_event_amount(&check(
+        QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::Controller,
+            },
+        },
+        fixed(4)
+    )));
+    assert!(!condition_compares_only_event_amount(&check(
+        amount(),
+        QuantityExpr::Ref {
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: None,
+            },
+        }
+    )));
+    assert!(!condition_compares_only_event_amount(&check(
+        QuantityExpr::Offset {
+            inner: Box::new(amount()),
+            offset: 1,
+        },
+        fixed(4)
+    )));
+    assert!(!condition_compares_only_event_amount(
+        &AbilityCondition::Not {
+            condition: Box::new(check(amount(), fixed(4))),
+        }
+    ));
+    assert!(!condition_compares_only_event_amount(
+        &AbilityCondition::And {
+            conditions: vec![check(amount(), fixed(4))],
+        }
+    ));
+    assert!(!condition_compares_only_event_amount(
+        &AbilityCondition::PreviousEffectAmount {
+            comparator: Comparator::LE,
+            rhs: fixed(3),
+            channel: crate::types::ability::DamageChannel::Total,
+        }
+    ));
+    assert!(!condition_compares_only_event_amount(
+        &AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        }
+    ));
+}
+
 /// Issue #6507 (CR 122.1): `condition_refs_source_object` must
 /// recognize a source-scoped counter-threshold `QuantityCheck` ("if there are
 /// no mining counters on this land") as source-referential — that gate is what

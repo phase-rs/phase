@@ -17,7 +17,8 @@
 //! Class's first sentence, without its Learn rider). Beck carries Beck's half.
 //! Monoxa, Pixie Guide, Tayam, Rhythm of the Wild, Stolen Identity, Fathom Mage and
 //! Storm the Festival carry only the lines under test, and Rite of the Moth its
-//! first line, without its flashback.
+//! first line, without its flashback. Monoxa's threshold rows use its full text
+//! (`MONOXA_FULL`).
 //! Ever After, Myojin of Life's Web, Oblation, Llanowar Elves and Roaming Throne
 //! are verbatim.
 //! Humility, Maskwood Nexus, Twinflame and Second Harvest are verbatim, and so is
@@ -89,6 +90,7 @@ const CITY_OF_TRAITORS: &str = "When you play another land, sacrifice this land.
 const LOTUS_VALE: &str = "If this land would enter, sacrifice two untapped lands instead. If you do, put this land onto the battlefield. If you don't, put it into its owner's graveyard.\n{T}: Add three mana of any one color.";
 const TEMP_OF_THE_DAMNED: &str = "As this creature enters, roll a six-sided die. This creature enters with a number of funk counters on it equal to the result.\nAt the beginning of your upkeep, remove a funk counter from this creature. If you can't, sacrifice it.";
 const MONOXA: &str = "Whenever you roll a 3 or higher, Monoxa gains first strike until end of turn.\n{6}: Roll a six-sided die.";
+const MONOXA_FULL: &str = "Whenever you roll a 3 or higher, Monoxa gains first strike until end of turn. If the roll was 4 or higher, it gains menace until end of turn. If the roll was 5 or higher, it gains lifelink until end of turn.\n{6}: Roll a six-sided die.";
 const PIXIE_GUIDE: &str = "Grant an Advantage — If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.";
 const STORM_THE_FESTIVAL: &str = "Look at the top five cards of your library. You may put up to two permanent cards with mana value 5 or less from among them onto the battlefield. Put the rest on the bottom of your library in a random order.";
 const STOLEN_IDENTITY: &str = "Create a token that's a copy of target artifact or creature.";
@@ -9167,4 +9169,490 @@ fn a_harvested_token_copy_does_not_see_another_copys_roll() {
     let rolls = die_results(&events);
     assert_eq!(rolls.len(), 1, "reach: the Jammer token's copy rolls");
     assert_copy_event_settled(&board, &events, p1_before, |roll| roll, "T-e");
+}
+
+// ---------------------------------------------------------------------------
+// Monoxa's roll thresholds
+// ---------------------------------------------------------------------------
+
+/// M3. Monoxa, Midway Manager (full Oracle text) activates its own roll +
+/// CR 603.2 + CR 706.2 + CR 608.2c: "Whenever you roll a 3 or higher" triggers on
+/// a result of 3 or more, and "If the roll was N or higher" gates each later grant
+/// on that same roll, so menace needs 4 and lifelink 5. Each gated "it" is
+/// Monoxa. A roll of 2 triggers nothing.
+#[test]
+fn monoxas_grants_follow_the_roll_thresholds() {
+    fn monoxa_board(seed: u64) -> (GameRunner, ObjectId) {
+        let mut scenario = board(seed);
+        let monoxa = scenario
+            .add_creature_from_oracle(P0, "Monoxa, Midway Manager", 3, 3, MONOXA_FULL)
+            .id();
+        scenario.with_mana_pool(P0, green(6));
+        (scenario.build(), monoxa)
+    }
+    fn activate(runner: &mut GameRunner, monoxa: ObjectId) -> Vec<GameEvent> {
+        let mut events = Vec::new();
+        act(
+            runner,
+            GameAction::ActivateAbility {
+                source_id: monoxa,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            },
+            &mut events,
+        );
+        settle(runner, &mut events, DEFAULT_ANSWERS);
+        events
+    }
+    for roll in 2..=6u32 {
+        let seed = find_seed(&format!("a roll of {roll}"), |seed| {
+            let (mut runner, monoxa) = monoxa_board(seed);
+            die_results(&activate(&mut runner, monoxa)) == vec![roll]
+        });
+        reset_triggers_seen();
+        let (mut runner, monoxa) = monoxa_board(seed);
+        let rolls = die_results(&activate(&mut runner, monoxa));
+        assert_eq!(rolls, vec![roll], "reach: the seed's roll");
+        let what = format!("roll {roll}");
+        assert_eq!(
+            triggers_seen_from(monoxa),
+            usize::from(roll >= 3),
+            "{what}: the trigger"
+        );
+        let monoxa = &runner.state().objects[&monoxa];
+        assert_eq!(
+            monoxa.has_keyword(&Keyword::FirstStrike),
+            roll >= 3,
+            "{what}: first strike"
+        );
+        assert_eq!(
+            monoxa.has_keyword(&Keyword::Menace),
+            roll >= 4,
+            "{what}: menace"
+        );
+        assert_eq!(
+            monoxa.has_keyword(&Keyword::Lifelink),
+            roll >= 5,
+            "{what}: lifelink"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A resumed batch re-parks beneath its next paused member
+// ---------------------------------------------------------------------------
+
+/// The resolution frames at each prompt a batch row answered, in order.
+#[derive(Default)]
+struct BatchPrompts {
+    counters: Vec<Vec<FrameKind>>,
+    /// The frames and the natural results at each keep choice.
+    keeps: Vec<(Vec<FrameKind>, Vec<u8>)>,
+    creature_types: Vec<Vec<FrameKind>>,
+}
+
+/// Drive a batch to settled, answering each counter prompt with `pick` first,
+/// each keep choice by ignoring the dice it offers, and each creature-type
+/// choice with Dwarf, and record the frames at every prompt.
+fn settle_batch_prompts(
+    runner: &mut GameRunner,
+    events: &mut Vec<GameEvent>,
+    pick: FirstPick,
+) -> BatchPrompts {
+    let mut prompts = BatchPrompts::default();
+    for _ in 0..120 {
+        record_stack(runner.state());
+        let state = runner.state();
+        let frames = stack_frames(state);
+        let action = match &state.waiting_for {
+            WaitingFor::Priority { .. } if resolution_is_settled(state) => return prompts,
+            WaitingFor::ReplacementChoice { .. } if is_counter_prompt(state) => {
+                prompts.counters.push(frames);
+                GameAction::ChooseReplacement {
+                    index: replacement_index(state, pick.source_name()),
+                }
+            }
+            WaitingFor::DieKeepChoice {
+                ignorable_indices,
+                ignore_count,
+                results,
+                ..
+            } => {
+                prompts.keeps.push((frames, results.clone()));
+                GameAction::SelectDieRolls {
+                    ignore_indices: ignorable_indices
+                        .iter()
+                        .take(*ignore_count)
+                        .copied()
+                        .collect(),
+                }
+            }
+            WaitingFor::NamedChoice {
+                choice_type: ChoiceType::CreatureType { .. },
+                ..
+            } => {
+                prompts.creature_types.push(frames);
+                GameAction::ChooseOption {
+                    choice: "Dwarf".to_string(),
+                }
+            }
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::OrderTriggers { .. } => {
+                engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
+                continue;
+            }
+            other => panic!("unhandled prompt while settling a batch: {other:?}"),
+        };
+        act(runner, action, events);
+    }
+    panic!("the batch never settled");
+}
+
+/// The source each `DieRolled` was made for, in order.
+fn roll_sources(events: &[GameEvent]) -> Vec<Option<ObjectId>> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DieRolled {
+                pre_entry_source, ..
+            } => Some(*pre_entry_source),
+            _ => None,
+        })
+        .collect()
+}
+
+/// R1. Storm the Festival puts two Hammer Jammers onto the battlefield with
+/// Hardened Scales, Branching Evolution, a resident Brazen Dwarf and Soul
+/// Warden + CR 616.1f + CR 706.6 + CR 614.12a: each Jammer's counter placement
+/// asks its own replacement order. The second asks once the batch has resumed
+/// after the first answer, and the rest of the batch waits where a first
+/// member's pause puts it, so both entries complete, each with its own roll.
+#[test]
+fn a_resumed_batch_parks_again_at_its_next_members_counter_prompt() {
+    let two_jammers = |seed| {
+        let mut scenario = board(seed);
+        let first = jammer_card(&mut scenario);
+        let second = jammer_card(&mut scenario);
+        let festival =
+            newcomer_festival(scenario, add_counter_replacements, true, &[first, second]);
+        (festival, first, second)
+    };
+    let seed = find_seed("two differing batch rolls", |seed| {
+        let (mut board, first, second) = two_jammers(seed);
+        let mut events = Vec::new();
+        festival_keeps(
+            &mut board.runner,
+            board.festival,
+            vec![first, second],
+            &mut events,
+        );
+        settle_batch_prompts(&mut board.runner, &mut events, FirstPick::Scales);
+        let rolls = die_results(&events);
+        rolls.len() == 2 && rolls[0] != rolls[1]
+    });
+    for pick in FirstPick::BOTH {
+        let what = format!("{pick:?}");
+        reset_triggers_seen();
+        let (board, first, second) = two_jammers(seed);
+        let NewcomerFestival {
+            mut runner,
+            warden,
+            resident_dwarf,
+            festival,
+            ..
+        } = board;
+        let dwarf = resident_dwarf.expect("the resident Dwarf");
+        let p0_before = life(runner.state(), P0);
+        let p1_before = life(runner.state(), P1);
+        let mut events = Vec::new();
+        festival_keeps(&mut runner, festival, vec![first, second], &mut events);
+        let prompts = settle_batch_prompts(&mut runner, &mut events, pick);
+        let state = runner.state();
+        assert_eq!(
+            prompts.counters,
+            vec![
+                vec![
+                    FrameKind::PostReplacement,
+                    FrameKind::CounterAdditions,
+                    FrameKind::BatchDelivery,
+                ],
+                vec![
+                    FrameKind::PostReplacement,
+                    FrameKind::CounterAdditions,
+                    FrameKind::CounterAdditions,
+                    FrameKind::BatchDelivery,
+                ],
+            ],
+            "{what}: one counter prompt per Jammer, the batch on top at each"
+        );
+        let rolls = die_results(&events);
+        assert_ne!(rolls[0], rolls[1], "{what}: reach: the seed's rolls differ");
+        assert_eq!(roll_sources(&events), vec![Some(first), Some(second)]);
+        assert_eq!(
+            plus_counters(state, first),
+            pick.counters(rolls[0]),
+            "{what}: {rolls:?}"
+        );
+        assert_eq!(
+            plus_counters(state, second),
+            pick.counters(rolls[1]),
+            "{what}: {rolls:?}"
+        );
+        assert_eq!(zone(state, first), Zone::Battlefield, "{what}");
+        assert_eq!(zone(state, second), Zone::Battlefield, "{what}");
+        assert_eq!(triggers_seen_from(dwarf), 2, "{what}: one per roll");
+        assert_eq!(life(state, P1), p1_before - 2, "{what}");
+        assert_eq!(life(state, P0), p0_before + 2, "{what}: Warden twice");
+        assert_eq!(triggers_seen_from(first), 0, "{what}");
+        assert_eq!(triggers_seen_from(second), 0, "{what}");
+        assert_finished(state, &[first, second, dwarf, warden], &what);
+    }
+}
+
+/// R1v (issue #186, no dice). Storm the Festival puts two vanilla 2/2 creature
+/// cards (mana value 2) onto the battlefield with Thunderous Velocipede, Hardened
+/// Scales and Branching Evolution + CR 616.1f + CR 122.6 + CR 614.5: each entry's
+/// one additional counter asks its own replacement order, the second after the
+/// batch resumed, and both entries complete with (1 + 1) x 2 counters.
+#[test]
+fn a_resumed_vanilla_batch_parks_again_at_its_next_members_counter_prompt() {
+    let mut scenario = board(7);
+    let a = scenario
+        .add_creature_to_hand_from_oracle(P0, "Bear A", 2, 2, "")
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let b = scenario
+        .add_creature_to_hand_from_oracle(P0, "Bear B", 2, 2, "")
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let NewcomerFestival {
+        mut runner,
+        warden,
+        festival,
+        ..
+    } = newcomer_festival(
+        scenario,
+        |scenario| {
+            add_velocipede(scenario);
+            add_counter_replacements(scenario);
+        },
+        false,
+        &[a, b],
+    );
+    let p0_before = life(runner.state(), P0);
+    let mut events = Vec::new();
+    festival_keeps(&mut runner, festival, vec![a, b], &mut events);
+    let prompts = settle_batch_prompts(&mut runner, &mut events, FirstPick::Scales);
+    let state = runner.state();
+    assert_eq!(prompts.counters.len(), 2, "reach: one prompt per entry");
+    assert_eq!(
+        prompts.counters[0],
+        vec![FrameKind::CounterAdditions, FrameKind::BatchDelivery]
+    );
+    assert_eq!(plus_counters(state, a), FirstPick::Scales.counters(1));
+    assert_eq!(plus_counters(state, b), FirstPick::Scales.counters(1));
+    assert!(die_results(&events).is_empty(), "no dice");
+    assert_eq!(life(state, P0), p0_before + 2, "Warden twice");
+    assert_finished(state, &[warden], "R1v");
+}
+
+/// R1t. Storm the Festival puts Roaming Throne, then Hammer Jammer, onto the
+/// battlefield with Hardened Scales and Branching Evolution and a resident Brazen
+/// Dwarf + CR 614.12a + CR 616.1f: Throne's creature type is chosen first, and
+/// Jammer's counter placement asks its replacement order once the batch has
+/// resumed. Throne enters with Jammer's event, so it does not double the
+/// Dwarf's trigger on that roll (CR 603.6a + CR 603.10).
+#[test]
+fn a_resumed_batch_parks_again_after_a_creature_type_choice() {
+    reset_triggers_seen();
+    let mut scenario = board(7);
+    let resident = add_typed_dwarf(&mut scenario);
+    let throne = throne_card(&mut scenario, ManaCost::generic(4));
+    let jammer = jammer_card(&mut scenario);
+    let NewcomerFestival {
+        mut runner,
+        festival,
+        ..
+    } = newcomer_festival(scenario, add_counter_replacements, false, &[throne, jammer]);
+    seed_creature_types(&mut runner);
+    let p1_before = life(runner.state(), P1);
+    let mut events = Vec::new();
+    festival_keeps(&mut runner, festival, vec![throne, jammer], &mut events);
+    let prompts = settle_batch_prompts(&mut runner, &mut events, FirstPick::Scales);
+    let state = runner.state();
+    assert_eq!(prompts.creature_types, vec![vec![FrameKind::BatchDelivery]]);
+    assert_eq!(
+        prompts.counters,
+        vec![vec![
+            FrameKind::PostReplacement,
+            FrameKind::CounterAdditions,
+            FrameKind::BatchDelivery,
+        ]]
+    );
+    assert!(
+        chose_dwarf(state, throne),
+        "reach: Roaming Throne chose Dwarf"
+    );
+    let rolls = die_results(&events);
+    assert_eq!(rolls.len(), 1);
+    assert_eq!(
+        plus_counters(state, jammer),
+        FirstPick::Scales.counters(rolls[0]),
+        "{rolls:?}"
+    );
+    assert_eq!(triggers_seen_from(resident), 1, "Throne does not double it");
+    assert_eq!(life(state, P1), p1_before - 1);
+    assert_finished(state, &[resident], "R1t");
+}
+
+/// R1k. Storm the Festival puts two Hammer Jammers onto the battlefield with
+/// Barbarian Class and a resident Brazen Dwarf, on a seed where both rolls
+/// tie + CR 706.6 + CR 614.12a: each tie asks which die to ignore before its
+/// Jammer enters. The second asks once the batch has resumed, so the rest of the
+/// batch waits beneath that member's whole child stack and the frame that owns
+/// the choice stays on top. (a) No counter replacements; (b) Hardened Scales and
+/// Branching Evolution, Scales first, so each entry also asks its counter order.
+#[test]
+fn a_resumed_batch_parks_beneath_its_next_members_keep_choice() {
+    let cases: [FestivalCase; 2] = [
+        (None, add_barbarian_class),
+        (Some(FirstPick::Scales), |scenario| {
+            add_barbarian_class(scenario);
+            add_counter_replacements(scenario);
+        }),
+    ];
+    for (pick, extras) in cases {
+        let what = format!("{pick:?}");
+        let two_jammers = |seed| {
+            let mut scenario = board(seed);
+            let first = jammer_card(&mut scenario);
+            let second = jammer_card(&mut scenario);
+            let festival = newcomer_festival(scenario, extras, true, &[first, second]);
+            (festival, first, second)
+        };
+        let driver_pick = pick.unwrap_or(FirstPick::Scales);
+        let seed = find_seed("two tied batch rolls", |seed| {
+            let (mut board, first, second) = two_jammers(seed);
+            let mut events = Vec::new();
+            festival_keeps(
+                &mut board.runner,
+                board.festival,
+                vec![first, second],
+                &mut events,
+            );
+            settle_batch_prompts(&mut board.runner, &mut events, driver_pick)
+                .keeps
+                .len()
+                == 2
+        });
+        reset_triggers_seen();
+        let (board, first, second) = two_jammers(seed);
+        let NewcomerFestival {
+            mut runner,
+            warden,
+            resident_dwarf,
+            festival,
+            ..
+        } = board;
+        let dwarf = resident_dwarf.expect("the resident Dwarf");
+        let p1_before = life(runner.state(), P1);
+        let mut events = Vec::new();
+        festival_keeps(&mut runner, festival, vec![first, second], &mut events);
+        let prompts = settle_batch_prompts(&mut runner, &mut events, driver_pick);
+        let state = runner.state();
+        let keep_frames = vec![
+            FrameKind::BatchDelivery,
+            FrameKind::PostReplacement,
+            FrameKind::AbilityContinuation,
+            FrameKind::DieRoll,
+        ];
+        assert_eq!(prompts.keeps.len(), 2, "{what}: reach: both rolls tie");
+        for (frames, _) in &prompts.keeps {
+            assert_eq!(*frames, keep_frames, "{what}");
+        }
+        assert_eq!(
+            prompts.counters.len(),
+            usize::from(pick.is_some()) * 2,
+            "{what}"
+        );
+        let counters = |naturals: &[u8]| {
+            let survivors = survivors_total(naturals);
+            pick.map_or(survivors, |pick| pick.counters(survivors))
+        };
+        assert_eq!(
+            plus_counters(state, first),
+            counters(&prompts.keeps[0].1),
+            "{what}: {:?}",
+            prompts.keeps
+        );
+        assert_eq!(
+            plus_counters(state, second),
+            counters(&prompts.keeps[1].1),
+            "{what}: {:?}",
+            prompts.keeps
+        );
+        assert_eq!(triggers_seen_from(dwarf), 2, "{what}: one per roll");
+        assert_eq!(life(state, P1), p1_before - 2, "{what}");
+        assert_eq!(triggers_seen_from(first), 0, "{what}");
+        assert_eq!(triggers_seen_from(second), 0, "{what}");
+        assert_finished(state, &[first, second, dwarf, warden], &what);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A zero-dice instruction in a resumed batch
+// ---------------------------------------------------------------------------
+
+/// Z2 (guard). Storm the Festival puts Hammer Jammer and Hydradoodle onto the
+/// battlefield, in both orders, with Hardened Scales, Branching Evolution and
+/// Angelic Shield + CR 107.3m + CR 706.1 + CR 706.4: Hydradoodle was not cast, so
+/// its X is 0; it rolls no dice and enters with no counters (its ruling: "you
+/// won't roll any dice as it enters and it will be a 0/0"), and Angelic Shield
+/// keeps it alive. Hammer Jammer's roll asks its counter order, before or after
+/// Hydradoodle is delivered.
+#[test]
+fn a_zero_dice_member_of_a_paused_batch_enters_with_no_counters() {
+    for jammer_first in [true, false] {
+        for pick in FirstPick::BOTH {
+            let what = format!("jammer first {jammer_first}, {pick:?}");
+            let mut scenario = board(7);
+            scenario.add_enchantment_from_oracle(P0, "Angelic Shield", ANGELIC_SHIELD);
+            let jammer = jammer_card(&mut scenario);
+            let doodle = scenario
+                .add_creature_to_hand_from_oracle(P0, "Hydradoodle", 0, 0, HYDRADOODLE)
+                .with_mana_cost(ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![
+                        ManaCostShard::X,
+                        ManaCostShard::X,
+                        ManaCostShard::Green,
+                        ManaCostShard::Green,
+                    ],
+                })
+                .id();
+            let cards = if jammer_first {
+                vec![jammer, doodle]
+            } else {
+                vec![doodle, jammer]
+            };
+            let NewcomerFestival {
+                mut runner,
+                warden,
+                festival,
+                ..
+            } = newcomer_festival(scenario, add_counter_replacements, false, &cards);
+            let mut events = Vec::new();
+            festival_keeps(&mut runner, festival, cards, &mut events);
+            let prompts = settle_batch_prompts(&mut runner, &mut events, pick);
+            let state = runner.state();
+            assert_eq!(prompts.counters.len(), 1, "{what}: Jammer's prompt only");
+            assert_eq!(roll_sources(&events), vec![Some(jammer)], "{what}");
+            assert_eq!(roll_resolved_for(&events, doodle), 1, "{what}: reach");
+            assert_eq!(plus_counters(state, doodle), 0, "{what}");
+            assert_eq!(zone(state, doodle), Zone::Battlefield, "{what}");
+            let r = die_results(&events)[0];
+            assert_eq!(plus_counters(state, jammer), pick.counters(r), "{what}");
+            assert_finished(state, &[warden], &what);
+        }
+    }
 }

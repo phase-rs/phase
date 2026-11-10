@@ -29691,6 +29691,46 @@ mod tests {
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 
+    /// Composed fixture: no printed card resumes a continuation whose die
+    /// instruction rolls zero dice. Hydradoodle and Neverwinter Hydra entering
+    /// with X = 0 (CR 107.3m) are the nearest printed anchors. CR 706.1 +
+    /// CR 706.4 + CR 608.2c: the zero-dice instruction's result is a determined
+    /// 0, published like every instruction result, so the continuation drain
+    /// keeps it instead of restoring the caller's earlier scalar.
+    #[test]
+    fn continuation_drain_preserves_a_zero_dice_results_zero() {
+        let (mut state, source, ambient) = continuation_die_context_fixture(Effect::RollDie {
+            count: QuantityExpr::Fixed { value: 0 },
+            sides: 6,
+            modifier: None,
+            results: vec![],
+        });
+        let mut events = vec![];
+        drain_pending_continuation(&mut state, &mut events);
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::RollDie,
+                    source_id,
+                    ..
+                } if *source_id == source
+            )),
+            "reach: the zero-dice instruction resolved"
+        );
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::DieRolled { .. })));
+        assert_eq!(state.die_result_this_resolution, Some(0));
+        assert_eq!(state.die_result_publication, Some(Some(0)));
+        assert_eq!(state.current_trigger_event, Some(ambient.clone()));
+        assert_eq!(state.current_trigger_events, vec![ambient]);
+        assert_eq!(state.current_trigger_match_count, Some(17));
+        assert!(state.resolution_stack.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
     /// CR 603.2h + CR 608.2d: the "would it prompt" authority agrees with production for
     /// an instance whose controller already took the ability's indicated action — no gate
     /// opens, so no stored "always accept" answer is read for it. The instance is a clone
