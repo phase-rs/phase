@@ -329,8 +329,8 @@ fn resolve_bound_attachment_operation(
     let attachment_ids =
         resolve_attachment_ids(state, ability, attachment_filter, &mut target_slots);
     if attachment_ids.is_empty() {
-        // CR 400.7: a referent that left play is a new object, so the attach
-        // attaches nothing and the instruction still resolved.
+        // CR 400.7 + CR 608.2b: a referent that became a new object or an
+        // illegal target is not attached, and the instruction still resolved.
         if attachment_referent_departed(state, ability, attachment_filter) {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
@@ -1745,7 +1745,7 @@ fn attachment_referent_departed(
         TargetFilter::SelfRef => trigger_source.or_else(|| ability.source_ref(state)),
         TargetFilter::OriginalSource => trigger_source,
         TargetFilter::GrantingObject { bound } => bound.or(ability.context.granting_object),
-        // CR 608.2h: the incarnation the firing event recorded for its object.
+        // CR 400.7: the incarnation the firing event recorded for its object.
         TargetFilter::TriggeringSource | TargetFilter::AttachedTo => {
             match crate::game::targeting::resolve_event_context_target(
                 state,
