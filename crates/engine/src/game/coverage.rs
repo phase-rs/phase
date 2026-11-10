@@ -7728,12 +7728,16 @@ pub fn compute_card_face_coverage(
 /// Compute full coverage information for a single card face against the engine's
 /// global registries and the default subtype lexicon.
 pub fn card_face_coverage(face: &CardFace) -> CardFaceCoverage {
-    compute_card_face_coverage(
-        face,
-        trigger_registry(),
-        static_registry(),
-        default_valid_subtypes(),
-    )
+    card_face_coverage_with_subtypes(face, default_valid_subtypes())
+}
+
+/// Like [`card_face_coverage`], but against a caller-supplied subtype lexicon
+/// (see [`collect_valid_subtypes`]) so the verdict matches `analyze_coverage`.
+pub fn card_face_coverage_with_subtypes(
+    face: &CardFace,
+    valid_subtypes: &HashSet<String>,
+) -> CardFaceCoverage {
+    compute_card_face_coverage(face, trigger_registry(), static_registry(), valid_subtypes)
 }
 
 /// Returns the list of unsupported handler labels for a card face (e.g.
@@ -8343,7 +8347,7 @@ pub fn default_valid_subtypes() -> &'static HashSet<String> {
 /// The MTG Comprehensive Rules define valid subtypes (CR 205.3), but the
 /// printed corpus is the authoritative source for the engine — anything
 /// that has appeared on a real card's type line is valid.
-fn collect_valid_subtypes(card_db: &CardDatabase) -> HashSet<String> {
+pub fn collect_valid_subtypes(card_db: &CardDatabase) -> HashSet<String> {
     let mut set: HashSet<String> = default_valid_subtypes().clone();
     set.extend(
         card_db

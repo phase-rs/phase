@@ -3693,11 +3693,15 @@ fn evaluate_deck_coverage(db: &CardDatabase, request: &DeckCompatibilityRequest)
     // it is excluded from the total instead. Unknown cards are surfaced to the
     // user separately, through `collect_unknown_cards`.
     let mut resolved_unique = 0usize;
+    // Same database-derived subtype lexicon `analyze_coverage` uses, so the
+    // deck verdict matches coverage-report for valid subtypes printed elsewhere.
+    let valid_subtypes = crate::game::coverage::collect_valid_subtypes(db);
 
     for (canonical, name) in &unique_names {
         if let Some(face) = db.get_face_by_name(name) {
             resolved_unique += 1;
-            let coverage = crate::game::coverage::card_face_coverage(face);
+            let coverage =
+                crate::game::coverage::card_face_coverage_with_subtypes(face, &valid_subtypes);
             if coverage.is_supported() {
                 supported_count += 1;
             } else {
