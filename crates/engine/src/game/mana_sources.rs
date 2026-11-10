@@ -2636,15 +2636,31 @@ fn mana_ability_usable_for_payment(
 /// ability's own mana cost deferred to the payment it is activated in
 /// ([`ManaPayabilityMode::Planning`]), so a producer another producer funds is
 /// counted. Decided without a legality simulation.
+///
+/// For the activation window (CapacityUse::ActivationWindow), we do NOT check
+/// the mana ability's output restrictions (CR 106.6 spend restrictions) here.
+/// Those restrictions are evaluated later in the witness search when mana is
+/// actually spent (via pool_composition and mana_unit_permits_payment_context),
+/// using the correct intermediate payment context for each spend. This allows
+/// mana abilities like Grand Architect (restricted to artifact spells/abilities)
+/// to fund other mana abilities like Prismite ({2}: Add one mana of any color)
+/// even when the final activation is not an artifact ability.
 fn mana_ability_plannable_for_payment(
     state: &GameState,
     controller: PlayerId,
     object_id: ObjectId,
     idx: usize,
     ability: &AbilityDefinition,
-    payment_context: Option<&PaymentContext<'_>>,
+    _payment_context: Option<&PaymentContext<'_>>,
     gates: &mana_abilities::ManaActivationGates,
 ) -> bool {
+    // CR 304.5 + CR 605.1: Mana classification does not override printed timing limits.
+    if ability
+        .activation_restrictions
+        .contains(&ActivationRestriction::AsInstant)
+    {
+        return false;
+    }
     mana_abilities::mana_ability_ready_without_simulation_gated(
         state,
         controller,
@@ -2654,16 +2670,7 @@ fn mana_ability_plannable_for_payment(
         ManaPayabilityMode::Planning,
         gates,
     ) && activation_condition_satisfied(state, controller, object_id, idx, ability)
-        && match &*ability.effect {
-            Effect::Mana { restrictions, .. } => mana_ability_allowed_for_payment(
-                ability,
-                restrictions,
-                state,
-                object_id,
-                payment_context,
-            ),
-            _ => false,
-        }
+        && matches!(&*ability.effect, Effect::Mana { .. })
 }
 
 /// CR 605.3b: Net mana one usable activation contributes to planned capacity.
@@ -2727,13 +2734,13 @@ pub(crate) fn has_activatable_player_choice_mana_ability_for_payment(
     state: &GameState,
     controller: PlayerId,
     exclude: Option<ObjectId>,
-    payment_context: Option<&PaymentContext<'_>>,
+    _payment_context: Option<&PaymentContext<'_>>,
 ) -> bool {
     activatable_player_choice_mana_abilities_for_payment(
         state,
         controller,
         exclude,
-        payment_context,
+        _payment_context,
     )
     .next()
     .is_some()
@@ -2747,7 +2754,7 @@ pub(crate) fn activatable_player_choice_mana_abilities_for_payment<'a>(
     state: &'a GameState,
     controller: PlayerId,
     exclude: Option<ObjectId>,
-    payment_context: Option<&'a PaymentContext<'a>>,
+    _payment_context: Option<&'a PaymentContext<'a>>,
 ) -> impl Iterator<Item = (ObjectId, usize)> + 'a {
     player_choice_mana_abilities_for_payment(state, controller).filter(
         move |&(object_id, index)| {
@@ -2763,7 +2770,7 @@ pub(crate) fn activatable_player_choice_mana_abilities_for_payment<'a>(
                             object_id,
                             index,
                             ability,
-                            payment_context,
+                            None,
                         )
                     })
         },
@@ -2813,14 +2820,16 @@ fn player_choice_mana_ability_shape(ability: &AbilityDefinition) -> bool {
 
 /// CR 605.3a + CR 117.1d: whether one candidate mana ability of
 /// [`player_choice_mana_abilities_for_payment`] can be activated on `state`
-/// now, with the caller's payment context.
+/// now. The payment context is not used for the readiness screen; output
+/// restrictions (CR 106.6) are evaluated later in the witness search when mana
+/// is actually spent.
 pub(crate) fn player_choice_mana_ability_ready_for_payment(
     state: &GameState,
     controller: PlayerId,
     object_id: ObjectId,
     idx: usize,
     ability: &AbilityDefinition,
-    payment_context: Option<&PaymentContext<'_>>,
+    _payment_context: Option<&PaymentContext<'_>>,
 ) -> bool {
     let gates = mana_abilities::ManaActivationGates::compute(state);
     player_choice_mana_ability_passes_screen(
@@ -2829,7 +2838,7 @@ pub(crate) fn player_choice_mana_ability_ready_for_payment(
         object_id,
         idx,
         ability,
-        payment_context,
+        None,
         &gates,
     ) && mana_abilities::can_activate_mana_ability_now_gated(
         state, controller, object_id, idx, ability, &gates,
@@ -2839,16 +2848,24 @@ pub(crate) fn player_choice_mana_ability_ready_for_payment(
 /// CR 605.3a + CR 117.1d: every check of
 /// [`player_choice_mana_ability_ready_for_payment`] that needs no legality
 /// simulation — the candidate's shape, its source's readiness (a tapped source
-/// can't pay a {T} cost, CR 107.5 + CR 118.3), its activation condition and its mana's
-/// spend restrictions. A candidate that fails it is not ready, so a caller
-/// that bounds its simulations need not spend one on it.
+/// can't pay a {T} cost, CR 107.5 + CR 118.3), its activation condition. A
+/// candidate that fails it is not ready, so a caller that bounds its simulations
+/// need not spend one on it.
+///
+/// We do NOT check the mana ability's output restrictions (CR 106.6 spend
+/// restrictions) here. Those restrictions are evaluated later in the witness
+/// search when mana is actually spent (via pool_composition and
+/// mana_unit_permits_payment_context), using the correct intermediate payment
+/// context for each spend. This allows mana abilities like Grand Architect
+/// (restricted to artifact spells/abilities) to be activated in the window even
+/// when the final activation is not an artifact ability.
 pub(crate) fn player_choice_mana_ability_passes_screen(
     state: &GameState,
     controller: PlayerId,
     object_id: ObjectId,
     idx: usize,
     ability: &AbilityDefinition,
-    payment_context: Option<&PaymentContext<'_>>,
+    _payment_context: Option<&PaymentContext<'_>>,
     gates: &mana_abilities::ManaActivationGates,
 ) -> bool {
     if !player_choice_mana_ability_shape(ability) {
@@ -2876,16 +2893,7 @@ pub(crate) fn player_choice_mana_ability_passes_screen(
     if !activation_condition_satisfied(state, controller, object_id, idx, ability) {
         return false;
     }
-    match &*ability.effect {
-        Effect::Mana { restrictions, .. } => mana_ability_allowed_for_payment(
-            ability,
-            restrictions,
-            state,
-            object_id,
-            payment_context,
-        ),
-        _ => false,
-    }
+    matches!(&*ability.effect, Effect::Mana { .. })
 }
 
 /// CR 117.1d + CR 601.2g: One activation's producible mana shape for the

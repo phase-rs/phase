@@ -28215,8 +28215,11 @@ fn payable_with_mana_ability_window_mana(
             };
             // An exhausted search proves nothing, so it offers nothing: a manual
             // window opened on it could commit a sacrifice the activation then
-            // can't use (CR 733.1 lets the player reverse only the mana
-            // abilities, not a library shuffle or the activation's own costs).
+            // can't use. CR 733.1 says "the entire action is reversed and any
+            // payments already made are canceled," with separate provisions for
+            // mana abilities and hidden-zone operations. The engine currently
+            // does not model this full reversal; a witness that exhausts its
+            // budget without finding a payable path is treated as inconclusive.
             mana_ability_window_mana_witness(
                 starting_board,
                 player,
@@ -28305,7 +28308,12 @@ fn mana_ability_window_mana_witness(
     // Readiness is decided per board, inside the search's budget.
     let candidates: Vec<(ObjectId, usize)> =
         super::mana_sources::player_choice_mana_abilities_for_payment(state, player).collect();
-    let distinguished_mana_types = payment_distinguished_mana_types(state, cost, &candidates);
+    let distinguished_mana_types = payment_distinguished_mana_types(
+        state,
+        cost,
+        &candidates,
+        activation_context.mana_color_constraint,
+    );
     let spend_contexts = candidates
         .iter()
         .filter(|(id, index)| {
@@ -28323,7 +28331,7 @@ fn mana_ability_window_mana_witness(
         payable,
         candidates: &candidates,
         budget: MANA_ABILITY_WINDOW_WITNESS_BUDGET,
-        color_constraint: activation_context.mana_color_constraint,
+        _color_constraint: activation_context.mana_color_constraint,
         payment_context: activation_context,
         distinguished_mana_types,
         spend_contexts,
@@ -28333,13 +28341,17 @@ fn mana_ability_window_mana_witness(
 
 /// CR 106.1 + CR 107.4: the mana types the window's payments can tell apart —
 /// each type some mana symbol of `cost`, or of a candidate mana ability's own
-/// cost, can be paid with. A unit of any other type pays only generic mana, so
-/// one such type stands for all of them. `None` when a symbol is paid by
-/// something beyond the unit's type ({S}: snow), which no such stand-in keeps.
+/// cost, can be paid with. Also includes the final activation's color constraint
+/// (Throne of Eldraine: "Spend only mana of the chosen color") so that mana
+/// abilities producing that color are tried. A unit of any other type pays only
+/// generic mana, so one such type stands for all of them. `None` when a symbol
+/// is paid by something beyond the unit's type ({S}: snow), which no such
+/// stand-in keeps.
 fn payment_distinguished_mana_types(
     state: &GameState,
     cost: &AbilityCost,
     candidates: &[(ObjectId, usize)],
+    color_constraint: ActivationManaColorConstraint,
 ) -> Option<Vec<ManaType>> {
     use mana_payment::ShardRequirement;
     let candidate_costs = candidates.iter().filter_map(|(id, index)| {
@@ -28368,6 +28380,11 @@ fn payment_distinguished_mana_types(
             }
         }
     }
+    // Include the final activation's color constraint so that mana abilities
+    // producing that color are tried (e.g., Throne of Eldraine needs green).
+    if let ActivationManaColorConstraint::Only(color) = color_constraint {
+        types.push(ManaType::from(color));
+    }
     Some(types)
 }
 
@@ -28377,7 +28394,10 @@ struct ManaWindowWitnessSearch<'a, F> {
     payable: &'a F,
     candidates: &'a [(ObjectId, usize)],
     budget: usize,
-    color_constraint: ActivationManaColorConstraint,
+    /// CR 106.6: the final activation's color constraint. Not used for
+    /// filtering intermediate mana ability color choices (those are filtered
+    /// by distinguished_mana_types and pool_composition).
+    _color_constraint: ActivationManaColorConstraint,
     /// CR 106.6: the activation's own payment context, so a candidate's
     /// restricted mana is judged exactly as the live window judges it.
     payment_context: ActivationPaymentContext,
@@ -28397,10 +28417,15 @@ type PoolCompositionKey = (Option<ManaType>, Vec<bool>);
 impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
     /// Whether some activations of `candidates` on `board` reach a
     /// board on which the cost is payable.
+    ///
+    /// Interleaves readiness checking with activation attempts (CR 605.3c):
+    /// for each candidate, check readiness and immediately try activating it
+    /// before moving to the next candidate. This prevents spending the full
+    /// budget on readiness checks for many ready producers (e.g., 257
+    /// Ashnod's Altars) before trying the first one that could succeed.
     fn from(&mut self, board: &GameState) -> WitnessOutcome {
         let player = self.player;
         let gates = super::mana_abilities::ManaActivationGates::compute(board);
-        let mut activatable: Vec<(ObjectId, usize, AbilityDefinition)> = Vec::new();
         for &(mana_source, index) in self.candidates {
             let Some(def) = board
                 .objects
@@ -28409,57 +28434,54 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
             else {
                 continue;
             };
-            let context = self.payment_context.as_payment_context();
             // CR 601.2g + CR 118.3: a candidate the screen refuses (a tapped
             // source's {T} cost, an unmet condition) is not ready, and judging
             // it simulates nothing, so it costs no budget: no number of
             // irrelevant producers keeps the search from the route that works.
+            // Output restrictions (CR 106.6) are NOT checked here; they are
+            // evaluated in pool_composition when mana is actually spent.
             if !super::mana_sources::player_choice_mana_ability_passes_screen(
                 board,
                 player,
                 mana_source,
                 index,
                 def,
-                Some(&context),
+                None,
                 &gates,
             ) {
                 continue;
             }
-            // A readiness verdict past the screen may simulate the activation
-            // on a clone, so it spends the same budget a board does.
-            let Some(budget) = self.budget.checked_sub(1) else {
-                return WitnessOutcome::BudgetExhausted;
-            };
-            self.budget = budget;
-            if super::mana_abilities::can_activate_mana_ability_now_gated(
+            // Try this activation immediately before checking the next candidate.
+            // The screen already verified readiness; activate_mana_ability will
+            // handle cost payment and any prompts, and try_each accounts for
+            // budget via clone_board.
+            let outcome = self.try_each(
                 board,
-                player,
-                mana_source,
-                index,
-                def,
-                &gates,
-            ) {
-                activatable.push((mana_source, index, def.clone()));
+                board,
+                std::iter::once((mana_source, index, def.clone())),
+                false,
+                |next, (mana_source, index, def)| {
+                    super::mana_abilities::activate_mana_ability(
+                        next,
+                        mana_source,
+                        player,
+                        index,
+                        &def,
+                        &mut Vec::new(),
+                        ManaAbilityResume::Priority,
+                        None,
+                    )
+                },
+            );
+            if outcome != WitnessOutcome::Unpayable {
+                return outcome;
+            }
+            // If budget exhausted, stop searching.
+            if self.budget == 0 {
+                return WitnessOutcome::BudgetExhausted;
             }
         }
-        self.try_each(
-            board,
-            board,
-            activatable,
-            false,
-            |next, (mana_source, index, def)| {
-                super::mana_abilities::activate_mana_ability(
-                    next,
-                    mana_source,
-                    player,
-                    index,
-                    &def,
-                    &mut Vec::new(),
-                    ManaAbilityResume::Priority,
-                    None,
-                )
-            },
-        )
+        WitnessOutcome::Unpayable
     }
 
     /// Tries each of `answers` on its own clone of `next` with `answer`, then
@@ -28685,108 +28707,79 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
     }
 
     /// CR 106.1 + CR 605.3b + CR 106.6: the answers to a mana ability's color
-    /// prompt that can matter to this payment, produced lazily. Under a spend
-    /// rider (Throne of Eldraine: "Spend only mana of the chosen color to
-    /// activate this ability.") only mana of that color can be spent, so the
-    /// one answer is all of it. Otherwise answers that differ only in units of
-    /// types no payment tells apart ([`payment_distinguished_mana_types`]) are
-    /// one answer — The Golden Throne's three mana for a {2} is one answer, not
-    /// thirty-five — and each single-type answer is tried first.
+    /// prompt that can matter to this payment, produced lazily. We do NOT filter
+    /// by the final activation's color constraint (Throne of Eldraine: "Spend
+    /// only mana of the chosen color") here, because intermediate mana abilities
+    /// (Molten Slagheap -> Blood Celebrant) may produce colors that are then
+    /// converted. The final constraint is enforced in pool_composition when mana
+    /// is actually spent. Answers that differ only in types no payment tells
+    /// apart ([`payment_distinguished_mana_types`]) are one answer.
     fn payment_relevant_mana_choice_answers<'p>(
         &self,
         prompt: &'p ManaChoicePrompt,
     ) -> Box<dyn Iterator<Item = ManaChoice> + 'p> {
-        match self.color_constraint {
-            ActivationManaColorConstraint::Only(color) => {
-                let required = ManaType::from(color);
-                match prompt {
-                    ManaChoicePrompt::SingleColor { options } => Box::new(
-                        options
-                            .contains(&required)
-                            .then_some(ManaChoice::SingleColor(required))
-                            .into_iter(),
-                    ),
-                    ManaChoicePrompt::Combination { options } => Box::new(
-                        options
-                            .iter()
-                            .filter(move |combo| combo.iter().all(|unit| *unit == required))
-                            .cloned()
-                            .map(ManaChoice::Combination),
-                    ),
-                    ManaChoicePrompt::AnyCombination { count, options } => Box::new(
-                        options
-                            .contains(&required)
-                            .then(|| ManaChoice::Combination(vec![required; *count]))
-                            .into_iter(),
-                    ),
+        let Some(distinguished) = self.distinguished_mana_types.clone() else {
+            return match prompt {
+                ManaChoicePrompt::AnyCombination { count, options } => {
+                    any_combination_answers(*count, options.clone())
                 }
-            }
-            ActivationManaColorConstraint::Impossible => Box::new(std::iter::empty()),
-            ActivationManaColorConstraint::Unrestricted => {
-                let Some(distinguished) = self.distinguished_mana_types.clone() else {
-                    return match prompt {
-                        ManaChoicePrompt::AnyCombination { count, options } => {
-                            any_combination_answers(*count, options.clone())
-                        }
-                        _ => mana_choice_answers(prompt),
-                    };
-                };
-                // The told-apart types an answer offers, then one stand-in for
-                // the rest.
-                let representatives = |options: &[ManaType]| -> Vec<ManaType> {
-                    let mut kept: Vec<ManaType> = options
+                _ => mana_choice_answers(prompt),
+            };
+        };
+        // The told-apart types an answer offers, then one stand-in for
+        // the rest.
+        let representatives = |options: &[ManaType]| -> Vec<ManaType> {
+            let mut kept: Vec<ManaType> = options
+                .iter()
+                .copied()
+                .filter(|unit| distinguished.contains(unit))
+                .collect();
+            kept.extend(
+                options
+                    .iter()
+                    .copied()
+                    .find(|unit| !distinguished.contains(unit)),
+            );
+            kept
+        };
+        match prompt {
+            ManaChoicePrompt::SingleColor { options } => Box::new(
+                representatives(options)
+                    .into_iter()
+                    .map(ManaChoice::SingleColor),
+            ),
+            ManaChoicePrompt::Combination { options } => {
+                // Keyed by how many units of each told-apart type the
+                // combination adds, and how many of any other.
+                let key = |combo: &[ManaType]| {
+                    let told_apart: Vec<usize> = distinguished
                         .iter()
-                        .copied()
-                        .filter(|unit| distinguished.contains(unit))
+                        .map(|kind| combo.iter().filter(|unit| *unit == kind).count())
                         .collect();
-                    kept.extend(
-                        options
-                            .iter()
-                            .copied()
-                            .find(|unit| !distinguished.contains(unit)),
-                    );
-                    kept
+                    let others = combo
+                        .iter()
+                        .filter(|unit| !distinguished.contains(unit))
+                        .count();
+                    (told_apart, others)
                 };
-                match prompt {
-                    ManaChoicePrompt::SingleColor { options } => Box::new(
-                        representatives(options)
-                            .into_iter()
-                            .map(ManaChoice::SingleColor),
-                    ),
-                    ManaChoicePrompt::Combination { options } => {
-                        // Keyed by how many units of each told-apart type the
-                        // combination adds, and how many of any other.
-                        let key = |combo: &[ManaType]| {
-                            let told_apart: Vec<usize> = distinguished
-                                .iter()
-                                .map(|kind| combo.iter().filter(|unit| *unit == kind).count())
-                                .collect();
-                            let others = combo
-                                .iter()
-                                .filter(|unit| !distinguished.contains(unit))
-                                .count();
-                            (told_apart, others)
-                        };
-                        let mut seen = Vec::new();
-                        let kept: Vec<ManaChoice> = options
-                            .iter()
-                            .filter(|combo| {
-                                let combo_key = key(combo);
-                                let fresh = !seen.contains(&combo_key);
-                                if fresh {
-                                    seen.push(combo_key);
-                                }
-                                fresh
-                            })
-                            .cloned()
-                            .map(ManaChoice::Combination)
-                            .collect();
-                        Box::new(kept.into_iter())
-                    }
-                    ManaChoicePrompt::AnyCombination { count, options } => {
-                        any_combination_answers(*count, representatives(options))
-                    }
-                }
+                let mut seen = Vec::new();
+                let kept: Vec<ManaChoice> = options
+                    .iter()
+                    .filter(|combo| {
+                        let combo_key = key(combo);
+                        let fresh = !seen.contains(&combo_key);
+                        if fresh {
+                            seen.push(combo_key);
+                        }
+                        fresh
+                    })
+                    .cloned()
+                    .map(ManaChoice::Combination)
+                    .collect();
+                Box::new(kept.into_iter())
+            }
+            ManaChoicePrompt::AnyCombination { count, options } => {
+                any_combination_answers(*count, representatives(options))
             }
         }
     }
