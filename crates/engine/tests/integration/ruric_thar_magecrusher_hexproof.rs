@@ -20,16 +20,19 @@ use engine::game::keywords::has_hexproof;
 use engine::game::layers::flush_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::game::zones::move_to_zone;
+use engine::game::zones::{apply_resolved_zone_change, move_to_zone};
 use engine::types::ability::{DamageKindFilter, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::format::{ChallengeDeck, FormatConfig};
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, ProtectionTarget};
 use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::resolved_commands::{
+    ResolvedRulesCommand, ResolvedZoneChangeCommand, ResolvedZoneChangeReplayInvariantError,
+};
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db;
@@ -330,6 +333,159 @@ fn r6_flicker_restores_hexproof() {
         !can_target(&back, ruric, P0),
         "the returned Ruric is a new object and has hexproof again"
     );
+}
+
+/// The damage-history facts of `id` as one comparable row: (combat latch,
+/// noncombat latch, Any-set membership, hexproof, zone, incarnation).
+fn damage_history_row(state: &GameState, id: ObjectId) -> (bool, bool, bool, bool, Zone, u64) {
+    let obj = &state.objects[&id];
+    (
+        obj.dealt_damage_kinds.has(DamageKindFilter::CombatOnly),
+        obj.dealt_damage_kinds.has(DamageKindFilter::NoncombatOnly),
+        state.objects_that_dealt_damage.contains(&id),
+        has_hexproof(obj),
+        obj.zone,
+        obj.incarnation,
+    )
+}
+
+/// P1 - CR 400.7: the recorded Exile and Battlefield zone commands, replayed
+/// through `apply_resolved_zone_change` on the pre-move state, retire Ruric's
+/// damage history exactly as the live blink does: the latch and the Any-set
+/// entry are gone already in Exile (a stale latch there is observable, since
+/// the layer condition reads the object in any zone), and the returned Ruric
+/// is a new object with hexproof. A second Ruric that also dealt combat damage
+/// and does not move keeps its history in both (retirement is per object).
+#[test]
+fn p1_replayed_exile_and_battlefield_commands_retire_damage_history_like_live() {
+    let mut scenario = base_scenario();
+    let ruric = add_ruric(&mut scenario, P0, 7);
+    let ruric_b = add_ruric(&mut scenario, P0, 7);
+    let mut runner = scenario.build();
+
+    let life_before = runner.state().players[1].life;
+    run_combat(&mut runner, &[ruric, ruric_b], &[]);
+    assert_eq!(
+        runner.state().players[1].life,
+        life_before - 14,
+        "reach-guard: both Rurics dealt combat damage to P1"
+    );
+    flush_layers(runner.state_mut());
+    for id in [ruric, ruric_b] {
+        assert!(dealt(&runner, id, DamageKindFilter::CombatOnly));
+        assert!(runner.state().objects_that_dealt_damage.contains(&id));
+        assert!(
+            !has_hexproof(&runner.state().objects[&id]),
+            "reach-guard: hexproof is gone before the move, so a later TRUE is a restore"
+        );
+    }
+
+    let pre = runner.state().clone();
+    let journal_start = pre.resolved_rules_journal.entries().len();
+
+    // Live: the production zone pipeline.
+    let mut live = pre.clone();
+    let mut events = Vec::new();
+    move_to_zone(&mut live, ruric, Zone::Exile, &mut events);
+    let live_mid = damage_history_row(&live, ruric);
+    move_to_zone(&mut live, ruric, Zone::Battlefield, &mut events);
+    flush_layers(&mut live);
+
+    let commands: Vec<ResolvedZoneChangeCommand> = live
+        .resolved_rules_journal
+        .entries_since(journal_start)
+        .iter()
+        .filter_map(|entry| match entry.command.as_ref() {
+            Some(ResolvedRulesCommand::ZoneChange(command))
+                if command.object.object_id == ruric =>
+            {
+                Some(command.as_ref().clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        commands
+            .iter()
+            .map(|command| (command.from, command.to))
+            .collect::<Vec<_>>(),
+        vec![
+            (Zone::Battlefield, Zone::Exile),
+            (Zone::Exile, Zone::Battlefield)
+        ],
+        "replay-taken guard: the live blink journaled exactly the two commands"
+    );
+
+    // Replay: the recorded commands, one by one, on the pre-move state.
+    let mut replay = pre.clone();
+    apply_resolved_zone_change(&mut replay, &commands[0]).expect("Exile command replays");
+    assert_eq!(
+        replay.objects[&ruric].incarnation,
+        commands[0].resulting_incarnation
+    );
+    let replay_mid = damage_history_row(&replay, ruric);
+    // Mid-point: the old incarnation's history is retired on EXIT, not on a
+    // later entry.
+    for (label, mid) in [("live", live_mid), ("replay", replay_mid)] {
+        assert_eq!(mid.4, Zone::Exile, "{label}: Ruric is in exile");
+        assert!(
+            !mid.0 && !mid.1,
+            "{label}: the exiled Ruric carries no damage-kind latch"
+        );
+        assert!(!mid.2, "{label}: the exiled Ruric is out of the Any set");
+    }
+    apply_resolved_zone_change(&mut replay, &commands[1]).expect("Battlefield command replays");
+    assert_eq!(
+        replay.objects[&ruric].incarnation,
+        commands[1].resulting_incarnation
+    );
+    assert_eq!(
+        replay.zone_changes_this_turn.len(),
+        pre.zone_changes_this_turn.len() + 2,
+        "replay-taken guard: both commands recorded their zone changes"
+    );
+    assert!(
+        matches!(
+            apply_resolved_zone_change(&mut replay, &commands[0]),
+            Err(ResolvedZoneChangeReplayInvariantError::OccurrenceMismatch { .. })
+        ),
+        "replay-taken guard: the Exile command was consumed"
+    );
+    flush_layers(&mut replay);
+
+    let live_end = damage_history_row(&live, ruric);
+    let replay_end = damage_history_row(&replay, ruric);
+    // Derived from the card and CR 400.7, not copied from live.
+    assert_eq!(
+        replay_end,
+        (
+            false,
+            false,
+            false,
+            true,
+            Zone::Battlefield,
+            commands[1].resulting_incarnation
+        ),
+        "the replayed Ruric is a new object with no damage history and hexproof"
+    );
+    assert_eq!(live_end, replay_end, "live and replay agree");
+
+    for (label, state) in [("live", &live), ("replay", &replay)] {
+        assert!(
+            state.objects[&ruric_b]
+                .dealt_damage_kinds
+                .has(DamageKindFilter::CombatOnly),
+            "{label}: the unmoved Ruric keeps its combat latch"
+        );
+        assert!(
+            state.objects_that_dealt_damage.contains(&ruric_b),
+            "{label}: the unmoved Ruric keeps its Any-set entry"
+        );
+        assert!(
+            !has_hexproof(&state.objects[&ruric_b]),
+            "{label}: the unmoved Ruric stays without hexproof"
+        );
+    }
 }
 
 /// R7 - CR 120.8: an attacking Ruric with 0 power deals no combat damage, so it

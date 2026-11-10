@@ -223,13 +223,16 @@ pub(crate) fn eval_source_entered_this_turn(state: &GameState, source_id: Object
 /// `StaticCondition::SourceHasDealtDamage` predicate; the "hasn't dealt damage yet"
 /// negation wraps this via `StaticCondition::Not`. The flag is set in
 /// `deal_damage` on the first nonzero amount actually dealt and cleared on a
-/// battlefield exit (`apply_zone_exit_cleanup`).
+/// battlefield exit by `zones::retire_damage_history_on_zone_change` (live
+/// cleanup and zone-command replay).
 ///
 /// CR 120.2a / CR 120.2b: `kind` selects which damage class counts. `Any` reads
 /// the id set above (the unchanged path for the unqualified "hasn't dealt damage
 /// yet" cards); `CombatOnly` / `NoncombatOnly` read the source object's
 /// `dealt_damage_kinds` latch, which the same writer sets in the same battlefield
-/// guard and `GameObject::reset_for_battlefield_exit` clears (CR 400.7).
+/// guard and `GameObject::retire_dealt_damage_kinds` clears (CR 400.7), called
+/// by `zones::retire_damage_history_on_zone_change` and by
+/// `GameObject::reset_for_battlefield_exit`.
 pub(crate) fn eval_source_has_dealt_damage(
     state: &GameState,
     source_id: ObjectId,

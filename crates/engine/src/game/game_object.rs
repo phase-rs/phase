@@ -687,8 +687,11 @@ pub fn token_art_derivation_count() -> usize {
 /// have dealt both); `DamageKindFilter::Any` is their union. Written only by the
 /// damage-history authority (`emit_damage_dealt_and_record`, shared by the
 /// synchronous, replacement-resumed, post-loss and combat-remnant paths) for
-/// battlefield sources, on a nonzero amount actually dealt (CR 120.8); cleared by
-/// `GameObject::reset_for_battlefield_exit`.
+/// battlefield sources, on a nonzero amount actually dealt (CR 120.8); cleared
+/// only by `GameObject::retire_dealt_damage_kinds`, which
+/// `GameObject::reset_for_battlefield_exit` calls and which
+/// `zones::retire_damage_history_on_zone_change` (the state-level owner, live
+/// cleanup and zone-command replay) also calls.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DealtDamageKinds {
     #[serde(default, skip_serializing_if = "is_false")]
@@ -818,7 +821,10 @@ pub struct GameObject {
     /// `StaticCondition::SourceHasDealtDamage { kind: CombatOnly | NoncombatOnly }`
     /// ("has hexproof as long as they haven't dealt combat damage yet"); the
     /// `Any` kind reads `GameState::objects_that_dealt_damage`, written together
-    /// with this field. Absent from the wire while empty.
+    /// with this field. Both are retired on a battlefield departure by
+    /// `zones::retire_damage_history_on_zone_change` (live and replay); the
+    /// latch reset itself is `GameObject::retire_dealt_damage_kinds`. Absent
+    /// from the wire while empty.
     #[serde(default, skip_serializing_if = "DealtDamageKinds::is_empty")]
     pub dealt_damage_kinds: DealtDamageKinds,
 
@@ -3907,6 +3913,19 @@ impl GameObject {
         }
     }
 
+    /// CR 400.7 + CR 120.2a / CR 120.2b: retire this object's damage-kind
+    /// history; the old incarnation's damage belongs to it, and a new object
+    /// has dealt no damage of either kind. The single definition of the latch
+    /// reset: called by `reset_for_battlefield_exit` (live exit and the
+    /// prepared-copy strip) and by `zones::retire_damage_history_on_zone_change`
+    /// (live cleanup and zone-command replay). Returns true when the latch was
+    /// non-empty, i.e. when this call changed anything.
+    pub(crate) fn retire_dealt_damage_kinds(&mut self) -> bool {
+        let had_history = !self.dealt_damage_kinds.is_empty();
+        self.dealt_damage_kinds = DealtDamageKinds::default();
+        had_history
+    }
+
     /// CR 400.7: Clear battlefield-only designations when a permanent leaves the battlefield.
     /// Separate from entry reset because some state (counters, transform) is already handled
     /// by `apply_zone_exit_cleanup` in zones.rs.
@@ -3917,7 +3936,7 @@ impl GameObject {
         // CR 400.7: the damage-kind history belongs to the old object; a
         // re-entering permanent has dealt no damage of either kind
         // (CR 120.2a / CR 120.2b).
-        self.dealt_damage_kinds = DealtDamageKinds::default();
+        self.retire_dealt_damage_kinds();
         // CR 701.64b: Harnessed designation clears when a permanent leaves the battlefield.
         self.harnessed = false;
         // CR 701.15a / CR 701.35a: Goad and detain are battlefield-only designations.

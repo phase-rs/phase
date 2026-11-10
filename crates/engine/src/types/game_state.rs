@@ -37703,8 +37703,8 @@ pub(crate) fn objects_content_eq(a: &ObjectMap, b: &ObjectMap) -> bool {
 /// COMPARED — the per-object fields a MANDATORY action can move on a stable (same-zone) object
 /// between two loop frames, MINUS the layer-derived axes the OMITTED paragraph below delegates
 /// to the static firewall: `controller` and `zone`; the tap / face-down / flip /
-/// transform / modal-back-face / phasing status axes; marked damage and the deathtouch flag;
-/// the attachment and pairing links; the counter map; the stored power / toughness / loyalty /
+/// transform / modal-back-face / phasing status axes; marked damage, the deathtouch flag and
+/// the damage-kind latch (`dealt_damage_kinds`); the attachment and pairing links; the counter map; the stored power / toughness / loyalty /
 /// defense family; `name`; the numeric and per-iteration accumulators the static firewall is
 /// blind to; and the designation, door and cast-occurrence toggles. Each conjunct below
 /// carries its own rule anchor where it has one.
@@ -37725,7 +37725,10 @@ pub(crate) fn objects_content_eq(a: &ObjectMap, b: &ObjectMap) -> bool {
 /// accumulated, and CR 105.2 (an object's colour comes from its mana cost, a colour indicator
 /// or a characteristic-defining ability) with CR 613.1e (Layer 5) put it in that bucket with
 /// the other firewall-scanned statics. Comparing it could only SUPPRESS a draw, while adding
-/// an axis a stale un-flushed clone can differ on.
+/// an axis a stale un-flushed clone can differ on. The damage-kind latch
+/// (`dealt_damage_kinds`) is NOT in the monotone-saturating bucket: it changes what is
+/// targetable (`conditions::eval_source_has_dealt_damage` gates hexproof on it), so it is
+/// compared, and its first-iteration settle is absorbed by the loop warm-up.
 ///
 /// `loyalty_activations_this_turn` fits none of those buckets. It is named here not as the only
 /// omission that doesn't, but because its compensation lives in a predicate this comparator
@@ -37764,6 +37767,10 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
         && x.phase_status == y.phase_status
         && x.damage_marked == y.damage_marked
         && x.dealt_deathtouch_damage == y.dealt_deathtouch_damage
+        // CR 120.2a/120.2b + CR 732.2a: combat vs noncombat history decides "hasn't dealt
+        // combat damage yet" hexproof, i.e. which targets are legal; two frames differing in
+        // it are not one position.
+        && x.dealt_damage_kinds == y.dealt_damage_kinds
         && x.attached_to == y.attached_to
         && x.attachments == y.attachments
         && x.paired_with == y.paired_with
@@ -52504,6 +52511,144 @@ mod tests {
             !loop_states_equal(&a.normalize_for_loop(), &c.normalize_for_loop()),
             "a goaded_by difference must NOT confirm (the comparator is live)"
         );
+    }
+
+    /// Verbatim Oracle text of Ruric Thar, Magecrusher.
+    const RURIC_ORACLE_TEXT: &str = "This spell can't be countered.\nReach, vigilance, trample\nRuric Thar has hexproof as long as they haven't dealt combat damage yet. (They can't be the target of spells or abilities your opponents control.)";
+
+    /// Damage-kind loop frames over a real Ruric Thar (layers flushed): `none`
+    /// (no damage history), `nc` (noncombat damage only: Any set + noncombat
+    /// latch, hexproof kept) and `cb` (`nc` plus combat damage: hexproof gone).
+    /// Each latch mutation is followed by `mark_full` so the flush re-evaluates
+    /// the layer-6 condition.
+    fn ruric_damage_kind_frames() -> (GameState, GameState, GameState, ObjectId) {
+        use crate::game::layers::flush_layers;
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let ruric = scenario
+            .add_creature(P0, "Ruric Thar, Magecrusher", 7, 7)
+            .from_oracle_text_with_keywords(&["Reach", "Vigilance", "Trample"], RURIC_ORACLE_TEXT)
+            .id();
+        let mut none = scenario.build().state().clone();
+        none.layers_dirty.mark_full();
+        flush_layers(&mut none);
+
+        let mut nc = none.clone();
+        assert!(nc
+            .objects
+            .get_mut(&ruric)
+            .unwrap()
+            .dealt_damage_kinds
+            .record(false));
+        nc.objects_that_dealt_damage.insert(ruric);
+        nc.layers_dirty.mark_full();
+        flush_layers(&mut nc);
+
+        let mut cb = nc.clone();
+        assert!(cb
+            .objects
+            .get_mut(&ruric)
+            .unwrap()
+            .dealt_damage_kinds
+            .record(true));
+        cb.layers_dirty.mark_full();
+        flush_layers(&mut cb);
+        (none, nc, cb, ruric)
+    }
+
+    /// A pure +1 colorless mana delta: a net-progress resource axis, so
+    /// `detect_loop` certifies whenever the board recurs.
+    fn one_colorless_delta() -> crate::analysis::resource::ResourceVector {
+        let mut delta = crate::analysis::resource::ResourceVector::default();
+        delta.mana[5] = 1;
+        delta
+    }
+
+    /// L1 - CR 732.2a + CR 104.4b + CR 120.2a / CR 120.2b: two frames that
+    /// differ ONLY in combat-versus-noncombat damage history allow different
+    /// targets (Ruric's "hasn't dealt combat damage yet" hexproof), so they are
+    /// not one position: the shared comparator, the strict normalized
+    /// comparison and the loop detector all refuse the pair. Revert-failing:
+    /// dropping the `dealt_damage_kinds` conjunct from `object_content_eq` makes
+    /// all three accept it.
+    #[test]
+    fn l1_combat_versus_noncombat_damage_history_is_not_a_recurrence() {
+        use crate::analysis::loop_check::detect_loop;
+        use crate::analysis::resource::loop_states_equal_modulo_resources;
+        use crate::game::keywords::has_hexproof;
+        use crate::game::scenario::P0;
+        use crate::types::ability::DamageKindFilter;
+
+        let (_none, nc, cb, ruric) = ruric_damage_kind_frames();
+        // Reach-guards: the difference is decisive for targeting.
+        assert!(
+            has_hexproof(&nc.objects[&ruric]),
+            "noncombat damage keeps hexproof"
+        );
+        assert!(
+            !has_hexproof(&cb.objects[&ruric]),
+            "combat damage ends hexproof"
+        );
+        // Hostile: the pair differs only in the latch.
+        assert_eq!(nc.objects_that_dealt_damage, cb.objects_that_dealt_damage);
+        let (x, y) = (&nc.objects[&ruric], &cb.objects[&ruric]);
+        assert_eq!(
+            (x.zone, x.tapped, &x.counters),
+            (y.zone, y.tapped, &y.counters)
+        );
+        assert!(!x.dealt_damage_kinds.has(DamageKindFilter::CombatOnly));
+        assert!(y.dealt_damage_kinds.has(DamageKindFilter::CombatOnly));
+
+        // Control: identical frames DO recur, so a refusal below is the
+        // comparator's doing and not an upstream refusal.
+        assert!(loop_states_equal_modulo_resources(&nc, &nc.clone()));
+        assert!(detect_loop(&nc, &nc.clone(), &one_colorless_delta(), P0, false).is_some());
+
+        assert!(
+            !loop_states_equal_modulo_resources(&nc, &cb),
+            "combat vs noncombat history must not compare equal modulo resources"
+        );
+        assert!(
+            !loop_states_equal(&nc.normalize_for_loop(), &cb.normalize_for_loop()),
+            "combat vs noncombat history must not compare equal after normalization"
+        );
+        assert!(
+            detect_loop(&nc, &cb, &one_colorless_delta(), P0, false).is_none(),
+            "the loop detector must not certify a hexproof and a non-hexproof Ruric as one position"
+        );
+    }
+
+    /// L2 - CR 732.2a: the latch is compared ungated (per object, whatever reads
+    /// it): an empty history and a noncombat-only history compare UNEQUAL even
+    /// though both leave Ruric hexproof, so a loop whose first iteration latches
+    /// is not a recurrence until the latch settles; once settled the frames
+    /// recur. Revert-failing: without the conjunct `(none, nc)` compares equal
+    /// (the Any set is projected out of the modulo-resources comparison).
+    #[test]
+    fn l2_first_latch_is_not_a_recurrence_settled_latch_is() {
+        use crate::analysis::loop_check::detect_loop;
+        use crate::analysis::resource::loop_states_equal_modulo_resources;
+        use crate::game::keywords::has_hexproof;
+        use crate::game::scenario::P0;
+
+        let (none, nc, _cb, ruric) = ruric_damage_kind_frames();
+        assert!(has_hexproof(&none.objects[&ruric]));
+        assert!(has_hexproof(&nc.objects[&ruric]));
+
+        assert!(
+            !loop_states_equal_modulo_resources(&none, &nc),
+            "first-iteration latch: empty vs noncombat history is not one position"
+        );
+        assert!(detect_loop(&none, &nc, &one_colorless_delta(), P0, false).is_none());
+
+        assert!(
+            loop_states_equal_modulo_resources(&nc, &nc.clone()),
+            "settled latch: the frames recur"
+        );
+        assert!(detect_loop(&nc, &nc.clone(), &one_colorless_delta(), P0, false).is_some());
     }
 
     /// CR 118.3a: the self-heal that fixes the reported "tap one mana → all

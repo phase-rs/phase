@@ -8786,6 +8786,12 @@ fn project_out_resources(state: &GameState) -> GameState {
     // `triggers_fired_this_game` (OncePerGame) are likewise NOT cleared here — consistent
     // with the preserved `crew_activated_this_turn`.
     // CR 120: who has dealt damage + the per-turn damage event log.
+    // The per-object `dealt_damage_kinds` latch is deliberately NOT projected:
+    // it decides "hasn't dealt combat damage yet" hexproof (which targets are
+    // legal), so `object_content_eq` compares it (CR 732.2a). The set clear is
+    // retained because strict `PartialEq` compares the set; for objects in
+    // `state.objects` it is redundant, since the damage writer keeps the set and
+    // the latch in lockstep, and it matters only for set entries without an object.
     s.objects_that_dealt_damage.clear();
     s.damage_dealt_this_turn.clear();
     // CR 601: per-turn / per-game cast journals.
