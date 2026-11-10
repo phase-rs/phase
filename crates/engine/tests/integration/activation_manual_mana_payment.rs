@@ -4430,6 +4430,47 @@ fn a_manual_activation_cannot_sacrifice_its_mana_fodder_again() {
     );
 }
 
+/// CR 118.10 + CR 601.2g + CR 605.3a: the same holds when one sacrifice to
+/// Ashnod's Altar makes exactly the activation's mana. "{2}, Sacrifice a
+/// creature" with a lone creature is offered in no mode, so no manual window
+/// can strand a creature sacrificed for mana the activation then can't use; a
+/// second creature makes it offered for a manual payment.
+#[test]
+fn a_lone_creature_cannot_fund_the_mana_and_pay_the_sacrifice() {
+    let board = |creatures: usize| {
+        let mut scenario = scenario_at_main();
+        let altar = scenario
+            .add_artifact_from_oracle(
+                P0,
+                "Two-Mana Sacrifice Altar",
+                "{2}, Sacrifice a creature: Draw a card.",
+            )
+            .with_mana_cost(ManaCost::generic(2))
+            .id();
+        scenario
+            .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
+            .with_mana_cost(ManaCost::generic(3));
+        for _ in 0..creatures {
+            scenario.add_vanilla(P0, 2, 2);
+        }
+        scenario.add_card_to_library_top(P0, "Drawn card");
+        (scenario.build(), altar)
+    };
+
+    let (runner, altar) = board(1);
+    assert!(
+        offered_modes(&runner, altar).is_empty(),
+        "the lone creature can fund the {{2}} or pay the sacrifice, not both"
+    );
+
+    let (runner, altar) = board(2);
+    assert_eq!(
+        offered_modes(&runner, altar),
+        vec![CastPaymentMode::Manual],
+        "a second creature pays the sacrifice"
+    );
+}
+
 /// CR 601.2g + CR 605.3b + CR 118.10: the offered manual activation completes:
 /// two creatures are sacrificed to one Ashnod's Altar in the window (activated
 /// twice), the third pays Carnage Altar's own sacrifice, and the draw resolves
