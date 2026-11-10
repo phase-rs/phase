@@ -144,7 +144,9 @@ pub(crate) fn stored_double_face(obj: &GameObject) -> Option<&BackFaceData> {
         return None;
     }
     // A `Single` layout names a single-faced card. No production writer stores it: the card
-    // database stores `None` for it (`back_face_for_card_face_with_printed_ref`).
+    // database stores `None` for it (`back_face_for_card_face_with_printed_ref`). That `None`
+    // is classified double-faced below, which fails closed; no oracle id in the current card
+    // export reaches that fallback (every two-face oracle id has a mapped layout).
     if face.layout_kind == Some(LayoutKind::Single) {
         return None;
     }
