@@ -622,46 +622,35 @@ fn any_typed_leg<F: Fn(&TypedFilter) -> bool>(filter: &TargetFilter, pred: &F) -
 }
 
 /// A scoped library leg names whose library is used, not who performs the
-/// instruction. The answer is a function of the filter's composed constraints,
-/// not of where the parser put them: two `InZone`/`InAnyZone` properties in one
-/// leaf and the same constraints split across `And` operands both describe one
-/// conjunction, so both are intersected here. Inspecting operands independently
-/// answered differently for those two encodings of the same library relation.
-///
-/// `Or` alternates target sets rather than conjoining them; there any
-/// alternative that names the library owner makes the instruction a
-/// library-owner instruction, and a mixed-zone alternative set stays classified
-/// by that same existential rule in both encodings.
+/// instruction. CR 608.2c: the instruction is a library-owner instruction only
+/// when every alternative that names the scoped player is confined to the
+/// library. A naming alternative that reaches any other zone makes the scoped
+/// player the performer, so the answer does not depend on whether the parser
+/// wrote one `InAnyZone` leaf or an `Or` of single-zone legs, nor on how `And`
+/// distributes over a nested `Or`.
 fn filter_names_library_owner(filter: &TargetFilter, origin_zones: &[Zone]) -> bool {
-    match filter {
-        TargetFilter::Or { filters } => filters
-            .iter()
-            .any(|branch| filter_names_library_owner(branch, origin_zones)),
-        TargetFilter::And { .. } | TargetFilter::Typed(_) => {
-            // `And` conjoins, so a nested `Or` distributes over it
-            // (`And(A, Or(B, C)) == Or(And(A, B), And(A, C))`). Evaluating those
-            // conjunction alternatives keeps a distributed encoding classified
-            // exactly like its single-alternative form; inspecting an `Or`
-            // operand on its own would drop the scoped leg inside it.
-            owner_reach_alternatives(filter, &ControllerRef::ScopedPlayer)
-                .into_iter()
-                .any(|reach| {
-                    reach.names && zone_reach_is_the_library(reach.zones.as_ref(), origin_zones)
-                })
-        }
-        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
-            filter_names_library_owner(filter, origin_zones)
-        }
-        _ => false,
-    }
+    let reach = owner_reach(filter, &ControllerRef::ScopedPlayer);
+    let library_scanned = origin_zones.is_empty() || origin_zones.contains(&Zone::Library);
+    let elsewhere_scanned =
+        origin_zones.is_empty() || origin_zones.iter().any(|zone| *zone != Zone::Library);
+    reach.named & REACH_LIBRARY != 0
+        && library_scanned
+        && !(reach.named & REACH_ELSEWHERE != 0 && elsewhere_scanned)
 }
 
-/// One conjunction's scoped-owner reach. `zones` is the intersection of every
-/// `InZone`/`InAnyZone` constraint in the conjunction; `None` means the
-/// conjunction carries no zone constraint at all.
-struct ComposedOwnerReach {
-    names: bool,
-    zones: Option<std::collections::BTreeSet<Zone>>,
+/// The two distinctions this classification needs. The zone set is finite, so a
+/// library/elsewhere bitmask answers "confined to the library" without
+/// enumerating or cloning Boolean alternatives.
+const REACH_LIBRARY: u8 = 0b01;
+const REACH_ELSEWHERE: u8 = 0b10;
+const REACH_BOTH: u8 = REACH_LIBRARY | REACH_ELSEWHERE;
+
+/// Zones admitted by the alternatives that name `player` (`named`) and by every
+/// alternative (`all`), each reduced to the library/elsewhere bitmask.
+#[derive(Clone, Copy)]
+struct OwnerReach {
+    named: u8,
+    all: u8,
 }
 
 /// A typed leg's own zone constraints, intersected: `InAnyZone { Library,
@@ -684,91 +673,80 @@ fn leg_zone_constraints(leg: &TypedFilter) -> Option<std::collections::BTreeSet<
     )
 }
 
-/// Expand a filter into the conjunction alternatives (`And`-conjoined terms) it
-/// denotes, following the distributive law. `Or` contributes one alternative per
-/// branch, `And` multiplies its children's alternatives, and negation keeps the
-/// reach of what it guards. A conjunction alternative describes one way the
-/// filter can match, so its owner reach is evaluated on its own.
-fn owner_reach_alternatives(
-    filter: &TargetFilter,
-    player: &ControllerRef,
-) -> Vec<ComposedOwnerReach> {
-    match filter {
-        TargetFilter::Typed(leg) => vec![ComposedOwnerReach {
-            names: leg_names_player(leg, player),
-            zones: leg_zone_constraints(leg),
-        }],
-        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
-            owner_reach_alternatives(filter, player)
-        }
-        TargetFilter::Or { filters } => filters
-            .iter()
-            .flat_map(|branch| owner_reach_alternatives(branch, player))
-            .collect(),
-        TargetFilter::And { filters } => {
-            let mut alternatives = vec![ComposedOwnerReach {
-                names: false,
-                zones: None,
-            }];
-            for child in filters {
-                let child_alternatives = owner_reach_alternatives(child, player);
-                // A filter outside this classification's traversal set (and an
-                // empty `Or`) contributes no alternative; as a conjunction term
-                // it is neutral, exactly like `any_typed_leg`'s `false` leaf.
-                if child_alternatives.is_empty() {
-                    continue;
-                }
-                let mut combined =
-                    Vec::with_capacity(alternatives.len() * child_alternatives.len());
-                for base in &alternatives {
-                    for child in &child_alternatives {
-                        combined.push(ComposedOwnerReach {
-                            names: base.names || child.names,
-                            zones: match (&base.zones, &child.zones) {
-                                (None, zones) | (zones, None) => zones.clone(),
-                                (Some(left), Some(right)) => {
-                                    Some(left.intersection(right).copied().collect())
-                                }
-                            },
-                        });
-                    }
-                }
-                alternatives = combined;
-            }
-            alternatives
-        }
-        // Filters this classification never treats as owner-named, matching the
-        // traversal set of `any_typed_leg`.
-        _ => Vec::new(),
+fn zone_reach_bits(zones: &std::collections::BTreeSet<Zone>) -> u8 {
+    let mut bits = 0;
+    for zone in zones {
+        bits |= if *zone == Zone::Library {
+            REACH_LIBRARY
+        } else {
+            REACH_ELSEWHERE
+        };
     }
+    bits
 }
 
-/// Whether the composed constraint confines the owner-named subject to the
-/// library.
+/// The scoped-owner reach of one filter, over the finite zone partition.
 ///
-/// The resolver may scan several zones (`InAnyZone` union), so the answer is the
-/// intersection of the constraint with that scan: only the zones both admit can
-/// actually be selected. With no explicit origin the constraint must be exactly
-/// `Library`; a conjunction that carries no zone constraint reaches exactly the
-/// caller's origin, so it qualifies only when that origin is the library alone.
-fn zone_reach_is_the_library(
-    zones: Option<&std::collections::BTreeSet<Zone>>,
-    origin_zones: &[Zone],
-) -> bool {
-    let reach: std::collections::BTreeSet<Zone> = match zones {
-        Some(zones) => zones.clone(),
-        None if origin_zones.is_empty() => return false,
-        None => origin_zones.iter().copied().collect(),
-    };
-    let reach = if origin_zones.is_empty() {
-        reach
-    } else {
-        reach
-            .intersection(&origin_zones.iter().copied().collect())
-            .copied()
-            .collect()
-    };
-    !reach.is_empty() && reach.iter().all(|zone| *zone == Zone::Library)
+/// `And` conjoins, so an alternative of the conjunction names the player when
+/// any operand's naming alternative does, and it reaches a zone only when every
+/// operand reaches that zone: `named = all & OR(child.named)`. `Or` alternates,
+/// so both unions are plain disjunctions. A negation excludes a set rather than
+/// confining its subject to the zones it names, so it keeps the naming fact and
+/// drops the positive reach.
+fn owner_reach(filter: &TargetFilter, player: &ControllerRef) -> OwnerReach {
+    match filter {
+        TargetFilter::Typed(leg) => {
+            let bits = leg_zone_constraints(leg)
+                .as_ref()
+                .map_or(REACH_BOTH, zone_reach_bits);
+            OwnerReach {
+                named: if leg_names_player(leg, player) {
+                    bits
+                } else {
+                    0
+                },
+                all: bits,
+            }
+        }
+        TargetFilter::And { filters } => {
+            let mut all = REACH_BOTH;
+            let mut naming = 0;
+            for child in filters {
+                let child = owner_reach(child, player);
+                all &= child.all;
+                naming |= child.named;
+            }
+            OwnerReach {
+                named: all & naming,
+                all,
+            }
+        }
+        TargetFilter::Or { filters } => {
+            filters
+                .iter()
+                .fold(OwnerReach { named: 0, all: 0 }, |acc, child| {
+                    let child = owner_reach(child, player);
+                    OwnerReach {
+                        named: acc.named | child.named,
+                        all: acc.all | child.all,
+                    }
+                })
+        }
+        TargetFilter::Not { filter } => {
+            let inner = owner_reach(filter, player);
+            OwnerReach {
+                named: if inner.named == 0 { 0 } else { REACH_BOTH },
+                all: REACH_BOTH,
+            }
+        }
+        TargetFilter::TrackedSetFiltered { filter, .. } => owner_reach(filter, player),
+        // Filters this classification never treats as owner-named: they add no
+        // name and no zone constraint, so they are neutral in a conjunction.
+        _ => OwnerReach {
+            named: 0,
+            all: REACH_BOTH,
+        },
+    }
 }
 
 /// CR 608.2c + CR 701.23a: a mass move announces no subject through
@@ -13648,11 +13626,13 @@ mod tests {
                 false,
             ),
             (
+                // CR 608.2c: a negated library leg names the library only to
+                // exclude it, so it is not a library-owner instruction.
                 "Not A",
                 TargetFilter::Not {
                     filter: Box::new(library_leg_encoding_a()),
                 },
-                true,
+                false,
                 false,
             ),
             (
@@ -13923,9 +13903,11 @@ mod tests {
         );
     }
 
-    /// A mixed-zone `Or` alternates target sets; an alternative that names the
-    /// library owner keeps the library-owner classification, and both encodings
-    /// of the same alternatives select and attribute identically.
+    /// A mixed-zone `Or` alternates target sets. CR 608.2c: the instruction is a
+    /// library-owner instruction only when every naming alternative is confined
+    /// to the library, so the graveyard alternative keeps this the scoped
+    /// player's move — and the single-leaf `InAnyZone` encoding of the same
+    /// three selected cards must answer the same.
     #[test]
     fn mixed_zone_or_control_matches_across_encodings() {
         let leaf_form = TargetFilter::Or {
@@ -13972,26 +13954,28 @@ mod tests {
         assert_eq!(
             filter_names_library_owner(&leaf_form, &scan),
             filter_names_library_owner(&split_form, &scan),
-            "the library-owner alternative classifies both encodings alike"
+            "both encodings of the same alternatives classify alike"
+        );
+        assert!(
+            !filter_names_library_owner(&leaf_form, &scan),
+            "the graveyard alternative keeps this the scoped player's move"
         );
         let leaf = mass_zone_exile_outcome(leaf_form);
         let split = mass_zone_exile_outcome(split_form);
         assert_eq!(leaf, split, "both encodings select and attribute alike");
         assert_eq!(
             leaf.iter()
-                .filter(|(_, zone, actor)| *zone == Zone::Exile && *actor == Some(PlayerId(0)))
+                .filter(|(_, zone, actor)| *zone == Zone::Exile && *actor == Some(PlayerId(1)))
                 .count(),
             3,
-            "every alternative's card is the caster's exile; got {leaf:?}"
+            "every alternative's card is the scoped player's exile; got {leaf:?}"
         );
     }
 
     /// An `Or` nested under an `And` denotes the same alternatives as its
-    /// distributed form. Evaluating the `Or` operand alone would lose the
-    /// `ScopedPlayer` leg inside it and answer "not a library owner" for
-    /// `And(any card, Or(scoped library, scoped graveyard))`, while the
-    /// distributed `Or(And(any, scoped library), And(any, scoped graveyard))`
-    /// answered "library owner". Both encodings must agree.
+    /// distributed form. The universal alternative rule must classify both the
+    /// same way, including the mixed alternative that keeps the scoped player as
+    /// the performer.
     #[test]
     fn and_over_or_matches_distributed_or_encoding() {
         let any_card = card_leg(None, vec![]);
@@ -14032,8 +14016,8 @@ mod tests {
             "a nested Or must classify like its distributed form"
         );
         assert!(
-            filter_names_library_owner(&nested, &scan),
-            "the library alternative keeps the library-owner classification"
+            !filter_names_library_owner(&nested, &scan),
+            "the graveyard alternative keeps this the scoped player's move"
         );
         let nested_outcome = mass_zone_exile_outcome(nested);
         let distributed_outcome = mass_zone_exile_outcome(distributed);
@@ -14044,10 +14028,129 @@ mod tests {
         assert_eq!(
             nested_outcome
                 .iter()
-                .filter(|(_, zone, actor)| *zone == Zone::Exile && *actor == Some(PlayerId(0)))
+                .filter(|(_, zone, actor)| *zone == Zone::Exile && *actor == Some(PlayerId(1)))
                 .count(),
             3,
-            "every alternative's card is the caster's exile; got {nested_outcome:?}"
+            "every alternative's card is the scoped player's exile; got {nested_outcome:?}"
+        );
+    }
+
+    /// A `Not` operand excludes a set; it does not confine its subject to the
+    /// zones it names. A scoped library leaf conjoined with `Not(Graveyard)`
+    /// therefore stays the caster's instruction, while negating the library leg
+    /// itself is not a library-owner relation.
+    #[test]
+    fn negated_zone_does_not_constrain_the_positive_reach() {
+        let scoped_library = card_leg(
+            Some(ControllerRef::ScopedPlayer),
+            vec![FilterProp::InZone {
+                zone: Zone::Library,
+            }],
+        );
+        let negated_graveyard = TargetFilter::Not {
+            filter: Box::new(card_leg(
+                None,
+                vec![FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }],
+            )),
+        };
+        let conjoined = TargetFilter::And {
+            filters: vec![scoped_library.clone(), negated_graveyard],
+        };
+        let negated_library = TargetFilter::Not {
+            filter: Box::new(scoped_library),
+        };
+        let scan = [Zone::Library, Zone::Graveyard];
+        assert!(
+            filter_names_library_owner(&conjoined, &scan),
+            "excluding the graveyard does not change the library-owner reach"
+        );
+        assert!(
+            !filter_names_library_owner(&negated_library, &scan),
+            "a negated library leg is not a library-owner instruction"
+        );
+        let outcome = mass_zone_exile_outcome(conjoined);
+        assert_eq!(
+            outcome
+                .iter()
+                .filter(|(_, zone, actor)| *zone == Zone::Exile && *actor == Some(PlayerId(0)))
+                .count(),
+            2,
+            "the library cards stay the caster's exile; got {outcome:?}"
+        );
+        assert!(
+            outcome
+                .iter()
+                .any(|(_, zone, actor)| *zone == Zone::Graveyard && actor.is_none()),
+            "the excluded graveyard card is not moved; got {outcome:?}"
+        );
+    }
+
+    /// Nested multi-branch alternatives must not change the attribution and must
+    /// stay bounded by the two-way zone partition rather than the product of
+    /// their branches.
+    #[test]
+    fn nested_multi_branch_control_stays_encoding_independent() {
+        let scoped_mixed = card_leg(
+            Some(ControllerRef::ScopedPlayer),
+            vec![library_and_graveyard_any_zone()],
+        );
+        let library_leg = card_leg(
+            None,
+            vec![FilterProp::InZone {
+                zone: Zone::Library,
+            }],
+        );
+        let graveyard_leg = card_leg(
+            None,
+            vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }],
+        );
+        let branch = || TargetFilter::Or {
+            filters: vec![library_leg.clone(), graveyard_leg.clone()],
+        };
+        let nested = TargetFilter::And {
+            filters: vec![scoped_mixed.clone(), branch(), branch()],
+        };
+        let scan = [Zone::Library, Zone::Graveyard];
+        assert_eq!(
+            filter_names_library_owner(&nested, &scan),
+            filter_names_library_owner(&scoped_mixed, &scan),
+            "nested branches must not change the attribution"
+        );
+        assert!(!filter_names_library_owner(&nested, &scan));
+        let nested_outcome = mass_zone_exile_outcome(nested);
+        let single_outcome = mass_zone_exile_outcome(scoped_mixed);
+        assert_eq!(
+            nested_outcome, single_outcome,
+            "both encodings select and attribute alike"
+        );
+        assert_eq!(
+            nested_outcome
+                .iter()
+                .filter(|(_, zone, actor)| *zone == Zone::Exile && *actor == Some(PlayerId(1)))
+                .count(),
+            3,
+            "the bounded classification keeps the scoped player's move; got {nested_outcome:?}"
+        );
+
+        let named_library = TargetFilter::And {
+            filters: vec![
+                card_leg(
+                    Some(ControllerRef::ScopedPlayer),
+                    vec![FilterProp::InZone {
+                        zone: Zone::Library,
+                    }],
+                ),
+                branch(),
+                branch(),
+            ],
+        };
+        assert!(
+            filter_names_library_owner(&named_library, &scan),
+            "a library-only naming conjunction remains the caster's instruction"
         );
     }
 

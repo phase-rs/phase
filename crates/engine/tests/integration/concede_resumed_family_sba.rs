@@ -1,11 +1,12 @@
 //! A public concession that cancels one member of a resolving activated
 //! family still owes the ordinary SBA/trigger boundary before priority.
 
+use engine::game::combat::AttackTarget;
 use engine::game::game_object::BackFaceData;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ControllerRef, Effect, ReplacementDefinition, ReplacementMode,
-    TargetFilter, TypedFilter,
+    TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
@@ -843,4 +844,97 @@ fn open_the_vaults_aura_host_chooser_concession_resumes_surviving_member() {
         1,
         "the begun spell completes exactly once after the concession"
     );
+}
+
+const OLIVIA_CRIMSON_BRIDE: &str = "Flying\nWhenever Olivia, Crimson Bride attacks, return target creature card from your graveyard to the battlefield tapped and attacking.";
+
+/// CR 508.4 + CR 608.2m + CR 800.4a: an entering attacker's defender pick is a
+/// prompt owned by the family's own paused delivery, not a replacement. When
+/// that chooser concedes, the entrant stays on the battlefield without being
+/// declared attacking, and the parked family drains to completion before
+/// priority instead of stranding.
+#[test]
+fn olivia_entry_attack_chooser_concession_resumes_parked_family() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let olivia = scenario
+        .add_creature_from_oracle(P0, "Olivia, Crimson Bride", 3, 4, OLIVIA_CRIMSON_BRIDE)
+        .id();
+    let bears = scenario
+        .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .id();
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(olivia, AttackTarget::Player(P1))])
+        .expect("Olivia attacks P1");
+
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::EntryAttackTargetChoice {
+                player, object_id, ..
+            } => {
+                assert_eq!(player, P0);
+                assert_eq!(object_id, bears);
+                break;
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order Olivia's attack trigger");
+            }
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(bears)),
+                    })
+                    .expect("choose the graveyard creature card");
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority toward Olivia's trigger");
+            }
+            other => panic!("unexpected state before the entry attack choice: {other:?}"),
+        }
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::EntryAttackTargetChoice { .. }
+        ),
+        "the returned attacker must park on its defender pick"
+    );
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+    assert!(runner.state().objects[&bears].tapped);
+    assert!(
+        runner
+            .state()
+            .active_change_zone_frame()
+            .and_then(|frame| frame.pending.as_ref())
+            .is_some(),
+        "the return family stays parked behind the defender pick"
+    );
+
+    let result = runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("the defender pick's controller concedes");
+    let state = runner.state();
+    assert!(state.players[P0.0 as usize].is_eliminated);
+    assert_eq!(
+        state.objects[&bears].zone,
+        Zone::Exile,
+        "P0's returned creature leaves the game with its owner (CR 800.4a)"
+    );
+    assert!(state.pending_replacement.is_none());
+    assert!(state.resolution_stack.is_empty());
+    assert!(state.stack.is_empty());
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "ordinary priority follows the drained family; got {:?}",
+        state.waiting_for
+    );
+    assert_eq!(result.waiting_for, state.waiting_for);
 }
