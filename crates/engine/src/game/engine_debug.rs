@@ -3335,7 +3335,7 @@ mod tests {
                 events.extend(
                     runner
                         .act(GameAction::ChooseReplacement { index: 0 })
-                        .expect("a representable control answer must be accepted")
+                        .expect("every ordering answer must be accepted")
                         .events,
                 );
             }

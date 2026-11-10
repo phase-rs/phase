@@ -1980,7 +1980,7 @@ mod tests {
             control.players[0].energy = u32::MAX - 2;
             let parent = super::super::lifecycle::enter_action_frame();
             resume_restored_stack_automation(&mut control)
-                .expect("the adjacent energy value is representable");
+                .expect("the control's energy gain from u32::MAX - 2 is representable");
             assert!(
                 control.stack.is_empty(),
                 "legacy={legacy}: both entries resolve"
