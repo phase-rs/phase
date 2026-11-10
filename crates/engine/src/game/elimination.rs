@@ -269,6 +269,11 @@ pub(crate) fn eliminate_players(
 ) -> bool {
     let first_event = events.len();
     let first_record = state.zone_changes_this_turn.len();
+    let initial_entry_attack = matches!(
+        state.waiting_for,
+        WaitingFor::EntryAttackTargetChoice { .. }
+    )
+    .then(|| state.waiting_for.clone());
     let mut eliminated_any = false;
     let mut leaving_set = HashSet::new();
     // CR 733: the CR 800.4a stack step is batch-scoped over the whole
@@ -864,20 +869,15 @@ pub(crate) fn eliminate_players(
         // CR 117.2e + CR 508.4: a batch member parked on its entering-attacker
         // choice keeps the batch and its continuation live. A departing
         // chooser's member is Remained and the batch tail resumes here.
-        if let WaitingFor::EntryAttackTargetChoice { player, .. } = state.waiting_for.clone() {
+        if let Some(WaitingFor::EntryAttackTargetChoice { player, .. }) =
+            initial_entry_attack.clone()
+        {
             if (players_to_eliminate.contains(&player) || !players::is_alive(state, player))
                 && state.active_batch_delivery().is_some()
             {
-                if let Some(event) = state.pending_entry_attack_event.take() {
-                    if let crate::types::ProposedEvent::ZoneChange { object_id, .. } = &event {
-                        if let Some(member) = state
-                            .objects
-                            .get(object_id)
-                            .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
-                        {
-                            let _ = state.prevent_paused_batch_zone_change_delivery(member, &event);
-                        }
-                    }
+                if let Some(sidecar) = state.pending_entry_attack_event.take() {
+                    let _ = state
+                        .prevent_paused_batch_zone_change_delivery(sidecar.member, &sidecar.event);
                 }
                 let next = players::next_player(state, player);
                 state.waiting_for = WaitingFor::Priority { player: next };

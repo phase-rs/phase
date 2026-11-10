@@ -1143,7 +1143,7 @@ fn open_the_vaults_aura_host_chooser_concession_resumes_surviving_member() {
     );
 }
 
-const OLIVIA_CRIMSON_BRIDE: &str = "Flying, haste\nWhenever Olivia, Crimson Bride attacks, return target creature card from your graveyard to the battlefield tapped and attacking. It's a Vampire in addition to its other types.";
+const OLIVIA_CRIMSON_BRIDE: &str = "Flying, haste\nWhenever Olivia, Crimson Bride attacks, return target creature card from your graveyard to the battlefield tapped and attacking.\nWhen you don't control a legendary Vampire, exile this creature.";
 
 /// CR 104.3a + CR 303.4f: a host-choice concession that ends a duel must not
 /// deliver the Aura or any later batch member.
@@ -1260,6 +1260,8 @@ fn olivia_clone_replacement_then_defender_answer_delivers() {
     scenario.at_phase(Phase::PreCombatMain);
     let olivia = scenario
         .add_creature_from_oracle(P0, "Olivia, Crimson Bride", 3, 4, OLIVIA_CRIMSON_BRIDE)
+        .as_legendary()
+        .with_subtypes(vec!["Vampire"])
         .id();
     let clone = scenario
         .add_creature_to_graveyard(P0, "Clone", 0, 0)
@@ -1432,6 +1434,83 @@ fn winota_concession_settles_batch_before_priority() {
     assert!(!state.battlefield.contains(&human));
 }
 
+/// CR 303.4f: a stale host answer with a surviving legal host reoffers the
+/// remaining hosts instead of treating the entry as unhosted.
+#[test]
+fn stale_aura_host_reoffers_surviving_host() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let vaults = scenario
+        .add_spell_to_hand_from_oracle(P0, "Open the Vaults", false, OPEN_THE_VAULTS)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 4,
+            shards: vec![ManaCostShard::White, ManaCostShard::White],
+        })
+        .id();
+    let pacifism = scenario
+        .add_enchantment_to_graveyard(P1, "Pacifism")
+        .from_oracle_text(PACIFISM)
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let leaving_host = scenario.add_creature(P2, "Leaving Host", 2, 2).id();
+    let surviving_host = scenario.add_creature(P0, "Surviving Host", 2, 2).id();
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::White,
+            ManaType::White,
+        ]
+        .into_iter()
+        .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+        .collect(),
+    );
+    let mut runner = scenario.build();
+    {
+        let enchant = Keyword::Enchant(TargetFilter::Typed(TypedFilter::creature()));
+        let obj = runner.state_mut().objects.get_mut(&pacifism).unwrap();
+        obj.keywords.push(enchant.clone());
+        obj.base_keywords.push(enchant);
+    }
+    runner.cast(vaults).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReturnAsAuraTarget { player: P1, .. }
+    ));
+    runner
+        .act(GameAction::Concede { player_id: P2 })
+        .expect("the third player concedes and removes one host");
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(leaving_host)),
+        })
+        .expect("the stale id is answered");
+    match runner.state().waiting_for.clone() {
+        WaitingFor::ReturnAsAuraTarget { legal_targets, .. } => {
+            assert_eq!(legal_targets, vec![TargetRef::Object(surviving_host)]);
+        }
+        other => panic!("expected a reoffered host list, got {other:?}"),
+    }
+    assert_eq!(runner.state().objects[&pacifism].zone, Zone::Graveyard);
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(surviving_host)),
+        })
+        .expect("choose the surviving host");
+    let state = runner.state();
+    assert_eq!(state.objects[&pacifism].zone, Zone::Battlefield);
+    assert_eq!(
+        state.objects[&pacifism]
+            .attached_to
+            .and_then(|target| target.as_object()),
+        Some(surviving_host)
+    );
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
+
 /// CR 303.4f + 303.4g: the offered host can leave before the chooser answers.
 /// The stale id is rejected at entry time and the Aura stays in its origin.
 #[test]
@@ -1515,7 +1594,7 @@ fn stale_aura_host_is_rejected_and_aura_remains_in_origin() {
     assert_eq!(result.waiting_for, state.waiting_for);
 }
 
-const SPIKE_FEEDER: &str = "Flash\nThis creature enters with two +1/+1 counters on it.\n{T}: Remove a +1/+1 counter from this creature: You gain 2 life.";
+const SPIKE_FEEDER: &str = "Flash\nThis creature enters with two +1/+1 counters on it.\n{T}: Remove a +1/+1 counter from this creature: You gain 2 life.\nRemove a +1/+1 counter from this creature: Put a +1/+1 counter on target creature.";
 
 /// CR 614.1c + CR 508.4: the approved event parked at the defender choice
 /// carries the replacement-granted counters, tap state, attacking status and
@@ -1526,6 +1605,8 @@ fn olivia_approved_entry_keeps_counters_and_attacking_after_defender_answer() {
     scenario.at_phase(Phase::PreCombatMain);
     let olivia = scenario
         .add_creature_from_oracle(P0, "Olivia, Crimson Bride", 3, 4, OLIVIA_CRIMSON_BRIDE)
+        .as_legendary()
+        .with_subtypes(vec!["Vampire"])
         .id();
     let feeder = scenario
         .add_creature_to_graveyard(P0, "Spike Feeder", 0, 0)
@@ -1605,6 +1686,8 @@ fn olivia_entry_attack_chooser_concession_resumes_parked_family() {
     scenario.at_phase(Phase::PreCombatMain);
     let olivia = scenario
         .add_creature_from_oracle(P0, "Olivia, Crimson Bride", 3, 4, OLIVIA_CRIMSON_BRIDE)
+        .as_legendary()
+        .with_subtypes(vec!["Vampire"])
         .id();
     let bears = scenario
         .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)

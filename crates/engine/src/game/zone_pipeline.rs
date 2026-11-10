@@ -1719,19 +1719,12 @@ pub(crate) fn preferred_entry_pause_boundary(
     ) {
         return anticipated;
     }
-    let Some(event) = state.pending_entry_attack_event.take() else {
-        return anticipated;
-    };
-    let object_id = match &event {
-        ProposedEvent::ZoneChange { object_id, .. } => *object_id,
-        _ => return anticipated,
-    };
-    let Some(object) = state.objects.get(&object_id) else {
+    let Some(sidecar) = state.pending_entry_attack_event.take() else {
         return anticipated;
     };
     Some(PendingZoneChangeDelivery::new(
-        crate::types::identifiers::ObjectIncarnationRef::from_object(object),
-        event,
+        sidecar.member,
+        sidecar.event,
     ))
 }
 
@@ -4182,7 +4175,23 @@ fn deliver_replaced_zone_change_inner(
                     &crate::types::ability::EntryAttackDestination::AnyDefender,
                 );
                 if valid_targets.len() > 1 {
-                    state.pending_entry_attack_event = Some(approved_entry_event);
+                    let member = crate::types::identifiers::ObjectIncarnationRef::from_object(
+                        state
+                            .objects
+                            .get(&object_id)
+                            .expect("paused entrant exists"),
+                    );
+                    state.pending_entry_attack_event = Some(Box::new(
+                        crate::types::game_state::PendingEntryAttackEvent {
+                            event: approved_entry_event,
+                            member,
+                            source_id,
+                            duration: duration.cloned(),
+                            exile_controller,
+                            track_exiled_by_source,
+                            library_placement: library_placement.clone(),
+                        },
+                    ));
                     state.waiting_for = WaitingFor::EntryAttackTargetChoice {
                         player: controller,
                         object_id,
@@ -4689,51 +4698,67 @@ pub(crate) fn resume_paused_aura_entry_choice(
             "aura host choice has no parked entry".to_string(),
         ));
     };
-    let mut event = pending.event;
-    let (object_id, from_zone, controller_override) = match &mut event {
+    let event = pending.event;
+    let (object_id, from_zone, controller_override) = match &event {
         ProposedEvent::ZoneChange {
             object_id,
             from,
             controller_override,
-            attach_to,
             ..
-        } => {
-            *attach_to = Some(match chosen {
-                TargetRef::Object(id) => AttachTarget::Object(id),
-                TargetRef::Player(id) => AttachTarget::Player(id),
-            });
-            (*object_id, *from, *controller_override)
-        }
+        } => (*object_id, *from, *controller_override),
         _ => {
             return Err(crate::game::engine::EngineError::InvalidAction(
                 "aura host choice parked without a zone change".to_string(),
             ));
         }
     };
-    // CR 303.4f: the offered host list can go stale while the chooser holds
-    // the prompt (another player concedes and takes the hosts away). Recheck
-    // eligibility here; with no legal host the Aura remains in its current
-    // zone (CR 303.4g), or goes to its owner's graveyard when it came off the
-    // stack.
-    let host_still_legal = aura_enchant_filter(state, object_id).is_some_and(|filter| {
-        let controller = controller_override.or_else(|| {
-            entering_object_projection(state, object_id).map(|object| object.controller)
-        });
-        let controller = controller.unwrap_or(PlayerId(0));
-        legal_aura_attachment_targets(
-            state,
-            object_id,
-            entering_object_projection(state, object_id),
-            controller,
-            &filter,
-        )
-        .contains(&chosen)
-    });
-    let player = match &state.waiting_for {
-        WaitingFor::ReturnAsAuraTarget { player, .. } => *player,
-        _ => state.active_player,
+    let (player, reoffer_effect) = match &state.waiting_for {
+        WaitingFor::ReturnAsAuraTarget {
+            player,
+            pending_effect,
+            ..
+        } => (*player, Some(pending_effect.clone())),
+        _ => (state.active_player, None),
     };
-    if !host_still_legal {
+    // CR 303.4f: the offered host list can go stale while the chooser holds
+    // the prompt. Recompute it before mutating the parked event.
+    let legal_targets = aura_enchant_filter(state, object_id)
+        .map(|filter| {
+            let controller = controller_override.or_else(|| {
+                entering_object_projection(state, object_id).map(|object| object.controller)
+            });
+            legal_aura_attachment_targets(
+                state,
+                object_id,
+                entering_object_projection(state, object_id),
+                controller.unwrap_or(PlayerId(0)),
+                &filter,
+            )
+        })
+        .unwrap_or_default();
+    if !legal_targets.contains(&chosen) {
+        if let Some(pending_effect) = reoffer_effect.filter(|_| !legal_targets.is_empty()) {
+            // Stale answer with surviving hosts: reoffer them from the same
+            // parked event, unchanged.
+            state.pending_aura_entry = Some(Box::new(crate::types::game_state::PendingAuraEntry {
+                event,
+                source_id: pending.source_id,
+                duration: pending.duration,
+                exile_controller: pending.exile_controller,
+                track_exiled_by_source: pending.track_exiled_by_source,
+                library_placement: pending.library_placement,
+            }));
+            state.waiting_for = WaitingFor::ReturnAsAuraTarget {
+                player,
+                source_id: pending.source_id,
+                returned_id: object_id,
+                legal_targets,
+                pending_effect,
+            };
+            return Ok(state.waiting_for.clone());
+        }
+        // CR 303.4g: genuinely no legal host. The Aura remains in its current
+        // zone (or goes to its owner's graveyard from the stack).
         let member = state
             .active_batch_delivery()
             .and_then(|batch| batch.paused_current.as_ref())
@@ -4766,6 +4791,13 @@ pub(crate) fn resume_paused_aura_entry_choice(
             super::engine::resume_pending_continuation_if_priority(state, events)?;
         }
         return Ok(state.waiting_for.clone());
+    }
+    let mut event = event;
+    if let ProposedEvent::ZoneChange { attach_to, .. } = &mut event {
+        *attach_to = Some(match chosen {
+            TargetRef::Object(id) => AttachTarget::Object(id),
+            TargetRef::Player(id) => AttachTarget::Player(id),
+        });
     }
     // Clearing the answered prompt before delivery keeps a completed delivery
     // from appearing to still await the same host choice.
@@ -4858,33 +4890,25 @@ pub(crate) fn resume_paused_entry_attack_choice(
                 })
         });
     let (member, expected_event, source_id, controller, duration, track, library_placement) =
-        if let Some(pause) = change_zone_pause {
-            pause
-        } else if let Some(event) = state.pending_entry_attack_event.take() {
-            // CR 508.4: a replacement-to-defender handoff (Clone) can surface
-            // the same choice without a ChangeZone paused member; the approved
-            // event itself is the delivery carrier.
-            let object_id = match &event {
-                ProposedEvent::ZoneChange { object_id, .. } => *object_id,
-                _ => object_id,
-            };
+        if let Some(sidecar) = state.pending_entry_attack_event.take() {
+            // CR 508.4: the approved event and its exact delivery identity are
+            // the carrier across a replacement-to-defender handoff.
             let controller = state
                 .objects
-                .get(&object_id)
+                .get(&sidecar.member.object_id)
                 .map(|object| object.controller)
                 .unwrap_or(player);
             (
-                crate::types::identifiers::ObjectIncarnationRef::of(
-                    object_id,
-                    state.objects[&object_id].incarnation,
-                ),
-                event,
-                object_id,
+                sidecar.member,
+                sidecar.event,
+                sidecar.source_id.unwrap_or(object_id),
                 controller,
-                None,
-                false,
-                None,
+                sidecar.duration,
+                sidecar.track_exiled_by_source,
+                sidecar.library_placement,
             )
+        } else if let Some(pause) = change_zone_pause {
+            pause
         } else {
             // CR 603.10a: a Dig/Draw batch can park the same pre-delivery
             // entering-attacker choice (Winota). Its paused member is settled

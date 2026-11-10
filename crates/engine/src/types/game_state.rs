@@ -5815,6 +5815,19 @@ pub struct PendingSingleDiscard {
 /// The companion `GameState::clause_minimum_snapshot` persists with this batch:
 /// a save taken mid-pause must resume the same CR 608.2h application with its
 /// original frozen value, rather than determine it again after restore.
+/// CR 508.4: the fully approved entering event and its exact delivery
+/// identity parked at the defender choice.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PendingEntryAttackEvent {
+    pub event: ProposedEvent,
+    pub member: ObjectIncarnationRef,
+    pub source_id: Option<ObjectId>,
+    pub duration: Option<crate::types::ability::Duration>,
+    pub exile_controller: Option<PlayerId>,
+    pub track_exiled_by_source: bool,
+    pub library_placement: Option<crate::types::ability::LibraryPosition>,
+}
+
 /// CR 303.4f: the approved entering-Aura event parked at the host choice,
 /// before the object moves. A departure at the chooser's prompt leaves the
 /// Aura in its origin zone (CR 800.4b).
@@ -25685,7 +25698,7 @@ declare_game_state! {
     /// survive the answer instead of being reconstructed from the pre-consult
     /// request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_entry_attack_event: Option<ProposedEvent>,
+    pub pending_entry_attack_event: Option<Box<PendingEntryAttackEvent>>,
     /// CR 303.4f: approved Aura entry parked before the host choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_aura_entry: Option<Box<PendingAuraEntry>>,
