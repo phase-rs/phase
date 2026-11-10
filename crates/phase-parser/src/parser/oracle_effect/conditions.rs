@@ -38,14 +38,15 @@ use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr,
 };
 use crate::types::ability::{
-    effect_announced_target_roles, payer_is_declared_target, AbilityCondition, AbilityDefinition,
-    AbilityKind, AbilityUseTally, AdditionalCostOrigin, AttachCardinality, AttachSelection,
-    CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator,
-    ControllerRef, CostCategory, CountScope, DamageChannel, DigSource, Duration, Effect,
-    EffectOutcomeSignal, FilterProp, GuessOutcome, LibraryPosition, MultiTargetSpec, ObjectScope,
-    ParsedCondition, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
-    SpentColor, StaticCondition, TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter,
-    TypedFilter,
+    damage_replacement_target_roles, effect_references_target_player,
+    extract_target_filter_from_effect, mana_multi_role, paired_subject_filters,
+    payer_is_declared_target, AbilityCondition, AbilityDefinition, AbilityKind, AbilityUseTally,
+    AdditionalCostOrigin, AttachCardinality, AttachSelection, CastManaObjectScope,
+    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CostCategory,
+    CountScope, DamageChannel, DigSource, Duration, Effect, EffectOutcomeSignal, FilterProp,
+    GuessOutcome, LibraryPosition, ObjectScope, ParsedCondition, PlayerScope, PtStat, PtValueScope,
+    QuantityExpr, QuantityRef, SharedQuality, SpentColor, StaticCondition, TargetChoiceTiming,
+    TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -4948,8 +4949,6 @@ fn is_declared_target_filter(filter: &TargetFilter) -> bool {
 #[derive(Debug)]
 struct EffectTargetProbe {
     filter: TargetFilter,
-    multi_target: Option<MultiTargetSpec>,
-    declared_slots: Vec<TargetFilter>,
 }
 
 /// Lowers `effect_text` on a throwaway context (the caller's is untouched)
@@ -4957,20 +4956,17 @@ struct EffectTargetProbe {
 fn probe_effect_target(effect_text: &str, ctx: &ParseContext) -> Option<EffectTargetProbe> {
     let clause = parse_effect_clause_inner(effect_text, &mut ctx.clone_throwaway());
     let filter = clause.effect.target_filter()?.clone();
-    Some(EffectTargetProbe {
-        filter,
-        multi_target: clause.multi_target,
-        declared_slots: Vec::new(),
-    })
+    Some(EffectTargetProbe { filter })
 }
 
-/// CR 115.1d: the effect probe narrowed to a declared target slot. A target
-/// antecedent must come from the phrase "target [something]", not from any
-/// operand that carries a filter: Whitemane Lion's "return a creature you
-/// control to its owner's hand" is a `Bounce` chosen at resolution, so
-/// `Effect::target_filter` surfaces its operand while the slot authority
-/// excludes it. The throwaway context also carries the announced-role registry
-/// (`try_parse_two_targets`), so a two-role instruction is distinguishable.
+/// CR 115.1d: the effect probe restricted to one proven mandatory object role.
+///
+/// The antecedent binder accepts only a single announced object target. A
+/// companion player (a target-player reference or a declared unless-payer) is
+/// announced before the primary filter, and the specialized source-role shapes
+/// (Fight, MoveCounters, Attach, damage replacement, paired subjects, mana
+/// multi-role, EachDealsDamageEqualToPower) announce roles the prose projection
+/// cannot order; all of those decline rather than risk binding the wrong slot.
 fn probe_declared_target_slot(effect_text: &str, ctx: &ParseContext) -> Option<EffectTargetProbe> {
     let clause = super::parse_effect_clause(effect_text, &mut ctx.clone_throwaway());
     // CR 115.1d + CR 115.10a: the timing decision runs before any slot is
@@ -4983,32 +4979,35 @@ fn probe_declared_target_slot(effect_text: &str, ctx: &ParseContext) -> Option<E
         clause.multi_target.is_some(),
         TargetSelectionMode::Chosen,
     );
-    if timing != TargetChoiceTiming::Stack {
+    if timing != TargetChoiceTiming::Stack || clause.multi_target.is_some() {
         return None;
     }
-    let mut declared_slots = effect_announced_target_roles(&clause.effect);
-    // CR 115.1 + CR 118.12a: a targeted unless-payer is announced before the
-    // primary filter (ability_utils::ability_needs_companion_target_player_slot).
-    let payer_first = clause
+    if clause
         .unless_pay
         .as_ref()
-        .is_some_and(|modifier| payer_is_declared_target(&modifier.payer));
-    if payer_first
-        && !declared_slots
-            .first()
-            .is_some_and(|f| matches!(f, TargetFilter::Player))
+        .is_some_and(|modifier| payer_is_declared_target(&modifier.payer))
+        || effect_references_target_player(&clause.effect)
+        || effect_has_specialized_source_roles(&clause.effect)
     {
-        declared_slots.insert(0, TargetFilter::Player);
-    }
-    if declared_slots.is_empty() {
         return None;
     }
-    let filter = declared_slots.first().cloned()?;
-    Some(EffectTargetProbe {
-        filter,
-        multi_target: clause.multi_target,
-        declared_slots,
-    })
+    let filter = extract_target_filter_from_effect(&clause.effect)?.clone();
+    Some(EffectTargetProbe { filter })
+}
+
+/// CR 115.1 + CR 601.2c: the multi-role shapes whose announced order cannot be
+/// projected from the head effect alone.
+fn effect_has_specialized_source_roles(effect: &Effect) -> bool {
+    damage_replacement_target_roles(effect).is_some()
+        || paired_subject_filters(effect).is_some()
+        || mana_multi_role(effect).is_some()
+        || matches!(
+            effect,
+            Effect::Fight { .. }
+                | Effect::MoveCounters { .. }
+                | Effect::Attach { .. }
+                | Effect::EachDealsDamageEqualToPower { .. }
+        )
 }
 
 pub(super) fn parse_quantity_comparison(text: &str) -> Option<(Comparator, QuantityExpr)> {
@@ -5231,51 +5230,27 @@ struct DeclaredObjectTarget {
     introduced_controller: Option<ControllerRef>,
 }
 
-/// CR 115.1a: an announced role is an object for the antecedent grammar when
-/// it is neither a context reference nor a player.
-fn is_object_role(filter: &TargetFilter) -> bool {
-    !filter.is_context_ref() && nom_condition::filter_guarantees_object_controller(filter)
-}
-
-/// CR 115.1 + CR 608.2c: the single object antecedent in declaration order.
-/// `ParentTargetController` reads the FIRST announced target, so the object
-/// role must be first and the only object role; a player first (a redirection)
-/// or a second object (Fight, Fate Transfer) has no faithful binding.
-fn single_object_antecedent(announced: &[TargetFilter]) -> Option<&TargetFilter> {
-    if announced.first().is_none_or(|first| !is_object_role(first)) {
-        return None;
-    }
-    let mut object_roles = announced.iter().filter(|filter| is_object_role(filter));
-    let filter = object_roles.next()?;
-    if object_roles.next().is_some() {
-        return None;
-    }
-    Some(filter)
-}
-
-/// CR 115.1: the instruction `effect_text` lowers to declares exactly one
-/// object target (not a context reference, the untyped `Any` fallback, a
-/// player, or a multi-role/multi-target slot). Parsed on a throwaway context so
-/// the caller's is untouched.
+/// CR 115.1: the instruction `effect_text` lowers to declares one object
+/// target that can supply a controller (not a context reference, the untyped
+/// `Any` fallback, a player, or a multi-role/multi-target slot). Parsed on a
+/// throwaway context so the caller's is untouched.
 fn declared_single_object_target(
     effect_text: &str,
     ctx: &ParseContext,
 ) -> Option<DeclaredObjectTarget> {
     let probe = probe_declared_target_slot(effect_text, ctx)?;
-    // One role with a cardinality range cannot name a single "that <noun>".
-    if probe.multi_target.is_some() {
+    if !is_declared_target_filter(&probe.filter)
+        || super::is_player_scoped_filter(&probe.filter)
+        || !nom_condition::filter_guarantees_object_controller(&probe.filter)
+    {
         return None;
     }
-    let filter = single_object_antecedent(&probe.declared_slots)?;
-    if !is_declared_target_filter(filter) || super::is_player_scoped_filter(filter) {
-        return None;
-    }
-    let introduced_controller = match filter {
+    let introduced_controller = match &probe.filter {
         TargetFilter::Typed(tf) => tf.controller.clone(),
         _ => None,
     };
     Some(DeclaredObjectTarget {
-        filter: filter.clone(),
+        filter: probe.filter,
         introduced_controller,
     })
 }
@@ -11110,6 +11085,42 @@ mod tests {
         assert!(cond.is_some(), "a battlefield token has a controller");
     }
 
+    /// CR 115.1 + CR 109.2b: the named-permanent branch proves the whole
+    /// slot is a battlefield permanent; a typed creature SPELL does not.
+    #[test]
+    fn named_permanent_referent_requires_a_whole_battlefield_slot() {
+        let (cond, _) = strip_suffix_conditional(
+            "Destroy target artifact or enchantment if you control more creatures than that permanent's controller",
+            &mut ParseContext::default(),
+        );
+        assert!(cond.is_some(), "both branches are battlefield permanents");
+
+        let (cond, _) = strip_suffix_conditional(
+            "Destroy target token an opponent controls if you control more creatures than that permanent's controller",
+            &mut ParseContext::default(),
+        );
+        assert!(cond.is_some(), "a battlefield token is a permanent");
+
+        let (cond, _) = strip_suffix_conditional(
+            "Counter target creature spell if you control more creatures than that permanent's controller",
+            &mut ParseContext::default(),
+        );
+        assert!(cond.is_none(), "a creature spell is not a permanent");
+    }
+
+    /// CR 115.4: "any other target" admits players, so it cannot prove an
+    /// object controller even when the filter is type-less.
+    #[test]
+    fn any_target_slot_cannot_bind_a_controller() {
+        let ctx = ParseContext::default();
+        let effect = "Deals that much damage to any other target";
+        let probe = probe_declared_target_slot(effect, &ctx).expect("any-target probe");
+        assert!(!nom_condition::filter_guarantees_object_controller(
+            &probe.filter
+        ));
+        assert!(declared_single_object_target(effect, &ctx).is_none());
+    }
+
     /// CR 205.2a + CR 109.4: Disenchant's "destroy target artifact or
     /// enchantment" is a typed disjunction; both branches are permanents.
     #[test]
@@ -11170,7 +11181,6 @@ mod tests {
         let effect = "Target creature gets -2/-2 until end of turn";
         let probe = probe_declared_target_slot(effect, &ctx).expect("creature effect probe");
         assert!(is_declared_target_filter(&probe.filter));
-        assert!(probe.multi_target.is_none());
         let target =
             declared_single_object_target(effect, &ctx).expect("a single declared object target");
         assert_eq!(target.introduced_controller, None);
@@ -11193,7 +11203,9 @@ mod tests {
             &probe.filter
         ));
         let role_probe = probe_declared_target_slot(effect, &ctx).expect("announced player role");
-        assert!(!super::is_object_role(&role_probe.declared_slots[0]));
+        assert!(!nom_condition::filter_guarantees_object_controller(
+            &role_probe.filter
+        ));
         assert!(declared_single_object_target(effect, &ctx).is_none());
         let condition = "that opponent controls no creatures";
         assert!(
@@ -11206,11 +11218,9 @@ mod tests {
             "{effect} if {condition}"
         );
 
-        // Multi-target slot: the probe keeps its multi-target metadata, so no
-        // single target controller exists.
+        // Multi-target slot: a cardinality range has no single target.
         let effect = "Up to two target creatures an opponent controls get -2/-2 until end of turn";
-        let probe = probe_declared_target_slot(effect, &ctx).expect("multi-target effect probe");
-        assert!(probe.multi_target.is_some());
+        assert!(probe_declared_target_slot(effect, &ctx).is_none());
         let condition = "that opponent controls no other creatures";
         assert!(
             nom_condition::parse_target_controller_count_condition(condition).is_ok(),
@@ -11266,10 +11276,9 @@ mod tests {
 
         // Fight announces two objects, so "that creature" has no single role.
         let effect = "Target creature you control fights target creature an opponent controls";
-        let probe = probe_declared_target_slot(effect, &ctx).expect("fight effect probe");
         assert!(
-            probe.multi_target.is_some() || probe.declared_slots.len() == 2,
-            "Fight must surface both announced roles: {probe:?}"
+            probe_declared_target_slot(effect, &ctx).is_none(),
+            "Fight announces two roles"
         );
         let condition = "you control more creatures than that creature's controller";
         assert_eq!(
@@ -11293,8 +11302,10 @@ mod tests {
         // target opponent pays 3 life." A declared unless-payer is announced
         // before the primary filter, so the object is not the first target.
         let effect = "Destroy target creature unless target opponent pays 3 life";
-        let probe = probe_declared_target_slot(effect, &ctx).expect("unless-payer probe");
-        assert_eq!(probe.declared_slots[0], TargetFilter::Player);
+        assert!(
+            probe_declared_target_slot(effect, &ctx).is_none(),
+            "the declared payer is announced first"
+        );
         let condition = "you control more creatures than that creature's controller";
         assert_eq!(
             parse_target_controller_control_condition_text(condition, effect, &ctx),
@@ -11308,7 +11319,9 @@ mod tests {
         let effect =
             "Prevent the next 1 damage that would be dealt to target player or planeswalker this turn";
         let probe = probe_declared_target_slot(effect, &ctx).expect("noble vestige probe");
-        assert!(!is_object_role(&probe.declared_slots[0]));
+        assert!(!nom_condition::filter_guarantees_object_controller(
+            &probe.filter
+        ));
         assert!(declared_single_object_target(effect, &ctx).is_none());
         let condition = "its controller controls no creatures";
         assert_eq!(
@@ -11321,7 +11334,9 @@ mod tests {
         // graveyard." A graveyard card has no controller (CR 109.4).
         let effect = "Exile target creature card from a graveyard";
         let probe = probe_declared_target_slot(effect, &ctx).expect("deathrite probe");
-        assert!(!is_object_role(&probe.declared_slots[0]));
+        assert!(!nom_condition::filter_guarantees_object_controller(
+            &probe.filter
+        ));
         assert!(declared_single_object_target(effect, &ctx).is_none());
         let condition = "its controller controls no creatures";
         assert_eq!(
@@ -11334,8 +11349,10 @@ mod tests {
         // (ability_utils::collect_target_slots_inner), so the object is not the
         // first target.
         let effect = "Destroy all creatures target player controls";
-        let probe = probe_declared_target_slot(effect, &ctx).expect("companion player probe");
-        assert_eq!(probe.declared_slots[0], TargetFilter::Player);
+        assert!(
+            probe_declared_target_slot(effect, &ctx).is_none(),
+            "the companion player is announced first"
+        );
         let condition = "you control more creatures than that creature's controller";
         assert_eq!(
             parse_target_controller_control_condition_text(condition, effect, &ctx),
@@ -11347,11 +11364,9 @@ mod tests {
         // another target creature." Two announced roles, so "that creature"
         // names neither uniquely.
         let effect = "Move all counters from target creature onto another target creature";
-        let probe = probe_declared_target_slot(effect, &ctx).expect("fate transfer probe");
-        assert_eq!(
-            probe.declared_slots.len(),
-            2,
-            "both counters roles must be announced"
+        assert!(
+            probe_declared_target_slot(effect, &ctx).is_none(),
+            "both counters roles are announced"
         );
         let condition = "you control more creatures than that creature's controller";
         assert_eq!(
@@ -11463,30 +11478,6 @@ mod tests {
             "the printed Unified Will condition must parse"
         );
         assert_eq!(body, "Counter target spell");
-    }
-
-    /// CR 115.1 + CR 608.2c: first-announced order decides the object
-    /// antecedent; a player first or a second object has no faithful binding.
-    #[test]
-    fn single_object_antecedent_requires_the_first_announced_role() {
-        let creature = TargetFilter::Typed(TypedFilter::creature());
-        assert_eq!(
-            single_object_antecedent(std::slice::from_ref(&creature)),
-            Some(&creature)
-        );
-        assert_eq!(
-            single_object_antecedent(&[TargetFilter::Player, creature.clone()]),
-            None
-        );
-        assert_eq!(
-            single_object_antecedent(&[creature.clone(), TargetFilter::Player]),
-            Some(&creature)
-        );
-        assert_eq!(
-            single_object_antecedent(&[creature.clone(), creature.clone()]),
-            None
-        );
-        assert_eq!(single_object_antecedent(&[TargetFilter::Player]), None);
     }
 
     /// CR 608.2d + CR 107.4 + CR 202.1: Omnath, Locus of All — "you may reveal

@@ -30,12 +30,13 @@ use crate::parser::oracle_target::{
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
-    AbilityCondition, AggregateFunction, AttachmentReferent, AttackedYouScope, CardTypeSetSource,
-    CastManaObjectScope, CastManaSpentMetric, CommanderOwnership, Comparator, ControllerRef,
-    CountScope, DamageChannel, DamageGroupKey, DamageKindFilter, FilterProp, NumberQuality,
-    ObjectProperty, ObjectScope, Parity, PlayerFilter, PlayerRelation, PlayerScope,
-    PropertyAggregate, QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation,
-    StaticCondition, TargetFilter, TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
+    is_any_target_filter, AbilityCondition, AggregateFunction, AttachmentReferent,
+    AttackedYouScope, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric,
+    CommanderOwnership, Comparator, ControllerRef, CountScope, DamageChannel, DamageGroupKey,
+    DamageKindFilter, FilterProp, NumberQuality, ObjectProperty, ObjectScope, Parity, PlayerFilter,
+    PlayerRelation, PlayerScope, PropertyAggregate, QuantityExpr, QuantityRef, SharedQuality,
+    SharedQualityRelation, StaticCondition, TargetFilter, TrackedAnaphorSource, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -4809,19 +4810,43 @@ fn filter_is_spell_slot(filter: &TargetFilter) -> bool {
 /// for a shape this projection cannot classify (a disjunction or a bare
 /// subtype-only filter) rather than binding by name alone.
 pub(crate) fn referent_noun_matches_slot(noun: ObjectReferentNoun, filter: &TargetFilter) -> bool {
+    let guarantees_controller = filter_guarantees_object_controller(filter);
     match noun {
-        ObjectReferentNoun::Pronoun => filter_guarantees_object_controller(filter),
-        ObjectReferentNoun::Spell => {
-            filter_is_spell_slot(filter) && filter_guarantees_object_controller(filter)
-        }
+        ObjectReferentNoun::Pronoun => guarantees_controller,
+        ObjectReferentNoun::Spell => filter_is_spell_slot(filter) && guarantees_controller,
+        // A stack object is not a permanent even when its type axis is a
+        // permanent type (Essence Scatter's creature spell).
         ObjectReferentNoun::Creature => {
             typed_slot_type_axis_matches(filter, |t| matches!(t, TypeFilter::Creature))
-                && filter_guarantees_object_controller(filter)
+                && guarantees_controller
+                && !slot_is_stack_object(filter)
         }
         ObjectReferentNoun::Permanent => {
-            typed_slot_type_axis_matches(filter, type_filter_is_permanent)
-                && filter_guarantees_object_controller(filter)
+            (typed_slot_type_axis_matches(filter, type_filter_is_permanent)
+                || property_only_permanent_slot(filter))
+                && guarantees_controller
+                && !slot_is_stack_object(filter)
         }
+    }
+}
+
+/// CR 110.1 + CR 111.1: a property-only typed filter on the battlefield (a
+/// token) denotes a permanent even without a type axis.
+fn property_only_permanent_slot(filter: &TargetFilter) -> bool {
+    matches!(filter, TargetFilter::Typed(tf)
+        if tf.type_filters.is_empty() && !tf.properties.is_empty())
+}
+
+/// CR 109.2b: a stack object (spell or ability) is never a battlefield
+/// permanent. Checked across the whole slot so a typed spell leg cannot make
+/// an `And` look like a permanent.
+fn slot_is_stack_object(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::StackSpell | TargetFilter::StackAbility { .. } => true,
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(slot_is_stack_object)
+        }
+        _ => false,
     }
 }
 
@@ -4964,6 +4989,7 @@ pub(crate) fn filter_guarantees_object_controller(filter: &TargetFilter) -> bool
         TargetFilter::Typed(tf) => {
             let typed = TargetFilter::Typed(tf.clone());
             !typed.denotes_player_target()
+                && !is_any_target_filter(&typed)
                 && typed
                     .extract_zones()
                     .iter()
