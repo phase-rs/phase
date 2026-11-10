@@ -2068,7 +2068,13 @@ fn drain_combat_lifelink(
     mut record: PendingCombatLifelink,
 ) -> CombatDamageBatch {
     let waiting_before = state.waiting_for.clone();
-    while let Some(gain) = record.remaining.pop_front() {
+    // CR 104.1: "A game ends immediately when a player wins". An earlier gain's
+    // replacement (Nefarious Lich's draw, then Laboratory Maniac's win) can end
+    // the game inside the batch; no later source's gain is applied after that.
+    while state.game_end.is_none() {
+        let Some(gain) = record.remaining.pop_front() else {
+            break;
+        };
         match crate::game::effects::life::apply_life_gain(
             state,
             gain.controller,
@@ -2111,18 +2117,32 @@ fn drain_combat_lifelink(
             // `mark_phase_transition_awaiting_post_replacement` only for the
             // substitution variant), so the divergence here is deliberate, not an
             // oversight.
+            //
+            // CR 104.1: a substitute that ended the game (Laboratory Maniac's win)
+            // left `GameOver`; the earlier wait is never restored over it.
             Err(ReplacementDeferred::SubstitutionContinuation { .. }) => {
-                state.waiting_for = waiting_before.clone();
+                if state.game_end.is_some() {
+                    crate::game::elimination::ensure_game_over_if_terminal(
+                        state,
+                        &mut record.batch_events,
+                    );
+                } else {
+                    state.waiting_for = waiting_before.clone();
+                }
             }
         }
     }
     // CR 510.2: the per-player aggregate, emitted after the gains exactly as it
-    // is on a batch that never paused.
+    // is on a batch that never paused. It records damage already dealt in Phase
+    // C, before any gain could end the game, so it is kept on a terminal batch.
     record.batch_events.append(&mut record.damage_to_players);
     // CR 615.5 + CR 615.13: Phase D fires once per shield, and only here — after
     // the last gain, so no rider continuation can ever run while a CR 616.1
     // prompt is open, and after nothing else can stamp `last_effect_count`.
-    fire_combat_prevention_riders(state, &record.prevention_tally, &mut record.batch_events);
+    // CR 104.1: a gain that ended the game ends the batch; no rider runs after it.
+    if state.game_end.is_none() {
+        fire_combat_prevention_riders(state, &record.prevention_tally, &mut record.batch_events);
+    }
     // CR 510.2 + CR 732.2a: the simultaneous batch is the EVENT the loop-ring life
     // prohibition keys on, and this is the last statement that can move life in it.
     // The batch moves life in three places and only a call here sees all three:

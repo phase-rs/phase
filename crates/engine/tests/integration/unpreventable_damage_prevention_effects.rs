@@ -1938,6 +1938,10 @@ const EXQUISITE_BLOOD: &str = "Whenever an opponent loses life, you gain that mu
 const FLAME_RIFT: &str = "Flame Rift deals 4 damage to each player.";
 const DRALNU_LICH_LORD: &str = "If damage would be dealt to Dralnu, sacrifice that many permanents instead.\n{T}: Target instant or sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to its mana cost. (You may cast that card from your graveyard for its flashback cost. Then exile it.)";
 const BOROS_SWIFTBLADE: &str = "Double strike";
+const LABORATORY_MANIAC: &str =
+    "If you would draw a card while your library has no cards in it, you win the game instead.";
+const VAMPIRE_OF_THE_DIRE_MOON: &str = "Deathtouch (Any amount of damage this deals to a creature is enough to destroy it.)\nLifelink (Damage dealt by this creature also causes you to gain that much life.)";
+const VAMPIRE_NIGHTHAWK: &str = "Flying\nDeathtouch (Any amount of damage this deals to a creature is enough to destroy it.)\nLifelink (Damage dealt by this creature also causes you to gain that much life.)";
 
 /// A main-phase board with eight library cards for each player, so a rider's draws and a later
 /// draw step find cards.
@@ -2670,6 +2674,81 @@ fn nothing_happens_in_the_batch_after_the_game_ends() {
     // before the Giant's portion ends the game, so P0 draws 2 (riders aren't held to the end of
     // the batch, Command Zone #172).
     assert_eq!(hand_size(&runner, P0) - hand_before, 2);
+}
+
+/// CR 104.1 inside the batch's lifelink gains (CR 702.15e: each source's gain is its own event):
+/// P0 controls Nefarious Lich, Laboratory Maniac and a Vampire of the Dire Moon with an empty
+/// library, and P1's Vampire Nighthawk blocks the Vampire. P0's gain of 1 becomes a draw (Nefarious
+/// Lich), which Laboratory Maniac replaces with P0 winning the game. Nothing in the batch happens
+/// after that: P1's gain of 2 is never applied, and when P0 has cast Channel Harm at the Nighthawk,
+/// the shield that prevented the Nighthawk's 2 runs no rider (CR 615.5).
+#[test]
+fn nothing_happens_in_the_batch_after_a_lifelink_gain_ends_the_game() {
+    for channel_harm in [false, true] {
+        let mut scenario = main_phase();
+        let lich = scenario
+            .add_enchantment_from_oracle(P0, "Nefarious Lich", NEFARIOUS_LICH)
+            .id();
+        let maniac = scenario
+            .add_creature_from_oracle(P0, "Laboratory Maniac", 2, 2, LABORATORY_MANIAC)
+            .id();
+        let attacker = creature_with_keywords(
+            &mut scenario,
+            P0,
+            "Vampire of the Dire Moon",
+            (1, 1),
+            &["Deathtouch", "Lifelink"],
+            VAMPIRE_OF_THE_DIRE_MOON,
+        );
+        let blocker = creature_with_keywords(
+            &mut scenario,
+            P1,
+            "Vampire Nighthawk",
+            (2, 3),
+            &["Flying", "Deathtouch", "Lifelink"],
+            VAMPIRE_NIGHTHAWK,
+        );
+        let harm = channel_harm.then(|| spell(&mut scenario, "Channel Harm", CHANNEL_HARM, true));
+        let mut runner = scenario.build();
+        assert!(runner.state().players[0].library.is_empty());
+        if let Some(harm) = harm {
+            cast(&mut runner, harm, vec![TargetRef::Object(blocker)]);
+        }
+
+        let combat = fight(&mut runner, &[attacker], &[(blocker, attacker)], None);
+
+        assert_p1_lost_inside_the_batch(&runner, &combat.events);
+        assert_nothing_after_the_game_ended(&runner, &combat.events);
+        assert!(combat.prompts.is_empty());
+        // Reach guard: the Vampire dealt its 1, and the game ended through P0's gain: Nefarious
+        // Lich replaced it and Laboratory Maniac replaced the draw. The Nighthawk's 2 was dealt,
+        // queuing P1's gain, or prevented by Channel Harm, leaving its rider owed.
+        assert_eq!(damage_dealt_to(&combat.events, blocker), vec![1]);
+        let nighthawk_damage = if channel_harm { vec![] } else { vec![2] };
+        assert_eq!(
+            damage_dealt_to(&combat.events, attacker),
+            nighthawk_damage,
+            "channel harm {channel_harm}"
+        );
+        let over = combat
+            .events
+            .iter()
+            .position(|e| matches!(e, GameEvent::GameOver { .. }))
+            .expect("the game ended");
+        for (source, kind) in [(lich, "GainLife"), (maniac, "Draw")] {
+            assert!(
+                combat.events[..over].iter().any(|e| matches!(
+                    e,
+                    GameEvent::ReplacementApplied { source_id, event_type }
+                        if *source_id == source && event_type == kind
+                )),
+                "{kind} was not replaced before the game ended (channel harm {channel_harm})"
+            );
+        }
+        assert_eq!(prevented(&combat.events), 0, "channel harm {channel_harm}");
+        assert_eq!(life(&runner, P0), 20);
+        assert_eq!(life(&runner, P1), 20, "channel harm {channel_harm}");
+    }
 }
 
 /// No damage, prevention, counter, life change or zone change follows the `GameOver` event, no
