@@ -28222,8 +28222,9 @@ enum WitnessOutcome {
 /// costs left behind. Each candidate is activated on a clone through the real
 /// mana-ability authority, every object choice its cost asks for tried in turn,
 /// and each activation resolves at once (CR 605.3b). The activation's own
-/// source is never chosen to pay a mana ability's cost, so the witness never
-/// rests on the source leaving before its own cost is paid. Traversal allows
+/// source may be chosen to pay a mana ability's cost (CR 113.7a); `payable`
+/// then refuses any cost that still needs the source ({T}, "Sacrifice this",
+/// "Remove a counter from this"). Traversal allows
 /// repeatable mana abilities and reverse-order sequences (e.g. Goblin Clearcutter
 /// before Ashnod's Altar). A color prompt is answered only with the colors the
 /// payment can spend, and a collect-evidence prompt with one answer. At most
@@ -28248,7 +28249,6 @@ fn mana_ability_window_mana_witness(
         .collect();
     let mut search = ManaWindowWitnessSearch {
         player,
-        source_id,
         cost,
         payable,
         candidates: &candidates,
@@ -28260,7 +28260,6 @@ fn mana_ability_window_mana_witness(
 
 struct ManaWindowWitnessSearch<'a, F> {
     player: PlayerId,
-    source_id: ObjectId,
     cost: &'a AbilityCost,
     payable: &'a F,
     candidates: &'a [(ObjectId, usize)],
@@ -28321,8 +28320,8 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
     }
 
     /// CR 118.3 + CR 605.3b: Follow one activation on `next` to its
-    /// resolution, trying each object choice its cost asks for (never the
-    /// activation's own source), then judge and extend each resolved board.
+    /// resolution, trying each object choice its cost asks for, then judge
+    /// and extend each resolved board.
     fn through_cost_choices(
         &mut self,
         board: &GameState,
@@ -28360,10 +28359,13 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
                 resume: CostResume::ManaAbility { mana_ability },
                 ..
             }) => {
-                let choices: Vec<ObjectId> = choices
-                    .into_iter()
-                    .filter(|id| *id != self.source_id)
-                    .collect();
+                // CR 113.7a + CR 602.2a: the announced ability exists on the
+                // stack independently of its source, so the source may itself
+                // pay a mana ability's cost (Mindless Automaton sacrificed to
+                // Ashnod's Altar). Whether the rest of the cost can still be
+                // paid without it ({T}, "Remove a counter from this", "Sacrifice
+                // this") is the payment authority's verdict on the resolved
+                // board, not a rule of this search.
                 if choices.len() < count
                     && matches!(
                         &kind,

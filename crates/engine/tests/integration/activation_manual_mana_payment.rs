@@ -4526,15 +4526,13 @@ const MINDLESS_AUTOMATON: &str = "This creature enters with two +1/+1 counters o
 {1}, Discard a card: Put a +1/+1 counter on this creature.\n\
 Remove two +1/+1 counters from this creature: Draw a card.";
 
-/// CR 601.2g + CR 118.3 (#10190): When an activated ability's source is the
-/// only creature on the battlefield, Ashnod's Altar ("Sacrifice a creature: Add {C}{C}.")
-/// has an incomplete selection (`choices.len() < count` after filtering the source).
-/// Rejecting incomplete selections before clamping `count` prevents exhausting the
-/// witness budget on empty selections, allowing the search to explore Krark-Clan Ironworks
-/// ("Sacrifice an artifact: Add {C}{C}."), which can sacrifice Ashnod's Altar to fund
-/// the activation.
+/// CR 601.2g + CR 605.3a (#10190): a mana ability may sacrifice another mana
+/// source in the window. With Mindless Automaton the only creature, Krark-Clan
+/// Ironworks ("Sacrifice an artifact: Add {C}{C}.") sacrifices Ashnod's Altar
+/// to fund "{1}, Discard a card", which is offered for a manual payment and
+/// completes with one {C} floating.
 #[test]
-fn incomplete_sacrifice_selection_does_not_exhaust_witness_budget() {
+fn a_manual_activation_is_funded_by_sacrificing_another_mana_source() {
     let mut scenario = scenario_at_main();
     let automaton = scenario
         .add_creature_from_oracle(P0, "Mindless Automaton", 2, 2, MINDLESS_AUTOMATON)
@@ -4608,6 +4606,133 @@ fn incomplete_sacrifice_selection_does_not_exhaust_witness_budget() {
         runner.state().stack.len(),
         1,
         "the activation is on the stack"
+    );
+}
+
+/// The payment modes `source`'s activated ability `index` is offered in.
+fn offered_modes_for(runner: &GameRunner, source: ObjectId, index: usize) -> Vec<CastPaymentMode> {
+    let (_, _, grouped) = legal_actions_full(runner.state());
+    grouped
+        .get(&source)
+        .into_iter()
+        .flatten()
+        .filter_map(|action| match action {
+            GameAction::ActivateAbility {
+                ability_index,
+                payment_mode,
+                ..
+            } if *ability_index == index => Some(*payment_mode),
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 113.7a + CR 601.2g + CR 605.3a (#10190 review): once announced, an
+/// activated ability exists on the stack independently of its source, so the
+/// source itself may pay a mana ability's cost. With Mindless Automaton the
+/// only creature and Ashnod's Altar the only mana source, "{1}, Discard a card"
+/// is offered for a manual payment: the Automaton is sacrificed for {C}{C},
+/// the {1} and the discard are paid, and the ability resolves with no creature
+/// left to put the counter on.
+#[test]
+fn a_manual_activation_may_sacrifice_its_own_source_for_mana() {
+    let mut scenario = scenario_at_main();
+    let automaton = scenario
+        .add_creature_from_oracle(P0, "Mindless Automaton", 2, 2, MINDLESS_AUTOMATON)
+        .as_artifact_creature()
+        .with_mana_cost(ManaCost::generic(4))
+        .with_plus_counters(2)
+        .id();
+    let ashnods = scenario
+        .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let discard = scenario.add_card_to_hand(P0, "Discard fodder");
+    let mut runner = scenario.build();
+    let discard_ability = activated_ability_definitions(runner.state(), automaton)
+        .iter()
+        .find(|(_, ability)| matches!(ability.effect.as_ref(), Effect::PutCounter { .. }))
+        .map(|(index, _)| *index)
+        .expect("Mindless Automaton's {1}, Discard a card ability");
+
+    assert_eq!(
+        offered_modes_for(&runner, automaton, discard_ability),
+        vec![CastPaymentMode::Manual],
+        "the Automaton can fund its own {{1}} through Ashnod's Altar"
+    );
+
+    let waiting_for = activate_index(
+        &mut runner,
+        automaton,
+        discard_ability,
+        CastPaymentMode::Manual,
+    );
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(&mut runner, ashnods, &[automaton], None);
+    assert!(
+        in_zone(&runner, automaton, Zone::Graveyard),
+        "the source was sacrificed for mana"
+    );
+    assert_eq!(pool_total(&runner), 2);
+
+    let waiting_for = pass(&mut runner);
+    assert!(
+        is_cost_prompt(&waiting_for, |kind| *kind == PayCostKind::Discard),
+        "the discard follows the window: {waiting_for:?}"
+    );
+    let waiting_for = select_cards(&mut runner, &[discard]);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(
+        in_zone(&runner, discard, Zone::Graveyard),
+        "the card was discarded"
+    );
+    assert_eq!(pool_total(&runner), 1, "the {{1}} left one {{C}} floating");
+    assert_eq!(runner.state().stack.len(), 1, "the ability is on the stack");
+
+    resolve_stack(&mut runner);
+    assert!(is_priority(&runner.state().waiting_for));
+    assert!(
+        in_zone(&runner, automaton, Zone::Graveyard),
+        "the ability resolved without returning or growing its source"
+    );
+}
+
+/// CR 118.10 + CR 601.2g + CR 602.2b: a source the rest of the cost still
+/// needs can't also pay a mana ability's cost. A lone creature whose ability
+/// costs "{2}, {T}" is offered in no mode with Ashnod's Altar as the only
+/// mana source — sacrificing it for the {2} leaves nothing to tap — and a
+/// second creature makes it offered for a manual payment.
+#[test]
+fn a_manual_activation_cannot_sacrifice_a_source_its_cost_still_taps() {
+    let board = |extra_creature: bool| {
+        let mut scenario = scenario_at_main();
+        let scholar = scenario
+            .add_creature_from_oracle(P0, "Tapping Scholar", 1, 1, "{2}, {T}: Draw a card.")
+            .with_mana_cost(ManaCost::generic(2))
+            .id();
+        scenario
+            .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
+            .with_mana_cost(ManaCost::generic(3));
+        if extra_creature {
+            scenario.add_vanilla(P0, 2, 2);
+        }
+        scenario.add_card_to_library_top(P0, "Drawn card");
+        let runner = scenario.build();
+        let index = non_mana_ability_index(&runner, scholar);
+        (runner, scholar, index)
+    };
+
+    let (runner, scholar, index) = board(false);
+    assert!(
+        offered_modes_for(&runner, scholar, index).is_empty(),
+        "the lone creature can fund the {{2}} or be tapped, not both"
+    );
+
+    let (runner, scholar, index) = board(true);
+    assert_eq!(
+        offered_modes_for(&runner, scholar, index),
+        vec![CastPaymentMode::Manual],
+        "a second creature funds the {{2}}"
     );
 }
 
