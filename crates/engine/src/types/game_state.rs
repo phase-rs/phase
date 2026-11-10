@@ -37904,6 +37904,10 @@ impl GameState {
             completed_hidden_search_audiences: _,
             pending_search_found_batch: _,
             pending_die_roll_instruction: _,
+            // CR 104.4b: the continuation die handoff (#10551) publishes a die result
+            // for the next instruction; both frames compare it raw like the other
+            // per-turn instruction state here.
+            die_result_publication: _,
             post_replacement_token_substitution_count: _,
             resolution_source_relatch: _,
             // PRE-EXISTING RAW PIN LIMITATIONS — outside the named issue rows:
