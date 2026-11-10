@@ -15,7 +15,7 @@ use engine::types::ability::{
     TargetChoiceTiming, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{PersistedGameState, WaitingFor};
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -1300,6 +1300,8 @@ fn stormkeld_curator_public_first_scope_redacts_private_eligibility() {
     let opponent_one = filter_state_for_viewer(one_eligible.state(), P1);
     let WaitingFor::EffectZoneChoice {
         cards: opponent_cards_zero,
+        count: opponent_count_zero,
+        min_count: opponent_min_zero,
         ..
     } = &opponent_zero.waiting_for
     else {
@@ -1307,6 +1309,8 @@ fn stormkeld_curator_public_first_scope_redacts_private_eligibility() {
     };
     let WaitingFor::EffectZoneChoice {
         cards: opponent_cards_one,
+        count: opponent_count_one,
+        min_count: opponent_min_one,
         ..
     } = &opponent_one.waiting_for
     else {
@@ -1316,11 +1320,22 @@ fn stormkeld_curator_public_first_scope_redacts_private_eligibility() {
         opponent_cards_zero.is_empty() && opponent_cards_one.is_empty(),
         "public-first mixed scope: equal hands with different eligible counts may not differ; got {opponent_cards_zero:?} and {opponent_cards_one:?}"
     );
+    assert_eq!(
+        (
+            *opponent_count_zero,
+            *opponent_min_zero,
+            *opponent_count_one,
+            *opponent_min_one
+        ),
+        (0, 0, 0, 0),
+        "candidate-derived bounds must be redacted for non-choosers"
+    );
 
     let chooser_zero = filter_state_for_viewer(zero_eligible.state(), P0);
     let chooser_one = filter_state_for_viewer(one_eligible.state(), P0);
     let WaitingFor::EffectZoneChoice {
         cards: chooser_cards_zero,
+        count: chooser_count_zero,
         ..
     } = &chooser_zero.waiting_for
     else {
@@ -1328,6 +1343,7 @@ fn stormkeld_curator_public_first_scope_redacts_private_eligibility() {
     };
     let WaitingFor::EffectZoneChoice {
         cards: chooser_cards_one,
+        count: chooser_count_one,
         ..
     } = &chooser_one.waiting_for
     else {
@@ -1343,6 +1359,51 @@ fn stormkeld_curator_public_first_scope_redacts_private_eligibility() {
         2,
         "chooser sees the graveyard and hand Auras"
     );
+    assert_eq!(
+        (*chooser_count_zero, *chooser_count_one),
+        (1, 2),
+        "chooser keeps the exact eligible bounds"
+    );
+
+    // CR 402.3: an older save may still name the public first scan zone. The
+    // restore chokepoint must reconstruct the private leg from the paused
+    // ability, and the opponent view must be identical for zero vs one
+    // eligible hand cards including the candidate-derived bounds.
+    for (runner, label) in [(&zero_eligible, "zero"), (&one_eligible, "one")] {
+        let mut legacy = runner.state().clone();
+        let WaitingFor::EffectZoneChoice { zone, .. } = &mut legacy.waiting_for else {
+            panic!("legacy state must hold the choice");
+        };
+        *zone = Zone::Graveyard;
+
+        let restored = PersistedGameState::capture(legacy)
+            .into_game_state()
+            .expect("legacy choice restores through the production chokepoint");
+        let WaitingFor::EffectZoneChoice { zone, .. } = &restored.waiting_for else {
+            panic!("restored state must retain the choice");
+        };
+        assert_eq!(*zone, Zone::Hand, "restore must recover the private leg");
+
+        let opponent = filter_state_for_viewer(&restored, P1);
+        let WaitingFor::EffectZoneChoice {
+            cards: opponent_cards,
+            count: opponent_count,
+            min_count: opponent_min_count,
+            ..
+        } = &opponent.waiting_for
+        else {
+            panic!("restored opponent must see the redacted envelope");
+        };
+        assert!(
+            opponent_cards.is_empty(),
+            "{label}: restored opponent cards must be empty; got {opponent_cards:?}"
+        );
+        assert_eq!(
+            (*opponent_count, *opponent_min_count),
+            (0, 0),
+            "{label}: restored opponent bounds must not reveal eligibility"
+        );
+    }
 }
 
 /// Drive Stormkeld Curator's ETB to its `EffectZoneChoice` without selecting an

@@ -16439,6 +16439,69 @@ impl GameState {
         }
     }
 
+    /// CR 402.3: a restored mixed-zone choice must remember its private scan
+    /// scope even when the saved prompt predates the producer's private-zone
+    /// selection. Older saves stored the first scan zone (often a public
+    /// Graveyard); reconstruct the scope from the paused ability chain and
+    /// move the prompt's zone to the first private leg so viewer projection
+    /// cannot infer hidden hand eligibility from an empty-vs-public candidate
+    /// set. No paused ChangeZone scope means nothing to migrate.
+    fn migrate_restored_effect_zone_choice_scope(&mut self) {
+        let current_is_public = match &self.waiting_for {
+            WaitingFor::EffectZoneChoice { zone, .. } => zone.is_public(),
+            _ => return,
+        };
+        if !current_is_public {
+            return;
+        }
+
+        fn walk(ability: &crate::types::ability::ResolvedAbility, private: &mut Option<Zone>) {
+            if private.is_some() {
+                return;
+            }
+            let target = match &ability.effect {
+                crate::types::ability::Effect::ChangeZone { target, .. }
+                | crate::types::ability::Effect::ChangeZoneAll { target, .. } => Some(target),
+                _ => None,
+            };
+            if let Some(target) = target {
+                if let Some(zone) = target
+                    .extract_zones()
+                    .into_iter()
+                    .find(|zone| !zone.is_public())
+                {
+                    *private = Some(zone);
+                    return;
+                }
+            }
+            if let Some(sub) = ability.sub_ability.as_deref() {
+                walk(sub, private);
+            }
+            if let Some(else_ability) = ability.else_ability.as_deref() {
+                walk(else_ability, private);
+            }
+        }
+
+        let mut private = None;
+        if let Some(continuation) = self.active_ability_continuation() {
+            walk(&continuation.chain, &mut private);
+        }
+        if private.is_none() {
+            if let Some(ability) = self
+                .resolving_stack_entry
+                .as_ref()
+                .and_then(|entry| entry.ability())
+            {
+                walk(ability, &mut private);
+            }
+        }
+        if let Some(private) = private {
+            if let WaitingFor::EffectZoneChoice { zone, .. } = &mut self.waiting_for {
+                *zone = private;
+            }
+        }
+    }
+
     /// CR 109.5 + CR 611.2a: drop any restored restriction whose affected player
     /// is still the raw `RestrictionPlayerScope::SourceController` placeholder
     /// (Conduit of Worlds' "you can't cast additional spells this turn").
@@ -16817,6 +16880,10 @@ impl PersistedGameState {
         // the repair — a legacy save restored through either one would
         // otherwise present an optional or search-found prompt as an ordering.
         state.migrate_restored_replacement_choice_kind();
+        // CR 402.3: older saves of a mixed public/private choice may still name
+        // the public first scan zone; reconstruct the private scope before the
+        // state is exposed to viewers.
+        state.migrate_restored_effect_zone_choice_scope();
         // `pending_trigger_event_batch` is a construction carrier for the
         // corresponding `pending_trigger`. A historical save can retain the
         // carrier after its trigger was dropped; it cannot represent live

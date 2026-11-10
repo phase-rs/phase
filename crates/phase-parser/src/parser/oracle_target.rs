@@ -11394,21 +11394,37 @@ pub(crate) fn scan_zone_phrase_span(
 /// ownership of the population. A mixed per-player/shared zone list can carry a
 /// possessor only in the `Established` case; `Unestablished` is the decline
 /// boundary that keeps one flat `Owned` from over-restricting a shared leg.
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum NounPhraseOwnership {
-    Established,
+    Established(ControllerRef),
     Unestablished,
 }
 
 /// The single authority for reading ownership off a constructed type phrase.
 fn noun_phrase_ownership(properties: &[FilterProp]) -> NounPhraseOwnership {
-    if properties
+    properties
         .iter()
-        .any(|prop| matches!(prop, FilterProp::Owned { .. }))
-    {
-        NounPhraseOwnership::Established
-    } else {
-        NounPhraseOwnership::Unestablished
+        .find_map(|prop| match prop {
+            FilterProp::Owned { controller } => {
+                Some(NounPhraseOwnership::Established(controller.clone()))
+            }
+            _ => None,
+        })
+        .unwrap_or(NounPhraseOwnership::Unestablished)
+}
+
+/// The owner a zone-list qualifier would apply to, when it names one.
+fn zone_qualifier_owner(qual: ZoneQual) -> Option<ControllerRef> {
+    match qual {
+        ZoneQual::Opponent => Some(ControllerRef::Opponent),
+        ZoneQual::You => Some(ControllerRef::You),
+        ZoneQual::ChosenPlayer => Some(ControllerRef::SourceChosenPlayer),
+        ZoneQual::TargetPlayer => Some(ControllerRef::TargetPlayer),
+        ZoneQual::Their => Some(ControllerRef::ScopedPlayer),
+        // "its owner's" / "that player's" / "each player's" do not bind one
+        // concrete ControllerRef, so a mixed list cannot prove the noun phrase
+        // and the qualifier name the same player.
+        ZoneQual::OtherPoss | ZoneQual::Plain => None,
     }
 }
 
@@ -11581,9 +11597,13 @@ fn parse_zone_phrase_entry(
     let (i, _) = peek_zone_boundary(i)?;
 
     if prep == ZonePrep::On && zone != Zone::Battlefield {
+        // An invalid first entry, not a deliberately declined zone list: a
+        // boundary scanner may still find a later real zone phrase. A
+        // continuation after a committed "or" is wrapped in `cut`, which turns
+        // this into a hard failure and still stops the scan.
         return Err(nom::Err::Error(nom::error::Error::new(
             i,
-            nom::error::ErrorKind::Fail,
+            nom::error::ErrorKind::Verify,
         )));
     }
 
@@ -11730,12 +11750,27 @@ fn parse_zone_suffix_nom(
         // already established ownership (`extend_zone_properties` then dedupes
         // the possessive), and otherwise decline rather than over-restrict the
         // shared leg. Plain/no-possessor lists stay union-only.
-        if mixed_scope && qual != ZoneQual::Plain && ownership == NounPhraseOwnership::Unestablished
-        {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                i,
-                nom::error::ErrorKind::Fail,
-            )));
+        if mixed_scope && qual != ZoneQual::Plain {
+            // CR 400.3: keep the actual owner reference. The noun phrase's
+            // ownership may be discarded only when the zone qualifier names the
+            // SAME player; otherwise the shared leg would silently inherit a
+            // different owner ("card you own in an opponent's graveyard or in
+            // exile" must not become "cards you own anywhere").
+            let Some(zone_owner) = zone_qualifier_owner(qual) else {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    i,
+                    nom::error::ErrorKind::Fail,
+                )));
+            };
+            match ownership {
+                NounPhraseOwnership::Established(noun_owner) if noun_owner == zone_owner => {}
+                _ => {
+                    return Err(nom::Err::Error(nom::error::Error::new(
+                        i,
+                        nom::error::ErrorKind::Fail,
+                    )));
+                }
+            }
         }
         if mixed_scope || !any_per_player {
             // Shared-only or mixed list: the possessor, if any, already lives on
@@ -26050,6 +26085,49 @@ mod zone_list_grammar {
         );
     }
 
+    /// CR 400.3: the noun phrase's ownership must name the SAME player as the
+    /// zone qualifier. "card you own in an opponent's graveyard or in exile"
+    /// cannot discard the opposing possessor and let your Owned predicate apply
+    /// to every leg.
+    #[test]
+    fn mixed_list_declines_when_noun_owner_differs_from_zone_owner() {
+        let (filter, remainder) =
+            parse_type_phrase_folding("card you own in an opponent's graveyard or in exile");
+        assert!(
+            !remainder.trim().is_empty(),
+            "mismatched noun/zone owners must not fold the list"
+        );
+        if let TargetFilter::Typed(typed) = filter {
+            assert!(
+                !typed
+                    .properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::InAnyZone { .. })),
+                "the mismatched list must not become an ownerless union"
+            );
+        }
+
+        // The matching-owner form still folds: the noun phrase and qualifier
+        // both name the same player.
+        let (filter, remainder) =
+            parse_type_phrase_folding("card you own in your graveyard or in exile");
+        assert_eq!(remainder.trim(), "");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a Typed filter");
+        };
+        assert_eq!(
+            typed.properties,
+            vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::You
+                },
+                FilterProp::InAnyZone {
+                    zones: vec![Zone::Graveyard, Zone::Exile]
+                },
+            ]
+        );
+    }
+
     /// `many0` admits a list of three or more zones, which the loop it replaced
     /// also did; pinned because the reduction and the possessor binding now run
     /// once over the whole list rather than pairwise.
@@ -26162,6 +26240,11 @@ mod zone_list_grammar {
         assert_eq!(
             scan_zone_phrase("on hand-picked cards in your graveyard").map(|(zone, _, _)| zone),
             Some(Zone::Graveyard),
+        );
+        assert_eq!(
+            scan_zone_phrase("on exile in your graveyard").map(|(zone, _, _)| zone),
+            Some(Zone::Graveyard),
+            "an invalid first entry is not a committed list decline",
         );
     }
 

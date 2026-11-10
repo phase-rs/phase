@@ -3152,6 +3152,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         });
         let mixed_private_public = has_private_card && has_public_card;
         let private_scope = !zone.is_public() || has_private_card;
+        let redact_bounds = private_scope;
         if !can_view_private_for_player(player) && private_scope {
             filtered.waiting_for = WaitingFor::EffectZoneChoice {
                 player,
@@ -3160,8 +3161,8 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 } else {
                     cards.iter().map(|_| ObjectId(0)).collect()
                 },
-                count,
-                min_count,
+                count: if redact_bounds { 0 } else { count },
+                min_count: if redact_bounds { 0 } else { min_count },
                 up_to,
                 source_id,
                 effect_kind,
