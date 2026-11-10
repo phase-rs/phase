@@ -6241,9 +6241,11 @@ pub fn matches_target_filter_on_lki_snapshot(
         lki,
         filter,
         ctx,
-        None,
-        None,
-        EpochReading::Projection,
+        LkiProjection {
+            entered_incarnation: None,
+            snapshot_zone: None,
+            reading: EpochReading::Projection,
+        },
     )
 }
 
@@ -6282,11 +6284,13 @@ pub(crate) fn matches_target_filter_on_announced_lki(
         lki,
         filter,
         ctx,
-        None,
-        zone.zone(),
-        // CR 115.9: a committed target is read as it was WHEN IT WAS SELECTED —
+        LkiProjection {
+            entered_incarnation: None,
+            snapshot_zone: zone.zone(),
+            reading: // CR 115.9: a committed target is read as it was WHEN IT WAS SELECTED —
         // the one reading whose uncaptured leaves refuse (see `CapturedEpoch`).
         EpochReading::SelectionTime,
+        },
     )
 }
 
@@ -6391,11 +6395,13 @@ pub fn matches_target_filter_on_departed_battlefield_lki(
         lki,
         filter,
         ctx,
-        None,
-        Some(Zone::Battlefield),
-        // A departed subject is a look-back over the snapshot the caller holds,
-        // not a CR 115.9 selection-time reading of a chosen target.
-        EpochReading::Projection,
+        LkiProjection {
+            entered_incarnation: None,
+            snapshot_zone: Some(Zone::Battlefield),
+            // A departed subject is a look-back over the snapshot the caller holds,
+            // not a CR 115.9 selection-time reading of a chosen target.
+            reading: EpochReading::Projection,
+        },
     )
 }
 
@@ -6534,16 +6540,35 @@ pub(crate) fn source_incarnation_matches_filter(
 ///
 /// `reading` states which CR 115.9 reading this projection answers — see
 /// [`EpochReading`].
+/// CR 115.9 + CR 400.7: the historical projection a caller asks this snapshot
+/// matching path for.
+///
+/// `entered_incarnation` becomes the record's `from_zone` incarnation and
+/// `snapshot_zone` its `from_zone`; `reading` states which CR 115.9 reading the
+/// projection answers — see [`EpochReading`].
+#[derive(Clone, Copy)]
+struct LkiProjection {
+    entered_incarnation: Option<u64>,
+    snapshot_zone: Option<Zone>,
+    reading: EpochReading,
+}
+
 fn matches_target_filter_on_lki_snapshot_with_incarnation(
     state: &GameState,
     object_id: ObjectId,
     lki: &LKISnapshot,
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
-    entered_incarnation: Option<u64>,
-    snapshot_zone: Option<Zone>,
-    reading: EpochReading,
+    projection: LkiProjection,
 ) -> bool {
+    // CR 115.9 + CR 400.7: how to project this snapshot is one statement, so it
+    // travels as one value rather than three trailing arguments that every caller
+    // must spell out in order.
+    let LkiProjection {
+        entered_incarnation,
+        snapshot_zone,
+        reading,
+    } = projection;
     let record = ZoneChangeRecord {
         object_id,
         name: lki.name.clone(),
@@ -6877,11 +6902,13 @@ pub fn matches_zone_change_event_object_filter(
                 lki,
                 filter,
                 ctx,
-                record.entered_incarnation,
-                origin,
-                // A departed battlefield subject is a look-back over the
-                // snapshot the record holds, not a selection-time reading.
-                EpochReading::Projection,
+                LkiProjection {
+                    entered_incarnation: record.entered_incarnation,
+                    snapshot_zone: origin,
+                    // A departed battlefield subject is a look-back over the
+                    // snapshot the record holds, not a selection-time reading.
+                    reading: EpochReading::Projection,
+                },
             )
         } else {
             // No exit LKI cached (defensive — a battlefield exit always caches
@@ -23978,9 +24005,11 @@ mod tests {
                 &lki,
                 &filter,
                 &ctx,
-                Some(3),
-                None,
-                EpochReading::Projection,
+                LkiProjection {
+                    entered_incarnation: Some(3),
+                    snapshot_zone: None,
+                    reading: EpochReading::Projection,
+                },
             ),
             "the original triggering incarnation is not another object"
         );
@@ -23991,9 +24020,11 @@ mod tests {
                 &lki,
                 &filter,
                 &ctx,
-                Some(4),
-                None,
-                EpochReading::Projection,
+                LkiProjection {
+                    entered_incarnation: Some(4),
+                    snapshot_zone: None,
+                    reading: EpochReading::Projection,
+                },
             ),
             "a later incarnation at the same storage id is another object"
         );
