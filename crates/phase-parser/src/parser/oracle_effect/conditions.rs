@@ -11142,12 +11142,14 @@ mod tests {
             "{effect} if {condition}"
         );
 
-        // Player target: the probe resolves to a player scope, not an object.
+        // Player target: the raw effect filter is player-scoped, but a player
+        // role is not an object role, so the declared-slot probe has none.
         let effect = "Target opponent loses 2 life";
-        let probe = probe_declared_target_slot(effect, &ctx).expect("player effect probe");
+        let probe = probe_effect_target(effect, &ctx).expect("player effect probe");
         assert!(crate::parser::oracle_effect::is_player_scoped_filter(
             &probe.filter
         ));
+        assert!(probe_declared_target_slot(effect, &ctx).is_none());
         let condition = "that opponent controls no creatures";
         assert!(
             nom_condition::parse_target_controller_count_condition(condition).is_ok(),
