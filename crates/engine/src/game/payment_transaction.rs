@@ -563,6 +563,18 @@ pub(crate) fn settle_after_outside_action(
         shadow.payment_transaction = None;
         shadow.payment_transaction_replay = true;
         shadow.payment_transaction_just_handled = false;
+        // Use the replay preparation on this second-concession path too.
+        shadow.card_db = state.card_db.clone();
+        shadow.card_face_registry = state.card_face_registry.clone();
+        shadow.meld_pair_registry = state.meld_pair_registry.clone();
+        shadow.booster_shelf = state.booster_shelf.clone();
+        shadow.all_card_names = state.all_card_names.clone();
+        shadow.log_player_names = state.log_player_names.clone();
+        adopt_host_stream(&mut shadow, state);
+        shadow.interaction_session_id = state.interaction_session_id.clone();
+        shadow.interaction_generation = state.interaction_generation;
+        shadow.next_interaction_serial = state.next_interaction_serial.clone();
+        shadow.active_interaction_slots = state.active_interaction_slots.clone();
         let mut events = checkpoint.events.clone();
         let mut log_entries = checkpoint.log_entries.clone();
         let mut mirrored = Vec::new();

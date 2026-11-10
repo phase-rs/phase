@@ -16682,9 +16682,20 @@ impl GameState {
             if matches!(
                 checkpoint.state.waiting_for,
                 WaitingFor::ReplacementChoice { .. }
-            ) && checkpoint.state.pending_replacement.is_none()
-            {
-                return Err("recovery checkpoint prompt lacks its replacement owner".to_string());
+            ) {
+                let Some(pending) = checkpoint.state.pending_replacement.as_ref() else {
+                    return Err(
+                        "recovery checkpoint prompt lacks its replacement owner".to_string()
+                    );
+                };
+                if pending.candidates.is_empty()
+                    && pending.search_found_candidates.is_empty()
+                    && !pending.is_optional
+                {
+                    return Err(
+                        "recovery checkpoint replacement has no executable candidate".to_string(),
+                    );
+                }
             }
             // The outer structural checks cannot see this nested state; apply
             // the same non-resolvable stack refusal to it.

@@ -2436,13 +2436,21 @@ fn finish_action_boundary_with_lifecycle(
         reconcile_terminal_result,
     ) {
         let life_failure = close_ingress_window(state, &mut prior_window);
-        lifecycle.discard();
-        restore_boundary_preserving_departure(state, boundary_snapshot);
-        return Err(
-            life_failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
-                player,
-            }),
-        );
+        if departure_committed(state, &boundary_snapshot) {
+            if let Some(player) = life_failure {
+                tracing::debug!(
+                    ?player,
+                    "keeping the committed concession after a life failure"
+                );
+            }
+            tracing::debug!(?err, "recovered departure keeps the committed board");
+        } else {
+            lifecycle.discard();
+            restore_boundary_preserving_departure(state, boundary_snapshot);
+            return Err(life_failure.map_or(err, |player| {
+                EngineError::LifeChangeUnrepresentable { player }
+            }));
+        }
     }
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
@@ -2574,17 +2582,27 @@ fn finish_action_boundary_with_lifecycle(
         .is_err()
         {
             let life_failure = close_ingress_window(state, &mut prior_window);
-            lifecycle.discard();
-            restore_boundary_preserving_departure(state, boundary_snapshot);
-            return Err(life_failure.map_or_else(
-                || {
-                    EngineError::InvalidAction(
-                        "Unable to allocate interaction authority for the resulting decision"
-                            .to_string(),
-                    )
-                },
-                |player| EngineError::LifeChangeUnrepresentable { player },
-            ));
+            if departure_committed(state, &boundary_snapshot) {
+                if let Some(player) = life_failure {
+                    tracing::debug!(
+                        ?player,
+                        "keeping the committed concession after a life failure"
+                    );
+                }
+                tracing::debug!("keeping the committed concession without a rebound interaction");
+            } else {
+                lifecycle.discard();
+                restore_boundary_preserving_departure(state, boundary_snapshot);
+                return Err(life_failure.map_or_else(
+                    || {
+                        EngineError::InvalidAction(
+                            "Unable to allocate interaction authority for the resulting decision"
+                                .to_string(),
+                        )
+                    },
+                    |player| EngineError::LifeChangeUnrepresentable { player },
+                ));
+            }
         }
     }
     // CR 733.1: capture after information/interaction settlement too, so a
@@ -11552,6 +11570,15 @@ fn run_auto_pass_loop(
                         // action boundary restores its snapshot, so none of
                         // these events may escape into the result.
                         if let Some(player) = boundary_life_change_failure(state) {
+                            if state.conceded_this_action.is_some() {
+                                tracing::debug!(
+                                    ?player,
+                                    "keeping the committed concession and its pass events after a life failure"
+                                );
+                                result.events.extend(events);
+                                result.waiting_for = outcome.waiting_for;
+                                break;
+                            }
                             return Err(EngineError::LifeChangeUnrepresentable { player });
                         }
                         advanced = true;
