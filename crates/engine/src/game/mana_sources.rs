@@ -14,6 +14,7 @@
 //! life loss, sacrifice) disqualifies a source from UI-level undo.
 
 use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::types::ability::CounterCostSelection;
 use crate::types::ability::{cost_has_component, ManaSpendRestriction};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, ControllerRef,
@@ -24,6 +25,7 @@ use crate::types::ability::{
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::card_type::Supertype;
+use crate::types::counter::CounterMatch;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{GameState, ManaAbilityResume, ProductionOverride, WaitingFor};
 use crate::types::identifiers::ObjectId;
@@ -2393,6 +2395,29 @@ pub(crate) fn mana_capacity(
     payment_context: Option<&PaymentContext<'_>>,
     capacity_use: CapacityUse,
 ) -> u32 {
+    mana_capacity_matching(
+        state,
+        object_id,
+        controller,
+        payment_context,
+        capacity_use,
+        |_| true,
+    )
+}
+
+/// CR 601.2g + CR 605.3c: [`mana_capacity`] for the mana abilities `gate`
+/// admits. An activation whose own cost needs its source untapped still leaves
+/// that source's tapless mana abilities able to fund it, so a caller that
+/// excludes the source must exclude it per ability, not per object (Cryptic
+/// Trilobite's "Remove a +1/+1 counter from this creature: Add {C}{C}").
+pub(crate) fn mana_capacity_matching(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    payment_context: Option<&PaymentContext<'_>>,
+    capacity_use: CapacityUse,
+    gate: impl Fn(&AbilityDefinition) -> bool,
+) -> u32 {
     let Some(obj) = state.objects.get(&object_id) else {
         return 0;
     };
@@ -2405,7 +2430,8 @@ pub(crate) fn mana_capacity(
         .iter()
         .enumerate()
         .filter(|(idx, ability)| {
-            is_payment_mana_ability(ability)
+            gate(ability)
+                && is_payment_mana_ability(ability)
                 && mana_ability_usable_for_payment(
                     state,
                     controller,
@@ -2484,11 +2510,55 @@ fn repeatable_mana_ability_multiplier(
             usize::try_from(life).unwrap_or(0) / usize::try_from(life_needed).unwrap_or(usize::MAX)
         });
 
-    if let Some(activations) = object_limits.chain(life_limit).min() {
+    // CR 118.3 + CR 122.1: each activation removes its printed counters from
+    // the source itself, so the counters on it bound how many activations are
+    // possible (Workhorse's four +1/+1 counters fund four activations, and
+    // {C}{C}{C}{C} pays Jayemdae Tome's {4}).
+    let counter_limit = ability
+        .cost
+        .as_ref()
+        .and_then(|cost| self_counter_cost_supply(state, object_id, cost));
+
+    if let Some(activations) = object_limits.chain(life_limit).chain(counter_limit).min() {
         return u32::try_from(activations).unwrap_or(u32::MAX);
     }
 
     1
+}
+
+/// CR 118.3 + CR 122.1: how many activations a self counter-removal cost of
+/// `cost` allows from `object_id`'s counters, or `None` when the cost removes
+/// none. A chosen-count (`X`) cost is left to the payment authority.
+fn self_counter_cost_supply(
+    state: &GameState,
+    object_id: ObjectId,
+    cost: &AbilityCost,
+) -> Option<usize> {
+    let object = state.objects.get(&object_id)?;
+    let mut supply: Option<usize> = None;
+    cost.for_each_cost_node(&mut |node| {
+        let AbilityCost::RemoveCounter {
+            count,
+            counter_type,
+            target: None,
+            selection: CounterCostSelection::SingleObject,
+        } = node
+        else {
+            return;
+        };
+        if *count == 0 || *count == u32::MAX {
+            return;
+        }
+        let available: u32 = match counter_type {
+            CounterMatch::Any => object.counters.values().copied().sum(),
+            CounterMatch::OfType(counter_type) => {
+                object.counters.get(counter_type).copied().unwrap_or(0)
+            }
+        };
+        let activations = (available / *count) as usize;
+        supply = Some(supply.map_or(activations, |known| known.min(activations)));
+    });
+    supply
 }
 
 /// CR 605.1a: An activated mana ability.
@@ -2611,33 +2681,65 @@ pub(crate) fn activatable_player_choice_mana_abilities_for_payment<'a>(
     exclude: Option<ObjectId>,
     payment_context: Option<&'a PaymentContext<'a>>,
 ) -> impl Iterator<Item = (ObjectId, usize)> + 'a {
-    state.battlefield.iter().flat_map(move |&object_id| {
-        let obj = state.objects.get(&object_id).filter(|obj| {
+    player_choice_mana_abilities_for_payment(state, controller).filter(
+        move |&(object_id, index)| {
             Some(object_id) != exclude
-                && obj.zone == Zone::Battlefield
-                && obj.controller == controller
-        });
+                && state
+                    .objects
+                    .get(&object_id)
+                    .and_then(|obj| obj.abilities.get(index))
+                    .is_some_and(|ability| {
+                        player_choice_mana_ability_ready_for_payment(
+                            state,
+                            controller,
+                            object_id,
+                            index,
+                            ability,
+                            payment_context,
+                        )
+                    })
+        },
+    )
+}
+
+/// CR 117.1d + CR 601.2g: every mana ability the player could activate during a
+/// payment window's opportunity, whether or not its own cost is payable on
+/// `state` itself: an earlier activation of the window can pay for it (Manaforge
+/// Cinder's "{1}: Add {B} or {R}" after Ashnod's Altar's {C}{C}). Readiness is
+/// decided per board by [`player_choice_mana_ability_ready_for_payment`].
+pub(crate) fn player_choice_mana_abilities_for_payment<'a>(
+    state: &'a GameState,
+    controller: PlayerId,
+) -> impl Iterator<Item = (ObjectId, usize)> + 'a {
+    state.battlefield.iter().flat_map(move |&object_id| {
+        let obj = state
+            .objects
+            .get(&object_id)
+            .filter(|obj| obj.zone == Zone::Battlefield && obj.controller == controller);
         obj.into_iter().flat_map(move |obj| {
             obj.abilities
                 .iter()
                 .enumerate()
-                .filter(move |(idx, ability)| {
-                    player_choice_mana_ability_usable_for_payment(
-                        state,
-                        controller,
-                        object_id,
-                        *idx,
-                        ability,
-                        payment_context,
-                    )
-                })
+                .filter(|(_, ability)| player_choice_mana_ability_shape(ability))
                 .map(move |(idx, _)| (object_id, idx))
         })
     })
 }
 
-/// CR 117.1d + CR 601.2g: one ability of [`activatable_player_choice_mana_abilities_for_payment`].
-fn player_choice_mana_ability_usable_for_payment(
+/// CR 117.1d + CR 605.3a: the mana abilities a payment window can offer at all.
+/// Choice-free tap-cost and unambiguous self-sacrifice abilities (Sol Ring,
+/// Gold, Treasure) are already covered by the tap path, so they are not window
+/// candidates.
+fn player_choice_mana_ability_shape(ability: &AbilityDefinition) -> bool {
+    ability.kind == AbilityKind::Activated
+        && mana_abilities::is_mana_ability(ability)
+        && !has_unambiguous_self_sacrifice_component(&ability.cost)
+}
+
+/// CR 605.3a + CR 117.1d: whether one candidate mana ability of
+/// [`player_choice_mana_abilities_for_payment`] can be activated on `state`
+/// now, with the caller's payment context.
+pub(crate) fn player_choice_mana_ability_ready_for_payment(
     state: &GameState,
     controller: PlayerId,
     object_id: ObjectId,
@@ -2645,17 +2747,14 @@ fn player_choice_mana_ability_usable_for_payment(
     ability: &AbilityDefinition,
     payment_context: Option<&PaymentContext<'_>>,
 ) -> bool {
-    if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
+    if !player_choice_mana_ability_shape(ability) {
         return false;
     }
-    // Choice-free tap-cost and unambiguous self-sacrifice abilities
-    // (Sol Ring, Gold, Treasure) are already covered by
-    // `is_active_tap_mana_ability` on the auto-tap path; a tap cost that
-    // chooses an object (CR 605.3a) belongs here with the ambiguous
-    // non-tap costs (KCI's "Sacrifice an artifact", discard, pay-life).
-    if (has_tap_component(&ability.cost)
-        && !mana_abilities::cost_requires_object_choice(state, controller, object_id, ability))
-        || has_unambiguous_self_sacrifice_component(&ability.cost)
+    // A tap cost that chooses an object (CR 605.3a) belongs here with the
+    // ambiguous non-tap costs (KCI's "Sacrifice an artifact", discard,
+    // pay-life); a choice-free tap ability pays through the tap path.
+    if has_tap_component(&ability.cost)
+        && !mana_abilities::cost_requires_object_choice(state, controller, object_id, ability)
     {
         return false;
     }

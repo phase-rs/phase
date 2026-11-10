@@ -5551,3 +5551,293 @@ fn a_replacement_choice_in_the_window_funds_staff_of_domination() {
     resolve_stack(&mut runner);
     assert_eq!(life(&runner, P0), 21, "the life gain resolved");
 }
+
+/// CR 118.13a + CR 601.2g + CR 701.59a (#10190 third review): the public offer
+/// must depend on the evidence answer that keeps a creature card, not on a fixed
+/// greedy choice. The row above has a mana-value-4 creature card and a
+/// mana-value-3 sorcery, so the minimal evidence answers are either card; only
+/// the sorcery leaves the creature card the Masticore exiles. On a board whose
+/// ONLY window mana is Cryptex plus three Wastes, replacing the sorcery with a
+/// second mana-value-2 CREATURE card makes every minimal answer take both
+/// creature cards: the four mana is reachable, the exile is not, and the
+/// activation is offered in no mode.
+#[test]
+fn the_masticore_offer_needs_the_evidence_answer_that_keeps_a_creature_card() {
+    let mut scenario = scenario_at_main();
+    let masticore = scenario
+        .add_creature_from_oracle(P0, "Molten-Tail Masticore", 4, 4, MOLTEN_TAIL_MASTICORE)
+        .as_artifact_creature()
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    add(&mut scenario, P0, "Cryptex", Zone::Battlefield);
+    for _ in 0..3 {
+        add(&mut scenario, P0, "Wastes", Zone::Battlefield);
+    }
+    for name in ["Graveyard Beast A", "Graveyard Beast B"] {
+        scenario
+            .add_creature_to_graveyard(P0, name, 2, 2)
+            .with_mana_cost(ManaCost::generic(2));
+    }
+    let runner = build(scenario);
+    let index = ability_index_of(&runner, masticore, "4 damage");
+
+    let modes = offered_payment_modes(&runner, masticore, index);
+    assert!(
+        !modes.contains(&CastPaymentMode::Manual),
+        "every minimal evidence answer exiles both creature cards: {modes:?}"
+    );
+}
+
+const IMMOLATING_SOULEATER: &str = "{R/P}: This creature gets +1/+0 until end of turn. ({R/P} can be paid with either {R} or 2 life.)";
+
+/// CR 118.13a + CR 601.2g (#10190 third review): an announcement is locked
+/// before the window, so a window that makes only colorless mana cannot pay a
+/// symbol announced as mana, and the all-life announcement of a cost with no
+/// other mana opens no window at all. At one life with Pristine Talisman and
+/// Ashnod's Altar, Immolating Souleater's {R/P} is offered in no mode; a
+/// Mountain makes it offered for a manual payment, which announces {R} and pays
+/// it without life.
+#[test]
+fn immolating_souleater_is_not_offered_on_a_colorless_window_that_could_gain_life() {
+    let board = |mountain: bool| {
+        let mut scenario = scenario_at_main();
+        scenario.with_life(P0, 1);
+        let souleater = scenario
+            .add_creature_from_oracle(P0, "Immolating Souleater", 2, 2, IMMOLATING_SOULEATER)
+            .as_artifact_creature()
+            .with_mana_cost(ManaCost::generic(2))
+            .id();
+        add(&mut scenario, P0, "Pristine Talisman", Zone::Battlefield);
+        add(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield);
+        scenario.add_vanilla(P0, 2, 2);
+        let mountain = mountain.then(|| add(&mut scenario, P0, "Mountain", Zone::Battlefield));
+        let runner = build(scenario);
+        let index = non_mana_ability_index(&runner, souleater);
+        (runner, souleater, index, mountain)
+    };
+
+    let (runner, souleater, index, _) = board(false);
+    assert!(
+        offered_payment_modes(&runner, souleater, index).is_empty(),
+        "colorless window mana cannot pay the symbol announced as mana"
+    );
+
+    let (mut runner, souleater, index, mountain) = board(true);
+    assert!(
+        !offered_payment_modes(&runner, souleater, index).is_empty(),
+        "the Mountain pays the announced {{R}}"
+    );
+    let waiting_for = activate_index(&mut runner, souleater, index, CastPaymentMode::Manual);
+    assert_announcement(&waiting_for, 1);
+    let waiting_for = submit_phyrexian(&mut runner, &[ShardChoice::PayMana]);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    tap_land_for_mana(&mut runner, mountain.expect("the Mountain"));
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert_eq!(life(&runner, P0), 1, "{{R}} paid the symbol, not 2 life");
+    assert_eq!(pool_total(&runner), 0);
+
+    resolve_stack(&mut runner);
+    assert_eq!(
+        (
+            runner.state().objects[&souleater].power,
+            runner.state().objects[&souleater].toughness
+        ),
+        (Some(3), Some(2)),
+        "the pump resolved"
+    );
+}
+
+const MANAFORGE_CINDER: &str = "{1}: Add {B} or {R}. Activate no more than three times each turn.";
+
+/// CR 601.2g + CR 106.1 (#10190 third review): the window's own actions enable
+/// producers that were not payable when it opened, and a mana action that keeps
+/// the pool total the same but changes its color is progress. Manaforge Cinder's
+/// "{1}: Add {B} or {R}" is paid with Ashnod's Altar's {C}{C} to make the {R}
+/// for Figure of Destiny's {R/W}.
+#[test]
+fn altar_mana_enables_manaforge_cinders_color_for_figure_of_destiny() {
+    let mut scenario = scenario_at_main();
+    let figure = add(&mut scenario, P0, "Figure of Destiny", Zone::Battlefield);
+    let cinder = scenario
+        .add_creature_from_oracle(P0, "Manaforge Cinder", 1, 1, MANAFORGE_CINDER)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::BlackRed],
+            generic: 0,
+        })
+        .id();
+    let altar = add(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield);
+    let fodder = scenario.add_vanilla(P0, 2, 2);
+    let mut runner = build(scenario);
+    let index = ability_index_of(&runner, figure, "Kithkin Spirit");
+
+    assert_eq!(
+        offered_payment_modes(&runner, figure, index),
+        vec![CastPaymentMode::Manual]
+    );
+    let waiting_for = activate_index(&mut runner, figure, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(&mut runner, altar, &[fodder], None);
+    assert_eq!(pool_total(&runner), 2, "the Altar made {{C}}{{C}}");
+    activate_in_window(
+        &mut runner,
+        cinder,
+        &[],
+        Some(engine::types::game_state::ManaChoice::SingleColor(
+            engine::types::mana::ManaType::Red,
+        )),
+    );
+    assert_eq!(pool_total(&runner), 2, "{{C}}{{C}} became {{C}}{{R}}");
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert_eq!(pool_total(&runner), 1, "the {{R}} paid {{R/W}}");
+    assert!(
+        !tapped(&runner, cinder),
+        "the Cinder's {{1}} cost never taps it"
+    );
+
+    resolve_stack(&mut runner);
+    assert_eq!(
+        (
+            runner.state().objects[&figure].power,
+            runner.state().objects[&figure].toughness
+        ),
+        (Some(2), Some(2)),
+        "the animation resolved"
+    );
+}
+
+const WORKHORSE: &str = "Workhorse enters with four +1/+1 counters on it.\nRemove a +1/+1 counter from Workhorse: Add {C}.";
+
+/// CR 605.3c + CR 118.3 (#10190 third review): a repeatable mana ability is
+/// bounded by the counters it removes. Workhorse's four +1/+1 counters fund
+/// four activations, {C}{C}{C}{C} for Jayemdae Tome's {4}; a single-activation
+/// estimate refuses the offer.
+#[test]
+fn workhorses_four_counters_fund_jayemdae_tomes_four_mana() {
+    let mut scenario = scenario_at_main();
+    let tome = scenario
+        .add_artifact_from_oracle(P0, "Jayemdae Tome", JAYEMDAE_TOME)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let workhorse = scenario
+        .add_creature_from_oracle(P0, "Workhorse", 0, 0, WORKHORSE)
+        .as_artifact_creature()
+        .with_mana_cost(ManaCost::generic(6))
+        .id();
+    scenario.with_counter(workhorse, CounterType::Plus1Plus1, 4);
+    scenario.add_card_to_library_top(P0, "Drawn card");
+    let mut runner = build(scenario);
+    let index = non_mana_ability_index(&runner, tome);
+
+    assert_eq!(
+        offered_payment_modes(&runner, tome, index),
+        vec![CastPaymentMode::Manual]
+    );
+    let waiting_for = activate_index(&mut runner, tome, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    for _ in 0..4 {
+        activate_mana_ability(&mut runner, workhorse);
+    }
+    assert_eq!(plus_counters(&runner, workhorse), 0, "four counters spent");
+    assert_eq!(pool_total(&runner), 4);
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert_eq!(pool_total(&runner), 0, "the {{4}} was paid");
+    assert!(tapped(&runner, tome));
+
+    resolve_stack(&mut runner);
+    assert_eq!(hand_size(&runner, P0), 1, "the Tome drew");
+}
+
+const COUNTER_RELIC: &str =
+    "{4}, {T}: Draw a card.\nRemove a +1/+1 counter from this creature: Add {C}{C}.";
+
+/// CR 601.2g + CR 113.7a (#10190 third review): an activation whose cost needs
+/// its source untapped excludes that source only per ability. The Relic's
+/// tapless "Remove a +1/+1 counter from this creature: Add {C}{C}" funds its own
+/// "{4}, {T}" while it stays alive and untapped — two counters make exactly
+/// {C}{C}{C}{C}.
+#[test]
+fn a_tapless_counter_ability_funds_its_own_tap_activation() {
+    let mut scenario = scenario_at_main();
+    let relic = scenario
+        .add_creature_from_oracle(P0, "Counter Relic", 0, 2, COUNTER_RELIC)
+        .as_artifact_creature()
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    scenario.with_counter(relic, CounterType::Plus1Plus1, 2);
+    scenario.add_card_to_library_top(P0, "Drawn card");
+    let mut runner = build(scenario);
+    let index = non_mana_ability_index(&runner, relic);
+
+    assert_eq!(
+        offered_payment_modes(&runner, relic, index),
+        vec![CastPaymentMode::Manual]
+    );
+    let waiting_for = activate_index(&mut runner, relic, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(&mut runner, relic, &[], None);
+    activate_in_window(&mut runner, relic, &[], None);
+    assert_eq!(plus_counters(&runner, relic), 0);
+    assert_eq!(pool_total(&runner), 4);
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, relic), "the {{T}} cost was paid");
+
+    resolve_stack(&mut runner);
+    assert_eq!(hand_size(&runner, P0), 1, "the draw resolved");
+}
+
+const CLUE: &str = "{2}, Sacrifice this artifact: Draw a card.";
+
+/// CR 601.2g + CR 118.10 (#10190 third review): the window's searches must not
+/// commit the resource the rest of the cost needs before trying another
+/// sacrifice. Phyrexian Vault has one artifact creature to sacrifice; Krark-Clan
+/// Ironworks can sacrifice that creature (first in battlefield order) or the
+/// Clue. The losing order is tried first, and the Clue route still pays the {2}
+/// and leaves the creature for the Vault.
+#[test]
+fn the_vaults_offer_finds_the_clue_sacrifice_before_committing_its_creature() {
+    let mut scenario = scenario_at_main();
+    let vault = scenario
+        .add_artifact_from_oracle(P0, "Phyrexian Vault", PHYREXIAN_VAULT)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let ironworks = scenario
+        .add_artifact_from_oracle(P0, "Krark-Clan Ironworks", KRARK_CLAN_IRONWORKS)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let creature = scenario
+        .add_creature_from_oracle(P0, "Test Artifact Creature", 2, 2, "")
+        .as_artifact_creature()
+        .id();
+    let clue = scenario
+        .add_artifact_from_oracle(P0, "Clue", CLUE)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    scenario.add_card_to_library_top(P0, "Drawn card");
+    let mut runner = build(scenario);
+    let index = non_mana_ability_index(&runner, vault);
+
+    assert_eq!(
+        offered_payment_modes(&runner, vault, index),
+        vec![CastPaymentMode::Manual]
+    );
+    let waiting_for = activate_index(&mut runner, vault, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(&mut runner, ironworks, &[clue], None);
+    assert!(in_zone(&runner, clue, Zone::Graveyard));
+    let waiting_for = pass(&mut runner);
+    assert!(
+        is_cost_prompt(&waiting_for, |kind| *kind == PayCostKind::Sacrifice),
+        "the Vault sacrifices after the window: {waiting_for:?}"
+    );
+    let waiting_for = select_cards(&mut runner, &[creature]);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(in_zone(&runner, creature, Zone::Graveyard));
+    assert!(tapped(&runner, vault));
+
+    resolve_stack(&mut runner);
+    assert_eq!(hand_size(&runner, P0), 1, "the Vault drew");
+}
