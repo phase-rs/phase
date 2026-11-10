@@ -504,13 +504,12 @@ fn push_object_mana_actions(
 /// 1. `player` sends each {T} mana action of `object`'s that the client lists
 ///    (`activatable_mana_actions_for_object`, the legality authority, which
 ///    reads mana affordability), answering a color prompt with its first color
-///    (CR 605.3b + CR 605.3c), and must be back at priority, still in the game.
+///    (CR 605.3b), and must be back at priority, still in the game.
 ///    The public action's terminal checkpoint ran, so a use that costs the game
 ///    stops here (CR 704.5a), and one that only ends an opponent's doesn't.
-/// 2. Every player passes until the untap has resolved, through the resolver:
-///    its targets are checked (CR 608.2b), its instructions run in order with
-///    their conditions read as they come (CR 608.2c), a stun counter is
-///    removed instead (CR 122.1d). A prompt on the way keeps the pass.
+/// 2. Every player passes until the untap has resolved, through the resolver,
+///    where a stun counter is removed instead (CR 122.1d) and a replacement
+///    may apply. A prompt on the way keeps the pass.
 /// 3. The same action must be listed again for `player`.
 ///
 /// The copy drops auto-pass settings, any stack-resolution session and loop
@@ -598,6 +597,11 @@ fn pass_until_resolved(copy: &mut GameState, entry: ObjectId) -> bool {
         );
         if resolved {
             return resolution_settled(copy);
+        }
+        // CR 800.4a: the untap left the stack without resolving, with a player
+        // who left the game.
+        if copy.stack.is_empty() {
+            return false;
         }
     }
     false
@@ -4190,11 +4194,10 @@ pub(crate) fn opponent_land_color_options(
 /// (usually tiny) set of trigger-bearing permanents.
 ///
 /// Once the trigger index is built it answers without a battlefield scan: its
-/// unclassified bucket, then its `TapsForMana` bucket, in the order
-/// `trigger_index::candidates_for_event` hands the same triggers to the
-/// trigger pipeline when they fire (CR 605.4a), each kept only while it is on
-/// the battlefield with a `TapsForMana` trigger. Before the index is built the
-/// scan runs, in battlefield order.
+/// unclassified bucket, then its `TapsForMana` bucket (battlefield order as of
+/// the last layer flush), each kept only while it is on the battlefield with a
+/// `TapsForMana` trigger. Before the index is built the scan runs, in
+/// battlefield order. Every reader of one state gets the same order.
 pub(crate) fn taps_for_mana_trigger_sources(state: &GameState) -> Vec<ObjectId> {
     let index = &state.trigger_index;
     if index.readiness == crate::types::game_state::DerivedIndexReadiness::Built {

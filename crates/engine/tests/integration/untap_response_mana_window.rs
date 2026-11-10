@@ -27,7 +27,8 @@
 //! ability, copy that ability.") copying such an untap.
 //!
 //! What keeps the pass: a stunned source (CR 122.1d), a first use that ends the
-//! game, an untap of another permanent (Arbor Elf, Freed from the Real), and
+//! game, an untap of another permanent (Arbor Elf, Freed from the Real), an
+//! ability that does more than untap (Eater of the Dead, Harsh Deceiver), and
 //! a trigger (Wilderness Reclamation: "At the beginning of your end step, untap
 //! all lands you control."), which goes on the stack with no player act.
 

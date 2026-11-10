@@ -504,7 +504,8 @@ fn resolution_untaps_ready_mana_source(
 
 /// The object `ability` untaps when it is a plain "Untap this artifact." /
 /// "Untap this creature." and nothing else: one unconditional, untargeted,
-/// non-optional instruction with no branch after it (Basalt Monolith, Grim
+/// non-optional instruction with no "unless" payment, player scope or branch
+/// after it (Basalt Monolith, Grim
 /// Monolith, Devoted Druid, Soliton). It is bound as the resolver binds it
 /// (`ResolvedAbility::self_ref_binding`): none once the source has left the
 /// battlefield, even if it came back (CR 400.7). An ability that does more
@@ -524,6 +525,9 @@ fn untapped_source(state: &GameState, ability: &ResolvedAbility) -> Option<Objec
         && ability.condition.is_none()
         && ability.targets.is_empty()
         && !ability.optional
+        && ability.optional_for.is_none()
+        && ability.unless_pay.is_none()
+        && ability.player_scope.is_none()
         && ability.repeat_for.is_none();
     plain_self_untap
         .then(|| ability.self_ref_binding(state))
