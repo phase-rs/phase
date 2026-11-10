@@ -12214,6 +12214,20 @@ pub enum AssistContributionConflict {
         /// journal records no spend by the helper on this cast at all.
         journal: Option<usize>,
     },
+    /// CR 702.132a + CR 118.3a: the save carries a correctly sized unit list for a
+    /// PAID helper, but the journal records no spend by that helper on this spell at
+    /// all. A unit list is the save's CLAIM; the journal's `ManaSpend` command is the
+    /// record written where the mana actually left the pool, so with no record the
+    /// payment is unproven. The list is not admitted on its own — "the journal has
+    /// nothing" is not the same fact as "the journal agrees", and the journal's own
+    /// absence answer is `None`, never an empty agreement.
+    JournalRecordsNoSpendForSavedUnits {
+        helper: PlayerId,
+        generic: u32,
+        /// The units the save carries for this helper — correctly sized, and
+        /// unbacked.
+        saved: usize,
+    },
     /// CR 702.132a + CR 118.3a: the journal DOES prove the payment, but the shared
     /// owner authority reports no writable cast for the owner that holds it, so the
     /// recovered units could not be put back. Refused instead of admitted
@@ -12278,6 +12292,17 @@ impl std::fmt::Display for AssistContributionConflict {
                  units, and the resolved-rules journal records no spend by that helper on this \
                  spell — reading that absence as `spent nothing` would drop mana the helper \
                  spent (CR 118.3a)"
+            ),
+            Self::JournalRecordsNoSpendForSavedUnits {
+                helper,
+                generic,
+                saved,
+            } => write!(
+                f,
+                "it carries {saved} units for {helper:?}, who is recorded as having paid \
+                 {generic} generic mana, but the resolved-rules journal records no spend by \
+                 that helper on this spell — a unit list nothing vouches for is not proof the \
+                 mana was removed (CR 118.3a)"
             ),
             Self::UnwritableRecoveryCarrier {
                 helper,
@@ -18097,6 +18122,62 @@ impl GameState {
         }
     }
 
+    /// CR 605.3b: refuse a save whose settlement records are not in COHERENT CUSTODY —
+    /// and, for a genuinely older save, bind the records it never stated.
+    ///
+    /// The record is [`SettlementNode::settled`], and the question this boundary
+    /// answers is a question about the PAYLOAD, not about one node: a node that
+    /// states no settlement is the older shape only if the save as a whole is older.
+    /// Asking per node let a CURRENT save delete one key and be read as legacy — the
+    /// two-activation Heronblade Elite witness points both of a parked activation's
+    /// records at the first, zero-output activation (CR 605.2 keeps it a mana ability
+    /// that resolved with no mana, so it carries no pip for the pip-based reading to
+    /// notice), deletes that node's settlement record, and is then admitted: the node
+    /// reads OPEN, and the colour answer writes the second activation's production
+    /// into an activation CR 605.3b already finished.
+    ///
+    /// So the format is decided ONCE, from the markers only this build writes:
+    ///
+    /// * any retained node states a settlement
+    ///   ([`ResolvedRulesJournal::states_settlement_record`]), or
+    /// * any parked mana-ability activation states an occurrence
+    ///   ([`PendingManaAbility::activated_mana_occurrence`], which no released build
+    ///   wrote — `LEGACY_PARKED_ACTIVATION_OCCURRENCE_ABSENT_2026Q4`).
+    ///
+    /// Either marker makes the payload CURRENT, and a current payload in which any
+    /// node of a settlement-recording kind states nothing is `Err`
+    /// ([`PersistedRestoreError::ContradictorySettlementCustody`]) — never the older
+    /// reading. With NEITHER marker the payload is uniformly older, and its records
+    /// are bound from the pip list they were always read from
+    /// ([`ResolvedRulesJournal::bind_legacy_settlement_records`]) so that the next
+    /// save states them and the mixed shape cannot arise.
+    ///
+    /// Deleting the settlement key from a current save cannot spoof this: the key is
+    /// one node's, and the format is read from the whole payload, so every other
+    /// lifecycle node's record and the parked activation's own occurrence remain to
+    /// reveal the format. Stripping EVERY current-format marker is a different act —
+    /// it fabricates a payload this build never wrote, indistinguishable by
+    /// construction from the uniform older saves that must keep restoring (see
+    /// `dina_conqueror_4p.json.gz`) — and that residual shape is exactly the legacy
+    /// admission documented in `docs/LEGACY-COMPAT.md`, not a hole this rule can close
+    /// without refusing real saves.
+    fn bind_or_reject_settlement_custody(&mut self) -> Result<(), PersistedRestoreError> {
+        let mut states_occurrence = false;
+        self.for_each_parked_mana_ability(&mut |pending| {
+            states_occurrence |= pending.activated_mana_occurrence.is_some();
+        });
+        let payload_is_current =
+            states_occurrence || self.resolved_rules_journal.states_settlement_record();
+        if !payload_is_current {
+            self.resolved_rules_journal.bind_legacy_settlement_records();
+            return Ok(());
+        }
+        match self.resolved_rules_journal.unrecorded_settlement_node() {
+            Some(node) => Err(PersistedRestoreError::ContradictorySettlementCustody { node }),
+            None => Ok(()),
+        }
+    }
+
     /// CR 605.3b: every parked mana-ability activation this saved state holds.
     ///
     /// The roots are the state-level fields that can carry one, listed so a new
@@ -18281,15 +18362,19 @@ impl GameState {
     ///
     /// * **The save states units.** Then a helper must be recorded as having paid
     ///   for this cast, and the units must number exactly the generic mana the helper
-    ///   committed (CR 118.3a: one unit per point). Where the journal also recorded
-    ///   the same payer's spend on the same spell, the two records must name the same
-    ///   units — the same pips in the same order. A record naming other units is a
-    ///   contradiction and is refused, because nothing in the save settles which
-    ///   payment happened. A record naming the SAME pips but describing them
-    ///   differently (a different source, epoch, restriction, grant or expiry) is one
-    ///   payment whose copy was corrupted: CR 118.3a makes the removal of those very
-    ///   units the payment, so the journal's description — written at the removal —
-    ///   is restored over the save's, and the resumed cast consumes it.
+    ///   committed (CR 118.3a: one unit per point), AND the journal must prove the
+    ///   spend: the save's unit list is a CLAIM, and a correctly sized claim no
+    ///   journal record backs is refused
+    ///   ([`AssistContributionConflict::JournalRecordsNoSpendForSavedUnits`]) rather
+    ///   than admitted on its own. Where the journal did record the same payer's
+    ///   spend on the same spell, the two records must name the same units — the same
+    ///   pips in the same order. A record naming other units is a contradiction and is
+    ///   refused, because nothing in the save settles which payment happened. A record
+    ///   naming the SAME pips but describing them differently (a different source,
+    ///   epoch, restriction, grant or expiry) is one payment whose copy was corrupted:
+    ///   CR 118.3a makes the removal of those very units the payment, so the journal's
+    ///   description — written at the removal — is restored over the save's, and the
+    ///   resumed cast consumes it.
     /// * **The save states no units but the cast is `Paid`.** Then the units must be
     ///   RECOVERED from the journal, which recorded them at the spend boundary. They
     ///   are admitted only when the journal proves exactly the recorded amount for
@@ -18440,15 +18525,23 @@ impl GameState {
                 },
             });
         }
-        // CR 118.3a + CR 702.132a: where the journal ALSO recorded this helper's spend
-        // on this spell, the two records are one payment stated twice. They must name
-        // the same units — the same COUNT (one unit per point of generic mana) in the
-        // same order — and where they do, the journal's description of those units is
-        // the binding one: it was written at the removal, so a save that kept the pips
-        // but changed a unit's source, epoch, restrictions, grants or expiry is
-        // carrying a corrupted copy of one payment rather than a second payment, and
-        // the resumed cast must consume the record the spend actually made. Different
-        // units altogether cannot be reconciled and are refused below.
+        // CR 118.3a + CR 702.132a: a POSITIVE contribution is proven by the journal's
+        // own record of this helper's spend on this spell, or it is not admitted (the
+        // `else` below). A correctly sized unit list that no journal record backs is a
+        // claim about a removal the journal never recorded — the save cannot prove the
+        // mana left anyone's pool — so it is refused rather than read as agreement with
+        // a spend that does not exist. (`spent_units_for_payer_and_recipient` answers
+        // `None` for "no record", which is NOT the same fact as "spent nothing".)
+        //
+        // Where the journal DID record the helper's spend on this spell, the two
+        // records are one payment stated twice. They must name the same units — the
+        // same COUNT (one unit per point of generic mana) in the same order — and where
+        // they do, the journal's description of those units is the binding one: it was
+        // written at the removal, so a save that kept the pips but changed a unit's
+        // source, epoch, restrictions, grants or expiry is carrying a corrupted copy of
+        // one payment rather than a second payment, and the resumed cast must consume
+        // the record the spend actually made. Different units altogether cannot be
+        // reconciled and are refused below.
         if let Some(journal) = journal {
             let same_units = journal.len() == saved.len()
                 && journal
@@ -18480,8 +18573,20 @@ impl GameState {
             if !identical {
                 return Ok(Some(claim(journal)));
             }
+            return Ok(None);
         }
-        Ok(None)
+        // CR 118.3a: the save states a payment the journal never recorded, so nothing
+        // proves the units it names were ever removed from the helper's pool. Absence
+        // is not agreement: admitting this on the save alone is the judgement call the
+        // maintainer rejected.
+        Err(PersistedRestoreError::ContradictoryAssistContribution {
+            source_id,
+            reason: AssistContributionConflict::JournalRecordsNoSpendForSavedUnits {
+                helper,
+                generic,
+                saved: saved.len(),
+            },
+        })
     }
 
     /// CR 601.2 / CR 602.2: at most one announcement is in flight, so every live
@@ -19032,6 +19137,26 @@ pub enum PersistedRestoreError {
         reason: ParkedActivationConflict,
     },
 
+    /// CR 605.3b: this payload is CURRENT format — it carries a marker only this
+    /// build writes, either a settlement record on some node or an occurrence on a
+    /// parked mana-ability activation — and yet `node` is of a kind whose settlement
+    /// IS recorded and states none.
+    ///
+    /// The older shape is not one missing node: no released build wrote
+    /// [`SettlementNode::settled`] anywhere
+    /// (`LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4`), while this build writes it for
+    /// every node with a settlement lifecycle. A payload that states it somewhere was
+    /// therefore written by a build that states it here too, so the key was deleted —
+    /// the save is contradicting itself, not predating the field. Reading it as the
+    /// older shape is what let a parked activation claim a finished zero-output
+    /// activation's node (CR 605.2: an activation that the game state allowed no mana
+    /// still resolved, and its record — not its empty pip list — is the witness).
+    #[error(
+        "persisted settlement node {node:?} states no settlement in a payload that states \
+         settlements, and cannot be restored"
+    )]
+    ContradictorySettlementCustody { node: RulesExecutionNodeRef },
+
     /// CR 702.132a + CR 118.3a: a parked cast's Assist contribution is not bound to
     /// the payment it claims, so admitting the save would record mana spent to cast
     /// the spell that the game never established — or omit mana the helper really
@@ -19266,6 +19391,11 @@ impl PersistedGameState {
         state.reject_unknown_cast_history_provenance()?;
         state.reject_unknown_activation_target_zone()?;
         state.bind_or_reject_floating_mana_provenance()?;
+        // CR 605.3b: decide this payload's settlement-record format BEFORE any reader
+        // asks whether a node resolved, so a current save cannot lose one node's
+        // record and be read as the older shape. A genuinely older payload keeps its
+        // pip-derived reading, bound into the record here.
+        state.bind_or_reject_settlement_custody()?;
         state.reject_contradictory_parked_activation_evidence()?;
         state.reject_conflicting_pending_cast_owners()?;
         state.reject_unknown_pending_target_facts()?;

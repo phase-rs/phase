@@ -9684,6 +9684,123 @@ fn restore_keeps_an_assist_save_whose_units_match_the_journal() {
     );
 }
 
+/// CR 118.3a + CR 702.132a: a correctly sized unit list is the save's CLAIM, not proof
+/// that the helper's mana was ever removed. With no journal spend behind it the
+/// contribution is refused — the maintainer's finding that the SAVE ALONE is not
+/// admissible evidence for a positive Assist contribution.
+///
+/// "Paying mana is done by removing the indicated mana from a player's mana pool"
+/// (CR 118.3a), and the journal's `ManaSpend` command is the record written at that
+/// removal. So the two are one payment stated twice and the journal is the half that
+/// says the removal HAPPENED. `spent_units_for_payer_and_recipient` answers `None` for
+/// "the journal records no spend by this payer on this spell", which is not the same
+/// fact as "the helper spent nothing" and must not be read as agreement with a unit
+/// list that happens to be the right size.
+///
+/// The board is an ordinary assisted Bring Down (`{3}{W}`, P1 pays the three generic
+/// with Treasures) paused while the caster pays its own `{W}`. The save is untampered
+/// apart from ONE edit: every `ManaSpend` command the journal recorded for the helper
+/// is re-attributed to another payer, so the journal holds no spend for P1 on this
+/// spell while the save's own correctly sized unit list survives untouched.
+#[test]
+fn restore_refuses_a_correctly_sized_assist_save_with_no_journal_spend() {
+    let BringDownBoard {
+        mut runner,
+        bring_down,
+        victim,
+        ..
+    } = bring_down_board();
+    announce_bring_down_with_helper(&mut runner, bring_down, victim, BRING_DOWN_ASSIST_GENERIC);
+    drive_to_caster_source_pause(&mut runner);
+
+    let recipient = assist_payment_recipient(runner.state(), bring_down, P1);
+    let journal_units = runner
+        .state()
+        .resolved_rules_journal
+        .spent_units_for_payer_and_recipient(P1, &recipient)
+        .expect("the journal recorded the helper's spend at the spend boundary");
+    let saved_units = parked_bring_down(&runner).assist_contributed_units.clone();
+    assert_eq!(
+        saved_units.len(),
+        BRING_DOWN_ASSIST_GENERIC as usize,
+        "reach-guard: the save carries a CORRECTLY SIZED unit list for the paid helper — \
+         exactly the shape the save-alone reading admitted"
+    );
+    assert_eq!(
+        saved_units
+            .iter()
+            .map(|unit| unit.pip_id)
+            .collect::<Vec<_>>(),
+        journal_units
+            .iter()
+            .map(|unit| unit.pip_id)
+            .collect::<Vec<_>>(),
+        "reach-guard: and it names the same pips the journal recorded, so only the proof is \
+         missing"
+    );
+
+    // --- The one edit: the journal's record of the helper's spend loses its command
+    // payload, the shape a node slot with no resolved command carries. Nothing is
+    // re-attributed and no ordinal moves, so the payload still decodes; what is gone is
+    // the `ManaSpend` record naming this payer, this recipient and these units.
+    let mut json = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+        .expect("the paused assisted cast serializes");
+    let mut erased = 0;
+    {
+        let entries = json["state"]["resolved_rules_journal"]["entries"]
+            .as_array_mut()
+            .expect("the journal serializes its entries");
+        for entry in entries.iter_mut() {
+            let names_the_helper = entry
+                .get("command")
+                .and_then(|command| command.get("ManaSpend"))
+                .is_some_and(|spend| spend["payer"] == serde_json::json!(P1.0));
+            if names_the_helper {
+                entry["command"] = serde_json::Value::Null;
+                erased += 1;
+            }
+        }
+    }
+    assert!(
+        erased >= 1,
+        "reach-guard: the journal did record the helper's spend, and this edit is what removes it"
+    );
+
+    let persisted: PersistedGameState =
+        serde_json::from_value(json).expect("the re-attributed journal still decodes");
+
+    let error = persisted
+        .into_game_state()
+        .expect_err("a correctly sized unit list no journal spend backs cannot be admitted");
+    match error {
+        engine::types::game_state::PersistedRestoreError::ContradictoryAssistContribution {
+            source_id,
+            reason:
+                engine::types::game_state::AssistContributionConflict::JournalRecordsNoSpendForSavedUnits {
+                    helper,
+                    generic,
+                    saved,
+                },
+        } => {
+            assert_eq!(
+                source_id, bring_down,
+                "the refusal names the cast it is about"
+            );
+            assert_eq!(helper, P1, "and the helper whose payment is unproven");
+            assert_eq!(generic, BRING_DOWN_ASSIST_GENERIC);
+            assert_eq!(
+                saved,
+                BRING_DOWN_ASSIST_GENERIC as usize,
+                "and the correctly sized unit list that nothing vouches for"
+            );
+        }
+        other => panic!(
+            "CR 118.3a: a positive Assist contribution the journal does not prove must be \
+             refused as unproven, got {other:?}"
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CR 118.3a + CR 702.132a + CR 118.11 + CR 616.1: the restore must also write a
 // journal-proven contribution into the carrier a REPLACED LIFE PAYMENT parks.
