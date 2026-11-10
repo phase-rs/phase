@@ -4022,6 +4022,38 @@ describe("StateCodecAttachment — first notice and the adoption boundary", () =
     expect(run.attachment.deliveryPolicy).toEqual({ kind: "snapshotOnly", reason: "confirmationFailure" });
   });
 
+  it("consumes a never-adopted failure's policy without touching the incumbent's gate or bootstrap", async () => {
+    const live = await openBound(true);
+    live.attachment.accept(live.socket.ws);
+    live.attachment.handleRecovery(live.binding, "recovering", live.socket.ws, false, vi.fn());
+    expect(() => live.attachment.assertNotRecovering()).toThrow();
+    expect(live.attachment.status(live.binding, live.socket.ws, false)).toBe("accepted");
+
+    const failed = live.attachment.begin();
+    failed.failure = { kind: "failed", reason: "decodeFailure", joinCredentials: null };
+    live.attachment.consumeFailure(failed);
+
+    expect(live.attachment.deliveryPolicy).toEqual({ kind: "snapshotOnly", reason: "decodeFailure" });
+    // The incumbent keeps both its recovery gate and its accepted bootstrap.
+    expect(() => live.attachment.assertNotRecovering()).toThrow();
+    expect(live.attachment.status(live.binding, live.socket.ws, false)).toBe("accepted");
+    expect(live.attachment.status(failed, null, false)).toBe("pending");
+
+    // Reach guard: adopting that same failed binding is what clears the gate
+    // and displaces the incumbent, which is why adoption is not used here.
+    const control = new StateCodecAttachment();
+    const incumbent = control.begin();
+    control.adopt(incumbent, live.socket.ws);
+    control.accept(live.socket.ws);
+    control.handleRecovery(incumbent, "recovering", live.socket.ws, false, vi.fn());
+    expect(() => control.assertNotRecovering()).toThrow();
+    const candidate = control.begin();
+    candidate.failure = { kind: "failed", reason: "decodeFailure", joinCredentials: null };
+    control.adopt(candidate, live.socket.ws);
+    expect(() => control.assertNotRecovering()).not.toThrow();
+    expect(control.status(incumbent, live.socket.ws, false)).toBe("pending");
+  });
+
   it("keeps the complete first notice when a later notice arrives, before and after adoption", async () => {
     const other = { playerToken: "other", yourPlayer: 0, fullKey: { game_code: "OTHER", generation: 9 } } as const;
     const second = { kind: "failed", reason: "decodeFailure", joinCredentials: other } as const;

@@ -2527,6 +2527,31 @@ describe("draft attachment settlement", () => {
     expect(await next()).toMatchObject({ resolvedWith: { events: [{ marker: "switched-match-complete" }] } });
   });
 
+  it("refuses a synchronous retry from the pending callback instead of stamping it for the outgoing match", async () => {
+    enterAcceptedFullMatch(adapter, established);
+    const nextKey = { game_code: "GAME04", generation: 10 };
+    const pending = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+    const sentAfterCommand = submissionTypes(established).length;
+    const retries: Promise<unknown>[] = [];
+    let fired = false;
+    const off = adapter.onEvent((event) => {
+      if (fired || event.type !== "actionPendingChanged" || event.pending) return;
+      fired = true;
+      retries.push(adapter.submitAction({ type: "PassPriority" }, 0).catch((error: unknown) => error));
+    });
+    receive(established, "DraftMatchStart", {
+      match_id: "r4-t0", round: 4, game_code: nextKey.game_code, full_key: nextKey,
+      player_token: "match-draft-token", your_player: 0, opponent_name: "Next opponent",
+    });
+    off();
+    expect(await pending()).toMatchObject({ code: "REQUEST_FAILED" });
+    expect(retries).toHaveLength(1);
+    // The retry raced the notification, not the authority: the new match is
+    // already current and has no accepted GameStarted, so nothing is sent.
+    expect(await retries[0]!).toMatchObject({ code: "ACTION_NOT_SENT" });
+    expect(submissionTypes(established)).toHaveLength(sentAfterCommand);
+  });
+
   it.each(["serverHello", "draftViewUpdated"] as const)(
     "drains older reconnect views before the synchronous selected-inventory reply from a %s pick consumer",
     async (trigger) => {
@@ -3686,6 +3711,109 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       }
     },
   );
+
+  it("keeps the incumbent's recovery gate closed when a replacement candidate fails before setup", async () => {
+    const session = draftCodecSession(decodeEnvelope);
+    const candidate = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider } = await startCodecDraft(session.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    // Test-only probe: the recovery gate has no public surface.
+    const internals = adapter as unknown as { stateCodec: { assertNotRecovering(): void } };
+    const gateOpen = () => {
+      try {
+        internals.stateCodec.assertNotRecovering();
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    ws.dispatchSynthetic("message", draftFrame("Delta", {
+      type: "StateUpdate",
+      data: { state: matchState("recoverable-10"), events: [], full_key: FULL_KEY, state_revision: 10 },
+    }));
+    await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+      type: "gameStateUpdated", state: expect.objectContaining({ label: "recoverable-10" }),
+    })));
+    session.decode.mockResolvedValueOnce({ kind: "resyncRequired" });
+    ws.dispatchSynthetic("message", draftFrame("Delta", {
+      type: "StateUpdate",
+      data: { state: matchState("rejected-delta"), events: [], full_key: FULL_KEY, state_revision: 11 },
+    }));
+    await vi.waitFor(() => expect(gateOpen()).toBe(false));
+    // A failing candidate: its setup frame cannot be sent, so it is abandoned.
+    provider.mockResolvedValueOnce(candidate.session);
+    const initialized = trackRejection(adapter.createDraft({
+      displayName: "Contender", setCodes: ["TST"], kind: "Premier", public: false,
+      tournamentFormat: "Swiss", podPolicy: "Competitive", podSize: 8,
+    }));
+    await drainArt();
+    const contender = MockWebSocket.last!;
+    expect(contender).not.toBe(ws);
+    contender.send.mockImplementation((raw: string) => {
+      const frame: { type: string } = JSON.parse(raw);
+      if (frame.type === "CreateDraftWithSettings") throw new Error("Contender setup failed");
+    });
+    contender.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+    await drainArt();
+    expect(await initialized()).toMatchObject({ code: "WS_CLOSED", message: "Failed to send setup frame" });
+    // The incumbent stays current with its recovery gate intact: the failed
+    // candidate's policy is consumed without adopting it.
+    expect(gateOpen()).toBe(false);
+    await expect(adapter.submitAction({ type: "PassPriority" } as GameAction, 0)).rejects
+      .toMatchObject({ code: "ACTION_NOT_SENT" });
+    // The incumbent's own recovery Full is still the accepted bootstrap.
+    session.decode.mockImplementation(async (frame: Uint8Array) => decodeEnvelope(frame));
+    ws.dispatchSynthetic("message", draftFrame("Full", {
+      type: "StateUpdate",
+      data: { state: matchState("recovered-11"), events: [], full_key: FULL_KEY, state_revision: 11 },
+    }));
+    await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+      type: "gameStateUpdated", state: expect.objectContaining({ label: "recovered-11" }),
+    })));
+    expect(gateOpen()).toBe(true);
+    adapter.dispose();
+  });
+
+  it("does not accept a same-key GameStarted Full older than the applied revision", async () => {
+    const session = draftCodecSession(decodeEnvelope);
+    const { adapter, ws } = await startCodecDraft(session.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    ws.dispatchSynthetic("message", draftFrame("Delta", {
+      type: "StateUpdate",
+      data: { state: matchState("bootstrap-base-10"), events: [], full_key: FULL_KEY, state_revision: 10 },
+    }));
+    await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+      type: "gameStateUpdated", state: expect.objectContaining({ label: "bootstrap-base-10" }),
+    })));
+    session.decode.mockResolvedValueOnce({ kind: "resyncRequired" });
+    ws.dispatchSynthetic("message", draftFrame("Delta", {
+      type: "StateUpdate",
+      data: { state: matchState("rejected-delta"), events: [], full_key: FULL_KEY, state_revision: 11 },
+    }));
+    // A same-key GameStarted bootstrap older than the applied revision is not
+    // accepted evidence: it neither applies nor completes recovery.
+    const beforeStale = events.length;
+    ws.dispatchSynthetic("message", draftFrame("Full", {
+      type: "GameStarted",
+      data: {
+        state: matchState("bootstrap-9"), your_player: 0, full_key: FULL_KEY, state_revision: 9,
+      },
+    }));
+    await vi.waitFor(() => expect(events.slice(beforeStale)).toContainEqual(
+      expect.objectContaining({ type: "disconnected" }),
+    ));
+    expect(events.slice(beforeStale)).not.toContainEqual(expect.objectContaining({
+      type: "gameStateUpdated",
+    }));
+    expect(await adapter.getSnapshot().catch(() => null)).not.toMatchObject({
+      state: expect.objectContaining({ label: "bootstrap-9" }),
+    });
+    adapter.dispose();
+  });
 
   it("does not accept a same-key recovery Full older than the applied revision", async () => {
     const session = draftCodecSession(decodeEnvelope);
@@ -5493,15 +5621,27 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
           // incomplete request; a different instance may even have the same name.
           pool: request === "different selected instance" ? [other] : [card, other],
         });
-        receive(replacement.ws, "DraftStateUpdate", { view: updated });
-        await replacement.reconnected;
-        expect(await observed()).toBe("never settled");
-        receive(ws, "DraftActionRejected", {
-          reason: request === "incomplete commander step"
-            ? "seat 0 must pick 2 card(s) from the current pack, got 1"
-            : "This socket's draft session identity is no longer current",
-        });
-        await expect(pick).rejects.toMatchObject({ code: "ACTION_REJECTED" });
+        if (request === "different selected instance") {
+          receive(replacement.ws, "DraftStateUpdate", { view: updated });
+          await replacement.reconnected;
+          expect(await observed()).toBe("never settled");
+          receive(ws, "DraftActionRejected", {
+            reason: "This socket's draft session identity is no longer current",
+          });
+          await expect(pick).rejects.toMatchObject({ code: "ACTION_REJECTED" });
+        } else {
+          // The request carried no complete selection and its sender was
+          // replaced: it is retired as unconfirmed so it can recover. A later
+          // pool update on the successor cannot turn it into a success.
+          expect(await observed()).toMatchObject({
+            code: "WS_CLOSED",
+            message: "The draft connection changed before this pick was confirmed",
+            recoverable: true,
+          });
+          receive(replacement.ws, "DraftStateUpdate", { view: updated });
+          await replacement.reconnected;
+          await expect(pick).rejects.toMatchObject({ code: "WS_CLOSED" });
+        }
       } finally {
         adapter.dispose();
         codec.runtime.dispose();
@@ -5510,7 +5650,7 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
   );
 
   it.each(["missing source view", "missing source card"] as const)(
-    "keeps original-source reply ownership when replacement inventory lacks complete selection authority: %s",
+    "retires an unprovable pick when its sender is replaced instead of awaiting a result it may never receive: %s",
     async (authority) => {
       const { adapter, ws, provider, codec, leaseClose } = await startRuntimeDraft();
       try {
@@ -5521,18 +5661,18 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
           }));
         }
         const pick = adapter.submitPick(card.instance_id);
-        const observed = trackRejection(pick);
-        const replacement = await replaceRuntimeSocket(adapter, provider, codec.provider, ws, false);
-        const selected = createMockDraftView({ pool: [card] });
-        receive(replacement.ws, "DraftStateUpdate", { view: selected });
-        await replacement.reconnected;
-        expect(await observed()).toBe("never settled");
-        expect(ws.close).not.toHaveBeenCalled();
-        expect(leaseClose).not.toHaveBeenCalled();
-        // The replacement cannot settle it, but the request-scoped receipt is
-        // the sending socket's own inventory: the supported settlement path.
-        receive(ws, "DraftStateUpdate", { view: selected });
-        await expect(pick).resolves.toEqual(selected);
+        const settled = vi.fn();
+        void pick.then(settled, settled);
+        await replaceRuntimeSocket(adapter, provider, codec.provider, ws, false);
+        // Production ordering: the server registers the reconnected sender, so
+        // A receives no success at all. The unprovable request is retired as
+        // recoverable rather than held open forever.
+        await expect(pick).rejects.toMatchObject({
+          code: "WS_CLOSED",
+          message: "The draft connection changed before this pick was confirmed",
+          recoverable: true,
+        });
+        expect(settled).toHaveBeenCalledOnce();
         expect(ws.close).toHaveBeenCalledOnce();
         expect(leaseClose).toHaveBeenCalledOnce();
       } finally {
@@ -6228,6 +6368,8 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
       const secondBaseline = codec.latestBaseline();
       const interaction = PREVIEW_KINDS.interaction.start(adapter, "dispose-retired-interaction");
       const pick = adapter.submitPick("dispose-retired-pick");
+      // The third adoption retires this unprovable pick before disposal.
+      void pick.catch(() => undefined);
       const third = await replaceRuntimeSocket(adapter, provider, codec.provider, second.ws, false);
       events.length = 0;
       await enterCodecMatch(third.ws, events);
@@ -6248,7 +6390,7 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
         { status: "rejected", reason: { code: "WS_CLOSED", message: "Adapter disposed during action" } },
         { status: "rejected", reason: { code: "WS_CLOSED", message: "Adapter disposed during mana-payment preview" } },
         { status: "rejected", reason: { code: "WS_CLOSED", message: "Adapter disposed during interaction preview" } },
-        { status: "rejected", reason: { code: "WS_CLOSED", message: "Adapter disposed during draft operation" } },
+        { status: "rejected", reason: { code: "WS_CLOSED", message: "The draft connection changed before this pick was confirmed" } },
         { status: "rejected", reason: { code: "WS_CLOSED", message: "Adapter disposed before draft started" } },
         { status: "rejected", reason: { code: "WS_CLOSED", message: "Adapter disposed during mana-payment preview" } },
       ]);

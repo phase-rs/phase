@@ -188,6 +188,16 @@ export class StateCodecAttachment {
     if (binding.failure !== null) this.degrade(binding.failure.reason);
   }
 
+  /**
+   * Consume a never-adopted attachment's terminal failure. Only the sticky
+   * delivery policy moves: the incumbent binding keeps its socket, bootstrap
+   * status and recovery gate. A failed replacement therefore cannot release
+   * the incumbent's recovery gate, nor authorize its own commands.
+   */
+  consumeFailure(binding: StateCodecBootstrapBinding): void {
+    if (binding.failure !== null) this.degrade(binding.failure.reason);
+  }
+
   /** Bootstrap status reported to the codec transport for `binding`. */
   status(
     binding: StateCodecBootstrapBinding,

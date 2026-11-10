@@ -847,6 +847,24 @@ export class ServerDraftAdapter implements EngineAdapter {
   }
 
   /**
+   * A pick sent without the engine's complete selection can only be proven by
+   * its own sending socket's inventory. Once a different socket is adopted the
+   * server's success fan-out follows the registered sender, so the original
+   * request may never be answered on its sender. Retire it as unconfirmed
+   * (recoverable) instead of leaving the caller awaiting forever.
+   */
+  private retireUnprovablePick(replacement: PhaseSocketTransport): void {
+    if (this.draftReject === null || this.draftActionStage !== "AwaitingReply") return;
+    const pick = this.draftPick;
+    if (!pick || pick.completeSelection || this.draftActionSocket === replacement) return;
+    this.settleDraftAction(new AdapterError(
+      "WS_CLOSED",
+      "The draft connection changed before this pick was confirmed",
+      true,
+    ));
+  }
+
+  /**
    * Draft broadcasts are not acknowledgements. A pick completes when its
    * inventory proves the exact newly selected instance. A request backed by the
    * complete selection offered in the original view can complete from any
@@ -1207,7 +1225,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         // that binding's sticky delivery policy without displacing an incumbent
         // peer: this candidate never owned a setup-capable attachment.
         if (!this.disposed && bootstrap.failure !== null) {
-          this.stateCodec.adopt(bootstrap, sourceSocket);
+          this.stateCodec.consumeFailure(bootstrap);
         }
         this.abandonSocket(socket);
         return;
@@ -1215,7 +1233,7 @@ export class ServerDraftAdapter implements EngineAdapter {
       // Same policy consumption for a live candidate; the incumbent socket and
       // its credentials stay current until this candidate's setup is on the wire.
       if (bootstrap.failure !== null) {
-        this.stateCodec.adopt(bootstrap, sourceSocket);
+        this.stateCodec.consumeFailure(bootstrap);
       }
       // Address the local candidate, not the still-current previous socket.
       if (!this.send(setupFrame, sourceSocket)) {
@@ -1229,6 +1247,9 @@ export class ServerDraftAdapter implements EngineAdapter {
       this.stateCodec.adopt(bootstrap, sourceSocket);
       this.ws = sourceSocket;
       this.acceptedGameSocket = null;
+      // A pick awaiting proof on the replaced socket can no longer be
+      // confirmed here: retire it before any listener observes the successor.
+      this.retireUnprovablePick(sourceSocket);
       if (initOwner?.kind !== "reconnect") {
         // Create/Join attach a new draft seat, not the previous draft's Full
         // game. Only replies on this attachment may establish its authority.
@@ -1279,7 +1300,7 @@ export class ServerDraftAdapter implements EngineAdapter {
       this.rejectAttachment(attachment.owner, failure);
       if (socket) {
         if (!this.disposed && bootstrap.failure !== null) {
-          this.stateCodec.adopt(bootstrap, socket.ws);
+          this.stateCodec.consumeFailure(bootstrap);
         }
         this.abandonSocket(socket);
       }
@@ -1379,9 +1400,27 @@ export class ServerDraftAdapter implements EngineAdapter {
           && this._playerId === data.your_player
           && fullSessionKeysEqual(this.activeFullKey, data.full_key);
         if (!sameMatch) {
+          this.clearSnapshot();
+          this.acceptedFullKey = null;
+          this.acceptedGameSocket = null;
+          // A new match needs its own GameStarted: reset before any listener
+          // can observe the transition.
+          this.stateCodec.reset(sourceSocket);
+        }
+        // Publish the new match authority BEFORE any listener can observe the
+        // transition. A synchronous retry from the pending callback must not be
+        // stamped for the outgoing match, whose addressed reply is fenced by
+        // the new key published here.
+        this.phase = "match";
+        this.activeMatchId = data.match_id;
+        this._playerId = data.your_player;
+        this._gameCode = data.game_code;
+        this.draftToken = data.player_token;
+        this.activeFullKey = data.full_key;
+        if (!sameMatch) {
           // A command already SENT for the outgoing match on this same socket
           // can never complete: its addressed reply is fenced by the new match
-          // key below. Release the slot before listeners can observe B. A
+          // key above. Release the slot before listeners can observe it. A
           // command still being claimed is released unsent by its own recheck.
           if (this.submission.occupied && this.submissionSocket === sourceSocket
             && this.submissionSent) {
@@ -1398,19 +1437,7 @@ export class ServerDraftAdapter implements EngineAdapter {
               this.emit({ type: "actionPendingChanged", pending: false });
             }
           }
-          this.clearSnapshot();
-          this.acceptedFullKey = null;
-          this.acceptedGameSocket = null;
-          // A new match needs its own GameStarted: reset before any listener
-          // can observe the transition.
-          this.stateCodec.reset(sourceSocket);
         }
-        this.phase = "match";
-        this.activeMatchId = data.match_id;
-        this._playerId = data.your_player;
-        this._gameCode = data.game_code;
-        this.draftToken = data.player_token;
-        this.activeFullKey = data.full_key;
         if (!sameMatch) {
           if (this.draftCode && this.draftToken) {
             this.send({
@@ -1491,10 +1518,18 @@ export class ServerDraftAdapter implements EngineAdapter {
         ) {
           break;
         }
+        const revision = typeof data.state_revision === "number" ? data.state_revision : null;
+        if (this.cachedStateRevision !== null && revision !== null
+          && revision < this.cachedStateRevision) {
+          // A same-key bootstrap that regresses the applied revision is not
+          // accepted evidence: it must not replace the snapshot, release the
+          // codec's recovery gate, or authorize commands.
+          break;
+        }
         this.acceptedFullKey = data.full_key ?? null;
         const started = ServerDraftAdapter.snapshotPair(data);
         const startedSnapshot = this.cacheSnapshot(started.state, started.legalResult, sourceSocket);
-        this.cachedStateRevision = data.state_revision ?? null;
+        this.cachedStateRevision = revision ?? this.cachedStateRevision;
         this._playerId = data.your_player;
         this.acceptedGameSocket = sourceSocket;
         // Accepted after the match/player/full-key guards above and after the
