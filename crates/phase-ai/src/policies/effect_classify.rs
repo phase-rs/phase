@@ -3544,6 +3544,7 @@ mod grant_trigger_polarity_tests {
     /// "When this dies, return it to the battlefield" — the Undying Malice grant.
     fn return_to_battlefield() -> Effect {
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,
             target: TargetFilter::SelfRef,

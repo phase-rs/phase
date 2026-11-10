@@ -4661,6 +4661,7 @@ fn lander_ability() -> AbilityDefinition {
             AbilityKind::Activated,
             // CR 614.1c: "enters tapped" is an as-enters replacement effect.
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -9248,6 +9249,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::SelfRef,

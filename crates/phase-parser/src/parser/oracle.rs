@@ -743,6 +743,7 @@ fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition>
         AbilityKind::BeginGame,
         // CR 103.6a: the card is put onto the battlefield from the opening hand.
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             destination: Zone::Battlefield,
             target: TargetFilter::SelfRef,
             origin: Some(Zone::Hand),
