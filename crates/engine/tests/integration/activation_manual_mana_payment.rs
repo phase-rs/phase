@@ -5137,3 +5137,418 @@ fn a_combination_mana_ability_funds_a_chosen_color_activation() {
     resolve_stack(&mut runner);
     assert_eq!(hand_size(&runner, P0), hand_before + 2, "the draw resolved");
 }
+
+// ---------------------------------------------------------------------------
+// #10190 second review: the offer judges each announced total and follows the
+// window's prompts through their live handlers; a search it cannot finish
+// offers nothing.
+// ---------------------------------------------------------------------------
+
+const PHYREXIAN_VAULT: &str = "{2}, {T}, Sacrifice a creature: Draw a card.";
+const TRANSMOGRANTS_CROWN: &str = "Equipped creature gets +2/+0.\n\
+Whenever equipped creature dies, draw a card.\n\
+Equip {2} or {B}";
+const BEETLEFORM_MAGE: &str = "{G}{U}: This creature gets +2/+2 and gains flying until end of turn. Activate only once each turn.";
+const MOLTEN_TAIL_MASTICORE: &str =
+    "At the beginning of your upkeep, sacrifice this creature unless you discard a card.\n\
+{4}, Exile a creature card from your graveyard: This creature deals 4 damage to any target.\n\
+{2}: Regenerate this creature.";
+const VAULT_ROBBER: &str = "{1}, {T}, Exile a creature card from your graveyard: Create a Treasure token. (It's an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")";
+
+fn treasures(runner: &GameRunner) -> usize {
+    runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| runner.state().objects[id].name == "Treasure")
+        .count()
+}
+
+/// CR 601.2g + CR 118.10 + CR 733.1 (#10190 second review): an offer stands
+/// only on a finished search. With one creature, The Golden Throne's "{T},
+/// Sacrifice a creature: Add three mana in any combination of colors." can
+/// make Phyrexian Vault's {2} only by sacrificing the creature its "Sacrifice
+/// a creature" needs, whichever colors it adds, so the Vault is offered in no
+/// mode. A second creature makes it offered for a manual payment, and the
+/// offer completes.
+#[test]
+fn a_lone_creature_cannot_fund_phyrexian_vault_through_the_golden_throne() {
+    let board = |creatures: usize| {
+        let mut scenario = scenario_at_main();
+        let vault = scenario
+            .add_artifact_from_oracle(P0, "Phyrexian Vault", PHYREXIAN_VAULT)
+            .with_mana_cost(ManaCost::generic(3))
+            .id();
+        let golden = add(&mut scenario, P0, "The Golden Throne", Zone::Battlefield);
+        let fodder: Vec<ObjectId> = (0..creatures)
+            .map(|_| scenario.add_vanilla(P0, 2, 2))
+            .collect();
+        scenario.add_card_to_library_top(P0, "Drawn card");
+        let runner = build(scenario);
+        let index = non_mana_ability_index(&runner, vault);
+        (runner, vault, golden, fodder, index)
+    };
+
+    let (runner, vault, _, _, index) = board(1);
+    assert!(
+        offered_payment_modes(&runner, vault, index).is_empty(),
+        "every color answer leaves no creature for the Vault's sacrifice"
+    );
+
+    let (mut runner, vault, golden, fodder, index) = board(2);
+    assert_eq!(
+        offered_payment_modes(&runner, vault, index),
+        vec![CastPaymentMode::Manual],
+        "a second creature pays the Vault's sacrifice"
+    );
+    let hand_before = hand_size(&runner, P0);
+    let waiting_for = activate_index(&mut runner, vault, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(
+        &mut runner,
+        golden,
+        &[fodder[0]],
+        Some(engine::types::game_state::ManaChoice::Combination(vec![
+            engine::types::mana::ManaType::Red;
+            3
+        ])),
+    );
+    assert_eq!(pool_total(&runner), 3);
+    let waiting_for = pass(&mut runner);
+    assert!(
+        is_cost_prompt(&waiting_for, |kind| *kind == PayCostKind::Sacrifice),
+        "the Vault's own sacrifice follows the window: {waiting_for:?}"
+    );
+    let waiting_for = select_cards(&mut runner, &[fodder[1]]);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, vault));
+    assert_eq!(pool_total(&runner), 1, "the {{2}} left one mana floating");
+
+    resolve_stack(&mut runner);
+    assert_eq!(hand_size(&runner, P0), hand_before + 1, "the draw resolved");
+}
+
+/// CR 601.2h + CR 602.2b (#10190 second review): each alternative of a
+/// disjunctive cost is a total the player can choose to pay. Transmogrant's
+/// Crown's "Equip {2} or {B}" has no single mana leg, but its {2} can be made
+/// by Ashnod's Altar, so it is offered for a manual payment: the {2}
+/// alternative is announced, the window sacrifices one creature, and the
+/// Crown attaches to the other.
+#[test]
+fn a_disjunctive_equip_cost_is_offered_through_its_payable_alternative() {
+    let mut scenario = scenario_at_main();
+    let crown = scenario
+        .add_artifact_from_oracle(P0, "Transmogrant's Crown", TRANSMOGRANTS_CROWN)
+        .with_subtypes(vec!["Equipment"])
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let altar = add(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield);
+    let bearer = add(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
+    let fodder = scenario.add_vanilla(P0, 1, 1);
+    let mut runner = build(scenario);
+    let index = non_mana_ability_index(&runner, crown);
+
+    assert_eq!(
+        offered_payment_modes(&runner, crown, index),
+        vec![CastPaymentMode::Manual]
+    );
+
+    activate_index(&mut runner, crown, index, CastPaymentMode::Manual);
+    let waiting_for = choose_targets(&mut runner, &[bearer]);
+    let WaitingFor::ActivationCostOneOfChoice { costs, .. } = &waiting_for else {
+        panic!("the alternative is announced before the window: {waiting_for:?}");
+    };
+    let generic = costs
+        .iter()
+        .position(|cost| {
+            matches!(
+                cost,
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost { shards, generic: 2 },
+                } if shards.is_empty()
+            )
+        })
+        .expect("the {2} alternative is offered");
+    let waiting_for = act(
+        &mut runner,
+        GameAction::ChooseActivationCostBranch { index: generic },
+    );
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(&mut runner, altar, &[fodder], None);
+    assert_eq!(pool_total(&runner), 2);
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert_eq!(pool_total(&runner), 0, "the {{2}} was paid");
+
+    resolve_stack(&mut runner);
+    assert_eq!(
+        runner.state().objects[&crown].attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(bearer)),
+        "the Crown is attached to the chosen creature"
+    );
+}
+
+/// CR 107.4f + CR 118.13a (#10190 second review): a Phyrexian symbol can be
+/// announced as 2 life, so it asks no mana of the window. With Ashnod's Altar
+/// as the only mana source, Birthing Pod's "{1}{G/P}, {T}, Sacrifice a
+/// creature" is offered for a manual payment: life is announced for {G/P}, the
+/// window sacrifices one creature for the {1}, and the Pod sacrifices the
+/// other to find a creature of mana value one more.
+#[test]
+fn birthing_pod_is_funded_by_ashnods_altar_with_its_phyrexian_symbol_paid_in_life() {
+    let mut scenario = scenario_at_main();
+    let pod = add(&mut scenario, P0, "Birthing Pod", Zone::Battlefield);
+    let altar = add(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield);
+    let bears = add(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
+    let fodder = scenario.add_vanilla(P0, 1, 1);
+    let courser = add(&mut scenario, P0, "Centaur Courser", Zone::Library);
+    add(&mut scenario, P0, "Hill Giant", Zone::Library);
+    let mut runner = build(scenario);
+    let index = non_mana_ability_index(&runner, pod);
+
+    assert_eq!(
+        offered_payment_modes(&runner, pod, index),
+        vec![CastPaymentMode::Manual],
+        "no green source, but {{G/P}} can be paid with life"
+    );
+
+    let waiting_for = activate_index(&mut runner, pod, index, CastPaymentMode::Manual);
+    assert_announcement(&waiting_for, 1);
+    let waiting_for = submit_phyrexian(&mut runner, &[ShardChoice::PayLife]);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(&mut runner, altar, &[fodder], None);
+    pass(&mut runner);
+    assert_eq!(life(&runner, P0), 18, "{{G/P}} was paid with 2 life");
+    finish_pod(&mut runner, bears, courser);
+}
+
+/// CR 605.3c + CR 113.7a (#10190 second review): one Phyrexian Altar
+/// ("Sacrifice a creature: Add one mana of any color.") is activated once per
+/// creature, a color chosen each time. With two creatures besides Beetleform
+/// Mage and no other mana, "{G}{U}: This creature gets +2/+2 and gains flying
+/// until end of turn." is offered for a manual payment and completes on one
+/// {G} and one {U}.
+#[test]
+fn one_phyrexian_altar_pays_two_colored_symbols_with_two_sacrifices() {
+    let mut scenario = scenario_at_main();
+    let mage = scenario
+        .add_creature_from_oracle(P0, "Beetleform Mage", 2, 2, BEETLEFORM_MAGE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green, ManaCostShard::Blue],
+            generic: 1,
+        })
+        .id();
+    let altar = add(&mut scenario, P0, "Phyrexian Altar", Zone::Battlefield);
+    let fodder = [
+        scenario.add_vanilla(P0, 1, 1),
+        scenario.add_vanilla(P0, 1, 1),
+    ];
+    let mut runner = build(scenario);
+    let index = non_mana_ability_index(&runner, mage);
+
+    assert_eq!(
+        offered_payment_modes(&runner, mage, index),
+        vec![CastPaymentMode::Manual]
+    );
+
+    let waiting_for = activate_index(&mut runner, mage, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    for (creature, color) in fodder.into_iter().zip([
+        engine::types::mana::ManaType::Green,
+        engine::types::mana::ManaType::Blue,
+    ]) {
+        activate_in_window(
+            &mut runner,
+            altar,
+            &[creature],
+            Some(engine::types::game_state::ManaChoice::SingleColor(color)),
+        );
+    }
+    assert_eq!(pool_total(&runner), 2);
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert_eq!(pool_total(&runner), 0, "{{G}}{{U}} was paid");
+
+    resolve_stack(&mut runner);
+    let mage_obj = &runner.state().objects[&mage];
+    assert_eq!(
+        (mage_obj.power, mage_obj.toughness),
+        (Some(4), Some(4)),
+        "the pump resolved"
+    );
+}
+
+/// CR 601.2g (#10190 second review): the window comes before every other
+/// payment, so what it makes counts for the rest of the cost. Ashnod's Altar
+/// sacrificing Grizzly Bears makes Vault Robber's {1} and puts the creature
+/// card in the graveyard that its "Exile a creature card from your graveyard"
+/// needs. With no creature card there beforehand, it is offered for a manual
+/// payment and completes; without the Altar it is offered in no mode.
+#[test]
+fn ashnods_altar_puts_the_creature_card_vault_robber_exiles_in_the_graveyard() {
+    let board = |altar: bool| {
+        let mut scenario = scenario_at_main();
+        let robber = scenario
+            .add_creature_from_oracle(P0, "Vault Robber", 1, 1, VAULT_ROBBER)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            })
+            .id();
+        let altar = altar.then(|| add(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield));
+        let bears = add(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
+        let runner = build(scenario);
+        let index = non_mana_ability_index(&runner, robber);
+        (runner, robber, altar, bears, index)
+    };
+
+    let (runner, robber, _, _, index) = board(false);
+    assert!(offered_payment_modes(&runner, robber, index).is_empty());
+
+    let (mut runner, robber, altar, bears, index) = board(true);
+    assert_eq!(
+        offered_payment_modes(&runner, robber, index),
+        vec![CastPaymentMode::Manual]
+    );
+    let waiting_for = activate_index(&mut runner, robber, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(&mut runner, altar.unwrap(), &[bears], None);
+    assert!(in_zone(&runner, bears, Zone::Graveyard));
+    let waiting_for = pass(&mut runner);
+    let waiting_for = if is_priority(&waiting_for) {
+        waiting_for
+    } else {
+        select_cards(&mut runner, &[bears])
+    };
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(
+        in_zone(&runner, bears, Zone::Exile),
+        "the sacrificed Bears paid the exile"
+    );
+    assert!(tapped(&runner, robber));
+
+    resolve_stack(&mut runner);
+    assert_eq!(treasures(&runner), 1, "the Treasure was created");
+}
+
+/// CR 701.59a (#10190 second review): which cards are collected as evidence
+/// can matter to the rest of the payment. Molten-Tail Masticore's "{4}, Exile
+/// a creature card from your graveyard" is funded by Cryptex, Ashnod's Altar
+/// sacrificing a creature token (a token is not a card, so it leaves no card
+/// to exile) and a Wastes. Cryptex can collect a mana-value-4 creature card or
+/// a mana-value-3 sorcery card; only the sorcery leaves the creature card the
+/// Masticore exiles, so the highest-value answer alone would refuse the offer.
+/// It is offered for a manual payment and completes with the sorcery
+/// collected.
+#[test]
+fn cryptex_evidence_that_keeps_the_masticores_creature_card_is_found() {
+    let mut scenario = scenario_at_main();
+    let masticore = scenario
+        .add_creature_from_oracle(P0, "Molten-Tail Masticore", 4, 4, MOLTEN_TAIL_MASTICORE)
+        .as_artifact_creature()
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let cryptex = add(&mut scenario, P0, "Cryptex", Zone::Battlefield);
+    let altar = add(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield);
+    let token = scenario.add_vanilla(P0, 1, 1);
+    add(&mut scenario, P0, "Wastes", Zone::Battlefield);
+    let creature_card = scenario
+        .add_creature_to_graveyard(P0, "Graveyard Beast", 4, 4)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let sorcery_card = scenario
+        .add_spell_to_graveyard(P0, "Graveyard Sorcery", false)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let mut runner = build(scenario);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&token)
+        .expect("the token")
+        .is_token = true;
+    let index = ability_index_of(&runner, masticore, "4 damage");
+
+    assert_eq!(
+        offered_payment_modes(&runner, masticore, index),
+        vec![CastPaymentMode::Manual]
+    );
+    activate_index(&mut runner, masticore, index, CastPaymentMode::Manual);
+    let waiting_for = runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(P1)],
+        })
+        .expect("the opponent is a legal target")
+        .waiting_for;
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(
+        &mut runner,
+        cryptex,
+        &[sorcery_card],
+        Some(engine::types::game_state::ManaChoice::SingleColor(
+            engine::types::mana::ManaType::Red,
+        )),
+    );
+    assert!(in_zone(&runner, sorcery_card, Zone::Exile));
+    activate_in_window(&mut runner, altar, &[token], None);
+    assert_eq!(pool_total(&runner), 3);
+    let waiting_for = pass(&mut runner);
+    assert!(
+        is_cost_prompt(&waiting_for, |kind| matches!(
+            kind,
+            PayCostKind::ExileFromZone { .. }
+        )),
+        "the exile follows the window: {waiting_for:?}"
+    );
+    let waiting_for = select_cards(&mut runner, &[creature_card]);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(in_zone(&runner, creature_card, Zone::Exile));
+
+    resolve_stack(&mut runner);
+    assert_eq!(life(&runner, P1), 16, "the damage resolved");
+}
+
+/// CR 616.1 (#10190 second review): a sacrifice two replacement effects
+/// compete for waits for its controller's choice, in the offer's search as in
+/// the window. Darksteel Colossus sacrificed to Ashnod's Altar under Rest in
+/// Peace asks which applies; either way the Altar makes {C}{C}, which pays
+/// Staff of Domination's "{2}, {T}: You gain 1 life." It is offered for a
+/// manual payment and completes through that answer.
+#[test]
+fn a_replacement_choice_in_the_window_funds_staff_of_domination() {
+    let mut scenario = scenario_at_main();
+    let staff = add(&mut scenario, P0, "Staff of Domination", Zone::Battlefield);
+    let altar = add(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield);
+    let colossus = add(&mut scenario, P0, "Darksteel Colossus", Zone::Battlefield);
+    add(&mut scenario, P0, "Rest in Peace", Zone::Battlefield);
+    let mut runner = build(scenario);
+    let index = ability_index_of(&runner, staff, "gain 1 life");
+
+    assert_eq!(
+        offered_payment_modes(&runner, staff, index),
+        vec![CastPaymentMode::Manual]
+    );
+
+    let waiting_for = activate_index(&mut runner, staff, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    let waiting_for = activate_mana_ability(&mut runner, altar);
+    assert!(
+        is_cost_prompt(&waiting_for, |kind| *kind == PayCostKind::Sacrifice),
+        "{waiting_for:?}"
+    );
+    let waiting_for = select_cards(&mut runner, &[colossus]);
+    assert!(
+        matches!(waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "the sacrifice waits for its CR 616.1 choice: {waiting_for:?}"
+    );
+    let waiting_for = act(&mut runner, GameAction::ChooseReplacement { index: 0 });
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    assert_eq!(pool_total(&runner), 2);
+    assert!(!in_zone(&runner, colossus, Zone::Battlefield));
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, staff));
+
+    resolve_stack(&mut runner);
+    assert_eq!(life(&runner, P0), 21, "the life gain resolved");
+}

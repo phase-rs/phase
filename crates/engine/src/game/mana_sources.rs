@@ -2344,8 +2344,9 @@ pub(crate) enum CapacityUse {
     Castability,
     /// An activation's manual window, which the exact witness
     /// (`casting::mana_ability_window_mana_witness`) then confirms: as
-    /// `Castability`, but a mana ability with no tap is credited every
-    /// activation its cost's supply allows (CR 605.3c).
+    /// an upper bound, not a plan: a mana ability with no tap is credited
+    /// every activation its cost's supply allows (CR 605.3c), and each of a
+    /// permanent's mana abilities is credited.
     ActivationWindow,
     /// The {X} ceiling sums capacities with no per-color accounting, so a
     /// source whose amount depends on the color it is activated for (Nyx Lotus
@@ -2399,7 +2400,8 @@ pub(crate) fn mana_capacity(
         return 0;
     }
 
-    obj.abilities
+    let nets = obj
+        .abilities
         .iter()
         .enumerate()
         .filter(|(idx, ability)| {
@@ -2421,9 +2423,13 @@ pub(crate) fn mana_capacity(
                 ),
                 CapacityUse::Castability | CapacityUse::XCeiling => net,
             })
-        })
-        .max()
-        .unwrap_or(0)
+        });
+    match capacity_use {
+        // An upper bound: a permanent may have each of its mana abilities
+        // activated in one window (a tap ability, then a sacrifice of itself).
+        CapacityUse::ActivationWindow => nets.fold(0, u32::saturating_add),
+        CapacityUse::Castability | CapacityUse::XCeiling => nets.max().unwrap_or(0),
+    }
 }
 
 /// CR 605.3c: How many times one mana ability could be activated in the

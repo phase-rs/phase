@@ -6984,7 +6984,21 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
     pending: &mut PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<WaitingFor>, EngineError> {
-    if let Some(residual) = pending.activation_cost.as_ref() {
+    // CR 601.2g: while a manual activation's mana window is still ahead, the
+    // residual is judged after it: its mana abilities can make what the rest
+    // needs (Ashnod's Altar puts the creature card in the graveyard that Vault
+    // Robber's "Exile a creature card from your graveyard" exiles). The offer
+    // already judged the cost on the window's boards.
+    let window_ahead = |residual: &AbilityCost| {
+        manual_activation_mana_window_ahead(pending)
+            && extract_mana_leg(residual)
+                .is_some_and(|(mana_cost, _)| !mana_cost.is_without_paying_mana())
+    };
+    if let Some(residual) = pending
+        .activation_cost
+        .as_ref()
+        .filter(|residual| !window_ahead(residual))
+    {
         if !super::cost_payability::activation_residual_jointly_payable(
             state,
             player,
@@ -7025,13 +7039,7 @@ fn route_manual_activation_mana_first(
     pending: &mut PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<WaitingFor>, EngineError> {
-    if !super::casting::activation_pays_mana_manually(pending)
-        || !pending.cost.is_without_paying_mana()
-        || matches!(
-            pending.activation_residual,
-            ActivationResidual::ManaLeg | ActivationResidual::XMana
-        )
-    {
+    if !manual_activation_mana_window_ahead(pending) {
         return Ok(None);
     }
     let (Some(ability_index), Some(cost)) = (
@@ -7072,6 +7080,20 @@ fn route_manual_activation_mana_first(
         &cost,
         events,
     )
+}
+
+/// CR 601.2g: whether `pending` is a manually paid activation whose mana leg
+/// is still in its residual, so its mana-ability window precedes every other
+/// payment. False for an automatic activation and for a root whose mana leg
+/// was already hoisted (`pending.cost` holds it, or a residual marker says it
+/// was taken).
+fn manual_activation_mana_window_ahead(pending: &PendingCast) -> bool {
+    super::casting::activation_pays_mana_manually(pending)
+        && pending.cost.is_without_paying_mana()
+        && !matches!(
+            pending.activation_residual,
+            ActivationResidual::ManaLeg | ActivationResidual::XMana
+        )
 }
 
 fn surface_next_interactive_activation_cost_leg(

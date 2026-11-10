@@ -692,6 +692,12 @@ fn is_phyrexian_requirement(req: &ShardRequirement) -> bool {
     )
 }
 
+/// CR 107.4f: whether `shard` is a Phyrexian symbol, which may be paid with
+/// 2 life instead of mana.
+pub(crate) fn shard_is_phyrexian(shard: ManaCostShard) -> bool {
+    is_phyrexian_requirement(&shard_to_mana_type(shard))
+}
+
 /// CR 107.4f + CR 601.2h: Build the mana demand for auto-tapping after the
 /// player has chosen mana or life for each Phyrexian-shaped shard. A shard
 /// paid with life must not cause an otherwise-unused mana source to tap.

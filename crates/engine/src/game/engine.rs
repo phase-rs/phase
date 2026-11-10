@@ -755,6 +755,23 @@ pub(in crate::game) fn preflight_priority_window(state: &GameState) -> PriorityP
     PriorityPreflight::Actionless
 }
 
+/// CR 616.1: the answer `index` to a pending replacement-ordering prompt —
+/// the one authority shared by `GameAction::ChooseReplacement` and the manual
+/// activation offer's mana-window witness, which follows a mana ability's
+/// paused cost move exactly as the live window would.
+pub(super) fn answer_replacement_choice(
+    state: &mut GameState,
+    index: usize,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if let Some(waiting_for) =
+        casting_costs::abandon_stale_resolution_sacrifice_cursor(state, events)
+    {
+        return Ok(waiting_for);
+    }
+    engine_replacement::handle_replacement_choice(state, index, events)
+}
+
 /// The narrow admission gate for engine-owned prospective progress. It keeps
 /// the detailed preflight result private to `game` while ensuring a caller can
 /// advance only an already-proven actionless Priority window.
@@ -16069,13 +16086,7 @@ fn apply_non_priority_pass_action(
             }
         }
         (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacement { index }) => {
-            if let Some(waiting_for) =
-                casting_costs::abandon_stale_resolution_sacrifice_cursor(state, &mut events)
-            {
-                waiting_for
-            } else {
-                engine_replacement::handle_replacement_choice(state, index, &mut events)?
-            }
+            answer_replacement_choice(state, index, &mut events)?
         }
         (
             WaitingFor::EntryControllerChoice { .. },
