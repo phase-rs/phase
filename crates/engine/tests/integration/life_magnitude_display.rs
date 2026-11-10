@@ -319,14 +319,14 @@ fn both_wardens_gains_land_exactly_in_one_take() {
 }
 
 /// CR 732.2a + CR 732.2b + CR 732.2c: P0's altar offer with Soul Warden is minted from P0's
-/// recorded period with a counted take that performs, so every count is admitted, and the take
-/// carries out exactly the count it admits. From `i32::MAX - 6` (`i32::MAX - 5` at the offer),
-/// `Fixed(5)` reaches the cap exactly and lands in one lump at the take; `Fixed(6)` would pass it,
-/// so the take performs the six cycles, its record keeping the first and last (CR 732.1b), and the
-/// gain the cap holds back still counts (CR 119.3). From 20, P1 shortening `Fixed(3)` to 2
-/// performs two cycles, and P1, who named that place, holds priority there; `Fixed(0)` does
-/// nothing. No row marks, stashes or reads ∞, and the step boundary asks no collapse count and
-/// moves no life.
+/// recorded period with a counted take that performs, so the take carries out exactly the count
+/// the offer admits (a count above the offer's capacity is refused at the declaration). From
+/// `i32::MAX - 6` (`i32::MAX - 5` at the offer), `Fixed(5)` reaches the cap exactly and lands in
+/// one lump at the take; `Fixed(6)` would pass it, so the take performs the six cycles, its
+/// record keeping the first and last (CR 732.1b), and the gain the cap holds back still counts
+/// (CR 119.3). From 20, P1 shortening `Fixed(3)` to 2 performs two cycles, and P1, who named that
+/// place, holds priority there; `Fixed(0)` does nothing. No row marks, stashes or reads ∞, and
+/// the step boundary asks no collapse count and moves no life.
 #[test]
 fn a_performable_life_shortcut_offer_is_carried_out_exactly_at_every_count_it_admits() {
     struct Row {

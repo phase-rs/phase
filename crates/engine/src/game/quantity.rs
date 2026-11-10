@@ -10525,8 +10525,9 @@ mod tests {
     }
 
     /// CR 103.4 + CR 810.9a + CR 810.4: `LifeAboveStarting` is the life total
-    /// (the team total in Two-Headed Giant) minus the starting life total,
-    /// exact and saturated once instead of overflowing at `i32::MIN`.
+    /// (in Two-Headed Giant the saturating team view, `team_life_total`)
+    /// minus the starting life total, computed in `i64` and saturated into
+    /// `i32` instead of overflowing at `i32::MIN`.
     #[test]
     fn life_above_starting_saturates_at_i32_limits() {
         let expr = QuantityExpr::Ref {

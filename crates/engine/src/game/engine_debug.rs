@@ -4207,9 +4207,9 @@ mod tests {
         }
 
         /// Rhox Faithmender ("If you would gain life, you gain twice that much
-        /// life instead.") doubles a requested 1 to 2. One below the limit it
-        /// applies in full; at `i32::MAX - 1` the total lands on `i32::MAX` and
-        /// the gain reports the doubled rules amount.
+        /// life instead.") doubles a requested 1 to 2. From `i32::MAX - 2` it
+        /// applies in full and reaches `i32::MAX` exactly; from `i32::MAX - 1` the
+        /// total lands on `i32::MAX` and the gain reports the doubled rules amount.
         #[test]
         fn debug_gain_after_a_parsed_doubler_saturates_the_life_total() {
             // Accepted control: 1 doubled to 2 reaches i32::MAX exactly.
@@ -4386,9 +4386,8 @@ mod tests {
         /// `event` (the shape Boon Reflection / Bloodletter of Aclazotz parse to,
         /// with a chosen factor). Distinct objects with an execute body are
         /// order-material, so every application but the last is a CR 616.1
-        /// ordering prompt. The factors are chosen so that the overflow needs
-        /// three candidates, not a dozen doubling cards. Returns the permanents'
-        /// ids in `factors` order.
+        /// ordering prompt. The factors let a few candidates reach what a dozen
+        /// doubling cards would. Returns the permanents' ids in `factors` order.
         fn add_life_multipliers(
             runner: &mut GameRunner,
             event: ReplacementEvent,
@@ -4802,10 +4801,11 @@ mod tests {
         /// CR 119.5: debug `SetLife` gains or loses the exact difference, so it
         /// lands on the target across the whole `i32` range (from `i32::MIN` to
         /// `i32::MAX` is a gain of `u32::MAX`). In-range control: 20 to 25.
-        /// In Two-Headed Giant the difference moves the team's shared total
-        /// (CR 810.9): a target the edit authority moves that total to in full
-        /// lands exactly — also from a total already outside `i32` — and one it
-        /// holds at an `i32` limit is refused with nothing changed.
+        /// In Two-Headed Giant the difference from P0's own field moves the
+        /// team's shared total (CR 810.9): where the edit authority moves that
+        /// total by the whole difference, P0's field lands exactly on the
+        /// target — also from a total already outside `i32` — and a difference
+        /// it holds at an `i32` limit is refused with nothing changed.
         #[test]
         fn debug_set_life_lands_exactly_from_i32_min_to_i32_max() {
             for (start, target, gained) in [(i32::MIN, i32::MAX, u32::MAX), (20, 25, 5)] {

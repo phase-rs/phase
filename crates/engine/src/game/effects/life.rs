@@ -1226,8 +1226,10 @@ pub fn resolve_set_life_total(
         // team-based formats. CR 810.9c: the player gains or loses the
         // difference, and the team's total moves by exactly the amount gained
         // or lost (the edit authority adjusts the shared total, CR 810.9);
-        // unless a replacement changes that gain or loss (CR 614.1a), the team
-        // lands on the new total.
+        // unless a replacement changes that gain or loss (CR 614.1a) or the
+        // player can't gain or can't lose life (CR 119.7 / CR 119.8;
+        // `apply_life_gain` / `apply_life_loss` stop before the pipeline), the
+        // team lands on the new total.
         if !state.players.iter().any(|p| p.id == target_player_id) {
             return Err(EffectError::PlayerNotFound);
         }
@@ -2973,7 +2975,8 @@ mod tests {
                         .as_ref()
                         .map(|pending| pending.unrepresentable_player_resource_change),
                     Some(UnrepresentablePolicy::Reject),
-                    "a gain parked inside the activation's action window rejects on resume"
+                    "a gain parked inside the activation's action window is stamped Reject \
+                     for its resume"
                 );
                 let mut events = Vec::new();
                 let mut rejected = None;

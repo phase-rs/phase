@@ -264,9 +264,10 @@ pub fn preview_player_counter_addition(
 
 /// CR 122.1: Settle a post-replacement player-counter gain: the one place the
 /// final edit is made and its representability decided, for the add path and
-/// the CR 616.1 resume alike. Same order as `life::settle_life_gain`: a
+/// the CR 616.1 resume alike. It opens as `life::settle_life_gain` does (a
 /// recorded replacement-quantity overflow, then an already-failed ingress
-/// window, then the amount must fit an `i32` delta, then the checked edit.
+/// window); then, where a life gain saturates, the amount must fit an `i32`
+/// delta and the edit is checked.
 /// An unrepresentable result is an engine numeric limit, not a CR 101.3 /
 /// CR 609.3 impossibility, and is handled per `policy`
 /// (`life::settle_unrepresentable`).

@@ -472,9 +472,10 @@ mod tests {
     }
 
     /// A payment that is affordable but whose replaced deduction the engine
-    /// cannot record reports the existing unpayable variant and leaves the
-    /// state untouched. The synthetic substitute turns the loss into an energy
-    /// gain of the same amount (CR 614.6), and an energy total past `u32::MAX`
+    /// cannot record reports the existing unpayable variant and changes
+    /// no life total, per-turn life counter or energy total. The
+    /// synthetic substitute turns the loss into an energy gain of the
+    /// same amount (CR 614.6), and an energy total past `u32::MAX`
     /// is unrepresentable. Reach-guard control: with room for the energy, the
     /// substitute replaces the loss and the cost is still paid (CR 118.11).
     /// "Energy Substitute" is synthetic: no printed card replaces a life loss

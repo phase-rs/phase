@@ -3349,13 +3349,14 @@ fn low3_activate_and_settle(runner: &mut GameRunner, source: ObjectId, ability_i
 /// life." / "{0}: Untap Lifedynamo."), which [`low3_life_engine_offered`] builds. No printed card
 /// is, on its own, a free engine that gains life each cycle, and the LOW-3 rows need a loop that
 /// makes mana and gains life by activations alone, so the Mark route's ∞ mana mark shows the
-/// route and the board holds only what each arm grafts. The nearest printed board is Phyrexian
-/// Altar ("Sacrifice a creature: Add one mana of any color."), Gravecrawler ("This creature can't
-/// block." / "You may cast this card from your graveyard as long as you control a Zombie.") and
-/// Walking Corpse (a Zombie with no rules text) beside Soul Warden ("Whenever another creature
-/// enters, you gain 1 life."), which gains 1 per cycle; its loop nets no mana (the Altar's mana
-/// pays for Gravecrawler) and gains its life through a cast and Soul Warden's battlefield-entry
-/// trigger, the kind of trigger the `Present` arm grafts.
+/// route and the board holds only what each arm grafts. The nearest printed board is Basalt
+/// Monolith ("This artifact doesn't untap during your untap step." / "{T}: Add {C}{C}{C}." / "{3}:
+/// Untap this artifact.") enchanted with Power Artifact ("Enchanted artifact's activated abilities
+/// cost {2} less to activate. This effect can't reduce the mana in that cost to less than one
+/// mana.") beside Staff of Domination ("{1}: Untap this artifact." / "{2}, {T}: You gain 1 life."):
+/// two Monolith cycles and one Staff cycle make {C} and gain 1 life by activations alone, over six
+/// activations of two permanents, one of them enchanted, where the Lifedynamo's period is three
+/// activations of one.
 ///
 /// REVERT-FAILING assertions: register the `Life` item instead of applying it (the pre-change
 /// Mark arm) and the stash is non-empty and P0's life does not move at the accept; force the
@@ -3409,16 +3410,16 @@ fn low3_unobserved_life_growth_accept_applies_its_batched_life_at_the_take() {
 /// **CLASS END (b): an axis whose applied items NEVER write a beat, at FULL delivery.** A take no
 /// longer stashes a `Life` item (its life lands at the take), so the boundary's `Life` arm is
 /// reached only by a stash restored from a save written before that. This pins that arm on the
-/// production `Lifedynamo` board: the offer is declined, and a `Life { P0, 1 }` item with its bound
-/// of 1 is grafted through the single-authority writer, as such a save carries it. A batched life
-/// gain writes no `waiting_for`, so at the bound the arm's exit is the only thing that can produce
-/// an ending point (CR 732.2a). Both arms run: at the bound the life moves by exactly the bound
-/// AND a seat can act; at `0` no life moves and a seat can still act.
+/// production `Lifedynamo` board: the offer is declined, and a `Life { P0, 1 }` item is grafted
+/// through the single-authority writer and its bound of 1 written beside it, as such a save carries
+/// them. A batched life gain writes no `waiting_for`, so at the bound the arm's exit is the only
+/// thing that can produce an ending point (CR 732.2a). Both arms run: at the bound the life moves
+/// by exactly the bound AND a seat can act; at `0` no life moves and a seat can still act.
 ///
 /// The Lifedynamo is synthetic: the doc of
 /// [`low3_unobserved_life_growth_accept_applies_its_batched_life_at_the_take`] says why no
-/// printed card fits and quotes the nearest printed board, Phyrexian Altar, Gravecrawler and
-/// Walking Corpse beside Soul Warden.
+/// printed card fits and quotes the nearest printed board, Basalt Monolith with Power Artifact
+/// beside Staff of Domination.
 ///
 /// Neither arm is green alone, and each refuses a different wrong repair. A repair keyed on
 /// `amount == 0` never fires at the bound, so the full-delivery arm reds. A repair conditioned on

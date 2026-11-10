@@ -102,12 +102,12 @@ fn add_energy_core(
 
 /// CR 122.1 + CR 107.14: Settle a post-replacement energy gain: the one place
 /// the final edit is made and its representability decided, for the add path
-/// and the CR 616.1 resume alike. Same order as `life::settle_life_gain`: a
+/// and the CR 616.1 resume alike. It opens as `life::settle_life_gain` does (a
 /// recorded replacement-quantity overflow, then an already-failed ingress
-/// window, then the amount must fit an `i32` delta, then the checked edit. An
-/// unrepresentable result is an engine numeric limit, not a CR 101.3 /
-/// CR 609.3 impossibility, and is handled per `policy`
-/// (`life::settle_unrepresentable`).
+/// window); then, where a life gain saturates, the amount must fit an `i32`
+/// delta and the edit is checked. An unrepresentable result is an engine
+/// numeric limit, not a CR 101.3 / CR 609.3 impossibility, and is handled per
+/// `policy` (`life::settle_unrepresentable`).
 pub(crate) fn apply_energy_addition(
     state: &mut GameState,
     player_id: PlayerId,

@@ -17552,8 +17552,8 @@ mod tests {
             replace_life_amount(vec![times()], life_gain_event(2_147_483_648)),
             (u32::MAX, None)
         );
-        // A u32 above i32::MAX is representable in the applier; the settle
-        // step, not the applier, decides.
+        // A u32 above i32::MAX is exact in the applier; the settle step applies
+        // it and the life total saturates.
         assert_eq!(
             replace_life_amount(vec![times()], life_gain_event(2_000_000_000)),
             (4_000_000_000, None)

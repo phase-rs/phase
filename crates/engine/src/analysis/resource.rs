@@ -2685,8 +2685,8 @@ impl ResourceVector {
     /// CR 810.9 + CR 810.9a: this field delta of `prior` to `current` with each seat's `life`
     /// entry read off the player the change happened to, its per-turn counters
     /// ([`life_counter_change`]), rather than off the field the spread
-    /// (`game::players::spread_life_change`) stored it in, bounded by the change the seat's
-    /// shared life total makes.
+    /// (`game::players::spread_life_change`) stored it in; an entry it rewrites is bounded by
+    /// the change the seat's shared life total makes.
     ///
     /// For each life total ([`life_total_changes`]), let `t` be its change: the sum of `self`'s
     /// entries over its members. Where every member's counter change is readable and the
@@ -2703,8 +2703,9 @@ impl ResourceVector {
     /// counter unreadable and a member's field moved fails closed: its counters cannot say who
     /// gained or lost (CR 810.9), so every member's entry is removed, the field holder's
     /// included, and the total advertises no life axis. Every other entry and axis is `self`'s,
-    /// so a period with no spill and no total held at an `i32` limit reads as `self`, and so does
-    /// a player's own life total: its one member's clamped counter change is `t` itself.
+    /// so a period with no spill, no total held at an `i32` limit and no total that fails closed
+    /// reads as `self`, and so does a player's own life total: its one member's clamped counter
+    /// change is `t` itself.
     ///
     /// Why the bound: CR 810.9 applies the result of each member's gains and losses to the
     /// team's shared total, and CR 810.9a reads an individual player's life total as the team's,
@@ -2712,21 +2713,23 @@ impl ResourceVector {
     /// member's life total makes across the period. Attribution (CR 810.9: they happen "to each
     /// player individually") decides which member carries that change, never its sign or its
     /// size, so a bounded entry has its total's sign or is 0. In a two-member team (CR 810.1)
-    /// whose counters sum to `t`, the members' entries still sum to `t`; where a limit held the
-    /// total back, each member carries at most `t`. In a total of three or more members (the
-    /// Archenemy Commander heroes', CR 904.13b, or a Horde game's three or more survivors',
-    /// `game::topology::has_shared_life`) neither need hold: a member whose counter change equals
-    /// its stored change keeps that change, so where another member lost life one member's gain
-    /// can exceed `t` and the entries can sum to more than `t`.
+    /// whose counters sum to `t`, the members' entries still sum to `t`. Where a limit held the
+    /// total back, or in a total of three or more members (the Archenemy Commander heroes',
+    /// CR 904.13b, or a Horde game's three or more survivors', `game::topology::has_shared_life`),
+    /// that need not hold: a member whose counter change equals its stored change keeps that
+    /// change, so where another member lost life one member's gain can exceed `t` and the
+    /// entries can sum to more than `t` (in a two-member team, one member gains 30 up to the
+    /// cap and the other's gain of 20 is held there before it loses 10: the first keeps 30
+    /// against a `t` of 20).
     ///
     /// Where no entry of `self` is negative, no entry of the result is, and a total that grows
     /// keeps a positive entry, except a total that fails closed, which keeps none: where its
     /// counters are read they sum to at least `t`, so a member that gained carries one. So the
     /// win-kind reader answers for the result as it answers for `self`, and the unbounded-axis
     /// reader names a life axis for each total that grows and can be attributed, and no drain
-    /// axis. Where a total's counters are read, a member gets a positive entry only if it gained
-    /// and its total grows. How a total's change is split across its members beyond that does
-    /// not reach the result's readers, which read only signs.
+    /// axis. Where no entry of `self` is negative and a total's counters are read, a member gets a
+    /// positive entry only if it gained and its total grows. How a total's change is split across
+    /// its members beyond that does not reach the result's readers, which read only signs.
     pub(crate) fn with_life_attributed(
         &self,
         prior: &GameState,
@@ -6867,11 +6870,15 @@ fn life_total_changes(prior: &GameState, current: &GameState) -> Vec<LifeTotalCh
 }
 
 /// CR 119.3 + CR 810.9 + CR 810.9a: the players whose life change in one driven cycle is not a
-/// gain stored whole on their own field. It is the take route's reading of the cycle:
-/// `game::engine`'s `PeriodGrowth::collapse_is_replay` performs a take whose driven cycle names
-/// anybody here. The offer reads [`ResourceVector::with_life_attributed`] instead, and whether a
-/// gain passes an `i32` limit is `game::engine`'s `PeriodGrowth::life_passes_a_limit`'s question;
-/// this reads no limit, so a seat at a limit that the cycle leaves alone is never named.
+/// gain stored whole on their own field, as far as the cycle's events and its players' counters
+/// can say (a one-member total whose counter ends at `u32::MAX` names nobody here;
+/// `PeriodGrowth::life_passes_a_limit` reads its gain held at a limit). It is the take route's
+/// reading of the cycle: `game::engine`'s `PeriodGrowth::collapse_is_replay` performs a take whose
+/// driven cycle names anybody here. The offer reads [`ResourceVector::with_life_attributed`]
+/// instead, and whether a gain passes an `i32` limit is `game::engine`'s
+/// `PeriodGrowth::life_passes_a_limit`'s question; this reads no limit, so a seat at a limit
+/// that the cycle leaves alone is named only as a member of a total that fails closed (the last
+/// bullet below).
 ///
 /// - Each player the cycle's events report losing life ([`CycleLifeChanges`]). The batched lump
 ///   carries gains only ([`grown_life_deltas`]), so it adds nothing to a lost counter and only the
@@ -17294,16 +17301,17 @@ mod tests {
     }
 
     /// CR 810.9 + CR 810.9a: the offer's attributed life delta names the member a change
-    /// happened to, bounded by the change its shared life total makes, so it never advertises a
-    /// change the total does not make or a gain for a member who gains nothing, also where the
-    /// cap held the total back. A period whose spilled gain the teammate's own loss cancels
+    /// happened to; on these rows an entry it rewrites is bounded by the change its shared
+    /// life total makes, so it advertises no change the total does not make and no gain for
+    /// a member who gains nothing, also where the cap held the total back. A period whose
+    /// spilled gain the teammate's own loss cancels
     /// keeps the field delta's empty life axis, so the offer classifies it as an advantage loop
     /// with no life axis. A total whose counters do not count its stored change (a loss held at
     /// `i32::MIN` before a gain), a total the cap holds, and a duel whose counter is pinned keep
     /// the field delta. A shared total with an unreadable counter (one that fell, or one pinned
     /// at `u32::MAX`) whose fields moved fails closed: no member's life entry is advertised.
     #[test]
-    fn with_life_attributed_never_advertises_a_change_its_shared_total_does_not_make() {
+    fn with_life_attributed_names_the_member_a_shared_total_change_happened_to() {
         use crate::analysis::loop_check::{classify_win_kind, WinKind};
         let p0 = PlayerId(0);
         let p1 = PlayerId(1);

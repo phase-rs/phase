@@ -7034,7 +7034,7 @@ struct PeriodGrowth {
     fodder: Option<PeriodFodder>,
     batched: Vec<crate::types::game_state::PersistentAxisMaterialization>,
     /// CR 119.3 + CR 810.9 + CR 810.9a: the players whose life change in the driven cycle is not
-    /// a gain stored whole on their own field
+    /// a gain stored whole on their own field, as far as the cycle's events and counters can say
     /// (`analysis::resource::life_not_stored_as_gains`). Empty on every growth the Mark route
     /// keeps.
     life_not_stored_as_gains: BTreeSet<PlayerId>,
@@ -7127,13 +7127,14 @@ impl PeriodGrowth {
                 && crate::types::game_state::LoopCollapseAxis::from_resource_axis(*axis).is_none()
         });
         // CR 732.2c + CR 119.3 + CR 810.9 + CR 810.9a: some life change in the driven cycle is
-        // not a gain stored whole on its player's own field: a loss of any size, a gain the
-        // spread stored on a teammate, a gain an `i32` limit held back, or a shared total's change
-        // its unreadable counters cannot attribute. The lump carries per-player gains read off
-        // the fields, so it would add nothing to a lost counter and only the net to a gained
-        // counter, or credit or drop the change, where performing the cycles stores each change
-        // and counts it as it happens. A cycle that nets nothing, or only spills, may batch no
-        // item at all, so this is read whatever the take batches.
+        // not a gain stored whole on its player's own field: a loss of any size, a gain the spread
+        // stored on a teammate, a gain an `i32` limit held back where its player's counters are
+        // readable (`life_passes_a_limit` below reads one whose counter is pinned), or a shared
+        // total's change its unreadable counters cannot attribute. The lump carries per-player
+        // gains read off the fields, so it would add nothing to a lost counter and only the net to
+        // a gained counter, or credit or drop the change, where performing the cycles stores each
+        // change and counts it as it happens. A cycle that nets nothing, or only spills, may batch
+        // no item at all, so this is read whatever the take batches.
         let life_not_stored_as_gains = !self.life_not_stored_as_gains.is_empty();
         // CR 732.2c + CR 119.3: one of this take's `n` cycles would carry a total its gains
         // touch, or a gaining player's own field, past an `i32` limit. Where two or more members'
