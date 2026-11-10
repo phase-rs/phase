@@ -38,15 +38,17 @@ use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr,
 };
 use crate::types::ability::{
-    damage_replacement_target_roles, effect_references_target_player,
-    extract_target_filter_from_effect, mana_multi_role, paired_subject_filters,
-    payer_is_declared_target, AbilityCondition, AbilityDefinition, AbilityKind, AbilityUseTally,
-    AdditionalCostOrigin, AttachCardinality, AttachSelection, CastManaObjectScope,
-    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CostCategory,
-    CountScope, DamageChannel, DigSource, Duration, Effect, EffectOutcomeSignal, FilterProp,
-    GuessOutcome, LibraryPosition, ObjectScope, ParsedCondition, PlayerScope, PtStat, PtValueScope,
-    QuantityExpr, QuantityRef, SharedQuality, SpentColor, StaticCondition, TargetChoiceTiming,
-    TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
+    become_copy_recipient_slot_filter, damage_replacement_target_roles,
+    effect_needs_parent_target_combat_relation_slot, effect_needs_target_creature_quantity_slot,
+    effect_references_target_player, extract_target_filter_from_effect, mana_multi_role,
+    paired_subject_filters, payer_is_declared_target, AbilityCondition, AbilityDefinition,
+    AbilityKind, AbilityUseTally, AdditionalCostOrigin, AttachCardinality, AttachSelection,
+    CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator,
+    ControllerRef, CostCategory, CountScope, DamageChannel, DigSource, Duration, Effect,
+    EffectOutcomeSignal, FilterProp, GuessOutcome, LibraryPosition, ObjectScope, ParsedCondition,
+    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SpentColor,
+    StaticCondition, TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -5001,6 +5003,9 @@ fn effect_has_specialized_source_roles(effect: &Effect) -> bool {
     damage_replacement_target_roles(effect).is_some()
         || paired_subject_filters(effect).is_some()
         || mana_multi_role(effect).is_some()
+        || effect_needs_target_creature_quantity_slot(effect)
+        || effect_needs_parent_target_combat_relation_slot(effect)
+        || become_copy_recipient_slot_filter(effect).is_some()
         || matches!(
             effect,
             Effect::Fight { .. }
@@ -11311,6 +11316,22 @@ mod tests {
             parse_target_controller_control_condition_text(condition, effect, &ctx),
             None,
             "{effect} if {condition}"
+        );
+
+        // A player-typed quantity slot is announced before the object and is
+        // not visible to the target-filter walk.
+        let effect =
+            "Deals damage to target creature equal to the number of cards in target opponent's hand";
+        assert!(
+            probe_declared_target_slot(effect, &ctx).is_none(),
+            "the target-opponent quantity slot is announced first"
+        );
+
+        // A BecomeCopy recipient/source pair is announced before the primary.
+        let effect = "Target artifact you control becomes a copy of target artifact you control";
+        assert!(
+            probe_declared_target_slot(effect, &ctx).is_none(),
+            "the copy recipient and source are separate roles"
         );
 
         // Printed Noble Vestige: "Prevent the next 1 damage that would be dealt
