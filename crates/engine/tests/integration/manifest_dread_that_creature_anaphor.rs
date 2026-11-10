@@ -685,6 +685,109 @@ fn deathrender_equips_the_chosen_creature_card() {
     assert_eq!(runner.state().objects[&first].zone, Zone::Hand);
 }
 
+const GHOSTLY_FLICKER: &str = "Exile two target artifacts, creatures, and/or lands you control, then return those cards to the battlefield under your control.";
+
+/// CR 400.7: Ghostly Flicker returns Deathrender as a new object while its dies trigger
+/// waits, so the trigger still puts the creature card but attaches nothing to it.
+#[test]
+fn deathrender_flickered_before_its_trigger_resolves_equips_nothing() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario.add_creature(P0, "Bear", 1, 1).id();
+    let bystander = scenario.add_creature(P0, "Bystander", 2, 2).id();
+    let deathrender = scenario
+        .add_artifact_from_oracle(P0, "Deathrender", DEATHRENDER)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let ogre = scenario.add_creature_to_hand(P0, "Hand Ogre", 3, 3).id();
+    let bolt = scenario.add_bolt_to_hand(P0);
+    let flicker = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ghostly Flicker", true, GHOSTLY_FLICKER)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    engine::game::effects::attach::attach_to(runner.state_mut(), deathrender, bear);
+    runner.cast(bolt).target_object(bear).commit();
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    runner.act(GameAction::PassPriority).expect("P1 passes");
+    assert_eq!(
+        runner.state().objects[&bear].zone,
+        Zone::Graveyard,
+        "reach guard: the equipped Bear died"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach guard: the dies trigger waits"
+    );
+    let departed = runner.state().objects[&deathrender].incarnation;
+
+    runner
+        .cast(flicker)
+        .target_objects(&[deathrender, bystander])
+        .commit();
+    let (_, offered) = settle(&mut runner, true, &[ogre]);
+
+    assert_ne!(
+        runner.state().objects[&deathrender].incarnation,
+        departed,
+        "reach guard: Deathrender returned as a new object"
+    );
+    assert_eq!(offered, 1, "reach guard: the optional put was offered");
+    assert_eq!(runner.state().objects[&ogre].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&deathrender].zone, Zone::Battlefield);
+    assert_eq!(host_of(&runner, deathrender), None);
+}
+
+const IRON_MAN: &str = "Flying, haste\nAt the beginning of combat on your turn, you may put an artifact card from your hand onto the battlefield. If it's an Equipment, attach it to The Invincible Iron Man.";
+
+/// CR 400.7: Ghostly Flicker returns The Invincible Iron Man as a new object while its
+/// beginning-of-combat trigger waits, so the Equipment it puts attaches to nothing.
+#[test]
+fn iron_man_flickered_before_its_trigger_resolves_equips_nothing() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let iron_man = scenario
+        .add_creature_from_oracle(P0, "The Invincible Iron Man", 3, 3, IRON_MAN)
+        .id();
+    let bystander = scenario.add_creature(P0, "Bystander", 2, 2).id();
+    let sword = scenario
+        .add_creature_to_hand(P0, "Test Sword", 0, 0)
+        .as_artifact()
+        .with_subtypes(vec!["Equipment"])
+        .from_oracle_text("Equipped creature gets +2/+0.\nEquip {1}")
+        .id();
+    let flicker = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ghostly Flicker", true, GHOSTLY_FLICKER)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    while runner.state().stack.is_empty() {
+        runner.act(GameAction::PassPriority).expect("pass");
+    }
+    assert_eq!(
+        runner.state().phase,
+        Phase::BeginCombat,
+        "reach guard: the beginning-of-combat trigger waits"
+    );
+    let departed = runner.state().objects[&iron_man].incarnation;
+
+    runner
+        .cast(flicker)
+        .target_objects(&[iron_man, bystander])
+        .commit();
+    let (_, offered) = settle(&mut runner, true, &[sword]);
+
+    assert_ne!(
+        runner.state().objects[&iron_man].incarnation,
+        departed,
+        "reach guard: Iron Man returned as a new object"
+    );
+    assert_eq!(offered, 1, "reach guard: the optional put was offered");
+    assert_eq!(runner.state().objects[&sword].zone, Zone::Battlefield);
+    assert_eq!(host_of(&runner, sword), None);
+}
+
 /// CR 400.7j + CR 701.3a: Pre-War Formalwear equips the creature card it returned, not
 /// itself.
 #[test]

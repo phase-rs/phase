@@ -1071,12 +1071,11 @@ fn rebind_child_to_forwarded_objects(
         child.source_id = moved[0];
     }
     if let Effect::Attach {
-        attachment: attachment @ TargetFilter::OriginalSource,
+        attachment: TargetFilter::OriginalSource,
         ..
-    } = &mut child.effect
+    } = &child.effect
     {
-        // CR 400.7j + CR 701.3a: the source is the attachment, so the moved card is the host; the empty target list lets the forwarded result bind it.
-        *attachment = TargetFilter::SpecificObject { id: producer };
+        // CR 400.7 + CR 701.3a: the moved card is the host, and `OriginalSource` stays a live check of the trigger source's incarnation, so a source that left and returned attaches nothing.
     } else if let Effect::Attach { target, .. } = &child.effect {
         let attach_target_is_last_created = matches!(target, TargetFilter::LastCreated);
         // CR 608.2c: ParentTarget hosts inherit an explicit parent
@@ -1091,7 +1090,14 @@ fn rebind_child_to_forwarded_objects(
                 if !producer_targets.is_empty() {
                     // The producer's occurrences, each with its own pin.
                     child.replace_target_occurrences(producer_targets.to_vec());
-                } else {
+                } else if child.trigger_source.as_ref().is_none_or(|source| {
+                    source.identity.reference.object_id != producer
+                        || matches!(
+                            source.source_read(state),
+                            crate::types::game_state::TriggerSourceRead::ExactLive(_)
+                        )
+                }) {
+                    // CR 400.7: a trigger source that left and returned is a new object, so it is not the host.
                     child.push_target(TargetRef::Object(producer));
                 }
             }
