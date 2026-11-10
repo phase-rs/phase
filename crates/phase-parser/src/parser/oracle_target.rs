@@ -1556,7 +1556,8 @@ pub fn parse_target_with_syntax<'a>(
         // is recognized as a typed-phrase prefix inside `parse_type_phrase_folding_with_ctx`
         // — it pushes `IsCommander` and composes uniformly with the existing
         // suffix machinery (ownership, control, counters, "with X", etc.).
-        let (filter, rest_after_type_phrase) = parse_type_phrase_folding_with_ctx(&text[target_offset..], ctx);
+        let (filter, rest_after_type_phrase) =
+            parse_type_phrase_folding_with_ctx(&text[target_offset..], ctx);
         let type_phrase_end = lower.len() - rest_after_type_phrase.len();
         let (filter, rest) = parse_target_not_named_suffix(filter, rest_after_type_phrase);
         // CR 115.1: an object-headed coordinated list whose later leg is a
@@ -25428,11 +25429,16 @@ mod tests {
             panic!("Expected Typed filter, got: {:?}", filter);
         };
         assert!(typed.type_filters.contains(&TypeFilter::Permanent));
-        assert!(typed.type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+        assert!(typed
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
         let has_not_named = typed.properties.iter().any(|p| {
             matches!(p, FilterProp::Not { prop } if matches!(&**prop, FilterProp::Named { name } if name == "spell queller"))
         });
-        assert!(has_not_named, "Should have Not(Named(spell queller)) property");
+        assert!(
+            has_not_named,
+            "Should have Not(Named(spell queller)) property"
+        );
     }
 
     /// Regression test: declared damage source with "not named" suffix containing
@@ -25443,8 +25449,8 @@ mod tests {
         // "target creature not named Spell Queller" as a damage source
         // Should not be scoped to StackSpell because "Spell Queller" is a name.
         let text = "target creature not named Spell Queller";
-        let (_rest, filter) = parse_declared_damage_source_target(text)
-            .expect("should parse as damage source");
+        let (_rest, filter) =
+            parse_declared_damage_source_target(text).expect("should parse as damage source");
 
         fn has_stack_spell(filter: &TargetFilter) -> bool {
             match filter {
@@ -25466,7 +25472,10 @@ mod tests {
             panic!("Expected And filter, got: {:?}", filter);
         };
         assert_eq!(filters.len(), 2);
-        assert!(matches!(filters[0], TargetFilter::ParentTargetSlot { index: 0 }));
+        assert!(matches!(
+            filters[0],
+            TargetFilter::ParentTargetSlot { index: 0 }
+        ));
         let TargetFilter::Typed(typed) = &filters[1] else {
             panic!("Expected Typed filter, got: {:?}", filters[1]);
         };
@@ -25474,7 +25483,10 @@ mod tests {
         let has_not_named = typed.properties.iter().any(|p| {
             matches!(p, FilterProp::Not { prop } if matches!(&**prop, FilterProp::Named { name } if name == "spell queller"))
         });
-        assert!(has_not_named, "Should have Not(Named(spell queller)) property");
+        assert!(
+            has_not_named,
+            "Should have Not(Named(spell queller)) property"
+        );
     }
 }
 
