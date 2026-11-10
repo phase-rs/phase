@@ -1,4 +1,4 @@
-use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::game::game_object::{GameObject, ObjectIncarnationRefExt};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -9,7 +9,7 @@ use crate::types::resolved_commands::{
 use crate::types::zones::Zone;
 
 use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
-use super::printed_cards::{apply_back_face_to_object, snapshot_object_face};
+use super::printed_cards::{apply_back_face_to_object, snapshot_object_base_face};
 
 /// An engine-authored transform announcement for Priority preflight. The
 /// permanent identity remains private to the transform authority until facade
@@ -196,13 +196,24 @@ fn face_swap_subject(
         .ok_or_else(|| EngineError::InvalidAction("Card has no back face".to_string()))
 }
 
+/// CR 701.27a + CR 707.2 + CR 613.1: turn `obj` to `other_face`, storing the
+/// face it turns away as that face's copiable values — its base fields, never
+/// its layer-modified live values. Shared by the transform and its CR 733
+/// journal replay so both store the same face. Not `swap_object_faces`: the
+/// transform stash writes `layout_kind: None` and the symmetric swap keeps the
+/// stored slot's layout.
+fn turn_to_other_face(obj: &mut GameObject, other_face: BackFaceData) {
+    obj.sync_missing_base_characteristics();
+    let displayed = snapshot_object_base_face(obj);
+    apply_back_face_to_object(obj, other_face);
+    obj.back_face = Some(displayed);
+}
+
 /// Swaps the displayed face and journals the swap with the object's settled
 /// timestamp and transformation count.
 fn swap_displayed_face(state: &mut GameState, object_id: ObjectId, other_face: BackFaceData) {
     let obj = state.objects.get_mut(&object_id).unwrap();
-    let displayed = snapshot_object_face(obj);
-    apply_back_face_to_object(obj, other_face);
-    obj.back_face = Some(displayed);
+    turn_to_other_face(obj, other_face);
     obj.transformed = !obj.transformed;
 
     let reference = ObjectIncarnationRef::from_object(obj);
@@ -265,9 +276,7 @@ pub fn apply_resolved_transform(
         .objects
         .get_mut(&command.object.object_id)
         .expect("validated transform command object remains live");
-    let displayed = snapshot_object_face(obj);
-    apply_back_face_to_object(obj, back_face);
-    obj.back_face = Some(displayed);
+    turn_to_other_face(obj, back_face);
     obj.transformed = command.resulting_transformed;
     obj.timestamp = command.resulting_timestamp;
     obj.transformation_count = command.resulting_transformation_count;
@@ -294,8 +303,8 @@ pub fn apply_resolved_transform(
 /// `layout_kind`). CR 710 flip cards in particular put their alternative half in
 /// the same `back_face` slot, so `back_face.is_some()` would report all 21 of
 /// them as double-faced. A DFC currently showing its back face is caught by the
-/// `transformed` flag, because `snapshot_object_face` zeroes `layout_kind` when
-/// the front face is stashed in `back_face` during a transform.
+/// `transformed` flag, because the transform stash hard-codes `layout_kind: None`
+/// when the front face is stored in `back_face` during a transform.
 pub fn is_double_faced_permanent(obj: &crate::game::game_object::GameObject) -> bool {
     use crate::types::card::LayoutKind;
     // CR 730.2j: a face-up melded permanent contains a double-faced component.
@@ -455,6 +464,61 @@ mod tests {
             [OracleDiagnostic::IgnoredRemainder { text, .. }] if text == "front diagnostic"
         ));
         assert_eq!(events.len(), 2);
+    }
+
+    /// CR 707.2 + CR 613.1 + CR 701.27a: the face a transform turns away is stored
+    /// as its copiable values — its base fields — never its layer-modified live
+    /// ones, so continuous effects apply over it again from its printed values
+    /// when it returns. The nearest printed board is Grub, Storied Matriarch
+    /// under Goblin Chieftain ("Other Goblin creatures you control get +1/+1 and
+    /// have haste."); the real board is the `grub_storied_matriarch_769`
+    /// integration row. This mirrors `flip::tests::
+    /// flip_stashes_printed_characteristics_not_layer_modified_ones`.
+    ///
+    /// Revert-failing: let the transform stash the live snapshot again
+    /// (`snapshot_object_face`) and the stored front face is 3/4 with haste, so
+    /// the restored front face is 3/4 with haste in both its live and base
+    /// fields — every P/T and keyword assertion below fails.
+    #[test]
+    fn transform_stashes_copiable_values_not_layer_modified_ones() {
+        let mut state = GameState::new_two_player(42);
+        let id = setup_dfc(&mut state);
+        {
+            // Stand in for an active continuous effect (+1/+1 and a granted
+            // keyword): live fields inflated, `base_*` untouched.
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.power = Some(3);
+            obj.toughness = Some(4);
+            obj.keywords.push(Keyword::Haste);
+        }
+        let mut events = Vec::new();
+
+        transform_permanent(&mut state, id, &mut events).unwrap();
+        let obj = &state.objects[&id];
+        assert_eq!(obj.name, "Werewolf Back", "reach-guard: it transformed");
+        let stored = obj.back_face.as_ref().expect("the front face is stored");
+        assert_eq!(stored.name, "Werewolf Front");
+        assert_eq!(
+            (stored.power, stored.toughness),
+            (Some(2), Some(3)),
+            "CR 707.2: the stored face holds its printed 2/3, not the inflated 3/4"
+        );
+        assert_eq!(
+            stored.keywords,
+            vec![Keyword::Vigilance],
+            "CR 707.2: a granted keyword is not a copiable value"
+        );
+
+        transform_permanent(&mut state, id, &mut events).unwrap();
+        let obj = &state.objects[&id];
+        assert_eq!(
+            obj.name, "Werewolf Front",
+            "reach-guard: it transformed back"
+        );
+        assert_eq!((obj.power, obj.toughness), (Some(2), Some(3)));
+        assert_eq!((obj.base_power, obj.base_toughness), (Some(2), Some(3)));
+        assert_eq!(obj.keywords, vec![Keyword::Vigilance]);
+        assert_eq!(obj.base_keywords, vec![Keyword::Vigilance]);
     }
 
     /// G1: transforming a double-faced permanent issues a new timestamp on each

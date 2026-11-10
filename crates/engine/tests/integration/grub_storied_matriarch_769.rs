@@ -23,20 +23,25 @@
 //! CR 118.12 + CR 118.3 + CR 608.2d: an optional pick from a zone with nothing
 //! eligible is not offered, so an "If you do" rider stays closed and an "If you
 //! don't" branch runs.
+//! CR 707.2 + CR 613.1: a stored face is that face's copiable values.
 
 use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
+use engine::game::game_object::BackFaceData;
+use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::TargetRef;
+use engine::game::zones::move_to_zone;
+use engine::types::ability::{ChosenAttribute, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{ReplacementChoiceKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaColor, ManaCost};
+use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::resolved_commands::ResolvedRulesCommand;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
@@ -47,6 +52,12 @@ const GOBLIN: &str = "Goblin Piker";
 const SOLEMNITY: &str = "Solemnity";
 const SLIP: &str = "Slip Out the Back";
 const CONCEALMENT: &str = "Clever Concealment";
+const CHIEFTAIN: &str = "Goblin Chieftain";
+const GRAVEDIGGER: &str = "Gravedigger";
+const ANTHEM: &str = "Glorious Anthem";
+const VALENTIN: &str = "Valentin, Dean of the Vein";
+const LISETTE: &str = "Lisette, Dean of the Root";
+const PAINTER: &str = "Painter's Servant";
 
 const AUNTIE_ORACLE: &str = "Menace\nWhenever Grub attacks, you may blight 1. If you do, create a tapped and attacking token that's a copy of the blighted creature, except it has \"At the beginning of the end step, sacrifice this token.\"\nAt the beginning of your first main phase, you may pay {B}. If you do, transform Grub.";
 const NEXUS_ORACLE: &str = "At the beginning of combat on your turn, draw a card. Then you may exile an artifact or creature card from your hand. If you do, create a token that's a copy of the exiled card, except it's a 3/3 Golem artifact creature in addition to its other types.";
@@ -58,6 +69,12 @@ const GANG_ORACLE: &str = "At the beginning of your first main phase, you may bl
 const SCROUNGER_ORACLE: &str = "At the beginning of your first main phase, you may blight 1. If you do, create a Treasure token. (To blight 1, put a -1/-1 counter on a creature you control. A Treasure token is an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")";
 const TORCHMASTER_ORACLE: &str = "At the beginning of combat on your turn, you may blight 1. When you do, target creature gains haste until end of turn. (To blight 1, put a -1/-1 counter on a creature you control.)";
 const SHOW_AND_TELL_ORACLE: &str = "Each player may put an artifact, creature, enchantment, or land card from their hand onto the battlefield.";
+const CHIEFTAIN_ORACLE: &str = "Haste (This creature can attack and {T} as soon as it comes under your control.)\nOther Goblin creatures you control get +1/+1 and have haste.";
+const GRAVEDIGGER_ORACLE: &str = "When this creature enters, you may return target creature card from your graveyard to your hand.";
+const ANTHEM_ORACLE: &str = "Creatures you control get +1/+1.";
+const VALENTIN_ORACLE: &str = "Menace, lifelink\nIf a nontoken creature an opponent controls would die, exile it instead. When you do, you may pay {2}. If you do, create a 1/1 black and green Pest creature token with \"When this token dies, you gain 1 life.\"";
+const LISETTE_ORACLE: &str = "Whenever you gain life, you may pay {1}. If you do, put a +1/+1 counter on each creature you control and those creatures gain trample until end of turn.";
+const PAINTER_ORACLE: &str = "As this creature enters, choose a color.\nAll cards that aren't on the battlefield, spells, and permanents are the chosen color in addition to their other colors.";
 
 /// A board at `phase`, with stocked libraries so a real draw step can't end the
 /// game (CR 704.5b).
@@ -1314,4 +1331,356 @@ fn transforming_into_auntie_does_not_return_a_goblin() {
     );
     assert_settled(&runner);
     assert_eq!(runner.state().objects[&goblin].zone, Zone::Graveyard);
+}
+
+// ===== CR 707.2 + CR 613.1: a face swap stores the face's copiable values =====
+
+/// Runs a full layer pass, so every reading below is the settled one.
+fn settle(runner: &mut GameRunner) {
+    runner.state_mut().layers_dirty.mark_full();
+    evaluate_layers(runner.state_mut());
+}
+
+/// Setup only: moves `id` to `zone` outside any spell or ability.
+fn put(runner: &mut GameRunner, id: ObjectId, zone: Zone) {
+    move_to_zone(runner.state_mut(), id, zone, &mut Vec::new());
+    settle(runner);
+}
+
+/// Setup only: turns a staged Grub to her other face without paying for it.
+fn turn(runner: &mut GameRunner, grub: ObjectId, into: &str) {
+    engine::game::transform::transform_permanent(runner.state_mut(), grub, &mut Vec::new())
+        .expect("Grub must transform");
+    settle(runner);
+    assert_eq!(runner.state().objects[&grub].name, into);
+}
+
+/// Adds `n` mana of one type to P0's pool.
+fn fund(runner: &mut GameRunner, mana: ManaType, n: usize) {
+    let pool = &mut runner.state_mut().players[0].mana_pool;
+    for _ in 0..n {
+        pool.add(ManaUnit::new(mana, ObjectId(0), false, vec![]));
+    }
+}
+
+/// The displayed face's name, live P/T and live haste.
+fn shown(runner: &GameRunner, id: ObjectId) -> (String, Option<i32>, Option<i32>, bool) {
+    let obj = &runner.state().objects[&id];
+    (
+        obj.name.clone(),
+        obj.power,
+        obj.toughness,
+        obj.keywords.contains(&Keyword::Haste),
+    )
+}
+
+/// The stored face's name, P/T and haste.
+fn stored(runner: &GameRunner, id: ObjectId) -> (String, Option<i32>, Option<i32>, bool) {
+    let face: &BackFaceData = runner.state().objects[&id]
+        .back_face
+        .as_ref()
+        .expect("the other face is stored");
+    (
+        face.name.clone(),
+        face.power,
+        face.toughness,
+        face.keywords.contains(&Keyword::Haste),
+    )
+}
+
+fn face(
+    name: &str,
+    power: i32,
+    toughness: i32,
+    haste: bool,
+) -> (String, Option<i32>, Option<i32>, bool) {
+    (name.to_string(), Some(power), Some(toughness), haste)
+}
+
+/// Casts Gravedigger and returns `card` from the graveyard with its trigger.
+fn return_with_gravedigger(runner: &mut GameRunner, gravedigger: ObjectId, card: ObjectId) {
+    fund(runner, ManaType::Black, 4);
+    runner.cast(gravedigger).commit();
+    both_pass(runner);
+    assert_eq!(runner.state().objects[&gravedigger].zone, Zone::Battlefield);
+    // The card is the only creature card in the graveyard, so the trigger
+    // takes it as its target without a prompt.
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach-guard: Gravedigger's trigger is on the stack"
+    );
+    both_pass(runner);
+    decide(runner, true);
+    assert_settled(runner);
+    assert_eq!(
+        runner.state().objects[&card].zone,
+        Zone::Hand,
+        "Gravedigger returns the card"
+    );
+    settle(runner);
+}
+
+/// Casts the modal card in hand as its back face and resolves it.
+fn cast_as_lisette(runner: &mut GameRunner, card: ObjectId) {
+    fund(runner, ManaType::Green, 4);
+    runner.cast(card).modal_back_face(true).commit();
+    both_pass(runner);
+    assert_settled(runner);
+    settle(runner);
+    assert_eq!(runner.state().objects[&card].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&card].name, LISETTE);
+}
+
+/// Goblin Chieftain: "Other Goblin creatures you control get +1/+1 and have
+/// haste." Grub pays {R} under it, transforms back while it is out, and is read
+/// again after it leaves. CR 613.1: each face starts from its printed 2/1 with
+/// menace; the Chieftain's layer 7c P/T and layer 6 haste apply only while it
+/// is on the battlefield (CR 611.3a), so neither may be stored with a face.
+#[test]
+fn a_transform_stores_the_face_without_the_chieftains_bonus() {
+    let (mut runner, grub, chieftain) = grub_board(Phase::Upkeep, |scenario, db| {
+        assert_oracle(db, CHIEFTAIN, CHIEFTAIN_ORACLE);
+        scenario.add_basic_land(P0, ManaColor::Red);
+        scenario.add_real_card(P0, CHIEFTAIN, Zone::Battlefield, db)
+    });
+
+    // (a) The production transform: Grub's own first-main trigger, paying {R}.
+    runner.advance_to_phase(Phase::PreCombatMain);
+    both_pass(&mut runner);
+    decide(&mut runner, true);
+    assert_settled(&runner);
+    settle(&mut runner);
+    assert_eq!(shown(&runner, grub), face(AUNTIE, 3, 2, true));
+    assert_eq!(
+        stored(&runner, grub),
+        face(MATRIARCH, 2, 1, false),
+        "CR 707.2: the stored Matriarch holds no Chieftain bonus"
+    );
+
+    // (b) Back to the Matriarch while the Chieftain is still out.
+    turn(&mut runner, grub, MATRIARCH);
+    assert_eq!(
+        shown(&runner, grub),
+        face(MATRIARCH, 3, 2, true),
+        "CR 613.1: the bonus applies once, over the printed 2/1"
+    );
+
+    // (c) The Chieftain leaves: nothing of it remains.
+    put(&mut runner, chieftain, Zone::Exile);
+    assert_eq!(shown(&runner, grub), face(MATRIARCH, 2, 1, false));
+    assert!(runner.state().objects[&grub]
+        .keywords
+        .contains(&Keyword::Menace));
+
+    // (d) The Auntie stored at (b), under the Chieftain, returns printed.
+    turn(&mut runner, grub, AUNTIE);
+    assert_eq!(shown(&runner, grub), face(AUNTIE, 2, 1, false));
+    assert!(runner.state().objects[&grub]
+        .keywords
+        .contains(&Keyword::Menace));
+}
+
+/// CR 712.8a + CR 400.7 + CR 707.2: Grub, Notorious Auntie dies under Goblin
+/// Chieftain. The card in the graveyard shows its front face and stores the
+/// Auntie as printed, so after Gravedigger ("When this creature enters, you may
+/// return target creature card from your graveyard to your hand.") returns it
+/// and it is recast and transformed with the Chieftain gone, the Auntie is the
+/// printed 2/1. The transform happens with the Chieftain in exile, so only the
+/// zone-exit revert can store the bonus.
+#[test]
+fn a_transformed_card_leaving_the_battlefield_stores_its_printed_back_face() {
+    let (mut runner, grub, (chieftain, gravedigger)) =
+        grub_board(Phase::PreCombatMain, |scenario, db| {
+            assert_oracle(db, CHIEFTAIN, CHIEFTAIN_ORACLE);
+            assert_oracle(db, GRAVEDIGGER, GRAVEDIGGER_ORACLE);
+            (
+                scenario.add_real_card(P0, CHIEFTAIN, Zone::Exile, db),
+                scenario.add_real_card(P0, GRAVEDIGGER, Zone::Hand, db),
+            )
+        });
+    flip(&mut runner, grub);
+    put(&mut runner, chieftain, Zone::Battlefield);
+    assert_eq!(
+        shown(&runner, grub),
+        face(AUNTIE, 3, 2, true),
+        "reach-guard: the Chieftain modifies the Auntie on the battlefield"
+    );
+
+    put(&mut runner, grub, Zone::Graveyard);
+    assert_eq!(
+        shown(&runner, grub),
+        face(MATRIARCH, 2, 1, false),
+        "CR 712.8a: the graveyard card shows its front face"
+    );
+    assert_eq!(
+        stored(&runner, grub),
+        face(AUNTIE, 2, 1, false),
+        "CR 707.2: the stored Auntie holds no Chieftain bonus"
+    );
+
+    put(&mut runner, chieftain, Zone::Exile);
+    return_with_gravedigger(&mut runner, gravedigger, grub);
+    fund(&mut runner, ManaType::Black, 3);
+    runner.cast(grub).commit();
+    runner.advance_until_stack_empty();
+    assert_settled(&runner);
+    settle(&mut runner);
+    assert_eq!(runner.state().objects[&grub].zone, Zone::Battlefield);
+    assert_eq!(shown(&runner, grub), face(MATRIARCH, 2, 1, false));
+
+    turn(&mut runner, grub, AUNTIE);
+    assert_eq!(
+        shown(&runner, grub),
+        face(AUNTIE, 2, 1, false),
+        "the recast card's Auntie is the printed 2/1"
+    );
+}
+
+/// CR 712.8a + CR 707.2, the modal member: Lisette, Dean of the Root (4/4) is
+/// cast back face up under Glorious Anthem ("Creatures you control get
+/// +1/+1."), dies, and the graveyard card stores Lisette as printed. Returned by
+/// Gravedigger and cast as Lisette again with the Anthem gone, she is 4/4.
+#[test]
+fn a_modal_card_leaving_the_battlefield_stores_its_printed_back_face() {
+    let (mut runner, (card, anthem, gravedigger)) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, VALENTIN, VALENTIN_ORACLE);
+        assert_oracle(db, LISETTE, LISETTE_ORACLE);
+        assert_oracle(db, ANTHEM, ANTHEM_ORACLE);
+        assert_oracle(db, GRAVEDIGGER, GRAVEDIGGER_ORACLE);
+        (
+            scenario.add_real_card(P0, VALENTIN, Zone::Hand, db),
+            scenario.add_real_card(P0, ANTHEM, Zone::Battlefield, db),
+            scenario.add_real_card(P0, GRAVEDIGGER, Zone::Hand, db),
+        )
+    });
+
+    cast_as_lisette(&mut runner, card);
+    assert_eq!(
+        shown(&runner, card),
+        face(LISETTE, 5, 5, false),
+        "reach-guard: the Anthem modifies Lisette on the battlefield"
+    );
+
+    put(&mut runner, card, Zone::Graveyard);
+    assert_eq!(
+        shown(&runner, card),
+        face(VALENTIN, 1, 1, false),
+        "CR 712.8a: the graveyard card shows its front face"
+    );
+    assert_eq!(
+        stored(&runner, card),
+        face(LISETTE, 4, 4, false),
+        "CR 707.2: the stored Lisette holds no Anthem bonus"
+    );
+
+    put(&mut runner, anthem, Zone::Exile);
+    return_with_gravedigger(&mut runner, gravedigger, card);
+    cast_as_lisette(&mut runner, card);
+    assert_eq!(
+        shown(&runner, card),
+        face(LISETTE, 4, 4, false),
+        "the recast Lisette is the printed 4/4"
+    );
+}
+
+/// CR 611.3a + CR 707.2 + CR 712.11b: a face election off the battlefield
+/// stores the face's copiable values too. Painter's Servant ("All cards that
+/// aren't on the battlefield, spells, and permanents are the chosen color in
+/// addition to their other colors.") paints Valentin, Dean of the Vein red in
+/// hand; casting it as Lisette stores Valentin with its printed black only.
+/// After Lisette dies and Painter's Servant leaves, the graveyard card is
+/// black. A battlefield-only stash rule would keep the red.
+#[test]
+fn a_face_election_in_hand_stores_the_face_without_the_painted_color() {
+    let (mut runner, (card, painter)) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, VALENTIN, VALENTIN_ORACLE);
+        assert_oracle(db, LISETTE, LISETTE_ORACLE);
+        assert_oracle(db, PAINTER, PAINTER_ORACLE);
+        (
+            scenario.add_real_card(P0, VALENTIN, Zone::Hand, db),
+            scenario.add_real_card(P0, PAINTER, Zone::Battlefield, db),
+        )
+    });
+    // CR 105.4: red was chosen as Painter's Servant entered.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&painter)
+        .expect("Painter's Servant exists")
+        .chosen_attributes
+        .push(ChosenAttribute::Color(ManaColor::Red));
+    settle(&mut runner);
+    assert_eq!(
+        runner.state().objects[&card].color,
+        vec![ManaColor::Black, ManaColor::Red],
+        "reach-guard: Painter's Servant paints the card in hand"
+    );
+
+    cast_as_lisette(&mut runner, card);
+    let stored_colors = &runner.state().objects[&card]
+        .back_face
+        .as_ref()
+        .expect("Valentin is stored")
+        .color;
+    assert_eq!(
+        stored_colors,
+        &vec![ManaColor::Black],
+        "CR 707.2: the stored Valentin holds no painted color"
+    );
+
+    put(&mut runner, card, Zone::Graveyard);
+    put(&mut runner, painter, Zone::Exile);
+    let obj = &runner.state().objects[&card];
+    assert_eq!(obj.name, VALENTIN);
+    assert_eq!(
+        obj.color,
+        vec![ManaColor::Black],
+        "the restored Valentin is printed black once Painter's Servant is gone"
+    );
+}
+
+/// CR 733 + CR 701.27a: the journal replay of a resolved transform stores the
+/// same face as the original execution, and that face is the Matriarch as
+/// printed, though Goblin Chieftain modifies her when Grub pays {R}.
+#[test]
+fn a_replayed_transform_stores_the_same_printed_face() {
+    let (mut runner, grub, ()) = grub_board(Phase::Upkeep, |scenario, db| {
+        assert_oracle(db, CHIEFTAIN, CHIEFTAIN_ORACLE);
+        scenario.add_basic_land(P0, ManaColor::Red);
+        scenario.add_real_card(P0, CHIEFTAIN, Zone::Battlefield, db);
+    });
+    runner.advance_to_phase(Phase::PreCombatMain);
+    both_pass(&mut runner);
+    settle(&mut runner);
+    assert_eq!(shown(&runner, grub), face(MATRIARCH, 3, 2, true));
+    let mut replay = runner.state().clone();
+    let journal_start = replay.resolved_rules_journal.entries().len();
+
+    decide(&mut runner, true);
+    assert_eq!(runner.state().objects[&grub].name, AUNTIE);
+    let command = runner
+        .state()
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .skip(journal_start)
+        .filter_map(|entry| entry.command.clone())
+        .find_map(|command| match command {
+            ResolvedRulesCommand::ObjectTransform(command) if command.object.object_id == grub => {
+                Some(command)
+            }
+            _ => None,
+        })
+        .expect("reach-guard: the transform is journaled");
+    engine::game::transform::apply_resolved_transform(&mut replay, &command)
+        .expect("the replay applies");
+
+    let original = runner.state().objects[&grub].back_face.as_ref();
+    assert_eq!(replay.objects[&grub].back_face.as_ref(), original);
+    assert_eq!(
+        stored(&runner, grub),
+        face(MATRIARCH, 2, 1, false),
+        "CR 707.2: both store the printed Matriarch"
+    );
 }

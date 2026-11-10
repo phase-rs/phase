@@ -396,7 +396,7 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
 /// CR 400.7 + CR 712.8a (#7565): swap the object's live face with its stored
 /// back face, preserving the stored slot's `layout_kind`. The layout is a
 /// printed property of the CARD PAIR, not of whichever half happens to be
-/// stashed — `snapshot_object_face` hardcodes `None`, so every bare
+/// stashed — the base snapshot hard-codes `None`, so every bare
 /// snapshot/apply/store dance silently erased the marker after one back-face
 /// round trip, muting the split/MDFC cast-face prompt and every other
 /// `layout_kind` consumer. Single authority for all symmetric face swaps.
@@ -405,7 +405,14 @@ pub fn swap_object_faces(obj: &mut GameObject) {
         return;
     };
     let layout_kind = stored.layout_kind;
-    let mut snapshot = snapshot_object_face(obj);
+    // CR 707.2 + CR 613.1: the face turned away is stored as its copiable
+    // values (the base fields), never its layer-modified live values, so
+    // continuous effects apply over it again from its printed values when it
+    // returns. In every zone: CR 611.3a effects modify cards off the
+    // battlefield too (Painter's Servant). `sync_missing_base_characteristics`
+    // first materializes a base no layer pass has seeded, as every layer reset does.
+    obj.sync_missing_base_characteristics();
+    let mut snapshot = snapshot_object_base_face(obj);
     snapshot.layout_kind = layout_kind;
     apply_back_face_to_object(obj, stored);
     obj.back_face = Some(snapshot);
@@ -1079,8 +1086,11 @@ pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
         // ("no baseline ever contains a `Resolution` member"): the carry-over would
         // then compute `base ++ live_resolution` on EVERY layer pass, growing the
         // shield count by one per pass without bound — a Maze of Ith / regeneration /
-        // Fog shield would prevent N damage events instead of one. Reachable on any
-        // transform round-trip, which stashes the live face and restores it.
+        // Fog shield would prevent N damage events instead of one. Load-bearing for
+        // the live-snapshot writers that remain (the face-down entry stash,
+        // specialize, conspiracy setup, the reload fallback); face swaps use
+        // `snapshot_object_base_face`, whose replacement store never holds a
+        // `Resolution` def.
         //
         // Same guard `copiable_replacement_definitions` (producer side) and
         // `GameObject::sync_missing_base_characteristics` (back-fill side) already
@@ -1118,14 +1128,18 @@ pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
 /// deliberately ignoring any live fields that continuous effects (CR 613) may
 /// have altered.
 ///
-/// Use this instead of [`snapshot_object_face`] whenever the snapshot is taken
-/// from a permanent already on the battlefield — specifically when turning it
-/// face down via a spell or ability (CR 708.2a). At that point the live fields
-/// may include layer-applied modifications (e.g. a +1/+1 anthem making a 2/2
-/// appear as 3/3). If those inflated values were stored in `back_face`,
-/// [`apply_back_face_to_object`] would write them into both live and base on
-/// restoration (CR 708.8), causing the anthem to reapply from an already-
-/// inflated baseline and produce a permanently-wrong value.
+/// CR 707.2 + CR 613.1: this is the snapshot for every face stash that records a
+/// face from an object whose live fields may carry continuous effects: face
+/// swaps in any zone ([`swap_object_faces`] and the `transform.rs` stash), flip
+/// (`flip::stash_flip_face`), and turning a permanent face down via a spell or
+/// ability (CR 708.2a). The live fields may include layer-applied modifications
+/// (e.g. a +1/+1 anthem making a 2/2 appear as 3/3, or Painter's Servant's color
+/// on a card in hand). If those inflated values were stored in `back_face`,
+/// [`apply_back_face_to_object`] would write them into both live and base when
+/// the face returns (CR 708.8 for face-down), causing the effect to reapply from
+/// an already-inflated baseline and produce a permanently-wrong value. Callers
+/// materialize an uninitialized base first
+/// (`GameObject::sync_missing_base_characteristics`).
 ///
 /// Fields with no base equivalent (`modal`, `additional_cost`, `strive_cost`,
 /// `casting_restrictions`, `casting_options`) are invariant after card creation
@@ -2111,9 +2125,10 @@ mod tests {
     /// prevent N damage events instead of one. No existing test covered a transform
     /// round-trip over a live resolution shield, which is how it survived review.
     ///
-    /// Revert-failing on two independent assertions: un-filter
-    /// `snapshot_object_face` and (a) base holds a `Resolution` def and (b) the
-    /// per-object resolution count GROWS between the two `evaluate_layers` passes.
+    /// Revert-failing on two independent assertions: let `swap_object_faces`
+    /// store the live snapshot again, unfiltered, and (a) base holds a
+    /// `Resolution` def and (b) the per-object resolution count GROWS between the
+    /// two `evaluate_layers` passes.
     #[test]
     fn transform_round_trip_does_not_duplicate_a_resolution_shield() {
         fn printed_def() -> ReplacementDefinition {
@@ -2199,6 +2214,121 @@ mod tests {
             after_second <= 1,
             "at most one copy of the shield may survive, got {after_second}"
         );
+    }
+
+    /// CR 707.2 + CR 613.1 + CR 611.3a: `swap_object_faces` stores the face it
+    /// turns away as that face's copiable values — its base fields — in every
+    /// zone, not only on the battlefield.
+    ///
+    /// Case (i): the nearest printed board is Valentin, Dean of the Vein in hand
+    /// under Painter's Servant ("All cards that aren't on the battlefield, spells,
+    /// and permanents are the chosen color in addition to their other colors."),
+    /// cast as Lisette, Dean of the Root. The live colors carry the painted red;
+    /// the base colors are the printed black. The real board is the
+    /// `grub_storied_matriarch_769` integration row; this pins the building block.
+    ///
+    /// Case (ii): no printed card reaches a face swap with an uninitialized base:
+    /// every card object is installed by `apply_card_face_to_object`, which sets
+    /// `base_characteristics_initialized`. The nearest printed shape is the
+    /// Incubator token from Blighted Burgeoning ("When this Aura enters, incubate
+    /// 2. (Create an Incubator token with two +1/+1 counters on it and "{2}:
+    /// Transform this token." It transforms into a 0/0 Phyrexian artifact
+    /// creature.)"). `incubate::resolve` leaves its flag unset until its first
+    /// layer pass. The case is still needed because charter D3.2 requires the
+    /// stash to hold the face for an uninitialized base. Also, 48 existing tests
+    /// build swap subjects with `create_object` and live-only writes. For those,
+    /// the sync mirrors `reset_recipient_to_base`'s materialization (CR 613.1).
+    ///
+    /// Revert-failing: let `swap_object_faces` store the live snapshot again and
+    /// (i) keeps red in the stored face; drop its
+    /// `sync_missing_base_characteristics` call and (ii) stores no P/T and no
+    /// card types.
+    #[test]
+    fn swap_object_faces_stores_copiable_values_in_every_zone() {
+        // (i) A painted card in hand: live colors differ from the printed base.
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Front Face".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.base_color = vec![ManaColor::Black];
+            obj.base_characteristics_initialized = true;
+            let mut back = snapshot_object_base_face(obj);
+            back.name = "Back Face".to_string();
+            back.power = Some(4);
+            back.toughness = Some(4);
+            back.color = vec![ManaColor::Black, ManaColor::Green];
+            back.layout_kind = Some(LayoutKind::Modal);
+            obj.back_face = Some(back);
+            // The CR 611.3a effect's live write, as a layer pass leaves it.
+            obj.color = vec![ManaColor::Black, ManaColor::Red];
+        }
+
+        swap_object_faces(state.objects.get_mut(&id).unwrap());
+        let obj = &state.objects[&id];
+        assert_eq!(obj.name, "Back Face", "reach-guard: the swap happened");
+        let stored = obj.back_face.as_ref().expect("the front face is stored");
+        assert_eq!(stored.name, "Front Face");
+        assert_eq!(
+            stored.color,
+            vec![ManaColor::Black],
+            "CR 707.2: the stored face holds its printed colors, not the painted red"
+        );
+        assert_eq!(
+            stored.layout_kind,
+            Some(LayoutKind::Modal),
+            "the stored slot's layout is preserved"
+        );
+
+        swap_object_faces(state.objects.get_mut(&id).unwrap());
+        let obj = &state.objects[&id];
+        assert_eq!(
+            obj.name, "Front Face",
+            "reach-guard: the swap back happened"
+        );
+        assert_eq!(obj.color, vec![ManaColor::Black]);
+        assert_eq!(obj.base_color, vec![ManaColor::Black]);
+
+        // (ii) A fixture whose base no layer pass has seeded: live-only writes.
+        let fixture = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Unseeded Front".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&fixture).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            let mut back = snapshot_object_face(obj);
+            back.name = "Unseeded Back".to_string();
+            obj.back_face = Some(back);
+            assert!(
+                !obj.base_characteristics_initialized && obj.base_power.is_none(),
+                "reach-guard: the fixture's base is unseeded"
+            );
+        }
+
+        swap_object_faces(state.objects.get_mut(&fixture).unwrap());
+        let obj = &state.objects[&fixture];
+        assert_eq!(obj.name, "Unseeded Back", "reach-guard: the swap happened");
+        let stored = obj.back_face.as_ref().expect("the front face is stored");
+        assert_eq!(stored.name, "Unseeded Front");
+        assert_eq!((stored.power, stored.toughness), (Some(2), Some(2)));
+        assert_eq!(stored.card_types.core_types, vec![CoreType::Creature]);
     }
 
     use crate::database::CardDatabase;

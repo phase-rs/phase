@@ -3903,7 +3903,7 @@ mod tests {
     /// described nothing on the object any more.
     ///
     /// Driven through the REAL `game::transform::transform_permanent`, not through
-    /// the two face helpers it calls — a test that called `snapshot_object_face`
+    /// the two face helpers it calls — a test that called `snapshot_object_base_face`
     /// and `apply_back_face_to_object` itself would go green even if the transform
     /// stopped using them.
     ///
@@ -3919,7 +3919,7 @@ mod tests {
     ///   `printed_cards::apply_back_face_to_object` ⇒ the post-transform assertion
     ///   fails in BOTH cases;
     /// * drop `parse_warnings: obj.parse_warnings.clone()` from
-    ///   `printed_cards::snapshot_object_face` ⇒ the transform-back assertion
+    ///   `printed_cards::snapshot_object_base_face` ⇒ the transform-back assertion
     ///   fails in the front-dirty case (the outgoing face's diagnostics are lost
     ///   rather than stashed).
     #[test]

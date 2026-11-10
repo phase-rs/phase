@@ -4061,25 +4061,18 @@ impl GameObject {
     /// `ManaCost::NoCost` (CR 708.2a). For those objects `base_mana_cost` describes
     /// the face currently shown, not the face the card will show off the battlefield.
     ///
-    /// # Known residual, stated per flag rather than as a blanket claim
+    /// # Which snapshot the stash holds
     ///
     /// The `back_face` slot is **shared** by the transform, MDFC, face-down and flip
-    /// stashes, and its writers do not agree on which snapshot they take:
-    ///   * `transform::transform_permanent`'s two `back_face` stashes call
-    ///     `printed_cards::snapshot_object_face`, which
-    ///     captures the **live** `mana_cost` (the `mana_cost: obj.mana_cost.clone()`
-    ///     field of the `BackFaceData` it builds). A permanent
-    ///     transformed while already under a mana-cost-altering copy effect therefore
-    ///     parks a polluted value, and this method will read it.
-    ///   * `effects::turn_face_down::turn_permanent_face_down` stashes
-    ///     `snapshot_object_base_face` — the
-    ///     **printed** baseline. That path is clean.
-    ///     The divergence is **BIDIRECTIONAL**, not downward-only: `intrinsic_copiable_
-    ///     values` sources `obj.base_mana_cost` from the COPY
-    ///     SOURCE and `apply_copiable_values` writes it to the RECIPIENT's live field
-    ///     with no clamp, so a `{1}{U}` Clone copying a fifteen-drop ends with live 15
-    ///     against base 2. Tracked as task #36; the fix is an engine change at the
-    ///     transform site and is out of this unit's scope.
+    /// stashes. Every face swap (the `transform.rs` stash and
+    /// `printed_cards::swap_object_faces`), flip, and
+    /// `effects::turn_face_down::turn_permanent_face_down` store
+    /// `printed_cards::snapshot_object_base_face`: the face's copiable values
+    /// (CR 707.2 + CR 613.1). A Layer-1 copy effect's `mana_cost`, which
+    /// `apply_copiable_values` writes to the live field only, therefore never
+    /// reaches the stash this method reads. The face-down entry profile
+    /// (`zone_pipeline::apply_face_down_entry_profile`) still stores the live
+    /// `printed_cards::snapshot_object_face`.
     pub fn mana_value_on_battlefield_exit(&self) -> u32 {
         let shows_stashed_face = self.transformed || self.modal_back_face || self.face_down;
         match self.back_face.as_ref().filter(|_| shows_stashed_face) {
@@ -4571,13 +4564,16 @@ pub(crate) fn source_chosen_player(state: &GameState, source_id: ObjectId) -> Op
 ///      anywhere in the tree that can copy the LIVE store INTO base, and it filters
 ///      `Resolution` defs out.
 ///   3. `printed_cards::apply_back_face_to_object` writes a `BackFaceData` snapshot
-///      to base. That snapshot comes from `printed_cards::snapshot_object_face`,
-///      which copies the LIVE store — so it MUST filter `Resolution` defs out, and
-///      does. This leg was previously (and wrongly) written as "a parsed / printed /
-///      face / snapshot source" being safe by construction; it is not, and a
-///      transform round-trip (`transform.rs` stashes the live face and restores it,
-///      also reachable via `turn_face_up.rs`, `morph.rs`, `zones.rs`, `casting.rs`,
-///      `specialize.rs`) put a `Resolution` def into base and made this function
+///      to base. Face swaps (`transform.rs`, `printed_cards::swap_object_faces`),
+///      flip and `turn_face_down` take it from `snapshot_object_base_face`, whose
+///      replacement store is base and so holds no `Resolution` def by legs 1, 2 and
+///      4. The remaining live writers (`zone_pipeline::apply_face_down_entry_profile`,
+///      `specialize.rs`, `conspiracy.rs`, the reload fallback) take it from
+///      `printed_cards::snapshot_object_face`, which copies the LIVE store — so it
+///      MUST filter `Resolution` defs out, and does. This leg was previously (and
+///      wrongly) written as "a parsed / printed / face / snapshot source" being safe
+///      by construction; it is not, and a transform round-trip that stashed the live
+///      face put a `Resolution` def into base and made this function
 ///      compute `base ++ live_resolution` on EVERY pass — unbounded per-pass
 ///      duplication of the shield. Pinned by
 ///      `printed_cards::tests::transform_round_trip_does_not_duplicate_a_resolution_shield`.
