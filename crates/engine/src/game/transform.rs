@@ -3,13 +3,14 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::object_data::BackFaceData;
+use crate::types::proposed_event::CopiedFaceUp;
 use crate::types::resolved_commands::{
     ResolvedObjectTransformCommand, ResolvedObjectTransformReplayInvariantError,
 };
 use crate::types::zones::Zone;
 
 use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
-use super::printed_cards::{apply_back_face_to_object, snapshot_object_base_face};
+use super::printed_cards::swap_object_faces;
 
 /// An engine-authored transform announcement for Priority preflight. The
 /// permanent identity remains private to the transform authority until facade
@@ -67,9 +68,9 @@ fn transform_instruction_is_noop(state: &GameState, object_id: ObjectId) -> bool
 /// (CR 710), Adventurer (CR 715), Omen (CR 720) and preparation (CR 722) cards
 /// keep alternative characteristics in the same `back_face` slot, but they are
 /// single-faced cards, and a token copy of one carries those characteristics as
-/// copiable values (CR 722.2b) without becoming double-faced. A transformed
-/// double-faced permanent stores its front face with an erased layout, and
-/// test-built double-faced fixtures often carry no layout at all, so only the
+/// copiable values (CR 722.2b) without becoming double-faced. A transform keeps
+/// the stored face's layout (`swap_object_faces`); test-built double-faced
+/// fixtures and Incubator tokens often carry no layout at all, so only the
 /// known single-faced layouts are excluded. Independently of layout, a face that
 /// is an instant or sorcery is never a transform destination.
 fn other_face_is_transform_destination(object: &crate::game::game_object::GameObject) -> bool {
@@ -115,9 +116,9 @@ fn layout_is_single_faced_alternative(layout: Option<crate::types::card::LayoutK
 /// Reads only the object's own state (its stored face, its own status, its printed type
 /// line), never copy-modified values, so a Layer-1 copy effect does not change the answer.
 ///
-/// Not [`is_double_faced_permanent`]: that answers CR 712.16's face-down question and keys on
-/// printed layouts and `transformed`, so it is false for a front-face-up Incubator token,
-/// whose stored Phyrexian face has no layout. This one keys on what `back_face` holds.
+/// [`is_double_faced_permanent`] reads this for unmerged permanents, so the face-down guard, mass
+/// transform and copying share one identity. A front-face-up Incubator token stores its
+/// Phyrexian face with no layout, and is double-faced (CR 111.10i).
 pub(crate) fn stored_double_face(obj: &GameObject) -> Option<&BackFaceData> {
     use crate::game::game_object::MergeKind;
     use crate::types::card::LayoutKind;
@@ -130,6 +131,10 @@ pub(crate) fn stored_double_face(obj: &GameObject) -> Option<&BackFaceData> {
     if obj.specialized_color.is_some() {
         return None;
     }
+    // CR 710.4: a flipped permanent's `back_face` is its flip stash.
+    if obj.flipped {
+        return None;
+    }
     match obj.merge_kind {
         // CR 730.2i: a merged permanent is not a double-faced permanent even if it contains
         // double-faced components.
@@ -139,14 +144,20 @@ pub(crate) fn stored_double_face(obj: &GameObject) -> Option<&BackFaceData> {
         Some(MergeKind::Meld) | None => {}
     }
     // CR 709.5b: a Room's other half is a copiable value of a single-faced card. A token copy
-    // stores it with no layout, so the printed type line is the discriminator.
-    if crate::game::room::has_shared_type_line(&obj.base_card_types) {
+    // stores it with no layout, so the printed type line is the discriminator — unless the
+    // token stores the half beside its other face (CR 707.8a).
+    if obj.double_faced_token_alternative.is_none()
+        && crate::game::room::has_shared_type_line(&obj.base_card_types)
+    {
         return None;
     }
-    // A `Single` layout names a single-faced card. No production writer stores it: the card
-    // database stores `None` for it (`back_face_for_card_face_with_printed_ref`). That `None`
-    // is classified double-faced below, which fails closed; no oracle id in the current card
-    // export reaches that fallback (every two-face oracle id has a mapped layout).
+    // CR 712.1 + CR 715.2c / CR 720.2c: a `Single` layout names a single-faced card. Its writer
+    // is `casting::swap_to_alternative_spell_face`: while an Adventure or Omen spell is on the
+    // stack its stored slot holds the card's normal face (CR 715.3b / CR 720.3b), and that card
+    // is one single-faced card. The card database stores `None` for a single-faced card
+    // (`back_face_for_card_face_with_printed_ref`); that `None` is classified double-faced
+    // below, which fails closed, and no oracle id in the current card export reaches that
+    // fallback (every two-face oracle id has a mapped layout).
     if face.layout_kind == Some(LayoutKind::Single) {
         return None;
     }
@@ -189,9 +200,9 @@ pub fn transform_permanent(
     object_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
-    let Some(other_face) = face_swap_subject(state, object_id)? else {
+    if !face_swap_subject(state, object_id)? {
         return Ok(());
-    };
+    }
 
     // CR 613.7g: a double-faced permanent receives a new timestamp when it
     // transforms. All blocked/no-op early-returns above (off-battlefield,
@@ -203,7 +214,7 @@ pub fn transform_permanent(
     // self-transform instructions from abilities already on the stack.
     obj.transformation_count = obj.transformation_count.wrapping_add(1);
 
-    swap_displayed_face(state, object_id, other_face);
+    swap_displayed_face(state, object_id);
     events.push(GameEvent::Transformed { object_id });
 
     Ok(())
@@ -217,19 +228,16 @@ pub(crate) fn enter_back_face_up(
     state: &mut GameState,
     object_id: ObjectId,
 ) -> Result<(), EngineError> {
-    let Some(other_face) = face_swap_subject(state, object_id)? else {
+    if !face_swap_subject(state, object_id)? {
         return Ok(());
-    };
-    swap_displayed_face(state, object_id, other_face);
+    }
+    swap_displayed_face(state, object_id);
     Ok(())
 }
 
-/// The face a battlefield permanent would turn to, or `None` when a face-swap
-/// instruction is a silent no-op for it.
-fn face_swap_subject(
-    state: &GameState,
-    object_id: ObjectId,
-) -> Result<Option<BackFaceData>, EngineError> {
+/// Whether a battlefield permanent turns to its other face: `false` when a
+/// face-swap instruction is a silent no-op for it.
+fn face_swap_subject(state: &GameState, object_id: ObjectId) -> Result<bool, EngineError> {
     let obj = state
         .objects
         .get(&object_id)
@@ -244,32 +252,26 @@ fn face_swap_subject(
     // A blocked, melded, or flip permanent ignores the instruction before a
     // meld result's intentionally absent back-face payload is inspected.
     if transform_instruction_is_noop(state, object_id) {
-        return Ok(None);
+        return Ok(false);
     }
-    obj.back_face
-        .clone()
-        .map(Some)
-        .ok_or_else(|| EngineError::InvalidAction("Card has no back face".to_string()))
+    if obj.back_face.is_none() {
+        return Err(EngineError::InvalidAction(
+            "Card has no back face".to_string(),
+        ));
+    }
+    Ok(true)
 }
 
-/// CR 701.27a + CR 707.2 + CR 613.1: turn `obj` to `other_face`, storing the
-/// face it turns away as that face's copiable values — its base fields, never
-/// its layer-modified live values. Shared by the transform and its CR 733
-/// journal replay so both store the same face. Not `swap_object_faces`: the
-/// transform stash writes `layout_kind: None` and the symmetric swap keeps the
-/// stored slot's layout.
-fn turn_to_other_face(obj: &mut GameObject, other_face: BackFaceData) {
-    obj.sync_missing_base_characteristics();
-    let displayed = snapshot_object_base_face(obj);
-    apply_back_face_to_object(obj, other_face);
-    obj.back_face = Some(displayed);
-}
-
-/// Swaps the displayed face and journals the swap with the object's settled
-/// timestamp and transformation count.
-fn swap_displayed_face(state: &mut GameState, object_id: ObjectId, other_face: BackFaceData) {
+/// CR 701.27a + CR 707.2 + CR 613.1: turns `obj` to its other face through
+/// `swap_object_faces`, which stores the face turned away as its copiable values
+/// and keeps the stored slot's layout, so the permanent stays a double-faced
+/// permanent on every face (CR 712.16). Orientation: toggles `transformed`;
+/// copying reads the orientation through `face_up`.
+///
+/// Journals the swap with the object's settled timestamp and transformation count.
+fn swap_displayed_face(state: &mut GameState, object_id: ObjectId) {
     let obj = state.objects.get_mut(&object_id).unwrap();
-    turn_to_other_face(obj, other_face);
+    swap_object_faces(obj);
     obj.transformed = !obj.transformed;
 
     let reference = ObjectIncarnationRef::from_object(obj);
@@ -324,15 +326,17 @@ pub fn apply_resolved_transform(
             },
         );
     }
-    let back_face = object.back_face.clone().ok_or(
-        ResolvedObjectTransformReplayInvariantError::MissingBackFace(command.object.object_id),
-    )?;
+    if object.back_face.is_none() {
+        return Err(
+            ResolvedObjectTransformReplayInvariantError::MissingBackFace(command.object.object_id),
+        );
+    }
 
     let obj = state
         .objects
         .get_mut(&command.object.object_id)
         .expect("validated transform command object remains live");
-    turn_to_other_face(obj, back_face);
+    swap_object_faces(obj);
     obj.transformed = command.resulting_transformed;
     obj.timestamp = command.resulting_timestamp;
     obj.transformation_count = command.resulting_transformation_count;
@@ -347,37 +351,53 @@ pub fn apply_resolved_transform(
     Ok(())
 }
 
+/// CR 712.8d/e/f: which face of a double-faced permanent is up — the copy capture's reader of the
+/// `transformed` / `modal_back_face` pair. `modal_back_face` records a modal card cast or
+/// played back face up (CR 712.11b, CR 712.12), and every transform toggles `transformed`
+/// (`swap_displayed_face`), so a modal card cast as its back face and then transformed —
+/// Valentin, Dean of the Vein cast as Lisette, Dean of the Root, then Moonmist ("Transform
+/// all Humans.", CR 712.9) — shows its front face with both set.
+pub(crate) fn face_up(obj: &GameObject) -> CopiedFaceUp {
+    match (obj.transformed, obj.modal_back_face) {
+        (false, false) | (true, true) => CopiedFaceUp::Front,
+        (true, false) => CopiedFaceUp::TransformedBack,
+        (false, true) => CopiedFaceUp::ModalBack,
+    }
+}
+
 /// CR 712.16 + CR 730.2j: True when `obj` is a double-faced permanent
-/// (transform/modal/meld DFC) or a melded permanent — none of which can be
-/// turned face down. Used by `effects::turn_face_down` to enforce the no-op,
-/// and by presentation adapters that need the engine's authoritative
-/// "is this permanent double-faced?" answer instead of re-deriving one.
+/// (transform/modal/meld DFC or a double-faced token) or a melded permanent —
+/// none of which can be turned face down. Used by `effects::turn_face_down` to
+/// enforce the no-op, by mass transform, and by presentation adapters that need
+/// the engine's authoritative "is this permanent double-faced?" answer instead
+/// of re-deriving one.
 ///
-/// Keys on the typed layout/merge discriminants rather than `back_face.is_some()`
-/// so that single-faced layouts that may legally be turned face down — Adventure,
-/// Omen, Split, Flip — are NOT blocked (they carry no Transform/Modal/Meld
-/// `layout_kind`). CR 710 flip cards in particular put their alternative half in
-/// the same `back_face` slot, so `back_face.is_some()` would report all 21 of
-/// them as double-faced. A DFC currently showing its back face is caught by the
-/// `transformed` flag, because the transform stash hard-codes `layout_kind: None`
-/// when the front face is stored in `back_face` during a transform.
+/// For an unmerged permanent it delegates to [`stored_double_face`], the one
+/// face identity copying and the transform stash share. That keys on what
+/// `back_face` holds rather than on `back_face.is_some()`, so single-faced
+/// layouts that may legally be turned face down — Adventure, Omen, Split, Flip,
+/// prepare — are NOT blocked: CR 710 flip cards in particular put their
+/// alternative half in the same `back_face` slot. A transform keeps the stored
+/// face's layout (`swap_object_faces`), so a double-faced permanent stays one on
+/// either face and after any number of transforms.
 pub fn is_double_faced_permanent(obj: &crate::game::game_object::GameObject) -> bool {
+    use crate::game::game_object::MergeKind;
     use crate::types::card::LayoutKind;
-    // CR 730.2j: a face-up melded permanent contains a double-faced component.
-    if obj.merge_kind == Some(crate::game::game_object::MergeKind::Meld) {
-        return true;
+    match obj.merge_kind {
+        // CR 730.2j: a face-up melded permanent contains a double-faced component.
+        Some(MergeKind::Meld) => true,
+        // CR 730.2j: a merged permanent keeps its own reading of a double-faced component.
+        Some(MergeKind::Mutate | MergeKind::Augment) => {
+            matches!(
+                obj.back_face.as_ref().and_then(|b| b.layout_kind),
+                Some(LayoutKind::Transform | LayoutKind::Modal | LayoutKind::Meld)
+            ) || obj.transformed
+        }
+        // CR 712.16 + CR 707.8a + CR 701.27a: the same face identity copying and the
+        // transform stash use, so a permanent stays double-faced on either face, after any
+        // number of transforms, and as a token copy.
+        None => stored_double_face(obj).is_some(),
     }
-    // CR 712.16: nonmodal/modal DFC and meld cards — the back face records the
-    // DFC layout.
-    if matches!(
-        obj.back_face.as_ref().and_then(|b| b.layout_kind),
-        Some(LayoutKind::Transform | LayoutKind::Modal | LayoutKind::Meld)
-    ) {
-        return true;
-    }
-    // CR 712.16: a DFC already showing its back face (its front face is snapshot
-    // into `back_face` with a zeroed `layout_kind`) is still a DFC.
-    obj.transformed
 }
 
 #[cfg(test)]
@@ -545,7 +565,7 @@ mod tests {
     /// (`snapshot_object_face`) and the stored front face is 3/4 with haste, so
     /// the restored front face is 3/4 with haste in both its live and base
     /// fields — every P/T and keyword assertion in (i) fails. Drop
-    /// `turn_to_other_face`'s `sync_missing_base_characteristics` call and (ii)
+    /// `swap_object_faces`'s `sync_missing_base_characteristics` call and (ii)
     /// stores no P/T and no card types.
     #[test]
     fn transform_stashes_copiable_values_not_layer_modified_ones() {
@@ -769,13 +789,22 @@ mod tests {
     /// Volcano Born, Bonecrusher Giant // Stomp, Dirgur Island Dragon // Skimming Strike and
     /// Adventurous Eater // Have a Bite; (h) a card manifested by Soul Summons; (i) Lae'zel,
     /// Githyanki Warrior after it specializes; (j) a token copy of Bottomless Pool // Locker Room
-    /// under a Layer-1 copy of a creature; (k) Gemrazer mutated onto Kessig Prowler. (g) is
-    /// synthetic: no production writer stores a `Single` layout.
+    /// under a Layer-1 copy of a creature; (k) Gemrazer mutated onto Kessig Prowler; (b2) Kessig
+    /// Prowler after "{4}{G}: Transform this creature." twice; (n) Cackling Counterpart copying
+    /// a Kessig Prowler that a copy effect made a copy of a Room. (g) is the stored face of
+    /// Bonecrusher Giant // Stomp while Stomp is on the stack
+    /// (`casting::swap_to_alternative_spell_face`). (m) is synthetic: production's
+    /// `flip::stash_flip_face` stamps `Flip` (CR 710.4); the nearest printed board is a flipped
+    /// Bushi Tenderfoot // Kenzo the Hardhearted.
     ///
     /// Revert-failing, one row per gate: drop the face-down gate ⇒ (h) is `Some`; the specialize
-    /// gate ⇒ (i); the Room gate ⇒ (j); the merged gate ⇒ (k)'s Mutate and Augment rows; the
-    /// `Single` gate ⇒ (g); replace `layout_is_single_faced_alternative` with `false` ⇒ every
-    /// (f) row. (b) and (e) are the positive reach for the no-layout arm.
+    /// gate ⇒ (i); the flipped gate ⇒ (m); the Room gate ⇒ (j); the Room gate's slot exception
+    /// ⇒ (n); the merged gate ⇒ (k)'s Mutate and Augment rows; the `Single` gate ⇒ (g); replace
+    /// `layout_is_single_faced_alternative` with `false` ⇒ every (f) row. (e) is the positive
+    /// reach for the no-layout arm; (b) and (b2) show a transform keeps the stored layout.
+    ///
+    /// Every unmerged row also checks that [`is_double_faced_permanent`] agrees, since it
+    /// delegates here; (k) keeps its merged reading and is excluded.
     #[test]
     fn stored_double_face_classifies_each_stored_face() {
         use crate::game::game_object::MergeKind;
@@ -818,7 +847,7 @@ mod tests {
             .layout_kind = Some(LayoutKind::Transform);
         rows.push(("(a) Transform, front face up".into(), prowler, true));
 
-        // (b) the same card after it transforms: its front face is stashed with no layout.
+        // (b) the same card after it transforms: its front face is stashed with its layout.
         let transformed = setup_dfc(&mut state);
         state
             .objects
@@ -834,14 +863,32 @@ mod tests {
                 .back_face
                 .as_ref()
                 .map(|face| face.layout_kind),
-            Some(None),
-            "(b) reach-guard: the transform stash has no layout"
+            Some(Some(LayoutKind::Transform)),
+            "(b) CR 701.27a: the transform stash keeps the face's layout"
         );
         rows.push((
-            "(b) transformed, stash with no layout".into(),
+            "(b) transformed, stash keeps its layout".into(),
             transformed,
             true,
         ));
+
+        // (b2) the same card transformed twice: front face up again, `transformed` false.
+        let round_trip = setup_dfc(&mut state);
+        state
+            .objects
+            .get_mut(&round_trip)
+            .unwrap()
+            .back_face
+            .as_mut()
+            .unwrap()
+            .layout_kind = Some(LayoutKind::Transform);
+        transform_permanent(&mut state, round_trip, &mut Vec::new()).unwrap();
+        transform_permanent(&mut state, round_trip, &mut Vec::new()).unwrap();
+        assert!(
+            !state.objects[&round_trip].transformed,
+            "(b2) reach-guard: two transforms leave the front face up"
+        );
+        rows.push(("(b2) transformed twice".into(), round_trip, true));
 
         // (c) a modal double-faced card; (d) a meld card that has not melded.
         let modal = with_face(&mut state, "Valentin", Some(LayoutKind::Modal));
@@ -911,6 +958,33 @@ mod tests {
             .specialized_color = Some(ManaColor::Red);
         rows.push(("(i) specialized".into(), specialized, false));
 
+        // (m) flipped: `back_face` is the flip stash (synthetic: no layout on the stash).
+        let flipped = with_face(&mut state, "Kenzo the Hardhearted", None);
+        state.objects.get_mut(&flipped).unwrap().flipped = true;
+        rows.push(("(m) flipped, stash with no layout".into(), flipped, false));
+
+        // (n) a double-faced copy token of a Room copy: printed Room type line, its other face
+        // in `back_face`, and the Room half beside it.
+        let room_faces = with_face(&mut state, "Bottomless Pool", Some(LayoutKind::Transform));
+        {
+            let obj = state.objects.get_mut(&room_faces).unwrap();
+            obj.is_token = true;
+            obj.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Enchantment],
+                subtypes: vec!["Room".to_string()],
+            };
+            obj.double_faced_token_alternative = Some(BackFaceData {
+                name: "Locker Room".to_string(),
+                ..Default::default()
+            });
+        }
+        rows.push((
+            "(n) double-faced Room copy token, half beside the face".into(),
+            room_faces,
+            true,
+        ));
+
         // (j) a Room-copy token: printed Room, stored half with no layout, and a live type
         // line without Room, as under a Layer-1 copy of a creature.
         let room_copy = with_face(&mut state, "Bottomless Pool", None);
@@ -970,6 +1044,22 @@ mod tests {
         assert!(
             mismatches.is_empty(),
             "stored_double_face misclassified: {mismatches:#?}"
+        );
+
+        // CR 712.16: `is_double_faced_permanent` delegates to `stored_double_face` for every
+        // unmerged permanent. (k) keeps its merged reading and is excluded.
+        let disagreements: Vec<&str> = rows
+            .iter()
+            .filter(|(_, id, _)| state.objects[id].merge_kind.is_none())
+            .filter(|(_, id, _)| {
+                let obj = &state.objects[id];
+                is_double_faced_permanent(obj) != stored_double_face(obj).is_some()
+            })
+            .map(|(row, _, _)| row.as_str())
+            .collect();
+        assert!(
+            disagreements.is_empty(),
+            "is_double_faced_permanent disagrees with stored_double_face: {disagreements:#?}"
         );
     }
 

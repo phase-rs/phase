@@ -391,13 +391,16 @@ fn handle_opponent_may_choice_inner(
             ability.set_scoped_player_recursive(promptee);
             ability.context.accepting_player = Some(promptee);
 
-            // CR 608.2d: a player cannot accept an exact resolution-time
-            // selection they cannot make. This query deliberately recognizes
-            // only counted `their graveyard` exile instructions; every
-            // adjacent optional effect stays on the established path below.
+            // CR 608.2d + CR 701.68b: a player cannot accept an exact
+            // resolution-time selection they cannot make (counted `their
+            // graveyard` exile), nor choose to blight while unable to put the
+            // counters on a creature they control. Both are judged for the
+            // bound accepting seat; the next seat is offered, or every seat
+            // has declined.
             if crate::game::effects::change_zone::exact_scoped_graveyard_exile_is_infeasible(
                 state, &ability,
             ) == Some(true)
+                || crate::game::effects::blight::optional_blight_is_infeasible(state, &ability)
             {
                 if let Some((&next, rest)) = remaining.split_first() {
                     state.waiting_for = WaitingFor::OpponentMayChoice {

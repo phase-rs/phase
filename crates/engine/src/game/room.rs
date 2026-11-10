@@ -140,7 +140,8 @@ pub(crate) fn door_text_functions(
 
 /// CR 709.5b + CR 707.2: the halves the object's OWN printed form provides, in
 /// printed order. Engine representation: the live face's identity sits in the
-/// `base_*` fields and the other printed half in the `back_face` slot;
+/// `base_*` fields and the other printed half in
+/// `printed_cards::stored_alternative_face`;
 /// `live_face_door` (the single orientation authority) maps the two slots back
 /// to printed order. Room-ness is the CALLER's gate — every consumer
 /// (`effective_room_halves` behind the handlers' live-type checks, and the
@@ -154,10 +155,11 @@ pub(crate) fn own_room_halves(
         name: obj.base_name.clone(),
         mana_cost: obj.base_mana_cost.clone(),
     };
-    let back = obj.back_face.as_ref().map(|back| RoomHalfIdentity {
-        name: back.name.clone(),
-        mana_cost: back.mana_cost.clone(),
-    });
+    let back =
+        crate::game::printed_cards::stored_alternative_face(obj).map(|back| RoomHalfIdentity {
+            name: back.name.clone(),
+            mana_cost: back.mana_cost.clone(),
+        });
     match live_face_door(obj) {
         RoomDoor::Left => RoomCopiableHalves {
             left: live,

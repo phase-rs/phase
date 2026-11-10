@@ -661,8 +661,7 @@ pub(crate) fn copiable_prepare_face(obj: &GameObject) -> Option<Arc<BackFaceData
     // The object's OWN stored face: an intrinsic snapshot stays independent of
     // Layer 1 (a copy effect folds over it in `compute_current_copiable_values`,
     // which replaces the whole value set including `prepare_face`).
-    obj.back_face
-        .as_ref()
+    stored_alternative_face(obj)
         .filter(|face| is_prepare_spell_face(face))
         .map(|face| Arc::new(face.clone()))
 }
@@ -683,9 +682,7 @@ pub(crate) fn effective_prepare_face(obj: &GameObject) -> Option<&BackFaceData> 
     if obj.layer1_copy_effect.is_some() {
         return obj.copied_prepare_face.as_deref();
     }
-    obj.back_face
-        .as_ref()
-        .filter(|face| is_prepare_spell_face(face))
+    stored_alternative_face(obj).filter(|face| is_prepare_spell_face(face))
 }
 
 /// CR 722.2b: the prepare spell a database card face's printed card carries —
@@ -993,22 +990,15 @@ pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableVa
         obj.mana_cost = halves.left.mana_cost.clone();
         obj.base_mana_cost = halves.left.mana_cost.clone();
         obj.modal_back_face = false;
-        obj.back_face = halves
-            .right
-            .as_ref()
-            .map(|right| crate::game::game_object::BackFaceData {
-                name: right.name.clone(),
-                mana_cost: right.mana_cost.clone(),
-                ..Default::default()
-            });
+        obj.back_face = stored_alternative_of_values(values);
     }
     // CR 722.2b + CR 707.2: a materialized copy of an object with a prepare
     // spell (a token copy, a conjured duplicate) has that prepare spell too, so
     // it can become prepared (CR 722.3a) and its CR 722.3c copy takes the
     // prepare spell's characteristics. Mutually exclusive with the Room branch
     // above: a Room is not a preparation card.
-    if let Some(prepare_face) = &values.prepare_face {
-        obj.back_face = Some(BackFaceData::clone(prepare_face));
+    if values.prepare_face.is_some() {
+        obj.back_face = stored_alternative_of_values(values);
     }
     // CR 707.9b: a folded name EXCEPTION is part of the materialized base —
     // the Step-1 seed restores the runtime marker from this every pass.
@@ -1016,6 +1006,28 @@ pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableVa
         == crate::types::ability::CopiedNameOrigin::Exception)
         .then_some(crate::types::ability::CopiedNameOrigin::Exception);
     obj.base_characteristics_initialized = true;
+}
+
+/// CR 709.5b + CR 722.2b: the alternative characteristics a materialized copy stores beside its
+/// face — a Room's other half (identity only: name and door cost; the halves' text rides in the
+/// door-stamped definitions) or a prepare spell. `None` for any other values.
+pub(crate) fn stored_alternative_of_values(values: &CopiableValues) -> Option<BackFaceData> {
+    if let Some(halves) = &values.room_halves {
+        return halves.right.as_ref().map(|right| BackFaceData {
+            name: right.name.clone(),
+            mana_cost: right.mana_cost.clone(),
+            ..Default::default()
+        });
+    }
+    values.prepare_face.as_deref().cloned()
+}
+
+/// CR 722.2b + CR 709.5b: where `obj` stores its own alternative characteristics: the
+/// double-faced copy slot when set, else `back_face`.
+pub(crate) fn stored_alternative_face(obj: &GameObject) -> Option<&BackFaceData> {
+    obj.double_faced_token_alternative
+        .as_ref()
+        .or(obj.back_face.as_ref())
 }
 
 pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
@@ -3291,6 +3303,86 @@ mod tests {
             &intrinsic_copiable_values(&creature_with_stored_face(None)),
         );
         assert_eq!(plain_copy.back_face, None);
+    }
+
+    /// A double-faced copy token: its other face in `back_face` (a Transform
+    /// layout) and `alternative` beside it in the double-faced copy slot.
+    fn double_faced_token_with(alternative: Option<BackFaceData>) -> GameObject {
+        let mut obj = creature_with_stored_face(Some(BackFaceData {
+            name: "Encouraging Aviator".to_string(),
+            layout_kind: Some(LayoutKind::Transform),
+            ..BackFaceData::default()
+        }));
+        obj.is_token = true;
+        obj.double_faced_token_alternative = alternative;
+        obj
+    }
+
+    /// CR 722.2b + CR 707.8a: a double-faced copy token whose copied values carry
+    /// a prepare spell keeps it in the double-faced copy slot, beside its other
+    /// face. Both prepare readers find it there, and a Layer-1 copy effect still
+    /// replaces it (CR 613.1a). Nearest printed board: Mirrorweave making Kessig
+    /// Prowler a copy of Encouraging Aviator, then Cackling Counterpart copying
+    /// the Prowler. The `None`-slot control is the board before this change: the
+    /// other face is no prepare spell.
+    #[test]
+    fn prepare_readers_find_a_double_faced_tokens_prepare_spell_beside_its_other_face() {
+        let jump = stored_instant_face(Some(LayoutKind::Prepare));
+        let token = double_faced_token_with(Some(jump.clone()));
+        assert_eq!(copiable_prepare_face(&token).as_deref(), Some(&jump));
+        assert_eq!(effective_prepare_face(&token), Some(&jump));
+        assert_eq!(
+            intrinsic_copiable_values(&token).prepare_face.as_deref(),
+            Some(&jump),
+            "CR 722.2b: the prepare spell stays a copiable value of the token"
+        );
+
+        // CR 613.1a: under a Layer-1 copy effect the copy's values decide.
+        let mut copied = double_faced_token_with(Some(jump.clone()));
+        copied.layer1_copy_effect = Some(crate::types::ability::CopyEffectInstanceRef {
+            continuous_effect_id: 1,
+            modification_index: 0,
+        });
+        assert_eq!(effective_prepare_face(&copied), None);
+
+        // Control: with no slot the other face is the only stored face, and it is
+        // not a prepare spell.
+        let plain = double_faced_token_with(None);
+        assert_eq!(copiable_prepare_face(&plain), None);
+        assert_eq!(effective_prepare_face(&plain), None);
+    }
+
+    /// CR 709.5b + CR 707.8a: a double-faced copy token whose copied values are a
+    /// Room's keeps the Room's other half in the double-faced copy slot, so its
+    /// own halves are the base (left) half and that slot's half, not its other
+    /// face. The `None`-slot control reads the other face, as before this change.
+    #[test]
+    fn own_room_halves_reads_a_double_faced_tokens_room_half_beside_its_other_face() {
+        let mut token = double_faced_token_with(Some(BackFaceData {
+            name: "Right".to_string(),
+            ..BackFaceData::default()
+        }));
+        token.base_name = "Left".to_string();
+        token.base_card_types = CardType {
+            core_types: vec![CoreType::Enchantment],
+            subtypes: vec!["Room".to_string()],
+            ..CardType::default()
+        };
+        let halves = crate::game::room::own_room_halves(&token);
+        assert_eq!(halves.left.name, "Left");
+        assert_eq!(
+            halves.right.map(|half| half.name),
+            Some("Right".to_string())
+        );
+
+        token.double_faced_token_alternative = None;
+        assert_eq!(
+            crate::game::room::own_room_halves(&token)
+                .right
+                .map(|half| half.name),
+            Some("Encouraging Aviator".to_string()),
+            "control: without the slot the stored face is read as the other half"
+        );
     }
 
     /// CR 722.2b + CR 707.2 + CR 613.1a: a Layer-1 copy carries the prepare

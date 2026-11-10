@@ -33,9 +33,11 @@ use engine::game::game_object::BackFaceData;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::game::transform::is_double_faced_permanent;
 use engine::game::zones::move_to_zone;
 use engine::types::ability::{ChosenAttribute, Effect, TargetFilter, TargetRef, TriggerDefinition};
 use engine::types::actions::GameAction;
+use engine::types::card::LayoutKind;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, GameState, ReplacementChoiceKind, WaitingFor};
@@ -77,6 +79,14 @@ const MYSTIC_REFLECTION: &str = "Mystic Reflection";
 const RAISE_THE_ALARM: &str = "Raise the Alarm";
 const DOUBLING_SEASON: &str = "Doubling Season";
 const BEARS: &str = "Grizzly Bears";
+const CYBER_CONVERSION: &str = "Cyber Conversion";
+const MOONMIST: &str = "Moonmist";
+const AVIATOR: &str = "Encouraging Aviator";
+const BONECRUSHER: &str = "Bonecrusher Giant";
+const STOMP: &str = "Stomp";
+const WAXING_MOON: &str = "Waxing Moon";
+const CONVERTER_BEAST: &str = "Converter Beast";
+const KARNS_TOUCH: &str = "Karn's Touch";
 
 const AUNTIE_ORACLE: &str = "Menace\nWhenever Grub attacks, you may blight 1. If you do, create a tapped and attacking token that's a copy of the blighted creature, except it has \"At the beginning of the end step, sacrifice this token.\"\nAt the beginning of your first main phase, you may pay {B}. If you do, transform Grub.";
 const NEXUS_ORACLE: &str = "At the beginning of combat on your turn, draw a card. Then you may exile an artifact or creature card from your hand. If you do, create a token that's a copy of the exiled card, except it's a 3/3 Golem artifact creature in addition to its other types.";
@@ -110,6 +120,16 @@ const MIRRORWEAVE_ORACLE: &str =
     "Each other creature becomes a copy of target nonlegendary creature until end of turn.";
 const MYSTIC_REFLECTION_ORACLE: &str = "Choose target nonlegendary creature. The next time one or more creatures or planeswalkers enter this turn, they enter as copies of the chosen creature.\nForetell {U} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)";
 const RAISE_THE_ALARM_ORACLE: &str = "Create two 1/1 white Soldier creature tokens.";
+const CYBER_CONVERSION_ORACLE: &str =
+    "Turn target creature face down. It's a 2/2 Cyberman artifact creature.";
+const MOONMIST_ORACLE: &str = "Transform all Humans. Prevent all combat damage that would be dealt this turn by creatures other than Werewolves and Wolves. (Only double-faced cards can be transformed.)";
+const AVIATOR_ORACLE: &str = "Flying\nWhenever this creature attacks, it becomes prepared. (While it's prepared, you may cast a copy of its spell. Doing so unprepares it.)";
+const BONECRUSHER_ORACLE: &str = "Whenever this creature becomes the target of a spell, this creature deals 2 damage to that spell's controller.";
+const WAXING_MOON_ORACLE: &str = "Transform up to one target Werewolf you control. Creatures you control gain trample until end of turn.";
+const CONVERTER_BEAST_ORACLE: &str = "When this creature enters, incubate 5. (Create an Incubator token with five +1/+1 counters on it and \"{2}: Transform this token.\" It transforms into a 0/0 Phyrexian artifact creature.)";
+const KARNS_TOUCH_ORACLE: &str = "Target noncreature artifact becomes an artifact creature with power and toughness each equal to its mana value until end of turn. (It retains its abilities.)";
+const STOMP_ORACLE: &str =
+    "Damage can't be prevented this turn. Stomp deals 2 damage to any target.";
 const DOUBLING_SEASON_ORACLE: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.\nIf an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.";
 
 /// A board at `phase`, with stocked libraries so a real draw step can't end the
@@ -1766,6 +1786,50 @@ fn stored_face(runner: &GameRunner, id: ObjectId) -> &BackFaceData {
         .expect("the other face is stored")
 }
 
+/// CR 708.2: Cyber Conversion turned `id` face down, with the characteristics
+/// the spell lists: a 2/2 Cyberman artifact creature.
+fn assert_cyber_converted(runner: &GameRunner, id: ObjectId) {
+    let obj = &runner.state().objects[&id];
+    assert!(
+        obj.face_down,
+        "reach-guard: Cyber Conversion turns a single-faced creature face down"
+    );
+    assert_eq!((obj.power, obj.toughness), (Some(2), Some(2)));
+    assert!(obj.card_types.core_types.contains(&CoreType::Artifact));
+    assert!(obj.card_types.core_types.contains(&CoreType::Creature));
+    assert!(obj.card_types.subtypes.iter().any(|s| s == "Cyberman"));
+}
+
+/// CR 712.16: "If a spell or ability tries to turn a double-faced permanent face
+/// down, nothing happens." `id` still shows `name`, is no Cyberman, and keeps
+/// the stored face it had before the spell.
+fn assert_not_turned_face_down(
+    runner: &GameRunner,
+    id: ObjectId,
+    name: &str,
+    stored_before: &BackFaceData,
+) {
+    let obj = &runner.state().objects[&id];
+    assert!(
+        !obj.face_down,
+        "CR 712.16: a double-faced permanent stays face up"
+    );
+    assert_eq!(obj.name, name);
+    assert!(
+        !obj.card_types.subtypes.iter().any(|s| s == "Cyberman"),
+        "CR 712.16: Cyber Conversion's characteristics never apply"
+    );
+    assert_eq!(
+        stored_face(runner, id),
+        stored_before,
+        "CR 712.16: the other face is kept"
+    );
+    assert!(
+        is_double_faced_permanent(obj),
+        "CR 712.16: it is a double-faced permanent"
+    );
+}
+
 /// CR 707.9a: whether `trigger` is the copy's "At the beginning of the end
 /// step, sacrifice this token."
 fn is_end_step_self_sacrifice(trigger: &TriggerDefinition) -> bool {
@@ -1865,24 +1929,31 @@ fn top_of_stack_from(runner: &GameRunner, source: ObjectId) -> ObjectId {
 }
 
 /// Grub, Notorious Auntie attacks with a Bear beside her, and her trigger asks
-/// whether to blight. P0 holds two Stifles, two Islands and a Swamp.
-fn auntie_about_to_blight() -> (GameRunner, ObjectId, ObjectId, [ObjectId; 2]) {
-    let (mut runner, grub, (bear, stifles)) = grub_board(Phase::BeginCombat, |scenario, db| {
-        assert_oracle(db, STIFLE, STIFLE_ORACLE);
-        let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
-        let stifles = [
-            scenario.add_real_card(P0, STIFLE, Zone::Hand, db),
-            scenario.add_real_card(P0, STIFLE, Zone::Hand, db),
-        ];
-        scenario.add_basic_land(P0, ManaColor::Blue);
-        scenario.add_basic_land(P0, ManaColor::Blue);
-        scenario.add_basic_land(P0, ManaColor::Black);
-        (bear, stifles)
-    });
+/// whether to blight. P0 holds two Stifles, two Cyber Conversions, two Islands
+/// and a Swamp.
+fn auntie_about_to_blight() -> (GameRunner, ObjectId, ObjectId, [ObjectId; 2], [ObjectId; 2]) {
+    let (mut runner, grub, (bear, stifles, conversions)) =
+        grub_board(Phase::BeginCombat, |scenario, db| {
+            assert_oracle(db, STIFLE, STIFLE_ORACLE);
+            assert_oracle(db, CYBER_CONVERSION, CYBER_CONVERSION_ORACLE);
+            let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+            let stifles = [
+                scenario.add_real_card(P0, STIFLE, Zone::Hand, db),
+                scenario.add_real_card(P0, STIFLE, Zone::Hand, db),
+            ];
+            let conversions = [
+                scenario.add_real_card(P0, CYBER_CONVERSION, Zone::Hand, db),
+                scenario.add_real_card(P0, CYBER_CONVERSION, Zone::Hand, db),
+            ];
+            scenario.add_basic_land(P0, ManaColor::Blue);
+            scenario.add_basic_land(P0, ManaColor::Blue);
+            scenario.add_basic_land(P0, ManaColor::Black);
+            (bear, stifles, conversions)
+        });
     flip(&mut runner, grub);
     attack_with(&mut runner, &[grub]);
     both_pass(&mut runner);
-    (runner, grub, bear, stifles)
+    (runner, grub, bear, stifles, conversions)
 }
 
 /// The maintainer's row. CR 707.8a: Grub's copy of herself is back face up with
@@ -1894,7 +1965,7 @@ fn auntie_about_to_blight() -> (GameRunner, ObjectId, ObjectId, [ObjectId; 2]) {
 /// the Matriarch is sacrificed at that turn's end step.
 #[test]
 fn grubs_copy_of_herself_transforms_into_the_matriarch() {
-    let (mut runner, grub, bear, stifles) = auntie_about_to_blight();
+    let (mut runner, grub, bear, stifles, conversions) = auntie_about_to_blight();
     blight(&mut runner, &[grub, bear], grub);
     assert_settled(&runner);
     settle(&mut runner);
@@ -1975,6 +2046,30 @@ fn grubs_copy_of_herself_transforms_into_the_matriarch() {
     both_pass(&mut runner);
     assert_eq!(runner.state().objects[&grub].zone, Zone::Hand);
 
+    // Cyber Conversion ("Turn target creature face down. It's a 2/2 Cyberman
+    // artifact creature."): the Bear turns face down, the token doesn't.
+    fund(&mut runner, ManaType::Blue, 4);
+    runner.cast(conversions[0]).target_object(bear).resolve();
+    settle(&mut runner);
+    assert_cyber_converted(&runner, bear);
+    let stored_before = stored_face(&runner, token).clone();
+    runner.cast(conversions[1]).target_object(token).resolve();
+    settle(&mut runner);
+    assert_not_turned_face_down(&runner, token, MATRIARCH, &stored_before);
+    assert_eq!(shown(&runner, token), face(MATRIARCH, 2, 1, false));
+    assert!(
+        !runner.state().objects[&token]
+            .card_types
+            .core_types
+            .contains(&CoreType::Artifact),
+        "CR 712.16: the token is not a Cyberman artifact"
+    );
+    assert_eq!(stored(&runner, token), face(AUNTIE, 2, 1, false));
+    assert!(
+        stored_sacrifices_itself(&runner, token),
+        "CR 712.16: the stored Auntie still has the sacrifice exception"
+    );
+
     // That turn's end step: the Matriarch is sacrificed.
     drive_to_end(&mut runner);
     top_of_stack_from(&runner, token);
@@ -1989,7 +2084,7 @@ fn grubs_copy_of_herself_transforms_into_the_matriarch() {
 /// birth did, and those are the faces CR 707.8a derives.
 #[test]
 fn a_replayed_double_faced_copy_has_the_same_faces() {
-    let (mut runner, grub, bear, _) = auntie_about_to_blight();
+    let (mut runner, grub, bear, _, _) = auntie_about_to_blight();
     decide(&mut runner, true);
     let mut replay = runner.state().clone();
     let journal_start = replay.resolved_rules_journal.entries().len();
@@ -2028,7 +2123,7 @@ fn a_replayed_double_faced_copy_has_the_same_faces() {
 /// A saved and reloaded game keeps the copy's faces and the face up.
 #[test]
 fn a_reloaded_double_faced_copy_keeps_its_faces() {
-    let (mut runner, grub, bear, _) = auntie_about_to_blight();
+    let (mut runner, grub, bear, _, _) = auntie_about_to_blight();
     blight(&mut runner, &[grub, bear], grub);
     let token = tokens(&runner)[0];
     let json = serde_json::to_string(runner.state()).expect("the game serializes");
@@ -2424,10 +2519,14 @@ fn a_round_tripped_donor_gives_a_double_faced_copy() {
     flip(&mut runner, grub);
     turn(&mut runner, prowler, PREDATOR);
     turn(&mut runner, prowler, PROWLER);
+    assert!(
+        stored_face(&runner, prowler).is_swap_snapshot,
+        "reach-guard: the stored face came from a transform"
+    );
     assert_eq!(
         stored_face(&runner, prowler).layout_kind,
-        None,
-        "reach-guard: the stored face came from a transform"
+        Some(LayoutKind::Transform),
+        "CR 701.27a: the stash keeps the face's layout"
     );
     attack_with(&mut runner, &[grub]);
     both_pass(&mut runner);
@@ -2653,4 +2752,368 @@ fn soul_separators_copy_of_sage_of_ancient_lore_stays_1_1_on_both_faces() {
         face(WEREWOLF_OF_ANCIENT_HUNGER, 1, 1, false)
     );
     assert!(!has_cda(&runner.state().objects[&token]));
+}
+
+/// CR 712.16: "If a spell or ability tries to turn a double-faced permanent face
+/// down, nothing happens." Kessig Prowler transforms by its own ability ("{4}{G}:
+/// Transform this creature.") into Sinuous Predator, and Waxing Moon ("Transform
+/// up to one target Werewolf you control. …") turns the Werewolf back, so it is
+/// front face up with `transformed` false. CR 701.27a: each transform keeps the
+/// stored face's layout, so Cyber Conversion still finds a double-faced
+/// permanent; Grizzly Bears beside it is the positive reach.
+#[test]
+fn a_double_faced_card_transformed_twice_cannot_be_turned_face_down() {
+    let (mut runner, (prowler, bears, moon, conversions)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            assert_oracle(db, PROWLER, PROWLER_ORACLE);
+            assert_oracle(db, PREDATOR, PREDATOR_ORACLE);
+            assert_oracle(db, WAXING_MOON, WAXING_MOON_ORACLE);
+            assert_oracle(db, CYBER_CONVERSION, CYBER_CONVERSION_ORACLE);
+            (
+                scenario.add_real_card(P0, PROWLER, Zone::Battlefield, db),
+                scenario.add_real_card(P0, BEARS, Zone::Battlefield, db),
+                scenario.add_real_card(P0, WAXING_MOON, Zone::Hand, db),
+                [
+                    scenario.add_real_card(P0, CYBER_CONVERSION, Zone::Hand, db),
+                    scenario.add_real_card(P0, CYBER_CONVERSION, Zone::Hand, db),
+                ],
+            )
+        });
+
+    fund(&mut runner, ManaType::Green, 5);
+    activate(&mut runner, prowler);
+    top_of_stack_from(&runner, prowler);
+    both_pass(&mut runner);
+    settle(&mut runner);
+    assert_eq!(runner.state().objects[&prowler].name, PREDATOR);
+    assert!(stored_face(&runner, prowler).is_swap_snapshot);
+    assert_eq!(
+        stored_face(&runner, prowler).layout_kind,
+        Some(LayoutKind::Transform),
+        "CR 701.27a: the stash keeps the face's layout"
+    );
+
+    fund(&mut runner, ManaType::Green, 2);
+    runner.cast(moon).target_object(prowler).resolve();
+    settle(&mut runner);
+    assert_eq!(runner.state().objects[&prowler].name, PROWLER);
+    assert!(
+        !runner.state().objects[&prowler].transformed,
+        "reach-guard: the round trip leaves the front face up"
+    );
+    assert!(stored_face(&runner, prowler).is_swap_snapshot);
+    assert_eq!(
+        stored_face(&runner, prowler).layout_kind,
+        Some(LayoutKind::Transform),
+        "CR 701.27a: the stash keeps the face's layout"
+    );
+
+    fund(&mut runner, ManaType::Blue, 4);
+    runner.cast(conversions[0]).target_object(bears).resolve();
+    settle(&mut runner);
+    assert_cyber_converted(&runner, bears);
+
+    let stored_before = stored_face(&runner, prowler).clone();
+    runner.cast(conversions[1]).target_object(prowler).resolve();
+    settle(&mut runner);
+    assert_not_turned_face_down(&runner, prowler, PROWLER, &stored_before);
+    assert!(
+        !runner.state().objects[&prowler]
+            .card_types
+            .core_types
+            .contains(&CoreType::Artifact),
+        "CR 712.16: the Prowler is not a Cyberman artifact"
+    );
+    assert_eq!(stored_face(&runner, prowler).name, PREDATOR);
+    assert_settled(&runner);
+}
+
+/// CR 712.11b: Valentin, Dean of the Vein cast as Lisette, Dean of the Root is
+/// transformed by Moonmist ("Transform all Humans. …"; Lisette is a Human Druid)
+/// and then returns to its owner's hand. CR 701.27a: the transform kept the
+/// stored face's modal layout, so the card in hand is still a modal
+/// double-faced card and can be cast as Lisette again.
+#[test]
+fn a_modal_card_moonmisted_and_returned_to_hand_can_be_cast_as_lisette() {
+    let (mut runner, (card, moonmist)) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, VALENTIN, VALENTIN_ORACLE);
+        assert_oracle(db, LISETTE, LISETTE_ORACLE);
+        assert_oracle(db, MOONMIST, MOONMIST_ORACLE);
+        (
+            scenario.add_real_card(P0, VALENTIN, Zone::Hand, db),
+            scenario.add_real_card(P0, MOONMIST, Zone::Hand, db),
+        )
+    });
+    cast_as_lisette(&mut runner, card);
+    fund(&mut runner, ManaType::Green, 2);
+    runner.cast(moonmist).resolve();
+    settle(&mut runner);
+    assert_eq!(
+        runner.state().objects[&card].name,
+        VALENTIN,
+        "reach-guard: Moonmist transformed Lisette"
+    );
+    assert_eq!(stored_face(&runner, card).name, LISETTE);
+    assert_eq!(
+        stored_face(&runner, card).layout_kind,
+        Some(LayoutKind::Modal),
+        "CR 701.27a: the stash keeps the face's layout"
+    );
+
+    put(&mut runner, card, Zone::Hand);
+    cast_as_lisette(&mut runner, card);
+}
+
+/// CR 715.3b + CR 715.2c + CR 712.1: while Bonecrusher Giant is on the stack as
+/// Stomp ("Damage can't be prevented this turn. Stomp deals 2 damage to any
+/// target."), the spell has only its Adventure characteristics and the card is
+/// one single-faced card, so the stored Bonecrusher Giant is not an other face
+/// of a double-faced card. The stack exit re-stamps the Adventure layout.
+#[test]
+fn stomp_on_the_stack_is_not_double_faced() {
+    let (mut runner, giant) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, BONECRUSHER, BONECRUSHER_ORACLE);
+        assert_oracle(db, STOMP, STOMP_ORACLE);
+        scenario.add_real_card(P0, BONECRUSHER, Zone::Hand, db)
+    });
+    fund(&mut runner, ManaType::Red, 2);
+    runner
+        .cast(giant)
+        .adventure_face(false)
+        .target_player(P1)
+        .commit();
+
+    let obj = &runner.state().objects[&giant];
+    assert_eq!(obj.name, STOMP);
+    assert_eq!(obj.zone, Zone::Stack);
+    assert_eq!(stored_face(&runner, giant).name, BONECRUSHER);
+    assert_eq!(
+        stored_face(&runner, giant).layout_kind,
+        Some(LayoutKind::Single),
+        "CR 715.3b: the stored normal face is marked single-faced while Stomp is on the stack"
+    );
+    assert!(
+        !is_double_faced_permanent(obj),
+        "CR 712.1 + CR 715.2c: an Adventure spell is one single-faced card"
+    );
+
+    both_pass(&mut runner);
+    assert_eq!(runner.state().players[1].life, 18, "Stomp resolved");
+    let obj = &runner.state().objects[&giant];
+    assert_eq!(obj.zone, Zone::Exile);
+    assert_eq!(obj.name, BONECRUSHER);
+    assert_eq!(stored_face(&runner, giant).name, STOMP);
+    assert_eq!(
+        stored_face(&runner, giant).layout_kind,
+        Some(LayoutKind::Adventure),
+        "the stack exit re-stamps the Adventure layout"
+    );
+    assert!(!is_double_faced_permanent(obj));
+    assert_settled(&runner);
+}
+
+/// CR 712.8d + CR 707.8a: Valentin, Dean of the Vein cast as Lisette, Dean of
+/// the Root and then transformed by Moonmist shows its front face with both
+/// orientation flags set. Cackling Counterpart's copy is a double-faced token
+/// front face up, with Lisette stored, and the legend rule applies (CR 704.5j).
+#[test]
+fn a_copy_of_lisette_moonmisted_into_valentin_is_double_faced_front_up() {
+    let (mut runner, (card, moonmist, cackling)) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, VALENTIN, VALENTIN_ORACLE);
+        assert_oracle(db, LISETTE, LISETTE_ORACLE);
+        assert_oracle(db, MOONMIST, MOONMIST_ORACLE);
+        assert_oracle(db, CACKLING, CACKLING_ORACLE);
+        (
+            scenario.add_real_card(P0, VALENTIN, Zone::Hand, db),
+            scenario.add_real_card(P0, MOONMIST, Zone::Hand, db),
+            scenario.add_real_card(P0, CACKLING, Zone::Hand, db),
+        )
+    });
+    cast_as_lisette(&mut runner, card);
+    fund(&mut runner, ManaType::Green, 2);
+    runner.cast(moonmist).resolve();
+    settle(&mut runner);
+    let obj = &runner.state().objects[&card];
+    assert_eq!(obj.name, VALENTIN);
+    assert!(
+        obj.transformed && obj.modal_back_face,
+        "reach-guard: the front face is up with both flags set"
+    );
+
+    fund(&mut runner, ManaType::Blue, 3);
+    runner.cast(cackling).target_object(card).commit();
+    both_pass(&mut runner);
+    settle(&mut runner);
+    let WaitingFor::ChooseLegend { candidates, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "CR 704.5j: two Valentins ask for the legend rule; got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let token = tokens(&runner)[0];
+    let mut candidates = candidates;
+    candidates.sort();
+    let mut expected = vec![card, token];
+    expected.sort();
+    assert_eq!(candidates, expected);
+
+    let obj = &runner.state().objects[&token];
+    assert_eq!(obj.name, VALENTIN);
+    assert!(
+        !obj.transformed && !obj.modal_back_face,
+        "CR 712.8d: the copy is front face up"
+    );
+    assert_eq!(stored_face(&runner, token).name, LISETTE);
+    assert_eq!(
+        stored_face(&runner, token).layout_kind,
+        Some(LayoutKind::Modal)
+    );
+    assert!(
+        is_double_faced_permanent(obj),
+        "CR 707.8a: a copy of a double-faced permanent is a double-faced token"
+    );
+
+    runner
+        .act(GameAction::ChooseLegend { keep: card })
+        .expect("keeping the original must succeed");
+    assert!(!runner.state().battlefield.contains(&token));
+    assert_eq!(runner.state().objects[&card].zone, Zone::Battlefield);
+}
+
+/// CR 707.8a + CR 722.2b: Mirrorweave ("Each other creature becomes a copy of
+/// target nonlegendary creature until end of turn.") makes Kessig Prowler a copy
+/// of Encouraging Aviator ("Flying / Whenever this creature attacks, it becomes
+/// prepared. …"), and Cackling Counterpart copies the Prowler. The token is a
+/// double-faced token with Encouraging Aviator on both faces (CR 707.8a "as
+/// modified by any other copy effects"), and it keeps Aviator's prepare spell,
+/// Jump, beside its other face: "The existence and values of these alternative
+/// characteristics are part of the object's copiable values." It transforms by
+/// itself, still an Aviator, and becomes prepared when it attacks (CR 722.3a),
+/// which exiles a prepared copy of Jump (CR 722.3c).
+#[test]
+fn a_copy_of_a_double_faced_card_copying_encouraging_aviator_keeps_both_faces_and_jump() {
+    let (mut runner, (prowler, aviator, weave, cackling)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            assert_oracle(db, PROWLER, PROWLER_ORACLE);
+            assert_oracle(db, AVIATOR, AVIATOR_ORACLE);
+            assert_oracle(db, MIRRORWEAVE, MIRRORWEAVE_ORACLE);
+            assert_oracle(db, CACKLING, CACKLING_ORACLE);
+            (
+                scenario.add_real_card(P0, PROWLER, Zone::Battlefield, db),
+                scenario.add_real_card(P0, AVIATOR, Zone::Battlefield, db),
+                scenario.add_real_card(P0, MIRRORWEAVE, Zone::Hand, db),
+                scenario.add_real_card(P0, CACKLING, Zone::Hand, db),
+            )
+        });
+    fund(&mut runner, ManaType::Blue, 7);
+    runner.cast(weave).target_object(aviator).resolve();
+    settle(&mut runner);
+    assert_eq!(runner.state().objects[&prowler].name, AVIATOR);
+    assert_eq!(stored_face(&runner, prowler).name, PREDATOR);
+
+    runner.cast(cackling).target_object(prowler).resolve();
+    settle(&mut runner);
+    let token = tokens(&runner)[0];
+    // (a) both faces are the copied Aviator.
+    assert_eq!(runner.state().objects[&token].name, AVIATOR);
+    assert_eq!(stored_face(&runner, token).name, AVIATOR);
+    assert_eq!(
+        stored_face(&runner, token).layout_kind,
+        Some(LayoutKind::Transform)
+    );
+    assert!(
+        is_double_faced_permanent(&runner.state().objects[&token]),
+        "CR 707.8a: a copy of a double-faced permanent is a double-faced token"
+    );
+
+    // (b) setup: the token's own transform still shows an Aviator.
+    turn(&mut runner, token, AVIATOR);
+    assert_eq!(stored_face(&runner, token).name, AVIATOR);
+
+    // (c) CR 722.3a: its prepare spell survived the copy and the transform.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&token)
+        .expect("the token exists")
+        .summoning_sick = false;
+    attack_with(&mut runner, &[token]);
+    both_pass(&mut runner);
+    assert!(
+        runner.state().objects[&token].prepared.is_some(),
+        "CR 722.3a: the attacking token becomes prepared"
+    );
+    // (d) CR 722.3c: the prepared copy of Jump waits in exile.
+    let state = runner.state();
+    assert!(
+        state.exile.iter().any(|id| {
+            state.objects[id].prepared_copy_source == Some(token)
+                && state.objects[id].name == "Jump"
+        }),
+        "CR 722.3c: a prepared copy of the token's prepare spell exists"
+    );
+}
+
+/// CR 111.10i + CR 712.16: "An Incubator token is a double-faced token", so it is
+/// a double-faced permanent with its front face up too, where its stored
+/// Phyrexian face has no layout and `transformed` is false. Converter Beast
+/// ("When this creature enters, incubate 5. …") makes one; Karn's Touch ("Target
+/// noncreature artifact becomes an artifact creature with power and toughness
+/// each equal to its mana value until end of turn. …") makes it a 5/5 creature;
+/// then Cyber Conversion does nothing to it. Converter Beast itself is the
+/// positive reach: Cyber Conversion turns it face down.
+#[test]
+fn an_animated_incubator_token_cannot_be_turned_face_down() {
+    let (mut runner, (beast, touch, conversions)) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, CONVERTER_BEAST, CONVERTER_BEAST_ORACLE);
+        assert_oracle(db, KARNS_TOUCH, KARNS_TOUCH_ORACLE);
+        assert_oracle(db, CYBER_CONVERSION, CYBER_CONVERSION_ORACLE);
+        (
+            scenario.add_real_card(P0, CONVERTER_BEAST, Zone::Hand, db),
+            scenario.add_real_card(P0, KARNS_TOUCH, Zone::Hand, db),
+            [
+                scenario.add_real_card(P0, CYBER_CONVERSION, Zone::Hand, db),
+                scenario.add_real_card(P0, CYBER_CONVERSION, Zone::Hand, db),
+            ],
+        )
+    });
+    fund(&mut runner, ManaType::Green, 4);
+    runner.cast(beast).resolve();
+    settle(&mut runner);
+    assert_eq!(runner.state().objects[&beast].zone, Zone::Battlefield);
+    let incubator = tokens(&runner)[0];
+    let name = runner.state().objects[&incubator].name.clone();
+    assert!(!runner.state().objects[&incubator].transformed);
+    assert_eq!(
+        (
+            stored_face(&runner, incubator).name.as_str(),
+            stored_face(&runner, incubator).layout_kind
+        ),
+        ("Phyrexian Token", None),
+        "reach-guard: the front-face-up Incubator stores its Phyrexian face with no layout"
+    );
+
+    fund(&mut runner, ManaType::Blue, 6);
+    runner.cast(touch).target_object(incubator).resolve();
+    settle(&mut runner);
+    assert!(
+        runner.state().objects[&incubator]
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature),
+        "reach-guard: Karn's Touch made the Incubator a creature Cyber Conversion can target"
+    );
+
+    runner.cast(conversions[0]).target_object(beast).resolve();
+    settle(&mut runner);
+    assert_cyber_converted(&runner, beast);
+
+    let stored_before = stored_face(&runner, incubator).clone();
+    runner
+        .cast(conversions[1])
+        .target_object(incubator)
+        .resolve();
+    settle(&mut runner);
+    assert_not_turned_face_down(&runner, incubator, &name, &stored_before);
+    assert_settled(&runner);
 }

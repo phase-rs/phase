@@ -42,10 +42,18 @@ fn blightable_creatures(
 
 /// CR 701.68b + CR 608.2d: a player unable to put the counters on a creature
 /// they control can't choose to blight, so the "you may" is an impossible option.
+/// Judged before the offer for the acting player, and for an any-player 'may'
+/// at acceptance for the accepting seat.
 pub(crate) fn optional_blight_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
     let Effect::BlightEffect { count, player } = &ability.effect else {
         return false;
     };
+    // CR 101.4 + CR 608.2c: an any-player "may" is the offered seat's choice, and that seat is
+    // bound only when it accepts (`handle_opponent_may_choice_inner`). Until then there is no
+    // blighting player, and `ScopedPlayer` would fall back to the controller.
+    if ability.optional_for.is_some() && ability.context.accepting_player.is_none() {
+        return false;
+    }
     crate::game::effects::resolve_player_for_context_ref(state, ability, player)
         .is_none_or(|player| blightable_creatures(state, player, *count).next().is_none())
 }
@@ -533,5 +541,209 @@ mod tests {
                 .contains_key(&CounterType::Minus1Minus1),
             "the controller's creature is untouched when the opponent blights"
         );
+    }
+
+    /// An any-player / any-opponent "may blight 1. If a player does, …" with
+    /// `ScopedPlayer` naming the blighter, plus its "if a player does" rider
+    /// giving the controller 1 life. Synthetic: no printed card has this
+    /// combination. The nearest printed seams are the same fan-out and
+    /// acceptance site — Carrion Wurm ("Whenever this creature attacks or
+    /// blocks, any player may exile three cards from their graveyard. If a
+    /// player does, this creature assigns no combat damage this turn.") and
+    /// Desecration Demon ("At the beginning of each combat, any opponent may
+    /// sacrifice a creature of their choice. If a player does, tap this
+    /// creature and put a +1/+1 counter on it.").
+    fn any_seat_blight(
+        source: ObjectId,
+        scope: crate::types::ability::OpponentMayScope,
+    ) -> ResolvedAbility {
+        use crate::types::ability::{AbilityCondition, EffectOutcomeSignal, QuantityExpr};
+
+        let mut rider = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        rider.condition = Some(AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        });
+        let mut ability = ResolvedAbility::new(
+            Effect::BlightEffect {
+                count: 1,
+                player: TargetFilter::ScopedPlayer,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.optional = true;
+        ability.optional_for = Some(scope);
+        ability.sub_ability = Some(Box::new(rider));
+        ability
+    }
+
+    fn noncreature_source(state: &mut GameState) -> ObjectId {
+        zones::create_object(
+            state,
+            CardId(50),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        )
+    }
+
+    fn accept(state: &mut GameState, seat: PlayerId) {
+        apply(
+            state,
+            seat,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("the offered seat accepts");
+    }
+
+    fn assert_offered(state: &GameState, seat: PlayerId, rest: &[PlayerId], why: &str) {
+        match &state.waiting_for {
+            WaitingFor::OpponentMayChoice {
+                player, remaining, ..
+            } => {
+                assert_eq!(*player, seat, "{why}");
+                assert_eq!(remaining.as_slice(), rest, "{why}");
+            }
+            other => panic!("{why}: expected OpponentMayChoice, got {other:?}"),
+        }
+    }
+
+    /// Completes the eligible seat's blight and its rider: the seat chooses its
+    /// only creature, which takes one -1/-1 counter, and the controller gains 1.
+    fn finish_blight_by(state: &mut GameState, seat: PlayerId, creature: ObjectId) {
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                effect_kind: EffectKind::BlightEffect,
+                ..
+            } => {
+                assert_eq!(*player, seat, "CR 701.68a: the accepting seat blights");
+                assert_eq!(cards, &[creature], "only that seat's creature is offered");
+            }
+            other => panic!("expected the blight choice, got {other:?}"),
+        }
+        apply(
+            state,
+            seat,
+            GameAction::SelectCards {
+                cards: vec![creature],
+            },
+        )
+        .expect("the blighting seat chooses its creature");
+        assert_eq!(
+            state.objects[&creature]
+                .counters
+                .get(&CounterType::Minus1Minus1)
+                .copied(),
+            Some(1)
+        );
+        assert_eq!(
+            state.players[0].life, 21,
+            "the \"if a player does\" rider runs once"
+        );
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.stack.is_empty());
+    }
+
+    /// CR 701.68b + CR 101.4 + CR 608.2c: an any-player "may blight" is judged
+    /// for the seat it is offered to, not for the controller. The controller
+    /// cannot blight (no creature) and is still offered first in APNAP order;
+    /// accepting skips them, and the opponent who can blight is offered next.
+    #[test]
+    fn an_any_player_blight_offers_each_seat_and_skips_one_that_cannot() {
+        use crate::types::ability::OpponentMayScope;
+
+        let mut state = GameState::new_two_player(7);
+        let source = noncreature_source(&mut state);
+        let theirs = make_creature(&mut state, 2, PlayerId(1));
+        let ability = any_seat_blight(source, OpponentMayScope::AnyPlayer);
+
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0)
+            .unwrap();
+        assert_offered(
+            &state,
+            PlayerId(0),
+            &[PlayerId(1)],
+            "no seat is bound yet, so the controller's empty board decides nothing",
+        );
+
+        accept(&mut state, PlayerId(0));
+        assert_offered(
+            &state,
+            PlayerId(1),
+            &[],
+            "CR 701.68b: the controller can't choose to blight, so the next seat is offered",
+        );
+        assert_eq!(state.players[0].life, 20, "no player has blighted yet");
+
+        accept(&mut state, PlayerId(1));
+        finish_blight_by(&mut state, PlayerId(1), theirs);
+    }
+
+    /// CR 701.68b: when no offered seat can blight, every acceptance is skipped
+    /// and the instruction resolves as declined by all, so the "if a player
+    /// does" rider never runs.
+    #[test]
+    fn an_any_player_blight_with_no_seat_able_to_blight_runs_no_rider() {
+        use crate::types::ability::OpponentMayScope;
+
+        let mut state = GameState::new_two_player(7);
+        let source = noncreature_source(&mut state);
+        let ability = any_seat_blight(source, OpponentMayScope::AnyPlayer);
+
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0)
+            .unwrap();
+        assert_offered(
+            &state,
+            PlayerId(0),
+            &[PlayerId(1)],
+            "both seats are offered before either is judged",
+        );
+
+        accept(&mut state, PlayerId(0));
+        assert_offered(&state, PlayerId(1), &[], "the controller can't blight");
+        accept(&mut state, PlayerId(1));
+
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.stack.is_empty());
+        assert_eq!(
+            state.players[0].life, 20,
+            "no player blighted, so the rider stays closed"
+        );
+    }
+
+    /// CR 701.68b + CR 101.4: an any-opponent "may blight" is offered to the
+    /// opponent even though the controller, who is never offered it, has no
+    /// creature.
+    #[test]
+    fn an_any_opponent_blight_is_judged_for_the_opponent() {
+        use crate::types::ability::OpponentMayScope;
+
+        let mut state = GameState::new_two_player(7);
+        let source = noncreature_source(&mut state);
+        let theirs = make_creature(&mut state, 2, PlayerId(1));
+        let ability = any_seat_blight(source, OpponentMayScope::AnyOpponent);
+
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0)
+            .unwrap();
+        assert_offered(
+            &state,
+            PlayerId(1),
+            &[],
+            "the opponent is offered; the controller's board is not the blighter's",
+        );
+
+        accept(&mut state, PlayerId(1));
+        finish_blight_by(&mut state, PlayerId(1), theirs);
     }
 }

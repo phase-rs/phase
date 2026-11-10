@@ -984,6 +984,18 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub back_face: Option<BackFaceData>,
 
+    /// CR 707.8a + CR 722.2b + CR 709.5b: the alternative characteristics a double-faced copy
+    /// token's copied values carry — a prepare spell, or a Room's other half — which every other
+    /// object keeps in `back_face`. A double-faced token's `back_face` holds its other face, so the
+    /// copy-token materializer stores them here. Both faces share them: no printed double-faced
+    /// card has a prepare spell or a Room half, so they reach a token only through values a copy
+    /// effect gave the copied object, and CR 707.8a gives each face those values "as modified by
+    /// any other copy effects that apply to that object". Written once at the token's birth.
+    /// Read through `printed_cards::stored_alternative_face`, and by
+    /// `transform::stored_double_face`'s Room gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub double_faced_token_alternative: Option<BackFaceData>,
+
     /// Digital-only Specialize: specialized faces keyed by added color pip.
     #[serde(
         default,
@@ -1905,6 +1917,10 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         // the §5.2c ADD set exists to catch.
         parse_warnings: _,
         back_face: _,
+        // OMITTED, SAFE BY WRITE SITE: written only at a double-faced copy token's birth
+        // (`materialize_token_copy_body`) and cleared by the prepared-copy strip; nothing
+        // mutates it while the object exists, so two compared states of one object agree on it.
+        double_faced_token_alternative: _,
         specialize_faces: _,
         specialized_color: _,
         base_power: _,
@@ -3248,6 +3264,7 @@ impl GameObject {
             spellbook: Vec::new(),
             parse_warnings: Vec::new(),
             back_face: None,
+            double_faced_token_alternative: None,
             specialize_faces: None,
             specialized_color: None,
             base_power: None,

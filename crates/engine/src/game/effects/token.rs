@@ -2089,12 +2089,10 @@ pub(crate) fn materialize_token_copy_body(
     // (CR 707.9a/b/d). The non-liminal seam folds its deferred stamps onto the
     // stored face itself, right after this call.
     if let Some(faces) = &copy.double_faced {
-        // CR 709.5b + CR 722.2b: the capture refuses values carrying a Room's other
-        // half or a preparation face, so the one `back_face` slot is free here.
-        debug_assert!(
-            copy.values.room_halves.is_none() && copy.values.prepare_face.is_none(),
-            "a double-faced copy's values carry no Room half or preparation face"
-        );
+        // CR 707.8a + CR 722.2b + CR 709.5b: the copied values' prepare spell or Room half is
+        // kept beside the other face, which takes `back_face`.
+        object.double_faced_token_alternative =
+            crate::game::printed_cards::stored_alternative_of_values(&values);
         let (stamped, all_creature_types): (&[ContinuousModification], &[String]) =
             match modifications {
                 ResolvedCopyBodyModifications::Folded {

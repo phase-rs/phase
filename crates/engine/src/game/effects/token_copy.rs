@@ -23,8 +23,7 @@ use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    CopiedDoubleFaces, CopiedFaceUp, CopyTokenSpec, EtbTapState, ProposedEvent,
-    TokenCharacteristics,
+    CopiedDoubleFaces, CopyTokenSpec, EtbTapState, ProposedEvent, TokenCharacteristics,
 };
 use crate::types::resolution::ChildStackDepth;
 use crate::types::resolved_commands::{
@@ -398,19 +397,25 @@ pub(crate) fn copy_source(
 /// CR 707.8a: the faces a token copy of `source` gets. `None` unless the copy
 /// source is a live double-faced permanent or double-faced card whose faces the
 /// token can carry; the token is then single-faced, with the copiable values of
-/// the face that's up (CR 707.8).
+/// the face that's up (CR 707.8). A departed donor read through last-known
+/// information also gives `None`, a known gap rather than the CR 707.8a answer.
 ///
 /// [`transform::stored_double_face`](crate::game::transform::stored_double_face)
 /// answers whether the donor is double-faced. The checks here are the copy's own:
 /// the donor must still be the object the copy read, a meld card's back face is
-/// not an other face a token can have, and the copied values must leave the
-/// token's one stored-face slot free.
+/// not an other face a token can have, and a copied prepare spell or Room half is
+/// stored beside the faces (`GameObject::double_faced_token_alternative`).
 pub(crate) fn copied_double_faces(
     state: &GameState,
     source: &CopySource,
 ) -> Option<CopiedDoubleFaces> {
-    // CR 400.7: the faces are read from the object the copy read its values
-    // from; a departed donor read through last-known information gives none.
+    // CR 400.7: the faces are read only from the object the copy read its values
+    // from, never from a later object under the same id. A departed donor read
+    // through last-known information therefore gives none, and its token is
+    // single-faced. That is a known gap, not the CR 707.8a answer, which would
+    // make that token double-faced too. Examples: Blade of Selves ("Equipped
+    // creature has myriad.") after the attacker has left; Saw in Half.
+    // Last-known information records no other face. The gap predates this change.
     let obj = state
         .objects
         .get(&source.incarnation.object_id)
@@ -429,24 +434,8 @@ pub(crate) fn copied_double_faces(
     if stored.layout_kind == Some(LayoutKind::Meld) {
         return None;
     }
-    // CR 709.5b + CR 722.2b: values copied from a Room or a preparation creature
-    // carry their alternative characteristics, which the token stores in the same
-    // slot an other face would take.
-    if source.values.room_halves.is_some() || source.values.prepare_face.is_some() {
-        return None;
-    }
     // CR 712.8d/e/f: the token is up on the face its source showed.
-    let up = match (obj.transformed, obj.modal_back_face) {
-        (false, false) => CopiedFaceUp::Front,
-        (true, false) => CopiedFaceUp::TransformedBack,
-        (false, true) => CopiedFaceUp::ModalBack,
-        // CR 701.27c + CR 707.8a: reachable when Valentin, Dean of the Vein is cast
-        // as Lisette, Dean of the Root and Moonmist ("Transform all Humans.")
-        // transforms her: `transform::swap_displayed_face` sets `transformed`
-        // without clearing `modal_back_face`, so the front face is up with both
-        // flags set. Refused, keeping the single-faced copy, rather than guessed.
-        (true, true) => return None,
-    };
+    let up = crate::game::transform::face_up(obj);
     let hidden = if obj.layer1_copy_effect.is_some() {
         // CR 707.8a + CR 613.2: each face is the copied object's face "as modified
         // by any other copy effects that apply to that object", so under a Layer-1
@@ -2496,6 +2485,7 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
+    use crate::types::proposed_event::CopiedFaceUp;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::resolution::{FrameKind, ResolutionStateWire};
     use crate::types::triggers::TriggerMode;
@@ -6662,7 +6652,7 @@ mod tests {
 
     /// CR 707.8a + CR 712.8d/e/f: the capture's up face follows the donor's
     /// flags, and its hidden face is the donor's stored face, whether that face
-    /// has a printed layout (Kessig Prowler) or came from a transform (no layout).
+    /// has a printed layout (Kessig Prowler) or none (an Incubator token's Phyrexian face, CR 111.10i).
     #[test]
     fn copied_double_faces_follows_the_up_face() {
         for layout in [Some(LayoutKind::Transform), None] {
@@ -6705,13 +6695,25 @@ mod tests {
     // The copy-only refusals. Each changes one thing on the donor of the positive
     // captures above, so each refusal is that one check's.
 
-    /// CR 400.7: a donor that has become a new object (last-known information). Nearest printed board: Saw in Half ("Destroy target creature. If that creature dies this way, its controller creates two tokens that are copies of that creature, …") destroying Kessig Prowler.
+    /// CR 400.7: the faces are read only from the object the copy read its values
+    /// from. The live object under the donor's id is a later object (its
+    /// incarnation moved on) with a different stored face, and the capture never
+    /// reads that face. This asserts the guard only: whether a departed donor's
+    /// token is single-faced is a known gap, not the CR 707.8a answer, and is not
+    /// asserted here. Nearest printed board: Saw in Half ("Destroy target
+    /// creature. If that creature dies this way, its controller creates two tokens
+    /// that are copies of that creature, …") destroying Kessig Prowler.
     #[test]
-    fn copied_double_faces_refuses_a_departed_donor() {
-        let faces = capture_after(Some(LayoutKind::Transform), |_, source| {
-            source.incarnation.incarnation += 1;
+    fn copied_double_faces_never_reads_a_later_object() {
+        let faces = capture_after(Some(LayoutKind::Transform), |obj, _| {
+            obj.incarnation += 1;
+            obj.back_face.as_mut().unwrap().name = "Later Face".to_string();
         });
-        assert!(faces.is_none());
+        assert_ne!(
+            faces.map(|faces| faces.hidden.name),
+            Some("Later Face".to_string()),
+            "CR 400.7: a later object under the same id never supplies the faces"
+        );
     }
 
     /// CR 712.4b: a melded permanent. Nearest printed board: Cackling Counterpart copying Brisela, Voice of Nightmares (Bruna, the Fading Light melded with Gisela, the Broken Blade).
@@ -6730,8 +6732,10 @@ mod tests {
     }
 
     /// CR 709.5b: values copied from a Room. Nearest printed board, by a read: Opalescence ("Each other non-Aura enchantment is a creature in addition to its other types …") animates Unholy Annex // Ritual Chamber, Mirrorweave targeting it makes Kessig Prowler a copy of the Room, and Cackling Counterpart copies the Prowler.
+    /// The token keeps both faces, and stores the Room half beside them
+    /// (`GameObject::double_faced_token_alternative`, CR 707.8a + CR 709.5b).
     #[test]
-    fn copied_double_faces_refuses_room_values() {
+    fn copied_double_faces_keeps_both_faces_beside_room_values() {
         let faces = capture_after(Some(LayoutKind::Transform), |_, source| {
             source.values.room_halves = Some(crate::types::ability::RoomCopiableHalves {
                 left: crate::types::ability::RoomHalfIdentity {
@@ -6740,33 +6744,45 @@ mod tests {
                 },
                 right: None,
             });
-        });
-        assert!(faces.is_none());
+        })
+        .expect("CR 707.8a: a double-faced donor copying a Room keeps both faces");
+        assert_eq!(faces.hidden.name, "Sinuous Predator");
     }
 
     /// CR 722.2b: values copied from a preparation creature. Nearest printed board: Mirrorweave targeting Encouraging Aviator ("Whenever this creature attacks, it becomes prepared. …") makes Kessig Prowler a copy of it, and Cackling Counterpart copies the Prowler.
+    /// The token keeps both faces, and stores the prepare spell beside them
+    /// (`GameObject::double_faced_token_alternative`, CR 707.8a + CR 722.2b).
     #[test]
-    fn copied_double_faces_refuses_preparation_values() {
+    fn copied_double_faces_keeps_both_faces_beside_preparation_values() {
         let faces = capture_after(Some(LayoutKind::Transform), |_, source| {
             source.values.prepare_face = Some(Arc::new(BackFaceData::default()));
-        });
-        assert!(faces.is_none());
+        })
+        .expect("CR 707.8a: a double-faced donor copying a preparation creature keeps both faces");
+        assert_eq!(faces.hidden.name, "Sinuous Predator");
     }
 
-    /// CR 701.27c: both back-face flags set (nearest printed board: Valentin,
-    /// Dean of the Vein cast as Lisette, Dean of the Root, then Moonmist).
+    /// CR 712.8d + CR 707.8a: both back-face flags set shows the front face
+    /// (nearest printed board: Valentin, Dean of the Vein cast as Lisette, Dean
+    /// of the Root, then Moonmist), so the copy is front face up with the
+    /// donor's stored face hidden.
     #[test]
-    fn copied_double_faces_refuses_both_back_face_flags() {
+    fn copied_double_faces_reads_the_front_face_up_under_both_flags() {
         let faces = capture_after(Some(LayoutKind::Modal), |obj, _| {
             obj.transformed = true;
             obj.modal_back_face = true;
-        });
-        assert!(faces.is_none());
+        })
+        .expect("a donor with both flags set has faces");
+        assert_eq!(faces.up, CopiedFaceUp::Front);
+        assert_eq!(faces.hidden.name, "Sinuous Predator");
     }
 
     /// CR 708.2: a face-down donor's `back_face` is its face-down stash, which
-    /// `transform::stored_double_face` refuses.
-    /// No double-faced card can be face down (CR 712.16), so the stub is synthetic; the nearest printed board is Cackling Counterpart copying a face-down Willbender (Morph {1}{U}, CR 702.37a), whose stash is its face-down one.
+    /// `transform::stored_double_face` refuses. A double-faced card can be face down: CR 712.15
+    /// covers one that enters the battlefield face down, as Soul Summons ("Manifest the top card
+    /// of your library.") can manifest Kessig Prowler; CR 712.16 stops only turning a double-faced
+    /// permanent face down. This stub is synthetic: it marks a Transform-layout face as the stash
+    /// where that printed board stores the manifested card's own face. Nearest printed board:
+    /// Cackling Counterpart copying a Kessig Prowler manifested by Soul Summons.
     #[test]
     fn copied_double_faces_refuses_a_face_down_donor() {
         let faces = capture_after(Some(LayoutKind::Transform), |obj, _| obj.face_down = true);
