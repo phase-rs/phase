@@ -6485,6 +6485,32 @@ where
     serde_json::from_value(raw).map_err(serde::de::Error::custom)
 }
 
+/// Legacy decode: a `DraftFromSpellbook` written before `selection` existed (or
+/// with `random: false`) was resolved by offering the whole spellbook.
+fn default_spellbook_selection_legacy_whole_book() -> SpellbookSelection {
+    SpellbookSelection::Chosen
+}
+
+/// Compatibility deserializer for `selection`, which replaced `random: bool`.
+/// Paired with `#[serde(alias = "random")]`: a legacy bool maps `true` →
+/// `Random`, `false` → `Chosen` (what base executed); the current
+/// representation decodes as the enum. Both keys at once is a serde
+/// duplicate-field error. Only `selection` is ever written.
+fn deserialize_spellbook_selection_compat<'de, D>(d: D) -> Result<SpellbookSelection, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = serde_json::Value::deserialize(d)?;
+    if let serde_json::Value::Bool(random) = raw {
+        return Ok(if random {
+            SpellbookSelection::Random
+        } else {
+            SpellbookSelection::Chosen
+        });
+    }
+    serde_json::from_value(raw).map_err(serde::de::Error::custom)
+}
+
 /// CR 608.2n: Compatibility deserializer for the `graveyard_replacement` field
 /// that replaced the former `exile_instead_of_graveyard_on_resolve: bool` on
 /// `CastingPermission::ExileWithAltCost`. Accepts both the current
@@ -10821,6 +10847,7 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
             destination: _,
             target,
             owner_library: _,
+            library_shuffle: _,
             enter_transformed: _,
             enters_under: _,
             enter_tapped: _,
@@ -20600,21 +20627,21 @@ impl LibraryPosition {
     }
 }
 
-/// CR 701.24a + CR 701.24d: Whether a mass move into a library is the move
+/// CR 701.24a + CR 701.24d: Whether a move into a library is the move
 /// component of one parser-emitted “shuffle this set into that library” action.
-/// Ordinary mass moves retain the zone pipeline's per-object library behavior;
+/// Ordinary moves retain the zone pipeline's per-object library behavior;
 /// `TerminalShuffle` reserves the single shuffle for the chained `Shuffle`
 /// instruction after every member has moved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "type")]
-pub enum MassLibraryShuffleMode {
+pub enum LibraryShuffleMode {
     #[default]
     PerObject,
     TerminalShuffle,
 }
 
-fn is_default_mass_library_shuffle_mode(mode: &MassLibraryShuffleMode) -> bool {
-    matches!(mode, MassLibraryShuffleMode::PerObject)
+fn is_default_library_shuffle_mode(mode: &LibraryShuffleMode) -> bool {
+    matches!(mode, LibraryShuffleMode::PerObject)
 }
 
 /// CR 701.20a + CR 608.2c: How the *set* of matching cards found by an
@@ -20808,6 +20835,21 @@ pub enum ConjureSource {
     /// referenced card's copiable characteristics (CR 707.2), resolved at
     /// resolution time from the ability's target / anaphoric reference.
     Duplicate { duplicate_of: TargetFilter },
+}
+
+/// Digital-only Alchemy (no CR entry): how `Effect::DraftFromSpellbook` picks
+/// the card it conjures from the source card's spellbook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpellbookSelection {
+    /// "draft a card from X's spellbook": the game offers a random sample of
+    /// distinct spellbook entries and the controller chooses one of them.
+    Draft,
+    /// "conjure a card of your choice from X's spellbook": the controller
+    /// chooses from the whole spellbook.
+    Chosen,
+    /// "conjure a random card from X's spellbook": one entry is picked at
+    /// random, with no prompt.
+    Random,
 }
 
 impl ConjureCard {
@@ -22461,6 +22503,11 @@ pub enum Effect {
         /// (not controller's). Used for "shuffle into its owner's library".
         #[serde(default)]
         owner_library: bool,
+        /// CR 701.24a + CR 701.24d: `TerminalShuffle` marks the move component
+        /// of a parser-emitted "shuffle [set] into [library]" operation. Its
+        /// chained `Shuffle` owns the one library randomization.
+        #[serde(default, skip_serializing_if = "is_default_library_shuffle_mode")]
+        library_shuffle: LibraryShuffleMode,
         /// CR 712.2: When true, the object enters the battlefield showing its back face.
         #[serde(default)]
         enter_transformed: bool,
@@ -22556,8 +22603,8 @@ pub enum Effect {
         /// CR 701.24a + CR 701.24d: `TerminalShuffle` marks the mass-move
         /// component of a parser-emitted "shuffle [set] into [library]"
         /// operation. Its chained `Shuffle` owns the one library randomization.
-        #[serde(default, skip_serializing_if = "is_default_mass_library_shuffle_mode")]
-        library_shuffle: MassLibraryShuffleMode,
+        #[serde(default, skip_serializing_if = "is_default_library_shuffle_mode")]
+        library_shuffle: LibraryShuffleMode,
         /// CR 401.4: When `true`, the objects are placed in a random order
         /// (e.g. Endurance). When `false`, the owner chooses the order per
         /// CR 401.4's default rule. Independent of `library_position`.
@@ -25904,20 +25951,34 @@ pub enum Effect {
         #[serde(default = "default_quantity_one")]
         amount: QuantityExpr,
     },
-    /// Digital-only Alchemy keyword action (no CR entry): "draft a card from
-    /// [this card]'s spellbook" — reveal the source card's fixed spellbook list,
-    /// the controller chooses one card name from it, and that card is conjured
-    /// into `destination` (mirrors `Conjure`, but the controller picks one entry
-    /// from a per-card list). The list is not in the Oracle text; it is carried
-    /// on the source object (`GameObject::spellbook`, from
-    /// `CardFace::metadata.spellbook`), so the resolver reads it from the source.
-    /// An empty list resolves as a no-op.
+    /// Digital-only Alchemy keyword action (no CR entry): take one card from the
+    /// source card's fixed spellbook list and conjure it into `destination`
+    /// (mirrors `Conjure`, but the card comes from a per-card list). `selection`
+    /// is how the card is picked: a draft offers a random sample of distinct
+    /// entries and the controller chooses one; "a card of your choice" offers the
+    /// whole book; "a random card" picks one with no prompt. The list is not in
+    /// the Oracle text; it is carried on the source object
+    /// (`GameObject::spellbook`, from `CardFace::metadata.spellbook`), so the
+    /// resolver reads it from the source. An empty list resolves as a no-op.
+    ///
+    /// For `SpellbookSelection::Draft`, `destination` is `Hand`, except the
+    /// deferred " and put it onto the battlefield[ tapped]" rider, which keeps
+    /// `Battlefield`. The exile riders (" and exile it", ", then exile it") are a
+    /// following `Effect::ChangeZone` of the drafted card, not a destination.
     DraftFromSpellbook {
         destination: Zone,
         #[serde(default)]
         tapped: bool,
-        #[serde(default)]
-        random: bool,
+        /// How the card is picked from the spellbook. Decodes the legacy
+        /// `random: bool` key (`true` → `Random`; `false` or absent → `Chosen`,
+        /// the whole-book choice base executed) through
+        /// `deserialize_spellbook_selection_compat`; only `selection` is written.
+        #[serde(
+            default = "default_spellbook_selection_legacy_whole_book",
+            alias = "random",
+            deserialize_with = "deserialize_spellbook_selection_compat"
+        )]
+        selection: SpellbookSelection,
     },
     /// CR 701.55 + CR 608.2d: Inline "[player] chooses/faces [effect A] or
     /// [effect B]" — the configured chooser scope chooses at resolution which
@@ -48180,6 +48241,7 @@ mod tests {
     #[test]
     fn change_zone_owner_library_serde_roundtrip() {
         let effect = Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Battlefield),
             destination: Zone::Library,
             target: TargetFilter::Any,
@@ -48636,6 +48698,7 @@ mod tests {
     /// Helper: build a minimal `Effect::ChangeZone` with `enters_under` set.
     fn change_zone_with_enters_under(enters_under: Option<ControllerRef>) -> Effect {
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,
             target: TargetFilter::Any,
@@ -50284,7 +50347,7 @@ mod static_condition_traversal_tests {
         else {
             panic!("expected ChangeZoneAll");
         };
-        assert_eq!(library_shuffle, MassLibraryShuffleMode::PerObject);
+        assert_eq!(library_shuffle, LibraryShuffleMode::PerObject);
         let legacy_json = serde_json::to_value(Effect::ChangeZoneAll {
             origin: None,
             destination: Zone::Library,
@@ -50295,7 +50358,7 @@ mod static_condition_traversal_tests {
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
-            library_shuffle: MassLibraryShuffleMode::PerObject,
+            library_shuffle: LibraryShuffleMode::PerObject,
             random_order: false,
         })
         .expect("default mode serializes");
@@ -50314,7 +50377,7 @@ mod static_condition_traversal_tests {
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
-            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
             random_order: false,
         };
         let terminal_json = serde_json::to_value(&terminal).expect("terminal mode serializes");
@@ -50679,7 +50742,7 @@ mod created_referent_classification_tests {
                 "destination": "Battlefield"
             })),
             effect(
-                json!({ "type": "DraftFromSpellbook", "destination": "Battlefield", "random": true }),
+                json!({ "type": "DraftFromSpellbook", "destination": "Battlefield", "selection": "Random" }),
             ),
             effect(json!({
                 "type": "CopyTokenBlockingAttacker",
@@ -50922,5 +50985,105 @@ mod created_referent_classification_tests {
             serde_json::from_value(serde_json::json!({"target": {"type": "Any"}, "count": 2}))
                 .expect("legacy decode");
         assert_eq!(legacy.requirement, SacrificeRequirement::Count { count: 2 });
+    }
+}
+
+#[cfg(test)]
+mod spellbook_selection_serde_tests {
+    //! `Effect::DraftFromSpellbook.selection` replaced `random: bool`. Persisted
+    //! payloads (server sessions, P2P backups, client saves, card data) written
+    //! before the change must keep decoding to the selection base executed.
+    use super::*;
+    use serde_json::json;
+
+    fn decode(value: serde_json::Value) -> Result<Effect, serde_json::Error> {
+        serde_json::from_value(value)
+    }
+
+    fn selection_of(value: serde_json::Value) -> SpellbookSelection {
+        match decode(value.clone()).unwrap_or_else(|err| panic!("{value} must load: {err}")) {
+            Effect::DraftFromSpellbook { selection, .. } => selection,
+            other => panic!("{value} decoded to {other:?}"),
+        }
+    }
+
+    /// Legacy `random: true` was the random pick; `random: false` and an absent
+    /// key were resolved as a whole-book choice, so both decode to `Chosen`.
+    #[test]
+    fn legacy_random_key_decodes_to_the_selection_base_executed() {
+        assert_eq!(
+            selection_of(
+                json!({ "type": "DraftFromSpellbook", "destination": "Hand", "random": true })
+            ),
+            SpellbookSelection::Random,
+            "legacy random: true"
+        );
+        assert_eq!(
+            selection_of(
+                json!({ "type": "DraftFromSpellbook", "destination": "Hand", "random": false })
+            ),
+            SpellbookSelection::Chosen,
+            "legacy random: false"
+        );
+        assert_eq!(
+            selection_of(json!({ "type": "DraftFromSpellbook", "destination": "Hand" })),
+            SpellbookSelection::Chosen,
+            "neither key present"
+        );
+    }
+
+    #[test]
+    fn selection_key_decodes_every_variant_and_round_trips() {
+        for (wire, variant) in [
+            ("Draft", SpellbookSelection::Draft),
+            ("Chosen", SpellbookSelection::Chosen),
+            ("Random", SpellbookSelection::Random),
+        ] {
+            let payload =
+                json!({ "type": "DraftFromSpellbook", "destination": "Hand", "selection": wire });
+            assert_eq!(selection_of(payload.clone()), variant, "selection {wire}");
+            let effect = decode(payload).expect("modern payload loads");
+            let reencoded = serde_json::to_value(&effect).expect("effect serializes");
+            assert_eq!(
+                decode(reencoded).expect("re-encoded payload loads"),
+                effect,
+                "selection {wire} round-trips"
+            );
+        }
+    }
+
+    /// Serialization always writes `selection`; the legacy key survives as a
+    /// read-side alias only.
+    #[test]
+    fn serialization_emits_only_the_selection_key() {
+        let effect =
+            decode(json!({ "type": "DraftFromSpellbook", "destination": "Hand", "random": true }))
+                .expect("legacy payload loads");
+        let json = serde_json::to_string(&effect).expect("effect serializes");
+        assert!(
+            json.contains("\"selection\":\"Random\""),
+            "the selection key must be written: {json}"
+        );
+        assert!(
+            !json.contains("\"random\""),
+            "the legacy key must never be written back out: {json}"
+        );
+    }
+
+    /// Both spellings name ONE field, so carrying both is a duplicate, not a
+    /// silent last-one-wins.
+    #[test]
+    fn both_keys_at_once_is_a_duplicate_field_error() {
+        let err = decode(json!({
+            "type": "DraftFromSpellbook",
+            "destination": "Hand",
+            "random": true,
+            "selection": "Draft"
+        }))
+        .expect_err("a payload carrying both spellings must be rejected");
+        assert!(
+            err.to_string().contains("duplicate field"),
+            "expected a duplicate-field error, got {err}"
+        );
     }
 }

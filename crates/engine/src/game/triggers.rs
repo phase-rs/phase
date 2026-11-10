@@ -31444,6 +31444,7 @@ pub mod tests {
                         AbilityDefinition::new(
                             AbilityKind::Database,
                             Effect::ChangeZone {
+                                library_shuffle: Default::default(),
                                 origin: Some(Zone::Battlefield),
                                 destination: Zone::Exile,
                                 target: TargetFilter::Typed(
@@ -32061,6 +32062,7 @@ pub mod tests {
             let mut execute = AbilityDefinition::new(
                 AbilityKind::Database,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::Typed(TypedFilter {
@@ -32251,6 +32253,7 @@ pub mod tests {
         let mut execute = AbilityDefinition::new(
             AbilityKind::Database,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(TypedFilter {
@@ -32457,6 +32460,7 @@ pub mod tests {
             let mut execute = AbilityDefinition::new(
                 AbilityKind::Database,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::Typed(TypedFilter {
@@ -32577,6 +32581,7 @@ pub mod tests {
                         AbilityDefinition::new(
                             AbilityKind::Database,
                             Effect::ChangeZone {
+                                library_shuffle: Default::default(),
                                 origin: Some(Zone::Battlefield),
                                 destination: Zone::Exile,
                                 target: TargetFilter::Typed(
@@ -32654,6 +32659,7 @@ pub mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: Some(Zone::Battlefield),
                             destination: Zone::Exile,
                             target: TargetFilter::Typed(
@@ -32715,6 +32721,7 @@ pub mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Typed(
@@ -32905,6 +32912,7 @@ pub mod tests {
             trigger.execute = Some(Box::new(crate::types::ability::AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Battlefield,
                     target: TargetFilter::SelfRef,
@@ -33065,6 +33073,7 @@ pub mod tests {
             trigger.execute = Some(Box::new(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Battlefield,
                     target: TargetFilter::SelfRef,
@@ -33350,6 +33359,7 @@ pub mod tests {
                             AbilityDefinition::new(
                                 AbilityKind::Spell,
                                 Effect::ChangeZone {
+                                    library_shuffle: Default::default(),
                                     origin: None,
                                     destination: Zone::Exile,
                                     target: TargetFilter::Any,
@@ -37356,6 +37366,7 @@ pub mod tests {
         // CR 115.1: "Put a land from your hand" doesn't target — selection at resolution.
 
         let effect = Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Hand),
             destination: Zone::Battlefield,
             target: TargetFilter::Typed(
@@ -37386,6 +37397,7 @@ pub mod tests {
         // "Exile target creature" should still extract the target filter
 
         let effect = Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Exile,
             target: TargetFilter::Typed(TypedFilter::creature()),
@@ -51525,6 +51537,7 @@ pub mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Any,
@@ -52853,6 +52866,7 @@ pub mod tests {
             LogicalZoneProductionCarrier::ChangeZone => {
                 let ability = ResolvedAbility::new(
                     Effect::ChangeZone {
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination,
                         target: TargetFilter::Any,
@@ -52937,6 +52951,7 @@ pub mod tests {
                         .execute(AbilityDefinition::new(
                             AbilityKind::Database,
                             Effect::ChangeZone {
+                                library_shuffle: Default::default(),
                                 origin: None,
                                 destination: redirected_destination,
                                 target: TargetFilter::SelfRef,
@@ -55684,6 +55699,7 @@ pub mod tests {
                         .execute(AbilityDefinition::new(
                             AbilityKind::Database,
                             Effect::ChangeZone {
+                                library_shuffle: Default::default(),
                                 origin: None,
                                 destination: Zone::Exile,
                                 target: TargetFilter::SelfRef,
@@ -55924,6 +55940,7 @@ pub mod tests {
                 ],
             };
             let execute_effect = Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter {
@@ -56053,6 +56070,7 @@ pub mod tests {
                 ],
             };
             let execute_effect = Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter {

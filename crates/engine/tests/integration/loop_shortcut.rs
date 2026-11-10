@@ -971,6 +971,94 @@ fn interactive_3p_optional_cascade_apnap_accept_win() {
     );
 }
 
+/// #10464: validating a responder's `Accept` must not TAKE the shortcut.
+///
+/// The last responder's `Accept` is the answer that materializes the whole take, so
+/// `SimulationFilter` used to answer "is this legal?" by cloning the state and applying it: the
+/// take ran once for the verdict and again for the real answer, holding the game lock for about
+/// two takes. This row measures the take drive itself (`take_cost_snapshot`), never a wall clock,
+/// and it measures it at the public `legal_actions` boundary — the call the server session makes
+/// after every action.
+///
+/// **Fixture pin:** P1 accepts first, so the window measured is P2's with `remaining_players`
+/// empty — the seat whose `Accept` is the materializing one (CR 732.2c: the shortcut is taken once
+/// the last player has answered). On a window that still has a queued
+/// responder an `Accept` merely advances the poll, which is why the shorter window would pass
+/// vacuously. The enumeration reach guard (`exactly one RespondToShortcut`) is what keeps the
+/// zero counters from being satisfied by an empty action list.
+#[test]
+fn shortcut_accept_validation_does_not_take_the_shortcut() {
+    // This measures the generic shortcut protocol using the existing composed synthetic loop.
+    // Nearest printed anchors: Marauding Blight-Priest and Exquisite Blood; the fixture's
+    // fixed-one Test Blood Sipper is not Exquisite Blood's variable-amount printed ability.
+    let (mut runner, kickoff) = setup_3p_optional_cascade(LoopDetectionMode::Interactive);
+    let _ = runner.cast(kickoff).resolve();
+    let (_events, wf) = drive_collect(&mut runner, 500);
+    assert!(
+        matches!(wf, WaitingFor::LoopShortcut { .. }),
+        "REACH-GUARD: the offer must fire, got {wf:?}"
+    );
+    runner
+        .act(GameAction::DeclareShortcut {
+            count: offered(runner.state()).1,
+            template: None,
+        })
+        .expect("P0 declares the shortcut");
+    runner
+        .act(GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        })
+        .expect("P1 accepts");
+
+    let WaitingFor::RespondToShortcut {
+        player,
+        remaining_players,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "REACH-GUARD: P2 must be prompted, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P2, "APNAP: the last responder is P2");
+    assert!(
+        remaining_players.is_empty(),
+        "REACH-GUARD: this row needs the seat whose Accept MATERIALIZES the take"
+    );
+
+    let before = take_cost_snapshot();
+    let validation_before = engine::game::perf_counters::snapshot().raw_validation_state_clones;
+    let actions = engine::ai_support::legal_actions(runner.state());
+    let during = take_cost_snapshot().since(before);
+    let validation_clones =
+        engine::game::perf_counters::snapshot().raw_validation_state_clones - validation_before;
+
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept
+            }]
+        ),
+        "REACH-GUARD: the window enumerates exactly the materializing Accept, got {actions:?} — \
+         a Shorten at place 0 takes nothing, so the take counters below would not be measuring \
+         the take this row exists to remove"
+    );
+    assert_eq!(
+        validation_clones, 0,
+        "deciding whether the Accept is legal must not reach the clone-and-apply probe"
+    );
+    // MEASURED, same fixture, same window: base `bf584d6bd` answers this call with
+    // `validation_clones=1, state_copies=50`; head with `0` and `1`. The copies above the one the
+    // candidate probe makes are the simulated Accept driving the shortcut — `GameState::clone`
+    // accounts every copy, so the take's snapshots land in this counter.
+    assert_eq!(
+        during.state_copies, 1,
+        "one copy, the candidate probe's; the legality verdict must not add a take's snapshot"
+    );
+}
+
 /// CR 732.2a: a shortcut belongs to the player with priority, not necessarily the player whose loop
 /// it is. On P1's turn P1 casts Soothing Balm on P0, who holds Marauding Blight-Priest and
 /// Exquisite Blood: the gain (CR 119.9 + CR 603.2c) starts the drain, and every repetition costs
@@ -8310,6 +8398,13 @@ fn a_shorten_by_a_seat_with_no_other_choice_at_its_place_is_refused() {
         shorten_refusal(&state, &proposal, P1, 1),
         Some(ShortenRefusal::NoDifferentChoice)
     );
+    let shorten_at_one = GameAction::RespondToShortcut {
+        response: ShortcutResponse::Shorten { at_iteration: 1 },
+    };
+    assert!(
+        !engine::ai_support::structurally_valid_prompt_answer(&state, &shorten_at_one),
+        "the AI legality hatch refuses the place the reducer refuses"
+    );
     let refused = apply(
         &mut state,
         P1,
@@ -8343,6 +8438,10 @@ fn a_shorten_by_a_seat_with_no_other_choice_at_its_place_is_refused() {
         panic!("the declaration opens a responder window on the Relic board");
     };
     assert_eq!(shorten_refusal(&relic_board, &proposal, P1, 1), None);
+    assert!(
+        engine::ai_support::structurally_valid_prompt_answer(&relic_board, &shorten_at_one),
+        "the AI legality hatch admits the place the reducer admits"
+    );
 }
 
 /// CR 732.2b: the published shortening range is a superset of the places `apply()` admits, so a

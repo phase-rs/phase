@@ -354,10 +354,11 @@ pub(crate) fn structurally_valid_named_choice_answer(
     }
 }
 
-/// CR 608.2d + CR 614.12a + CR 701.23a: Whether the pending prompt's submission
-/// guard admits `action`, decided without mutating the game, for a library search
-/// selection ([`structurally_valid_search_selection`]) or a named choice from the
-/// prompt's enumerated domain ([`structurally_valid_named_choice_answer`]).
+/// CR 608.2d + CR 614.12a + CR 701.23a + CR 732.2b: Whether the pending prompt's
+/// submission guard admits `action`, decided without mutating the game, for a library
+/// search selection ([`structurally_valid_search_selection`]), a named choice from the
+/// prompt's enumerated domain ([`structurally_valid_named_choice_answer`]), or an answer
+/// to a loop-shortcut offer ([`structurally_valid_shortcut_response`]).
 /// `true` means the guard admits the answer; `false` means it rejects it or the
 /// shape is not modeled here.
 ///
@@ -380,6 +381,51 @@ pub(crate) fn structurally_valid_named_choice_answer(
 pub fn structurally_valid_prompt_answer(state: &GameState, action: &GameAction) -> bool {
     structurally_valid_search_selection(state, action)
         || structurally_valid_named_choice_answer(state, action)
+        || structurally_valid_shortcut_response(state, action)
+}
+
+/// CR 732.2b/c: whether the pending loop-shortcut offer admits `action` as a responder's answer,
+/// decided without mutating the game. Every refusal the reducer makes is a `Shorten`; `Accept`
+/// names no place, so it passes every pre-take guard.
+///
+/// PRE-TAKE GUARDS ARE THE WHOLE CLAIM. An admitted answer can still fail when applied: a
+/// `Shorten` at place 0 elides the rest of the poll and takes it at once, the last responder's
+/// answer takes it too, and that take can be rejected after the guards (a life change outside the
+/// engine's range, `LifeChangeUnrepresentable`) or fall back to manual play without an error (a
+/// departed proposer, whose guard restores priority). That is the same class as an
+/// admitted named choice whose life gain is unrepresentable — the authority's contract is that an
+/// admitted answer is one the PROMPT admits, not one the engine can execute, which is why phase-ai's
+/// chooser simulates the single answer it submits and re-decides on a rejection
+/// (`ai_driver_replaces_a_submitted_creature_type_the_engine_rejects`). On this shape the rejection
+/// is pinned by
+/// `public_recorded_period_replay_rejects_later_life_counter_overflow_atomically`, whose hostile
+/// overflowing gain makes a public `Accept` return that error and restore its entry state.
+///
+/// MIRRORS THE REDUCER'S ADMITTED SET BY CALLING ITS AUTHORITY, not by restating it: a `Shorten`
+/// is admitted exactly when [`crate::game::engine::shorten_refusal`], the refusal
+/// `handle_respond_to_shortcut` itself consults, has none. Its scratch take to the named place
+/// runs only for a `Shorten`; an `Accept` is admitted without one. That price is why the hatch
+/// exists: the probe APPLIES the answer, so for the last responder an `Accept` materializes the
+/// entire shortcut, which then materializes again when the real answer is applied (issue #10464).
+///
+/// `false` for `WaitingFor::RespondToPrecastCopyShortcut`: that window carries no proposal summary,
+/// so there is no place and no counted take here to read, and it stays on the simulation path.
+pub(crate) fn structurally_valid_shortcut_response(state: &GameState, action: &GameAction) -> bool {
+    let (
+        WaitingFor::RespondToShortcut {
+            player, proposal, ..
+        },
+        GameAction::RespondToShortcut { response },
+    ) = (&state.waiting_for, action)
+    else {
+        return false;
+    };
+    match response {
+        crate::analysis::loop_check::ShortcutResponse::Accept => true,
+        crate::analysis::loop_check::ShortcutResponse::Shorten { at_iteration } => {
+            crate::game::engine::shorten_refusal(state, proposal, *player, *at_iteration).is_none()
+        }
+    }
 }
 
 fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {

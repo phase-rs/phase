@@ -7296,9 +7296,29 @@ id = "060956cd-74d3-5eab-8057-50a1dfc76020"
 category = "Creature"
 fidelity = "Full"
 source_card_names = [
-    "Icatian Crier",
-    "Icatian Town",
-    "Sarpadian Empires, Vol. VII",
+    "Boss's Chauffeur",
+    "Cabaretti Charm",
+    "Caldaia Guardian",
+    "Citizen's Crowbar",
+    "Courier's Briefcase",
+    "Darling of the Masses",
+    "Exhibition Magician",
+    "Grand Crescendo",
+    "Halo Fountain",
+    "Indulge // Excess",
+    "Kitt Kanto, Mayhem Diva",
+    "Luxurious Libation",
+    "Master of Ceremonies",
+    "Origin of the Hulk",
+    "Phabine, Boss's Confidant",
+    "Prosperous Partnership",
+    "Rabble Rousing",
+    "Rakish Revelers",
+    "Rope Line Attendant",
+    "Sanctuary Warden",
+    "Scepter of Celebration",
+    "Stimulus Package",
+    "Warm Welcome",
 ]
 set_code = "TRC"
 set_name = "Star Trek Commander"
@@ -7313,12 +7333,25 @@ toughness = 1
 core_types = ["Creature"]
 subtypes = ["Citizen"]
 supertypes = []
-colors = ["White"]
+colors = [
+    "Green",
+    "White",
+]
 keywords = []
+
+[[token.source_card_refs]]
+card_name = "Grand Crescendo"
+scryfall_oracle_id = "dc600c06-8239-409e-b53d-20f813a3f5e7"
+scryfall_id = "b41a1ff1-8e72-4269-825c-aaa12b3a4dca"
+
+[[token.source_card_refs]]
+card_name = "Grand Crescendo"
+scryfall_oracle_id = "dc600c06-8239-409e-b53d-20f813a3f5e7"
+scryfall_id = "a149748e-f192-4ec6-bae3-5a18ffcec140"
 
 [token.token_image_ref]
 scryfall_id = "f801903a-5db6-4566-ad33-2c1de8ac4287"
-scryfall_oracle_id = "e31c15d7-f89e-480b-a22f-5823343342bb"
+scryfall_oracle_id = "ffbc4833-01db-45f8-b8b4-c2e2c8235d0c"
 preset_id = "060956cd-74d3-5eab-8057-50a1dfc76020"
 
 [[token]]
@@ -192814,17 +192847,7 @@ keywords = []
 [[token.source_card_refs]]
 card_name = "Grand Crescendo"
 scryfall_oracle_id = "dc600c06-8239-409e-b53d-20f813a3f5e7"
-scryfall_id = "b41a1ff1-8e72-4269-825c-aaa12b3a4dca"
-
-[[token.source_card_refs]]
-card_name = "Grand Crescendo"
-scryfall_oracle_id = "dc600c06-8239-409e-b53d-20f813a3f5e7"
 scryfall_id = "a60834b0-38ab-40c9-9fd9-db3a23b13076"
-
-[[token.source_card_refs]]
-card_name = "Grand Crescendo"
-scryfall_oracle_id = "dc600c06-8239-409e-b53d-20f813a3f5e7"
-scryfall_id = "a149748e-f192-4ec6-bae3-5a18ffcec140"
 
 [token.token_image_ref]
 scryfall_id = "b7171de9-476d-4bfa-8cc0-b4fbc168cf4d"
@@ -223487,10 +223510,30 @@ id = "f1a4c23e-3433-5f96-bd82-ec2a3f1c81a1"
 category = "Creature"
 fidelity = "Full"
 source_card_names = [
+    "Boss's Chauffeur",
+    "Cabaretti Charm",
+    "Caldaia Guardian",
     "Citizen",
-    "Icatian Crier",
-    "Icatian Town",
-    "Sarpadian Empires, Vol. VII",
+    "Citizen's Crowbar",
+    "Courier's Briefcase",
+    "Darling of the Masses",
+    "Exhibition Magician",
+    "Grand Crescendo",
+    "Halo Fountain",
+    "Indulge // Excess",
+    "Kitt Kanto, Mayhem Diva",
+    "Luxurious Libation",
+    "Master of Ceremonies",
+    "Origin of the Hulk",
+    "Phabine, Boss's Confidant",
+    "Prosperous Partnership",
+    "Rabble Rousing",
+    "Rakish Revelers",
+    "Rope Line Attendant",
+    "Sanctuary Warden",
+    "Scepter of Celebration",
+    "Stimulus Package",
+    "Warm Welcome",
 ]
 set_code = "TRC"
 set_name = "Star Trek Commander"
@@ -223505,12 +223548,15 @@ toughness = 1
 core_types = ["Creature"]
 subtypes = ["Citizen"]
 supertypes = []
-colors = ["White"]
+colors = [
+    "Green",
+    "White",
+]
 keywords = []
 
 [token.token_image_ref]
 scryfall_id = "bb355701-39e2-428e-a62b-feac0bdada72"
-scryfall_oracle_id = "e31c15d7-f89e-480b-a22f-5823343342bb"
+scryfall_oracle_id = "ffbc4833-01db-45f8-b8b4-c2e2c8235d0c"
 preset_id = "f1a4c23e-3433-5f96-bd82-ec2a3f1c81a1"
 
 [[token]]
