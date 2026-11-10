@@ -717,6 +717,17 @@ impl DealtDamageKinds {
         !std::mem::replace(slot, true)
     }
 
+    /// True when `record(is_combat)` would change the latch state (the kind's
+    /// slot is not yet set). Lets the damage-history authority skip a mutable
+    /// borrow — and the copy-on-write unshare it implies — on a repeat hit.
+    pub(crate) fn would_record(&self, is_combat: bool) -> bool {
+        if is_combat {
+            !self.combat
+        } else {
+            !self.noncombat
+        }
+    }
+
     /// True when damage of the selected `kind` has been recorded.
     pub fn has(&self, kind: DamageKindFilter) -> bool {
         match kind {

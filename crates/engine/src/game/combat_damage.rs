@@ -1606,10 +1606,12 @@ struct PhaseCAccumulators {
 /// CR 510.2 + CR 616.1: outcome of running Phase C legs.
 enum PhaseCRunOutcome {
     Complete,
-    /// Leg `index` paused on its life-loss replacements (a combat-flagged
-    /// stash is parked). The leg's lifelink share and bookkeeping are already
-    /// folded into the accumulators; legs after `index` never applied.
-    PausedOnLoss {
+    /// Leg `index` paused on a CR 616.1 replacement choice over its results:
+    /// its life loss (a combat-flagged stash is parked) or its poison counters
+    /// (infect/toxic; no stash — the damage fact was already recorded at the
+    /// pause). The leg's lifelink share and bookkeeping are already folded into
+    /// the accumulators; legs after `index` never applied.
+    PausedOnReplacement {
         index: usize,
     },
 }
@@ -1707,10 +1709,10 @@ fn fold_combat_leg_amount(
 
 /// CR 510.2 + CR 120.3 + CR 616.1: apply Phase C legs in batch order —
 /// shared by the fresh batch and the remnant resume. A leg whose life loss
-/// pauses (a combat-flagged stash that was absent before this leg) folds
-/// eagerly and parks the tail; a leg paused on poison-counter ordering
-/// (infect/toxic stash nothing) keeps the legacy drop, and `None` survivors
-/// apply as 0 with bookkeeping, exactly as the never-paused path would.
+/// pauses (a combat-flagged stash that was absent before this leg) or whose
+/// poison counters pause (infect/toxic stash nothing) folds eagerly and parks
+/// the tail so the prompt surfaces; `None` survivors apply as 0 with
+/// bookkeeping, exactly as the never-paused path would.
 fn run_phase_c_legs(
     state: &mut GameState,
     legs: &[PendingCombatLeg],
@@ -1726,6 +1728,13 @@ fn run_phase_c_legs(
                 // combat path that stashes, so a combat-flagged stash that
                 // appears here identifies THIS leg's loss pause.
                 let had_stash = state.pending_damage_post_loss.is_some();
+                // CR 120.4b: the post-replacement amount this leg deals, read
+                // before the apply consumes the event (a counter pause leaves
+                // no stash to read it from).
+                let dealt_amount = match &survivor_event {
+                    ProposedEvent::Damage { amount, .. } => *amount,
+                    _ => 0,
+                };
                 let ctx = DamageContext::from(leg.ctx);
                 match apply_damage_after_replacement(state, &ctx, survivor_event, true, events) {
                     DamageResult::Applied(amt) => amt,
@@ -1740,13 +1749,34 @@ fn run_phase_c_legs(
                         }
                         if let Some(amt) = loss_pause_amount {
                             fold_combat_leg_amount(state, leg, amt, accums);
-                            return PhaseCRunOutcome::PausedOnLoss { index };
+                            return PhaseCRunOutcome::PausedOnReplacement { index };
                         }
-                        // CR 510.2 (legacy): poison-counter ordering pauses
-                        // (infect/toxic) carry no post-loss stash, so the
-                        // deferred portion is dropped (mirrors the legacy
-                        // `apply_damage_to_target` combat behavior).
-                        0
+                        // CR 120.4c + CR 616.1: no fresh stash means the leg
+                        // paused on its poison-counter result (infect/toxic).
+                        // That identification holds because the combat ctx has
+                        // `has_lifelink` forced off (lifelink folds per source
+                        // in `apply_combat_damage`) and no `excess_recipient`,
+                        // so the loss pause is the only stashing combat
+                        // `NeedsChoice`. The damage fact was recorded at the
+                        // pause; fold the dealt amount like an unpaused leg and
+                        // park the tail so the ordering prompt surfaces and the
+                        // counter answer resumes the batch. A future combat
+                        // `NeedsChoice` source must be classified here, not
+                        // folded as a counter pause.
+                        debug_assert!(
+                            !ctx.has_lifelink && ctx.excess_recipient.is_none(),
+                            "combat Phase C leg paused without a stash outside the \
+                             poison-counter path"
+                        );
+                        debug_assert!(
+                            matches!(
+                                state.pending_replacement.as_ref().map(|p| &p.proposed),
+                                Some(ProposedEvent::AddCounter { .. })
+                            ),
+                            "stashless combat leg pause must be a counter-addition choice"
+                        );
+                        fold_combat_leg_amount(state, leg, dealt_amount, accums);
+                        return PhaseCRunOutcome::PausedOnReplacement { index };
                     }
                 }
             }
@@ -1841,7 +1871,7 @@ fn complete_combat_phase_c_remnant(
                 .collect();
             RemnantOutcome::Complete
         }
-        PhaseCRunOutcome::PausedOnLoss { index } => RemnantOutcome::Repaused {
+        PhaseCRunOutcome::PausedOnReplacement { index } => RemnantOutcome::Repaused {
             remnant: PendingCombatPhaseCRemnant {
                 remaining: remaining[index + 1..].to_vec(),
                 lifelink_by_source: accums.lifelink_by_source,
@@ -1977,7 +2007,7 @@ pub(crate) fn apply_combat_damage(
         combat_damage_to_players: Vec::new(),
         source_incarnations: Vec::new(),
     };
-    if let PhaseCRunOutcome::PausedOnLoss { index } =
+    if let PhaseCRunOutcome::PausedOnReplacement { index } =
         run_phase_c_legs(state, &legs, &mut accums, &mut events)
     {
         // CR 510.2 + CR 616.1: a leg's life loss paused — park the unapplied

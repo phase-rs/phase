@@ -24544,13 +24544,14 @@ declare_game_state! {
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub commander_declined_zone_return: HashSet<ObjectId>,
 
-    /// CR 120.3 + CR 120.6 + CR 702.11b: Battlefield objects that have actually
+    /// CR 120.3 + CR 702.11b: Battlefield objects that have actually
     /// dealt damage (combat or noncombat) since entering the battlefield. Sticky
     /// per-object flag backing the `StaticCondition::SourceHasDealtDamage`
     /// predicate (e.g. "has hexproof if it hasn't dealt damage yet"). Set only
-    /// when a nonzero amount of damage is actually dealt (CR 120.3/120.6, not the
-    /// would-deal amount of CR 120.1a); cleared when the object leaves the
-    /// battlefield so a flickered object starts with a clean slate.
+    /// when a nonzero amount of damage is actually dealt (CR 120.3, not the
+    /// would-be amount before replacement/prevention modification, CR 120.4b);
+    /// cleared when the object leaves the battlefield so a flickered object
+    /// starts with a clean slate.
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub objects_that_dealt_damage: HashSet<ObjectId>,

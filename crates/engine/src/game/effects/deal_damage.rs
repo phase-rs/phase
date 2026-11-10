@@ -803,6 +803,14 @@ pub(crate) fn apply_damage_after_replacement(
                     events,
                 ) == player_counter::PlayerCounterAdditionOutcome::NeedsChoice
                 {
+                    record_player_damage_at_counter_pause(
+                        state,
+                        ctx,
+                        *player_id,
+                        actual_amount,
+                        is_combat,
+                        events,
+                    );
                     return DamageResult::NeedsChoice;
                 }
             } else {
@@ -817,9 +825,10 @@ pub(crate) fn apply_damage_after_replacement(
                     // Both combat and non-combat legs stash their post-loss work
                     // (combat-flagged for the batch remnant, which the combat
                     // resume consumes; the shared drain skips combat stashes).
-                    // Counter-addition pauses (infect/toxic) return NeedsChoice
-                    // WITHOUT stashing, so the stash's presence after this call
-                    // identifies a loss pause.
+                    // Counter-addition pauses (infect/toxic) record the damage
+                    // fact at the pause and return NeedsChoice WITHOUT stashing,
+                    // so the stash's presence after this call identifies a loss
+                    // pause (the combat Phase C runner relies on this).
                     state.pending_damage_post_loss =
                         Some(Box::new(crate::types::game_state::PendingDamagePostLoss {
                             source_id: ctx.source_id,
@@ -853,6 +862,16 @@ pub(crate) fn apply_damage_after_replacement(
                     events,
                 ) == player_counter::PlayerCounterAdditionOutcome::NeedsChoice
                 {
+                    // The life loss above already ran synchronously; only the
+                    // poison result is parked, so the fact is recorded once here.
+                    record_player_damage_at_counter_pause(
+                        state,
+                        ctx,
+                        *player_id,
+                        actual_amount,
+                        is_combat,
+                        events,
+                    );
                     return DamageResult::NeedsChoice;
                 }
             }
@@ -1051,6 +1070,36 @@ pub(crate) fn apply_damage_after_replacement(
     DamageResult::Applied(actual_amount)
 }
 
+/// CR 120.4b + CR 120.4c: a player leg whose poison-counter result (infect,
+/// CR 120.3b; toxic, CR 120.3g) paused on a CR 616.1 replacement ordering
+/// choice has already been DEALT — only its result is still being processed.
+/// Record the damage fact now, through the single damage-history authority,
+/// using the context captured at damage time (CR 400.7), so the choice cannot
+/// un-deal it. Nothing on the counter-answer resume path records damage, so the
+/// fact is written exactly once. Players have no excess (CR 120.10 is
+/// permanent-only), so dealt = recorded = `actual_amount`, excess 0.
+fn record_player_damage_at_counter_pause(
+    state: &mut GameState,
+    ctx: &DamageContext,
+    target: PlayerId,
+    actual_amount: u32,
+    is_combat: bool,
+    events: &mut Vec<GameEvent>,
+) {
+    emit_damage_dealt_and_record(
+        state,
+        ctx.source_id,
+        ctx.source_incarnation,
+        ctx.controller,
+        &TargetRef::Player(target),
+        actual_amount,
+        actual_amount,
+        0,
+        is_combat,
+        events,
+    );
+}
+
 /// CR 120.1: push the `DamageDealt` event and record the damage for "was
 /// dealt damage by" condition queries. `dealt_amount` gates recording (a
 /// nonzero amount actually dealt per CR 120.3/120.6); `record_amount` /
@@ -1161,12 +1210,12 @@ pub(crate) fn emit_damage_dealt_and_record(
             record.source_zone = obj.zone;
         }
         state.damage_dealt_this_turn.push_back(record);
-        // CR 120.3 + CR 120.6 + CR 702.11b + CR 613.1f: Mark the source as having
+        // CR 120.3 + CR 702.11b + CR 613.1f: Mark the source as having
         // actually dealt damage (this branch is gated on `dealt_amount > 0`, i.e.
-        // a nonzero amount actually dealt per CR 120.3/120.6, not the would-be
-        // amount of CR 120.1a). Only battlefield-resident sources carry this
-        // sticky flag, since the reset in `apply_zone_exit_cleanup` is gated on a
-        // battlefield exit. When the id is NEWLY inserted, mark layers fully dirty
+        // a nonzero amount actually dealt per CR 120.3, not the would-be amount
+        // before replacement/prevention modification, CR 120.4b). Only
+        // battlefield-resident sources carry this sticky flag, since the reset in
+        // `apply_zone_exit_cleanup` is gated on a battlefield exit. When the id is NEWLY inserted, mark layers fully dirty
         // so `flush_layers` recomputes the materialized keyword set that
         // `has_hexproof` reads — otherwise the conditional hexproof grant for
         // "has hexproof if it hasn't dealt damage yet" would never drop at the
@@ -1178,17 +1227,23 @@ pub(crate) fn emit_damage_dealt_and_record(
         // leaves neither store stale. Both stores are written by the two `let`s
         // below; the dirty flag must OR both, because `newly_any` alone misses
         // the first combat hit after noncombat damage. `|` (not `||`) so both
-        // stores are always written.
-        let on_battlefield = state
-            .objects
-            .get(&source_id)
-            .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield);
+        // stores are always written. The kind latch is read before `get_mut`:
+        // `ObjectMap::get_mut` unshares a copy-on-write object, so a repeat
+        // same-kind hit (latch already set) must not take a mutable borrow.
+        let (on_battlefield, kind_pending) =
+            state.objects.get(&source_id).map_or((false, false), |obj| {
+                (
+                    obj.zone == crate::types::zones::Zone::Battlefield,
+                    obj.dealt_damage_kinds.would_record(is_combat),
+                )
+            });
         if on_battlefield {
             let newly_any = state.objects_that_dealt_damage.insert(source_id);
-            let newly_kind = state
-                .objects
-                .get_mut(&source_id)
-                .is_some_and(|obj| obj.dealt_damage_kinds.record(is_combat));
+            let newly_kind = kind_pending
+                && state
+                    .objects
+                    .get_mut(&source_id)
+                    .is_some_and(|obj| obj.dealt_damage_kinds.record(is_combat));
             if newly_any | newly_kind {
                 state.layers_dirty.mark_full();
             }
@@ -5460,6 +5515,88 @@ mod tests {
                 && state.objects[&gone].dealt_damage_kinds.is_empty()
         );
         assert!(!state.layers_dirty.is_dirty());
+    }
+
+    /// U-3 - CR 120.2a / CR 120.2b: a repeat hit of a kind the source already
+    /// latched leaves the latch unchanged, so the damage-history authority must
+    /// not take a mutable borrow of the source: `ObjectMap::get_mut` unshares a
+    /// copy-on-write object (a deep `GameObject` clone on every AI-search state
+    /// clone). A hit of a NEW kind still writes the object and dirties layers.
+    #[test]
+    fn repeat_same_kind_hit_keeps_source_object_shared() {
+        use crate::game::layers::flush_layers;
+
+        let target = TargetRef::Player(PlayerId(0));
+        let mut state = GameState::new_two_player(42);
+        let source = sticky_damage_source(&mut state, 9404, Zone::Battlefield);
+        let mut events = Vec::new();
+        emit_damage_dealt_and_record(
+            &mut state,
+            source,
+            None,
+            PlayerId(1),
+            &target,
+            2,
+            2,
+            0,
+            true,
+            &mut events,
+        );
+        flush_layers(&mut state);
+        assert_eq!(sticky_kinds(&state, source), (true, true, false));
+
+        // Repeat combat hit on a clone: the record is written, the object is not.
+        let snapshot = state.clone();
+        assert!(
+            state.objects.shares_object_with(&snapshot.objects, source),
+            "premise: a fresh clone shares the source object"
+        );
+        emit_damage_dealt_and_record(
+            &mut state,
+            source,
+            None,
+            PlayerId(1),
+            &target,
+            1,
+            1,
+            0,
+            true,
+            &mut events,
+        );
+        assert_eq!(
+            state.damage_dealt_this_turn.len(),
+            2,
+            "reach-guard: the repeat hit reached the record branch"
+        );
+        assert_eq!(sticky_kinds(&state, source), (true, true, false));
+        assert!(
+            state.objects.shares_object_with(&snapshot.objects, source),
+            "a repeat same-kind hit must not unshare the source object"
+        );
+        assert!(
+            !state.layers_dirty.is_dirty(),
+            "an unchanged latch must not dirty layers"
+        );
+
+        // A new kind (noncombat) must write the object and dirty layers.
+        emit_damage_dealt_and_record(
+            &mut state,
+            source,
+            None,
+            PlayerId(1),
+            &target,
+            1,
+            1,
+            0,
+            false,
+            &mut events,
+        );
+        assert_eq!(sticky_kinds(&state, source), (true, true, true));
+        assert!(
+            !state.objects.shares_object_with(&snapshot.objects, source),
+            "a newly recorded kind writes the source object"
+        );
+        assert!(state.layers_dirty.is_dirty());
     }
 
     /// W8 - CR 120.3f + CR 120.2b: the non-combat post-loss resume drain emits
