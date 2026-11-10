@@ -34,7 +34,7 @@
 use engine::game::combat::has_cant_be_blocked_static;
 use engine::game::layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
-use engine::types::ability::EffectKind;
+use engine::types::ability::{EffectKind, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
@@ -1157,4 +1157,108 @@ fn stolen_uniform_attaches_the_equipment_to_the_chosen_creature() {
 
     assert_eq!(host_of(&runner, equipment), Some(wearer));
     assert_eq!(attach_subjects(&events), vec![Some(equipment)]);
+}
+
+const AJANIS_CHOSEN: &str = "Whenever an enchantment you control enters, create a 2/2 white Cat creature token. If that enchantment is an Aura, you may attach it to the token.";
+
+const PACIFISM: &str = "Enchant creature\nEnchanted creature can't attack or block.";
+
+const FLICKER_OF_FATE: &str = "Exile target creature or enchantment, then return it to the battlefield under its owner's control.";
+
+/// Pacifism enters on a Bear and Ajani's Chosen's trigger waits; when `flicker`, Flicker of
+/// Fate returns Pacifism as a new object in response. Returns the runner, Pacifism, the
+/// incarnation it entered as, and the events.
+fn ajanis_chosen(flicker: bool) -> (GameRunner, ObjectId, u64, Vec<GameEvent>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Ajani's Chosen", 3, 3, AJANIS_CHOSEN);
+    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let mut pacifism = scenario.add_creature_to_hand(P0, "Pacifism", 0, 0);
+    pacifism
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::zero())
+        .from_oracle_text_with_keywords(&["Enchant creature"], PACIFISM);
+    let pacifism = pacifism.id();
+    let flicker_of_fate = scenario
+        .add_spell_to_hand_from_oracle(P0, "Flicker of Fate", true, FLICKER_OF_FATE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(pacifism).target_object(bear).commit();
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    runner.act(GameAction::PassPriority).expect("P1 passes");
+    assert_eq!(
+        host_of(&runner, pacifism),
+        Some(bear),
+        "reach guard: Pacifism entered on the Bear"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach guard: Ajani's Chosen's trigger waits"
+    );
+    let entered = runner.state().objects[&pacifism].incarnation;
+    if flicker {
+        runner
+            .cast(flicker_of_fate)
+            .target_object(pacifism)
+            .commit();
+        runner.act(GameAction::PassPriority).expect("P0 passes");
+        runner.act(GameAction::PassPriority).expect("P1 passes");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReturnAsAuraTarget { .. }
+            ),
+            "reach guard: the returned Pacifism asks for a host"
+        );
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(bear)),
+            })
+            .expect("Pacifism returns on the Bear");
+    }
+    let (events, _) = settle(&mut runner, true, &[]);
+    (runner, pacifism, entered, events)
+}
+
+fn cats(events: &[GameEvent]) -> Vec<ObjectId> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 400.7: Flicker of Fate returns Pacifism as a new object while Ajani's Chosen's
+/// trigger waits, so that trigger still creates its Cat but attaches nothing; the new
+/// Pacifism's own trigger attaches it to its own Cat.
+#[test]
+fn ajanis_chosen_whose_aura_was_flickered_attaches_nothing() {
+    let (runner, pacifism, entered, events) = ajanis_chosen(true);
+
+    assert_ne!(
+        runner.state().objects[&pacifism].incarnation,
+        entered,
+        "reach guard: Pacifism returned as a new object"
+    );
+    let cats = cats(&events);
+    assert_eq!(cats.len(), 2, "both triggers created a Cat");
+    assert_eq!(attach_subjects(&events), vec![Some(pacifism), None]);
+    // The new incarnation's trigger is stacked above the departed one, so it resolves first.
+    assert_eq!(host_of(&runner, pacifism), Some(cats[0]));
+}
+
+/// CR 701.3a: with Pacifism unmoved, Ajani's Chosen attaches it to the Cat.
+#[test]
+fn ajanis_chosen_attaches_the_aura_to_the_cat() {
+    let (runner, pacifism, _, events) = ajanis_chosen(false);
+
+    let cats = cats(&events);
+    assert_eq!(cats.len(), 1);
+    assert_eq!(attach_subjects(&events), vec![Some(pacifism)]);
+    assert_eq!(host_of(&runner, pacifism), Some(cats[0]));
 }

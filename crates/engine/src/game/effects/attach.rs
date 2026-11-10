@@ -225,6 +225,13 @@ fn resolve_attachment_ids<'a>(
             .or_else(|| resolve_object_filter(state, ability, attachment_filter, target_slots))
             .into_iter()
             .collect()
+    } else if matches!(
+        attachment_filter,
+        TargetFilter::TriggeringSource | TargetFilter::AttachedTo
+    ) && attachment_referent_departed(state, ability, attachment_filter)
+    {
+        // CR 400.7: the event's object is the attachment only as the incarnation the event named.
+        Vec::new()
     } else {
         resolve_object_filter(state, ability, attachment_filter, &mut std::iter::empty())
             .into_iter()
@@ -1738,6 +1745,21 @@ fn attachment_referent_departed(
         TargetFilter::SelfRef => trigger_source.or_else(|| ability.source_ref(state)),
         TargetFilter::OriginalSource => trigger_source,
         TargetFilter::GrantingObject { bound } => bound.or(ability.context.granting_object),
+        // CR 608.2h: the incarnation the firing event recorded for its object.
+        TargetFilter::TriggeringSource | TargetFilter::AttachedTo => {
+            match crate::game::targeting::resolve_event_context_target(
+                state,
+                filter,
+                ability.source_id,
+            ) {
+                Some(TargetRef::Object(id)) => {
+                    state.current_trigger_event.as_ref().and_then(|event| {
+                        crate::game::targeting::event_context_incarnation(filter, event, id)
+                    })
+                }
+                _ => None,
+            }
+        }
         // The live slot read already dropped it: a declared object departed or became illegal.
         TargetFilter::ParentTargetSlot { index } => {
             return matches!(
