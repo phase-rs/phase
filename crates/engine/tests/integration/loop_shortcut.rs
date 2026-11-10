@@ -12605,6 +12605,72 @@ fn optional_winning_ring_offer_headroom_bounds_and_plays_out_when_insufficient()
     }
 }
 
+/// CR 732.2a + CR 704.5a: the PRINTED Dina–Conqueror drain whose crossing lies past the
+/// engine's repetition horizon is offered at the full reachable count — and that count COMMITS.
+/// The offer names no winner, drives every repetition it states, and hands priority back with
+/// the drained seat still alive.
+#[test]
+fn printed_dina_conqueror_long_fixed_offer_commits_its_full_count() {
+    let reachable: u32 = 1_000;
+    let (mut runner, kickoff, _bolt, _cleric) =
+        setup_2p_optional_dina_conqueror(LoopDetectionMode::Interactive);
+    // The drain is 1 life per repetition (the kickoff's own trigger chain drains one before the
+    // offer), so 2,500 life needs 2,499 repetitions — past the 1,000-repetition horizon. The offer
+    // therefore states the reachable count, not `UntilLethal`.
+    runner.state_mut().players[P1.0 as usize].life = 2_500;
+    let p0_before = runner.state().players[P0.0 as usize].life;
+    let _ = runner.cast(kickoff).resolve();
+    let (_events, wf) = drive_collect(&mut runner, 500);
+    let WaitingFor::LoopShortcut {
+        proposer,
+        predicted_winner,
+        schema,
+        ..
+    } = wf
+    else {
+        panic!("the long printed drain must offer its reachable count, got {wf:?}");
+    };
+    assert_eq!(proposer, P0);
+    assert_eq!(
+        predicted_winner, None,
+        "a fixed count promises no crossing, so the offer names no winner"
+    );
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(reachable));
+    assert_eq!(schema.deliverable_capacity, reachable);
+    let p1_at_offer = runner.state().players[P1.0 as usize].life;
+
+    runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(reachable),
+            template: None,
+        })
+        .expect("the offered count is admitted");
+    runner
+        .act(GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        })
+        .expect("accept the offered count");
+
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        p1_at_offer - reachable as i32,
+        "each stated repetition committed its printed drain"
+    );
+    assert!(
+        runner.state().players[P1.0 as usize].life > 0,
+        "the fixed count ends short of lethal"
+    );
+    assert!(
+        runner.state().players[P0.0 as usize].life > p0_before,
+        "the printed gain leg committed alongside the drain"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the long take completed and handed priority back, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
 /// CR 732.2a + CR 732.2b: the proven lethal offer carries its ending point through BOTH public
 /// answers. Accepting `UntilLethal` takes the shortcut to the CR 704.5a crossing; shortening at
 /// a named place makes that place the new ending point, leaving the game running at priority
