@@ -3678,11 +3678,20 @@ pub(crate) fn loop_states_equal_modulo_resources_side<'a, C: CurrentSide<'a>>(
 /// fact read straight off that producer would otherwise differ every cycle and refuse
 /// the loop it exists to certify (`corpus::drive_offline_priest_umbral`).
 ///
-/// The comparison is over the SET of the facts rather than a multiset, matching the
-/// quantity-blindness the projection applies to the pools themselves. A unit whose
-/// producer cannot be resolved at all contributes the distinct fact `None` — "this mana,
-/// but I cannot say from what" — so an unprovable unit is distinguishable from a provable
-/// Treasure rather than silently absent.
+/// EACH FACT IS PAIRED WITH THE UNIT THAT CARRIES IT. The comparison is a set of
+/// (unit shape, fact) pairs rather than a flat set of facts: a repeated fact on ONE shape is
+/// the same evidence rather than more of it — the quantity-blindness the projection applies
+/// to the pools themselves — while the same fact on a DIFFERENT shape is a different
+/// position, because the shape is what a payment selects on (CR 107.4a: coloured mana in a
+/// cost can be paid only with the appropriate colour of mana). One red and one blue unit
+/// holding the same two facts are therefore two DIFFERENT positions when the proof sits on
+/// the red unit in one and on the blue unit in the other, and neither the projection's
+/// quantity relaxation nor the set relaxation over facts reaches that difference. See
+/// [`spendable_unit_producer_facts`].
+///
+/// A unit whose producer cannot be resolved at all contributes the distinct fact `None` —
+/// "this mana, but I cannot say from what" — so an unprovable unit is distinguishable from a
+/// provable Treasure rather than silently absent.
 ///
 /// The oracle is the payment's own: if some legal payment's outcome differs between the
 /// two positions, the facts differ; if none can, they do not. Fail-closed direction: a
@@ -3732,6 +3741,10 @@ fn floating_producer_facts_match(a: &GameState, b: &GameState) -> bool {
 /// tag (CR 104.4b), which is not position. A payer whose pool moved is governed by the
 /// quantity relaxation and casts no vote; a payer who holds the same bodies of mana but
 /// different EVIDENCE about them is what this conjunct is asked about.
+///
+/// The evidence is compared as (unit shape, fact) pairs ([`spendable_unit_producer_facts`]),
+/// never as a flat set of facts: what a payment selects is the UNIT, so a fact that sits on a
+/// different unit is a different position even when the pool's set of facts is unchanged.
 fn payer_producer_facts_match(
     a: &GameState,
     payer: &Player,
@@ -3741,48 +3754,87 @@ fn payer_producer_facts_match(
     if payer.mana_pool != counterpart.mana_pool {
         return true;
     }
-    let left = floating_producer_facts(a, payer.mana_pool.units());
-    let right = floating_producer_facts(b, counterpart.mana_pool.units());
-    left.iter().all(|fact| right.contains(fact)) && right.iter().all(|fact| left.contains(fact))
+    let left = spendable_unit_producer_facts(a, &payer.mana_pool);
+    let right = spendable_unit_producer_facts(b, &counterpart.mana_pool);
+    left.iter().all(|pair| right.contains(pair)) && right.iter().all(|pair| left.contains(pair))
 }
 
-/// CR 106.3 + CR 118.3a: the DISTINCT producer facts ONE payer's floating mana can prove,
-/// read through the payment's own resolver and canonicalized to the payment-visible part
-/// (see [`floating_producer_facts_match`]).
+/// CR 106.3 + CR 107.4a + CR 118.3a: the DISTINCT (unit shape, producer fact) pairs ONE
+/// payer's floating mana can prove, each fact read through the payment's own resolver and
+/// canonicalized to the payment-visible part (see [`floating_producer_facts_match`]).
 ///
-/// The units are the caller's — one payer's pool, in pool order — because the fact belongs
-/// to the payer whose payment can spend it, not to the state as a whole.
+/// THE UNIT IS HALF THE FACT. A payment removes the unit it spends from the PAYING player's
+/// pool (CR 118.3a), and CR 107.4a lets a colour-locked cost be paid only with the named
+/// colour, so which unit carries a proof decides whether that proof prices a given cast:
+/// `{red: Treasure, blue: cannot-say}` and `{red: cannot-say, blue: Treasure}` hold the same
+/// bodies of mana and the same set of facts, and only the first can pay a Treasure-backed red
+/// cost. The pair keeps the two apart.
 ///
-/// `None` is one floating unit whose producer the payment cannot name — the shape a
-/// position whose exit record was lost falls into.
-fn floating_producer_facts(
+/// The SHAPE is the unit's identity here, not its pip. `ManaShape` is exactly what
+/// [`ManaPool`](crate::types::mana::ManaPool)'s own equality compares — everything two units
+/// must share for no reader to tell them apart — while the pip is the mint tag CR 104.4b
+/// excludes. Two units of one shape are therefore interchangeable: a payment of that shape
+/// reaches the same facts whichever of them it spends, so the facts of one shape are a SET,
+/// and a repeated fact on that shape is the same evidence rather than more of it (the
+/// quantity-blindness the projection applies to the pools themselves, CR 106.1).
+///
+/// TWO JUDGEMENT CALLS, both stated as the relaxations they are rather than as claims that the
+/// underlying difference is invisible:
+///
+/// * The key is the WHOLE shape, `source_id` and `source_incarnation` included, although no
+///   cost's legality reads either. A proof moving between two units of the same colour and
+///   profile but a different source is therefore refused even though a payer free to choose
+///   between them could reach the same facts either way. That is this conjunct's standing
+///   fail-closed direction — refusing a pair suppresses a loop match, it never manufactures
+///   one — and it keeps the pairing keyed on the single axis `ManaPool`'s own equality already
+///   compares, instead of a second, hand-written notion of "payability" a later reader would
+///   have to keep in step with the payment code.
+/// * The facts of one shape stay a SET. A cost needing two units of one shape can tell
+///   `[Treasure, Treasure]` from `[Treasure, cannot-say]`, so this is a relaxation and not a
+///   claim of invisibility; it is kept because the finding it answers is a proof that changes
+///   the SHAPE carrying it, and because the previous round's set reading is what the shipped
+///   mana loops were certified under.
+///
+/// `None` is the fact of a unit whose producer the payment cannot name — the shape a position
+/// whose exit record was lost falls into. The units are the caller's — one payer's pool, in
+/// pool order — because the fact belongs to the payer whose payment can spend it, not to the
+/// state as a whole.
+fn spendable_unit_producer_facts(
     state: &GameState,
-    units: impl Iterator<Item = crate::types::mana::ManaUnit>,
-) -> Vec<Option<crate::types::game_state::LKISnapshot>> {
-    fn push(
-        facts: &mut Vec<Option<crate::types::game_state::LKISnapshot>>,
-        fact: Option<crate::types::game_state::LKISnapshot>,
-    ) {
-        if !facts.contains(&fact) {
-            facts.push(fact);
+    pool: &crate::types::mana::ManaPool,
+) -> Vec<(crate::types::mana::ManaShape, Option<LKISnapshot>)> {
+    let mut facts: Vec<(crate::types::mana::ManaShape, Option<LKISnapshot>)> = Vec::new();
+    for unit in pool.units() {
+        let fact = unit_producer_fact(state, &unit);
+        let (shape, _pip) = unit.into_shape_and_pip();
+        let listed = facts
+            .iter()
+            .any(|(listed_shape, listed_fact)| *listed_shape == shape && *listed_fact == fact);
+        if !listed {
+            facts.push((shape, fact));
         }
     }
-
-    let units: Vec<crate::types::mana::ManaUnit> = units.collect();
-    // One listed fact per FLOATING UNIT. `mana_spent_source_snapshots` drops the units it
-    // cannot resolve, so the unresolved ones are the remainder — they carry the distinct
-    // "cannot say" fact rather than vanishing, which is what makes an unprovable pool
-    // differ from a provable one of the same size.
-    let resolved = crate::game::casting::mana_spent_source_snapshots(state, &units);
-    let unresolved = units.len().saturating_sub(resolved.len());
-    let mut facts: Vec<Option<crate::types::game_state::LKISnapshot>> = Vec::new();
-    for snapshot in resolved {
-        push(&mut facts, Some(canonical_producer_fact(snapshot.lki)));
-    }
-    for _ in 0..unresolved {
-        push(&mut facts, None);
-    }
     facts
+}
+
+/// CR 106.3 + CR 113.7 + CR 400.7: the ONE fact `unit`'s payment can prove, or `None` when
+/// the payment cannot name its producer at all.
+///
+/// The resolver is `game::casting::mana_spent_source_snapshots` — the single authority a
+/// payment uses — asked about THIS unit alone, because that is the question a payment asks:
+/// it resolves the unit it is about to spend, one unit at a time
+/// (`game::casting::mana_spent_source_snapshot`). The batch answer drops every unit it cannot
+/// resolve, so it says how many units are unprovable but never WHICH, and a fact compared
+/// without its unit is exactly the defect this pairing exists to close. A payer's pool holds
+/// only the mana a payment can drain, so the per-unit call is bounded by that payment.
+fn unit_producer_fact(
+    state: &GameState,
+    unit: &crate::types::mana::ManaUnit,
+) -> Option<LKISnapshot> {
+    crate::game::casting::mana_spent_source_snapshots(state, std::slice::from_ref(unit))
+        .into_iter()
+        .next()
+        .map(|snapshot| canonical_producer_fact(snapshot.lki))
 }
 
 /// CR 106.3 + CR 613.1g: the payment-visible part of one producer fact — the snapshot
@@ -10790,8 +10842,18 @@ mod tests {
     /// CR 106.3 + CR 113.7: float one red unit in `payer`'s pool, pinned to the
     /// incarnation of `source` that produced it.
     fn float_pinned_red(state: &mut GameState, payer: PlayerId, source: ObjectId) {
+        float_pinned_of(state, payer, source, ManaType::Red);
+    }
+
+    /// CR 106.3 + CR 113.7: float one unit of `color` in `payer`'s pool, pinned to the
+    /// incarnation of `source` that produced it.
+    ///
+    /// The colour is the caller's because the unit's colour is the shape axis a
+    /// colour-locked cost selects on (CR 107.4a): two units of one source in two colours are
+    /// two shapes, and that is the pool a within-payer fact swap has to be expressed in.
+    fn float_pinned_of(state: &mut GameState, payer: PlayerId, source: ObjectId, color: ManaType) {
         let incarnation = state.objects[&source].incarnation;
-        let mut unit = crate::types::mana::ManaUnit::new(ManaType::Red, source, false, Vec::new());
+        let mut unit = crate::types::mana::ManaUnit::new(color, source, false, Vec::new());
         unit.source_incarnation = Some(incarnation);
         state.players[payer.0 as usize].mana_pool.add(unit);
     }
@@ -10814,9 +10876,9 @@ mod tests {
     /// and canonicalized exactly as the comparison does.
     ///
     /// `None` is one unit whose producer the payment cannot name. This is the test's own
-    /// oracle, deliberately independent of [`floating_producer_facts`]'s shape, so the
+    /// oracle, deliberately independent of [`spendable_unit_producer_facts`]'s shape, so the
     /// same witnesses compile and mean the same thing before and after the comparison is
-    /// keyed by payer.
+    /// keyed by payer and paired with the unit that carries each fact.
     fn unit_facts(
         state: &GameState,
         units: &[crate::types::mana::ManaUnit],
@@ -10836,6 +10898,29 @@ mod tests {
         let units: Vec<crate::types::mana::ManaUnit> =
             state.players[payer.0 as usize].mana_pool.units().collect();
         unit_facts(state, &units)
+    }
+
+    /// The fact each of ONE payer's units proves, keyed by the COLOUR of the unit that carries
+    /// it, in pool order — "the red unit" and "the blue unit" of the maintainer's finding.
+    ///
+    /// Each unit is resolved ALONE, so a fact is never attributed to a unit by position: the
+    /// batch resolver drops the units it cannot name, and the point of this reader is to say
+    /// which unit lost its proof.
+    fn payer_unit_facts_by_color(
+        state: &GameState,
+        payer: PlayerId,
+    ) -> Vec<(ManaType, Option<LKISnapshot>)> {
+        state.players[payer.0 as usize]
+            .mana_pool
+            .units()
+            .map(|unit| {
+                let fact = unit_facts(state, std::slice::from_ref(&unit))
+                    .into_iter()
+                    .next()
+                    .expect("one unit yields exactly one fact");
+                (unit.color, fact)
+            })
+            .collect()
     }
 
     /// The PRE-FIX reading, kept only as a reach-guard: every player's units flattened
@@ -11049,6 +11134,142 @@ mod tests {
         assert!(
             loop_states_equal_modulo_resources(&a, &b),
             "CR 732.2a: a growing payer pool must stay covered"
+        );
+    }
+
+    /// CR 106.3 + CR 107.4a + CR 118.3a: ONE payer's identical red/blue pool, the
+    /// Treasure-backed proof carried by a DIFFERENT unit.
+    ///
+    /// Both positions hold the same two units, in the same order, from the same two Treasures,
+    /// each pinned to the epoch that produced it. Only WHICH Treasure still IS its pinned epoch
+    /// differs, and reincarnation is not an axis either comparator reads: the pin lives on the
+    /// unit, and `objects_content_eq` omits the live `incarnation`. So the raw pools are equal
+    /// and the SET of facts P0's pool proves is `{Treasure, cannot-say}` in both — while in `a`
+    /// the RED unit carries the Treasure proof and in `b` the BLUE unit does.
+    fn swapped_within_payer_treasure_proof() -> (GameState, GameState) {
+        let mut a = GameState::new_two_player(7);
+        let red_treasure = treasure_on_battlefield(&mut a, 641, PlayerId(0));
+        let blue_treasure = treasure_on_battlefield(&mut a, 642, PlayerId(0));
+        float_pinned_of(&mut a, PlayerId(0), red_treasure, ManaType::Red);
+        float_pinned_of(&mut a, PlayerId(0), blue_treasure, ManaType::Blue);
+
+        let mut b = a.clone();
+        // In `a` the blue unit has lost its proving epoch; in `b` the red one has. The proof
+        // moves from the red unit to the blue unit and nothing else moves.
+        reincarnate(&mut a, blue_treasure);
+        reincarnate(&mut b, red_treasure);
+        (a, b)
+    }
+
+    /// CR 106.3 + CR 107.4a + CR 118.3a: the maintainer's WITHIN-PAYER swap control — one
+    /// payer's identical red/blue pool, the Treasure-backed proof moved from the red unit to
+    /// the blue unit, must NOT be the same position.
+    ///
+    /// A payment removes the unit it spends from the paying player's pool (CR 118.3a), and a
+    /// colour-locked cost can be paid only with the named colour (CR 107.4a), so the RED unit's
+    /// fact is the one a red cost reads. Rain of Riches asks whether "mana from a Treasure was
+    /// spent to cast" the payer's spell, which is answered by the unit that paid — so the two
+    /// positions price a red cast differently even though both hold the same bodies of mana and
+    /// the same set of facts.
+    #[test]
+    fn a_within_payer_swap_of_the_treasure_proof_is_not_the_same_position() {
+        let (a, b) = swapped_within_payer_treasure_proof();
+        let p0 = PlayerId(0);
+
+        // Reach-guards. The maintainer's "identical red/blue pool" precondition holds, the
+        // PRE-FIX within-payer reading really is identical (the trap is armed, so the assertion
+        // below can only be satisfied by pairing each fact with its unit), and a bare
+        // reincarnation is not itself a position difference (so the veto below is the evidence
+        // conjunct and nothing else).
+        assert_eq!(
+            a.players[0].mana_pool, b.players[0].mana_pool,
+            "the two positions must hold the same raw red/blue pool"
+        );
+        assert!(
+            same_fact_set(&payer_unit_facts(&a, p0), &payer_unit_facts(&b, p0)),
+            "reach-guard: the SET of facts P0's pool proves must be EQUAL, or this pair is not \
+             the shape the finding describes. got {:?} vs {:?}",
+            payer_unit_facts(&a, p0),
+            payer_unit_facts(&b, p0)
+        );
+        let mut bare_bump = GameState::new_two_player(7);
+        let bumped = battlefield_creature(&mut bare_bump, 649, 0);
+        let mut after_bump = bare_bump.clone();
+        reincarnate(&mut after_bump, bumped);
+        assert!(
+            loop_states_equal_modulo_resources(&bare_bump, &after_bump),
+            "reach-guard: a reincarnation alone must not be a position difference, or the veto \
+             below would pass for the wrong reason"
+        );
+
+        let facts_a = payer_unit_facts_by_color(&a, p0);
+        let facts_b = payer_unit_facts_by_color(&b, p0);
+        assert_eq!(
+            facts_a
+                .iter()
+                .map(|(color, fact)| (*color, fact.is_some()))
+                .collect::<Vec<_>>(),
+            vec![(ManaType::Red, true), (ManaType::Blue, false)],
+            "reach-guard: in `a` the RED unit carries the Treasure proof and the blue unit cannot \
+             name its producer. got {facts_a:?}"
+        );
+        assert_eq!(
+            facts_b
+                .iter()
+                .map(|(color, fact)| (*color, fact.is_some()))
+                .collect::<Vec<_>>(),
+            vec![(ManaType::Red, false), (ManaType::Blue, true)],
+            "reach-guard: in `b` the proof has MOVED to the blue unit — it did not appear or \
+             vanish. got {facts_b:?}"
+        );
+        assert_eq!(
+            facts_a[0].1, facts_b[1].1,
+            "reach-guard: the moved proof must be the SAME fact, so this is a swap and not a \
+             difference in what can be proved at all"
+        );
+
+        assert!(
+            !floating_producer_facts_match(&a, &b),
+            "CR 106.3 + CR 107.4a + CR 118.3a: within ONE payer, moving the Treasure-backed \
+             proof from the red unit to the blue unit is NOT the same position. Both pools hold \
+             the same red and blue bodies and the same SET of facts, but a colour-locked red \
+             cost is paid with the RED unit, so the cast this mana prices answers differently. \
+             got a={facts_a:?} b={facts_b:?}"
+        );
+        assert!(
+            !loop_states_equal_modulo_resources(&a, &b),
+            "CR 732.2a: the within-payer evidence difference must veto the loop cover — the rest \
+             of the position is identical, so this conjunct is the only thing that can"
+        );
+    }
+
+    /// CR 106.3 + CR 732.2a: the over-tightening guard for the control above. The SAME red/blue
+    /// pool with the proof left on the unit that carried it must still compare EQUAL, so the
+    /// control cannot be satisfied by refusing every two-unit pool.
+    #[test]
+    fn a_red_blue_pool_that_keeps_its_proofs_still_compares_equal() {
+        let mut a = GameState::new_two_player(7);
+        let red_treasure = treasure_on_battlefield(&mut a, 651, PlayerId(0));
+        let blue_treasure = treasure_on_battlefield(&mut a, 652, PlayerId(0));
+        float_pinned_of(&mut a, PlayerId(0), red_treasure, ManaType::Red);
+        float_pinned_of(&mut a, PlayerId(0), blue_treasure, ManaType::Blue);
+
+        let mut b = a.clone();
+        b.players[0].life += 1;
+
+        assert_eq!(
+            payer_unit_facts_by_color(&a, PlayerId(0)),
+            payer_unit_facts_by_color(&b, PlayerId(0)),
+            "reach-guard: the same unit must carry the same proof in both positions"
+        );
+        assert!(
+            floating_producer_facts_match(&a, &b),
+            "CR 106.3 + CR 732.2a: a red/blue pool that keeps its proof on the unit that carried \
+             it is the same evidence, so the pair must compare EQUAL"
+        );
+        assert!(
+            loop_states_equal_modulo_resources(&a, &b),
+            "CR 732.2a: an unchanged red/blue pool plus a monotone life change must stay covered"
         );
     }
 
