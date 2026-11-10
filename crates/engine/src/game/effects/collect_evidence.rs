@@ -147,20 +147,20 @@ pub(crate) fn resolve(
     };
 
     if can_collect_evidence(state, ability.controller, None, amount) {
-        let pending_ability = ability
-            .sub_ability
-            .as_ref()
-            .map(|sub| sub.as_ref().clone())
-            .unwrap_or_else(|| {
-                ResolvedAbility::new(
-                    Effect::TargetOnly {
-                        target: crate::types::ability::TargetFilter::Any,
-                    },
-                    vec![],
-                    ability.source_id,
-                    ability.controller,
-                )
-            });
+        // CR 701.59a + CR 603.12 + CR 608.2c: the evidence prompt is a
+        // resolution choice, so the chain walker parks this effect's tail and
+        // resumes it once the choice returns to priority. That resumption is
+        // what lets a "when you do" reflexive trigger only after the evidence
+        // is actually exiled. The resume therefore carries a no-op anchor
+        // (source and controller only) and never re-runs the tail itself.
+        let pending_ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: crate::types::ability::TargetFilter::Any,
+            },
+            vec![],
+            ability.source_id,
+            ability.controller,
+        );
         state.waiting_for = waiting_state(
             state,
             ability.controller,
@@ -587,8 +587,14 @@ mod tests {
         assert!(matches!(err, EngineError::InvalidAction(_)));
     }
 
+    /// CR 701.59a + CR 608.2c: the evidence prompt is a resolution choice. The
+    /// chain walker parks the effect's tail behind it, so answering the prompt
+    /// exiles the evidence and records the action without the handler running
+    /// the tail itself; the parked tail resumes at the priority boundary (real
+    /// cards: Lamplight's "If you do" and Memory Vampire's "When you do"
+    /// integration tests). Running it here too would perform the tail twice.
     #[test]
-    fn collect_evidence_effect_resumes_sub_ability() {
+    fn collect_evidence_choice_exiles_without_rerunning_the_parked_tail() {
         let mut state = GameState::new_two_player(42);
         let first = add_graveyard_card(&mut state, PlayerId(0), 1, "One", 2);
         let second = add_graveyard_card(&mut state, PlayerId(0), 2, "Two", 2);
@@ -622,8 +628,7 @@ mod tests {
         )));
 
         let mut events = Vec::new();
-        resolve(&mut state, &ability, &mut events).unwrap();
-
+        super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
         let (minimum_mana_value, cards, resume) = match state.waiting_for.clone() {
             WaitingFor::CollectEvidenceChoice {
                 minimum_mana_value,
@@ -631,7 +636,7 @@ mod tests {
                 resume,
                 ..
             } => (minimum_mana_value, cards, resume),
-            other => panic!("Expected CollectEvidenceChoice, got {:?}", other),
+            other => panic!("the evidence prompt suspends the chain: {other:?}"),
         };
 
         let mut resume_events = Vec::new();
@@ -646,7 +651,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(next, WaitingFor::SearchChoice { .. }));
+        assert_eq!(state.objects[&first].zone, Zone::Exile);
+        assert_eq!(state.objects[&second].zone, Zone::Exile);
         assert!(resume_events.iter().any(|event| matches!(
             event,
             GameEvent::PlayerPerformedAction {
@@ -654,6 +660,10 @@ mod tests {
                 ..
             }
         )));
+        assert!(
+            !matches!(next, WaitingFor::SearchChoice { .. }),
+            "the handler must not run the parked tail itself: {next:?}"
+        );
     }
 
     fn mana_pending(source_id: ObjectId) -> PendingManaAbility {

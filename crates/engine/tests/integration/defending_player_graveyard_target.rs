@@ -169,24 +169,28 @@ struct Answers {
 /// Declare `attacker` at `defender`, decline all blocks, answer every prompt
 /// from `answers`, and run combat through damage until the postcombat main
 /// phase opens with an empty stack. `on_priority` runs at every priority
-/// window before it is passed.
+/// window before it is passed. Returns every non-priority prompt answered, in order.
 fn run_combat(
     r: &mut GameRunner,
     attacker: ObjectId,
     defender: PlayerId,
     answers: &Answers,
     on_priority: &mut dyn FnMut(&mut GameRunner),
-) {
+) -> Vec<&'static str> {
     r.advance_to_combat();
     r.declare_attackers(&[(attacker, AttackTarget::Player(defender))])
         .expect("the attack is legal");
     let mut picks = answers.picks.clone();
+    let mut prompts = Vec::new();
     for _ in 0..200 {
         if r.state().phase == Phase::PostCombatMain
             && r.state().stack.is_empty()
             && matches!(r.state().waiting_for, WaitingFor::Priority { .. })
         {
-            return;
+            return prompts;
+        }
+        if !matches!(r.state().waiting_for, WaitingFor::Priority { .. }) {
+            prompts.push(r.state().waiting_for.variant_name());
         }
         match r.state().waiting_for.clone() {
             WaitingFor::TriggerTargetSelection {
@@ -279,8 +283,10 @@ fn defenders_cards(graveyards: &[(PlayerId, ObjectId)], defender: PlayerId) -> V
 /// CR 510.1a: an attacker that "assigns no combat damage" deals none; without
 /// the rider an unblocked 2/2 deals 2. "If you do" gates the life gain and the
 /// rider on the optional exile, so declining leaves combat damage intact.
-/// Choosing zero targets (CR 115.6) is not pinned here: no rule or ruling
-/// settles whether exiling zero cards counts as having done it.
+/// CR 115.6 + CR 118.12: "up to two" permits zero targets, and the optional
+/// effect is keyed on choosing to perform it — accepting with no targets still
+/// takes the "if you do" branch, so the Badger exiles and gains nothing yet
+/// assigns no combat damage.
 #[test]
 fn rysorian_badger_rider_follows_the_exile_decision_through_combat() {
     struct Row {
@@ -309,6 +315,14 @@ fn rysorian_badger_rider_follows_the_exile_decision_through_combat() {
             combat_damage: 0,
         },
         Row {
+            label: "accept, zero targets",
+            accept: true,
+            pick_count: 0,
+            exiled: 0,
+            life_gained: 0,
+            combat_damage: 0,
+        },
+        Row {
             label: "decline",
             accept: false,
             pick_count: 2,
@@ -322,7 +336,7 @@ fn rysorian_badger_rider_follows_the_exile_decision_through_combat() {
         let targets = defenders_cards(&graveyards, P1);
         let picks: Vec<ObjectId> = targets.iter().copied().take(row.pick_count).collect();
         let (p0_life, p1_life) = (r.life(P0), r.life(P1));
-        run_combat(
+        let prompts = run_combat(
             &mut r,
             attacker,
             P1,
@@ -332,6 +346,17 @@ fn rysorian_badger_rider_follows_the_exile_decision_through_combat() {
                 pay_with: vec![],
             },
             &mut |_| {},
+        );
+        // Reach guard: the target prompt and the "you may" prompt were offered.
+        assert!(
+            prompts.contains(&"TriggerTargetSelection"),
+            "{}: target prompt offered: {prompts:?}",
+            row.label
+        );
+        assert!(
+            prompts.contains(&"OptionalEffectChoice"),
+            "{}: optional prompt offered: {prompts:?}",
+            row.label
         );
         let exiled = targets
             .iter()
@@ -514,7 +539,7 @@ fn memory_vampire_casts_from_the_defenders_graveyard_after_leaving_play() {
             removed = true;
         }
     };
-    run_combat(
+    let prompts = run_combat(
         &mut r,
         vampire,
         P1,
@@ -529,12 +554,21 @@ fn memory_vampire_casts_from_the_defenders_graveyard_after_leaving_play() {
         removed,
         "reach guard: the reflexive trigger targeted the defender's card and the Vampire left play"
     );
-    // The evidence card is offered as payment, but not asserted exiled: accepting
-    // "you may collect evidence 9" currently fires the "When you do" trigger
-    // without surfacing the evidence prompt (a pre-existing collect-evidence
-    // sequencing defect, tracked separately). This test pins the CR 508.5 cast
-    // boundary only.
-    let _ = evidence;
+    // CR 701.59a + CR 603.12: evidence was actually paid, and the reflexive
+    // trigger chose its target only after that payment.
+    assert_eq!(zone(&r, evidence), Zone::Exile, "evidence was collected");
+    let paid = prompts
+        .iter()
+        .position(|p| *p == "CollectEvidenceChoice")
+        .unwrap_or_else(|| panic!("the evidence prompt was answered: {prompts:?}"));
+    let reflexive_target = prompts
+        .iter()
+        .rposition(|p| *p == "TriggerTargetSelection")
+        .unwrap_or_else(|| panic!("the reflexive trigger chose a target: {prompts:?}"));
+    assert!(
+        paid < reflexive_target,
+        "the reflexive trigger waits for evidence: {prompts:?}"
+    );
     let cast = &r.state().objects[&wanted];
     assert_eq!(cast.zone, Zone::Battlefield, "the defender's card was cast");
     assert_eq!(cast.controller, P0);
@@ -543,4 +577,51 @@ fn memory_vampire_casts_from_the_defenders_graveyard_after_leaving_play() {
         Zone::Graveyard,
         "a non-defending player's card is never cast"
     );
+}
+
+/// CR 603.12: declining "you may collect evidence 9" means the "When you do"
+/// event never happens, so no evidence is exiled and nothing is cast.
+#[test]
+fn memory_vampire_declining_evidence_casts_nothing() {
+    let mut sc = GameScenario::new_n_player(3, 42);
+    sc.at_phase(Phase::PreCombatMain);
+    for player in [P0, P1, P2] {
+        for _ in 0..10 {
+            sc.add_card_to_library_top(player, "Plains");
+        }
+    }
+    let vampire = sc
+        .add_creature_from_oracle(P0, "Memory Vampire", 4, 4, MEMORY_VAMPIRE)
+        .id();
+    sc.add_creature(P1, "P1 Bystander", 1, 1);
+    let evidence = sc
+        .add_creature_to_graveyard(P0, "Evidence", 1, 1)
+        .with_mana_cost(ManaCost::generic(9))
+        .id();
+    let wanted = sc
+        .add_creature_to_graveyard(P1, "P1 Recruit", 2, 2)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let mut r = sc.build();
+    let prompts = run_combat(
+        &mut r,
+        vampire,
+        P1,
+        &Answers {
+            picks: vec![wanted],
+            accept: false,
+            pay_with: vec![evidence],
+        },
+        &mut |_| {},
+    );
+    assert!(
+        prompts.contains(&"OptionalEffectChoice"),
+        "reach guard: the evidence offer was made: {prompts:?}"
+    );
+    assert!(
+        !prompts.contains(&"CollectEvidenceChoice"),
+        "declined evidence is never chosen: {prompts:?}"
+    );
+    assert_eq!(zone(&r, evidence), Zone::Graveyard);
+    assert_eq!(zone(&r, wanted), Zone::Graveyard, "nothing was cast");
 }

@@ -5186,6 +5186,8 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             // control", pause the parent effect before any `WhenYouDo` rider can
             // check whether the cost was paid.
             | WaitingFor::PayCost { .. }
+            // CR 701.59a: the evidence to exile is chosen during resolution.
+            | WaitingFor::CollectEvidenceChoice { .. }
             | WaitingFor::RetargetChoice { .. }
             | WaitingFor::ChooseFromZoneChoice { .. }
             // CR 608.2d + CR 608.2e: the controller's pick of WHICH opponent
