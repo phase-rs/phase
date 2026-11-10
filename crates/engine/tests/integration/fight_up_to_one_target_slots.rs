@@ -191,7 +191,7 @@ fn two_slot_selected_pair_fights() {
     assert_eq!(state.objects[&fighter].damage_marked, 2, "2/2 deals 2 back");
 }
 
-/// CR 115.6 + CR 701.14b: a chosen fighter with the opponent declined resolves
+/// CR 115.6 + CR 701.14a + CR 609.3: a chosen fighter with the opponent declined resolves
 /// as no fight — the lone fighter is not reread as "~ fights".
 #[test]
 fn two_slot_declined_opponent_is_no_fight() {
@@ -511,7 +511,7 @@ fn gut_declining_the_fought_creature_is_rejected() {
 
 /// CR 115.6 + CR 608.2b: a declined fighter keeps its identity, so the chosen
 /// fought creature is validated against its own role ("creature you don't
-/// control") and the ability resolves. CR 701.14b: a two-slot fight with only
+/// control") and the ability resolves. CR 701.14a + CR 609.3: a two-slot fight with only
 /// one creature does not fight.
 #[test]
 fn gut_declined_fighter_resolves_without_a_fight() {
@@ -692,7 +692,7 @@ fn earth_rumble_fighter_optional_fought_required() {
     );
 }
 
-/// CR 115.6 + CR 701.14b: declining Earth Rumble's fighter resolves the
+/// CR 115.6 + CR 701.14a + CR 609.3: declining Earth Rumble's fighter resolves the
 /// reflexive trigger without a fight.
 #[test]
 fn earth_rumble_declined_fighter_resolves_without_a_fight() {

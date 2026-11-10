@@ -6941,7 +6941,7 @@ fn coin_optional_same_node_election_keeps_the_ancestor_in_static_scope() {
         vec![false],
         "reach: optional branch resolves after elections"
     );
-    // CR 701.14a + CR 701.14b: a two-slot fight holding one target does not
+    // CR 701.14a + CR 609.3: a two-slot fight holding one target does not
     // fight, so the chosen victim is untouched.
     assert_eq!(runner.state().objects[&ancestor].zone, Zone::Battlefield);
     assert_eq!(runner.state().objects[&victim].zone, Zone::Battlefield);
