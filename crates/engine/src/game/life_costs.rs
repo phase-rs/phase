@@ -115,8 +115,9 @@ pub fn max_payable_life(state: &GameState, player: PlayerId) -> u32 {
     }
     // CR 119.4 + CR 119.4a: the exact `i64` team total. Life changes saturate a
     // team's total at the `i32` limits (`arithmetic::saturating_life_total`); the
-    // wide read stays exact for a state written another way (a fixture or a
-    // restored payload).
+    // wide read stays exact for a total outside `i32` (a fixture, a restored
+    // payload, or a shared total after a member whose field was negative left
+    // the game).
     crate::game::arithmetic::i64_to_u32_saturating(crate::game::players::team_life_sum(
         state, player,
     ))
@@ -194,8 +195,9 @@ pub fn pay_life_as_cost(
     // cost whose replacement is still resolving with insufficient life.
     // Engine representability limit, not a rule: a nested player-counter or
     // energy settlement the engine cannot represent (the life loss itself
-    // saturates) leaves life and counters untouched and is reported through the
-    // existing unpayable variant.
+    // saturates) is reported through the existing unpayable variant; the life
+    // loss that settled before it is not undone here (the public action
+    // boundary restores the action's entry state).
     match try_apply_life_loss(state, player, amount, events) {
         Ok(_) => PayLifeCostResult::Paid { amount },
         Err(PlayerResourceChangeError::Unrepresentable(_)) => PayLifeCostResult::InsufficientLife,

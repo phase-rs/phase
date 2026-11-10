@@ -11880,7 +11880,11 @@ mod tests {
     fn life_amount_constraint_reads_an_i32_min_loss_magnitude() {
         // CR 119.3: a loss of `i32::MIN` has a magnitude past `i32::MAX`; the
         // `life_amount` comparison reads it saturated at `i32::MAX` instead of
-        // overflowing.
+        // overflowing. The `EQ 1` row is Ob Nixilis, Captive Kingpin's trigger
+        // ("Whenever one or more opponents each lose exactly 1 life, put a +1/+1
+        // counter on Ob Nixilis."). No printed card triggers on one life change
+        // of N or more, so the `GE 3` rows have no printed card; the nearest is
+        // Ob Nixilis's exactly-1 trigger.
         let state = setup();
         let context = test_trigger_source_context(&state, ObjectId(1));
         let min_loss = GameEvent::LifeChanged {

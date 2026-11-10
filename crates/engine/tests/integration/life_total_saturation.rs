@@ -17,7 +17,7 @@
 //! past it as `i32::MAX`, and so does Tainted Remedy ("If an opponent would
 //! gain life, that player loses that much life instead.") for a gain past it,
 //! which `engine_debug.rs`'s
-//! `a_loss_past_i32_reports_i32_min_and_that_much_reads_its_magnitude` and
+//! `a_loss_past_i32_reports_i32_min_and_that_much_reads_i32_max` and
 //! `a_gain_past_i32_substituted_by_tainted_remedy_reads_the_saturated_stamp`
 //! pin. Set/exchange/redistribute land exactly across the whole range, and a
 //! change to a shared life total, a Two-Headed Giant team's (CR 810.4) or the
@@ -1500,7 +1500,8 @@ fn dragon_loop(
 
 /// Asserts the standing shortcut offer: P0's, with exactly `unbounded` as its
 /// unbounded axes, minted from P0's recorded period with a counted take that
-/// performs (CR 732.2a), so every count the declaration names is admitted.
+/// performs (CR 732.2a): a declared count the offer admits drives that many
+/// repetitions.
 fn assert_recorded_period_offer(runner: &GameRunner, unbounded: &[ResourceAxis]) {
     let WaitingFor::LoopShortcut {
         proposer,
@@ -1643,8 +1644,9 @@ fn assert_landing(name: &str, events: &[GameEvent], cycles: u32, landing: Landin
 /// to target creature's power. The next time that creature would deal damage
 /// this turn, prevent that damage.") on a creature of power `i32::MAX`, doubled
 /// by Boon Reflection ("If you would gain life, you gain twice that much life
-/// instead.") alone and with Rhox Faithmender (the same doubler) in either
-/// order: the gain past `u32` lands on `u32::MAX`, the total stops at
+/// instead."): alone it doubles the gain to 4,294,967,294, which the gained
+/// counter holds exactly; with Rhox Faithmender (the same doubler), in either
+/// order, the gain passes `u32` and lands on `u32::MAX`. The total stops at
 /// `i32::MAX`, and the rest of the spell resolves. The control at power 100
 /// with both doublers gains 400.
 #[test]
@@ -3482,9 +3484,9 @@ fn a_soul_warden_shortcut_matches_performing_the_cycles() {
 /// gain life equal to the life you've lost this turn. (Damage causes loss of life.)") then gains
 /// what performing lost, so with two Wardens and Carnival P0 ends at 28. That holds with the loss
 /// first or last, a loss between two gains that a later gain refills, a cycle that nets nothing
-/// (where a lump has no item at all), only a loss, and a lost counter pinned at `u32::MAX`, which
-/// cannot hide the loss. Control: a cycle of only gains lands in one lump at the take with the same
-/// outcome, and Korlis then gains nothing (CR 119.9).
+/// (where a lump has no item at all), only a loss, and (without Children of Korlis) a lost counter
+/// pinned at `u32::MAX`, which cannot hide the loss. Control: a cycle of only gains lands in one
+/// lump at the take with the same outcome, and Korlis then gains nothing (CR 119.9).
 #[test]
 fn a_shortcut_whose_cycle_loses_life_lands_every_counter_where_performing_leaves_it() {
     let Some(db) = crate::support::shared_card_db() else {

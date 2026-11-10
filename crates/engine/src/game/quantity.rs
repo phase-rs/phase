@@ -5013,9 +5013,10 @@ fn resolve_ref(
         // (team total in 2HG, individual total elsewhere) minus the selected
         // controller's rules starting total. Single controller bind — no
         // double-count, and Archenemy's 40/20 baseline follows that controller.
-        // Exact in `i64`, saturated once. Reads the saturating team view
-        // (`team_life_total`); the exact `team_life_sum` is reserved for
-        // affordability, payable-life budgets and set life's current value.
+        // The difference from the saturating team view (`team_life_total`) is
+        // computed in `i64` and saturated into `i32`; the exact `team_life_sum`
+        // is read by affordability, payable-life budgets, set life's current
+        // value and `players::aggregate_over_teams`.
         QuantityRef::LifeAboveStarting => player.map_or(0, |p| {
             i64_to_i32_saturating(
                 i64::from(crate::game::players::team_life_total(state, p.id))

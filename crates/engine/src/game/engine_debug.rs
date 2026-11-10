@@ -4736,7 +4736,7 @@ mod tests {
         /// `i32::MAX`. Eleven copies are the in-range control (2,048,000,000).
         /// Platinum Angel keeps P1 in the game so the trigger resolves.
         #[test]
-        fn a_loss_past_i32_reports_i32_min_and_that_much_reads_its_magnitude() {
+        fn a_loss_past_i32_reports_i32_min_and_that_much_reads_i32_max() {
             // (Bloodletters, P1 lost, LifeChanged amount, P1 life, P0 life,
             // P0 gained)
             type Case = (usize, u32, i32, i32, i32, u32);
@@ -5038,9 +5038,9 @@ mod tests {
         /// (`u32::MAX`), never the life total's: a life total at or below 0 would
         /// make the action boundary's state-based actions end the game before
         /// the prompt could be observed (CR 704.5a), so P0 stays at 20 life.
-        /// At `u32::MAX` both orders end in a loss (lose 1, or gain 2 then lose
-        /// 2) whose counter stays at `u32::MAX`. At `u32::MAX - 2` both orders
-        /// apply in full.
+        /// At `u32::MAX` both orders end in a loss (lose 1, or the gain doubled
+        /// to 2 and then replaced by a loss of 2) whose counter stays at
+        /// `u32::MAX`. At `u32::MAX - 2` both orders apply in full.
         #[test]
         fn debug_gain_resumed_substitute_loss_saturates_the_lost_counter() {
             let mut scenario = scenario();
@@ -5059,8 +5059,8 @@ mod tests {
             assert!(
                 (player.life, player.life_lost_this_turn) == (19, u32::MAX - 1)
                     || (player.life, player.life_lost_this_turn) == (18, u32::MAX),
-                "Tainted first loses 1 (19, MAX - 1); Boon first gains 2 then loses 2 (18, MAX); \
-                 got ({}, {})",
+                "Tainted first loses 1 (19, MAX - 1); Boon first doubles the gain to 2, which \
+                 Tainted Remedy replaces with a loss of 2 (18, MAX); got ({}, {})",
                 player.life,
                 player.life_lost_this_turn
             );
@@ -5087,8 +5087,8 @@ mod tests {
             assert!(
                 (player.life, player.life_lost_this_turn) == (19, u32::MAX)
                     || (player.life, player.life_lost_this_turn) == (18, u32::MAX),
-                "Tainted first loses 1 (19, MAX); Boon first gains 2 then loses 2 (18, MAX); \
-                 got ({}, {})",
+                "Tainted first loses 1 (19, MAX); Boon first doubles the gain to 2, which \
+                 Tainted Remedy replaces with a loss of 2 (18, MAX); got ({}, {})",
                 player.life,
                 player.life_lost_this_turn
             );

@@ -83,7 +83,8 @@ const SERRA: Card = Card::Creature("Serra Ascendant", 1, 1, SERRA_ASCENDANT);
 /// How the board's creature returns from the graveyard to be sacrificed each cycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Engine {
-    /// Gravecrawler cast with the Phyrexian Altar's {B}: the cycle nets no mana.
+    /// Gravecrawler cast with the Phyrexian Altar's {B}: the return and sacrifice net no mana (a
+    /// payoff such as Carnival of Souls adds its {B}).
     Black,
     /// Gravecrawler cast with Birds of Paradise, untapped by Intruder Alarm, so the Phyrexian
     /// Altar's {W} is net: the loop stays on offer where a limit holds its life.

@@ -335,13 +335,14 @@ fn run_ingress_life_change(
 /// entry that calls this, never decided here.
 ///
 /// The settle step never refuses a life change (its total and per-turn counters
-/// saturate), so no life event takes the `Err` return below, which would come
-/// BEFORE the stashed post-replacement continuation drains. A player-counter or
-/// energy settlement the continuation reaches takes the failure branch
-/// (`settle_unrepresentable`): an open ingress window records it and the public
-/// boundary rejects the action and restores its entry state; outside a public
-/// action boundary it is logged and skipped. That skip is an engine limit and a
-/// compatibility fallback, NOT a CR 101.3 impossibility.
+/// saturate), so a life event takes the `Err` return below only when its settle
+/// pauses (the Horde no-life-total mill redirect's replacement choice, CR 616.1),
+/// which comes BEFORE the stashed post-replacement continuation drains. A
+/// player-counter or energy settlement the continuation reaches takes the
+/// failure branch (`settle_unrepresentable`): an open ingress window records it
+/// and the public boundary rejects the action and restores its entry state;
+/// outside a public action boundary it is logged and skipped. That skip is an
+/// engine limit and a compatibility fallback, NOT a CR 101.3 impossibility.
 fn apply_life_change_core(
     state: &mut GameState,
     proposed: ProposedEvent,
@@ -957,10 +958,10 @@ pub(super) fn life_total_difference(target: i32, current: i64) -> i64 {
 /// CR 119.5 + CR 701.12c + CR 701.12g: The player gains or loses `difference`
 /// as one life-gain or life-loss event through the replacement pipeline. The
 /// amount is the difference's magnitude saturated at `u32::MAX`: exact for any
-/// difference of at most `u32::MAX`, which covers every total the edit
-/// authority stores (each within `i32`, so a difference to an `i32` target
-/// fits); a hand-built total further than that from its target lands short.
-/// Returns the deferral when the pipeline paused.
+/// difference of at most `u32::MAX`, which covers every total within `i32`; a
+/// total outside it (a fixture, a restored payload, or a shared total after a
+/// member whose field was negative left the game) further than that from its
+/// target lands short. Returns the deferral when the pipeline paused.
 pub(super) fn apply_life_difference(
     state: &mut GameState,
     player: PlayerId,
@@ -1223,9 +1224,10 @@ pub fn resolve_set_life_total(
         // individual player's life total, that cost or effect uses the
         // team's life total instead" — degenerates to `Player::life` outside
         // team-based formats. CR 810.9c: the player gains or loses the
-        // difference and the team's total moves by exactly that amount (the
-        // edit authority adjusts the shared total, CR 810.9), so the team lands
-        // on the new total.
+        // difference, and the team's total moves by exactly the amount gained
+        // or lost (the edit authority adjusts the shared total, CR 810.9);
+        // unless a replacement changes that gain or loss (CR 614.1a), the team
+        // lands on the new total.
         if !state.players.iter().any(|p| p.id == target_player_id) {
             return Err(EffectError::PlayerNotFound);
         }

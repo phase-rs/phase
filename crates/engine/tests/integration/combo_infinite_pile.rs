@@ -3909,7 +3909,7 @@ fn take_at(state: &mut GameState, n: u32) -> usize {
 /// `Tokens` and `Life` — and taking N=5 must pay the life exactly ONCE, measured ACROSS the take
 /// *and* the stack drain (the drain is where the double-count surfaced: 596 → 646).
 ///
-/// REVERT-PROBE (discriminating): drop the `life_beside_deferred_growth` conjunct from
+/// REVERT-PROBE (discriminating): drop the `life_beside_deferred_growth` disjunct from
 /// `PeriodGrowth::collapse_is_replay` ⇒ the take registers `["Tokens"]` and applies the batched
 /// life at the take instead of performing, so the drained ETBs pay it again.
 ///
@@ -3961,7 +3961,7 @@ fn batched_and_replay_routes_converge_on_the_same_life_total() {
 /// suppressor keyed on "an ETB source exists" would drop the whole batched `Life` item and
 /// under-apply. Here it would pay N instead of 2N.
 ///
-/// REVERT-PROBE (discriminating): drop the `life_beside_deferred_growth` conjunct ⇒ the take
+/// REVERT-PROBE (discriminating): drop the `life_beside_deferred_growth` disjunct ⇒ the take
 /// registers `["Tokens"]` and applies `Life(PlayerId(0), 2)` per cycle at the take instead of
 /// performing.
 #[test]
@@ -4087,13 +4087,13 @@ fn combined_batched_etb_gainer_fires_once_per_replayed_cycle() {
 /// `double.rs`, `exchange_life.rs`, `deal_damage.rs`), so that test answers NO here, the loop
 /// keeps the batched `[Tokens, Life]` pair, and the 596-vs-646 double-apply reproduces.
 ///
-/// REVERT-PROBE: this cycle's ping makes each opponent lose life, so two conjuncts of
+/// REVERT-PROBE: this cycle's ping makes each opponent lose life, so two disjuncts of
 /// `PeriodGrowth::collapse_is_replay` perform the take: the `life_not_stored_as_gains` gate and
 /// `life_beside_deferred_growth`. Dropping either alone leaves this test green; dropping both ⇒
 /// the take registers `["Tokens"]` and applies the `Life(PlayerId(0), 3)` lump at the take, so
 /// the drained ETBs pay it again. The earlier probe, re-adding the `Effect::GainLife` chain test
 /// as a conjunct of `board_has_functioning_etb_trigger`, no longer discriminates: neither
-/// conjunct reads that predicate.
+/// disjunct reads that predicate.
 #[test]
 fn lifelink_etb_damage_life_axis_routes_to_replay() {
     const N: u32 = 5;

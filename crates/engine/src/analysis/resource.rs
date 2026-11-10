@@ -2703,8 +2703,8 @@ impl ResourceVector {
     /// counter unreadable and a member's field moved fails closed: its counters cannot say who
     /// gained or lost (CR 810.9), so every member's entry is removed, the field holder's
     /// included, and the total advertises no life axis. Every other entry and axis is `self`'s,
-    /// so a period with no spill reads as `self`, and so does a player's own life total: its one
-    /// member's clamped counter change is `t` itself.
+    /// so a period with no spill and no total held at an `i32` limit reads as `self`, and so does
+    /// a player's own life total: its one member's clamped counter change is `t` itself.
     ///
     /// Why the bound: CR 810.9 applies the result of each member's gains and losses to the
     /// team's shared total, and CR 810.9a reads an individual player's life total as the team's,
@@ -26942,7 +26942,9 @@ mod tests {
         for (axis, why) in [
             (
                 ResourceAxis::Life(p0),
-                "a restored save's `Life` mark stands for a CR 119.3 gain its stash has not applied; a take marks no `Life` axis",
+                "a restored save's `Life` mark stands for a CR 119.3 gain its stash has not \
+                 applied; an object-growth take marks no `Life` axis (a drain crown's mark ends \
+                 with the game)",
             ),
             (
                 ResourceAxis::DamageDealt(p0),

@@ -24841,8 +24841,11 @@ declare_game_state! {
 
     /// CR 732.2a: for each controller that accepted an unbounded loop shortcut, the
     /// list of deferred persistent-axis materializations captured at accept. Part 1
-    /// marks the ∞ axes and applies the batched life (or, for a token loop, also seeds a
-    /// display anchor); the concrete finite growth is applied at the next phase/step boundary,
+    /// marks the ∞ axes and applies any batched life (a take with a `Tokens` or `Counters`
+    /// item batches none, since one batching life beside them is performed); for a token loop
+    /// whose period taps a fodder each cycle while the proposer has none tapped, it seeds a
+    /// tapped display anchor and one untapped token (`seed_representative_fodder`); the
+    /// concrete finite growth is applied at the next phase/step boundary,
     /// where the controller is prompted (`PayableResource::LoopCollapse`) for a finite
     /// N. Each element is one `PersistentAxisMaterialization` — a per-axis batched item
     /// (`Tokens` mint recipe / `Counters` δ / `Life` δ) that applies N×δ. The token profile is a `CopiableValues`

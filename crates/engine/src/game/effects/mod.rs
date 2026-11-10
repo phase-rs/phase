@@ -29023,7 +29023,9 @@ mod tests {
     /// CR 119.3 + CR 608.2c: "the life lost this way" / "that much life" totals
     /// the magnitudes of this instruction's own life changes. A loss of
     /// `i32::MIN` and a sum of large losses or gains both pass `i32::MAX`; the
-    /// total is exact and saturates once instead of overflowing.
+    /// total is exact and saturates once instead of overflowing. The printed
+    /// card is Exsanguinate ("Each opponent loses X life. You gain life equal
+    /// to the life lost this way.").
     #[test]
     fn life_amount_channels_total_past_i32_limits() {
         let state = GameState::new_two_player(42);
