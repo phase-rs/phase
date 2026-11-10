@@ -20,6 +20,9 @@
 //! first line, without its flashback.
 //! Ever After, Myojin of Life's Web, Oblation, Llanowar Elves and Roaming Throne
 //! are verbatim.
+//! Humility, Maskwood Nexus, Twinflame and Second Harvest are verbatim, and so is
+//! Pixie Guide where a row composes its Flying line. Wyll, Blade of Frontiers
+//! carries its first two lines, without Choose a Background (commander-only).
 //! Dice-dependent rows choose their RNG seed by search and assert against the
 //! emitted `DieRolled` results, never a hard-coded total.
 
@@ -115,6 +118,12 @@ const OBLATION: &str =
 const LLANOWAR_ELVES: &str = "{T}: Add {G}.";
 const EVER_AFTER: &str = "Return up to two target creature cards from your graveyard to the battlefield. Each of those creatures is a black Zombie in addition to its other colors and types. Put Ever After on the bottom of its owner's library.";
 const MYOJIN_OF_LIFES_WEB: &str = "Myojin of Life's Web enters with a divinity counter on it if you cast it from your hand.\nMyojin of Life's Web has indestructible as long as it has a divinity counter on it.\nRemove a divinity counter from Myojin of Life's Web: Put any number of creature cards from your hand onto the battlefield.";
+const HUMILITY: &str = "All creatures lose all abilities and have base power and toughness 1/1.";
+const WYLL: &str = "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.\nWhenever you roll one or more dice, put a +1/+1 counter on Wyll.";
+const MASKWOOD_NEXUS: &str = "Creatures you control are every creature type. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.\n{3}, {T}: Create a 2/2 blue Shapeshifter creature token with changeling. (It is every creature type.)";
+const TWINFLAME: &str = "Strive — This spell costs {2}{R} more to cast for each target beyond the first.\nChoose any number of target creatures you control. For each of them, create a token that's a copy of that creature, except it has haste. Exile those tokens at the beginning of the next end step.";
+const SECOND_HARVEST: &str =
+    "For each token you control, create a token that's a copy of that permanent.";
 
 /// The scenario module exports only `P0` and `P1`.
 const P2: PlayerId = PlayerId(2);
@@ -7925,4 +7934,1129 @@ fn held_roll_contexts_stay_out_of_every_viewer_projection() {
         FirstPick::Scales.counters(r)
     );
     assert_finished(state, &[board.dwarf], "R24");
+}
+
+// ---------------------------------------------------------------------------
+// The pre-entry board: an as-enters roll is made before its event, so none of
+// that event's entrants is on the battlefield when it is proposed or observed
+// ---------------------------------------------------------------------------
+
+/// A permanent card a pre-entry row puts onto the battlefield with Hammer Jammer.
+#[derive(Clone, Copy, Debug)]
+enum CoEntrant {
+    Humility,
+    PixieGuide,
+    Wyll,
+    BarbarianClass,
+    MaskwoodNexus,
+}
+
+impl CoEntrant {
+    const ROLL_REPLACEMENTS: [CoEntrant; 3] = [
+        CoEntrant::PixieGuide,
+        CoEntrant::Wyll,
+        CoEntrant::BarbarianClass,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            CoEntrant::Humility => "Humility",
+            CoEntrant::PixieGuide => "Pixie Guide",
+            CoEntrant::Wyll => "Wyll, Blade of Frontiers",
+            CoEntrant::BarbarianClass => "Barbarian Class",
+            CoEntrant::MaskwoodNexus => "Maskwood Nexus",
+        }
+    }
+
+    /// The card in P0's hand, for `seat_on_library_top`. Every one has mana value
+    /// 5 or less, as Storm the Festival requires.
+    fn card(self, scenario: &mut GameScenario) -> ObjectId {
+        match self {
+            CoEntrant::Humility => scenario
+                .add_creature_to_hand_from_oracle(P0, self.name(), 0, 0, HUMILITY)
+                .as_enchantment()
+                .with_mana_cost(ManaCost::generic(4))
+                .id(),
+            CoEntrant::PixieGuide => scenario
+                .add_creature_to_hand_from_oracle(P0, self.name(), 1, 3, &pixie_guide())
+                .with_mana_cost(ManaCost::generic(2))
+                .id(),
+            CoEntrant::Wyll => scenario
+                .add_creature_to_hand_from_oracle(P0, self.name(), 1, 1, WYLL)
+                .with_mana_cost(ManaCost::generic(2))
+                .id(),
+            CoEntrant::BarbarianClass => scenario
+                .add_creature_to_hand_from_oracle(P0, self.name(), 0, 0, BARBARIAN_CLASS_L1)
+                .as_enchantment()
+                .with_mana_cost(ManaCost::generic(1))
+                .id(),
+            CoEntrant::MaskwoodNexus => scenario
+                .add_artifact_to_hand_from_oracle(P0, self.name(), MASKWOOD_NEXUS)
+                .with_mana_cost(ManaCost::generic(4))
+                .id(),
+        }
+    }
+
+    /// The same card already on P0's battlefield.
+    fn resident(self, scenario: &mut GameScenario) -> ObjectId {
+        match self {
+            CoEntrant::Humility => scenario
+                .add_enchantment_from_oracle(P0, self.name(), HUMILITY)
+                .id(),
+            CoEntrant::PixieGuide => scenario
+                .add_creature_from_oracle(P0, self.name(), 1, 3, &pixie_guide())
+                .id(),
+            CoEntrant::Wyll => scenario
+                .add_creature_from_oracle(P0, self.name(), 1, 1, WYLL)
+                .id(),
+            CoEntrant::BarbarianClass => scenario
+                .add_enchantment_from_oracle(P0, self.name(), BARBARIAN_CLASS_L1)
+                .id(),
+            CoEntrant::MaskwoodNexus => scenario
+                .add_artifact_from_oracle(P0, self.name(), MASKWOOD_NEXUS)
+                .id(),
+        }
+    }
+}
+
+/// Pixie Guide's whole Oracle text: its Flying line, then the line under test.
+fn pixie_guide() -> String {
+    format!("Flying\n{PIXIE_GUIDE}")
+}
+
+fn add_resident_pixie(scenario: &mut GameScenario) {
+    CoEntrant::PixieGuide.resident(scenario);
+}
+
+fn add_resident_pixie_and_barbarian(scenario: &mut GameScenario) {
+    CoEntrant::PixieGuide.resident(scenario);
+    add_barbarian_class(scenario);
+}
+
+fn add_resident_pixie_and_grumgully(scenario: &mut GameScenario) {
+    CoEntrant::PixieGuide.resident(scenario);
+    add_grumgully(scenario);
+}
+
+fn add_resident_pixie_barbarian_and_grumgully(scenario: &mut GameScenario) {
+    add_resident_pixie_and_barbarian(scenario);
+    add_grumgully(scenario);
+}
+
+/// Where a pre-entry row's other permanent is when Hammer Jammer rolls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CoLayout {
+    /// Storm the Festival keeps it, then Hammer Jammer: delivered first, so it is
+    /// physically on the battlefield, as one of the roll's event's entrants.
+    CoFirst,
+    /// Storm the Festival keeps Hammer Jammer, then it: it is not yet delivered.
+    JammerFirst,
+    /// Already on the battlefield; Storm the Festival keeps Hammer Jammer alone.
+    Resident,
+}
+
+impl CoLayout {
+    const ALL: [CoLayout; 3] = [CoLayout::CoFirst, CoLayout::JammerFirst, CoLayout::Resident];
+}
+
+/// A pre-entry row's board: Storm the Festival over `layout`'s cards, with a
+/// resident Brazen Dwarf and Soul Warden, `extras`, and a free Box of Free-Range
+/// Goblins in hand.
+struct PreEntryBoard {
+    festival: NewcomerFestival,
+    jammer: ObjectId,
+    co_entrant: ObjectId,
+    kept: Vec<ObjectId>,
+}
+
+fn pre_entry_board(
+    seed: u64,
+    co_entrant: CoEntrant,
+    layout: CoLayout,
+    extras: fn(&mut GameScenario),
+) -> PreEntryBoard {
+    let mut scenario = board(seed);
+    let jammer = jammer_card(&mut scenario);
+    let (co_entrant, kept) = match layout {
+        CoLayout::CoFirst => {
+            let card = co_entrant.card(&mut scenario);
+            (card, vec![card, jammer])
+        }
+        CoLayout::JammerFirst => {
+            let card = co_entrant.card(&mut scenario);
+            (card, vec![jammer, card])
+        }
+        CoLayout::Resident => (co_entrant.resident(&mut scenario), vec![jammer]),
+    };
+    let festival = newcomer_festival(scenario, extras, true, &kept);
+    PreEntryBoard {
+        festival,
+        jammer,
+        co_entrant,
+        kept,
+    }
+}
+
+impl PreEntryBoard {
+    fn dwarf(&self) -> ObjectId {
+        self.festival.resident_dwarf.expect("the resident Dwarf")
+    }
+
+    fn keep(&mut self, events: &mut Vec<GameEvent>) {
+        festival_keeps(
+            &mut self.festival.runner,
+            self.festival.festival,
+            self.kept.clone(),
+            events,
+        );
+    }
+
+    /// Reach: in `CoFirst`, the other permanent is delivered, and so on the
+    /// battlefield, before Hammer Jammer rolls.
+    fn assert_delivered_before_the_roll(&self, events: &[GameEvent], what: &str) {
+        let entry = battlefield_entry_index(events, self.co_entrant)
+            .unwrap_or_else(|| panic!("{what}: the co-entrant entered"));
+        assert!(
+            entry < first_roll_index(events),
+            "{what}: reach: the co-entrant is on the battlefield before the roll"
+        );
+    }
+
+    /// Cast Box of Free-Range Goblins and settle: a roll P0 makes once every
+    /// permanent of the row is on the battlefield. Returns its events.
+    fn roll_with_the_box(&mut self) -> Vec<GameEvent> {
+        let mut events = Vec::new();
+        cast_and_pass(
+            &mut self.festival.runner,
+            self.festival.box_of_goblins,
+            None,
+            None,
+            &mut events,
+        );
+        settle(&mut self.festival.runner, &mut events, DEFAULT_ANSWERS);
+        events
+    }
+}
+
+/// V1. Storm the Festival puts Humility and Hammer Jammer onto the battlefield,
+/// with Brazen Dwarf resident + CR 603.6d + CR 611.3b + CR 603.2 + CR 603.10: the
+/// roll is part of the event that puts Hammer Jammer onto the battlefield, so it
+/// is made before Humility is on the battlefield, whichever was delivered first.
+/// Humility's effect does not apply yet, and the Dwarf triggers on the roll. Once
+/// Humility is on the battlefield (a later roll, or Humility resident) the Dwarf
+/// has no abilities.
+#[test]
+fn a_co_entrants_static_does_not_reach_a_resident_at_the_roll() {
+    for seed in [7, 0] {
+        for layout in CoLayout::ALL {
+            let what = format!("seed {seed} {layout:?}");
+            reset_triggers_seen();
+            let mut board = pre_entry_board(seed, CoEntrant::Humility, layout, no_extras);
+            let dwarf = board.dwarf();
+            let p1_before = life(board.festival.runner.state(), P1);
+            let mut events = Vec::new();
+            board.keep(&mut events);
+            settle(&mut board.festival.runner, &mut events, DEFAULT_ANSWERS);
+            let state = board.festival.runner.state();
+            let rolls = die_results(&events);
+            assert_eq!(rolls.len(), 1, "{what}");
+            let seen = match layout {
+                CoLayout::CoFirst | CoLayout::JammerFirst => 1,
+                CoLayout::Resident => 0,
+            };
+            assert_eq!(
+                triggers_seen_from(dwarf),
+                seen,
+                "{what}: Humility applies to the Dwarf only once it is on the battlefield"
+            );
+            assert_eq!(p1_before - life(state, P1), seen as i32, "{what}");
+            if layout == CoLayout::CoFirst {
+                board.assert_delivered_before_the_roll(&events, &what);
+            }
+            if layout != CoLayout::Resident {
+                // CR 614.12: under a resident Humility the entrant's own as-enters
+                // replacement is a separate, disclosed question; not asserted.
+                assert_eq!(plus_counters(state, board.jammer), rolls[0], "{what}");
+            }
+            assert_finished(state, &[dwarf], &what);
+
+            // Reach: with Humility on the battlefield, the Dwarf has no abilities.
+            let p1_before_box = life(state, P1);
+            let _ = take_triggers_seen_from(dwarf);
+            board.roll_with_the_box();
+            let state = board.festival.runner.state();
+            assert_eq!(
+                triggers_seen_from(dwarf),
+                0,
+                "{what}: reach: Humility applies"
+            );
+            assert_eq!(life(state, P1), p1_before_box, "{what}");
+            assert_finished(state, &[dwarf], &what);
+        }
+    }
+}
+
+/// V2. Storm the Festival puts Pixie Guide, Wyll, Blade of Frontiers or Barbarian
+/// Class onto the battlefield with Hammer Jammer + CR 603.6d + CR 113.6 +
+/// CR 614.12: the roll is made before the event that puts either onto the
+/// battlefield, so a co-entrant's "if you would roll one or more dice, instead roll
+/// that many dice plus one" does not apply to it, whichever was delivered first.
+/// It applies to a roll made once it is on the battlefield, and to Hammer
+/// Jammer's when it is resident.
+#[test]
+fn a_co_entrants_roll_replacement_does_not_apply() {
+    for co_entrant in CoEntrant::ROLL_REPLACEMENTS {
+        for layout in CoLayout::ALL {
+            let what = format!("{co_entrant:?} {layout:?}");
+            reset_triggers_seen();
+            let mut board = pre_entry_board(7, co_entrant, layout, no_extras);
+            let mut events = Vec::new();
+            board.keep(&mut events);
+            settle(&mut board.festival.runner, &mut events, DEFAULT_ANSWERS);
+            let state = board.festival.runner.state();
+            let ignored = match layout {
+                CoLayout::CoFirst | CoLayout::JammerFirst => 0,
+                CoLayout::Resident => 1,
+            };
+            assert_eq!(
+                ignored_rolls(&events),
+                ignored,
+                "{what}: the replacement applies only from the battlefield"
+            );
+            assert_eq!(die_results(&events).len(), 1, "{what}");
+            if layout == CoLayout::CoFirst {
+                board.assert_delivered_before_the_roll(&events, &what);
+                if matches!(co_entrant, CoEntrant::Wyll) {
+                    assert_eq!(
+                        triggers_seen_from(board.co_entrant),
+                        0,
+                        "{what}: a co-entrant does not observe the roll either"
+                    );
+                }
+            }
+            assert_finished(state, &[board.dwarf()], &what);
+
+            // Reach: on the battlefield, the replacement applies.
+            let box_events = board.roll_with_the_box();
+            assert_eq!(
+                ignored_rolls(&box_events),
+                1,
+                "{what}: reach: the replacement applies once on the battlefield"
+            );
+        }
+    }
+}
+
+/// A V3 board's resident replacements and the prompt it reaches before the roll.
+#[derive(Clone, Copy, Debug)]
+enum ResidentPixieCase {
+    /// Pixie Guide alone: no prompt.
+    Alone,
+    /// Pixie Guide and Barbarian Class: the roll asks their order (CR 616.1),
+    /// inside Storm the Festival's batch.
+    WithBarbarian,
+    /// Pixie Guide and Grumgully, the Generous: Hammer Jammer's entry asks its
+    /// replacement order first, which parks the batch before the roll.
+    BehindAnEntryPrompt,
+    /// Pixie Guide, Barbarian Class and Grumgully: the entry prompt parks the
+    /// batch, then the roll asks its order after that action boundary.
+    BothPrompts,
+}
+
+impl ResidentPixieCase {
+    const ALL: [ResidentPixieCase; 4] = [
+        ResidentPixieCase::Alone,
+        ResidentPixieCase::WithBarbarian,
+        ResidentPixieCase::BehindAnEntryPrompt,
+        ResidentPixieCase::BothPrompts,
+    ];
+
+    fn extras(self) -> fn(&mut GameScenario) {
+        match self {
+            ResidentPixieCase::Alone => add_resident_pixie,
+            ResidentPixieCase::WithBarbarian => add_resident_pixie_and_barbarian,
+            ResidentPixieCase::BehindAnEntryPrompt => add_resident_pixie_and_grumgully,
+            ResidentPixieCase::BothPrompts => add_resident_pixie_barbarian_and_grumgully,
+        }
+    }
+
+    fn has_barbarian(self) -> bool {
+        matches!(
+            self,
+            ResidentPixieCase::WithBarbarian | ResidentPixieCase::BothPrompts
+        )
+    }
+
+    fn has_grumgully(self) -> bool {
+        matches!(
+            self,
+            ResidentPixieCase::BehindAnEntryPrompt | ResidentPixieCase::BothPrompts
+        )
+    }
+}
+
+/// Answer the roll's ordering prompt, if one is asked, with Pixie Guide first,
+/// after checking it was rendered with both resident replacements.
+fn answer_roll_order_with_pixie(runner: &mut GameRunner, events: &mut Vec<GameEvent>, what: &str) {
+    let state = runner.state();
+    let WaitingFor::ReplacementChoice { candidates, .. } = &state.waiting_for else {
+        panic!(
+            "{what}: expected the roll's ordering prompt, got {:?}",
+            state.waiting_for
+        );
+    };
+    let mut names: Vec<&str> = candidates.iter().map(|c| c.source_name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["Barbarian Class", "Pixie Guide"], "{what}");
+    let pixie = candidates
+        .iter()
+        .find(|candidate| candidate.source_name == "Pixie Guide")
+        .expect("Pixie Guide is offered");
+    assert!(
+        !pixie.description.is_empty(),
+        "{what}: Pixie Guide's replacement is described from the board it applies on"
+    );
+    let index = replacement_index(state, "Pixie Guide");
+    act(runner, GameAction::ChooseReplacement { index }, events);
+}
+
+/// V3. A resident Pixie Guide with Storm the Festival putting Humility and Hammer
+/// Jammer onto the battlefield + CR 603.6d + CR 611.3b + CR 614.12 + CR 616.1f:
+/// Humility is not on the battlefield when the roll is made, so Pixie Guide's
+/// replacement applies to it, both when the roll asks the replacement order and
+/// on the answer's re-scan, and behind an entry prompt that parks the batch. Two
+/// "plus one and ignore the lowest" replacements leave two ignored rolls. Once
+/// Humility is on the battlefield, Pixie Guide's replacement is gone.
+#[test]
+fn a_co_entrants_static_does_not_remove_a_residents_roll_replacement() {
+    for case in ResidentPixieCase::ALL {
+        for layout in CoLayout::ALL {
+            let what = format!("{case:?} {layout:?}");
+            reset_triggers_seen();
+            let mut board = pre_entry_board(7, CoEntrant::Humility, layout, case.extras());
+            let mut events = Vec::new();
+            board.keep(&mut events);
+            let humility_resident = layout == CoLayout::Resident;
+            if case.has_grumgully() && !humility_resident {
+                let state = board.festival.runner.state();
+                assert_eq!(
+                    stack_frames(state),
+                    vec![FrameKind::BatchDelivery],
+                    "{what}: reach: the entry prompt parks the batch before the roll"
+                );
+                order_entry(&mut board.festival.runner, "Hammer Jammer", &mut events);
+            }
+            if case.has_barbarian() && !humility_resident {
+                if matches!(case, ResidentPixieCase::WithBarbarian) {
+                    assert_eq!(
+                        stack_frames(board.festival.runner.state()),
+                        vec![
+                            FrameKind::PostReplacement,
+                            FrameKind::AbilityContinuation,
+                            FrameKind::BatchDelivery
+                        ],
+                        "{what}: reach: the roll's prompt is inside the batch"
+                    );
+                }
+                answer_roll_order_with_pixie(&mut board.festival.runner, &mut events, &what);
+            }
+            settle(&mut board.festival.runner, &mut events, DEFAULT_ANSWERS);
+            let state = board.festival.runner.state();
+            let replacements_at_the_roll = match (humility_resident, case.has_barbarian()) {
+                // Humility is not on the battlefield: Pixie Guide applies.
+                (false, true) => 2,
+                (false, false) => 1,
+                // Humility removes Pixie Guide's ability; Barbarian Class is no
+                // creature.
+                (true, true) => 1,
+                (true, false) => 0,
+            };
+            assert_eq!(
+                ignored_rolls(&events),
+                replacements_at_the_roll,
+                "{what}: one ignored roll per replacement that applied"
+            );
+            if layout == CoLayout::CoFirst {
+                board.assert_delivered_before_the_roll(&events, &what);
+            }
+            assert_finished(state, &[board.dwarf()], &what);
+
+            // Reach: once Humility is on the battlefield, Pixie Guide's
+            // replacement no longer applies.
+            let box_events = board.roll_with_the_box();
+            assert_eq!(
+                ignored_rolls(&box_events),
+                usize::from(case.has_barbarian()),
+                "{what}: reach: Humility suppresses Pixie Guide"
+            );
+        }
+    }
+}
+
+/// V4. Roaming Throne resident, having chosen Goblin, with a resident Brazen
+/// Dwarf (Dwarf Shaman), and Storm the Festival putting Maskwood Nexus and Hammer
+/// Jammer onto the battlefield + CR 603.6d + CR 611.3b + CR 603.2d: Maskwood
+/// Nexus is not on the battlefield when the roll is made, so the Dwarf is not a
+/// Goblin then and Roaming Throne does not double its trigger. Once Maskwood
+/// Nexus is on the battlefield, it does.
+#[test]
+fn a_co_entrants_type_grant_does_not_feed_a_residents_doubler() {
+    for layout in CoLayout::ALL {
+        let what = format!("{layout:?}");
+        reset_triggers_seen();
+        let mut scenario = board(7);
+        let dwarf = add_typed_dwarf(&mut scenario);
+        let throne = throne_card(&mut scenario, ManaCost::generic(0));
+        let jammer = jammer_card(&mut scenario);
+        let (maskwood, kept) = match layout {
+            CoLayout::CoFirst => {
+                let card = CoEntrant::MaskwoodNexus.card(&mut scenario);
+                (card, vec![card, jammer])
+            }
+            CoLayout::JammerFirst => {
+                let card = CoEntrant::MaskwoodNexus.card(&mut scenario);
+                (card, vec![jammer, card])
+            }
+            CoLayout::Resident => (
+                CoEntrant::MaskwoodNexus.resident(&mut scenario),
+                vec![jammer],
+            ),
+        };
+        let NewcomerFestival {
+            mut runner,
+            festival,
+            box_of_goblins,
+            ..
+        } = newcomer_festival(scenario, no_extras, false, &kept);
+        seed_creature_types(&mut runner);
+        let mut events = Vec::new();
+        cast_and_pass(&mut runner, throne, None, None, &mut events);
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::NamedChoice {
+                    choice_type: ChoiceType::CreatureType { .. },
+                    ..
+                }
+            ),
+            "{what}: {:?}",
+            runner.state().waiting_for
+        );
+        act(
+            &mut runner,
+            GameAction::ChooseOption {
+                choice: "Goblin".to_string(),
+            },
+            &mut events,
+        );
+        settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+        let throne_types = &runner.state().objects[&throne].card_types.subtypes;
+        assert!(
+            throne_types.iter().any(|t| t == "Goblin"),
+            "{what}: reach: Roaming Throne chose Goblin: {throne_types:?}"
+        );
+        if layout != CoLayout::Resident {
+            assert!(
+                !throne_types.iter().any(|t| t == "Dwarf"),
+                "{what}: reach: without Maskwood Nexus, Throne is no Dwarf: {throne_types:?}"
+            );
+        }
+
+        let p1_before = life(runner.state(), P1);
+        let _ = take_triggers_seen_from(dwarf);
+        let mut events = Vec::new();
+        festival_keeps(&mut runner, festival, kept.clone(), &mut events);
+        settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+        let state = runner.state();
+        assert_eq!(die_results(&events).len(), 1, "{what}");
+        let seen = match layout {
+            CoLayout::CoFirst | CoLayout::JammerFirst => 1,
+            CoLayout::Resident => 2,
+        };
+        assert_eq!(
+            triggers_seen_from(dwarf),
+            seen,
+            "{what}: Maskwood Nexus makes the Dwarf a Goblin only from the battlefield"
+        );
+        assert_eq!(p1_before - life(state, P1), seen as i32, "{what}");
+        if layout == CoLayout::CoFirst {
+            let entry = battlefield_entry_index(&events, maskwood).expect("Maskwood entered");
+            assert!(entry < first_roll_index(&events), "{what}: reach");
+        }
+        assert_finished(state, &[dwarf], &what);
+
+        // Reach: on the battlefield, Maskwood Nexus feeds Roaming Throne.
+        let p1_before_box = life(state, P1);
+        let _ = take_triggers_seen_from(dwarf);
+        cast_box_and_settle(&mut runner, box_of_goblins, None);
+        let state = runner.state();
+        assert_eq!(
+            triggers_seen_from(dwarf),
+            2,
+            "{what}: reach: the Dwarf is a Goblin"
+        );
+        assert_eq!(p1_before_box - life(state, P1), 2, "{what}");
+        assert_finished(state, &[dwarf], &what);
+    }
+}
+
+/// U-V3. R9's board (Storm the Festival keeps two Hammer Jammers, Brazen Dwarf
+/// resident) with a resident "Whenever you roll one or more dice, you gain 1
+/// life. This ability triggers only once each turn." + CR 603.2 + CR 603.2c: each
+/// roll's observers are collected on its pre-entry board, and the trigger-limit
+/// ledger that collection records is the game's, so the second roll and a later
+/// roll the same turn do not trigger it again.
+///
+/// The observer is composed: no printed dice observer carries a trigger limit
+/// (AtomicCards search). Priority Boarding's "Do this only once each turn" limits
+/// resolution, not triggering, and Resolute Veggiesaur's "your third die each
+/// turn" is a dice-count condition. The nearest printed card is Priority Boarding.
+/// The ledger is still committed, because the collection's journal is its only
+/// path to the live ledgers and the live event-batch flush.
+#[test]
+fn a_once_each_turn_observer_triggers_once_for_two_held_rolls() {
+    for seed in [7, 0] {
+        let what = format!("seed {seed}");
+        reset_triggers_seen();
+        let mut scenario = board(seed);
+        let once = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Once Observer",
+                1,
+                1,
+                "Whenever you roll one or more dice, you gain 1 life. This ability triggers only once each turn.",
+            )
+            .id();
+        let first = jammer_card(&mut scenario);
+        let second = jammer_card(&mut scenario);
+        let NewcomerFestival {
+            mut runner,
+            resident_dwarf,
+            festival,
+            box_of_goblins,
+            ..
+        } = newcomer_festival(scenario, no_extras, true, &[first, second]);
+        let dwarf = resident_dwarf.expect("the resident Dwarf");
+        let mut events = Vec::new();
+        festival_keeps(&mut runner, festival, vec![first, second], &mut events);
+        settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+        assert_eq!(die_results(&events).len(), 2, "{what}");
+        assert_eq!(
+            triggers_seen_from(dwarf),
+            2,
+            "{what}: reach: two instructions"
+        );
+        assert_eq!(triggers_seen_from(once), 1, "{what}: once each turn");
+        assert_finished(runner.state(), &[dwarf, once], &what);
+        cast_box_and_settle(&mut runner, box_of_goblins, None);
+        assert_eq!(
+            triggers_seen_from(dwarf),
+            3,
+            "{what}: reach: the Box's roll"
+        );
+        assert_eq!(
+            triggers_seen_from(once),
+            1,
+            "{what}: the ledger the held collection recorded is the game's"
+        );
+        assert_finished(runner.state(), &[dwarf, once], &what);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Token copies made at once: each roll instruction is its own, and no token of
+// the creating event observes another's roll
+// ---------------------------------------------------------------------------
+
+/// The `pre_entry_source` of every `DieRolled`, in order.
+fn roll_stamps(events: &[GameEvent]) -> Vec<Option<ObjectId>> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DieRolled {
+                pre_entry_source, ..
+            } => Some(*pre_entry_source),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every token named `name` on the battlefield, in creation order.
+fn tokens_named(state: &GameState, name: &str) -> Vec<ObjectId> {
+    let mut tokens: Vec<ObjectId> = state
+        .objects
+        .values()
+        .filter(|object| object.is_token && object.name == name && object.zone == Zone::Battlefield)
+        .map(|object| object.id)
+        .collect();
+    tokens.sort();
+    tokens
+}
+
+/// Stolen Identity on a resident Hammer Jammer under Doubling Season, with a
+/// resident Brazen Dwarf and, for `scales`, Hardened Scales.
+fn doubled_stolen_identity_board(
+    seed: u64,
+    scales: bool,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = board(seed);
+    let resident = resident_jammer(&mut scenario, P0);
+    let dwarf = add_dwarf(&mut scenario);
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON);
+    if scales {
+        scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES);
+    }
+    let spell = free_spell(&mut scenario, "Stolen Identity", false, STOLEN_IDENTITY);
+    (scenario.build(), resident, dwarf, spell)
+}
+
+/// A seed whose two tokens roll differently. Searched without Hardened Scales,
+/// whose prompts draw nothing from the RNG, so the same seed serves T-b.
+fn two_differing_token_rolls() -> u64 {
+    find_seed("two differing token rolls", |seed| {
+        let (mut runner, resident, _, spell) = doubled_stolen_identity_board(seed, false);
+        let mut events = Vec::new();
+        cast_and_pass(&mut runner, spell, None, Some(resident), &mut events);
+        settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+        let rolls = die_results(&events);
+        rolls.len() == 2 && rolls[0] != rolls[1]
+    })
+}
+
+/// The tokens each roll was stamped with, paired with that roll's result.
+fn rolls_by_token(events: &[GameEvent], what: &str) -> Vec<(ObjectId, u32)> {
+    let stamps = roll_stamps(events);
+    let rolls = die_results(events);
+    assert_eq!(stamps.len(), rolls.len(), "{what}");
+    stamps
+        .into_iter()
+        .zip(rolls)
+        .map(|(stamp, roll)| {
+            (
+                stamp.unwrap_or_else(|| panic!("{what}: a token's roll names its token")),
+                roll,
+            )
+        })
+        .collect()
+}
+
+/// T-a. Stolen Identity copies a resident Hammer Jammer under Doubling Season,
+/// with Brazen Dwarf resident + Stolen Identity's ruling + CR 707.2 + CR 603.6a +
+/// CR 603.6d + CR 603.2c: each token makes its own as-enters roll, the two
+/// tokens enter in one event, so neither observes the other's roll, and the
+/// Dwarf triggers once per roll instruction. Each token enters with twice its
+/// own result.
+#[test]
+fn each_token_copy_rolls_and_is_seen_on_its_own() {
+    let seed = two_differing_token_rolls();
+    reset_triggers_seen();
+    let (mut runner, resident, dwarf, spell) = doubled_stolen_identity_board(seed, false);
+    let p1_before = life(runner.state(), P1);
+    let mut events = Vec::new();
+    cast_and_pass(&mut runner, spell, None, Some(resident), &mut events);
+    settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+    let state = runner.state();
+    let tokens = tokens_named(state, "Hammer Jammer");
+    assert_eq!(tokens.len(), 2, "reach: Doubling Season makes two tokens");
+    let rolls = rolls_by_token(&events, "T-a");
+    assert_eq!(
+        rolls.iter().map(|(token, _)| *token).collect::<Vec<_>>(),
+        tokens,
+        "each token's roll is held as its own entry's"
+    );
+    assert_ne!(rolls[0].1, rolls[1].1, "reach: the seed's rolls differ");
+    for (token, roll) in &rolls {
+        assert_eq!(
+            triggers_seen_from(*token),
+            0,
+            "no token observes a roll of its event"
+        );
+        assert_eq!(plus_counters(state, *token), 2 * roll, "{rolls:?}");
+    }
+    assert_eq!(
+        triggers_seen_from(dwarf),
+        2,
+        "one trigger per roll instruction"
+    );
+    assert_eq!(p1_before - life(state, P1), 2);
+    assert_eq!(
+        triggers_seen_from(resident),
+        2,
+        "the resident Jammer, once per die"
+    );
+    assert_finished(state, &[dwarf, resident], "T-a");
+}
+
+/// T-b. T-a with Hardened Scales, each counter prompt answered Scales first +
+/// CR 616.1 + CR 614.1c + CR 122.6a: the first token's counter prompt pauses the
+/// batch, and the second token still makes its own roll and enters with its own
+/// counters, not the first token's.
+#[test]
+fn a_paused_token_copy_batch_rolls_for_each_token() {
+    let seed = two_differing_token_rolls();
+    reset_triggers_seen();
+    let (mut runner, resident, dwarf, spell) = doubled_stolen_identity_board(seed, true);
+    let p1_before = life(runner.state(), P1);
+    let mut events = Vec::new();
+    cast_and_pass(&mut runner, spell, None, Some(resident), &mut events);
+    let state = runner.state();
+    assert_counter_prompt(state);
+    assert_eq!(
+        stack_frames(state),
+        vec![FrameKind::CopyToken, FrameKind::CounterAdditions],
+        "reach: the first token's counter prompt pauses the batch"
+    );
+    assert_eq!(
+        tokens_named(state, "Hammer Jammer").len(),
+        1,
+        "reach: one token is on the battlefield at the first prompt"
+    );
+    settle_picking(&mut runner, &mut events, FirstPick::Scales);
+    let state = runner.state();
+    let tokens = tokens_named(state, "Hammer Jammer");
+    assert_eq!(tokens.len(), 2);
+    let rolls = rolls_by_token(&events, "T-b");
+    assert_eq!(rolls.len(), 2, "each token rolls: {rolls:?}");
+    assert_ne!(rolls[0].1, rolls[1].1, "reach: the seed's rolls differ");
+    assert_eq!(
+        rolls.iter().map(|(token, _)| *token).collect::<Vec<_>>(),
+        tokens
+    );
+    for (token, roll) in &rolls {
+        assert_eq!(triggers_seen_from(*token), 0);
+        assert_eq!(
+            plus_counters(state, *token),
+            FirstPick::Scales.counters(*roll),
+            "each token enters with its own roll's counters: {rolls:?}"
+        );
+    }
+    assert_eq!(triggers_seen_from(dwarf), 2);
+    assert_eq!(p1_before - life(state, P1), 2);
+    assert_eq!(triggers_seen_from(resident), 2);
+    assert_finished(state, &[dwarf, resident], "T-b");
+}
+
+/// T-c. Stolen Identity copies a resident Fanatic of Xenagos under Doubling
+/// Season and Hardened Scales + CR 702.104a + CR 707.2 + CR 122.6a: each token
+/// asks its own tribute ("As this creature enters, choose an opponent"). P1 pays
+/// for the first, whose counter prompt pauses the batch, and declines for the
+/// second, which enters with no counters, none of the first token's.
+#[test]
+fn each_tribute_copy_asks_its_own_tribute() {
+    let mut scenario = board(7);
+    let fanatic = scenario
+        .add_creature(P0, "Fanatic of Xenagos", 3, 3)
+        .from_oracle_text_with_keywords(&["trample", "tribute:1"], FANATIC_OF_XENAGOS)
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON);
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES);
+    let spell = free_spell(&mut scenario, "Stolen Identity", false, STOLEN_IDENTITY);
+    let mut runner = scenario.build();
+    let mut events = Vec::new();
+    cast_and_pass(&mut runner, spell, None, Some(fanatic), &mut events);
+    let mut opponent_choices = 0;
+    let mut tributes = Vec::new();
+    for _ in 0..60 {
+        record_stack(runner.state());
+        let state = runner.state();
+        let action = match &state.waiting_for {
+            WaitingFor::Priority { .. } if resolution_is_settled(state) => break,
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::NamedChoice { .. } => {
+                opponent_choices += 1;
+                GameAction::ChooseOption {
+                    choice: "1".to_string(),
+                }
+            }
+            WaitingFor::TributeChoice { source_id, .. } => {
+                tributes.push(*source_id);
+                // P1 pays the first tribute and declines the second.
+                GameAction::DecideOptionalEffect {
+                    accept: tributes.len() == 1,
+                }
+            }
+            WaitingFor::ReplacementChoice { .. } => GameAction::ChooseReplacement {
+                index: replacement_index(state, "Doubling Season"),
+            },
+            WaitingFor::OrderTriggers { .. } => {
+                engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
+                continue;
+            }
+            other => panic!("unhandled prompt: {other:?}"),
+        };
+        act(&mut runner, action, &mut events);
+    }
+    let state = runner.state();
+    let tokens = tokens_named(state, "Fanatic of Xenagos");
+    assert_eq!(tokens.len(), 2, "reach: Doubling Season makes two tokens");
+    assert_eq!(opponent_choices, 2, "each token chooses its opponent");
+    assert_eq!(tributes, tokens, "each token asks its own tribute");
+    assert_eq!(
+        plus_counters(state, tokens[0]),
+        3,
+        "the paid tribute, doubled then plus one"
+    );
+    assert_eq!(
+        plus_counters(state, tokens[1]),
+        0,
+        "the declined tribute: no counters, and none of the first token's"
+    );
+    // The second token's "if tribute wasn't paid" bonus is not asserted: a token
+    // copy's tribute-not-paid trigger is a separate, disclosed question (it does
+    // not fire for a lone Stolen Identity copy either).
+    assert_finished(state, &[fanatic], "T-c");
+}
+
+/// A Twinflame or Second Harvest row's board: a Brazen Dwarf and a Hammer Jammer
+/// on P0's battlefield, as `tokens` or as cards, and `extras`.
+struct CopyEventBoard {
+    runner: GameRunner,
+    dwarf: ObjectId,
+    jammer: ObjectId,
+    spell: ObjectId,
+}
+
+fn copy_event_board(
+    seed: u64,
+    spell: (&str, bool, &str),
+    tokens: bool,
+    extras: fn(&mut GameScenario),
+) -> CopyEventBoard {
+    let mut scenario = board(seed);
+    extras(&mut scenario);
+    let dwarf = add_dwarf(&mut scenario);
+    let jammer = resident_jammer(&mut scenario, P0);
+    let (name, instant, oracle) = spell;
+    let spell = free_spell(&mut scenario, name, instant, oracle);
+    // Strive: one target beyond the first costs {2}{R} more.
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    if tokens {
+        for id in [dwarf, jammer] {
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&id)
+                .expect("resident")
+                .is_token = true;
+        }
+    }
+    CopyEventBoard {
+        runner,
+        dwarf,
+        jammer,
+        spell,
+    }
+}
+
+fn add_doubling_season_and_scales(scenario: &mut GameScenario) {
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON);
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES);
+}
+
+/// What a copy-event row asserts once it has settled: `copies_of_the_dwarf` new
+/// Dwarf tokens see no roll, the resident Dwarf sees each roll once, and each
+/// Hammer Jammer token enters with its own roll's counters.
+fn assert_copy_event_settled(
+    board: &CopyEventBoard,
+    events: &[GameEvent],
+    p1_before: i32,
+    counters: fn(u32) -> u32,
+    what: &str,
+) {
+    let state = board.runner.state();
+    let rolls = rolls_by_token(events, what);
+    let dwarf_tokens: Vec<ObjectId> = tokens_named(state, "Brazen Dwarf")
+        .into_iter()
+        .filter(|id| *id != board.dwarf)
+        .collect();
+    let jammer_tokens: Vec<ObjectId> = tokens_named(state, "Hammer Jammer")
+        .into_iter()
+        .filter(|id| *id != board.jammer)
+        .collect();
+    assert!(
+        !dwarf_tokens.is_empty(),
+        "{what}: reach: the Dwarf was copied"
+    );
+    assert_eq!(
+        rolls.iter().map(|(token, _)| *token).collect::<Vec<_>>(),
+        jammer_tokens,
+        "{what}: each Jammer token rolls as it enters"
+    );
+    for token in &dwarf_tokens {
+        assert_eq!(
+            triggers_seen_from(*token),
+            0,
+            "{what}: a token of the same creating event does not observe the roll"
+        );
+    }
+    for (token, roll) in &rolls {
+        assert_eq!(triggers_seen_from(*token), 0, "{what}");
+        assert_eq!(
+            plus_counters(state, *token),
+            counters(*roll),
+            "{what}: {rolls:?}"
+        );
+    }
+    assert_eq!(
+        triggers_seen_from(board.dwarf),
+        rolls.len(),
+        "{what}: the resident Dwarf, once per roll"
+    );
+    assert_eq!(p1_before - life(state, P1), rolls.len() as i32, "{what}");
+    assert_eq!(triggers_seen_from(board.jammer), rolls.len(), "{what}");
+    assert_finished(state, &[board.dwarf, board.jammer], what);
+}
+
+const TWINFLAME_SPELL: (&str, bool, &str) = ("Twinflame", false, TWINFLAME);
+
+/// CR 603.7 + CR 608.2c: at the next end step, Twinflame's "Exile those tokens"
+/// exiles every token it created, whichever batch made it.
+fn assert_twinflame_tokens_exiled_at_end_step(board: &mut CopyEventBoard, what: &str) {
+    let state = board.runner.state();
+    let tokens: Vec<ObjectId> = tokens_named(state, "Brazen Dwarf")
+        .into_iter()
+        .chain(tokens_named(state, "Hammer Jammer"))
+        .collect();
+    assert!(!tokens.is_empty(), "{what}: reach: Twinflame made tokens");
+    board.runner.advance_to_combat();
+    board
+        .runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![],
+            bands: vec![],
+        })
+        .expect("declare no attackers to cross combat");
+    board.runner.advance_to_end_step();
+    board.runner.advance_until_stack_empty();
+    let state = board.runner.state();
+    let left: Vec<ObjectId> = tokens
+        .into_iter()
+        .filter(|token| state.battlefield.contains(token))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "{what}: every Twinflame token is exiled, left {left:?}"
+    );
+    assert_eq!(zone(state, board.dwarf), Zone::Battlefield, "{what}");
+    assert_eq!(zone(state, board.jammer), Zone::Battlefield, "{what}");
+}
+const SECOND_HARVEST_SPELL: (&str, bool, &str) = ("Second Harvest", true, SECOND_HARVEST);
+
+/// T-d. Twinflame targets a resident Brazen Dwarf, then a resident Hammer Jammer +
+/// Twinflame's ruling ("The tokens see each other enter the battlefield") +
+/// CR 603.6a + CR 603.6d + CR 707.2: the two tokens enter in one event, so the
+/// Dwarf token, created first, is not on the battlefield when the Jammer token
+/// makes its as-enters roll. Only the resident Dwarf triggers. The reverse target
+/// order is the control: the Dwarf token does not exist yet at the roll.
+#[test]
+fn a_token_copy_of_another_source_does_not_see_the_roll() {
+    for dwarf_first in [true, false] {
+        let what = format!("Twinflame, Dwarf first: {dwarf_first}");
+        reset_triggers_seen();
+        let mut board = copy_event_board(7, TWINFLAME_SPELL, false, no_extras);
+        let p1_before = life(board.runner.state(), P1);
+        let targets = if dwarf_first {
+            [board.dwarf, board.jammer]
+        } else {
+            [board.jammer, board.dwarf]
+        };
+        let mut events = Vec::new();
+        let commit = board
+            .runner
+            .cast(board.spell)
+            .target_objects(&targets)
+            .commit();
+        events.extend(commit.events().iter().cloned());
+        drop(commit);
+        settle(&mut board.runner, &mut events, DEFAULT_ANSWERS);
+        assert_copy_event_settled(&board, &events, p1_before, |roll| roll, &what);
+        assert_twinflame_tokens_exiled_at_end_step(&mut board, &what);
+    }
+}
+
+/// T-d2. T-d under Doubling Season and Hardened Scales, each counter prompt
+/// answered Scales first + CR 616.1: each source makes two tokens, and the first
+/// Hammer Jammer token's counter prompt pauses the resolution, which keeps the
+/// tokens it has created across the pause: neither Dwarf token nor the first
+/// Jammer token observes the second Jammer token's roll, and the tokens it
+/// created are all of them (CR 608.2c).
+///
+/// Known pre-existing gap, not asserted here: "Exile those tokens" reads the
+/// tracked set the chain publishes from the paused step's events, which holds
+/// only the first source's tokens. Measured at 7e96a03a5 and on this change
+/// alike: at the next end step the two Hammer Jammer tokens stay on the
+/// battlefield (the unpaused T-d exiles every token).
+#[test]
+fn a_paused_copy_event_keeps_its_earlier_tokens_off_the_roll() {
+    reset_triggers_seen();
+    let mut board = copy_event_board(7, TWINFLAME_SPELL, false, add_doubling_season_and_scales);
+    let p1_before = life(board.runner.state(), P1);
+    let mut events = Vec::new();
+    let targets = [board.dwarf, board.jammer];
+    let commit = board
+        .runner
+        .cast(board.spell)
+        .target_objects(&targets)
+        .commit();
+    events.extend(commit.events().iter().cloned());
+    drop(commit);
+    pass_until_prompt(&mut board.runner, &mut events);
+    assert_counter_prompt(board.runner.state());
+    assert!(
+        stack_frames(board.runner.state()).contains(&FrameKind::CopyToken),
+        "reach: the counter prompt pauses the copy resolution: {:?}",
+        stack_frames(board.runner.state())
+    );
+    assert_eq!(
+        tokens_named(board.runner.state(), "Brazen Dwarf").len(),
+        2,
+        "reach: both Dwarf tokens are on the battlefield at the pause"
+    );
+    settle_picking(&mut board.runner, &mut events, FirstPick::Scales);
+    assert_eq!(die_results(&events).len(), 2, "reach: two Jammer tokens");
+    assert_copy_event_settled(
+        &board,
+        &events,
+        p1_before,
+        |roll| FirstPick::Scales.counters(roll),
+        "T-d2",
+    );
+    // CR 608.2c: the resolution's created referent is every token it created,
+    // across the pause. Its end-step exile reads a tracked set published from the
+    // paused step's events, a separate, disclosed question; the unpaused T-d
+    // asserts the exile.
+    let state = board.runner.state();
+    let created: Vec<ObjectId> = tokens_named(state, "Brazen Dwarf")
+        .into_iter()
+        .chain(tokens_named(state, "Hammer Jammer"))
+        .collect();
+    assert_eq!(created.len(), 4, "reach: two tokens per source");
+    assert_eq!(
+        state.last_created_token_ids, created,
+        "T-d2: the created referent keeps the earlier batches' tokens"
+    );
+}
+
+/// T-e. Second Harvest copies a Brazen Dwarf token and a Hammer Jammer token +
+/// CR 603.6a + CR 603.6d + CR 707.2: "For each token you control, create a token
+/// that's a copy of that permanent" is one event, so the Dwarf token's copy,
+/// created first, does not observe the Jammer token's copy's roll.
+#[test]
+fn a_harvested_token_copy_does_not_see_another_copys_roll() {
+    reset_triggers_seen();
+    let mut board = copy_event_board(7, SECOND_HARVEST_SPELL, true, no_extras);
+    let p1_before = life(board.runner.state(), P1);
+    let mut events = Vec::new();
+    cast_and_pass(&mut board.runner, board.spell, None, None, &mut events);
+    settle(&mut board.runner, &mut events, DEFAULT_ANSWERS);
+    let rolls = die_results(&events);
+    assert_eq!(rolls.len(), 1, "reach: the Jammer token's copy rolls");
+    assert_copy_event_settled(&board, &events, p1_before, |roll| roll, "T-e");
 }

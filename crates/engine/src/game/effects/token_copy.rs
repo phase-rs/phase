@@ -543,13 +543,19 @@ fn drain_copy_token_resolution(
                 // batch, paused. `Suppress`: this frame's drain emits the
                 // effect's terminal `EffectResolved{CopyTokenOf}`, so no pause
                 // of the event owes one.
-                let completed = super::token::apply_create_token_after_replacement_with_created_ids(
-                    state,
-                    event,
-                    Vec::new(),
-                    crate::types::game_state::PendingEffectResolutionEvent::Suppress,
-                    events,
-                );
+                // CR 111.1 + CR 603.6a: every batch of this resolution creates
+                // its tokens in one event, so the tokens earlier batches created
+                // are published to this batch's entrants.
+                let completed =
+                    publish_committed_copy_tokens(state, pending.created_ids.clone(), |state| {
+                        super::token::apply_create_token_after_replacement_with_created_ids(
+                            state,
+                            event,
+                            Vec::new(),
+                            crate::types::game_state::PendingEffectResolutionEvent::Suppress,
+                            events,
+                        )
+                    });
                 if !completed {
                     pending
                         .created_ids
@@ -582,6 +588,21 @@ fn drain_copy_token_resolution(
         source_id: pending.source_id,
         subject: None,
     });
+}
+
+/// CR 111.1 + CR 603.6a + CR 603.6d: run `deliver` with `committed`, the tokens
+/// the resolving copy-token effect has already created, published as entrants of
+/// the event the tokens `deliver` creates belong to
+/// (`zone_pipeline::simultaneous_entrants_of`). Restores the outer publication.
+pub(crate) fn publish_committed_copy_tokens<R>(
+    state: &mut GameState,
+    committed: Vec<ObjectId>,
+    deliver: impl FnOnce(&mut GameState) -> R,
+) -> R {
+    let outer = state.active_copy_token_resolution_tokens.replace(committed);
+    let result = deliver(state);
+    state.active_copy_token_resolution_tokens = outer;
+    result
 }
 
 /// Park a copy-token owner as the direct paused frame, or below the complete
@@ -1196,10 +1217,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         state.waiting_for = crate::types::game_state::WaitingFor::Priority {
             player: state.active_player,
         };
-        let created_ids_for_pending = state.last_created_token_ids.clone();
-        if let Some(pending) = state.active_copy_token_mut() {
-            pending.created_ids = created_ids_for_pending;
-        }
+        super::token::record_copy_batch_ledger_on_active_copy_token(state);
         if state.active_copy_token().is_some() {
             drain_pending_copy_token_resolution(state, events);
         }

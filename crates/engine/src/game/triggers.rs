@@ -695,10 +695,6 @@ struct TriggerCollectionSession {
     /// session prepares each event batch with `ObserveEventBatch` and reads
     /// these sources instead of rebuilding them (`BulkMemberTriggerCollection`).
     bulk_member_sources: Option<Vec<OffZoneTriggerSourceCache>>,
-    /// CR 603.6a + CR 603.6d: the permanents that enter in the same event as
-    /// the as-enters roll this session collects for, its roller among them.
-    /// Empty for every other scan.
-    simultaneous_entrants: Vec<ObjectId>,
 }
 
 impl TriggerCollectionSession {
@@ -709,7 +705,6 @@ impl TriggerCollectionSession {
             operation_journal: None,
             admitted_matches: 0,
             bulk_member_sources: None,
-            simultaneous_entrants: Vec::new(),
         }
     }
 
@@ -724,46 +719,35 @@ impl TriggerCollectionSession {
             operation_journal: Some(operation_journal),
             admitted_matches: 0,
             bulk_member_sources: None,
-            simultaneous_entrants: Vec::new(),
         }
     }
 
     /// CR 603.2 + CR 603.10: the scan made when an as-enters roll is rolled, the
-    /// one scan that collects that roll's observers. `simultaneous_entrants` are
-    /// the permanents entering in the roll's event (CR 603.6a); `roller`, the
-    /// entrant whose roll it is, enters in that event too (CR 614.1c).
-    fn at_as_enters_roll(
-        roller: Option<ObjectId>,
-        mut simultaneous_entrants: Vec<ObjectId>,
-    ) -> Self {
-        if let Some(roller) = roller.filter(|roller| !simultaneous_entrants.contains(roller)) {
-            simultaneous_entrants.push(roller);
-        }
+    /// one scan that collects that roll's observers.
+    fn at_as_enters_roll() -> Self {
         Self {
             as_enters_roll_scan: AsEntersRollScan::AtEmission,
-            simultaneous_entrants,
             ..Self::new(TriggerCollectionOverlay::default())
         }
     }
 
-    /// CR 603.6a + CR 603.6d + CR 113.6: is `obj_id` one of the permanents that
-    /// enter in the same event as this as-enters roll? That event follows the
-    /// roll, so none of them is on the battlefield when it is rolled.
-    fn enters_with_the_roll(&self, obj_id: ObjectId) -> bool {
-        self.simultaneous_entrants.contains(&obj_id)
+    /// This session, retaining its operations in a journal so they can be
+    /// committed to a game other than the staged board it collects on.
+    fn staged(mut self) -> Self {
+        self.operation_journal = Some(Vec::new());
+        self
     }
 
-    /// CR 603.2d + CR 611.3b + CR 603.10: the trigger doublers that function
-    /// for this scan's events. A permanent entering with an as-enters roll is
-    /// not on the battlefield when it is rolled, so its doubling static does not
-    /// apply to the roll's triggers; every other scan reads the board as it is.
-    fn trigger_doublers(
-        &self,
-        state: &GameState,
-    ) -> Vec<crate::types::events::LatchedTriggerDoubler> {
-        let mut doublers = active_trigger_doublers(state);
-        doublers.retain(|doubler| !self.enters_with_the_roll(doubler.source_id()));
-        doublers
+    /// Commit this staged session's operations to `state`, in collection order.
+    fn commit_operations(self, state: &mut GameState) {
+        Self::commit_journal(state, self.into_operation_journal());
+    }
+
+    /// Apply a staged collection's ordered operation journal to `state`.
+    fn commit_journal(state: &mut GameState, journal: Vec<TriggerCollectionOperation>) {
+        for operation in journal {
+            let _ = Self::apply_operation(state, operation);
+        }
     }
 
     fn prepare(&mut self, state: &mut GameState, events: &[GameEvent]) {
@@ -895,7 +879,6 @@ impl TriggerCollectionSession {
         Self::apply_operation(state, operation)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // Returned to the durable pending carrier.
     fn into_operation_journal(mut self) -> Vec<TriggerCollectionOperation> {
         self.operation_journal.take().unwrap_or_default()
     }
@@ -1082,9 +1065,7 @@ impl PendingActivationTriggerCollection {
         state: &mut GameState,
         deferred_contexts: &mut Vec<PendingTriggerContext>,
     ) {
-        for operation in self.operation_journal {
-            let _ = TriggerCollectionSession::apply_operation(state, operation);
-        }
+        TriggerCollectionSession::commit_journal(state, self.operation_journal);
         deferred_contexts.extend(retire_departed_controller_contexts(
             state,
             self.pending_contexts,
@@ -5520,8 +5501,7 @@ fn collect_pending_triggers_with_collection(
                 event_idx,
                 obj_id,
                 &battlefield_entry_index,
-            ) || session.enters_with_the_roll(obj_id)
-            {
+            ) {
                 continue;
             }
             let (
@@ -6009,8 +5989,7 @@ fn collect_pending_triggers_with_collection(
                         event_idx,
                         obj_id,
                         &battlefield_entry_index,
-                    ) || session.enters_with_the_roll(obj_id)
-                    {
+                    ) {
                         continue;
                     }
                     let Some(obj) = state.objects.get(&obj_id) else {
@@ -7497,10 +7476,10 @@ fn collect_pending_triggers_with_collection(
     // alongside The Ring's emblem trigger rather than from object definitions.
     super::cipher::collect_combat_damage_recast_triggers(state, events, &mut pending);
 
-    // CR 603.2d: Trigger doubling — Panharmonicon-style effects. The session
-    // owns which doublers function for these events (an as-enters roll's
-    // co-entrants do not), then matching pending triggers are cloned.
-    apply_trigger_doublers(state, &session.trigger_doublers(state), &mut pending);
+    // CR 603.2d: Trigger doubling — Panharmonicon-style effects.
+    // Scan battlefield for objects with StaticMode::Panharmonicon statics,
+    // then clone matching pending triggers.
+    apply_trigger_doubling(state, &mut pending);
     pending = filter_auto_inert_noop_triggers(state, pending);
 
     // CR 800.4d: a departing permanent's own leaves-the-battlefield abilities
@@ -9258,13 +9237,16 @@ pub(crate) fn collect_triggers_into_deferred(state: &mut GameState, events: &[Ga
 
 /// CR 603.2 + CR 603.10 + CR 603.2c: the triggered abilities one as-enters roll
 /// instruction triggers, collected as it is rolled, with the battlefield as it
-/// is then. Its roller is excluded by `pre_entry_source` (CR 113.6), and a
+/// is then. The roll is made before the event that puts its roller onto the
+/// battlefield (CR 603.6d), so it is collected on the pre-entry view
+/// (`PreEntryRulesView`): none of that event's entrants (the roller, and every
+/// co-entrant already delivered, CR 603.6a) is a source, a trigger doubler
+/// (CR 603.2d) or the source of a continuous effect (CR 611.3b) there. A
 /// permanent not yet on the battlefield (a later batch member, a newcomer) is
-/// not an observer. A co-entrant of the same simultaneous change is not an
-/// observer either (CR 603.6a + CR 603.6d), and neither its nor the roller's
-/// trigger-doubling static applies to the roll (CR 603.2d + CR 611.3b). Delayed
-/// contexts come first, as the release queues them. Composes the two choke
-/// points; it matches nothing itself.
+/// not an observer either. The collection's ledger operations are committed to
+/// the game. Delayed contexts come first, as the release queues them, read from
+/// the live game (CR 603.7: a delayed trigger is no permanent's ability).
+/// Composes the two choke points; it matches nothing itself.
 pub(crate) fn collect_as_enters_roll_observers(
     state: &mut GameState,
     rolls: &[GameEvent],
@@ -9272,9 +9254,6 @@ pub(crate) fn collect_as_enters_roll_observers(
     let roller = rolls.first().and_then(as_enters_roller);
     // One hold is one instruction of one source.
     debug_assert!(rolls.iter().all(|roll| as_enters_roller(roll) == roller));
-    let simultaneous_entrants = roller
-        .map(|roller| crate::game::zone_pipeline::simultaneous_entrants_of(state, roller))
-        .unwrap_or_default();
     let mut observers = collect_matching_delayed_triggers_with(
         state,
         rolls,
@@ -9282,13 +9261,32 @@ pub(crate) fn collect_as_enters_roll_observers(
         AsEntersRollScan::AtEmission,
     )
     .contexts;
-    let mut session = TriggerCollectionSession::at_as_enters_roll(roller, simultaneous_entrants);
-    observers.extend(collect_pending_triggers_with_collection(
-        state,
-        rolls,
-        LogicalZoneTriggerCollection::Ordinary,
-        &mut session,
-    ));
+    // CR 603.2 + CR 603.10 + CR 603.6d + CR 611.3b: the roll triggers what is on
+    // the battlefield when it is rolled, as it is then: none of its event's
+    // entrants is there, and their effects do not apply. Collected on that board;
+    // the collection's ledger operations are committed to the game.
+    match roller.and_then(|roller| super::pre_entry_view::PreEntryRulesView::of_roll(state, roller))
+    {
+        Some(mut view) => {
+            let mut session = TriggerCollectionSession::at_as_enters_roll().staged();
+            observers.extend(collect_pending_triggers_with_collection(
+                view.board_mut(),
+                rolls,
+                LogicalZoneTriggerCollection::Ordinary,
+                &mut session,
+            ));
+            session.commit_operations(state);
+        }
+        None => {
+            let mut session = TriggerCollectionSession::at_as_enters_roll();
+            observers.extend(collect_pending_triggers_with_collection(
+                state,
+                rolls,
+                LogicalZoneTriggerCollection::Ordinary,
+                &mut session,
+            ));
+        }
+    }
     observers
 }
 
@@ -9424,9 +9422,7 @@ impl ImmediatelyBeforeObservers {
             LogicalZoneTriggerCollection::Ordinary,
             &mut session,
         );
-        for operation in session.into_operation_journal() {
-            let _ = TriggerCollectionSession::apply_operation(state, operation);
-        }
+        session.commit_operations(state);
         let live = retire_departed_controller_contexts(state, contexts);
         state.deferred_triggers.extend(live);
     }
@@ -13303,19 +13299,9 @@ fn doubler_applies(
 }
 
 fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTriggerContext>) {
-    apply_trigger_doublers(state, &active_trigger_doublers(state), pending);
-}
-
-/// CR 603.2d: clone each pending trigger once per functioning doubler in `live`
-/// that applies to it; a look-back control-change trigger is counted against
-/// its instruction's latched doublers instead (CR 603.10d).
-fn apply_trigger_doublers(
-    state: &GameState,
-    live: &[crate::types::events::LatchedTriggerDoubler],
-    pending: &mut Vec<PendingTriggerContext>,
-) {
+    let live = active_trigger_doublers(state);
     let mut extra: Vec<PendingTriggerContext> = Vec::new();
-    for doubler in live {
+    for doubler in &live {
         for trigger_context in pending.iter() {
             if control_change_doubling_authority(state, &trigger_context.pending).is_none()
                 && doubler_applies(state, trigger_context, doubler, None)

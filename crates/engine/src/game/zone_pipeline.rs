@@ -31,6 +31,7 @@ use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
+use crate::types::resolution::ResolutionFrame;
 use crate::types::zones::{EtbTapState, Zone};
 
 use crate::game::effects::change_zone::shuffle_library;
@@ -1620,11 +1621,45 @@ pub(crate) fn deliver_simultaneous_member<R>(
 /// CR 603.6a + CR 603.6d + CR 614.12a: the permanents that the one event
 /// putting `entrant` onto the battlefield can put there, `entrant` among them.
 /// Empty when no logical owner is delivering it (a single put). An inline
-/// owner publishes them; a parked owner holds them on its frame.
+/// owner publishes them; a parked owner holds them on its frame. A token copy
+/// still being created is listed with the tokens its creating effect has
+/// already created.
 ///
 /// Every listed id was off the battlefield when the change was announced, so a
 /// listed id now on the battlefield entered through this change.
 pub(crate) fn simultaneous_entrants_of(state: &GameState, entrant: ObjectId) -> Vec<ObjectId> {
+    // CR 111.1 + CR 603.6a + CR 707.2: a token copy still being created enters in
+    // one event with every token its creating effect creates: those its own batch
+    // has committed (listed on its liminal entry), and those earlier batches of
+    // the resolution committed (published by the inline copy drain, or held on
+    // the parked `CopyToken` frame across a pause).
+    if let Some(entry) = state.liminal_entries.get(&entrant) {
+        let resolution = match &state.active_copy_token_resolution_tokens {
+            Some(committed) => committed.as_slice(),
+            // The innermost parked owner is the one creating this token.
+            None => state
+                .resolution_stack
+                .iter()
+                .filter_map(|frame| match frame {
+                    ResolutionFrame::CopyToken(pending) => Some(pending.created_ids.as_slice()),
+                    _ => None,
+                })
+                .last()
+                .unwrap_or_default(),
+        };
+        let mut entrants: Vec<ObjectId> = Vec::new();
+        for id in resolution
+            .iter()
+            .chain(entry.created_ids.iter())
+            .copied()
+            .chain(std::iter::once(entrant))
+        {
+            if !entrants.contains(&id) {
+                entrants.push(id);
+            }
+        }
+        return entrants;
+    }
     if state.active_simultaneous_entrants.contains(&entrant) {
         return state.active_simultaneous_entrants.clone();
     }

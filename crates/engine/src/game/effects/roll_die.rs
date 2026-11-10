@@ -132,13 +132,29 @@ pub(crate) fn propose_roll(
         applied: HashSet::new(),
     };
 
-    match replacement::replace_event(state, proposed, events) {
+    // CR 603.6d + CR 614.12a + CR 611.3b: an as-enters roll is proposed on the
+    // board before its event; every other roll on the live board.
+    let (result, viewed_choice) =
+        match crate::game::pre_entry_view::PreEntryRulesView::of_pending_roll(state) {
+            Some(view) => {
+                let viewed = view.replace(
+                    state,
+                    |board, events| replacement::replace_event(board, proposed, events),
+                    events,
+                );
+                (viewed.result, viewed.choice)
+            }
+            None => (replacement::replace_event(state, proposed, events), None),
+        };
+    match result {
         ReplacementResult::Execute(event) => proposal_from_modified_event(event, count),
         ReplacementResult::Prevented => RollProposal::Prevented,
         ReplacementResult::NeedsChoice(choice_player) => {
             // CR 616.1: two or more applicable replacements — the affected
             // player orders them before the roll happens.
-            state.waiting_for = replacement::replacement_choice_waiting_for(choice_player, state);
+            state.waiting_for = viewed_choice.unwrap_or_else(|| {
+                replacement::replacement_choice_waiting_for(choice_player, state)
+            });
             RollProposal::Suspended
         }
     }
@@ -706,9 +722,10 @@ pub(crate) fn resume_after_ignore(
     let mut rolled_any = already_rolled_any;
 
     // CR 614.1c + CR 614.12 + CR 113.6: this is the one seam that knows both which
-    // roll this is and that its source has not entered.
+    // roll this is and that its source has not entered: a card whose parked entry
+    // is pending, or a token copy still being created (CR 111.1 + CR 707.2).
     let pre_entry_source =
-        crate::game::engine_replacement::entrant_entry_is_pending(state, source_id)
+        crate::game::engine_replacement::entrant_has_not_entered(state, source_id)
             .then_some(source_id);
     // CR 603.2 + CR 603.10 + CR 603.2c: this pass's stamped rolls, whose
     // observers are collected together, as rolled, at either exit below.
@@ -915,6 +932,7 @@ fn hold_as_enters_rolls(state: &mut GameState, as_enters_rolls: &mut Vec<GameEve
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::scenario::{GameScenario, P0};
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, BounceSelection, DieResultBranch, QuantityExpr,
         TargetFilter,
@@ -1002,6 +1020,154 @@ mod tests {
             held_triggers: Vec::new(),
         }];
         assert_eq!(stamps_of_two_dice(&mut state, entrant), vec![None, None]);
+    }
+
+    const GRANT_AN_ADVANTAGE: &str = "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.";
+
+    /// A board for an as-enters roll by a token copy still being created, whose
+    /// batch has already committed a Wyll, Blade of Frontiers token, and with
+    /// `residents` (Barbarian Class, Pixie Guide) on P0's battlefield. The roll's
+    /// instruction is parked, as `resolve_step` parks it before proposing.
+    fn pre_entry_roll_board(residents: bool) -> GameState {
+        let mut scenario = GameScenario::new();
+        let co_entrant = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Wyll, Blade of Frontiers",
+                1,
+                1,
+                &format!(
+                    "{GRANT_AN_ADVANTAGE}\nWhenever you roll one or more dice, put a +1/+1 counter on Wyll."
+                ),
+            )
+            .id();
+        if residents {
+            scenario.add_enchantment_from_oracle(P0, "Barbarian Class", GRANT_AN_ADVANTAGE);
+            scenario.add_creature_from_oracle(
+                P0,
+                "Pixie Guide",
+                1,
+                3,
+                &format!("Flying\nGrant an Advantage — {GRANT_AN_ADVANTAGE}"),
+            );
+        }
+        let mut state = scenario.build().state().clone();
+        crate::game::layers::flush_layers(&mut state);
+        let roller = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let token = crate::game::game_object::GameObject::new(
+            roller,
+            CardId(0),
+            P0,
+            "Hammer Jammer".to_string(),
+            Zone::Battlefield,
+        );
+        state.liminal_entries.insert(
+            roller,
+            crate::types::game_state::LiminalEntry {
+                object: crate::types::game_state::LiminalEntrant::Token(
+                    crate::types::game_state::TokenProjection::materialize(token),
+                ),
+                name: "Hammer Jammer".to_string(),
+                source_id: roller,
+                controller: P0,
+                enters_attacking: false,
+                attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
+                attach_to: None,
+                sacrifice_at: None,
+                remaining_count: 0,
+                created_ids: vec![co_entrant],
+                copy_resume: None,
+                spec_resume: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: Vec::new(),
+                kind: crate::types::game_state::LiminalEntryKind::Token,
+                replacement_applied: HashSet::new(),
+            },
+        );
+        state.pending_die_roll_instruction = Some(Box::new(PendingDieRollInstruction {
+            source_id: roller,
+            controller: P0,
+            roller: P0,
+            targets: Vec::new(),
+            results_table: Vec::new(),
+            modifier: None,
+            die_result: None,
+            trigger_context: None,
+            continuation: DieRollContinuation::Resolution,
+            chain_root_targets: Vec::new(),
+            illegal_target_slots: Vec::new(),
+            chain_root_target_pins: Vec::new(),
+            declared_capture: None,
+            quantity_controller: None,
+            scoped_player: None,
+            local_target_pins: Vec::new(),
+            keyed_target_incarnations: Vec::new(),
+            declared_player: None,
+        }));
+        state
+    }
+
+    /// `state` with the fields a pre-entry proposal hands to the game put back
+    /// as `before` had them.
+    fn without_the_handover(state: &GameState, before: &GameState) -> GameState {
+        let mut rest = state.clone();
+        rest.pending_replacement = before.pending_replacement.clone();
+        rest.replacement_auto_choice_tail = before.replacement_auto_choice_tail.clone();
+        rest.loop_decision_tally = before.loop_decision_tally;
+        rest.waiting_for = before.waiting_for.clone();
+        rest
+    }
+
+    /// U-V2. CR 603.6d + CR 614.12 + CR 616.1: an as-enters roll is proposed on
+    /// the pre-entry board, so a co-entrant's roll replacement does not apply, and
+    /// the proposal writes nothing to the game but its typed handover: the pending
+    /// record, the remembered-order tail, the loop-decision tally and the prompt.
+    #[test]
+    fn a_pre_entry_proposal_writes_only_its_handover() {
+        // Inline: the co-entrant Wyll is the only replacement source, and it is
+        // not on the pre-entry board.
+        let mut state = pre_entry_roll_board(false);
+        let before = state.clone();
+        let mut events = Vec::new();
+        let proposal = propose_roll(&mut state, P0, 1, 6, &mut events);
+        assert!(
+            matches!(
+                proposal,
+                RollProposal::Execute { count: 1, ref ignore_rules } if ignore_rules.is_empty()
+            ),
+            "the co-entrant's replacement does not apply"
+        );
+        assert!(state.pending_replacement.is_none());
+        assert!(without_the_handover(&state, &before) == before);
+
+        // Paused: the two residents' replacements are ordered; the co-entrant's
+        // is not among them.
+        let mut state = pre_entry_roll_board(true);
+        let before = state.clone();
+        let proposal = propose_roll(&mut state, P0, 1, 6, &mut events);
+        assert!(matches!(proposal, RollProposal::Suspended));
+        let WaitingFor::ReplacementChoice { candidates, .. } = &state.waiting_for else {
+            panic!("expected the ordering prompt, got {:?}", state.waiting_for);
+        };
+        let mut names: Vec<&str> = candidates.iter().map(|c| c.source_name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["Barbarian Class", "Pixie Guide"]);
+        assert_eq!(
+            state
+                .pending_replacement
+                .as_ref()
+                .map(|pending| pending.candidates.len()),
+            Some(2),
+            "the view's pending record is the game's"
+        );
+        assert!(without_the_handover(&state, &before) == before);
+
+        // CR 104.4b + CR 732: no saved order can answer a die roll's prompt (its
+        // replacements' branches can prompt, so the auto-choice key refuses them),
+        // so the pipeline records no loop decision here; the handover of the tally
+        // is tested on `PreEntryRulesView::replace` itself.
+        assert!(crate::game::replacement::replacement_auto_choice_key(&state).is_none());
     }
 
     /// The stamp's wire: it round-trips, an older payload decodes to no stamp, and

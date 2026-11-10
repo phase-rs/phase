@@ -1137,14 +1137,12 @@ fn apply_pending_counter_post_action(
             owner,
             copy,
             enter_tapped,
-            enter_with_counters,
             remaining_count,
         } => super::token::continue_liminal_copy_token_batch_after_counter_pause(
             state,
             owner,
             copy,
             enter_tapped,
-            enter_with_counters,
             remaining_count,
             events,
         ),
@@ -1171,15 +1169,12 @@ fn apply_pending_counter_post_action(
                 super::token::record_last_created_token(state, object_id);
             }
             // DELIBERATELY NOT `record_last_created_copy_batch_token`: this arm RE-SYNCS the batch
-            // buffer to the whole guarded ledger rather than appending one id, and the two are not
+            // buffer with the whole guarded ledger rather than appending one id, and the two are not
             // interchangeable — the buffer accumulates across batches while the ledger is reset per
-            // batch. Copying the ledger cannot publish an id the ledger's own guard withheld, so
+            // batch. Merging the ledger cannot publish an id the ledger's own guard withheld, so
             // this shape needs no second predicate; it needs the source to stay the GUARDED ledger,
             // which is what `state.last_created_token_ids` is after the call above.
-            let created_ids = state.last_created_token_ids.clone();
-            if let Some(pending) = state.active_copy_token_mut() {
-                pending.created_ids = created_ids;
-            }
+            super::token::record_copy_batch_ledger_on_active_copy_token(state);
             true
         }
         PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant } => {

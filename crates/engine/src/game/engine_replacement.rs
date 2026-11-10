@@ -466,7 +466,28 @@ fn handle_replacement_choice_inner(
         .pending_replacement
         .as_ref()
         .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::BeginPhase { .. }));
-    let result = super::replacement::continue_replacement(state, index, events);
+    // CR 616.1f + CR 603.6d: the re-scan after an answered ordering choice on an
+    // as-enters roll reads the same pre-entry board as its proposal.
+    let pre_entry = state
+        .pending_replacement
+        .as_ref()
+        .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::RollDice { .. }))
+        .then(|| super::pre_entry_view::PreEntryRulesView::of_pending_roll(state))
+        .flatten();
+    let (result, viewed_choice) = match pre_entry {
+        Some(view) => {
+            let viewed = view.replace(
+                state,
+                |board, events| super::replacement::continue_replacement(board, index, events),
+                events,
+            );
+            (viewed.result, viewed.choice)
+        }
+        None => (
+            super::replacement::continue_replacement(state, index, events),
+            None,
+        ),
+    };
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
     // multiple eligible lands) re-parked the pending replacement with
@@ -1851,9 +1872,11 @@ fn handle_replacement_choice_inner(
                     pending.inherit_delivery_boundary(&paused.expected_event);
                 }
             }
-            Ok(super::replacement::replacement_choice_waiting_for(
-                player, state,
-            ))
+            // CR 616.1 + CR 603.6d: an as-enters roll's next ordering prompt is
+            // rendered from the pre-entry board its re-scan ran on.
+            Ok(viewed_choice.unwrap_or_else(|| {
+                super::replacement::replacement_choice_waiting_for(player, state)
+            }))
         }
         super::replacement::ReplacementResult::Prevented => {
             if let Some(object_id) = parked_zone_change_object_id {
@@ -3073,13 +3096,15 @@ pub(super) fn handle_copy_target_choice(
             .liminal_entries
             .get(&source_id)
             .map_or(0, |entry| entry.created_ids.len() + 1);
+        // CR 122.6a + CR 614.1c: the batch's next token carries none of this
+        // entrant's own scheduled counters; a liminal batch has no creation
+        // counters, so it starts with none.
         let copy_continuation = state.liminal_entries.get(&source_id).and_then(|entry| {
             entry.copy_resume.as_ref().map(|copy| {
                 (
                     entry.object.projected().owner,
                     copy.clone(),
                     entry.enter_tapped,
-                    entry.enter_with_counters.clone(),
                     entry.remaining_count,
                 )
             })
@@ -3199,9 +3224,7 @@ pub(super) fn handle_copy_target_choice(
                 },
             );
         }
-        if let Some((owner, mut copy, enter_tapped, enter_with_counters, remaining_count)) =
-            copy_continuation.clone()
-        {
+        if let Some((owner, mut copy, enter_tapped, remaining_count)) = copy_continuation.clone() {
             copy.attack_request = copy
                 .attack_request
                 .after_entrants(entrants_through_this_entry);
@@ -3210,7 +3233,6 @@ pub(super) fn handle_copy_target_choice(
                     owner,
                     copy,
                     enter_tapped,
-                    enter_with_counters,
                     remaining_count,
                 },
             );
@@ -3227,8 +3249,8 @@ pub(super) fn handle_copy_target_choice(
         )? {
             return Ok(waiting_for);
         }
-        if let Some((owner, copy, enter_tapped, enter_with_counters, remaining_count)) =
-            copy_continuation.filter(|(_, _, _, _, remaining_count)| *remaining_count > 0)
+        if let Some((owner, copy, enter_tapped, remaining_count)) =
+            copy_continuation.filter(|(_, _, _, remaining_count)| *remaining_count > 0)
         {
             let initial_created_ids = state.last_created_token_ids.clone();
             let status =
@@ -3237,7 +3259,7 @@ pub(super) fn handle_copy_target_choice(
                     owner,
                     *copy,
                     enter_tapped,
-                    enter_with_counters,
+                    Vec::new(),
                     remaining_count,
                     initial_created_ids,
                     events,
@@ -4205,6 +4227,14 @@ pub(crate) fn entrant_entry_is_pending(state: &GameState, entrant: ObjectId) -> 
                 ParkedEntryState::Completed => false,
             }
     })
+}
+
+/// CR 614.1c + CR 614.12 + CR 111.1: has `entrant` not entered yet? Its parked
+/// battlefield entry is pending (`entrant_entry_is_pending`), or it is a liminal
+/// entrant whose entry is decided but not committed (a token copy, CR 707.2),
+/// which is in no zone at all.
+pub(crate) fn entrant_has_not_entered(state: &GameState, entrant: ObjectId) -> bool {
+    entrant_entry_is_pending(state, entrant) || state.liminal_entries.contains_key(&entrant)
 }
 
 /// CR 400.7: is `record` an entry of exactly `incarnation`? A record stamped

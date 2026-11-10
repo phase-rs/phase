@@ -1226,7 +1226,7 @@ fn primary_token_ids(delivered: &[PositionedTokenIds]) -> Vec<ObjectId> {
 /// first run and every resume.
 fn drive_token_event_delivery(
     state: &mut GameState,
-    mut cursor: PendingTokenEventDelivery,
+    cursor: PendingTokenEventDelivery,
     pause_event: PendingEffectResolutionEvent,
     events: &mut Vec<GameEvent>,
 ) -> CreateTokenDelivery {
@@ -1236,7 +1236,7 @@ fn drive_token_event_delivery(
     // the event's batches the copy drive's environment (no inline frame drain
     // inside a liminal-immediate copy apply, and every route writes the
     // ledger); the event's ids are handed to it once, below.
-    let mut held_frame = if cursor
+    let held_frame = if cursor
         .remaining
         .iter()
         .any(|positioned| positioned.batch.copy.is_some())
@@ -1258,7 +1258,30 @@ fn drive_token_event_delivery(
     } else {
         pause_event
     };
+    // CR 111.1 + CR 603.6a: a detached owner is off the stack, so the tokens
+    // its resolution has already created are published to this event's batches.
+    match held_frame
+        .as_ref()
+        .map(|(frame, _)| frame.created_ids.clone())
+    {
+        Some(committed) => {
+            super::token_copy::publish_committed_copy_tokens(state, committed, |state| {
+                deliver_token_event_batches(state, cursor, held_frame, pause_event, events)
+            })
+        }
+        None => deliver_token_event_batches(state, cursor, held_frame, pause_event, events),
+    }
+}
 
+/// The batches of a compound CreateToken event, delivered in order by
+/// `drive_token_event_delivery` with the CopyToken owner it detached, if any.
+fn deliver_token_event_batches(
+    state: &mut GameState,
+    mut cursor: PendingTokenEventDelivery,
+    mut held_frame: Option<(PendingCopyTokenResolution, ChildStackDepth)>,
+    pause_event: PendingEffectResolutionEvent,
+    events: &mut Vec<GameEvent>,
+) -> CreateTokenDelivery {
     while !cursor.remaining.is_empty() {
         let PositionedTokenBatch {
             position,
@@ -2179,7 +2202,6 @@ struct LiminalCopyTokenContinuation {
     owner: PlayerId,
     copy: Box<CopyTokenSpec>,
     enter_tapped: EtbTapState,
-    enter_with_counters: Vec<(CounterType, u32)>,
     remaining_count: u32,
 }
 
@@ -2196,7 +2218,6 @@ fn liminal_copy_token_continuation_for_event(
         owner: entry.object.projected().owner,
         copy,
         enter_tapped: entry.enter_tapped,
-        enter_with_counters: entry.enter_with_counters.clone(),
         remaining_count: entry.remaining_count,
     })
 }
@@ -2209,21 +2230,21 @@ fn continue_liminal_copy_token_batch(
     state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
     };
-    let created_ids = state.last_created_token_ids.clone();
-    if let Some(pending) = state.active_copy_token_mut() {
-        pending.created_ids = created_ids;
-    }
+    record_copy_batch_ledger_on_active_copy_token(state);
     let Some(continuation) = continuation else {
         return finish_liminal_copy_token_batch(state, events);
     };
     if continuation.remaining_count > 0 {
         let initial_created_ids = state.last_created_token_ids.clone();
+        // CR 122.6a + CR 614.1c: a liminal batch is created with no creation
+        // counters, and a committed entrant's own scheduled counters (its roll,
+        // its tribute) were its alone, so the next token starts with none.
         let status = super::token_copy::apply_copy_token_after_replacement_with_created_ids(
             state,
             continuation.owner,
             *continuation.copy,
             continuation.enter_tapped,
-            continuation.enter_with_counters,
+            Vec::new(),
             continuation.remaining_count,
             initial_created_ids,
             events,
@@ -2250,10 +2271,7 @@ pub(crate) fn finish_liminal_copy_token_batch(
     if !super::counters::resume_parked_token_event_delivery(state, events) {
         return false;
     }
-    let created_ids = state.last_created_token_ids.clone();
-    if let Some(pending) = state.active_copy_token_mut() {
-        pending.created_ids = created_ids;
-    }
+    record_copy_batch_ledger_on_active_copy_token(state);
     if state.active_copy_token().is_some() {
         super::token_copy::drain_pending_copy_token_resolution(state, events);
     }
@@ -2267,7 +2285,6 @@ fn liminal_copy_token_continuation_post_action(
         owner: continuation.owner,
         copy: continuation.copy,
         enter_tapped: continuation.enter_tapped,
-        enter_with_counters: continuation.enter_with_counters,
         remaining_count: continuation.remaining_count,
     }
 }
@@ -2277,7 +2294,6 @@ pub(crate) fn continue_liminal_copy_token_batch_after_counter_pause(
     owner: PlayerId,
     copy: Box<CopyTokenSpec>,
     enter_tapped: EtbTapState,
-    enter_with_counters: Vec<(CounterType, u32)>,
     remaining_count: u32,
     events: &mut Vec<GameEvent>,
 ) -> bool {
@@ -2287,7 +2303,6 @@ pub(crate) fn continue_liminal_copy_token_batch_after_counter_pause(
             owner,
             copy,
             enter_tapped,
-            enter_with_counters,
             remaining_count,
         }),
         events,
@@ -3083,6 +3098,24 @@ pub(crate) fn record_last_created_token(state: &mut GameState, object_id: Object
 /// drain, it would silently widen what `TargetFilter::LastCreated` names for "the tokens created
 /// this way" — the same widening argument that keeps the predicate out of
 /// `restrictions::record_token_created`.
+/// CR 608.2c + CR 603.7 + CR 111.1: merge the copy batch's ledger
+/// (`last_created_token_ids`, reset per batch) into the active CopyToken owner's
+/// buffer, which holds every token the whole resolution created ("those
+/// tokens"): its earlier batches' first, then this batch's not yet listed, in
+/// creation order. The single authority for that re-sync; an assignment would
+/// drop the earlier batches' tokens once a paused batch resumes. The ledger is
+/// the guarded one, so no id its guard withheld is published.
+pub(crate) fn record_copy_batch_ledger_on_active_copy_token(state: &mut GameState) {
+    let batch = state.last_created_token_ids.clone();
+    if let Some(pending) = state.active_copy_token_mut() {
+        let unlisted: Vec<ObjectId> = batch
+            .into_iter()
+            .filter(|id| !pending.created_ids.contains(id))
+            .collect();
+        pending.created_ids.extend(unlisted);
+    }
+}
+
 pub(crate) fn record_last_created_copy_batch_token(state: &mut GameState, object_id: ObjectId) {
     if !record_last_created_token(state, object_id) {
         return;

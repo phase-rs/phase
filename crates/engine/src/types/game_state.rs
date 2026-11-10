@@ -8252,11 +8252,13 @@ pub enum PendingCounterPostAction {
         ability_injection: LiminalTokenAbilityInjection,
         entry_events: TokenEntryEventEmission,
     },
+    /// CR 707.2 + CR 122.6a: create the rest of a liminal copy batch after a
+    /// committed token's counter pause. A liminal batch has no creation counters
+    /// and each token's scheduled counters are its own, so none is carried.
     ContinueLiminalCopyTokenBatch {
         owner: PlayerId,
         copy: Box<CopyTokenSpec>,
         enter_tapped: EtbTapState,
-        enter_with_counters: Vec<(CounterType, u32)>,
         remaining_count: u32,
     },
     /// CR 400.7 + CR 616.1: realize the token battlefield entry parked in
@@ -23962,6 +23964,13 @@ declare_game_state! {
     /// instead. Never serialized and never compared.
     #[serde(skip)]
     pub(crate) active_simultaneous_entrants: Vec<ObjectId>,
+    /// CR 111.1 + CR 603.6a: the tokens the copy-token resolution being drained
+    /// inline has already created, which enter in one event with the token it is
+    /// creating now (`token_copy::publish_committed_copy_tokens`). `None` outside
+    /// that synchronous window; a paused resolution's tokens are read from its
+    /// parked `CopyToken` frame instead. Never serialized and never compared.
+    #[serde(skip)]
+    pub(crate) active_copy_token_resolution_tokens: Option<Vec<ObjectId>>,
     /// CR 601.2a: transient copy of the object-attached casting permission
     /// identity while finalization owns the `PendingCast` by value. Payment
     /// consults it only inside that synchronous window; it is never serialized.
@@ -34244,6 +34253,7 @@ impl GameState {
             active_payment_pins: Vec::new(),
             active_rules_execution_node: None,
             active_simultaneous_entrants: Vec::new(),
+            active_copy_token_resolution_tokens: None,
             active_casting_permission_index: None,
             active_graveyard_permission_latch: None,
             active_paid_resolution_offer_tail: None,
@@ -38170,6 +38180,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         active_payment_pins: _,
         active_rules_execution_node: _,
         active_simultaneous_entrants: _,
+        active_copy_token_resolution_tokens: _,
         active_casting_permission_index: _,
         active_graveyard_permission_latch: _,
         active_paid_resolution_offer_tail: _,
