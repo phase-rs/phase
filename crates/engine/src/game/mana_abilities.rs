@@ -5747,7 +5747,7 @@ fn tap_creature_cost_choice(
     Some((min_count, max_count, creatures, mode))
 }
 
-fn discard_cost_choice(
+pub(crate) fn discard_cost_choice(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
@@ -5816,7 +5816,7 @@ fn find_exile_cost(cost: &AbilityCost) -> Option<(u32, Zone, Option<&TargetFilte
 /// CR 117.1 + CR 118.3 + CR 605.3b: Surface eligible objects for a non-self
 /// exile mana ability cost. Library costs are deterministic top-card payment,
 /// not a player choice, so they are prepared separately.
-fn exile_cost_choice(
+pub(crate) fn exile_cost_choice(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
@@ -5880,7 +5880,7 @@ fn prepare_deterministic_exile_cost_selection(
 /// for an `AbilityCost::Sacrifice(SacrificeCost::count(!SelfRef, 1))` mana ability cost.
 /// Delegates eligibility to the casting cost helper so mana and non-mana
 /// activation costs share the same battlefield/controller/filter semantics.
-fn sacrifice_cost_choice(
+pub(crate) fn sacrifice_cost_choice(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,

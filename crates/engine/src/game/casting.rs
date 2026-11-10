@@ -23974,6 +23974,7 @@ fn manual_mana_payment_route(
         source_id,
         cost,
         spell_ctx.as_ref(),
+        super::mana_sources::CapacityUse::Castability,
     )
 }
 
@@ -23985,7 +23986,8 @@ fn manual_mana_payment_route(
 /// KCI, Phyrexian Altar, Ashnod's Altar). `payment_source` is the object whose
 /// cost is paid (its mana-spend permissions apply); `excluded` is a permanent
 /// whose mana abilities can't help pay (the spell itself, or an activation
-/// source whose cost needs it untapped).
+/// source whose cost needs it untapped). `capacity_use` says how often one
+/// mana ability is credited ([`super::mana_sources::CapacityUse`]).
 fn player_choice_mana_payment_route(
     state: &GameState,
     player: PlayerId,
@@ -23993,6 +23995,7 @@ fn player_choice_mana_payment_route(
     excluded: Option<ObjectId>,
     cost: &ManaCost,
     payment_ctx: Option<&PaymentContext<'_>>,
+    capacity_use: super::mana_sources::CapacityUse,
 ) -> ManualPaymentRoute {
     // CR 601.2g: Once the exact auto-tap payment probe has failed, only a
     // mana ability that requires a manual choice can make the payment reachable.
@@ -24043,7 +24046,10 @@ fn player_choice_mana_payment_route(
     // across the controller's untapped non-excluded battlefield permanents.
     // Each contribution is the largest single mana-ability output the
     // controller could currently activate (covering Sacrifice / Discard /
-    // PayLife costs that auto-tap cannot simulate).
+    // PayLife costs that auto-tap cannot simulate). For an activation's
+    // window, which an exact witness then confirms, a mana ability with no
+    // tap is credited every activation its cost's supply allows (CR 605.3c:
+    // one Ashnod's Altar and two creatures make {C}{C}{C}{C}).
     //
     // Subtract the capacity shard coverage used up, so one activation is not
     // counted twice (issue #583 review: power-2 Vivi must not cover {1}
@@ -24061,7 +24067,7 @@ fn player_choice_mana_payment_route(
         .battlefield
         .iter()
         .filter(|id| Some(**id) != excluded)
-        .map(|&id| super::mana_sources::feasible_mana_capacity(state, id, player, payment_ctx))
+        .map(|&id| super::mana_sources::mana_capacity(state, id, player, payment_ctx, capacity_use))
         .sum::<u32>()
         .saturating_sub(shard_charge);
 
@@ -24118,6 +24124,7 @@ fn activation_manual_mana_payment_route(
         requires_untapped(cost).then_some(source_id),
         &mana,
         Some(&activation_ctx),
+        super::mana_sources::CapacityUse::ActivationWindow,
     )
 }
 
@@ -27867,7 +27874,7 @@ pub(super) fn split_alt_cost_components(
 /// `QuantityExpr` resolves dynamically (e.g. War Room's
 /// `QuantityRef::ColorsInCommandersColorIdentity`), so this helper must be
 /// evaluated at activation time against the current game state.
-fn find_pay_life_cost(
+pub(crate) fn find_pay_life_cost(
     cost: &AbilityCost,
     state: &GameState,
     player: PlayerId,
@@ -28128,6 +28135,9 @@ pub(crate) fn can_pay_ability_cost_now(
 /// both to Ashnod's Altar and for "Sacrifice a creature"), which
 /// [`mana_ability_window_mana_witness`] judges on boards where the player has
 /// really activated those mana abilities.
+/// A cost that also pays life is judged from the life witness board
+/// ([`mana_ability_window_life_witness`]), so the window's mana, life and
+/// objects change together.
 fn payable_with_mana_ability_window_mana(
     state: &GameState,
     player: PlayerId,
@@ -28144,16 +28154,65 @@ fn payable_with_mana_ability_window_mana(
     let Some((mana, rest)) = casting_costs::extract_mana_leg(cost) else {
         return false;
     };
-    activation_manual_mana_payment_route(state, player, source_id, ability_index, cost, &mana)
-        == ManualPaymentRoute::Feasible
-        && rest.as_ref().is_none_or(|rest| payable(state, rest))
-        && mana_ability_window_mana_witness(state, player, source_id, cost, ability_index, &payable)
+    if activation_manual_mana_payment_route(state, player, source_id, ability_index, cost, &mana)
+        != ManualPaymentRoute::Feasible
+    {
+        return false;
+    }
+    // CR 601.2g + CR 119.3: a cost that also pays life is judged after the
+    // window's life-gaining mana abilities too (Pristine Talisman), so its
+    // mana, life and objects change together on one board. The witness keeps
+    // their mana in the pool, so the mana route above still holds on it.
+    let life_colors = super::static_abilities::player_life_payment_colors(state, player);
+    let starting_board = match life {
+        ActivationLifeWindow::ManaAbilityWindow { witness, .. }
+            if activation_cost_pays_life(cost, life_colors) =>
+        {
+            witness
+                .get_or_init(|| {
+                    mana_ability_window_life_witness(state, player, source_id).map(Box::new)
+                })
+                .as_deref()
+                .unwrap_or(state)
+        }
+        _ => state,
+    };
+    if !rest
+        .as_ref()
+        .is_none_or(|rest| payable(starting_board, rest))
+    {
+        return false;
+    }
+    match mana_ability_window_mana_witness(
+        starting_board,
+        player,
+        source_id,
+        cost,
+        ability_index,
+        &payable,
+    ) {
+        WitnessOutcome::Payable | WitnessOutcome::BudgetExhausted => true,
+        WitnessOutcome::Unpayable => false,
+    }
 }
 
-/// The most boards [`mana_ability_window_mana_witness`] builds for one
-/// verdict. Past it the search fails closed: the activation is refused rather
-/// than offered without a witness.
+/// The most boards [`mana_ability_window_mana_witness`] builds, plus the
+/// payability probes it runs on them, for one verdict. Each probe dry-runs the
+/// payment on a clone of its own, so both are counted. A search that runs out
+/// answers [`WitnessOutcome::BudgetExhausted`], not `Unpayable`: as with an
+/// undecided target-cost search (`ActivationCostFeasibility::Undecided`), the
+/// activation is then still offered for a manual payment, whose window the
+/// player can leave by cancelling before any mana ability is activated.
 const MANA_ABILITY_WINDOW_WITNESS_BUDGET: usize = 32;
+
+/// The outcome of [`mana_ability_window_mana_witness`]. Keeps budget exhaustion
+/// distinct from proving an activation unaffordable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WitnessOutcome {
+    Payable,
+    Unpayable,
+    BudgetExhausted,
+}
 
 /// CR 601.2g + CR 605.3a + CR 605.3b + CR 118.10: whether `player` can activate,
 /// during the activation's CR 601.2g opportunity, mana abilities the automatic
@@ -28164,12 +28223,11 @@ const MANA_ABILITY_WINDOW_WITNESS_BUDGET: usize = 32;
 /// mana-ability authority, every object choice its cost asks for tried in turn,
 /// and each activation resolves at once (CR 605.3b). The activation's own
 /// source is never chosen to pay a mana ability's cost, so the witness never
-/// rests on the source leaving before its own cost is paid. A search over
-/// activations in candidate order (a source may be activated again) explores
-/// each multiset of activations once; an activation that adds no mana, or
-/// stops for a prompt other than its cost's object choice (a mana color), is
-/// not part of any witness. At most [`MANA_ABILITY_WINDOW_WITNESS_BUDGET`]
-/// boards are built.
+/// rests on the source leaving before its own cost is paid. Traversal allows
+/// repeatable mana abilities and reverse-order sequences (e.g. Goblin Clearcutter
+/// before Ashnod's Altar). A color prompt is answered only with the colors the
+/// payment can spend, and a collect-evidence prompt with one answer. At most
+/// [`MANA_ABILITY_WINDOW_WITNESS_BUDGET`] boards and probes are spent.
 fn mana_ability_window_mana_witness(
     state: &GameState,
     player: PlayerId,
@@ -28177,7 +28235,7 @@ fn mana_ability_window_mana_witness(
     cost: &AbilityCost,
     ability_index: Option<usize>,
     payable: &impl Fn(&GameState, &AbilityCost) -> bool,
-) -> bool {
+) -> WitnessOutcome {
     let activation_context = activation_payment_context(state, source_id, ability_index);
     let payment_ctx = activation_context.as_payment_context();
     let candidates: Vec<(ObjectId, usize)> =
@@ -28195,8 +28253,9 @@ fn mana_ability_window_mana_witness(
         payable,
         candidates: &candidates,
         budget: MANA_ABILITY_WINDOW_WITNESS_BUDGET,
+        color_constraint: activation_context.mana_color_constraint,
     };
-    search.from(state, 0)
+    search.from(state)
 }
 
 struct ManaWindowWitnessSearch<'a, F> {
@@ -28206,13 +28265,15 @@ struct ManaWindowWitnessSearch<'a, F> {
     payable: &'a F,
     candidates: &'a [(ObjectId, usize)],
     budget: usize,
+    color_constraint: ActivationManaColorConstraint,
 }
 
 impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
-    /// Whether some activations of `candidates[first..]` on `board` reach a
+    /// Whether some activations of `candidates` on `board` reach a
     /// board on which the cost is payable.
-    fn from(&mut self, board: &GameState, first: usize) -> bool {
-        for (candidate, &(mana_source, index)) in self.candidates.iter().enumerate().skip(first) {
+    fn from(&mut self, board: &GameState) -> WitnessOutcome {
+        let mut any_exhausted = false;
+        for &(mana_source, index) in self.candidates.iter() {
             let Some(def) = board
                 .objects
                 .get(&mana_source)
@@ -28231,7 +28292,7 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
                 continue;
             }
             let Some(mut next) = self.clone_board(board) else {
-                return false;
+                return WitnessOutcome::BudgetExhausted;
             };
             let waiting = super::mana_abilities::activate_mana_ability(
                 &mut next,
@@ -28243,14 +28304,20 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
                 ManaAbilityResume::Priority,
                 None,
             );
-            if self.through_cost_choices(board, next, waiting, candidate) {
-                return true;
+            match self.through_cost_choices(board, next, waiting) {
+                WitnessOutcome::Payable => return WitnessOutcome::Payable,
+                WitnessOutcome::BudgetExhausted => any_exhausted = true,
+                WitnessOutcome::Unpayable => {}
             }
             if self.budget == 0 {
-                return false;
+                return WitnessOutcome::BudgetExhausted;
             }
         }
-        false
+        if any_exhausted {
+            WitnessOutcome::BudgetExhausted
+        } else {
+            WitnessOutcome::Unpayable
+        }
     }
 
     /// CR 118.3 + CR 605.3b: Follow one activation on `next` to its
@@ -28261,8 +28328,7 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
         board: &GameState,
         mut next: GameState,
         waiting: Result<WaitingFor, EngineError>,
-        candidate: usize,
-    ) -> bool {
+    ) -> WitnessOutcome {
         match waiting {
             Ok(WaitingFor::Priority { .. }) => {
                 let pool = |state: &GameState| {
@@ -28272,10 +28338,19 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
                         .map_or(0, |p| p.mana_pool.total())
                 };
                 if pool(&next) <= pool(board) {
-                    return false;
+                    return WitnessOutcome::Unpayable;
                 }
                 next.waiting_for = board.waiting_for.clone();
-                (self.payable)(&next, self.cost) || self.from(&next, candidate)
+                // The payability probe dry-runs the payment on its own clone,
+                // so it spends the budget like a board does.
+                let Some(budget) = self.budget.checked_sub(1) else {
+                    return WitnessOutcome::BudgetExhausted;
+                };
+                self.budget = budget;
+                if (self.payable)(&next, self.cost) {
+                    return WitnessOutcome::Payable;
+                }
+                self.from(&next)
             }
             Ok(WaitingFor::PayCost {
                 kind,
@@ -28297,18 +28372,19 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
                             | PayCostKind::Sacrifice
                     )
                 {
-                    return false;
+                    return WitnessOutcome::Unpayable;
                 }
                 // CR 118.3: pay exactly the printed count where the cost
                 // allows it; an X-sentinel form pays its largest.
                 let count = count.min(choices.len());
                 if count < min_count {
-                    return false;
+                    return WitnessOutcome::Unpayable;
                 }
+                let mut any_exhausted = false;
                 for picked in index_combinations(choices.len(), count, Repetition::Distinct) {
                     let chosen: Vec<ObjectId> = picked.iter().map(|&i| choices[i]).collect();
                     let Some(mut answered) = self.clone_board(&next) else {
-                        return false;
+                        return WitnessOutcome::BudgetExhausted;
                     };
                     let resumed = super::mana_abilities::handle_mana_ability_cost_selection(
                         &mut answered,
@@ -28320,14 +28396,64 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
                         &chosen,
                         &mut Vec::new(),
                     );
-                    if self.through_cost_choices(board, answered, resumed, candidate) {
-                        return true;
+                    match self.through_cost_choices(board, answered, resumed) {
+                        WitnessOutcome::Payable => return WitnessOutcome::Payable,
+                        WitnessOutcome::BudgetExhausted => any_exhausted = true,
+                        WitnessOutcome::Unpayable => {}
                     }
                     if self.budget == 0 {
-                        return false;
+                        return WitnessOutcome::BudgetExhausted;
                     }
                 }
-                false
+                if any_exhausted {
+                    WitnessOutcome::BudgetExhausted
+                } else {
+                    WitnessOutcome::Unpayable
+                }
+            }
+            Ok(WaitingFor::CollectEvidenceChoice {
+                player,
+                minimum_mana_value,
+                cards,
+                resume,
+            }) => {
+                // CR 701.59a: the evidence answer is the fewest cards that
+                // reach the total, highest mana value first. Which cards are
+                // exiled adds no mana, so one answer stands for every other:
+                // enumerating subsets of a graveyard grows exponentially.
+                let mut by_value: Vec<(u32, ObjectId)> = cards
+                    .iter()
+                    .map(|&id| {
+                        (
+                            super::effects::collect_evidence::total_mana_value(&next, &[id]),
+                            id,
+                        )
+                    })
+                    .collect();
+                by_value.sort_by_key(|&(value, _)| std::cmp::Reverse(value));
+                let mut total = 0;
+                let chosen: Vec<ObjectId> = by_value
+                    .into_iter()
+                    .take_while(|&(value, _)| {
+                        let short = total < minimum_mana_value;
+                        total += value;
+                        short
+                    })
+                    .map(|(_, id)| id)
+                    .collect();
+                let Some(mut answered) = self.clone_board(&next) else {
+                    return WitnessOutcome::BudgetExhausted;
+                };
+                let resumed = super::effects::collect_evidence::handle_choice(
+                    &mut answered,
+                    player,
+                    minimum_mana_value,
+                    &cards,
+                    &resume,
+                    &chosen,
+                    &mut Vec::new(),
+                );
+                self.through_cost_choices(board, answered, resumed)
             }
             // CR 106.1 + CR 605.3b: each color (or combination) the ability
             // can add is a separate way to activate it.
@@ -28336,9 +28462,11 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
                 context: ManaChoiceContext::ManaAbility(mana_ability),
                 ..
             }) => {
-                for chosen in mana_choice_answers(&prompt) {
+                let answers = self.payment_relevant_mana_choice_answers(&prompt);
+                let mut any_exhausted = false;
+                for chosen in answers {
                     let Some(mut answered) = self.clone_board(&next) else {
-                        return false;
+                        return WitnessOutcome::BudgetExhausted;
                     };
                     let resumed = super::mana_abilities::handle_choose_mana_color(
                         &mut answered,
@@ -28347,16 +28475,75 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
                         chosen,
                         &mut Vec::new(),
                     );
-                    if self.through_cost_choices(board, answered, resumed, candidate) {
-                        return true;
+                    match self.through_cost_choices(board, answered, resumed) {
+                        WitnessOutcome::Payable => return WitnessOutcome::Payable,
+                        WitnessOutcome::BudgetExhausted => any_exhausted = true,
+                        WitnessOutcome::Unpayable => {}
                     }
                     if self.budget == 0 {
-                        return false;
+                        return WitnessOutcome::BudgetExhausted;
                     }
                 }
-                false
+                if any_exhausted {
+                    WitnessOutcome::BudgetExhausted
+                } else {
+                    WitnessOutcome::Unpayable
+                }
             }
-            _ => false,
+            _ => WitnessOutcome::Unpayable,
+        }
+    }
+
+    /// CR 106.1 + CR 605.3b + CR 106.6: the answers to a mana ability's color
+    /// prompt that can matter to this payment, produced lazily. Under a spend
+    /// rider (Throne of Eldraine: "Spend only mana of the chosen color to
+    /// activate this ability.") only mana of that color can be spent, so the
+    /// one answer is all of it, wherever the full enumeration would reach it.
+    /// Otherwise every answer is tried, each single-color answer first.
+    fn payment_relevant_mana_choice_answers<'p>(
+        &self,
+        prompt: &'p ManaChoicePrompt,
+    ) -> Box<dyn Iterator<Item = ManaChoice> + 'p> {
+        match self.color_constraint {
+            ActivationManaColorConstraint::Only(color) => {
+                let required = ManaType::from(color);
+                match prompt {
+                    ManaChoicePrompt::SingleColor { options } => Box::new(
+                        options
+                            .contains(&required)
+                            .then_some(ManaChoice::SingleColor(required))
+                            .into_iter(),
+                    ),
+                    ManaChoicePrompt::Combination { options } => Box::new(
+                        options
+                            .iter()
+                            .filter(move |combo| combo.iter().all(|unit| *unit == required))
+                            .cloned()
+                            .map(ManaChoice::Combination),
+                    ),
+                    ManaChoicePrompt::AnyCombination { count, options } => Box::new(
+                        options
+                            .contains(&required)
+                            .then(|| ManaChoice::Combination(vec![required; *count]))
+                            .into_iter(),
+                    ),
+                }
+            }
+            ActivationManaColorConstraint::Impossible => Box::new(std::iter::empty()),
+            ActivationManaColorConstraint::Unrestricted => match prompt {
+                ManaChoicePrompt::AnyCombination { count, options } if *count > 1 => {
+                    let uniform = options
+                        .iter()
+                        .map(move |&unit| ManaChoice::Combination(vec![unit; *count]));
+                    let mixed = index_combinations(options.len(), *count, Repetition::Allowed)
+                        .filter(|picked| picked.first() != picked.last())
+                        .map(move |picked| {
+                            ManaChoice::Combination(picked.iter().map(|&i| options[i]).collect())
+                        });
+                    Box::new(uniform.chain(mixed))
+                }
+                _ => mana_choice_answers(prompt),
+            },
         }
     }
 
@@ -29151,21 +29338,44 @@ fn manual_activation_mana_route_possible(
     source_id: ObjectId,
     ability_index: usize,
 ) -> bool {
-    let Some(def) = activation_ability_definition(state, source_id, ability_index) else {
+    super::mana_sources::has_activatable_player_choice_mana_ability_for_payment(
+        state, player, None, None,
+    ) && manual_activation_total_cost_may_satisfy(state, player, source_id, ability_index, |cost| {
+        casting_costs::extract_mana_leg(cost).is_some()
+    })
+}
+
+/// CR 601.2f + CR 602.2b: whether the total cost of `player`'s activation of
+/// `source_id`'s ability `ability_index` — the printed cost plus every
+/// additional cost and increase, minus every reduction, as the activation's
+/// own verdict folds it — may satisfy `shape`. A printed cost alone is not
+/// the total: Thermo-Alchemist's "{T}: This creature deals 1 damage to each
+/// opponent." has no mana in it, but under Suppression Field ("Activated
+/// abilities cost {2} more to activate unless they're mana abilities.") its
+/// total includes {2}. When a modifier depends on targets not yet chosen, the
+/// total is unknown here and the verdict, which walks the targets, decides.
+/// A mana ability (CR 605.3a) is activated during a payment, not paid for by
+/// hand, so it never has a manual payment to judge.
+fn manual_activation_total_cost_may_satisfy(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    shape: impl Fn(&AbilityCost) -> bool,
+) -> bool {
+    let Some(mut def) = activation_ability_definition(state, source_id, ability_index) else {
         return false;
     };
-    // CR 605.3a: a mana ability is activated during a payment, not paid for by
-    // hand, so it has no manual payment to relax.
     if super::mana_abilities::is_mana_ability(&def) {
         return false;
     }
+    if may_gain_target_gated_modifiers(state, &def, player, source_id) {
+        return true;
+    }
+    apply_cost_reduction(state, &mut def, player, source_id);
     def.cost
-        .as_ref()
-        .and_then(casting_costs::extract_mana_leg)
-        .is_some()
-        && super::mana_sources::has_activatable_player_choice_mana_ability_for_payment(
-            state, player, None, None,
-        )
+        .map(|cost| activation_cost_for_affordability(cost, def.ability_tag))
+        .is_some_and(|cost| shape(&cost))
 }
 
 /// CR 601.2g + CR 119.4: a manual activation's verdict can differ from the
@@ -29186,24 +29396,12 @@ fn manual_activation_life_retry_possible(
     {
         return false;
     }
-    let Some(def) = activation_ability_definition(state, source_id, ability_index) else {
-        return false;
-    };
-    // CR 605.3a: a mana ability is activated during a payment, not paid for by
-    // hand, so it has no manual payment to relax.
-    if super::mana_abilities::is_mana_ability(&def) {
-        return false;
-    }
-    let Some(cost) = def
-        .cost
-        .map(|cost| activation_cost_for_affordability(cost, def.ability_tag))
-    else {
-        return false;
-    };
     let life_colors = super::static_abilities::player_life_payment_colors(state, player);
-    mana_ability_window_routes(&cost)
-        .iter()
-        .any(|route| activation_cost_pays_life(route, life_colors))
+    manual_activation_total_cost_may_satisfy(state, player, source_id, ability_index, |cost| {
+        mana_ability_window_routes(cost)
+            .iter()
+            .any(|route| activation_cost_pays_life(route, life_colors))
+    })
 }
 
 /// CR 602.5 + CR 118.3: the one activation-legality evaluation, shared by

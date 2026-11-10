@@ -4370,8 +4370,8 @@ struct CarnageBoard {
     creatures: Vec<ObjectId>,
 }
 
-/// Carnage Altar ("{3}, Sacrifice a creature: Draw a card.") with two Ashnod's
-/// Altars ("Sacrifice a creature: Add {C}{C}.") as P0's only mana sources and
+/// Carnage Altar ("{3}, Sacrifice a creature: Draw a card.") with one Ashnod's
+/// Altar ("Sacrifice a creature: Add {C}{C}.") as P0's only mana source and
 /// `creatures` vanilla creatures to sacrifice. The {3} takes two Ashnod
 /// activations, so the activation needs three distinct creatures.
 fn carnage_board(creatures: usize) -> CarnageBoard {
@@ -4384,9 +4384,6 @@ fn carnage_board(creatures: usize) -> CarnageBoard {
         .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
         .with_mana_cost(ManaCost::generic(3))
         .id();
-    scenario
-        .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
-        .with_mana_cost(ManaCost::generic(3));
     let creatures = (0..creatures)
         .map(|_| scenario.add_vanilla(P0, 2, 2))
         .collect();
@@ -4414,7 +4411,7 @@ fn offered_modes(runner: &GameRunner, source: ObjectId) -> Vec<CastPaymentMode> 
 
 /// CR 118.10 + CR 601.2g + CR 605.3a (#10190): one sacrifice can't pay both a
 /// mana ability's cost and the activation's. With two creatures, sacrificing
-/// both to Ashnod's Altars makes the {3} but leaves nothing for Carnage Altar's
+/// both to Ashnod's Altar makes the {3} but leaves nothing for Carnage Altar's
 /// "Sacrifice a creature", so the activation is offered in no mode; a third
 /// creature makes it offered for a manual payment.
 #[test]
@@ -4571,4 +4568,409 @@ fn incomplete_sacrifice_selection_does_not_exhaust_witness_budget() {
         1,
         "the activation is on the stack"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #10190 review rows: the manual offer is judged on the activation's total
+// cost and on the prompts the mana abilities really raise in the window.
+// ---------------------------------------------------------------------------
+
+const SUPPRESSION_FIELD: &str =
+    "Activated abilities cost {2} more to activate unless they're mana abilities.";
+const THERMO_ALCHEMIST: &str = "Defender\n\
+{T}: This creature deals 1 damage to each opponent.\n\
+Whenever you cast an instant or sorcery spell, untap this creature.";
+const JAYEMDAE_TOME: &str = "{4}, {T}: Draw a card.";
+const EMMESSI_TOME: &str = "{5}, {T}: Draw two cards, then discard a card.";
+const GOBLIN_CLEARCUTTER: &str =
+    "{T}, Sacrifice a Forest: Add three mana in any combination of {R} and/or {G}.";
+const PRISTINE_TALISMAN: &str = "{T}: Add {C}. You gain 1 life.";
+const BOOK_OF_RASS: &str = "{2}, Pay 2 life: Draw a card.";
+const CRYPTEX: &str = "{T}, Collect evidence 3: Add one mana of any color. Put an unlock counter on this artifact. (To collect evidence 3, exile cards with total mana value 3 or greater from your graveyard.)\n\
+Sacrifice this artifact: Surveil 3, then draw three cards. Activate only if this artifact has five or more unlock counters on it.";
+const ARCANE_ENCYCLOPEDIA: &str = "{3}, {T}: Draw a card.";
+const THE_GOLDEN_THRONE: &str = "Arcane Life-support — If you would lose the game, instead exile The Golden Throne and your life total becomes 1.\n\
+A Thousand Souls Die Every Day — {T}, Sacrifice a creature: Add three mana in any combination of colors.";
+const THRONE_OF_ELDRAINE: &str = "As Throne of Eldraine enters, choose a color.\n\
+{T}: Add four mana of the chosen color. Spend this mana only to cast monocolored spells of that color.\n\
+{3}, {T}: Draw two cards. Spend only mana of the chosen color to activate this ability.";
+
+/// The index of `source`'s only activated ability that is not a mana ability.
+fn non_mana_ability_index(runner: &GameRunner, source: ObjectId) -> usize {
+    activated_ability_definitions(runner.state(), source)
+        .iter()
+        .find(|(_, ability)| !is_mana_ability(ability))
+        .map(|(index, _)| *index)
+        .expect("a non-mana activated ability")
+}
+
+/// Activates `source`'s mana ability inside the manual window and answers the
+/// prompts it raises — an object choice with `cards`, a color prompt with
+/// `color` — until the window is back.
+fn activate_in_window(
+    runner: &mut GameRunner,
+    source: ObjectId,
+    cards: &[ObjectId],
+    color: Option<engine::types::game_state::ManaChoice>,
+) {
+    let mut waiting_for = activate_mana_ability(runner, source);
+    for _ in 0..4 {
+        waiting_for = match waiting_for {
+            WaitingFor::ManaPayment { .. } => return,
+            WaitingFor::PayCost { .. } | WaitingFor::CollectEvidenceChoice { .. } => {
+                select_cards(runner, cards)
+            }
+            WaitingFor::ChooseManaColor { .. } => act(
+                runner,
+                GameAction::ChooseManaColor {
+                    choice: color.clone().expect("the test names the color to add"),
+                    count: 1,
+                },
+            ),
+            other => panic!("unexpected prompt in the window: {other:?}"),
+        };
+    }
+    panic!("the window never came back: {waiting_for:?}");
+}
+
+/// Passes priority until the stack is empty and P0 holds priority again.
+fn resolve_stack(runner: &mut GameRunner) {
+    for _ in 0..4 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        pass(runner);
+    }
+    assert!(runner.state().stack.is_empty(), "the stack resolved");
+}
+
+/// CR 601.2f + CR 602.2b (#10190 review): the manual offer is judged on the
+/// total cost, not the printed one. Thermo-Alchemist's "{T}: This creature
+/// deals 1 damage to each opponent." has no mana in it, but under Suppression
+/// Field its total is {2}, {T}, and Ashnod's Altar can make the {2}. It is
+/// offered for a manual payment only, and the offer completes: the creature
+/// sacrificed in the window pays the tax and the damage resolves.
+#[test]
+fn a_manual_offer_counts_an_imposed_tax_as_the_mana_leg() {
+    let mut scenario = scenario_at_main();
+    scenario
+        .add_enchantment_from_oracle(P1, "Suppression Field", SUPPRESSION_FIELD)
+        .with_mana_cost(ManaCost::generic(2));
+    let alchemist = scenario
+        .add_creature_from_oracle(P0, "Thermo-Alchemist", 0, 3, THERMO_ALCHEMIST)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let altar = scenario
+        .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let fodder = scenario.add_vanilla(P0, 2, 2);
+    let mut runner = scenario.build();
+    let index = non_mana_ability_index(&runner, alchemist);
+
+    assert_eq!(
+        offered_payment_modes(&runner, alchemist, index),
+        vec![CastPaymentMode::Manual],
+        "the {{2}} tax is payable only with the Altar's mana"
+    );
+
+    let waiting_for = activate_index(&mut runner, alchemist, index, CastPaymentMode::Manual);
+    assert!(
+        is_mana_payment(&waiting_for),
+        "the tax opens the window: {waiting_for:?}"
+    );
+    activate_in_window(&mut runner, altar, &[fodder], None);
+    assert_eq!(pool_total(&runner), 2);
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, alchemist), "the {{T}} was paid");
+    assert!(in_zone(&runner, fodder, Zone::Graveyard));
+    assert_eq!(
+        pool_total(&runner),
+        0,
+        "the {{2}} tax spent the Altar's mana"
+    );
+
+    resolve_stack(&mut runner);
+    assert_eq!(life(&runner, P1), 19, "the damage resolved");
+}
+
+/// CR 605.3c (#10190 review): a mana ability can't be activated again only
+/// until it has resolved, so one Ashnod's Altar with two creatures makes four
+/// mana. Jayemdae Tome's "{4}, {T}: Draw a card." is offered for a manual
+/// payment and completes with the Altar activated twice.
+#[test]
+fn one_repeatable_altar_funds_an_activation_through_the_production_offer() {
+    let mut scenario = scenario_at_main();
+    let tome = scenario
+        .add_artifact_from_oracle(P0, "Jayemdae Tome", JAYEMDAE_TOME)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let altar = scenario
+        .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let creatures = [
+        scenario.add_vanilla(P0, 2, 2),
+        scenario.add_vanilla(P0, 2, 2),
+    ];
+    scenario.add_card_to_library_top(P0, "Drawn card");
+    let mut runner = scenario.build();
+    let index = non_mana_ability_index(&runner, tome);
+    let hand_before = hand_size(&runner, P0);
+
+    assert_eq!(
+        offered_payment_modes(&runner, tome, index),
+        vec![CastPaymentMode::Manual]
+    );
+
+    let waiting_for = activate_index(&mut runner, tome, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    for creature in creatures {
+        activate_in_window(&mut runner, altar, &[creature], None);
+    }
+    assert_eq!(pool_total(&runner), 4, "the Altar resolved twice");
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, tome));
+    assert_eq!(pool_total(&runner), 0);
+
+    resolve_stack(&mut runner);
+    assert_eq!(hand_size(&runner, P0), hand_before + 1, "the draw resolved");
+}
+
+/// CR 601.2g + CR 605.3b (#10190 review): the window's mana abilities can be
+/// activated in any order. Ashnod's Altar is listed before Goblin Clearcutter,
+/// but Clearcutter must go first — sacrificing the Forest for three mana —
+/// and then be sacrificed to the Altar for two more. Emmessi Tome's "{5}, {T}:
+/// Draw two cards, then discard a card." is offered for a manual payment and
+/// completes in that order.
+#[test]
+fn a_later_listed_mana_ability_can_fund_an_earlier_listed_altar() {
+    let mut scenario = scenario_at_main();
+    let tome = scenario
+        .add_artifact_from_oracle(P0, "Emmessi Tome", EMMESSI_TOME)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let altar = scenario
+        .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let clearcutter = scenario
+        .add_creature_from_oracle(P0, "Goblin Clearcutter", 3, 3, GOBLIN_CLEARCUTTER)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let forest = scenario.add_basic_land(P0, ManaColor::Green);
+    scenario.add_card_to_library_top(P0, "First drawn card");
+    scenario.add_card_to_library_top(P0, "Second drawn card");
+    let mut runner = scenario.build();
+    let index = non_mana_ability_index(&runner, tome);
+    let hand_before = hand_size(&runner, P0);
+
+    assert_eq!(
+        offered_payment_modes(&runner, tome, index),
+        vec![CastPaymentMode::Manual]
+    );
+
+    let waiting_for = activate_index(&mut runner, tome, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(
+        &mut runner,
+        clearcutter,
+        &[forest],
+        Some(engine::types::game_state::ManaChoice::Combination(vec![
+            engine::types::mana::ManaType::Red;
+            3
+        ])),
+    );
+    activate_in_window(&mut runner, altar, &[clearcutter], None);
+    assert_eq!(pool_total(&runner), 5);
+    assert!(in_zone(&runner, forest, Zone::Graveyard));
+    assert!(in_zone(&runner, clearcutter, Zone::Graveyard));
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, tome));
+
+    pass(&mut runner);
+    let waiting_for = pass(&mut runner);
+    let discarded: Vec<ObjectId> = runner.state().players[P0.0 as usize]
+        .hand
+        .iter()
+        .take(1)
+        .copied()
+        .collect();
+    let waiting_for = match waiting_for {
+        WaitingFor::Priority { .. } => waiting_for,
+        _ => select_cards(&mut runner, &discarded),
+    };
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        hand_size(&runner, P0),
+        hand_before + 1,
+        "two cards drawn and one discarded"
+    );
+}
+
+/// CR 601.2g + CR 119.3 + CR 119.4 (#10190 review): a window's changes to
+/// mana and life are carried together. At one life, Pristine Talisman ("{T}:
+/// Add {C}. You gain 1 life.") alone makes one mana and two life, and Ashnod's
+/// Altar alone makes two mana at one life; together they pay Book of Rass's
+/// "{2}, Pay 2 life: Draw a card." It is offered for a manual payment and the
+/// cost is paid in full (the player then loses at zero life, CR 704.5a).
+#[test]
+fn a_manual_offer_combines_mana_ability_life_and_sacrifice_mana() {
+    let mut scenario = scenario_at_main();
+    scenario.with_life(P0, 1);
+    let book = scenario
+        .add_artifact_from_oracle(P0, "Book of Rass", BOOK_OF_RASS)
+        .with_mana_cost(ManaCost::generic(6))
+        .id();
+    let talisman = scenario
+        .add_artifact_from_oracle(P0, "Pristine Talisman", PRISTINE_TALISMAN)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let altar = scenario
+        .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let fodder = scenario.add_vanilla(P0, 2, 2);
+    let mut runner = scenario.build();
+    let index = non_mana_ability_index(&runner, book);
+
+    assert_eq!(
+        offered_payment_modes(&runner, book, index),
+        vec![CastPaymentMode::Manual]
+    );
+
+    let waiting_for = activate_index(&mut runner, book, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(&mut runner, talisman, &[], None);
+    activate_in_window(&mut runner, altar, &[fodder], None);
+    assert_eq!(pool_total(&runner), 3);
+    assert_eq!(life(&runner, P0), 2);
+    assert!(in_zone(&runner, fodder, Zone::Graveyard));
+    pass(&mut runner);
+    assert_eq!(life(&runner, P0), 0, "the 2 life was paid");
+    assert_eq!(pool_total(&runner), 1, "the {{2}} left one mana floating");
+}
+
+/// CR 701.59a + CR 605.3b (#10190 review): the witness answers a mana
+/// ability's collect-evidence prompt as the player would. Cryptex ("{T},
+/// Collect evidence 3: Add one mana of any color.") and Ashnod's Altar together
+/// make Arcane Encyclopedia's "{3}, {T}: Draw a card.", neither alone. It is
+/// offered for a manual payment and completes.
+#[test]
+fn a_collect_evidence_mana_ability_funds_a_manual_offer() {
+    let mut scenario = scenario_at_main();
+    let encyclopedia = scenario
+        .add_artifact_from_oracle(P0, "Arcane Encyclopedia", ARCANE_ENCYCLOPEDIA)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let cryptex = scenario
+        .add_artifact_from_oracle(P0, "Cryptex", CRYPTEX)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let altar = scenario
+        .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let fodder = scenario.add_vanilla(P0, 2, 2);
+    let evidence = scenario
+        .add_creature_to_graveyard(P0, "Evidence", 3, 3)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    scenario.add_card_to_library_top(P0, "Drawn card");
+    let mut runner = scenario.build();
+    let index = non_mana_ability_index(&runner, encyclopedia);
+    let hand_before = hand_size(&runner, P0);
+
+    assert_eq!(
+        offered_payment_modes(&runner, encyclopedia, index),
+        vec![CastPaymentMode::Manual]
+    );
+
+    let waiting_for = activate_index(&mut runner, encyclopedia, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(
+        &mut runner,
+        cryptex,
+        &[evidence],
+        Some(engine::types::game_state::ManaChoice::SingleColor(
+            engine::types::mana::ManaType::Blue,
+        )),
+    );
+    assert!(
+        in_zone(&runner, evidence, Zone::Exile),
+        "the evidence was collected"
+    );
+    activate_in_window(&mut runner, altar, &[fodder], None);
+    assert_eq!(pool_total(&runner), 3);
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, encyclopedia));
+
+    resolve_stack(&mut runner);
+    assert_eq!(hand_size(&runner, P0), hand_before + 1, "the draw resolved");
+}
+
+/// CR 106.6 + CR 608.2d (#10190 review): under a spend rider only the
+/// all-chosen-color answer of a combination prompt can pay, so the witness
+/// tries it rather than enumerating every combination first. The Golden
+/// Throne's "{T}, Sacrifice a creature: Add three mana in any combination of
+/// colors." pays a green-chosen Throne of Eldraine's "{3}, {T}: Draw two
+/// cards. Spend only mana of the chosen color to activate this ability." It is
+/// offered for a manual payment and completes on {G}{G}{G}.
+#[test]
+fn a_combination_mana_ability_funds_a_chosen_color_activation() {
+    let mut scenario = scenario_at_main();
+    let throne = scenario
+        .add_creature_from_oracle(P0, "Throne of Eldraine", 0, 1, THRONE_OF_ELDRAINE)
+        .as_artifact()
+        .with_mana_cost(ManaCost::generic(5))
+        .id();
+    let golden = scenario
+        .add_artifact_from_oracle(P0, "The Golden Throne", THE_GOLDEN_THRONE)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let fodder = scenario.add_vanilla(P0, 2, 2);
+    scenario.add_card_to_library_top(P0, "First drawn card");
+    scenario.add_card_to_library_top(P0, "Second drawn card");
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&throne)
+        .expect("the Throne")
+        .chosen_attributes
+        .push(engine::types::ability::ChosenAttribute::Color(
+            ManaColor::Green,
+        ));
+    let index = non_mana_ability_index(&runner, throne);
+    let hand_before = hand_size(&runner, P0);
+
+    assert_eq!(
+        offered_payment_modes(&runner, throne, index),
+        vec![CastPaymentMode::Manual]
+    );
+
+    let waiting_for = activate_index(&mut runner, throne, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(
+        &mut runner,
+        golden,
+        &[fodder],
+        Some(engine::types::game_state::ManaChoice::Combination(vec![
+            engine::types::mana::ManaType::Green;
+            3
+        ])),
+    );
+    assert_eq!(pool_total(&runner), 3);
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, throne));
+    assert_eq!(pool_total(&runner), 0);
+
+    resolve_stack(&mut runner);
+    assert_eq!(hand_size(&runner, P0), hand_before + 2, "the draw resolved");
 }

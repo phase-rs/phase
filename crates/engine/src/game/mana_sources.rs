@@ -2337,10 +2337,16 @@ fn mana_ability_allowed_for_payment(
 
 /// Which payment estimate a mana capacity serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CapacityUse {
+pub(crate) enum CapacityUse {
     /// Castability: colored shards are assigned first, and a color chosen on
-    /// activation is charged for what that color adds.
+    /// activation is charged for what that color adds. Each permanent is
+    /// credited one activation (#1234).
     Castability,
+    /// An activation's manual window, which the exact witness
+    /// (`casting::mana_ability_window_mana_witness`) then confirms: as
+    /// `Castability`, but a mana ability with no tap is credited every
+    /// activation its cost's supply allows (CR 605.3c).
+    ActivationWindow,
     /// The {X} ceiling sums capacities with no per-color accounting, so a
     /// source whose amount depends on the color it is activated for (Nyx Lotus
     /// with unequal devotion) is left out: the ceiling fails closed.
@@ -2379,7 +2385,7 @@ pub(crate) fn feasible_mana_capacity(
     )
 }
 
-fn mana_capacity(
+pub(crate) fn mana_capacity(
     state: &GameState,
     object_id: ObjectId,
     controller: PlayerId,
@@ -2408,10 +2414,67 @@ fn mana_capacity(
                 )
         })
         .filter_map(|(_, ability)| {
-            usable_mana_ability_net(state, object_id, controller, ability, capacity_use)
+            let net = usable_mana_ability_net(state, object_id, controller, ability, capacity_use)?;
+            Some(match capacity_use {
+                CapacityUse::ActivationWindow => net.saturating_mul(
+                    repeatable_mana_ability_multiplier(state, object_id, controller, ability),
+                ),
+                CapacityUse::Castability | CapacityUse::XCeiling => net,
+            })
         })
         .max()
         .unwrap_or(0)
+}
+
+/// CR 605.3c: How many times one mana ability could be activated in the
+/// payment window. A tap or untap cost, or an explicit activation restriction,
+/// limits the permanent to one activation. A non-tap repeatable ability
+/// (Ashnod's Altar's creature sacrifice, Krark-Clan Ironworks's artifact
+/// sacrifice, discard, or pay-life) can be activated as many times as its
+/// resource supply allows.
+fn repeatable_mana_ability_multiplier(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    ability: &AbilityDefinition,
+) -> u32 {
+    if has_tap_component(&ability.cost)
+        || cost_has_component(&ability.cost, |c| matches!(c, AbilityCost::Untap))
+        || ability
+            .activation_restrictions
+            .iter()
+            .any(|r| matches!(r, ActivationRestriction::OnlyOnceEachTurn))
+    {
+        return 1;
+    }
+
+    // Each activation chooses its own objects (CR 118.10), so the supply of
+    // eligible objects bounds how many times the ability can resolve.
+    let supply = mana_abilities::sacrifice_cost_choice(state, controller, object_id, ability)
+        .or_else(|| mana_abilities::discard_cost_choice(state, controller, object_id, ability))
+        .or_else(|| {
+            mana_abilities::exile_cost_choice(state, controller, object_id, ability)
+                .map(|(count, _, cards)| (count, cards))
+        });
+    if let Some(activations) = supply.and_then(|(count, objects)| objects.len().checked_div(count))
+    {
+        return u32::try_from(activations).unwrap_or(u32::MAX);
+    }
+
+    // CR 119.4: each activation pays its life from the total that is left.
+    if let Some(life_needed) = ability.cost.as_ref().and_then(|cost| {
+        super::casting::find_pay_life_cost(cost, state, controller, object_id)
+            .filter(|&needed| needed > 0)
+    }) {
+        let life = state
+            .players
+            .iter()
+            .find(|p| p.id == controller)
+            .map_or(0, |p| p.life);
+        return u32::try_from(life).unwrap_or(0) / life_needed;
+    }
+
+    1
 }
 
 /// CR 605.1a: An activated mana ability.
