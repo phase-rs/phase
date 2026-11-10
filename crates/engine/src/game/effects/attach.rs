@@ -324,7 +324,10 @@ fn resolve_bound_attachment_operation(
     if attachment_ids.is_empty() {
         // CR 400.7: a source that left play is a new object, so "attach ~" attaches
         // nothing and the instruction still resolved.
-        if matches!(attachment_filter, TargetFilter::OriginalSource) {
+        if matches!(
+            attachment_filter,
+            TargetFilter::SelfRef | TargetFilter::OriginalSource
+        ) {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id,

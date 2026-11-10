@@ -934,3 +934,76 @@ fn last_voyage_with_a_sticker_enchants_the_creature_it_returned() {
     assert_eq!(runner.state().objects[&voyage].stickers.len(), 1);
     assert_voyage_enchants(&runner, voyage, grave_bear, &events);
 }
+
+/// CR 400.7: Ghostly Flicker returns Ancestral Blade as a new object while its enters
+/// trigger waits, so that trigger still creates its Soldier but attaches nothing to it.
+#[test]
+fn ancestral_blade_flickered_before_its_trigger_resolves_equips_only_the_new_triggers_token() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bystander = scenario.add_creature(P0, "Bystander", 2, 2).id();
+    let blade = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Ancestral Blade", ANCESTRAL_BLADE)
+        .with_subtypes(vec!["Equipment"])
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let flicker = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ghostly Flicker", true, GHOSTLY_FLICKER)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    scenario.with_mana_pool(P0, vec![]);
+    let mut runner = scenario.build();
+    runner.cast(blade).commit();
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    runner.act(GameAction::PassPriority).expect("P1 passes");
+    assert_eq!(
+        runner.state().objects[&blade].zone,
+        Zone::Battlefield,
+        "reach guard: the Blade entered"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach guard: the enters trigger waits"
+    );
+    let departed = runner.state().objects[&blade].incarnation;
+
+    runner
+        .cast(flicker)
+        .target_objects(&[blade, bystander])
+        .commit();
+    let (events, _) = settle(&mut runner, true, &[]);
+
+    assert_ne!(
+        runner.state().objects[&blade].incarnation,
+        departed,
+        "reach guard: the Blade returned as a new object"
+    );
+    let no_op_attaches = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Attach,
+                    subject: None,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        no_op_attaches, 1,
+        "the departed trigger's attach resolved as a no-op"
+    );
+    let soldiers: Vec<ObjectId> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(soldiers.len(), 2, "both triggers created a Soldier");
+    // The new incarnation's trigger is stacked above the departed one, so it resolves first.
+    assert_eq!(host_of(&runner, blade), Some(soldiers[0]));
+}
