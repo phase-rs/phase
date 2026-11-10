@@ -702,8 +702,9 @@ pub fn apply_life_gain_after_replacement(
 /// `ChooseReplacement` answer delivered under the policy the parked record was
 /// stamped with. The settle never refuses the gain (its total and per-turn
 /// counter saturate), so the policy reaches only the shared settle routing; a
-/// nested player-counter or energy settlement the answer reaches is held to
-/// the ingress window `handle_replacement_choice` opens for a record stamped `Reject`.
+/// nested player-counter or energy settlement the answer reaches is held to a
+/// `Reject` stamp by the open ingress window: the one `handle_replacement_choice`
+/// opens for a record stamped `Reject`, else the public action boundary's.
 pub(crate) fn settle_life_gain_after_choice(
     state: &mut GameState,
     event: ProposedEvent,
