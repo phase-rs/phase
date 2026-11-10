@@ -2302,6 +2302,20 @@ fn settle_deferred_triggers_after_persisted_restore(
     Ok(())
 }
 
+/// CR 104.3a: a finalization failure must not restore a snapshot that predates a
+/// committed concession. Keep the live state when it carries a departure the
+/// snapshot does not.
+fn restore_boundary_preserving_departure(
+    state: &mut GameState,
+    snapshot: std::sync::Arc<GameState>,
+) {
+    let restored = std::sync::Arc::unwrap_or_clone(snapshot);
+    if state.eliminated_players.len() > restored.eliminated_players.len() {
+        return;
+    }
+    *state = restored;
+}
+
 fn finish_action_boundary(
     state: &mut GameState,
     raw: RawActionApplication,
@@ -2353,7 +2367,7 @@ fn finish_action_boundary_with_lifecycle(
     ) {
         let life_failure = close_ingress_window(state, &mut prior_window);
         lifecycle.discard();
-        *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
+        restore_boundary_preserving_departure(state, boundary_snapshot);
         return Err(
             life_failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
                 player,
@@ -2382,7 +2396,7 @@ fn finish_action_boundary_with_lifecycle(
             Err(error) => {
                 let life_failure = close_ingress_window(state, &mut prior_window);
                 lifecycle.discard();
-                *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
+                restore_boundary_preserving_departure(state, boundary_snapshot);
                 return Err(life_failure.map_or(error, |player| {
                     EngineError::LifeChangeUnrepresentable { player }
                 }));
@@ -2399,7 +2413,7 @@ fn finish_action_boundary_with_lifecycle(
     {
         let life_failure = close_ingress_window(state, &mut prior_window);
         lifecycle.discard();
-        *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
+        restore_boundary_preserving_departure(state, boundary_snapshot);
         return Err(
             life_failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
                 player,
@@ -2407,7 +2421,7 @@ fn finish_action_boundary_with_lifecycle(
         );
     }
     if matches!(result.waiting_for, WaitingFor::GameOver { .. }) {
-        take_and_restore_stack_resolution_session(state);
+        payment_transaction::retire_terminal_transaction(state);
     }
     // Debug "infinite mana" (CR 500.5 suppressed for flagged players): restore any
     // pool that a spend during this action depleted, before public state is
@@ -2445,7 +2459,7 @@ fn finish_action_boundary_with_lifecycle(
         {
             let life_failure = close_ingress_window(state, &mut prior_window);
             lifecycle.discard();
-            *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
+            restore_boundary_preserving_departure(state, boundary_snapshot);
             return Err(life_failure.map_or_else(
                 || {
                     EngineError::InvalidAction(
@@ -2488,7 +2502,7 @@ fn finish_action_boundary_with_lifecycle(
     if let Err(error) = recording {
         let life_failure = close_ingress_window(state, &mut prior_window);
         lifecycle.discard();
-        *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
+        restore_boundary_preserving_departure(state, boundary_snapshot);
         return Err(
             life_failure.map_or(error, |player| EngineError::LifeChangeUnrepresentable {
                 player,
@@ -2497,7 +2511,7 @@ fn finish_action_boundary_with_lifecycle(
     }
     if let Some(player) = close_ingress_window(state, &mut prior_window) {
         lifecycle.discard();
-        *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
+        restore_boundary_preserving_departure(state, boundary_snapshot);
         return Err(EngineError::LifeChangeUnrepresentable { player });
     }
     #[cfg(debug_assertions)]

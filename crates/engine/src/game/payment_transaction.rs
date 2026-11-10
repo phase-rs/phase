@@ -334,6 +334,7 @@ fn settle_canonical_tail(
         completed,
     )?;
     crate::game::public_state::sync_waiting_for(state, &waiting_for);
+    retire_terminal_transaction(state);
     Ok(())
 }
 
@@ -728,6 +729,16 @@ pub(crate) fn mirror_outside_action(state: &mut GameState, actor: PlayerId, acti
         .payment_transaction
         .as_mut()
         .expect("the descriptor is live") = updated;
+}
+
+/// CR 104.1 + CR 104.3a: a terminal game retires a parked payment descriptor;
+/// its prompt is never shown in sideboarding or the results view.
+pub(crate) fn retire_terminal_transaction(state: &mut GameState) {
+    if state.game_end.is_some() {
+        state.payment_transaction = None;
+        state.payment_transaction_replay = false;
+        state.payment_transaction_just_handled = false;
+    }
 }
 
 /// Runtime-only fields are `#[serde(skip)]` on the live state and cannot be
@@ -1186,6 +1197,62 @@ mod tests {
                 .expect_err("restore must reject an out-of-range payment owner");
             assert!(error.to_string().contains("payment transaction is invalid"));
         }
+    }
+
+    #[test]
+    fn persisted_recovery_checkpoint_rejects_combat_damage_on_its_stack() {
+        let mut state = GameState::new_two_player(7);
+        let mut checkpoint_state = GameState::new_two_player(7);
+        checkpoint_state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        checkpoint_state
+            .stack
+            .push_back(crate::types::game_state::StackEntry {
+                id: crate::types::identifiers::ObjectId(1),
+                source_id: crate::types::identifiers::ObjectId(2),
+                controller: PlayerId(0),
+                kind: crate::types::game_state::StackEntryKind::CombatDamage {
+                    sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
+                    assignments: Vec::new(),
+                },
+            });
+        state.payment_transaction = Some(Box::new(ResolutionPaymentTransaction {
+            wire_version: 1,
+            owner: PlayerId(0),
+            root: Box::new(crate::types::ability::ResolvedAbility::new(
+                crate::types::ability::Effect::NoOp,
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )),
+            transcript: Vec::new(),
+            base_waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            resolving_trigger_context: None,
+            recovered: Some(Box::new(PaymentRecoveryCheckpoint {
+                state: Box::new(checkpoint_state),
+                events: Vec::new(),
+                log_entries: Vec::new(),
+                consumed: 0,
+            })),
+        }));
+        let restored = serde_json::from_value::<PersistedGameState>(
+            serde_json::to_value(PersistedGameState::capture(state))
+                .expect("the trusted shape serializes"),
+        )
+        .expect("the wire shape remains decodable");
+        let error = restored
+            .into_game_state()
+            .expect_err("restore must reject combat damage in the checkpoint");
+        assert!(
+            error.to_string().contains("combat damage"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
