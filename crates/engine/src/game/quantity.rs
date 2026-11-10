@@ -375,8 +375,16 @@ fn characteristic_view_for_object(
 /// binds the read: a stamped origin selects its departure record, never any
 /// latest older departure by storage id.
 enum TrackedMemberRead<'s> {
-    /// Stamped producing transition with a recorded departure snapshot.
-    Snapshot(&'s crate::types::game_state::LKISnapshot),
+    /// Stamped producing transition with a recorded departure snapshot, together
+    /// with the object incarnation that departure belonged to. The incarnation
+    /// travels with the snapshot because every historical leaf answers from the
+    /// capture that belongs to THIS epoch: CR 400.7 makes the storage id reusable,
+    /// so a member that left and returned has a later row (and a later live
+    /// object) that is a different object.
+    Snapshot {
+        lki: &'s crate::types::game_state::LKISnapshot,
+        departure_incarnation: u64,
+    },
     /// Stamped producing transition from a zone that records no LKI
     /// (hand/library/graveyard): the live object is authoritative — the
     /// legacy cache slot necessarily describes an EARLIER, unrelated
@@ -412,7 +420,10 @@ fn tracked_member_read_authority(
             .get(&object_id)
             .and_then(|history| history.get(&origin.departure_incarnation))
         {
-            Some(lki) => TrackedMemberRead::Snapshot(lki),
+            Some(lki) => TrackedMemberRead::Snapshot {
+                lki,
+                departure_incarnation: origin.departure_incarnation,
+            },
             // A recording origin with no record is a data gap (legacy save,
             // pruned history): best-effort legacy behavior. A non-recording
             // origin has no snapshot BY CONSTRUCTION, so live is
@@ -438,7 +449,7 @@ fn tracked_member_characteristic_view<'s>(
     object_id: ObjectId,
 ) -> Option<CharacteristicView<'s>> {
     match tracked_member_read_authority(state, set_id, object_id) {
-        TrackedMemberRead::Snapshot(lki) => Some(CharacteristicView::Lki(lki)),
+        TrackedMemberRead::Snapshot { lki, .. } => Some(CharacteristicView::Lki(lki)),
         TrackedMemberRead::Live => state
             .objects
             .get(&object_id)
@@ -694,11 +705,17 @@ fn visit_characteristic_leaf<'s>(
                 let filter_ok = match filter {
                     None => true,
                     Some(filter) => match tracked_member_read_authority(state, set_id, oid) {
-                        TrackedMemberRead::Snapshot(lki) => {
-                            crate::game::filter::matches_target_filter_on_lki_snapshot(
-                                state, oid, lki, filter, filter_ctx,
-                            )
-                        }
+                        TrackedMemberRead::Snapshot {
+                            lki,
+                            departure_incarnation,
+                        } => crate::game::filter::matches_target_filter_on_departed_lki_at_incarnation(
+                            state,
+                            oid,
+                            lki,
+                            departure_incarnation,
+                            filter,
+                            filter_ctx,
+                        ),
                         TrackedMemberRead::Live => crate::game::filter::matches_target_filter(
                             state, oid, filter, filter_ctx,
                         ),
@@ -6003,7 +6020,23 @@ fn resolve_ref(
                     };
                     let matches_filter =
                         match tracked_member_read_authority(state, Some(*set_id), oid) {
-                            TrackedMemberRead::Snapshot(lki) => read_snapshot(oid, lki),
+                            // CR 608.2h + CR 400.7: the stamped departure's own
+                            // snapshot AND its incarnation travel together, so every
+                            // historical leaf — token identity included — answers
+                            // from the capture that belongs to this epoch rather
+                            // than from the newest row or the live object at a
+                            // storage id a later object may hold.
+                            TrackedMemberRead::Snapshot {
+                                lki,
+                                departure_incarnation,
+                            } => crate::game::filter::matches_target_filter_on_departed_lki_at_incarnation(
+                                state,
+                                oid,
+                                lki,
+                                departure_incarnation,
+                                filter,
+                                &filter_ctx,
+                            ),
                             TrackedMemberRead::Live => read_live(oid),
                             TrackedMemberRead::Legacy
                                 if state.battlefield.contains(&oid)
@@ -21791,6 +21824,159 @@ mod tests {
             resolve_quantity(&state, &aggregate, PlayerId(0), source),
             0,
             "live power 2 fails the power-3 floor; the stale pumped 5 must not admit the member"
+        );
+    }
+
+    /// CR 608.2h + CR 400.7 + CR 111.1: a tracked-set member that LEFT and
+    /// RETURNED under the same storage id. The producing transition stamped the
+    /// member with the incarnation it departed at and `lki_by_incarnation` holds
+    /// that departure's snapshot — the exact departure the member filter must read
+    /// — but a later object now occupies the storage id and wrote its own
+    /// zone-change row.
+    ///
+    /// The token leaf must answer from the DEPARTURE capture the member is stamped
+    /// with, not from the newest row for the storage id, which describes a
+    /// different object (CR 400.7). This is the Ceaseless Conflict shape: "each
+    /// nontoken creature you controlled that was destroyed this way" reads the
+    /// destroyed token member through exactly this projection.
+    ///
+    /// Revert-probe: taking the bit from the newest row by storage id — the base
+    /// behaviour — reads the reentry's nontoken row, so the destroyed token drops
+    /// out of a `Token` member filter and is admitted to a `NonToken` one, which is
+    /// precisely the wrong count in both directions.
+    #[test]
+    fn tracked_member_token_bit_comes_from_its_departure_capture_not_the_newest_row() {
+        use crate::types::game_state::{LKISnapshot, TrackedMemberOrigin};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Ceaseless Conflict".to_string(),
+            Zone::Graveyard,
+        );
+        let member = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "Spirit Token".to_string(),
+            Zone::Battlefield,
+        );
+
+        // EPOCH 1 — the token, as it left the battlefield. Both captures belong to
+        // this epoch: the exit snapshot under incarnation 1, and the zone-change
+        // row the same departure wrote (pinned to the pre-move incarnation).
+        {
+            let obj = state.objects.get_mut(&member).unwrap();
+            obj.is_token = true;
+            obj.incarnation = 1;
+            obj.card_types.core_types = vec![CoreType::Creature];
+        }
+        let departure = state
+            .objects
+            .get(&member)
+            .unwrap()
+            .snapshot_for_zone_change(member, Some(Zone::Battlefield), Zone::Graveyard);
+        assert!(
+            departure.is_token,
+            "fixture precondition: a token left the battlefield"
+        );
+        assert_eq!(
+            departure
+                .trigger_source_context()
+                .map(|context| context.identity.reference.incarnation),
+            Some(1),
+            "fixture precondition: the row is pinned to the departure epoch"
+        );
+        state.zone_changes_this_turn.push_back(departure);
+        state.lki_by_incarnation.entry(member).or_default().insert(
+            1,
+            LKISnapshot {
+                name: "Spirit Token".to_string(),
+                token_image_ref: None,
+                power: Some(3),
+                toughness: Some(2),
+                base_power: None,
+                base_toughness: None,
+                mana_value: 0,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Creature],
+                subtypes: vec![],
+                supertypes: vec![],
+                keywords: vec![],
+                colors: vec![],
+                chosen_attributes: vec![],
+                counters: Default::default(),
+                tapped: false,
+                is_suspected: false,
+                was_prepared: false,
+                attachments: Vec::new(),
+                intensity: 0,
+            },
+        );
+
+        // EPOCH 2 — the same storage id comes back as a real card and writes its
+        // own row. This is the row the base leaf answered from.
+        {
+            let obj = state.objects.get_mut(&member).unwrap();
+            obj.is_token = false;
+            obj.incarnation = 2;
+            obj.name = "Bear".to_string();
+            obj.card_types.core_types = vec![CoreType::Creature];
+        }
+        let reentry = state
+            .objects
+            .get(&member)
+            .unwrap()
+            .snapshot_for_zone_change(member, Some(Zone::Graveyard), Zone::Battlefield);
+        assert!(
+            !reentry.is_token,
+            "fixture precondition: the reentry is not a token"
+        );
+        state.zone_changes_this_turn.push_back(reentry);
+
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state.tracked_object_sets.insert(set_id, vec![member]);
+        state.tracked_set_member_origins.insert(
+            set_id,
+            [(
+                member,
+                TrackedMemberOrigin {
+                    departed_from: Zone::Battlefield,
+                    departure_incarnation: 1,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+
+        let count = |prop: FilterProp| {
+            resolve_quantity(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::FilteredTrackedSetSize {
+                        filter: Box::new(TargetFilter::Typed(
+                            TypedFilter::new(TypeFilter::Creature).properties(vec![prop]),
+                        )),
+                        caused_by: None,
+                    },
+                },
+                PlayerId(0),
+                source,
+            )
+        };
+        assert_eq!(
+            count(FilterProp::Token),
+            1,
+            "the member departed as a token, so a Token member filter must count it"
+        );
+        assert_eq!(
+            count(FilterProp::NonToken),
+            0,
+            "and the reentry's nontoken row — a different object — must not admit it"
         );
     }
 
