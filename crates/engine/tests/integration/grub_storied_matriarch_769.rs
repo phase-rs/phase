@@ -886,30 +886,52 @@ fn scuzzback_scrounger_that_cannot_blight_makes_no_treasure() {
 /// "If you do" stays closed. No printed card nests an optional blight this way
 /// (every printed optional blight starts its ability, as Scuzzback Scrounger's
 /// does), so this line is synthetic. It guards the inherited "performed" flag
-/// from the accepted draw.
+/// from the accepted draw. The paired board has a creature, so the nested
+/// blight is offered and its rider makes the Treasure.
 #[test]
 fn nested_blight_that_cannot_happen_keeps_its_rider_closed() {
     const NESTED_ORACLE: &str = "At the beginning of your first main phase, you may draw a card. \
 If you do, you may blight 1. If you do, create a Treasure token.";
-    let (mut runner, _) = board(Phase::Upkeep, |scenario, _| {
-        scenario
-            .add_artifact_from_oracle(P0, "Nested Blight Test Artifact", NESTED_ORACLE)
-            .id()
-    });
-    runner.advance_to_phase(Phase::PreCombatMain);
+    let stage = |with_creature: bool| {
+        move |scenario: &mut GameScenario, _: &'static CardDatabase| {
+            scenario.add_artifact_from_oracle(P0, "Nested Blight Test Artifact", NESTED_ORACLE);
+            with_creature.then(|| scenario.add_creature(P0, "Bear", 2, 2).id())
+        }
+    };
+
+    let (mut able, bear) = board(Phase::Upkeep, stage(true));
+    let bear = bear.expect("the paired board has a creature");
+    able.advance_to_phase(Phase::PreCombatMain);
     assert_eq!(
-        runner.state().stack.len(),
+        able.state().stack.len(),
         1,
         "reach-guard: the first-main trigger is on the stack"
     );
-    both_pass(&mut runner);
+    both_pass(&mut able);
+    decide(&mut able, true);
+    blight(&mut able, &[bear], bear);
+    assert_settled(&able);
+    assert_eq!(
+        tokens(&able).len(),
+        1,
+        "the nested blight happened, so its rider makes the Treasure"
+    );
+
+    let (mut unable, _) = board(Phase::Upkeep, stage(false));
+    unable.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(
+        unable.state().stack.len(),
+        1,
+        "reach-guard: the first-main trigger is on the stack"
+    );
+    both_pass(&mut unable);
     // The draw is the only choice: no creature is on the battlefield, so the
     // nested blight is never offered.
-    decide(&mut runner, true);
+    decide(&mut unable, true);
 
-    assert_settled(&runner);
+    assert_settled(&unable);
     assert!(
-        tokens(&runner).is_empty(),
+        tokens(&unable).is_empty(),
         "the blight never happened, so its rider makes no Treasure"
     );
 }
