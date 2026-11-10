@@ -3350,7 +3350,7 @@ fn low3_activate_and_settle(runner: &mut GameRunner, source: ObjectId, ability_i
 /// life." / "{0}: Untap Lifedynamo."), which [`low3_life_engine_offered`] builds. No printed card
 /// is, on its own, a free engine that gains life each cycle, and the LOW-3 rows need a loop that
 /// makes mana and gains life by activations alone, so the Mark route's ∞ mana mark shows the
-/// route and the board holds only what each arm grafts. The nearest printed board is Basalt
+/// route and the board holds only what each arm adds. The nearest printed board is Basalt
 /// Monolith ("This artifact doesn't untap during your untap step." / "{T}: Add {C}{C}{C}." / "{3}:
 /// Untap this artifact.") enchanted with Power Artifact ("Enchanted artifact's activated abilities
 /// cost {2} less to activate. This effect can't reduce the mana in that cost to less than one
@@ -3997,8 +3997,8 @@ fn opponents_etb_life_gainer_does_not_suppress_your_axis() {
     let mut state = offer_state();
     strip_life_conditional_cost_static(&mut state);
 
-    // P0's own gainer, Prosperous Innkeeper ("another creature YOU control enters"), placed
-    // without entering, so its own Treasure trigger does not fire.
+    // P0's own gainer, Prosperous Innkeeper ("Whenever another creature you control enters,
+    // you gain 1 life."), placed without entering, so its own Treasure trigger does not fire.
     place_card(
         &mut state,
         P0,
