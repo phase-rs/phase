@@ -1696,6 +1696,12 @@ pub fn resolve(
             exile_tracked_set_library_only,
         );
         let scan_zone = scan_zones[0];
+        // CR 402.3: a private-scope choice must not auto-resolve a singleton,
+        // because the presence/absence of the prompt would reveal whether a
+        // hidden hand card matched. Force the interactive choice so the
+        // opponent's observable prompt sequence is identical for zero and one
+        // eligible hidden cards.
+        let private_scope = scan_zones.iter().any(|zone| !zone.is_public());
         // CR 701.24d-e: retain an explicitly designated typed player even when
         // the source zone supplies zero eligible cards.
         publish_finalized_owner_library_subjects(state, ability, &[]);
@@ -1829,7 +1835,7 @@ pub fn resolve(
             )));
         }
 
-        if eligible.len() == 1 && !choice_up_to && choice_count == 1 {
+        if eligible.len() == 1 && !choice_up_to && choice_count == 1 && !private_scope {
             let chosen = eligible[0];
             let chosen_origin = chosen_object_origin(state, chosen, &scan_zones, scan_zone);
             publish_finalized_owner_library_subjects(state, ability, &[chosen]);

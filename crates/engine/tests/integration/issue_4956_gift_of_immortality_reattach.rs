@@ -970,12 +970,11 @@ fn next_of_kin_offers_command_zone_and_moves_the_chosen_creature() {
     );
 }
 
-/// The single-eligible shortcut must move the command-zone candidate without a
-/// card-choice prompt. The scan set, not the first entry alone, is what makes
-/// the candidate eligible; the move is driven through the production trigger
-/// and priority pipeline, not a direct mover.
+/// A private-scope singleton still opens the card-choice prompt: otherwise the
+/// prompt's presence would reveal whether a hidden hand card matched. The scan
+/// set, not the first entry alone, makes the command-zone candidate eligible.
 #[test]
-fn next_of_kin_single_command_zone_candidate_moves_without_a_hand_leg() {
+fn next_of_kin_single_command_zone_candidate_still_prompts() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -1015,8 +1014,13 @@ fn next_of_kin_single_command_zone_candidate_moves_without_a_hand_leg() {
         "the printed \"you may\" must still reach an OptionalEffectChoice prompt"
     );
     assert!(
-        !consumed_choice && observations.zone_choices.is_empty(),
-        "one eligible card must not open a card-choice prompt"
+        consumed_choice,
+        "a private-scope singleton must still open the card-choice prompt"
+    );
+    assert_eq!(
+        observations.zone_choices,
+        vec![vec![command]],
+        "the prompt must offer exactly the command-zone candidate"
     );
     assert_eq!(
         runner.state().objects[&command].zone,
@@ -1038,6 +1042,83 @@ fn next_of_kin_single_command_zone_candidate_moves_without_a_hand_leg() {
         Some(AttachTarget::Object(command)),
         "the delayed Attach must bind the lone command-zone creature"
     );
+}
+
+/// CR 402.3: with one public commander and equal-sized hands, zero vs one
+/// matching hand cards must produce the same observable choice prompt. The
+/// private scope forces the singleton prompt, and the opponent envelope
+/// (cards + bounds) is identical; both choices settle the commander the same.
+#[test]
+fn next_of_kin_singleton_prompt_presence_does_not_leak_hand_match() {
+    let zero_eligible = open_next_of_kin_choice(0, 2, 1);
+    let one_eligible = open_next_of_kin_choice(1, 1, 1);
+
+    let mut chooser_lengths = Vec::new();
+    for runner in [&zero_eligible, &one_eligible] {
+        let WaitingFor::EffectZoneChoice {
+            cards,
+            count,
+            min_count,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("a private-scope singleton must still open the choice prompt");
+        };
+        chooser_lengths.push(cards.len());
+        assert!(
+            cards
+                .iter()
+                .all(|id| *id != engine::types::identifiers::ObjectId(0)),
+            "chooser must see exact ids"
+        );
+        assert!(*count > 0, "chooser keeps its real bounds");
+        let _ = min_count;
+
+        let opponent = filter_state_for_viewer(runner.state(), P1);
+        let WaitingFor::EffectZoneChoice {
+            cards: opponent_cards,
+            count: opponent_count,
+            min_count: opponent_min_count,
+            ..
+        } = &opponent.waiting_for
+        else {
+            panic!("opponent must still see the redacted envelope");
+        };
+        assert!(
+            opponent_cards.is_empty(),
+            "opponent cards must not reveal the hidden match; got {opponent_cards:?}"
+        );
+        assert_eq!(
+            (*opponent_count, *opponent_min_count),
+            (0, 0),
+            "opponent bounds must not reveal the hidden match"
+        );
+    }
+    assert_eq!(
+        chooser_lengths,
+        vec![1, 2],
+        "chooser sees the commander alone vs commander plus the hidden match"
+    );
+
+    for mut runner in [zero_eligible, one_eligible] {
+        let command = runner
+            .state()
+            .objects
+            .iter()
+            .find_map(|(id, object)| (object.zone == Zone::Command).then_some(*id))
+            .expect("the staged commander exists");
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![command],
+            })
+            .expect("choose the commander");
+        runner.advance_until_stack_empty();
+        assert_eq!(
+            runner.state().objects[&command].zone,
+            Zone::Battlefield,
+            "both prompt paths must settle the commander onto the battlefield"
+        );
+    }
 }
 
 /// Invalid-zone control: a lesser-mana-value creature that is only in exile is
@@ -1103,7 +1184,11 @@ fn next_of_kin_ignores_a_creature_outside_hand_and_command() {
 /// the multi-origin `EffectZoneChoice`, without choosing a card. `eligible`
 /// hand creatures are mana value 2; `lands` filler cards keep the hand size
 /// controllable for the visibility comparison.
-fn open_next_of_kin_choice(eligible_hand_creatures: usize, lands: usize) -> GameRunner {
+fn open_next_of_kin_choice(
+    eligible_hand_creatures: usize,
+    lands: usize,
+    commanders: usize,
+) -> GameRunner {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -1111,18 +1196,13 @@ fn open_next_of_kin_choice(eligible_hand_creatures: usize, lands: usize) -> Game
         .add_creature(P0, "Hill Giant", 3, 3)
         .with_mana_cost(generic_cost(3))
         .id();
-    let command = scenario
-        .add_creature_to_hand(P0, "Elite Vanguard", 2, 1)
-        .with_mana_cost(generic_cost(1))
-        .id();
-    scenario.with_commander(command);
-    // A second public command-zone candidate so the opponent can subtract two
-    // known cards from the placeholder count.
-    let partner = scenario
-        .add_creature_to_hand(P0, "Partner Vanguard", 2, 1)
-        .with_mana_cost(generic_cost(1))
-        .id();
-    scenario.with_commander(partner);
+    for index in 0..commanders {
+        let command = scenario
+            .add_creature_to_hand(P0, &format!("Command Vanguard {index}"), 2, 1)
+            .with_mana_cost(generic_cost(1))
+            .id();
+        scenario.with_commander(command);
+    }
     for index in 0..eligible_hand_creatures {
         scenario
             .add_creature_to_hand(P0, &format!("Hand Bear {index}"), 2, 2)
@@ -1180,8 +1260,8 @@ fn next_of_kin_mixed_choice_redacts_private_eligibility() {
     // set, the zero-eligible payload would expose both commanders while the
     // one-eligible payload would be empty, leaking whether the hand contains a
     // qualifying card.
-    let zero_eligible = open_next_of_kin_choice(0, 2);
-    let one_eligible = open_next_of_kin_choice(1, 1);
+    let zero_eligible = open_next_of_kin_choice(0, 2, 2);
+    let one_eligible = open_next_of_kin_choice(1, 1, 2);
 
     for (runner, expect_hand) in [(&zero_eligible, false), (&one_eligible, true)] {
         let WaitingFor::EffectZoneChoice { cards, .. } = &runner.state().waiting_for else {
