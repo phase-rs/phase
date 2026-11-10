@@ -3912,6 +3912,7 @@ pub fn candidate_actions_broad_with_probe(
         // (Scored by `phase_ai::policies::loop_shortcut::LoopShortcutPolicy`.)
         WaitingFor::LoopShortcut {
             proposer,
+            predicted_winner,
             schema,
             declaration,
             period,
@@ -3937,17 +3938,11 @@ pub fn candidate_actions_broad_with_probe(
                 crate::analysis::decision_template::IterationCount::WithoutEnd => {
                     Some(crate::analysis::decision_template::IterationCount::WithoutEnd)
                 }
-                crate::analysis::decision_template::IterationCount::UntilLethal => {
-                    // CR 732.2a: UntilLethal names no count, so it is legal ONLY against an
-                    // offer whose iteration_count is UntilLethal or WithoutEnd — i.e., the
-                    // offer itself states no bound. The predicted_winner is irrelevant here;
-                    // the offer's certificate is the proof.
-                    Some(crate::analysis::decision_template::IterationCount::UntilLethal)
-                }
-                crate::analysis::decision_template::IterationCount::Fixed(_) => {
-                    // A Fixed offer states a specific count; never emit UntilLethal for it.
-                    // The bounded-offer logic below emits the suggested Fixed count.
-                    None
+                // CR 732.2a: until lethal ends only where the offer's named winner wins.
+                crate::analysis::decision_template::IterationCount::Fixed(_)
+                | crate::analysis::decision_template::IterationCount::UntilLethal => {
+                    (!schema.is_bounded() && predicted_winner.is_some())
+                        .then_some(crate::analysis::decision_template::IterationCount::UntilLethal)
                 }
             };
             if let Some(count) = unbounded {
@@ -7869,10 +7864,7 @@ mod tests {
                 residual_board_delta: crate::analysis::resource::BoardDelta::default(),
                 per_cycle: None,
             },
-            schema: crate::analysis::decision_template::ShortcutDecisionSchema {
-                iteration_count: crate::analysis::decision_template::IterationCount::UntilLethal,
-                ..Default::default()
-            },
+            schema: crate::analysis::decision_template::ShortcutDecisionSchema::default(),
             declaration: None,
             road: crate::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
