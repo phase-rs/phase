@@ -641,9 +641,9 @@ fn ashaya_druid_untap_holds(manabarbs: bool, wild_growth: bool) -> bool {
     !recommends_pass(&runner)
 }
 
-/// Devoted Druid under Ashaya is a Forest, so its mana comes through the land
-/// rows. Its own untap holds with the board's mana triggers around it: Wild
-/// Growth on the Druid, or a Manabarbs on each side.
+/// Devoted Druid under Ashaya is a Forest. Its own untap holds with the board's
+/// mana triggers around it: Wild Growth on the Druid, or a Manabarbs on each
+/// side.
 #[test]
 fn a_land_source_holds_with_mana_triggers_around_it() {
     for (manabarbs, wild_growth) in [(false, false), (false, true), (true, false)] {
@@ -809,9 +809,17 @@ fn a_costed_source_is_read_without_running_it() {
                 work.strict_fast_path_mana_readiness_state_clones,
                 work.auto_payment_owned_state_clones,
                 work.priority_cast_probe_state_clones,
+                work.auto_tap_source_cache_builds,
+                work.post_apply_uncached_source_collections,
+                work.mana_aura_trigger_scans,
             ),
-            (0, 0, 0, 0, 0),
+            (0, 0, 0, 0, 0, 0, 0, 0),
             "Prism: {prism}: no copy of the game"
+        );
+        assert_eq!(
+            perf_counters::ability_mana_auto_tap_probe_snapshot().state_clones,
+            0,
+            "Prism: {prism}: no auto-payment run"
         );
     }
 }

@@ -474,8 +474,8 @@ fn resolution_can_remove_activatable_mana_source(
 /// untapped, so the untap does nothing unless they tap it first, and this is
 /// the window to do it. Basalt Monolith: "{3}: Untap this artifact." under
 /// Rings of Brighthearth, with the copy resolved and the original still on the
-/// stack. Only public facts are read: the entry, and its source's listed mana
-/// actions.
+/// stack. Only public facts are read: the entry, and its source's mana
+/// abilities through their readiness gates.
 fn resolution_untaps_ready_mana_source(
     state: &GameState,
     player: PlayerId,

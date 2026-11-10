@@ -457,8 +457,8 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
 /// type (CR 305.6). A stun counter means the untap removes it instead. A mana
 /// part of the cost (Celestial Prism's {2}) isn't settled here, because that
 /// would run the auto-payment; it reads as payable, so the hold errs toward
-/// stopping: it can stop once where a second use turns out impossible, and
-/// never passes a real one.
+/// stopping: it can stop once where a use turns out impossible, the first (no
+/// mana floating for the Prism) or the second, and never passes a real one.
 pub(crate) fn untap_would_repeat_mana(
     state: &GameState,
     player: PlayerId,
@@ -517,7 +517,6 @@ pub(crate) fn untap_would_repeat_mana(
                             }
                         )
                     })
-                    && activation_condition_satisfied(state, player, object, ability_index, ability)
                     && mana_abilities::mana_ability_ready_without_simulation_gated(
                         state,
                         player,
