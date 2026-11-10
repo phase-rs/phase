@@ -31699,7 +31699,10 @@ mod damage_history_priority_cost_tests {
                 run_auto_pass_loop(&mut state, &mut result).expect("the finite damage stack resolves"),
                 "the automatic route must advance"
             );
-            assert!(state.stack.is_empty(), "all pending damage consumers finish");
+            assert!(
+                state.stack.is_empty(),
+                "all pending damage consumers finish"
+            );
             assert_eq!(state.players[1].life, 1_000 - RESOLUTIONS as i32);
             assert_eq!(
                 state.damage_dealt_this_turn.len(),
