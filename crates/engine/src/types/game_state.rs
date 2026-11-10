@@ -12190,9 +12190,12 @@ pub enum AssistContributionConflict {
         saved: usize,
     },
     /// CR 702.132a + CR 118.3a: the save's units and the journal's own record of the
-    /// same helper's spend on the same spell are different payments. Both are
-    /// evidence the game itself wrote, so this boundary refuses rather than
-    /// overwriting one with the other.
+    /// same helper's spend on the same spell name DIFFERENT units — a different count,
+    /// or the same count of other pips. The two records are then two payments, and
+    /// nothing in the save settles which one happened, so this boundary refuses rather
+    /// than picking one. (A journal record of the SAME pips whose metadata differs is
+    /// not this conflict: it is one payment described twice, and the journal's
+    /// description is restored over the save's.)
     JournalDisagreesWithSavedUnits {
         helper: PlayerId,
         journal: usize,
@@ -12211,11 +12214,15 @@ pub enum AssistContributionConflict {
         /// journal records no spend by the helper on this cast at all.
         journal: Option<usize>,
     },
-    /// CR 702.132a + CR 118.3a: the journal DOES prove the payment, but the save holds
-    /// the cast in a carrier this admission boundary cannot rewrite, so the recovered
-    /// units could not be put back. Refused instead of admitted half-completed: a
-    /// recovered contribution that never reaches the carrier is, at the finalizer, the
-    /// same "the helper spent nothing" payment this rule exists to reject.
+    /// CR 702.132a + CR 118.3a: the journal DOES prove the payment, but the shared
+    /// owner authority reports no writable cast for the owner that holds it, so the
+    /// recovered units could not be put back. Refused instead of admitted
+    /// half-completed: a recovered contribution that never reaches the carrier is, at
+    /// the finalizer, the same "the helper spent nothing" payment this rule exists to
+    /// reject. Every carrier the finalizers park a cast in is writable through
+    /// [`crate::types::game_state::GameState::pending_cast_at_mut`], so this names the
+    /// one case that genuinely has no destination: the read and write accessors
+    /// disagreeing about one untrusted save.
     UnwritableRecoveryCarrier {
         helper: PlayerId,
         generic: u32,
@@ -12278,9 +12285,9 @@ impl std::fmt::Display for AssistContributionConflict {
                 journal,
             } => write!(
                 f,
-                "it records {helper:?} as having paid {generic} generic mana with no units, and \
-                 although the journal proves {journal} units for that helper on this spell, this \
-                 save holds the cast in a carrier admission cannot rewrite"
+                "it records {helper:?} as having paid {generic} generic mana, and although the \
+                 journal proves {journal} units for that helper on this spell, this save holds \
+                 the cast in a carrier that offers no writable pending cast"
             ),
         }
     }
@@ -18275,9 +18282,14 @@ impl GameState {
     /// * **The save states units.** Then a helper must be recorded as having paid
     ///   for this cast, and the units must number exactly the generic mana the helper
     ///   committed (CR 118.3a: one unit per point). Where the journal also recorded
-    ///   the same payer's spend on the same spell, it must name the same units — two
-    ///   records of one payment that disagree are refused, never reconciled, because
-    ///   both are evidence the game itself wrote.
+    ///   the same payer's spend on the same spell, the two records must name the same
+    ///   units — the same pips in the same order. A record naming other units is a
+    ///   contradiction and is refused, because nothing in the save settles which
+    ///   payment happened. A record naming the SAME pips but describing them
+    ///   differently (a different source, epoch, restriction, grant or expiry) is one
+    ///   payment whose copy was corrupted: CR 118.3a makes the removal of those very
+    ///   units the payment, so the journal's description — written at the removal —
+    ///   is restored over the save's, and the resumed cast consumes it.
     /// * **The save states no units but the cast is `Paid`.** Then the units must be
     ///   RECOVERED from the journal, which recorded them at the spend boundary. They
     ///   are admitted only when the journal proves exactly the recorded amount for
@@ -18292,11 +18304,20 @@ impl GameState {
     ///
     /// Every carrier that can hold a parked cast is checked — the assertion-free
     /// enumeration [`Self::pending_cast_owners`], because this runs on untrusted input.
-    /// A recovery is written back onto the two carriers a paused cast is actually
-    /// parked in (the external payment root and the current prompt). A carrier this
-    /// boundary cannot rewrite is refused rather than admitted half-completed: a
-    /// recovered contribution that could not be put back is exactly the "the helper
-    /// spent nothing" shape this rule exists to reject.
+    /// A recovery is written back through the shared owner authority
+    /// ([`Self::pending_cast_at_mut`]), so EVERY carrier the finalizers can park a
+    /// cast in receives it. That is not only the external payment root and the
+    /// current prompt: [`apply_committed_assist`](crate::game::casting_costs) pays the
+    /// helper inside the finalizer, and the caster's own payment can then pause on a
+    /// replaced life payment (CR 118.11 — K'rrik's "you may pay 2 life rather than pay
+    /// that mana", a life loss the Bloodletter of Aclazotz class modifies and whose
+    /// ordering or substitute the replacement pipeline has to park, CR 616.1). That
+    /// pause parks the cast — with a paid contribution already on it — in
+    /// [`PendingCastOwner::DeferredLifeCost`], so a boundary that could only write the
+    /// other two would refuse a payment it had already proved. A carrier the shared
+    /// authority reports no writable cast for is still refused rather than admitted
+    /// half-completed: a recovered contribution that could not be put back is exactly
+    /// the "the helper spent nothing" shape this rule exists to reject.
     ///
     /// Refusals are made here, at the single chokepoint every production restore
     /// funnels through ([`Self::prepare_for_restore`]), so resume and admission cannot
@@ -18306,67 +18327,56 @@ impl GameState {
     ) -> Result<(), PersistedRestoreError> {
         // Read pass on an unmodified state: deciding borrows `self` (the parked casts
         // and the journal), and the write-back below needs it mutably.
-        let mut recoveries: Vec<(PendingCastOwner, Vec<ManaUnit>)> = Vec::new();
+        let mut recoveries: Vec<(PendingCastOwner, AssistContribution)> = Vec::new();
         for owner in self.pending_cast_owners() {
             let Some(pending) = self.pending_cast_at(owner) else {
                 continue;
             };
-            if let Some(units) = self.proven_assist_contribution_units(pending)? {
-                recoveries.push((owner, units));
+            if let Some(claim) = self.proven_assist_contribution_units(pending)? {
+                recoveries.push((owner, claim));
             }
         }
-        for (owner, units) in recoveries {
+        for (owner, claim) in recoveries {
             // CR 118.3a: the journal-bound units are the payment the helper actually
             // made, so admission restores them verbatim — the same units the spend
-            // boundary captured and the finalizers record.
-            let restored = match owner {
-                PendingCastOwner::External => self
-                    .pending_cast
-                    .as_deref_mut()
-                    .map(|pending| &mut pending.assist_contributed_units),
-                PendingCastOwner::Prompt => self
-                    .waiting_for
-                    .pending_cast_mut()
-                    .map(|pending| &mut pending.assist_contributed_units),
-                PendingCastOwner::DeferredLifeCost
-                | PendingCastOwner::CostMove
-                | PendingCastOwner::DiscardForCost => None,
-            };
-            let Some(field) = restored else {
-                // Every carrier holding a cast the engine parked through the spend
-                // boundary is either the external root or the current prompt; the rest
-                // hold casts that have not reached it, so a paid-but-absent contribution
-                // there is a save this boundary cannot complete. Refuse it, naming the
-                // cast, rather than admit a payment whose units were dropped.
-                let Some(pending) = self.pending_cast_at(owner) else {
-                    continue;
-                };
-                let AssistState::Paid { helper, generic } = pending.assist_state else {
-                    // A recovery is decided only for a paid contribution.
-                    continue;
-                };
+            // boundary captured and the finalizers record. The carrier is resolved
+            // through the same owner authority the finalizers park through, so every
+            // prompt shape they can produce is writable here.
+            let Some(pending) = self.pending_cast_at_mut(owner) else {
+                // The read pass above saw this owner holding the cast, so an owner with
+                // no writable counterpart is the two accessors disagreeing about one
+                // untrusted save. Refuse rather than drop a payment the journal proved.
                 return Err(PersistedRestoreError::ContradictoryAssistContribution {
-                    source_id: pending.object_id,
+                    source_id: claim.source_id,
                     reason: AssistContributionConflict::UnwritableRecoveryCarrier {
-                        helper,
-                        generic,
-                        journal: units.len(),
+                        helper: claim.helper,
+                        generic: claim.generic,
+                        journal: claim.units.len(),
                     },
                 });
             };
-            *field = units;
+            pending.assist_contributed_units = claim.units;
         }
         Ok(())
     }
 
-    /// CR 702.132a + CR 118.3a: the units this save proves for the parked cast's paid
-    /// Assist contribution. `Ok(None)` means the save's own units stand (they were
-    /// present and consistent); `Ok(Some(units))` is the journal-bound recovery the
-    /// caller must write back onto the cast.
+    /// CR 702.132a + CR 118.3a: the contribution this save proves for the parked
+    /// cast, or `None` when the save's own units stand (they were present and are the
+    /// proven record). `Some(claim)` is the journal-bound payment the caller must
+    /// write back onto the cast, because the save's copy of it does not say what the
+    /// journal says.
+    ///
+    /// The journal is the record the spend boundary wrote at the removal itself
+    /// (CR 118.3a: paying mana is removing those units), so where the two records name
+    /// the same pips but describe them differently, the journal's description is the
+    /// binding one — a save that keeps the pips and changes a unit's source or epoch
+    /// is carrying a corrupted copy of one payment, not a second payment. The
+    /// differences that cannot be reconciled at all are refused instead: a different
+    /// count, or a different pip (a different unit).
     fn proven_assist_contribution_units(
         &self,
         pending: &PendingCast,
-    ) -> Result<Option<Vec<ManaUnit>>, PersistedRestoreError> {
+    ) -> Result<Option<AssistContribution>, PersistedRestoreError> {
         let source_id = pending.object_id;
         let saved = &pending.assist_contributed_units;
         let (helper, generic) = match pending.assist_state {
@@ -18384,6 +18394,14 @@ impl GameState {
                 });
             }
         };
+        // CR 702.132a + CR 118.3a: one typed claim, so the restored units can only
+        // ever travel with the payer and the amount they were proved for.
+        let claim = |units: Vec<ManaUnit>| AssistContribution {
+            source_id,
+            helper,
+            generic,
+            units,
+        };
         // The spell object is still on the stack under the same storage id, so the
         // recipient the spend recorded is the live object's own incarnation — the
         // value `mana_payment_recipient` built at the spend boundary.
@@ -18400,7 +18418,7 @@ impl GameState {
             // CR 118.3a: the payment's units must come from the journal's own record
             // of THIS helper's spend on THIS spell, at exactly the recorded amount.
             return match journal {
-                Some(units) if units.len() as u32 == generic => Ok(Some(units)),
+                Some(units) if units.len() as u32 == generic => Ok(Some(claim(units))),
                 other => Err(PersistedRestoreError::ContradictoryAssistContribution {
                     source_id,
                     reason: AssistContributionConflict::PaidGenericUnproven {
@@ -18423,15 +18441,21 @@ impl GameState {
             });
         }
         // CR 118.3a + CR 702.132a: where the journal ALSO recorded this helper's spend
-        // on this spell, the two records must name the same units. They are one
-        // payment, and neither record is preferred over the other.
+        // on this spell, the two records are one payment stated twice. They must name
+        // the same units — the same COUNT (one unit per point of generic mana) in the
+        // same order — and where they do, the journal's description of those units is
+        // the binding one: it was written at the removal, so a save that kept the pips
+        // but changed a unit's source, epoch, restrictions, grants or expiry is
+        // carrying a corrupted copy of one payment rather than a second payment, and
+        // the resumed cast must consume the record the spend actually made. Different
+        // units altogether cannot be reconciled and are refused below.
         if let Some(journal) = journal {
-            let same = journal.len() == saved.len()
+            let same_units = journal.len() == saved.len()
                 && journal
                     .iter()
                     .zip(saved.iter())
                     .all(|(recorded, carried)| recorded.pip_id == carried.pip_id);
-            if !same {
+            if !same_units {
                 return Err(PersistedRestoreError::ContradictoryAssistContribution {
                     source_id,
                     reason: AssistContributionConflict::JournalDisagreesWithSavedUnits {
@@ -18440,6 +18464,21 @@ impl GameState {
                         saved: saved.len(),
                     },
                 });
+            }
+            // `ManaUnit`'s `PartialEq` compares exactly what a payment-derived
+            // predicate can read — CR 106.3 source and CR 400.7 producing incarnation,
+            // colour, supertype, CR 106.6 restrictions and grants, expiry — and
+            // deliberately not `pip_id`: the pip is the runtime identity tag the test
+            // above already compared, and it is excluded from unit equality so that
+            // CR 104.4b mandatory-loop detection can still see two pool units of one
+            // shape as equal. So this asks exactly "does the save describe the payment
+            // the journal recorded".
+            let identical = journal
+                .iter()
+                .zip(saved.iter())
+                .all(|(recorded, carried)| recorded == carried);
+            if !identical {
+                return Ok(Some(claim(journal)));
             }
         }
         Ok(None)
