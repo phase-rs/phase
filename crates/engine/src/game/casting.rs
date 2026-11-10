@@ -20530,21 +20530,18 @@ pub(crate) fn requires_additional_cost_declaration_before_targets(
 ) -> bool {
     // Walk the full sub_ability chain (GiftDelivery nesting) for
     // AdditionalCostPaidInstead with a real target declaration (CR 601.2c /
-    // 702.174m). A companion player slot counts: Galadriel's Dismissal's
-    // kicked branch ("each creature target player controls phases out") is a
-    // mass population, so `extract_target_filter_from_effect` yields no
-    // primary object filter, but the branch still changes WHICH target is
-    // declared (a player replaces the base branch's creature). The kicker
-    // decision must therefore precede target selection.
+    // 702.174m). Use the timing-aware declaration authority: a companion
+    // player slot counts, so Galadriel's Dismissal's kicked branch ("each
+    // creature target player controls phases out") still changes WHICH target
+    // is declared even though its mass population yields no primary object
+    // filter. The kicker decision must therefore precede target selection.
     let mut node = Some(ability);
     while let Some(current) = node {
         if let Some(sub_ability) = current.sub_ability.as_deref() {
             if matches!(
                 sub_ability.condition,
                 Some(AbilityCondition::AdditionalCostPaidInstead)
-            ) && (crate::types::ability::extract_target_filter_from_effect(&sub_ability.effect)
-                .is_some()
-                || super::ability_utils::ability_needs_companion_target_player_slot(sub_ability))
+            ) && super::ability_utils::node_has_stack_target_declaration(sub_ability)
             {
                 return true;
             }

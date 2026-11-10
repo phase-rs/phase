@@ -14623,6 +14623,28 @@ fn affected_objects_from_events(
                 }
             })
             .collect(),
+        // CR 702.26b: the permanents that actually changed phase status are the
+        // population a following "they"/"those creatures" instruction names.
+        // Indirect attachment phase-outs are excluded: they follow their host
+        // (CR 702.26g), and the effect's own population is the directly phased
+        // set. Phase-in events carry no indirect marker.
+        Effect::PhaseOut { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::PermanentPhasedOut {
+                    object_id,
+                    indirect: false,
+                } => Some(*object_id),
+                _ => None,
+            })
+            .collect(),
+        Effect::PhaseIn { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::PermanentPhasedIn { object_id } => Some(*object_id),
+                _ => None,
+            })
+            .collect(),
         // CR 508.1a + CR 608.2c + CR 603.7c + CR 611.2c + CR 615.11 (issue
         // #6682): A mass "attack this turn if able" coercion (Maddening Imp's
         // `{T}` `GenericEffect{MustAttack}`) or a Continuous-mode broadcast
@@ -24561,6 +24583,18 @@ fn resolve_chain_body(
         vec![]
     };
     let effect_events = &events[events_before..];
+    // CR 608.2c: phase-out/phase-in affect a resolved population, not a
+    // declared object target. Publish the actual set so a following
+    // `ParentTarget` rider ("until end of turn, they can't phase in") binds the
+    // creatures that changed status rather than the player-only anchor.
+    let phase_affected_objects = if matches!(
+        &ability.effect,
+        Effect::PhaseOut { .. } | Effect::PhaseIn { .. }
+    ) {
+        affected_objects_from_events(state, ability, &ability.effect, effect_events)
+    } else {
+        Vec::new()
+    };
     // CR 608.2c + CR 608.2h: a later instruction may read a public-to-hidden
     // move's last-known controller/owner metadata, without treating the hidden
     // object itself as an available parent referent.
@@ -26027,6 +26061,23 @@ fn resolve_chain_body(
                 ForwardedResultContext::from_object_ids(state, &forwarded_objects),
                 attachment_candidates,
             );
+            progress = resolve_ability_chain_step(state, &sub_with_context, events, depth + 1)?;
+        } else if !phase_affected_objects.is_empty() && ability_refs_parent_target(sub) {
+            // CR 608.2c: a phase instruction's resolved population is the
+            // antecedent for a following `ParentTarget` rider. Forward the
+            // actual objects through the same result-binding authority a
+            // forward-result producer uses; `effect.rs`'s inherited-target
+            // path then binds one transient effect per phased permanent.
+            let mut sub_with_context = sub.as_ref().clone();
+            apply_parent_chain_context(
+                &mut sub_with_context,
+                ability,
+                effect_context_object.as_ref(),
+                state,
+            );
+            sub_with_context.context.forwarded_result_context = Some(Box::new(
+                ForwardedResultContext::from_object_ids(state, &phase_affected_objects),
+            ));
             progress = resolve_ability_chain_step(state, &sub_with_context, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()

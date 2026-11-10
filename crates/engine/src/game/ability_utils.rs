@@ -3171,6 +3171,20 @@ fn paid_instead_delegate(ability: &ResolvedAbility) -> Option<&ResolvedAbility> 
         .filter(|sub| is_paid_instead_sub(&ability.context, sub))
 }
 
+/// CR 601.2b + CR 608.2c: The node whose `targets` are the BASE-exposed
+/// declaration when the additional cost was paid. The cast path delegates the
+/// whole chain to the paid "instead" sub (`collect_target_slots` /
+/// `collect_target_slot_specs` return after descending), and assignment mirrors
+/// the sub's targets onto the parent, so the sub — not the unkicked parent — is
+/// the authority for what a retarget may change.
+pub(crate) fn base_exposed_node(ability: &ResolvedAbility) -> &ResolvedAbility {
+    let mut node = ability;
+    while let Some(sub) = paid_instead_delegate(node) {
+        node = sub;
+    }
+    node
+}
+
 /// CR 608.2b: The slots of `declared` — numbered exactly as
 /// [`declared_targets_in_chain`] numbers them, the numbering every
 /// `ParentTargetSlot` reader and [`declared_slots_ahead_of`] use — whose target
@@ -12128,12 +12142,15 @@ pub fn chain_retarget_slots(ability: &ResolvedAbility) -> Vec<RetargetSlotBindin
         ability: &ResolvedAbility,
         path: Vec<ChainStep>,
     ) -> (&ResolvedAbility, Vec<ChainStep>) {
-        if let Some(sub) = paid_instead_delegate(ability) {
-            let mut new_path = path;
+        let base = base_exposed_node(ability);
+        let mut node = ability;
+        let mut new_path = path;
+        while !std::ptr::eq(node, base) {
+            node = paid_instead_delegate(node)
+                .expect("base_exposed_node stops only at a node with no paid delegate");
             new_path.push(ChainStep::SubAbility);
-            return resolve_base_exposed(sub, new_path);
         }
-        (ability, path)
+        (base, new_path)
     }
     let (base_node, base_path) = resolve_base_exposed(ability, Vec::new());
 
