@@ -9438,6 +9438,16 @@ pub enum PendingCostMoveResume {
         paused_at_index: usize,
         destination: Zone,
         completion: PendingCostMoveCompletion,
+        /// CR 118.11: the number of objects this cost CALLED FOR, owed to
+        /// `last_effect_count` once every parked move has settled. A deterministic
+        /// top-of-library exile cost publishes its count inline when it pays
+        /// without pausing; when a replacement pauses it mid-payment, the count
+        /// must survive the round trip instead of being recomputed from what
+        /// actually arrived. `None` for every other cost shape, which owes no
+        /// count — the completion is shared, so the field is what identifies a
+        /// resume that owes one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        requested_cost_count: Option<u32>,
         /// CR 603.2 + CR 603.10a: Cost events emitted in earlier actions of
         /// this one logical multi-object cost move (a counted return to hand or
         /// exile). They are stamped and settled only when every selected object
@@ -18444,9 +18454,12 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         proposition_truth: Option<bool>,
     },
-    /// Alchemy "draft a card from [card]'s spellbook": `player` chooses one card
-    /// name from `options` (the source card's spellbook list); the chosen card is
-    /// then conjured into `destination` (`tapped` if a "tapped" rider applied).
+    /// Alchemy spellbook choice: `player` chooses one card name from `options`;
+    /// the chosen card is then conjured into `destination` (`tapped` if a
+    /// "tapped" rider applied). A draft ("draft a card from [card]'s
+    /// spellbook") offers a random sample of the source card's spellbook; a
+    /// conjure-of-your-choice offers the whole book. The offer is hidden from
+    /// other viewers (`visibility::filter_state_for_scope` empties `options`).
     SpellbookDraft {
         player: PlayerId,
         source_id: ObjectId,
@@ -26142,9 +26155,14 @@ declare_game_state! {
     /// CR 615.5 + CR 614.6: runtime continuations of resolution-installed shields,
     /// named by `ReplacementDefinition::runtime_execute`. Append-only for the whole
     /// game: an entry outlives every shield that names it, and its position is never
-    /// reused. Not compared by `impl PartialEq for GameState`: no rider is compared
-    /// through `pending_damage_replacements` or object definitions, and the CR 616.1
-    /// auto-choice identities hold their rider by value. Boxed: populated only once a
+    /// reused. Not compared by `impl PartialEq for GameState`, so generic equality stays
+    /// allocation-history-free. Both shield comparators reach it — `loop_states_equal`'s
+    /// CR 104.4b recurrence and `analysis::resource::eq_except_growable`'s CR 732.2a cover
+    /// ask the same `pending_shields_loop_eq` — and it compares the live
+    /// `pending_damage_replacements` shields BY VALUE, resolving each side's handle with
+    /// `split_replacement_rider` in its own arena, so the
+    /// arena POSITION is allocation history and the rider CONTENT is what they compare (the
+    /// CR 616.1 auto-choice identities also hold their rider by value). Boxed: populated only once a
     /// rider is installed, and the inline `im::Vector` (64 B) would push `GameState`
     /// past its stack budget (`game_state_size.rs`).
     #[serde(default, skip_serializing_if = "im::Vector::is_empty")]
@@ -26159,6 +26177,13 @@ declare_game_state! {
     /// Instant/sorcery prevention effects (e.g., Fog: "prevent all combat damage")
     /// and resolving-trigger replacements that are not tied to a permanent live here.
     /// Checked during damage application in `deal_damage.rs` and pruned by expiry.
+    ///
+    /// COMPARED — by value, live-only and arena-insensitively — by `loop_states_equal` and by
+    /// `analysis::resource::eq_except_growable`, both through `pending_shields_loop_eq`; the
+    /// spent entries (CR 615.3 + CR 614.3) are not part of the position, so the two
+    /// comparators share one predicate and no growth axis. `impl PartialEq` still skips the
+    /// whole field so generic state equality and AI-search dedup keep their
+    /// allocation-history-free meaning.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_damage_replacements: Vec<crate::types::ability::ReplacementDefinition>,
 
@@ -37501,15 +37526,145 @@ impl GameState {
 const LOOP_DETECT_RING_CAP: usize = 16;
 
 /// CR 104.4b confirmation between two states that have BOTH already been
-/// `normalize_for_loop`d. Reuses `PartialEq` for the non-object fields and
-/// supplements its `objects.len()`-only object check with per-object content
-/// equality.
+/// `normalize_for_loop`d. Reuses `PartialEq` for the non-object fields, supplements its
+/// `objects.len()`-only object check with per-object content equality, and supplements its
+/// deliberate omission of `pending_damage_replacements` with [`pending_shields_loop_eq`]
+/// (CR 104.4b + CR 615.3: a state is not the same loop point when its LIVE floating shields
+/// differ; a spent shield is not part of the position).
 pub(crate) fn loop_states_equal(a: &GameState, b: &GameState) -> bool {
     a.is_loop_comparable()
         && b.is_loop_comparable()
         && a == b
         && a.stack_trigger_firings == b.stack_trigger_firings
         && objects_content_eq(&a.objects, &b.objects)
+        && pending_shields_loop_eq(a, b)
+}
+
+/// CR 615.3 + CR 614.3: the LIVE floating shields in `state`, in registry order — the
+/// sequence [`pending_shields_loop_eq`] compares. A used-up shield can no longer apply at a
+/// priority beat, so it is not part of the position; production agrees, with one bounded
+/// exception that cannot span a sample: `find_applicable_replacements` skips a spent floating
+/// entry unless the SAME simultaneous combat batch is still applying it
+/// (`if repl_def.is_consumed && !consumed_replacement_applies_in_combat_batch(state, event, rid) { continue; }`
+/// in `game::replacement`), and that re-admission ledger exists only inside
+/// `replace_combat_damage_batch` (`combat_one_shot_applications`), which grants no priority,
+/// so no loop sample ever observes a spent shield able to apply again. This is the same
+/// live-only reading `analysis::resource::replacement_def_is_live` gives the loop firewall
+/// (`last_known_records_grow_unread`), applied to both comparators here because they now share
+/// one predicate.
+fn live_shields(state: &GameState) -> impl Iterator<Item = &ReplacementDefinition> + '_ {
+    state
+        .pending_damage_replacements
+        .iter()
+        .filter(|def| !def.is_consumed)
+}
+
+/// CR 104.4b + CR 615.3: the LIVE floating replacement registry
+/// (`pending_damage_replacements`), compared BY VALUE with multiplicities tolerated. This is
+/// ONE predicate for both comparators that ask about shields — `loop_states_equal`'s strict
+/// CR 104.4b recurrence and `analysis::resource::eq_except_growable`'s CR 732.2a history
+/// cover. `impl PartialEq for GameState` deliberately skips this field, so without this
+/// predicate two positions differing only in the shields compare equal.
+///
+/// SPENT SHIELDS ARE NOT POSITION (CR 615.3 + CR 614.3). Both sides are filtered through
+/// [`live_shields`] before any comparison, so a consumed definition — which can never apply to
+/// a later damage event — cannot break equality, however much its content differs from the
+/// shield it replaces. Without that filter the CR 732.2a cover would be unreachable for the
+/// pinned row
+/// `loop_period_remade_token_source::copy_effects_used_up_inside_each_spawn_period_leave_the_periods_covered`:
+/// its periods append only used-up `Mystic Reflection` copies, each naming a DIFFERENT Spawn
+/// token in its inline `execute` (`Effect::BecomeCopy { target: SpecificObject { id } }`), so
+/// the raw registries differ in both length and content while the game position recurs.
+/// [`live_shields`] cites the `replacement_def_is_live` precedent for this reading. The
+/// CR 104.4b recurrence is unaffected: a loop point whose live shields match is the same
+/// position regardless of how many spent shields the append-only log remembers.
+///
+/// MULTIPLICITY OF LIVE SHIELDS IS EXEMPT: within a turn the registry is append-only between
+/// priority points — every writer appends (`effects::install_floating_damage_replacement`,
+/// `add_target_replacement`'s player arm, `create_draw_replacement`,
+/// `create_planeswalk_replacement`, plus `install_replacement_continuation`'s riders), every
+/// other mutation is an in-place content edit (`is_consumed`, depleted amount —
+/// `replacement.rs`), and every removal runs at a phase or turn transition before the next
+/// priority point: the only removal forms are the three `turns.rs` retains
+/// (`complete_end_combat_teardown`'s `EndOfCombat`, the untap step's
+/// `UntilPlayerNextTurn` retain, and `execute_cleanup`'s `EndOfTurn|EndOfCombat` retain).
+/// Both comparators require `turn_number` and `phase` equality through `PartialEq`, so a
+/// pair that straddles a prune is already rejected. `is_consumed` is the one in-place edit
+/// that also SHORTENS the live sequence. The comparison is symmetric: it tolerates a change
+/// in identical live-shield multiplicity in either direction. This is a loop-comparison
+/// policy, not a claim that different shield counts have equal future damage capacity;
+/// callers must still establish the loop's decision and recurrence conditions. In the shrink
+/// direction, spending one of several identical applicable shields passes through the
+/// CR 616.1 replacement-order choice, so it does not by itself yield a forced loop. A new
+/// mid-phase registry REMOVAL site would invalidate the phase-transition
+/// half of this argument. A LIVE shield whose amount, expiry, source anchors
+/// or rider differ is still content (CR 615.7 for amounts; CR 615.5 for riders): the
+/// common-prefix compare below refuses that pair before the tail rule is reached.
+///
+/// ARENA-INSENSITIVE: `shield_content_eq` resolves each side's `runtime_execute` rider
+/// through `split_replacement_rider` in that side's own `replacement_continuations` arena,
+/// so a re-installed `==` rider at a fresh position compares equal.
+pub(crate) fn pending_shields_loop_eq(a: &GameState, b: &GameState) -> bool {
+    let a_len = live_shields(a).count();
+    let b_len = live_shields(b).count();
+    let (short_state, long_state, short_len) = if a_len <= b_len {
+        (a, b, a_len)
+    } else {
+        (b, a, b_len)
+    };
+    // CR 104.4b: the common live prefix, by value.
+    if !live_shields(short_state)
+        .zip(live_shields(long_state))
+        .all(|(x, y)| shield_content_eq(short_state, x, long_state, y))
+    {
+        return false;
+    }
+    if a_len == b_len {
+        return true;
+    }
+    let mut tail = live_shields(long_state).skip(short_len);
+    match live_shields(short_state).last() {
+        // Every appended live shield repeats the class the shorter frame's live registry
+        // ended on.
+        Some(last) => tail.all(|def| shield_content_eq(long_state, def, short_state, last)),
+        // No class has been observed yet: require the tail to show one repeating rather
+        // than infer a class from a single install. Fail-closed; delays a draw by at most
+        // one cycle.
+        None => {
+            let mut count = 0usize;
+            let mut prev: Option<&ReplacementDefinition> = None;
+            for def in tail {
+                if let Some(previous) = prev {
+                    if !shield_content_eq(long_state, previous, long_state, def) {
+                        return false;
+                    }
+                }
+                prev = Some(def);
+                count += 1;
+            }
+            count >= 2
+        }
+    }
+}
+
+/// CR 615.5 + CR 614.6: one shield's by-value identity. Each side resolves its
+/// `runtime_execute` handle in its OWN arena, so the arena position is allocation history;
+/// every other field (event, `shield_kind` amount, expiry, source anchors, inline `execute`)
+/// is content and breaks equality. `is_consumed` is compared by the derived `PartialEq` too,
+/// but both entries reaching here are live by construction ([`live_shields`] filters the
+/// spent ones out first), so that field never distinguishes them.
+fn shield_content_eq(
+    a: &GameState,
+    x: &ReplacementDefinition,
+    b: &GameState,
+    y: &ReplacementDefinition,
+) -> bool {
+    // With no rider on either side, the derived `PartialEq` IS the split view (both handles
+    // are `None`), and avoids two clones per compared entry.
+    if x.runtime_execute.is_none() && y.runtime_execute.is_none() {
+        return x == y;
+    }
+    a.split_replacement_rider(x) == b.split_replacement_rider(y)
 }
 
 /// CR 104.4b: per-object mutable-content equality — supplements `GameState`'s
@@ -37644,8 +37799,9 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
 ///
 /// Where the cover gate needs such an axis it compensates BY HAND at its own seam, which is
 /// the second site a reader has to know about: `analysis::resource::eq_except_growable`
-/// compares `post_replacement_token_substitution_count` on top of its `PartialEq` reuse, with
-/// its own one-sided-safety argument stated there.
+/// compares `post_replacement_token_substitution_count` and
+/// `game_state::pending_shields_loop_eq` on top of its `PartialEq` reuse, each with its own
+/// one-sided-safety argument stated there.
 /// `analysis::resource::loyalty_activation_counts_match` is a sibling predicate over a
 /// per-object count, consulted at its own call sites, and not part of that pair.
 #[cfg(test)]
@@ -37972,8 +38128,11 @@ fn _gamestate_partition_is_total(s: &GameState) {
         city_blessing: _,
         enduring_story: _,
         epic_effects: _,
-        // EXCLUDED from `impl PartialEq for GameState`: allocation history; base compared no
-        // rider through `pending_damage_replacements` or object definitions.
+        // EXCLUDED from `impl PartialEq for GameState`: allocation history. The
+        // `pending_shields_loop_eq` comparator compares the LIVE registry content by hand
+        // (one predicate shared by the CR 104.4b recurrence and the CR 732.2a cover, spent
+        // entries filtered out), with riders resolved by value; `PartialEq` still does not,
+        // so generic equality stays allocation-history-free.
         replacement_continuations: _,
         restrictions: _,
         pending_damage_replacements: _,
@@ -49178,6 +49337,7 @@ mod tests {
             paused_at_index: 0,
             destination: Zone::Hand,
             completion: PendingCostMoveCompletion::FinishPending,
+            requested_cost_count: None,
             deferred_cost_events: vec![deferred_event],
             departure_record_indices: vec![],
         });
@@ -49234,6 +49394,7 @@ mod tests {
             paused_at_index: 0,
             destination: Zone::Hand,
             completion: PendingCostMoveCompletion::FinishPending,
+            requested_cost_count: None,
             deferred_cost_events: vec![],
             departure_record_indices: vec![],
         };
@@ -49250,6 +49411,7 @@ mod tests {
             paused_at_index: 0,
             destination: Zone::Hand,
             completion: PendingCostMoveCompletion::FinishPending,
+            requested_cost_count: None,
             deferred_cost_events: vec![],
             departure_record_indices: vec![4, 5],
         };
@@ -59199,6 +59361,7 @@ mod restored_exact_attack_authority_tests {
                             )),
                             prepaid_actual_mana_spent: None,
                         },
+                        requested_cost_count: None,
                         deferred_cost_events: vec![],
                         departure_record_indices: vec![],
                     });
@@ -59217,6 +59380,7 @@ mod restored_exact_attack_authority_tests {
                             phyrexian_choices: None,
                             pre_payment_checks: Some(Box::new(pre_payment_checks())),
                         },
+                        requested_cost_count: None,
                         deferred_cost_events: vec![],
                         departure_record_indices: vec![],
                     });

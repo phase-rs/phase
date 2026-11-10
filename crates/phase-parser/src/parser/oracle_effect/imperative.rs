@@ -9628,7 +9628,7 @@ pub(super) fn parse_put_ast(
                 // never moved as part of THIS clause, so the clause text gives
                 // no origin (`infer_origin_zone` → None). When a producer clause
                 // earlier in the chain published the set's source zone
-                // (`pending_tracked_set_origin`, e.g. Breach the Multiverse's
+                // (`pending_tracked_set`, e.g. Breach the Multiverse's
                 // graveyard choose), bind it here. An impulse/cascade producer
                 // leaves the context unset, so the exile default in
                 // `lower_put_ast` still governs those reanimations.
@@ -9636,7 +9636,7 @@ pub(super) fn parse_put_ast(
                     (
                         None,
                         TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. },
-                    ) => ctx.pending_tracked_set_origin.or(origin),
+                    ) => ctx.pending_tracked_set.map(|set| set.zone).or(origin),
                     _ => origin,
                 };
                 Some(PutImperativeAst::ZoneChange {

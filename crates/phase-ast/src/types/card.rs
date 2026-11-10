@@ -7,6 +7,7 @@ use super::ability::{
     ReplacementDefinition, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
 };
 use super::card_type::CardType;
+use super::confirmed_misparse::MisparseClass;
 use super::format::DeckCopyLimit;
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost};
@@ -66,6 +67,9 @@ pub struct CardMetadata {
     /// so no `CardFace`/`DeckEntry` construction site needs to change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub off_stack_mana_value_override: Option<u32>,
+    /// Curated support classification only; never projected onto a game object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed_misparse: Option<MisparseClass>,
 }
 
 impl CardMetadata {
@@ -78,6 +82,7 @@ impl CardMetadata {
             && self.source_printing_ids.is_empty()
             && self.spellbook.is_empty()
             && self.off_stack_mana_value_override.is_none()
+            && self.confirmed_misparse.is_none()
     }
 }
 

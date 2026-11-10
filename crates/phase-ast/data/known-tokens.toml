@@ -7296,9 +7296,29 @@ id = "060956cd-74d3-5eab-8057-50a1dfc76020"
 category = "Creature"
 fidelity = "Full"
 source_card_names = [
-    "Icatian Crier",
-    "Icatian Town",
-    "Sarpadian Empires, Vol. VII",
+    "Boss's Chauffeur",
+    "Cabaretti Charm",
+    "Caldaia Guardian",
+    "Citizen's Crowbar",
+    "Courier's Briefcase",
+    "Darling of the Masses",
+    "Exhibition Magician",
+    "Grand Crescendo",
+    "Halo Fountain",
+    "Indulge // Excess",
+    "Kitt Kanto, Mayhem Diva",
+    "Luxurious Libation",
+    "Master of Ceremonies",
+    "Origin of the Hulk",
+    "Phabine, Boss's Confidant",
+    "Prosperous Partnership",
+    "Rabble Rousing",
+    "Rakish Revelers",
+    "Rope Line Attendant",
+    "Sanctuary Warden",
+    "Scepter of Celebration",
+    "Stimulus Package",
+    "Warm Welcome",
 ]
 set_code = "TRC"
 set_name = "Star Trek Commander"
@@ -7313,12 +7333,25 @@ toughness = 1
 core_types = ["Creature"]
 subtypes = ["Citizen"]
 supertypes = []
-colors = ["White"]
+colors = [
+    "Green",
+    "White",
+]
 keywords = []
+
+[[token.source_card_refs]]
+card_name = "Grand Crescendo"
+scryfall_oracle_id = "dc600c06-8239-409e-b53d-20f813a3f5e7"
+scryfall_id = "b41a1ff1-8e72-4269-825c-aaa12b3a4dca"
+
+[[token.source_card_refs]]
+card_name = "Grand Crescendo"
+scryfall_oracle_id = "dc600c06-8239-409e-b53d-20f813a3f5e7"
+scryfall_id = "a149748e-f192-4ec6-bae3-5a18ffcec140"
 
 [token.token_image_ref]
 scryfall_id = "f801903a-5db6-4566-ad33-2c1de8ac4287"
-scryfall_oracle_id = "e31c15d7-f89e-480b-a22f-5823343342bb"
+scryfall_oracle_id = "ffbc4833-01db-45f8-b8b4-c2e2c8235d0c"
 preset_id = "060956cd-74d3-5eab-8057-50a1dfc76020"
 
 [[token]]
@@ -12820,6 +12853,7 @@ fidelity = "Full"
 source_card_names = [
     "Bovine Intervention",
     "Bruse Tarl, Roving Rancher",
+    "Oko, Lord of the Fae",
 ]
 set_code = "OTJ"
 set_name = "Outlaws of Thunder Junction"
@@ -28930,6 +28964,7 @@ fidelity = "Full"
 source_card_names = [
     "Bovine Intervention",
     "Bruse Tarl, Roving Rancher",
+    "Oko, Lord of the Fae",
 ]
 set_code = "PLST"
 set_name = "The List"
@@ -58338,32 +58373,50 @@ category = "Creature"
 fidelity = "Full"
 source_card_names = [
     "Beast",
-    "Bestial Incursion",
-    "Garruk, Curse Breaker",
-    "Garruk, Veiled Butcher",
-    "Way of the Deathbringer",
-    "Way of the Wildspeaker",
+    "Beast Within",
+    "Bringer of the Green Dawn",
+    "Curious Herd",
+    "Druid of Horns",
+    "Elder Gargaroth",
+    "Feral Incarnation",
+    "Fresh Meat",
+    "Garruk Wildspeaker",
+    "Garruk, Primal Hunter",
+    "Garruk, Unleashed",
+    "Herd Migration",
+    "Midsummer Revel",
+    "Primeval Bounty",
+    "Pulse of the Tangle",
+    "Radagast, Wizard of Wilds",
+    "Savage Conception",
+    "Sawtusk Demolisher",
+    "Somberwald Beastmaster",
+    "Soul of Zendikar",
+    "The Huntsman's Redemption",
+    "Thragtusk",
+    "Trumpeting Gnarr",
+    "Vivien, Monsters' Advocate",
+    "Wild Endeavor",
 ]
 set_code = "TRC"
 set_name = "Star Trek Commander"
 collector_number = "4"
 released_at = "2026-11-13"
 type_line = "Token Creature — Beast"
-rules_text = "Trample"
 
 [token.body]
 display_name = "Beast"
-power = 4
-toughness = 4
+power = 3
+toughness = 3
 core_types = ["Creature"]
 subtypes = ["Beast"]
 supertypes = []
 colors = ["Green"]
-keywords = ["Trample"]
+keywords = []
 
 [token.token_image_ref]
 scryfall_id = "215c8aec-f26f-4777-aa90-252e537f5df9"
-scryfall_oracle_id = "7ed8a016-a259-4fda-aae5-02f8df94f2de"
+scryfall_oracle_id = "6bb61f34-5d57-4eaa-a02c-f5d08c1ee920"
 preset_id = "430fd6aa-cf47-596e-b11c-65179e9543ca"
 
 [[token]]
@@ -89192,32 +89245,55 @@ id = "6273f391-1a23-5c79-94b2-0789961a30f6"
 category = "Creature"
 fidelity = "Full"
 source_card_names = [
-    "Bestial Incursion",
-    "Garruk, Curse Breaker",
-    "Garruk, Veiled Butcher",
-    "Way of the Deathbringer",
-    "Way of the Wildspeaker",
+    "Beast Within",
+    "Bringer of the Green Dawn",
+    "Curious Herd",
+    "Druid of Horns",
+    "Elder Gargaroth",
+    "Feral Incarnation",
+    "Fresh Meat",
+    "Garruk Wildspeaker",
+    "Garruk, Primal Hunter",
+    "Garruk, Unleashed",
+    "Herd Migration",
+    "Midsummer Revel",
+    "Primeval Bounty",
+    "Pulse of the Tangle",
+    "Radagast, Wizard of Wilds",
+    "Savage Conception",
+    "Sawtusk Demolisher",
+    "Somberwald Beastmaster",
+    "Soul of Zendikar",
+    "The Huntsman's Redemption",
+    "Thragtusk",
+    "Trumpeting Gnarr",
+    "Vivien, Monsters' Advocate",
+    "Wild Endeavor",
 ]
 set_code = "TRC"
 set_name = "Star Trek Commander"
 collector_number = "11"
 released_at = "2026-11-13"
 type_line = "Token Creature — Beast"
-rules_text = "Trample"
 
 [token.body]
 display_name = "Beast"
-power = 4
-toughness = 4
+power = 3
+toughness = 3
 core_types = ["Creature"]
 subtypes = ["Beast"]
 supertypes = []
 colors = ["Green"]
-keywords = ["Trample"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Beast Within"
+scryfall_oracle_id = "7735eeba-693b-47e2-bd51-414379cf1016"
+scryfall_id = "1929cf4b-0d18-4f7d-a631-621a378ff015"
 
 [token.token_image_ref]
 scryfall_id = "ca8e8a9a-d673-4644-9eec-f4f549307d9b"
-scryfall_oracle_id = "7ed8a016-a259-4fda-aae5-02f8df94f2de"
+scryfall_oracle_id = "6bb61f34-5d57-4eaa-a02c-f5d08c1ee920"
 preset_id = "6273f391-1a23-5c79-94b2-0789961a30f6"
 
 [[token]]
@@ -89654,6 +89730,7 @@ source_card_names = [
     "Avatar of Burgeoning Echoes",
     "Campus Crier",
     "Countersculpt",
+    "Crux of the Theory",
     "Fatehold Charm",
     "Hexhaven Battalion",
     "Inspired Tethermage",
@@ -89665,6 +89742,7 @@ source_card_names = [
     "Overwrite the Multiverse",
     "Plan for All Outcomes",
     "Protege's Awakening",
+    "Remnants of Beleren",
     "Repurposed Enforcer",
     "Rewrite Regrets",
     "Sanctum Lurker",
@@ -166360,6 +166438,7 @@ fidelity = "Full"
 source_card_names = [
     "Bovine Intervention",
     "Bruse Tarl, Roving Rancher",
+    "Oko, Lord of the Fae",
     "Ox",
 ]
 set_code = "MSC"
@@ -192768,17 +192847,7 @@ keywords = []
 [[token.source_card_refs]]
 card_name = "Grand Crescendo"
 scryfall_oracle_id = "dc600c06-8239-409e-b53d-20f813a3f5e7"
-scryfall_id = "b41a1ff1-8e72-4269-825c-aaa12b3a4dca"
-
-[[token.source_card_refs]]
-card_name = "Grand Crescendo"
-scryfall_oracle_id = "dc600c06-8239-409e-b53d-20f813a3f5e7"
 scryfall_id = "a60834b0-38ab-40c9-9fd9-db3a23b13076"
-
-[[token.source_card_refs]]
-card_name = "Grand Crescendo"
-scryfall_oracle_id = "dc600c06-8239-409e-b53d-20f813a3f5e7"
-scryfall_id = "a149748e-f192-4ec6-bae3-5a18ffcec140"
 
 [token.token_image_ref]
 scryfall_id = "b7171de9-476d-4bfa-8cc0-b4fbc168cf4d"
@@ -219997,6 +220066,7 @@ fidelity = "Full"
 source_card_names = [
     "Bovine Intervention",
     "Bruse Tarl, Roving Rancher",
+    "Oko, Lord of the Fae",
 ]
 set_code = "MSC"
 set_name = "Marvel Super Heroes Commander"
@@ -223440,10 +223510,30 @@ id = "f1a4c23e-3433-5f96-bd82-ec2a3f1c81a1"
 category = "Creature"
 fidelity = "Full"
 source_card_names = [
+    "Boss's Chauffeur",
+    "Cabaretti Charm",
+    "Caldaia Guardian",
     "Citizen",
-    "Icatian Crier",
-    "Icatian Town",
-    "Sarpadian Empires, Vol. VII",
+    "Citizen's Crowbar",
+    "Courier's Briefcase",
+    "Darling of the Masses",
+    "Exhibition Magician",
+    "Grand Crescendo",
+    "Halo Fountain",
+    "Indulge // Excess",
+    "Kitt Kanto, Mayhem Diva",
+    "Luxurious Libation",
+    "Master of Ceremonies",
+    "Origin of the Hulk",
+    "Phabine, Boss's Confidant",
+    "Prosperous Partnership",
+    "Rabble Rousing",
+    "Rakish Revelers",
+    "Rope Line Attendant",
+    "Sanctuary Warden",
+    "Scepter of Celebration",
+    "Stimulus Package",
+    "Warm Welcome",
 ]
 set_code = "TRC"
 set_name = "Star Trek Commander"
@@ -223458,12 +223548,15 @@ toughness = 1
 core_types = ["Creature"]
 subtypes = ["Citizen"]
 supertypes = []
-colors = ["White"]
+colors = [
+    "Green",
+    "White",
+]
 keywords = []
 
 [token.token_image_ref]
 scryfall_id = "bb355701-39e2-428e-a62b-feac0bdada72"
-scryfall_oracle_id = "e31c15d7-f89e-480b-a22f-5823343342bb"
+scryfall_oracle_id = "ffbc4833-01db-45f8-b8b4-c2e2c8235d0c"
 preset_id = "f1a4c23e-3433-5f96-bd82-ec2a3f1c81a1"
 
 [[token]]
@@ -226355,6 +226448,7 @@ source_card_names = [
     "Craftwork Crusher",
     "Fatehold Chronologist",
     "Fatehold Chronologist // Peer Review",
+    "Flourishing Forces",
     "Germinate Recruits",
     "Heartstring Puller",
     "Hexhaven Battalion",
@@ -226362,6 +226456,7 @@ source_card_names = [
     "Peer Review",
     "Prudent Fateseer",
     "Prudent Fateseer // Peer Review",
+    "Quintorius, Fate Splitter",
     "Recursive Recruitment",
     "Semester Foreseer",
     "Semester Foreseer // Peer Review",
@@ -232875,11 +232970,6 @@ subtypes = ["Beast"]
 supertypes = []
 colors = ["Green"]
 keywords = []
-
-[[token.source_card_refs]]
-card_name = "Beast Within"
-scryfall_oracle_id = "7735eeba-693b-47e2-bd51-414379cf1016"
-scryfall_id = "1929cf4b-0d18-4f7d-a631-621a378ff015"
 
 [[token.source_card_refs]]
 card_name = "Fresh Meat"
