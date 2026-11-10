@@ -2728,6 +2728,14 @@ impl ResolvedRulesJournal {
             // released build carries no record and is read from the pips it does
             // have. The LIVE writer never produces this shape: allocation records
             // `Open`, so the ambiguity the shim used to create is gone at the source.
+            //
+            // The shim is reachable only for a payload that states NO settlement
+            // anywhere. The restore boundary decides that once, per save, from the
+            // payload-level markers ([`Self::states_settlement_record`] beside the
+            // parked activation's occurrence) and materializes the answer with
+            // [`Self::bind_legacy_settlement_records`], so a CURRENT payload that
+            // omitted one node's record is refused there as a contradiction instead
+            // of reaching this arm and being read as older.
             Some(NodeSettlement::Unrecorded) => self
                 .node_index(node)
                 .map(|position| !self.nodes[position].produced_pips.is_empty())
@@ -2758,6 +2766,66 @@ impl ResolvedRulesJournal {
             Some(false) => NodeSettlement::Open,
             None => NodeSettlement::Unrecorded,
         })
+    }
+
+    /// CR 605.3b: whether this payload states a settlement record ANYWHERE — the
+    /// payload-level FORMAT MARKER that decides, once per save, whether a node that
+    /// states none is the older shape or a contradiction.
+    ///
+    /// [`SettlementNode::settled`] is written only by this build: no released build
+    /// wrote the field anywhere (`LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4`), and
+    /// this build writes it for every node whose kind has a settlement lifecycle —
+    /// `Some(false)` at allocation, `Some(true)` at settlement. The older shape is
+    /// therefore UNIFORM by construction: a writer that never wrote the field never
+    /// wrote it on any node. A payload that states it somewhere was written by a
+    /// build that states it everywhere it applies, so a node of a
+    /// settlement-recording kind beside it that states nothing is not an older node —
+    /// it is that payload contradicting itself, and the record was deleted from a
+    /// save that had one.
+    ///
+    /// The marker is read from the payload, never defaulted: an empty journal (or one
+    /// holding only nodes of kinds with no lifecycle) states nothing and is judged by
+    /// its other markers.
+    pub fn states_settlement_record(&self) -> bool {
+        self.nodes.iter().any(|node| node.settled.is_some())
+    }
+
+    /// CR 605.3b: the first retained node whose kind HAS a settlement lifecycle but
+    /// which states no record — the contradiction
+    /// [`Self::states_settlement_record`] makes refusable in a payload that states
+    /// settlements somewhere else. `None` when every such node states one (or the
+    /// journal holds none of them).
+    pub fn unrecorded_settlement_node(&self) -> Option<RulesExecutionNodeRef> {
+        self.nodes
+            .iter()
+            .find(|node| node.kind.records_settlement() && node.settled.is_none())
+            .map(|node| node.identity)
+    }
+
+    /// CR 605.3b: materialize a UNIFORMLY OLDER payload's settlement records from the
+    /// pip record they were always read from — once, at the boundary that decided the
+    /// payload is older, and into the record itself.
+    ///
+    /// This is the legacy read the shim used to perform lazily, per query, in
+    /// [`Self::node_settled`] (`None => !produced_pips.is_empty()`). Binding it here
+    /// keeps the same answer while making it a stated fact, which is what the
+    /// round trip needs: a restored older save that plays on allocates CURRENT nodes
+    /// beside the old ones, so the payload it writes next states settlement in some
+    /// nodes and not others. Left lazy, that mixed payload would be re-read as a
+    /// current payload contradicting itself. Bound, every lifecycle node states a
+    /// record and the save it writes is uniformly current.
+    ///
+    /// Only nodes whose kind has a lifecycle are bound
+    /// ([`RulesExecutionNodeKind::records_settlement`]): a Proposal, Payment or
+    /// PlayerLeave node records nothing because nothing would ever settle it, and
+    /// writing a value there would invent a lifecycle that does not exist.
+    pub(crate) fn bind_legacy_settlement_records(&mut self) {
+        for position in 0..self.nodes.len() {
+            let node = &mut self.nodes[position];
+            if node.kind.records_settlement() && node.settled.is_none() {
+                node.settled = Some(!node.produced_pips.is_empty());
+            }
+        }
     }
 
     /// CR 605.3b: record that `node` has RESOLVED — the writer behind

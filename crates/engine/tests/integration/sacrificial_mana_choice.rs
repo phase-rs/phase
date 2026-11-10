@@ -2546,20 +2546,49 @@ fn zero_output_activation_settles_so_a_later_parked_activation_cannot_claim_its_
     );
 }
 
-/// A journal node that states NO settlement record — the shape every RELEASED build
-/// wrote, because `SettlementNode` has been persisted since 0.85 and this field only
-/// since 0.123.
+/// CR 605.2 + CR 605.3b: a CURRENT payload that DELETES a settled node's settlement
+/// record is refused as a contradiction — deleting the key does not turn the save
+/// into the older shape.
 ///
-/// It is read from the pip list it does carry (`LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4`),
-/// which is what lets a committed pre-field capture (`dina_conqueror_4p.json.gz`) keep
-/// restoring. What must NOT happen is a CURRENT payload landing in that arm: this
-/// build writes the record at allocation (`Some(false)`) and at settlement
-/// (`Some(true)`), so the ambiguity that made a completed zero-output activation
-/// indistinguishable from a live one exists only for saves that predate the field.
+/// This is the maintainer's exact cross-check between the two legacy readings. The
+/// board is the two-activation Heronblade Elite witness: activation 1 resolved at
+/// power 0 with NO mana, so it settled with an empty pip list, and activation 2 is
+/// parked at its colour prompt. Two edits make the save claim activation 1 is still
+/// open, and they are the two the older-shape readings would each accept on their own:
+///
+///   * BOTH of the parked activation's records (the node reference AND the occurrence
+///     beside it, so `ParkedActivationConflict::SettledOccurrence` cannot answer it)
+///     are pointed at activation 1's node; and
+///   * that node's `settled` record is deleted, so the pip-based legacy reading
+///     (`LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4`) sees an EMPTY pip list and
+///     answers "not resolved" — CR 605.2 is exactly why the pip list is the wrong
+///     witness for a zero-output activation.
+///
+/// The format is a property of the PAYLOAD, not of one node. This payload is current:
+/// activation 2's own node still states a settlement record, and the parked activation
+/// still states an occurrence — both written only by this build. So a
+/// settlement-recording node that states nothing is a contradiction, and the save is
+/// refused rather than read as older. Stripping EVERY current-format marker is the
+/// different shape the uniform older payload test covers.
 #[test]
-fn a_node_that_states_no_settlement_is_read_from_its_pips_as_the_older_shape() {
-    let (runner, _source, first_node) = prismite_second_activation_parked();
+fn a_current_payload_that_deletes_a_settled_node_s_record_is_refused_as_a_contradiction() {
+    let (runner, _source, first_node) = power_raised_elite_with_a_parked_second_activation();
     let mut json = persisted_json(runner.state());
+
+    let stale_occurrence = ManaActivationOccurrence::of_node(first_node)
+        .expect("reach-guard: activation 1's node is an activated-mana node");
+    {
+        let pending = saved_pending_mut(&mut json);
+        pending.insert(
+            "rules_execution_node".to_string(),
+            serde_json::to_value(first_node).expect("the node identity serializes"),
+        );
+        pending.insert(
+            "activated_mana_occurrence".to_string(),
+            serde_json::to_value(stale_occurrence).expect("the occurrence serializes"),
+        );
+    }
+
     let first_identity = serde_json::to_value(first_node).expect("the node identity serializes");
     {
         let nodes = json["state"]["resolved_rules_journal"]["nodes"]
@@ -2572,39 +2601,148 @@ fn a_node_that_states_no_settlement_is_read_from_its_pips_as_the_older_shape() {
         assert_eq!(
             node["settled"],
             serde_json::json!(true),
-            "reach-guard: this build wrote the settlement record for it"
+            "reach-guard: this build wrote the settlement record for the zero-output activation"
+        );
+        assert!(
+            node["produced_pips"]
+                .as_array()
+                .is_none_or(|pips| pips.is_empty()),
+            "reach-guard: CR 605.2 — the zero-output activation carries no pip for the older \
+             reading to notice"
         );
         assert!(
             node.as_object_mut()
                 .expect("a node serializes as an object")
                 .remove("settled")
                 .is_some(),
-            "reach-guard: the record is what this test removes"
+            "reach-guard: the record is the key this test deletes"
         );
+    }
+    // The payload is still current: activation 2's own node states a record, and the
+    // parked activation states an occurrence. Both are the markers the format
+    // decision reads, so the deletion above cannot make the save look older.
+    let another_node_states_a_record = json["state"]["resolved_rules_journal"]["nodes"]
+        .as_array()
+        .expect("the journal serializes its nodes")
+        .iter()
+        .filter(|candidate| candidate["identity"] != first_identity)
+        .any(|candidate| candidate.get("settled").is_some());
+    assert!(
+        another_node_states_a_record,
+        "reach-guard: another settlement node still states the record this build writes"
+    );
+    assert!(
+        saved_pending_mut(&mut json)
+            .get("activated_mana_occurrence")
+            .is_some(),
+        "reach-guard: and the parked activation still states its occurrence"
+    );
+
+    match &admission_refusal(json) {
+        PersistedRestoreError::ContradictorySettlementCustody { node } => {
+            assert_eq!(
+                *node, first_node,
+                "the refusal names the node whose settlement record was deleted"
+            );
+        }
+        other => panic!(
+            "CR 605.2 + CR 605.3b: a CURRENT save whose settled node lost its record must be \
+             refused as a contradiction, not read as the older shape — reading it that way made \
+             the zero-output activation look open and the parked activation's colour answer wrote \
+             its mana into an activation that had already resolved; got {other:?}"
+        ),
+    }
+}
+
+/// CR 605.3b: the GENUINE older shape — a UNIFORMLY old payload — still restores, and
+/// still re-parks and finishes.
+///
+/// `SettlementNode` has been persisted since 0.85 and `settled` only since 0.123, so
+/// every released build wrote a payload in which NO node states a settlement record
+/// and no parked activation states an occurrence. That shape is the one the pre-field
+/// capture (`dina_conqueror_4p.json.gz`) carries and it must keep restoring. Because
+/// the record is written at allocation (`Some(false)`) and at settlement
+/// (`Some(true)`) by this build, a payload that states it SOMEWHERE and omits it on one
+/// node is not this shape — it is a current payload that lost a key (see
+/// [`a_current_payload_that_deletes_a_settled_node_s_record_is_refused_as_a_contradiction`]).
+///
+/// The format decision is made once per payload at the restore boundary, and the
+/// older payload's reading — settlement answered from the pip list the node carries
+/// (`LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4`) — is BOUND into the record there,
+/// so the answer is a stated fact from then on and the mixed shape cannot arise when
+/// the resumed game saves again.
+#[test]
+fn a_uniformly_older_payload_is_bound_from_its_pips_and_still_finishes() {
+    let (runner, _source, first_node) = prismite_second_activation_parked();
+    let mut json = persisted_json(runner.state());
+
+    // Strip EVERY marker only this build writes, which is what makes the payload the
+    // uniform older shape rather than a current save missing a key.
+    {
+        let nodes = json["state"]["resolved_rules_journal"]["nodes"]
+            .as_array_mut()
+            .expect("the journal serializes its nodes");
+        let mut stripped = 0;
+        for node in nodes.iter_mut() {
+            if node
+                .as_object_mut()
+                .expect("a node serializes as an object")
+                .remove("settled")
+                .is_some()
+            {
+                stripped += 1;
+            }
+        }
+        assert!(
+            stripped >= 2,
+            "reach-guard: this build states a record on both activation nodes, got {stripped}"
+        );
+        let first_identity =
+            serde_json::to_value(first_node).expect("the node identity serializes");
+        let node = nodes
+            .iter()
+            .find(|candidate| candidate["identity"] == first_identity)
+            .expect("the journal retains activation 1's node");
         assert!(
             node["produced_pips"]
                 .as_array()
                 .is_some_and(|pips| pips.len() == 1),
-            "reach-guard: and it carries the pip its resolution produced"
+            "reach-guard: and the node this reading is about carries the pip it produced"
         );
     }
+    assert!(
+        saved_pending_mut(&mut json)
+            .remove("activated_mana_occurrence")
+            .is_some(),
+        "reach-guard: the occurrence is the other marker this build writes"
+    );
 
     let mut runner = GameRunner::from_state(
-        admitted(json).expect("an older save that states no settlement still restores"),
+        admitted(json)
+            .expect("a uniformly older payload is the legacy shape, never a contradiction"),
     );
+    assert_eq!(
+        runner
+            .state()
+            .resolved_rules_journal
+            .node_settlement(first_node),
+        Some(engine::types::resolved_commands::NodeSettlement::Resolved),
+        "the pip-derived reading of the older payload is BOUND into the node's own record \
+         at admission"
+    );
+
     runner = choose_blue(runner);
     assert!(
         runner
             .state()
             .resolved_rules_journal
             .node_settled(first_node),
-        "the pre-field shape answers from the pip the node recorded, so the finished node \
-         still reads as settled and cannot be claimed by the later activation"
+        "the finished node still reads as settled and cannot be claimed by the later activation"
     );
     assert_eq!(
         node_produced_pips(runner.state(), first_node).len(),
         1,
-        "and the later activation's pip did not land in it"
+        "and it still re-parks and finishes: the later activation's pip did not land in it"
     );
 }
 
