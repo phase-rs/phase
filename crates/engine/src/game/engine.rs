@@ -18308,6 +18308,10 @@ fn apply_non_priority_pass_action(
             None,
         );
         triggers::collect_unclaimed_delayed_triggers_into_deferred(state, &events, &delayed_input);
+        // CR 603.2: an ordinary draw trigger emitted by the answered
+        // replacement is also processed replay history now; defer it so the
+        // next priority queues it exactly once.
+        triggers::collect_triggers_into_deferred(state, &events);
         state.consumed_before_priority_trigger_events.clear();
     }
 
