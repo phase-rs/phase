@@ -5704,6 +5704,62 @@ pub(crate) fn ability_reads_sibling_mutable(ability: &ResolvedAbility) -> bool {
     resolved_ability_axes(ability, ScanMode::Conservative).sibling
 }
 
+/// CR 608.2k + CR 400.7: can this ability chain hand an EXACT `TargetFilter::EventTarget`
+/// to `resolve_event_referent_permanents`, the only reader of
+/// `DamageRecord::target_incarnation` (`targeting.rs::event_recipient_is_live_incarnation`,
+/// single call site)? Used by the resource projection to skip a full-journal recipient
+/// scan when no retained carrier can observe the recipient at all.
+///
+/// Nested `EventTarget` occurrences (inside `Or`/`And`/`Typed`/quantities) are evaluated by
+/// the generic matcher and read no journal row, so only the four effect positions that
+/// read it exactly are consulted — their RAW fields, not `Effect::target_filter()`, which
+/// answers `None` for the `All` scope those same effects still read.
+pub(crate) fn ability_reads_event_target(ability: &ResolvedAbility) -> bool {
+    fn node_reads(node: &Effect) -> bool {
+        match node {
+            Effect::SetTapState { target, .. }
+            | Effect::BecomePrepared { target, .. }
+            | Effect::BecomeUnprepared { target, .. }
+            | Effect::PreventDamage { target, .. } => *target == TargetFilter::EventTarget,
+            Effect::GenericEffect {
+                target,
+                static_abilities,
+                ..
+            } => {
+                target.as_ref() == Some(&TargetFilter::EventTarget)
+                    || static_abilities
+                        .iter()
+                        .any(|d| d.affected.as_ref() == Some(&TargetFilter::EventTarget))
+            }
+            _ => false,
+        }
+    }
+    let mut reads = false;
+    let _ = crate::types::ability_visit::visit_effect(&ability.effect, &mut |node: &Effect| {
+        reads |= node_reads(node);
+        std::ops::ControlFlow::Continue(())
+    });
+    reads
+        || ability
+            .child_links()
+            .any(|(_, child)| ability_reads_event_target(child))
+        || {
+            let mut modes = false;
+            for def in &ability.mode_abilities {
+                let _ = crate::types::ability_visit::visit_ability_def(
+                    def,
+                    &mut |node: &Effect| {
+                        modes |= node_reads(node);
+                        std::ops::ControlFlow::Continue(())
+                    },
+                );
+            }
+            modes
+        }
+        // Conservative: an unless-pay cost effect is not paired by the child walk.
+        || ability.unless_pay.is_some()
+}
+
 /// Axis 3 on a bare trigger fire-time `condition` (CR 603.4 intervening-if) —
 /// the off-stack scan surface (`analysis::resource` item 5).
 pub(crate) fn trigger_condition_reads_projected_resource(condition: &TriggerCondition) -> bool {

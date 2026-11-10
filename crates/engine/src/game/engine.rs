@@ -6451,13 +6451,19 @@ fn published_period_elapsed(frames_this_cycle: u32, frames_per_period: Option<u3
 
 /// The board a shortcut take compares its settle frames against: `state` seeded to its active
 /// player's priority and normalized.
+///
+/// CR 104.4b + CR 732.2a: the SAMPLE form, not the strict one. Every consumer of this value
+/// (`settle_recurs`, and through it `loop_states_equal_modulo_resources` /
+/// `loop_states_cover_modulo_growth`) projects before it ranks, so a strict boundary would
+/// rank the row-unbounded damage journal on the very path that defers that work — the
+/// maintainer's second whole-priority blocker.
 pub(crate) fn take_boundary(state: &GameState) -> GameState {
     let mut seed = state.clone();
     priority::reset_priority(&mut seed);
     seed.waiting_for = WaitingFor::Priority {
         player: seed.active_player,
     };
-    seed.normalize_for_loop()
+    seed.normalize_for_loop_sample()
 }
 
 /// Whether a settle frame recurs against `boundary` on the take's board predicates.
@@ -31621,6 +31627,55 @@ mod damage_history_priority_cost_tests {
     use super::*;
     use crate::types::ability::{QuantityExpr, TargetFilter};
     use crate::types::game_state::{DamageRecord, LOOP_DAMAGE_JOURNAL_VISITS};
+
+    #[test]
+    fn loop_relational_take_boundary_defers_history_through_first_settle() {
+        use crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS;
+
+        const ROWS: usize = 512;
+        let mut state = GameState::new_two_player(7);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Boundary history source".to_string(),
+            Zone::Battlefield,
+        );
+        let incarnation = state.objects[&source].incarnation;
+        for _ in 0..ROWS {
+            state.damage_dealt_this_turn.push_back(DamageRecord {
+                source_id: source,
+                source_incarnation: Some(incarnation),
+                target: TargetRef::Player(PlayerId(1)),
+                amount: 1,
+                ..Default::default()
+            });
+        }
+        // The boundary itself must not rank history: its consumers project first.
+        LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+        let boundary = take_boundary(&state);
+        assert_eq!(
+            LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get),
+            0,
+            "take_boundary must not rank the row-unbounded journal"
+        );
+        // Boundary construction through the first settle comparison: one reduction pass per
+        // projected side, plus any bounded witness rank — never an identity rank of H.
+        LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+        let _ = settle_recurs(&boundary, &state);
+        let whole_path = LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get);
+        assert!(
+            whole_path <= 2 * ROWS + 8,
+            "{whole_path} visits from boundary construction through the first settle \
+             comparison for {ROWS} unread rows"
+        );
+    }
 
     #[test]
     fn loop_relational_auto_pass_window_defers_unread_damage_history() {

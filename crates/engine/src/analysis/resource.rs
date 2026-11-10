@@ -8897,6 +8897,49 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
+/// CR 608.2k + CR 400.7: whether the retained carriers can observe a damage recipient
+/// at all. `Some(false)` means every carrier event was paired with its ability and none of
+/// those abilities can evaluate an exact `EventTarget`; `None` means some carrier has no
+/// paired ability here, so the caller must keep the full-journal scan. Fail closed: eliding
+/// a stale-versus-live relation from the comparand could manufacture a false loop win.
+fn loop_carriers_read_event_target(state: &GameState, carrier_events: usize) -> Option<bool> {
+    let mut paired = 0usize;
+    let mut reads = false;
+    let mut pair = |ability: &crate::types::ability::ResolvedAbility, carries_event: bool| {
+        if carries_event {
+            paired += 1;
+            reads |= crate::game::ability_scan::ability_reads_event_target(ability);
+        }
+    };
+    for entry in state.stack.iter().chain(state.resolving_stack_entry.iter()) {
+        if let StackEntryKind::TriggeredAbility {
+            ability,
+            trigger_event,
+            ..
+        } = &entry.kind
+        {
+            pair(ability, trigger_event.is_some());
+        }
+    }
+    if let Some(pending) = state.pending_trigger.as_deref() {
+        pair(&pending.ability, pending.trigger_event.is_some());
+    }
+    let order_contexts = state
+        .pending_trigger_order
+        .iter()
+        .flat_map(|order| order.groups.iter())
+        .flat_map(|group| group.triggers.iter());
+    for context in state.deferred_triggers.iter().chain(order_contexts) {
+        let pending = &context.pending;
+        pair(&pending.ability, pending.trigger_event.is_some());
+        // Extra batch events belong to this same pending ability.
+        for _ in &context.trigger_events {
+            pair(&pending.ability, true);
+        }
+    }
+    (paired == carrier_events).then_some(reads)
+}
+
 /// CR 400.7 + CR 608.2k + CR 732.2a: reduce full damage history to the one
 /// recipient answer each retained damage carrier can still read — legacy (no
 /// matching stamp), all-stale, or live. Full damage history remains strict
@@ -8923,7 +8966,9 @@ fn project_damage_recipient_relations_for_loop(
     // or per-object COW, and no second requested-key collection.
     let objects = state.objects.clone();
     let mut requested = HashMap::new();
+    let mut carrier_events = 0usize;
     state.for_each_trigger_event_carrier_mut(&mut |event| {
+        carrier_events += 1;
         let Some(key) = DamageEventKey::from_event(event) else {
             return;
         };
@@ -8940,6 +8985,13 @@ fn project_damage_recipient_relations_for_loop(
     });
     drop(objects);
     if requested.is_empty() {
+        return smallvec::SmallVec::new();
+    }
+    // CR 608.2k: a recipient answer is observable only through an exact top-level
+    // `EventTarget`. When every retained carrier is paired with an ability and none of
+    // those abilities can evaluate it, no witness can affect the comparand — skip the
+    // H-row scan the maintainer's cost blocker names.
+    if loop_carriers_read_event_target(state, carrier_events) == Some(false) {
         return smallvec::SmallVec::new();
     }
     for record in &journal {
@@ -9781,7 +9833,7 @@ mod tests {
     // recipient and also the dealer named by a retained Curse event at incarnation 4.
     fn relational_recipient_frame(pin: Option<u64>, curse: bool, receipt: bool) -> GameState {
         use crate::types::ability::{
-            Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+            Effect, EffectScope, ResolvedAbility, TapStateChange, TargetFilter, TargetRef,
         };
         use crate::types::events::GameEvent;
         use crate::types::game_state::{DamageRecord, StackEntry, StackEntryKind};
@@ -9808,9 +9860,12 @@ mod tests {
                 kind: StackEntryKind::TriggeredAbility {
                     source_id: source,
                     ability: Box::new(ResolvedAbility::new(
-                        Effect::Draw {
-                            count: QuantityExpr::Fixed { value: 1 },
-                            target: TargetFilter::Controller,
+                        // CR 608.2k: a REAL recipient consumer ("tap that creature"), so the
+                        // fixture is a carrier the projection must keep a witness for.
+                        Effect::SetTapState {
+                            target: TargetFilter::EventTarget,
+                            scope: EffectScope::Single,
+                            state: TapStateChange::Tap,
                         },
                         vec![],
                         source,
@@ -10077,6 +10132,71 @@ mod tests {
             whole_path_visits <= journal_rows + 8 * projected.damage_dealt_this_turn.len(),
             "{whole_path_visits} whole-priority journal visits for {journal_rows} rows and {} retained keys; strict ranking must follow reduction",
             projected.damage_dealt_this_turn.len()
+        );
+    }
+
+    /// CR 608.2k: a retained damage trigger that never reads the recipient must not make
+    /// the projection scan the whole journal. Stuffy Doll's shape: the event's amount plus
+    /// a chosen player, never `EventTarget`.
+    #[test]
+    fn loop_relational_no_reader_trigger_skips_the_journal_scan() {
+        use crate::types::ability::{QuantityExpr, QuantityRef};
+        use crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS;
+
+        fn retarget_to_no_reader(state: &mut GameState) {
+            for entry in state.stack.iter_mut() {
+                let StackEntryKind::TriggeredAbility { ability, .. } = &mut entry.kind else {
+                    unreachable!("fixture keeps only trigger carriers");
+                };
+                **ability = ResolvedAbility::new(
+                    Effect::DealDamage {
+                        amount: QuantityExpr::Ref(QuantityRef::EventContextAmount),
+                        target: TargetFilter::SpecificPlayer { id: PlayerId(1) },
+                        damage_source: None,
+                        excess: None,
+                    },
+                    vec![],
+                    entry.source_id,
+                    PlayerId(0),
+                );
+            }
+        }
+
+        // No reader: the whole journal stays unread, so no witness and no H-row pass.
+        let mut no_reader = relational_recipient_frame(Some(7), false, false);
+        retarget_to_no_reader(&mut no_reader);
+        let row = no_reader.damage_dealt_this_turn[0].clone();
+        for _ in 0..256 {
+            no_reader.damage_dealt_this_turn.push_back(row.clone());
+        }
+        assert!(no_reader.current_trigger_event.is_none());
+        DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(0));
+        LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+        let projected = project_out_resources(&no_reader);
+        assert!(
+            projected.damage_dealt_this_turn.is_empty(),
+            "an unobservable recipient relation needs no witness"
+        );
+        assert_eq!(
+            DAMAGE_RECIPIENT_JOURNAL_VISITS.with(std::cell::Cell::get),
+            0,
+            "a no-reader trigger must not scan the damage journal"
+        );
+
+        // Positive control: the same carrier with a real `EventTarget` consumer keeps its
+        // witness and does the one H-row pass.
+        DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(0));
+        LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+        let reading = relational_recipient_frame(Some(7), false, false);
+        let projected = project_out_resources(&reading);
+        assert_eq!(
+            projected.damage_dealt_this_turn.len(),
+            1,
+            "an EventTarget consumer keeps its witness"
+        );
+        assert!(
+            DAMAGE_RECIPIENT_JOURNAL_VISITS.with(std::cell::Cell::get) > 0,
+            "the reader path still performs the one journal pass"
         );
     }
 
