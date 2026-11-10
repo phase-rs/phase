@@ -38,8 +38,8 @@ use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr,
 };
 use crate::types::ability::{
-    effect_object_target_roles, AbilityCondition, AbilityDefinition, AbilityKind, AbilityUseTally,
-    AdditionalCostOrigin, AttachCardinality, AttachSelection, CastManaObjectScope,
+    effect_announced_target_roles, AbilityCondition, AbilityDefinition, AbilityKind,
+    AbilityUseTally, AdditionalCostOrigin, AttachCardinality, AttachSelection, CastManaObjectScope,
     CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CostCategory,
     CountScope, DamageChannel, DigSource, Duration, Effect, EffectOutcomeSignal, FilterProp,
     GuessOutcome, LibraryPosition, MultiTargetSpec, ObjectScope, ParsedCondition, PlayerScope,
@@ -5001,7 +5001,7 @@ fn probe_declared_target_slot(effect_text: &str, ctx: &ParseContext) -> Option<E
     if timing != TargetChoiceTiming::Stack {
         return None;
     }
-    let declared_slots = effect_object_target_roles(&clause.effect);
+    let declared_slots = effect_announced_target_roles(&clause.effect);
     if declared_slots.is_empty() {
         return None;
     }
@@ -5233,6 +5233,12 @@ struct DeclaredObjectTarget {
     introduced_controller: Option<ControllerRef>,
 }
 
+/// CR 115.1a: an announced role is an object for the antecedent grammar when
+/// it is neither a context reference nor a player.
+fn is_object_role(filter: &TargetFilter) -> bool {
+    !filter.is_context_ref() && !super::is_player_scoped_filter(filter)
+}
+
 /// CR 115.1: the instruction `effect_text` lowers to declares exactly one
 /// object target (not a context reference, the untyped `Any` fallback, a
 /// player, or a multi-role/multi-target slot). Parsed on a throwaway context so
@@ -5242,12 +5248,29 @@ fn declared_single_object_target(
     ctx: &ParseContext,
 ) -> Option<DeclaredObjectTarget> {
     let probe = probe_declared_target_slot(effect_text, ctx)?;
-    // Two announced roles (Fight's two creatures), or one role with a
-    // cardinality range, cannot name a single "that <noun>" antecedent.
-    if probe.multi_target.is_some() || probe.declared_slots.len() > 1 {
+    // One role with a cardinality range cannot name a single "that <noun>".
+    if probe.multi_target.is_some() {
         return None;
     }
-    let filter = probe.declared_slots.first()?;
+    // CR 115.1 + CR 608.2c: `ParentTargetController` reads the FIRST announced
+    // target. The object antecedent must therefore be the first role and the
+    // only object role; a player first (a redirection) or a second object
+    // (Fight, Fate Transfer) cannot be represented faithfully.
+    if probe
+        .declared_slots
+        .first()
+        .is_none_or(|first| !is_object_role(first))
+    {
+        return None;
+    }
+    let mut object_roles = probe
+        .declared_slots
+        .iter()
+        .filter(|filter| is_object_role(filter));
+    let filter = object_roles.next()?;
+    if object_roles.next().is_some() {
+        return None;
+    }
     if !is_declared_target_filter(filter) || super::is_player_scoped_filter(filter) {
         return None;
     }
@@ -11142,14 +11165,16 @@ mod tests {
             "{effect} if {condition}"
         );
 
-        // Player target: the raw effect filter is player-scoped, but a player
-        // role is not an object role, so the declared-slot probe has none.
+        // Player target: the announced list is player-only, so the slot probe
+        // surfaces it but the object antecedent declines.
         let effect = "Target opponent loses 2 life";
         let probe = probe_effect_target(effect, &ctx).expect("player effect probe");
         assert!(crate::parser::oracle_effect::is_player_scoped_filter(
             &probe.filter
         ));
-        assert!(probe_declared_target_slot(effect, &ctx).is_none());
+        let role_probe = probe_declared_target_slot(effect, &ctx).expect("announced player role");
+        assert!(!super::is_object_role(&role_probe.declared_slots[0]));
+        assert!(declared_single_object_target(effect, &ctx).is_none());
         let condition = "that opponent controls no creatures";
         assert!(
             nom_condition::parse_target_controller_count_condition(condition).is_ok(),

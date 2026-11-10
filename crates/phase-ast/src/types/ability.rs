@@ -26754,39 +26754,31 @@ pub fn effect_stack_target_declaration_matching(
             && extract_target_filter_from_effect(effect).is_some_and(predicate))
 }
 
-/// CR 115.1a: object roles only. A player target is not an object antecedent
-/// for a "that <noun>'s controller" suffix, so it must not consume the
-/// single-object cardinality this list feeds.
-fn object_roles(mut roles: Vec<TargetFilter>) -> Vec<TargetFilter> {
-    roles.retain(|filter| !filter.is_context_ref() && !filter.denotes_player_target());
-    roles
-}
-
-/// CR 115.1 + CR 601.2c: the object roles this effect announces as targets, in
+/// CR 115.1 + CR 601.2c: the roles this effect announces as targets, in
 /// declaration order, using the same authorities as
-/// [`effect_stack_target_declaration_matching`]. Player-only roles are omitted:
-/// this list answers "how many announced OBJECT roles exist", and a player
-/// target is not an object antecedent for a "that <noun>'s controller" suffix.
+/// [`effect_stack_target_declaration_matching`]. Players are included: callers
+/// that need an object antecedent must filter and keep the original order,
+/// because `ParentTargetController` reads the FIRST announced target.
 ///
 /// The timing decision stays separate (`target_choice_timing_for_parsed`): a
 /// role listed here still binds at resolution when that authority says so.
-pub fn effect_object_target_roles(effect: &Effect) -> Vec<TargetFilter> {
+pub fn effect_announced_target_roles(effect: &Effect) -> Vec<TargetFilter> {
     let mut roles: Vec<TargetFilter> = Vec::new();
     if let Some(damage_roles) = damage_replacement_target_roles(effect) {
         roles.extend(damage_roles.into_iter().map(|role| role.filter().clone()));
-        return object_roles(roles);
+        return roles;
     }
     if let Some(filter) = damage_replacement_source_slot_filter(effect) {
         roles.push(filter.clone());
-        return object_roles(roles);
+        return roles;
     }
     if paired_subject_filters(effect).is_some() {
         roles.extend(paired_subject_slot_filters(effect).cloned());
-        return object_roles(roles);
+        return roles;
     }
     if let Effect::Fight { subject, target } = effect {
         roles.extend(fight_declared_slot_filters(subject, target).cloned());
-        return object_roles(roles);
+        return roles;
     }
     if let Effect::MoveCounters {
         source,
@@ -26801,11 +26793,11 @@ pub fn effect_object_target_roles(effect: &Effect) -> Vec<TargetFilter> {
                 .filter(|filter| !filter.is_context_ref())
                 .cloned(),
         );
-        return object_roles(roles);
+        return roles;
     }
     if let Some(role) = mana_multi_role(effect) {
         roles.extend(role.surfaced_filters().map(|(_, filter)| filter.clone()));
-        return object_roles(roles);
+        return roles;
     }
     if let Effect::Attach {
         attachment,
@@ -26819,11 +26811,11 @@ pub fn effect_object_target_roles(effect: &Effect) -> Vec<TargetFilter> {
         if attach_host_filter_needs_target_slot(target) {
             roles.push(target.clone());
         }
-        return object_roles(roles);
+        return roles;
     }
     if let Effect::EachDealsDamageEqualToPower { recipient, .. } = effect {
         roles.push(recipient.clone());
-        return object_roles(roles);
+        return roles;
     }
     if effect_needs_target_creature_quantity_slot(effect)
         && !one_sided_fight_source_supplies_quantity_creature(effect)
@@ -26843,7 +26835,7 @@ pub fn effect_object_target_roles(effect: &Effect) -> Vec<TargetFilter> {
             roles.push(filter.clone());
         }
     }
-    object_roles(roles)
+    roles
 }
 /// CR 115.1 + CR 601.2c: the `Effect::BecomeCopy` RECIPIENT filter that must be
 /// announced as its own target slot, or `None` when the recipient needs no
@@ -51176,21 +51168,5 @@ mod spellbook_selection_serde_tests {
             err.to_string().contains("duplicate field"),
             "expected a duplicate-field error, got {err}"
         );
-    }
-}
-
-#[cfg(test)]
-mod object_role_tests {
-    use super::*;
-
-    /// CR 115.1a: a player role is not an object antecedent; a mixed list keeps
-    /// only the object role for the single-object cardinality.
-    #[test]
-    fn object_roles_drops_player_roles_and_keeps_objects() {
-        let roles = object_roles(vec![
-            TargetFilter::Player,
-            TargetFilter::Typed(TypedFilter::creature()),
-        ]);
-        assert_eq!(roles, vec![TargetFilter::Typed(TypedFilter::creature())]);
     }
 }
