@@ -851,6 +851,9 @@ fn object_leg_demand_and_candidates(
 /// activation cost walkers (`casting::find_non_self_sacrifice_cost` and its
 /// siblings) use to pick the next leg to pay. A `OneOf` that holds such legs
 /// becomes one unmodeled leg over the union of its branches' candidates.
+// The shared state/player/source/granting-object quartet already exceeds the
+// lint's width; `costs.rs` allows the same shape for this helper family.
+#[allow(clippy::too_many_arguments)]
 fn collect_object_cost_legs<'a>(
     state: &GameState,
     player: PlayerId,
@@ -1036,6 +1039,7 @@ fn object_legs_jointly_payable(legs: &[ObjectCostLeg<'_>], payment: ObjectLegPay
 /// This is the single joint authority for a composite's direct children: it
 /// also runs [`discard_legs_jointly_payable`] over the same children, which is
 /// the evidence behind [`ObjectLegCoverage::PrintedOrderDiscardSequence`].
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn object_cost_legs_jointly_payable(
     state: &GameState,
     player: PlayerId,
