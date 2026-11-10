@@ -4990,11 +4990,28 @@ fn probe_declared_target_slot(effect_text: &str, ctx: &ParseContext) -> Option<E
         .is_some_and(|modifier| payer_is_declared_target(&modifier.payer))
         || effect_references_target_player(&clause.effect)
         || effect_has_specialized_source_roles(&clause.effect)
+        || clause_has_child_targets(&clause)
     {
         return None;
     }
     let filter = extract_target_filter_from_effect(&clause.effect)?.clone();
     Some(EffectTargetProbe { filter })
+}
+
+/// CR 115.1: a separately targeted child ability is announced alongside or
+/// after the head; production descends into declared children, so the head's
+/// single filter is not the whole declaration.
+fn clause_has_child_targets(clause: &super::ParsedEffectClause) -> bool {
+    let mut child = clause.sub_ability.as_deref();
+    while let Some(definition) = child {
+        if definition.target_choice_timing == TargetChoiceTiming::Stack
+            && (definition.effect.target_filter().is_some() || definition.multi_target.is_some())
+        {
+            return true;
+        }
+        child = definition.sub_ability.as_deref();
+    }
+    false
 }
 
 /// CR 115.1 + CR 601.2c: the multi-role shapes whose announced order cannot be
@@ -11318,20 +11335,51 @@ mod tests {
             "{effect} if {condition}"
         );
 
-        // A player-typed quantity slot is announced before the object and is
-        // not visible to the target-filter walk.
+        // Synthetic quantity composition; the nearest printed quantity operand
+        // is Bulwark ("X is the number of cards in target opponent's hand").
         let effect =
             "Deals damage to target creature equal to the number of cards in target opponent's hand";
+        let clause =
+            crate::parser::oracle_effect::parse_effect_clause(effect, &mut ctx.clone_throwaway());
+        assert!(effect_needs_target_creature_quantity_slot(&clause.effect));
+        assert_eq!(
+            crate::parser::oracle_effect::lower::target_choice_timing_for_parsed(
+                &clause,
+                effect,
+                None,
+                clause.multi_target.is_some(),
+                super::TargetSelectionMode::Chosen,
+            ),
+            super::TargetChoiceTiming::Stack
+        );
         assert!(
             probe_declared_target_slot(effect, &ctx).is_none(),
             "the target-opponent quantity slot is announced first"
         );
 
-        // A BecomeCopy recipient/source pair is announced before the primary.
+        // Printed True Polymorph copy operand (the synthetic copy form stays
+        // close to it); the copy recipient is a separate announced role.
         let effect = "Target artifact you control becomes a copy of target artifact you control";
+        let clause =
+            crate::parser::oracle_effect::parse_effect_clause(effect, &mut ctx.clone_throwaway());
+        assert!(become_copy_recipient_slot_filter(&clause.effect).is_some());
         assert!(
             probe_declared_target_slot(effect, &ctx).is_none(),
             "the copy recipient and source are separate roles"
+        );
+
+        // Printed Master's Rebuke: the head is TargetOnly and the damage is a
+        // separately targeted child; the head alone is not the declaration.
+        let effect = "Target creature you control deals damage equal to its power to target creature or planeswalker you don't control";
+        let clause =
+            crate::parser::oracle_effect::parse_effect_clause(effect, &mut ctx.clone_throwaway());
+        assert!(clause
+            .sub_ability
+            .as_ref()
+            .is_some_and(|child| { child.effect.target_filter().is_some() }));
+        assert!(
+            probe_declared_target_slot(effect, &ctx).is_none(),
+            "a separately targeted child is part of the declaration"
         );
 
         // Printed Noble Vestige: "Prevent the next 1 damage that would be dealt
