@@ -837,7 +837,7 @@ fn resolved_mana_ability_for_live_output(
 ) -> ResolvedAbility {
     let ability = match &*ability_def.effect {
         Effect::Mana { produced, .. } => {
-            largest_sizing_resolution(state, produced, ability_def, source_id, player)
+            largest_sizing_resolution(state, produced, ability_def, source_id, player, None)
                 .map(|(resolved, _)| resolved)
         }
         _ => None,
@@ -880,17 +880,23 @@ fn sizing_resolutions(
 
 /// The sizing resolution that adds the most mana, with that amount. An
 /// any-one-color amount that reads the color chosen for it is sized by its
-/// best color (`planned_gross_mana`).
+/// best color (`planned_gross_mana`). `announced_x`, when given, is bound as
+/// the activation's X (CR 107.3a), so an amount that reads it ("Add X mana")
+/// is sized at that X rather than at an unannounced X of 0.
 fn largest_sizing_resolution(
     state: &GameState,
     produced: &ManaProduction,
     ability: &AbilityDefinition,
     object_id: ObjectId,
     controller: PlayerId,
+    announced_x: Option<u32>,
 ) -> Option<(ResolvedAbility, u32)> {
     sizing_resolutions(state, ability, object_id, controller)
         .into_iter()
-        .map(|resolved| {
+        .map(|mut resolved| {
+            if let Some(x) = announced_x {
+                resolved.set_chosen_x_recursive(x);
+            }
             let gross = planned_gross_mana(produced, state, &resolved);
             (resolved, gross)
         })
@@ -2215,9 +2221,10 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
         })
         .filter_map(|(_, ability)| match &*ability.effect {
             Effect::Mana { produced, .. } => {
-                let gross =
-                    largest_sizing_resolution(state, produced, ability, object_id, controller)
-                        .map_or(0, |(_, gross)| gross);
+                let gross = largest_sizing_resolution(
+                    state, produced, ability, object_id, controller, None,
+                )
+                .map_or(0, |(_, gross)| gross);
                 // CR 605.3b: Net the mana paid to activate this ability —
                 // gross output overstates what a filter land actually adds.
                 let activation_cost = mana_abilities::mana_sub_cost_of(&ability.cost)
@@ -2425,6 +2432,8 @@ pub(crate) fn mana_capacity_matching(
         return 0;
     }
 
+    let gates = (capacity_use == CapacityUse::ActivationWindow)
+        .then(|| mana_abilities::ManaActivationGates::compute(state));
     let nets = obj
         .abilities
         .iter()
@@ -2432,14 +2441,32 @@ pub(crate) fn mana_capacity_matching(
         .filter(|(idx, ability)| {
             gate(ability)
                 && is_payment_mana_ability(ability)
-                && mana_ability_usable_for_payment(
-                    state,
-                    controller,
-                    object_id,
-                    *idx,
-                    ability,
-                    payment_context,
-                )
+                && match &gates {
+                    // CR 601.2g + CR 605.3a: an upper bound on the window can't
+                    // judge a producer's own mana cost on the board it opens
+                    // on — an earlier activation of the window can pay it
+                    // (Calciform Pools' "{1}, Remove X storage counters" after
+                    // Ashnod's Altar's {C}{C}). Every other cost is still judged
+                    // now, and the producer's net output already charges its
+                    // mana cost.
+                    Some(gates) => mana_ability_plannable_for_payment(
+                        state,
+                        controller,
+                        object_id,
+                        *idx,
+                        ability,
+                        payment_context,
+                        gates,
+                    ),
+                    None => mana_ability_usable_for_payment(
+                        state,
+                        controller,
+                        object_id,
+                        *idx,
+                        ability,
+                        payment_context,
+                    ),
+                }
         })
         .filter_map(|(_, ability)| {
             let net = usable_mana_ability_net(state, object_id, controller, ability, capacity_use)?;
@@ -2605,6 +2632,40 @@ fn mana_ability_usable_for_payment(
     }
 }
 
+/// CR 601.2g + CR 605.3a: [`mana_ability_usable_for_payment`] with the
+/// ability's own mana cost deferred to the payment it is activated in
+/// ([`ManaPayabilityMode::Planning`]), so a producer another producer funds is
+/// counted. Decided without a legality simulation.
+fn mana_ability_plannable_for_payment(
+    state: &GameState,
+    controller: PlayerId,
+    object_id: ObjectId,
+    idx: usize,
+    ability: &AbilityDefinition,
+    payment_context: Option<&PaymentContext<'_>>,
+    gates: &mana_abilities::ManaActivationGates,
+) -> bool {
+    mana_abilities::mana_ability_ready_without_simulation_gated(
+        state,
+        controller,
+        object_id,
+        idx,
+        ability,
+        ManaPayabilityMode::Planning,
+        gates,
+    ) && activation_condition_satisfied(state, controller, object_id, idx, ability)
+        && match &*ability.effect {
+            Effect::Mana { restrictions, .. } => mana_ability_allowed_for_payment(
+                ability,
+                restrictions,
+                state,
+                object_id,
+                payment_context,
+            ),
+            _ => false,
+        }
+}
+
 /// CR 605.3b: Net mana one usable activation contributes to planned capacity.
 fn usable_mana_ability_net(
     state: &GameState,
@@ -2616,7 +2677,14 @@ fn usable_mana_ability_net(
     let Effect::Mana { produced, .. } = &*ability.effect else {
         return None;
     };
-    let sizing = largest_sizing_resolution(state, produced, ability, object_id, controller);
+    // CR 107.3a + CR 601.2g: the window's upper bound sizes an "Add X mana"
+    // ability at the largest X its cost lets the player announce (Calciform
+    // Pools' storage counters, Chicago Loop's speed).
+    let announced_x = (capacity_use == CapacityUse::ActivationWindow)
+        .then(|| mana_abilities::largest_announceable_x(state, controller, object_id, ability))
+        .flatten();
+    let sizing =
+        largest_sizing_resolution(state, produced, ability, object_id, controller, announced_x);
     if capacity_use == CapacityUse::XCeiling
         && sizing.as_ref().is_some_and(|(resolved, _)| {
             activation_amount_depends_on_color(state, produced, resolved)
@@ -2728,12 +2796,19 @@ pub(crate) fn player_choice_mana_abilities_for_payment<'a>(
 
 /// CR 117.1d + CR 605.3a: the mana abilities a payment window can offer at all.
 /// Choice-free tap-cost and unambiguous self-sacrifice abilities (Sol Ring,
-/// Gold, Treasure) are already covered by the tap path, so they are not window
-/// candidates.
+/// Wastes, Gold, Treasure) are already covered by the tap path, so they are
+/// not window candidates. A tap ability whose cost has no object-choosing
+/// component is judged by its shape, so no board the window reaches makes it
+/// one, and a battlefield of such producers costs the window's search nothing.
 fn player_choice_mana_ability_shape(ability: &AbilityDefinition) -> bool {
     ability.kind == AbilityKind::Activated
         && mana_abilities::is_mana_ability(ability)
         && !has_unambiguous_self_sacrifice_component(&ability.cost)
+        && !(has_tap_component(&ability.cost)
+            && !ability
+                .cost
+                .as_ref()
+                .is_some_and(mana_abilities::cost_may_require_object_choice))
 }
 
 /// CR 605.3a + CR 117.1d: whether one candidate mana ability of
@@ -2747,6 +2822,35 @@ pub(crate) fn player_choice_mana_ability_ready_for_payment(
     ability: &AbilityDefinition,
     payment_context: Option<&PaymentContext<'_>>,
 ) -> bool {
+    let gates = mana_abilities::ManaActivationGates::compute(state);
+    player_choice_mana_ability_passes_screen(
+        state,
+        controller,
+        object_id,
+        idx,
+        ability,
+        payment_context,
+        &gates,
+    ) && mana_abilities::can_activate_mana_ability_now_gated(
+        state, controller, object_id, idx, ability, &gates,
+    )
+}
+
+/// CR 605.3a + CR 117.1d: every check of
+/// [`player_choice_mana_ability_ready_for_payment`] that needs no legality
+/// simulation — the candidate's shape, its source's readiness (a tapped source
+/// can't pay a {T} cost, CR 107.5 + CR 118.3), its activation condition and its mana's
+/// spend restrictions. A candidate that fails it is not ready, so a caller
+/// that bounds its simulations need not spend one on it.
+pub(crate) fn player_choice_mana_ability_passes_screen(
+    state: &GameState,
+    controller: PlayerId,
+    object_id: ObjectId,
+    idx: usize,
+    ability: &AbilityDefinition,
+    payment_context: Option<&PaymentContext<'_>>,
+    gates: &mana_abilities::ManaActivationGates,
+) -> bool {
     if !player_choice_mana_ability_shape(ability) {
         return false;
     }
@@ -2758,7 +2862,15 @@ pub(crate) fn player_choice_mana_ability_ready_for_payment(
     {
         return false;
     }
-    if !mana_abilities::can_activate_mana_ability_now(state, controller, object_id, idx, ability) {
+    if !mana_abilities::mana_ability_ready_without_simulation_gated(
+        state,
+        controller,
+        object_id,
+        idx,
+        ability,
+        ManaPayabilityMode::Current,
+        gates,
+    ) {
         return false;
     }
     if !activation_condition_satisfied(state, controller, object_id, idx, ability) {

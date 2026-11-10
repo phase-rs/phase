@@ -5841,3 +5841,317 @@ fn the_vaults_offer_finds_the_clue_sacrifice_before_committing_its_creature() {
     resolve_stack(&mut runner);
     assert_eq!(hand_size(&runner, P0), 1, "the Vault drew");
 }
+
+// ---------------------------------------------------------------------------
+// #10190 fourth review: irrelevant producers spend none of the search, a
+// conversion that makes mana spendable is progress, and the window follows a
+// mana ability's announced X.
+// ---------------------------------------------------------------------------
+
+/// Answers the `PayAmountChoice` a mana ability's announced X raises.
+fn submit_pay_amount(runner: &mut GameRunner, amount: u32) -> WaitingFor {
+    act(runner, GameAction::SubmitPayAmount { amount })
+}
+
+fn choose_mana(runner: &mut GameRunner, colors: Vec<engine::types::mana::ManaType>) -> WaitingFor {
+    act(
+        runner,
+        GameAction::ChooseManaColor {
+            choice: engine::types::game_state::ManaChoice::Combination(colors),
+            count: 1,
+        },
+    )
+}
+
+/// CR 601.2g + CR 118.3 (#10190 fourth review): tapped producers can't be
+/// activated in the window, so however many there are, they spend none of the
+/// witness search's budget. Mindless Automaton's "{1}, Discard a card" with
+/// Ashnod's Altar ("Sacrifice a creature: Add {C}{C}."), a creature and a card
+/// in hand stays offered for a manual payment beside 257 tapped producers —
+/// Wastes ("{T}: Add {C}.", never a window candidate) and Springleaf Drum
+/// ("{T}, Tap an untapped creature you control: Add one mana of any color.",
+/// a candidate whose tapped source the readiness screen refuses) — and
+/// completes with one {C} floating.
+#[test]
+fn tapped_producers_leave_the_automatons_altar_offer_reachable() {
+    for producer in ["Wastes", "Springleaf Drum"] {
+        let mut scenario = scenario_at_main();
+        let automaton = scenario
+            .add_creature_from_oracle(P0, "Mindless Automaton", 2, 2, MINDLESS_AUTOMATON)
+            .as_artifact_creature()
+            .with_mana_cost(ManaCost::generic(4))
+            .with_plus_counters(2)
+            .id();
+        let altar = add(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield);
+        let fodder = add(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
+        let discard = add(&mut scenario, P0, "Grizzly Bears", Zone::Hand);
+        let producers: Vec<ObjectId> = (0..257)
+            .map(|_| add(&mut scenario, P0, producer, Zone::Battlefield))
+            .collect();
+        let mut runner = build(scenario);
+        for id in &producers {
+            runner
+                .state_mut()
+                .objects
+                .get_mut(id)
+                .expect("the producer")
+                .tapped = true;
+        }
+        let index = ability_index_of(&runner, automaton, "Discard a card");
+
+        assert_eq!(
+            offered_payment_modes(&runner, automaton, index),
+            vec![CastPaymentMode::Manual],
+            "{producer}: the Altar route is found past the tapped producers"
+        );
+        let waiting_for = activate_index(&mut runner, automaton, index, CastPaymentMode::Manual);
+        assert!(is_mana_payment(&waiting_for), "{producer}: {waiting_for:?}");
+        activate_in_window(&mut runner, altar, &[fodder], None);
+        assert_eq!(
+            pool_total(&runner),
+            2,
+            "{producer}: the Altar made {{C}}{{C}}"
+        );
+        let waiting_for = pass(&mut runner);
+        assert!(
+            is_cost_prompt(&waiting_for, |kind| *kind == PayCostKind::Discard),
+            "{producer}: the discard follows the window: {waiting_for:?}"
+        );
+        let waiting_for = select_cards(&mut runner, &[discard]);
+        assert!(is_priority(&waiting_for), "{producer}: {waiting_for:?}");
+        assert!(in_zone(&runner, fodder, Zone::Graveyard));
+        assert!(in_zone(&runner, discard, Zone::Graveyard));
+        assert_eq!(pool_total(&runner), 1, "{producer}: one {{C}} floats");
+        assert!(
+            producers.iter().all(|id| tapped(&runner, *id)),
+            "{producer}: no tapped producer was used"
+        );
+
+        resolve_stack(&mut runner);
+        assert_eq!(
+            plus_counters(&runner, automaton),
+            3,
+            "{producer}: the counter resolved"
+        );
+    }
+}
+
+/// CR 106.6 + CR 601.2g (#10190 fourth review): a conversion that leaves the
+/// pool's total and printed-symbol types alone is progress when it makes mana
+/// spendable under the activation's own rider. A red-chosen Throne of
+/// Eldraine's "{3}, {T}: Draw two cards. Spend only mana of the chosen color to
+/// activate this ability." is funded by two Ashnod's Altar sacrifices
+/// ({C}{C}{C}{C}) and three Manaforge Cinder conversions ("{1}: Add {B} or {R}.
+/// Activate no more than three times each turn.") to {R}{R}{R}. It is offered
+/// for a manual payment and completes with one {C} floating.
+#[test]
+fn cinder_conversions_of_altar_mana_fund_a_red_chosen_throne() {
+    let mut scenario = scenario_at_main();
+    let throne = scenario
+        .add_creature_from_oracle(P0, "Throne of Eldraine", 0, 1, THRONE_OF_ELDRAINE)
+        .as_artifact()
+        .with_mana_cost(ManaCost::generic(5))
+        .id();
+    let cinder = add(&mut scenario, P0, "Manaforge Cinder", Zone::Battlefield);
+    let altar = add(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield);
+    let creatures = [
+        scenario.add_vanilla(P0, 2, 2),
+        scenario.add_vanilla(P0, 2, 2),
+    ];
+    scenario.add_card_to_library_top(P0, "First drawn card");
+    scenario.add_card_to_library_top(P0, "Second drawn card");
+    let mut runner = build(scenario);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&throne)
+        .expect("the Throne")
+        .chosen_attributes
+        .push(engine::types::ability::ChosenAttribute::Color(
+            ManaColor::Red,
+        ));
+    let index = non_mana_ability_index(&runner, throne);
+    let hand_before = hand_size(&runner, P0);
+
+    assert_eq!(
+        offered_payment_modes(&runner, throne, index),
+        vec![CastPaymentMode::Manual],
+        "three converted {{R}} pay the red-only {{3}}"
+    );
+    let waiting_for = activate_index(&mut runner, throne, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    for creature in creatures {
+        activate_in_window(&mut runner, altar, &[creature], None);
+    }
+    assert_eq!(
+        pool_total(&runner),
+        4,
+        "the Altar made {{C}}{{C}}{{C}}{{C}}"
+    );
+    for _ in 0..3 {
+        activate_in_window(
+            &mut runner,
+            cinder,
+            &[],
+            Some(engine::types::game_state::ManaChoice::SingleColor(
+                engine::types::mana::ManaType::Red,
+            )),
+        );
+    }
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(engine::types::mana::ManaType::Red),
+        3,
+        "three {{C}} became {{R}}"
+    );
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, throne), "the {{T}} was paid");
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(engine::types::mana::ManaType::Colorless),
+        1,
+        "the red {{3}} left the {{C}} floating"
+    );
+    assert_eq!(pool_total(&runner), 1);
+
+    resolve_stack(&mut runner);
+    assert_eq!(hand_size(&runner, P0), hand_before + 2, "the draw resolved");
+}
+
+/// CR 107.3a + CR 601.2g (#10190 fourth review): the window follows a mana
+/// ability's announced X through its live prompt. Chicago Loop's "Pay X speed:
+/// Add X mana in any combination of colors." pays Figure of Destiny's "{R/W}:
+/// This creature becomes a Kithkin Spirit with base power and toughness 2/2."
+/// with X = 1; its "{T}: Add {C}." can't. The activation is offered for a
+/// manual payment only and completes, spending the speed.
+#[test]
+fn chicago_loops_announced_speed_funds_figure_of_destiny() {
+    let mut scenario = scenario_at_main();
+    let figure = add(&mut scenario, P0, "Figure of Destiny", Zone::Battlefield);
+    let chicago_loop = add(&mut scenario, P0, "Chicago Loop", Zone::Battlefield);
+    let mut runner = build(scenario);
+    runner.state_mut().players[P0.0 as usize].speed = Some(1);
+    let index = ability_index_of(&runner, figure, "Kithkin Spirit with");
+    let speed_ability = ability_index_of(&runner, chicago_loop, "speed");
+
+    assert_eq!(
+        offered_payment_modes(&runner, figure, index),
+        vec![CastPaymentMode::Manual],
+        "only the announced speed makes the {{R/W}}"
+    );
+    let waiting_for = activate_index(&mut runner, figure, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    let waiting_for = act(
+        &mut runner,
+        GameAction::ActivateAbility {
+            source_id: chicago_loop,
+            ability_index: speed_ability,
+            payment_mode: CastPaymentMode::Auto,
+        },
+    );
+    assert!(
+        matches!(waiting_for, WaitingFor::PayAmountChoice { max: 1, .. }),
+        "{waiting_for:?}"
+    );
+    let waiting_for = submit_pay_amount(&mut runner, 1);
+    assert!(
+        matches!(waiting_for, WaitingFor::ChooseManaColor { .. }),
+        "{waiting_for:?}"
+    );
+    let waiting_for = choose_mana(&mut runner, vec![engine::types::mana::ManaType::Red]);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    assert_eq!(runner.state().players[P0.0 as usize].speed, Some(0));
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert_eq!(pool_total(&runner), 0, "the {{R}} paid {{R/W}}");
+    assert!(
+        !tapped(&runner, chicago_loop),
+        "the Loop's {{T}} was not used"
+    );
+
+    resolve_stack(&mut runner);
+    assert_eq!(
+        (
+            runner.state().objects[&figure].power,
+            runner.state().objects[&figure].toughness
+        ),
+        (Some(2), Some(2)),
+        "the animation resolved"
+    );
+}
+
+/// CR 601.2g + CR 605.3a + CR 107.3a (#10190 fourth review): one producer can
+/// fund another, so the window's entry estimate can't judge a producer's own
+/// mana cost on the board the window opens on. A tapped Calciform Pools with
+/// three storage counters turns one of Ashnod's Altar's {C}{C} into three mana
+/// ("{1}, Remove X storage counters from this land: Add X mana in any
+/// combination of {W} and/or {U}."), four in all for Jayemdae Tome's "{4},
+/// {T}: Draw a card." It is offered for a manual payment and completes.
+#[test]
+fn calciform_pools_funded_by_the_altar_pays_jayemdae_tome() {
+    let mut scenario = scenario_at_main();
+    let tome = scenario
+        .add_artifact_from_oracle(P0, "Jayemdae Tome", JAYEMDAE_TOME)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let pools = add(&mut scenario, P0, "Calciform Pools", Zone::Battlefield);
+    let altar = add(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield);
+    let fodder = add(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
+    scenario.with_counter(pools, CounterType::Generic("storage".to_string()), 3);
+    scenario.add_card_to_library_top(P0, "Drawn card");
+    let mut runner = build(scenario);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&pools)
+        .expect("the Pools")
+        .tapped = true;
+    let index = non_mana_ability_index(&runner, tome);
+    let storage_ability = ability_index_of(&runner, pools, "storage counters from");
+    let hand_before = hand_size(&runner, P0);
+
+    assert_eq!(
+        offered_payment_modes(&runner, tome, index),
+        vec![CastPaymentMode::Manual],
+        "the Altar's {{C}}{{C}} and the Pools' conversion make {{4}}"
+    );
+    let waiting_for = activate_index(&mut runner, tome, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(&mut runner, altar, &[fodder], None);
+    assert_eq!(pool_total(&runner), 2);
+    let waiting_for = act(
+        &mut runner,
+        GameAction::ActivateAbility {
+            source_id: pools,
+            ability_index: storage_ability,
+            payment_mode: CastPaymentMode::Auto,
+        },
+    );
+    assert!(
+        matches!(waiting_for, WaitingFor::PayAmountChoice { max: 3, .. }),
+        "{waiting_for:?}"
+    );
+    let mut waiting_for = submit_pay_amount(&mut runner, 3);
+    if matches!(waiting_for, WaitingFor::ChooseManaColor { .. }) {
+        waiting_for = choose_mana(
+            &mut runner,
+            vec![
+                engine::types::mana::ManaType::White,
+                engine::types::mana::ManaType::White,
+                engine::types::mana::ManaType::Blue,
+            ],
+        );
+    }
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    assert_eq!(pool_total(&runner), 4, "{{C}} plus three from the Pools");
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert_eq!(pool_total(&runner), 0, "the {{4}} was paid");
+    assert!(tapped(&runner, tome));
+
+    resolve_stack(&mut runner);
+    assert_eq!(hand_size(&runner, P0), hand_before + 1, "the Tome drew");
+}

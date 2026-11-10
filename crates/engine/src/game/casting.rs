@@ -28251,9 +28251,11 @@ fn one_of_announcements(cost: &AbilityCost) -> Vec<std::borrow::Cow<'_, AbilityC
 }
 
 /// The most work [`mana_ability_window_mana_witness`] does for one verdict:
-/// each candidate it checks for readiness, each board it builds, and each
-/// payability probe it runs. Each probe dry-runs the payment on a clone of its
-/// own, so all three are counted. A search that runs out answers
+/// each readiness verdict that may simulate an activation, each board it
+/// builds, and each payability probe it runs. Each probe dry-runs the payment
+/// on a clone of its own, so all three are counted; a candidate the readiness
+/// screen refuses without simulating (a tapped source's {T} cost) is not. A
+/// search that runs out answers
 /// [`WitnessOutcome::BudgetExhausted`], which offers nothing — the budget must
 /// cover the work that finds the winning route, not only the boards after it
 /// (Phyrexian Vault's only creature spent to the first Ironworks sacrifice
@@ -28304,6 +28306,17 @@ fn mana_ability_window_mana_witness(
     let candidates: Vec<(ObjectId, usize)> =
         super::mana_sources::player_choice_mana_abilities_for_payment(state, player).collect();
     let distinguished_mana_types = payment_distinguished_mana_types(state, cost, &candidates);
+    let spend_contexts = candidates
+        .iter()
+        .filter(|(id, index)| {
+            state
+                .objects
+                .get(id)
+                .and_then(|obj| obj.abilities.get(*index))
+                .is_some_and(|def| super::mana_abilities::mana_sub_cost_of(&def.cost).is_some())
+        })
+        .map(|&(id, index)| activation_payment_context(state, id, Some(index)))
+        .collect();
     let mut search = ManaWindowWitnessSearch {
         player,
         cost,
@@ -28313,6 +28326,7 @@ fn mana_ability_window_mana_witness(
         color_constraint: activation_context.mana_color_constraint,
         payment_context: activation_context,
         distinguished_mana_types,
+        spend_contexts,
     };
     search.from(state)
 }
@@ -28369,21 +28383,25 @@ struct ManaWindowWitnessSearch<'a, F> {
     payment_context: ActivationPaymentContext,
     /// [`payment_distinguished_mana_types`] of the cost.
     distinguished_mana_types: Option<Vec<ManaType>>,
+    /// CR 106.6: the payment context of each candidate whose own cost spends
+    /// mana — an intermediate payment of the window
+    /// ([`Self::pool_composition`]).
+    spend_contexts: Vec<ActivationPaymentContext>,
 }
+
+/// One bucket of [`ManaWindowWitnessSearch::pool_composition`]: the unit's
+/// told-apart type (`None` for the stand-in), and whether each of the window's
+/// payments may spend it.
+type PoolCompositionKey = (Option<ManaType>, Vec<bool>);
 
 impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
     /// Whether some activations of `candidates` on `board` reach a
     /// board on which the cost is payable.
     fn from(&mut self, board: &GameState) -> WitnessOutcome {
         let player = self.player;
+        let gates = super::mana_abilities::ManaActivationGates::compute(board);
         let mut activatable: Vec<(ObjectId, usize, AbilityDefinition)> = Vec::new();
         for &(mana_source, index) in self.candidates {
-            // CR 601.2g: readiness work is part of the search, so it spends the
-            // same budget a board does.
-            let Some(budget) = self.budget.checked_sub(1) else {
-                return WitnessOutcome::BudgetExhausted;
-            };
-            self.budget = budget;
             let Some(def) = board
                 .objects
                 .get(&mana_source)
@@ -28392,13 +28410,34 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
                 continue;
             };
             let context = self.payment_context.as_payment_context();
-            if super::mana_sources::player_choice_mana_ability_ready_for_payment(
+            // CR 601.2g + CR 118.3: a candidate the screen refuses (a tapped
+            // source's {T} cost, an unmet condition) is not ready, and judging
+            // it simulates nothing, so it costs no budget: no number of
+            // irrelevant producers keeps the search from the route that works.
+            if !super::mana_sources::player_choice_mana_ability_passes_screen(
                 board,
                 player,
                 mana_source,
                 index,
                 def,
                 Some(&context),
+                &gates,
+            ) {
+                continue;
+            }
+            // A readiness verdict past the screen may simulate the activation
+            // on a clone, so it spends the same budget a board does.
+            let Some(budget) = self.budget.checked_sub(1) else {
+                return WitnessOutcome::BudgetExhausted;
+            };
+            self.budget = budget;
+            if super::mana_abilities::can_activate_mana_ability_now_gated(
+                board,
+                player,
+                mana_source,
+                index,
+                def,
+                &gates,
             ) {
                 activatable.push((mana_source, index, def.clone()));
             }
@@ -28615,6 +28654,32 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
                     )
                 })
             }
+            // CR 107.3a + CR 107.1c: a mana ability whose cost carries an X the
+            // player announces ("Pay X speed": Chicago Loop; "Remove X storage
+            // counters": Calciform Pools) waits for that amount. Each legal
+            // amount is a separate way to activate it, answered through the
+            // live continuation authority; the largest is tried first.
+            Ok(WaitingFor::PayAmountChoice {
+                resource,
+                min,
+                max,
+                pending_mana_ability: Some(pending),
+                ..
+            }) => self.try_each(
+                board,
+                &next,
+                (min..=max).rev(),
+                false,
+                |answered, amount| {
+                    super::mana_abilities::handle_mana_ability_pay_amount(
+                        answered,
+                        &pending,
+                        &resource,
+                        amount,
+                        &mut Vec::new(),
+                    )
+                },
+            ),
             _ => WitnessOutcome::Unpayable,
         }
     }
@@ -28726,28 +28791,45 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
         }
     }
 
-    /// CR 106.1 + CR 107.4: the payment's spendable mana as the types it can
-    /// tell apart, plus one bucket for every other type (all of which pay only
-    /// generic mana).
-    fn pool_composition(&self, state: &GameState) -> Vec<usize> {
+    /// CR 106.1 + CR 107.4 + CR 106.6: the pool as the payments of this window
+    /// see it — each unit keyed by its type when some payment tells that type
+    /// apart (one stand-in for every other type, all of which pay only generic
+    /// mana), and by which payments may spend it at all: the activation's own
+    /// ([`Self::payment_context`]) and each candidate's mana cost
+    /// ([`Self::spend_contexts`]). A conversion that leaves the pool's total
+    /// and its printed-symbol types alone can still make mana spendable that
+    /// was not: Manaforge Cinder's {R} from an Altar's {C} pays Throne of
+    /// Eldraine's "Spend only mana of the chosen color" {3}.
+    fn pool_composition(&self, state: &GameState) -> Vec<(PoolCompositionKey, usize)> {
         let Some(player) = state.players.get(self.player.0 as usize) else {
             return Vec::new();
         };
-        match self.distinguished_mana_types.as_deref() {
-            None => vec![player.mana_pool.total()],
-            Some(types) => {
-                let mut composition: Vec<usize> = types
+        let final_context = self.payment_context.as_payment_context();
+        let spend_contexts: Vec<PaymentContext<'_>> = std::iter::once(final_context)
+            .chain(
+                self.spend_contexts
                     .iter()
-                    .map(|&kind| player.mana_pool.count_color(kind))
-                    .collect();
-                composition.push(
-                    player
-                        .mana_pool
-                        .count_where(|shape| !types.contains(&shape.color)),
-                );
-                composition
+                    .map(ActivationPaymentContext::as_payment_context),
+            )
+            .collect();
+        let mut composition: Vec<(PoolCompositionKey, usize)> = Vec::new();
+        for (shape, count) in player.mana_pool.shapes() {
+            let kind = self
+                .distinguished_mana_types
+                .as_deref()
+                .and_then(|types| types.contains(&shape.color).then_some(shape.color));
+            let spendable = spend_contexts
+                .iter()
+                .map(|ctx| mana_payment::mana_unit_permits_payment_context(shape, ctx))
+                .collect();
+            let key = (kind, spendable);
+            match composition.iter_mut().find(|(known, _)| *known == key) {
+                Some((_, total)) => *total += count,
+                None => composition.push((key, count)),
             }
         }
+        composition.sort();
+        composition
     }
 
     fn clone_board(&mut self, board: &GameState) -> Option<GameState> {
