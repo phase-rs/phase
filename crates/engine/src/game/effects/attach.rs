@@ -2245,7 +2245,7 @@ fn protection_blocks_attachment(
 ) -> bool {
     use crate::types::keywords::Keyword;
 
-    host.keywords.iter().any(|keyword| {
+    host.keywords.iter().any(|keyword| { // allow-raw-authority: attachment legality needs the specific protection quality and its surviving provenance; host is the live battlefield object
         let Keyword::Protection(quality) = keyword else {
             return false;
         };
@@ -5552,9 +5552,10 @@ mod tests {
             provenance.iter().any(|entry| entry.rider.is_none()),
             "the syntheses branch must record the printed contributor"
         );
-        assert!(state.objects[&host].keywords.contains(&Keyword::Protection(
-            ProtectionTarget::Color(ManaColor::White)
-        )));
+        assert!(crate::game::keywords::has_keyword(
+            &state.objects[&host],
+            &Keyword::Protection(ProtectionTarget::Color(ManaColor::White))
+        ));
         // REVERT-PROBE: drop the rider-less synthesis from
         // `record_protection_provenance` ⇒ only the exempting Source instance
         // remains, so this returns None and the assertion fails.
