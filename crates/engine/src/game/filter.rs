@@ -6631,22 +6631,34 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
     // CR 115.9 + CR 608.2h: `lki` IS the epoch this projection answers for, so
     // the counter set and tap status it captured answer from it — not the live
     // object and not the ObjectId-keyed exit cache. Token identity is the one
-    // leaf the snapshot cannot state, so it answers from what the engine DID
-    // capture for this object (`captured_token_identity`) or from a zone that
-    // proves non-token-ness; where neither holds, `reading` decides between
-    // refusing and the projection's own conservative bit (see `token_identity`).
+    // leaf the snapshot cannot state (CR 707.2: it is not a copiable value), so
+    // it answers from a derivation that dates the bit to THIS capture, never from
+    // "the latest zone-change row for this id", which can belong to another epoch
+    // of the object (see `selected_token_identity`).
     let epoch = CapturedEpoch {
         counters: &lki.counters,
         tapped: lki.tapped,
-        is_token: match snapshot_zone {
-            Some(Zone::Battlefield) | None => captured_token_identity(state, object_id),
-            // CR 111.7: a token in a zone other than the battlefield ceases to
-            // exist, so a target announced elsewhere is certainly not one.
-            Some(_) => Some(false),
+        snapshot_zone,
+        token: match reading {
+            // CR 115.9: the selection-time reading asks what the chosen target
+            // WAS when it was chosen, so a bit no capture can date refuses (see
+            // `CapturedEpoch::token_identity`).
+            EpochReading::SelectionTime => {
+                selected_token_identity(state, object_id, snapshot_zone, &lki.name)
+            }
+            // A look-back projection is not a selection epoch: it reads only the
+            // row that belongs to the snapshot's own epoch, and otherwise keeps
+            // the projection's conservative bit.
+            EpochReading::Projection => projected_token_identity(state, object_id, snapshot_zone),
         },
         reading,
     };
-    zone_change_filter_inner_with_epoch(state, &record, record.from_zone, filter, ctx, Some(epoch))
+    // CR 115.9 + CR 608.2h: three-valued, because a leaf this capture cannot
+    // answer must neither report a match nor be inverted into one. UNKNOWN
+    // settles to no match at this boundary — the caller asked whether the filter
+    // holds of the selection, and an unprovable leaf does not hold.
+    zone_change_filter_answer_with_epoch(state, &record, record.from_zone, filter, ctx, epoch)
+        .is_some_and(|holds| holds)
 }
 
 /// CR 608.2k + CR 608.2h: Evaluate a target filter against an ability's
@@ -7831,29 +7843,117 @@ fn build_battlefield_entry_token_object(
     obj
 }
 
-/// CR 111.1 + CR 400.7: token identity of the exact object a historical subject
-/// names, read from the zone-change record the engine captured when that object
-/// last changed zones ([`crate::game::restrictions::record_zone_change`]).
-///
-/// Token-ness is a property of the object itself, not of a moment: a token is a
-/// marker representing a permanent that no card represents (CR 111.1), and
-/// token-ness is not among the copiable values a copy effect acquires
-/// (CR 707.2), so it is fixed when the object is created. It therefore needs no
-/// epoch of its own — any captured record for that storage id states it for the
-/// object's whole life, which is also why the zone-change path itself answers
-/// `FilterProp::Token` from the departure record after the object has ceased to
-/// exist.
-///
-/// `zone_changes_this_turn` is the per-turn journal every move writes through,
-/// so `None` means the object has not changed zones this turn and no capture
-/// holds a token bit for it. That is an absence of evidence, never evidence of
-/// non-token-ness, and the caller must refuse rather than read the live object.
-fn captured_token_identity(state: &GameState, object_id: ObjectId) -> Option<bool> {
+/// The engine's own capture for an object's last zone change — the row it wrote
+/// when the object moved ([`crate::game::restrictions::record_zone_change`]).
+/// `None` means the object has not changed zones this turn, so no such capture
+/// exists. That is an absence of evidence, never evidence of anything.
+fn latest_zone_change_record(state: &GameState, object_id: ObjectId) -> Option<&ZoneChangeRecord> {
     state
         .zone_changes_this_turn
         .iter()
         .rev()
         .find(|record| record.object_id == object_id)
+}
+
+/// CR 111.1 + CR 111.7 + CR 115.9 + CR 730.2a + CR 730.2c + CR 730.2d: token
+/// identity of a target as it was WHEN IT WAS SELECTED, or `None` when no
+/// capture dates the bit to that epoch.
+///
+/// The bit cannot be part of an `LKISnapshot` (CR 707.2: token-ness is not a
+/// copiable value), so this leaf has to answer from a capture that says WHEN the
+/// object held it. The object's latest zone-change row is not such a capture on
+/// its own: CR 730.2d lets a card merge onto a token and leave the SAME object
+/// (CR 730.2c) with the opposite token-ness, and a merge is not a zone change
+/// (CR 730.2b), so that row keeps stating the bit the object entered with while
+/// the object itself is now the other thing. Reading it as "the" answer reports
+/// an earlier epoch's bit for a later selection.
+///
+/// What places the selection on one side of that in-place change is the other
+/// half of the same rule pair: CR 730.2a gives a merged permanent the topmost
+/// component's characteristics, so the name the epoch captured identifies which
+/// component was on top when the capture was taken. An epoch that name cannot
+/// place is refused rather than guessed at.
+///
+/// The live object enters this derivation only as EVIDENCE about which epoch the
+/// selection is in — never as the answer: the live bit is returned only once the
+/// captured name has placed the selection on the post-change side, where
+/// CR 730.2d makes that bit the selection's own. The residue is a merge between
+/// two same-named components, which leaves the name unable to separate the two
+/// sides; that shape is indistinguishable here and therefore refused.
+fn selected_token_identity(
+    state: &GameState,
+    object_id: ObjectId,
+    snapshot_zone: Option<Zone>,
+    captured_name: &str,
+) -> Option<bool> {
+    if let Some(zone) = snapshot_zone {
+        // CR 111.7: a token in a zone other than the battlefield ceases to exist,
+        // so a target announced anywhere else is certainly not one.
+        if zone != Zone::Battlefield {
+            return Some(false);
+        }
+    }
+    let record = latest_zone_change_record(state, object_id)?;
+    let Some(live) = state.objects.get(&object_id) else {
+        // The object is gone. A departure writes the row from the object as it
+        // left, so the row states the bit of the last epoch there was.
+        return Some(record.is_token);
+    };
+    if live.is_token == record.is_token {
+        // Nothing changed the bit in place since the row, so it spans the whole
+        // interval that contains the selection.
+        return Some(record.is_token);
+    }
+    // CR 730.2d: the bit changed IN PLACE — a card merged on top of this object —
+    // so the row states the pre-merge epoch and the live object the post-merge
+    // one. CR 730.2a is what tells them apart: the merge that decided the bit is
+    // the merge that put a component's characteristics on the top of the pile, so
+    // the captured name says which side the selection is on.
+    if card_names_match(captured_name, &record.name) {
+        return Some(record.is_token);
+    }
+    if card_names_match(captured_name, &live.name) {
+        return Some(live.is_token);
+    }
+    // The capture names neither side (a layer effect renamed the object after
+    // selection, a blank capture name, a merge between two same-named
+    // components): refuse, never guess.
+    None
+}
+
+/// CR 111.7 + CR 400.7 + CR 608.2h: token identity for a LOOK-BACK projection —
+/// a snapshot the caller holds for another epoch (a departed subject, a spent
+/// mana source, a tracked-set member), not a CR 115.9 selection-time reading.
+///
+/// A projection has no selection epoch to date, so it must not read "the latest
+/// zone-change row by object id": that row can belong to a later epoch of the
+/// object than the snapshot does. What it may read is the row that belongs to the
+/// snapshot's OWN epoch — the departure row, whose `from_zone` is the zone the
+/// snapshot was taken in and whose token bit was captured as the object left it.
+/// Any other row states a different epoch and answers nothing, which lets the
+/// projection keep its own conservative bit
+/// ([`CapturedEpoch::token_identity`]) rather than a claim about some row.
+fn projected_token_identity(
+    state: &GameState,
+    object_id: ObjectId,
+    snapshot_zone: Option<Zone>,
+) -> Option<bool> {
+    // A capture that states no zone states no epoch to key a row on.
+    let zone = snapshot_zone?;
+    // CR 111.7: a token in a zone other than the battlefield ceases to exist, so
+    // a subject projected in any other zone is certainly not one.
+    if zone != Zone::Battlefield {
+        return Some(false);
+    }
+    state
+        .zone_changes_this_turn
+        .iter()
+        .rev()
+        .find(|record| {
+            record.object_id == object_id
+                && record.from_zone == Some(zone)
+                && record.to_zone != zone
+        })
         .map(|record| record.is_token)
 }
 
@@ -7884,14 +7984,17 @@ struct CapturedEpoch<'a> {
     counters: &'a HashMap<CounterType, u32>,
     /// CR 110.5: the tap status the subject had when it was selected.
     tapped: bool,
-    /// CR 111.1 + CR 111.7: token identity, from either of the two captured
-    /// facts that can prove it — the record the engine captured for this object
-    /// at its last zone change ([`captured_token_identity`]), or a zone the
-    /// subject was announced in that is not the battlefield (a token in any
-    /// other zone ceases to exist, so such a subject is certainly not a token).
-    /// `None` means neither capture holds it; [`Self::token_identity`] decides
-    /// what that means for the reading being answered.
-    is_token: Option<bool>,
+    /// CR 601.2c + CR 110.5d: the zone the snapshot was taken in, whenever the
+    /// caller states one. `None` states none. The tap leaves need it: status is a
+    /// property of permanents, so a capture taken in any other zone cannot answer
+    /// them at all.
+    snapshot_zone: Option<Zone>,
+    /// CR 111.1 + CR 111.7 + CR 730.2d: token identity, dated to this epoch by
+    /// [`selected_token_identity`] (a selection-time reading) or to the
+    /// snapshot's own departure row ([`projected_token_identity`]). `None` means
+    /// no capture dates it to this epoch; [`Self::token_identity`] decides what
+    /// that means for the reading being answered.
+    token: Option<bool>,
     /// CR 115.9: which reading of this capture is being answered.
     reading: EpochReading,
 }
@@ -7921,19 +8024,35 @@ impl CapturedEpoch<'_> {
     /// CR 111.1 + CR 108.2 + CR 115.9: token identity as this epoch may state
     /// it. `None` means the leaf must refuse.
     ///
-    /// A capture that states the bit answers with it. One that does not may
-    /// stand as "not a token" only in a [`EpochReading::Projection`], where that
-    /// is the conservative bit a projected record already carries
+    /// A capture that dates the bit to this epoch answers with it. One that does
+    /// not may stand as "not a token" only in a [`EpochReading::Projection`],
+    /// where that is the conservative bit a projected record already carries
     /// (`is_token: false`) — the same fail-closed answer
     /// `spell_record_matches_property` gives a cast record, and not a read of
     /// any live object. A [`EpochReading::SelectionTime`] reading refuses
     /// instead: there the question is what the target WAS when it was chosen,
     /// and "presumably not a token" is not that answer.
     fn token_identity(self) -> Option<bool> {
-        self.is_token.or(match self.reading {
+        self.token.or(match self.reading {
             EpochReading::SelectionTime => None,
             EpochReading::Projection => Some(false),
         })
+    }
+
+    /// CR 110.5 + CR 110.5d: tap status as this epoch may state it. `None` means
+    /// the leaf must refuse.
+    ///
+    /// Status is a property of permanents only: a card in a graveyard, in exile,
+    /// on the stack, in a hand or in a library is neither tapped nor untapped, so
+    /// a capture taken in one of those zones has no answer to give — it is not
+    /// "untapped". A capture that states the battlefield, or states no zone at
+    /// all (a look-back over a snapshot whose `tapped` bit was itself taken from
+    /// a public-zone object, see [`LKISnapshot`]), answers from the captured bit.
+    fn tap_status(self) -> Option<bool> {
+        match self.snapshot_zone {
+            Some(zone) if zone != Zone::Battlefield => None,
+            _ => Some(self.tapped),
+        }
     }
 }
 
@@ -7946,6 +8065,133 @@ fn zone_change_filter_inner(
     ctx: &FilterContext<'_>,
 ) -> bool {
     zone_change_filter_inner_with_epoch(state, record, licensed, filter, ctx, None)
+}
+
+/// The epoch-carrying door for a HISTORICAL subject: three-valued, so a leaf the
+/// capture cannot answer neither reports a match nor becomes one under
+/// `TargetFilter::Not`.
+///
+/// `None` is UNKNOWN. The combinator arms keep it (Kleene `and`/`or`, and a
+/// negation inverts a known value only), and every other arm is definite, so an
+/// unanswerable leaf can only ever travel upward as UNKNOWN — never as `false`,
+/// which a surrounding `Not` would read as a match and never as `true`, which
+/// would report the leaf itself as holding. The collapse to "no match" happens
+/// once, at the entry point that answers a caller.
+fn zone_change_filter_answer_with_epoch(
+    state: &GameState,
+    record: &ZoneChangeRecord,
+    licensed: Option<Zone>,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+    epoch: CapturedEpoch<'_>,
+) -> Option<bool> {
+    match filter {
+        // CR 608.2c: a known answer is inverted; an unknown one stays unknown.
+        TargetFilter::Not { filter } => {
+            zone_change_filter_answer_with_epoch(state, record, licensed, filter, ctx, epoch)
+                .map(|holds| !holds)
+        }
+        TargetFilter::And { filters } => kleene_and(filters.iter().map(|filter| {
+            zone_change_filter_answer_with_epoch(state, record, licensed, filter, ctx, epoch)
+        })),
+        TargetFilter::Or { filters } => kleene_or(filters.iter().map(|filter| {
+            zone_change_filter_answer_with_epoch(state, record, licensed, filter, ctx, epoch)
+        })),
+        // CR 205.1: a typed filter is a conjunction of its axes. Only the
+        // property axis can be unanswerable, and only when one of its leaves is
+        // one of the capture's own; a filter with none of them keeps the
+        // one-pass record walk below.
+        TargetFilter::Typed(typed) if typed.properties.iter().any(epoch_answerable_property) => {
+            let source_ctx = source_context_from_filter(
+                state,
+                ctx.source_id,
+                ctx.source_controller,
+                ctx.ability,
+                ctx.trigger_source,
+                None,
+                ctx.triggering_object,
+                ctx.granting_object,
+            );
+            // Every property is definite, so the record walk decides the
+            // remaining axes (types, controller) and combines them the same way
+            // it always has. An unanswerable property poisons the conjunction:
+            // conservative in one direction only, because UNKNOWN never becomes a
+            // match and no other axis can turn it into one.
+            kleene_and(
+                typed
+                    .properties
+                    .iter()
+                    .map(|prop| epoch_property_answer(prop, epoch, state, record, &source_ctx)),
+            )
+            .map(|_| {
+                zone_change_filter_inner_with_epoch(
+                    state,
+                    record,
+                    licensed,
+                    filter,
+                    ctx,
+                    Some(epoch),
+                )
+            })
+        }
+        _ => Some(zone_change_filter_inner_with_epoch(
+            state,
+            record,
+            licensed,
+            filter,
+            ctx,
+            Some(epoch),
+        )),
+    }
+}
+
+/// Whether `prop` asks for a fact only the captured epoch can answer — directly,
+/// or through the composites the record walk recurses into.
+fn epoch_answerable_property(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::Token | FilterProp::NonToken | FilterProp::Tapped | FilterProp::Untapped => {
+            true
+        }
+        FilterProp::AnyOf { props } => props.iter().any(epoch_answerable_property),
+        FilterProp::Not { prop } => epoch_answerable_property(prop),
+        _ => false,
+    }
+}
+
+/// CR 111.1 + CR 110.5d + CR 115.9: the three-valued answer for a property the
+/// capture may be unable to state. `None` is UNKNOWN, and every composite keeps
+/// it (see [`zone_change_filter_answer_with_epoch`]).
+fn epoch_property_answer(
+    prop: &FilterProp,
+    epoch: CapturedEpoch<'_>,
+    state: &GameState,
+    record: &ZoneChangeRecord,
+    source: &SourceContext<'_>,
+) -> Option<bool> {
+    match prop {
+        FilterProp::AnyOf { props } => kleene_or(
+            props
+                .iter()
+                .map(|inner| epoch_property_answer(inner, epoch, state, record, source)),
+        ),
+        FilterProp::Not { prop } => {
+            epoch_property_answer(prop, epoch, state, record, source).map(|holds| !holds)
+        }
+        // CR 111.1 + CR 111.7: token identity, dated to this epoch.
+        FilterProp::Token => epoch.token_identity(),
+        FilterProp::NonToken => epoch.token_identity().map(|is_token| !is_token),
+        // CR 110.5 + CR 110.5d: tap status, only for a permanent.
+        FilterProp::Tapped => epoch.tap_status(),
+        FilterProp::Untapped => epoch.tap_status().map(|tapped| !tapped),
+        // Every other leaf is a definite answer from the capture.
+        _ => Some(zone_change_record_matches_property(
+            prop,
+            state,
+            record,
+            source,
+            Some(epoch),
+        )),
+    }
 }
 
 /// The epoch-carrying body of [`zone_change_filter_inner`]. `epoch` is `Some`
@@ -11746,15 +11992,13 @@ fn zone_change_record_matches_property(
     // read the live token bit, `Counters`/`Tapped`/`Untapped` read `lki_cache`.
     // `CapturedEpoch` states which of them the capture can answer; a leaf it
     // cannot answer refuses rather than reporting the present.
+    //
+    // The leaves themselves are answered by [`epoch_property_answer`], the one
+    // authority both this door and the three-valued door read, so a `Not` above
+    // them sees exactly the answer this walk would have: a definite value, or
+    // nothing at all.
     if let Some(epoch) = epoch {
         match prop {
-            // CR 111.1 + CR 115.9: token identity, from the captured record the
-            // engine holds for this object's own life, from a zone that proves
-            // it, or — in a look-back projection only — as the projection's own
-            // conservative bit. Neither the live token bit nor an absence may
-            // answer.
-            FilterProp::Token => return epoch.token_identity() == Some(true),
-            FilterProp::NonToken => return epoch.token_identity() == Some(false),
             // CR 122.1: the counter set captured at selection time.
             FilterProp::Counters {
                 counters,
@@ -11770,9 +12014,10 @@ fn zone_change_record_matches_property(
                     resolve_filter_threshold(state, count, source),
                 );
             }
-            // CR 110.5 + CR 110.5d: the tap status captured at selection time.
-            FilterProp::Tapped => return epoch.tapped,
-            FilterProp::Untapped => return !epoch.tapped,
+            _ if epoch_answerable_property(prop) => {
+                return epoch_property_answer(prop, epoch, state, record, source)
+                    .is_some_and(|holds| holds);
+            }
             _ => {}
         }
     }
@@ -24766,6 +25011,206 @@ mod tests {
                 &ctx,
             ),
             "a selection-time reading refuses what the capture cannot state"
+        );
+    }
+
+    /// The same selection-time capture with a different name — the leaf that
+    /// places an epoch on one side of an in-place token-ness change reads the
+    /// name the capture recorded (CR 730.2a), so the tests below need it.
+    fn named_epoch_snapshot(name: &str) -> LKISnapshot {
+        let mut lki = epoch_snapshot(&[], false);
+        lki.name = name.to_string();
+        lki
+    }
+
+    /// CR 730.2a + CR 730.2b + CR 730.2c + CR 730.2d + CR 115.9 + CR 400.7:
+    /// Gemrazer mutating on top of a token host. The merge is not a zone change
+    /// (CR 730.2b/c), so the host's captured on-move row keeps stating the token
+    /// bit it ENTERED with, while the merged permanent — the same ObjectId — is a
+    /// nontoken creature (CR 730.2d). A history question about a target selected
+    /// after the merge must answer with the selection epoch's bit; that row is an
+    /// earlier epoch of the same object and cannot state it.
+    ///
+    /// Revert-probe: reading the latest row for the object id (the base
+    /// behaviour) answers `Token` = true for the post-merge selection, i.e. the
+    /// entry epoch rather than the selected one.
+    #[test]
+    fn history_token_leaf_answers_from_the_selected_epoch_not_the_entry_row() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Gemrazer Source");
+        let host = add_creature(&mut state, PlayerId(0), "Soldier Token");
+        let gemrazer = add_creature(&mut state, PlayerId(0), "Gemrazer");
+
+        // CR 702.140a: the mutate host is a creature TOKEN and the mutating spell
+        // is a card. Capture the host's identity as it entered the battlefield —
+        // the row the history leaf used to read.
+        state.objects.get_mut(&host).unwrap().is_token = true;
+        let entry = state.objects.get(&host).unwrap().snapshot_for_zone_change(
+            host,
+            None,
+            Zone::Battlefield,
+        );
+        assert!(
+            entry.is_token,
+            "fixture precondition: the host entered as a token"
+        );
+        state.zone_changes_this_turn.push_back(entry);
+
+        // SELECTION made while the host still was a token.
+        let before = ActivationTargetFact::Object {
+            id: host,
+            lki: Box::new(named_epoch_snapshot("Soldier Token")),
+            zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+        };
+
+        // Gemrazer mutates ON TOP: same ObjectId (CR 730.2c), nontoken from now
+        // on (CR 730.2d), characteristics from the topmost component (CR 730.2a).
+        state.battlefield.retain(|&id| id != gemrazer);
+        let mut events = Vec::new();
+        crate::game::merge::merge_object_onto(
+            &mut state,
+            gemrazer,
+            host,
+            crate::game::merge::MergeSide::Top,
+            &mut events,
+        );
+        assert!(
+            !state.objects.get(&host).unwrap().is_token,
+            "fixture precondition: a card on top of a token host is nontoken (CR 730.2d)"
+        );
+        assert_eq!(
+            state.objects.get(&host).unwrap().name,
+            "Gemrazer",
+            "fixture precondition: the topmost component supplies the name (CR 730.2a)"
+        );
+
+        let ctx = FilterContext::from_source(&state, source);
+        let matches = |fact: &ActivationTargetFact, filter: TargetFilter| {
+            declared_target_facts_match(&state, std::slice::from_ref(fact), &filter, &ctx)
+        };
+
+        // SELECTION AFTER the merge: the merged permanent is not a token, so
+        // "targets a token" is false and "targets a nontoken" holds.
+        let after = ActivationTargetFact::Object {
+            id: host,
+            lki: Box::new(named_epoch_snapshot("Gemrazer")),
+            zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+        };
+        assert!(
+            !matches(&after, prop_filter(FilterProp::Token)),
+            "the entry row's token bit is an EARLIER epoch of this object; the \
+             selection saw a nontoken permanent"
+        );
+        assert!(
+            matches(&after, prop_filter(FilterProp::NonToken)),
+            "the selection epoch states the nontoken bit"
+        );
+
+        // The mirror: a selection taken BEFORE the merge still answers token,
+        // from the same capture, with the same stale row present.
+        assert!(
+            matches(&before, prop_filter(FilterProp::Token)),
+            "a selection made while the host was a token answers token"
+        );
+        assert!(!matches(&before, prop_filter(FilterProp::NonToken)));
+    }
+
+    /// CR 110.5 + CR 110.5d + CR 115.9: only permanents have status. A target
+    /// announced as a CARD in a graveyard or in exile is neither tapped nor
+    /// untapped, so both history tap leaves refuse for it — and their negation
+    /// refuses too, because "not untapped" is not a fact about a card that has no
+    /// status at all.
+    ///
+    /// Revert-probe: the base reading answers `Untapped` = true for such a card
+    /// (its snapshot's `tapped` bit is false by capture, not by rules) and lets
+    /// `Not(Untapped)` report a match.
+    #[test]
+    fn history_tap_leaves_refuse_for_a_card_with_no_status() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Reanimate Source");
+        let card = add_creature(&mut state, PlayerId(0), "Dead Creature");
+        let ctx = FilterContext::from_source(&state, source);
+
+        let matches = |zone: Zone, filter: TargetFilter| {
+            let fact = ActivationTargetFact::Object {
+                id: card,
+                lki: Box::new(epoch_snapshot(&[], false)),
+                zone: AnnouncedTargetZone::Known(zone),
+            };
+            declared_target_facts_match(&state, std::slice::from_ref(&fact), &filter, &ctx)
+        };
+
+        for zone in [Zone::Graveyard, Zone::Exile] {
+            assert!(
+                !matches(zone, prop_filter(FilterProp::Tapped)),
+                "{zone:?}: a card that is not on the battlefield is not tapped (CR 110.5d)"
+            );
+            assert!(
+                !matches(zone, prop_filter(FilterProp::Untapped)),
+                "{zone:?}: a card that is not on the battlefield is not untapped either"
+            );
+            assert!(
+                !matches(
+                    zone,
+                    TargetFilter::Not {
+                        filter: Box::new(prop_filter(FilterProp::Untapped)),
+                    }
+                ),
+                "{zone:?}: an unanswerable status cannot be inverted into a match"
+            );
+        }
+
+        // The control: the same captured bit on a BATTLEFIELD permanent answers,
+        // so the refusals above are about the zone, not about the leaf.
+        assert!(
+            matches(Zone::Battlefield, prop_filter(FilterProp::Untapped)),
+            "a permanent the capture saw on the battlefield answers from it"
+        );
+    }
+
+    /// CR 111.1 + CR 115.9 + CR 608.2h: a leaf the capture cannot answer stays
+    /// unanswerable under `TargetFilter::Not`. Defaulting it to "no" is the one
+    /// thing a negation turns into a positive match — a claim about the selection
+    /// that no capture supports.
+    ///
+    /// Revert-probe: with the bit defaulted to false, `Not(Token)` reports a match
+    /// for a target whose token identity is not captured anywhere.
+    #[test]
+    fn a_negation_cannot_turn_an_unanswerable_leaf_into_a_match() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Unknown Source");
+        let candidate = add_creature(&mut state, PlayerId(0), "Unknown Target");
+        // No on-move capture exists for this object, so the epoch states no token
+        // bit at all.
+        let ctx = FilterContext::from_source(&state, source);
+        let fact = ActivationTargetFact::Object {
+            id: candidate,
+            lki: Box::new(epoch_snapshot(&[], false)),
+            zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+        };
+        let matches = |filter: TargetFilter| {
+            declared_target_facts_match(&state, std::slice::from_ref(&fact), &filter, &ctx)
+        };
+
+        assert!(
+            !matches(prop_filter(FilterProp::Token)),
+            "the capture states no token bit for this selection"
+        );
+        assert!(
+            !matches(TargetFilter::Not {
+                filter: Box::new(prop_filter(FilterProp::Token)),
+            }),
+            "so its negation refuses too: UNKNOWN must not become a match"
+        );
+        // Nested one level deeper: the disjunction is unanswerable exactly when
+        // both of its (unstated, complementary) leaves are.
+        assert!(
+            !matches(TargetFilter::Not {
+                filter: Box::new(prop_filter(FilterProp::AnyOf {
+                    props: vec![FilterProp::Token, FilterProp::NonToken],
+                })),
+            }),
+            "an unanswerable disjunction stays unanswerable under negation"
         );
     }
 
