@@ -42913,9 +42913,15 @@ fn repaired_grammar_neighbours_parse_to_their_meaning_or_an_explicit_gap() {
 // into a `conditional` that the exporter already rendered. The other seven were
 // invisible, which is why earlier scope estimates for this change disagreed.
 //
-// One caveat: "The Destined" has no Scryfall match (searched by exact name,
-// 404), so its row is a parse-side data point and is asserted nowhere here.
-// Every other name above was confirmed against Scryfall.
+// Every name above was confirmed against Scryfall by exact name. In particular
+// "The Destined" IS a real card — "Spells you control that target a creature you
+// control cost {2} less to cast." — so an earlier version of this comment that
+// called it a parse-side-only data point was wrong and is corrected here.
+//
+// Two of the ten cards this PR changes parse SEMANTICS for are not cost modifiers
+// at all and so do not appear in this class: Rain of Riches and TARDIS Bay, whose
+// `affects` and `SpreadsCastThisTurn` gate change with the post-timing qualifier.
+// The full semantic set is those two plus the eight above.
 #[test]
 fn cost_modifier_bare_type_target_qualifier_carries_battlefield_scope() {
     use crate::parser::oracle_target::scope_type_phrase_to_the_battlefield;
@@ -43287,5 +43293,65 @@ fn activated_ability_cost_modifier_qualifier_axes_stay_in_their_slots() {
             .iter()
             .any(|f| matches!(f, TypeFilter::Artifact)),
         "the source qualifier must stay on `affected`, not migrate into the target: {source:?}"
+    );
+}
+
+#[test]
+fn static_tardis_bay_parses_from_its_complete_printed_line() {
+    // CR 202.3 + CR 601.2f + CR 611.2f: the COMPLETE printed Oracle text of TARDIS
+    // Bay, reminder text included — the string card data actually feeds the parser —
+    // rather than the clause alone. A fixture that trims the reminder can pass while
+    // the real line fails, which is why this one keeps it.
+    let printed = "The first spell you cast during each of your turns with mana value 2 or \
+                   greater has cascade. (When you cast that spell, exile cards from the top of \
+                   your library until you exile a nonland card that costs less. You may cast it \
+                   without paying its mana cost. Put the exiled cards on the bottom in a random \
+                   order.)";
+    let def = parse_static_line(printed).expect("TARDIS Bay's complete printed line must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Cascade,
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected Typed affected, got {:?}", def.affected);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        tf.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 2 },
+            }
+        )),
+        "the complete printed line must still carry the mana-value qualifier, got {:?}",
+        tf.properties
+    );
+}
+
+#[test]
+fn static_ordinary_cost_modifier_carries_no_target_scope() {
+    // Control for the CR 109.2 shaper: a cost modifier whose Oracle text names no
+    // target phrase at all — the ordinary payment case — must come out with an
+    // UNSCOPED affected filter. This is what proves the battlefield shaper fires on
+    // the qualifier rather than on every cost modifier.
+    let def = parse_static_line("Instant and sorcery spells you cast cost {1} less to cast.")
+        .expect("an ordinary cost modifier must parse");
+    let StaticMode::ModifyCost { .. } = def.mode else {
+        panic!("expected a cast-cost modifier, got {:?}", def.mode);
+    };
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected Typed affected, got {:?}", def.affected);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        !tf.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::Targets { .. } | FilterProp::InZone { .. },
+        )),
+        "an ordinary cost modifier names no target, so no target scope may be added; got {:?}",
+        tf.properties
     );
 }
