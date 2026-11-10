@@ -11345,8 +11345,7 @@ fn run_auto_pass_loop(
                             && matches!(result.waiting_for, WaitingFor::Priority { .. })
                         {
                             #[cfg(test)]
-                            AUTO_PASS_WINDOW_SAMPLES
-                                .with(|samples| samples.set(samples.get() + 1));
+                            AUTO_PASS_WINDOW_SAMPLES.with(|samples| samples.set(samples.get() + 1));
                             let fingerprint = state.loop_fingerprint();
                             let normalized = state.normalize_for_loop_sample();
                             // CR 732.5: the out verdict is read only for a repeat; it needs each
