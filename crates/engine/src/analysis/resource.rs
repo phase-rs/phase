@@ -3580,12 +3580,14 @@ fn cover_projection(state: &GameState) -> GameState {
 /// draw only if the game truly repeats with nothing changing. For a *beneficial* loop
 /// (CR 732.2a, the shortcut) the question asked here is identity in **board, zones and
 /// tap-state on the PROJECTED feed**: `normalize_for_loop`, then [`project_out_resources`],
-/// then that same strict comparator — plus the hand conjunct at the end of
-/// [`loop_states_equal_modulo_resources_side`], where this gate compensates for an axis the
-/// strict comparator leaves out: [`loyalty_activation_counts_match`] over the per-object
+/// then that same strict comparator — plus two hand conjuncts at the end of
+/// [`loop_states_equal_modulo_resources_side`], where this gate compensates for axes the
+/// projection removes: [`loyalty_activation_counts_match`] over the per-object
 /// CR 606.3 count and per-permanent extra-activation grant (distinct from the per-player
 /// `GameState::extra_loyalty_activations_this_turn` map, which
-/// `impl PartialEq for GameState` does compare). It states its own fail-closed argument there.
+/// `impl PartialEq for GameState` does compare), and
+/// [`floating_producer_facts_match`] over the CR 106.3 producer facts the projected-away
+/// pools could prove. Each states its own fail-closed argument there.
 ///
 /// What the projection removes is named by its own authorities rather than listed, because a
 /// list presented as exact is wrong by omission the moment a zeroing site is added — see
@@ -3639,7 +3641,150 @@ pub(crate) fn loop_states_equal_modulo_resources_side<'a, C: CurrentSide<'a>>(
     // widen the strict comparator, do NOT zero the fields) so a loop that
     // re-activates a loyalty ability (count k -> k+1) compares UNEQUAL and is not
     // falsely certified.
-    loop_states_equal(&pa, &pb) && loyalty_activation_counts_match(&pa, &pb)
+    //
+    // CR 106.3 + CR 118.3a: the producer FACTS the compared positions' floating mana
+    // can prove are compared analysis-locally for the same reason and one more: the
+    // projection clears every pool, which resolves no fact at all, so a pair one exit
+    // record apart used to collapse to two empty record sets. The fact is not a
+    // quantity — a payment resolves it before any pool arithmetic — so clearing the
+    // quantity cannot clear it too. See [`floating_producer_facts_match`].
+    loop_states_equal(&pa, &pb)
+        && loyalty_activation_counts_match(&pa, &pb)
+        && floating_producer_facts_match(a, b.state())
+}
+
+/// CR 106.3 + CR 118.3a + CR 732.2a: do the two compared positions prove the same
+/// payment-visible producer facts for the mana they hold?
+///
+/// A floating unit's producer is resolved by `game::casting::mana_spent_source_snapshots`
+/// — the single authority a payment uses: the live object when it still IS the pinned
+/// epoch, else that epoch's exit last-known information, else the pool's per-pip ledger
+/// row. What that authority returns is the fact a cast's "mana from a Treasure was spent
+/// to cast" gate reads, so comparing it compares what a payment can distinguish.
+///
+/// IDENTITY IS NOT PAYMENT-VISIBLE AND IS DROPPED. `source_id` and the epoch that minted
+/// the mana are not read by any price: every reader of the fact asks about the producing
+/// object's public characteristics (CR 106.3 makes the mana's source the source of the
+/// ability, and the question asked of it is what that source was). Two fresh producers of
+/// one object therefore carry the SAME fact, which is what keeps a real mana loop
+/// certifiable: Displacer Kitten + Blazing Firesinger mints and spends a producer every
+/// cycle, and no payment can tell cycle N's casting of that card from cycle N+1's.
+///
+/// THE LAYER-DERIVED FAMILY IS DROPPED TOO, for the reason
+/// [`project_object_for_loop`] states: power/toughness and the monotone counters are
+/// recomputed by the layer flush from inputs this comparison already projects, so a
+/// stored difference in them encodes no position. It has to be dropped here as well: the
+/// shipped Priest of Titania + Umbral Mantle loop pumps the PRODUCER each cycle, and a
+/// fact read straight off that producer would otherwise differ every cycle and refuse
+/// the loop it exists to certify (`corpus::drive_offline_priest_umbral`).
+///
+/// The comparison is over the SET of the facts rather than a multiset, matching the
+/// quantity-blindness the projection applies to the pools themselves. A unit whose
+/// producer cannot be resolved at all contributes the distinct fact `None` — "this mana,
+/// but I cannot say from what" — so an unprovable unit is distinguishable from a provable
+/// Treasure rather than silently absent.
+///
+/// The oracle is the payment's own: if some legal payment's outcome differs between the
+/// two positions, the facts differ; if none can, they do not. Fail-closed direction: a
+/// position that can prove its mana's producer and one that cannot compare UNEQUAL,
+/// which suppresses the loop match rather than manufacturing one.
+///
+/// WHERE THE QUESTION IS ASKED. Only when the two positions hold the SAME mana
+/// ([`identical_floating_mana`]). A differing pool is the QUANTITY — and, through it, the
+/// composition — this comparator deliberately does not compare (a growing pool is a
+/// mana loop's whole point), so a fact difference that comes with a differing pool is
+/// already governed by that relaxation and is not this conjunct's business. What it does
+/// answer is the shape that has no such excuse: identical pools, one of which can still
+/// prove where its mana came from and one of which cannot. That is a difference of
+/// EVIDENCE at a fixed quantity, which no relaxation reaches and which a payment reads.
+fn floating_producer_facts_match(a: &GameState, b: &GameState) -> bool {
+    if !identical_floating_mana(a, b) {
+        return true;
+    }
+    let left = floating_producer_facts(a);
+    let right = floating_producer_facts(b);
+    left.iter().all(|fact| right.contains(fact)) && right.iter().all(|fact| left.contains(fact))
+}
+
+/// CR 106.1: do the two positions hold the same floating mana, unit for unit?
+///
+/// [`ManaPool`](crate::types::mana::ManaPool)'s own equality is the answer, and it is
+/// the right one: it compares each unit's shape in pool order — colour, producing object,
+/// producing incarnation, restrictions, grants and expiry — and excludes only the mint
+/// tag (CR 104.4b), which is not position. Two positions that hold the same bodies of
+/// mana but different EVIDENCE about them are what
+/// [`floating_producer_facts_match`] is asked about.
+fn identical_floating_mana(a: &GameState, b: &GameState) -> bool {
+    a.players.len() == b.players.len()
+        && a.players
+            .iter()
+            .zip(&b.players)
+            .all(|(left, right)| left.mana_pool == right.mana_pool)
+}
+
+/// CR 106.3 + CR 118.3a: the DISTINCT producer facts the mana still floating in `state`
+/// can prove, read through the payment's own resolver and canonicalized to the
+/// payment-visible part (see [`floating_producer_facts_match`]).
+///
+/// `None` is one floating unit whose producer the payment cannot name — the shape a
+/// position whose exit record was lost falls into.
+fn floating_producer_facts(
+    state: &GameState,
+) -> Vec<Option<crate::types::game_state::LKISnapshot>> {
+    fn push(
+        facts: &mut Vec<Option<crate::types::game_state::LKISnapshot>>,
+        fact: Option<crate::types::game_state::LKISnapshot>,
+    ) {
+        if !facts.contains(&fact) {
+            facts.push(fact);
+        }
+    }
+
+    let units: Vec<crate::types::mana::ManaUnit> = state
+        .players
+        .iter()
+        .flat_map(|player| player.mana_pool.units())
+        .collect();
+    // One listed fact per FLOATING UNIT. `mana_spent_source_snapshots` drops the units it
+    // cannot resolve, so the unresolved ones are the remainder — they carry the distinct
+    // "cannot say" fact rather than vanishing, which is what makes an unprovable pool
+    // differ from a provable one of the same size.
+    let resolved = crate::game::casting::mana_spent_source_snapshots(state, &units);
+    let unresolved = units.len().saturating_sub(resolved.len());
+    let mut facts: Vec<Option<crate::types::game_state::LKISnapshot>> = Vec::new();
+    for snapshot in resolved {
+        push(&mut facts, Some(canonical_producer_fact(snapshot.lki)));
+    }
+    for _ in 0..unresolved {
+        push(&mut facts, None);
+    }
+    facts
+}
+
+/// CR 106.3 + CR 613.1g: the payment-visible part of one producer fact — the snapshot
+/// with the fields a price cannot read erased.
+///
+/// Three erasures, each with its own ground:
+///
+/// * `token_image_ref` is display data by its own declaration ("Display-only token
+///   catalog ref"), so two Treasures with the same characteristics are the same producer
+///   fact however each was minted. Smaug's remade Treasure arrives by a different creation
+///   path than the one the pool already holds, and comparing this field refused the loop
+///   (`loop_period_remade_token_source`).
+/// * `power`/`toughness` are the layer-flush outputs [`project_object_for_loop`] erases,
+///   for the reason stated there; a producer the loop pumps (Priest of Titania under
+///   Umbral Mantle) would otherwise differ every cycle.
+/// * the monotone counters are that same function's other erasure, by the same class
+///   authority (`CounterType::is_monotone_loop_resource`).
+fn canonical_producer_fact(
+    mut fact: crate::types::game_state::LKISnapshot,
+) -> crate::types::game_state::LKISnapshot {
+    fact.token_image_ref = None;
+    fact.power = None;
+    fact.toughness = None;
+    fact.counters
+        .retain(|counter_type, _| !counter_type.is_monotone_loop_resource());
+    fact
 }
 
 /// CR 606.3: per-object loyalty-activation equality across two projected
@@ -3702,11 +3847,50 @@ pub(crate) fn cost_modifier_reads_changed_projected_resource(
             else {
                 return true;
             };
+            // CR 601.2f: the variant axis is the cast the REPEAT makes, so it is read
+            // once from the casts the two frames actually recorded and handed to both
+            // frames. Pricing each frame against its own list would compare two
+            // different questions.
+            let variants = actual_cast_variants([prior, current]);
             observables.into_iter().any(|observable| {
-                resolve_cost_observable(prior, before.controller, *id, observable)
-                    != resolve_cost_observable(current, after.controller, *id, observable)
+                resolve_cost_observable(prior, before.controller, *id, observable, &variants)
+                    != resolve_cost_observable(
+                        current,
+                        after.controller,
+                        *id,
+                        observable,
+                        &variants,
+                    )
             })
         })
+}
+
+/// CR 601.2f: the casting variants the compared frames actually recorded — the axis a
+/// variant-gated price must be asked with, because a price gate is asked about the cast
+/// the repeat makes and the only casts a frame can show are the ones in its journal.
+///
+/// `None` is the list's single entry only when NEITHER frame recorded a cast: with no
+/// cast announced the variant-gated price has nothing to price on either frame, so the
+/// gate answers the same on both and the caller's other observables decide. Reading a
+/// journal row costs no static scan, so this adds no loop-detection pass.
+fn actual_cast_variants(
+    frames: [&GameState; 2],
+) -> Vec<Option<crate::types::game_state::CastingVariant>> {
+    let mut variants: Vec<Option<crate::types::game_state::CastingVariant>> = Vec::new();
+    for state in frames {
+        for rows in state.spells_cast_this_turn_by_player.values() {
+            for row in rows {
+                let variant = Some(row.cast_variant);
+                if !variants.contains(&variant) {
+                    variants.push(variant);
+                }
+            }
+        }
+    }
+    if variants.is_empty() {
+        variants.push(None);
+    }
+    variants
 }
 
 /// CR 601.2f: ONE thing a live cost modifier's static reads on a compared frame.
@@ -3728,7 +3912,34 @@ pub(crate) fn cost_modifier_reads_changed_projected_resource(
 #[derive(Debug, Clone, Copy)]
 enum CostObservable<'a> {
     Count(&'a crate::types::ability::QuantityRef),
-    Gate(&'a crate::types::ability::StaticCondition),
+    /// CR 601.2f + CR 109.5: the gate plus the modifier's CASTER SCOPE ("spells you
+    /// cast" / "spells your opponents cast" / unscoped). The scope is what says whose
+    /// journal the gate's "you" names, so it is part of the observable and not of the
+    /// state being read.
+    Gate {
+        condition: &'a crate::types::ability::StaticCondition,
+        caster_scope: crate::types::ability::CostModifierCasterScope,
+    },
+}
+
+/// CR 601.2f: one observable's reading on one frame — the shape the veto compares
+/// across frames.
+///
+/// [`Gate`](Self::Gate) resolves to one answer per `(payer, casting variant)` pair
+/// rather than one answer: a price gate is a claim about a CAST, and the two roles a
+/// cast brings (who pays, how they cast) are exactly the axes the reading must keep
+/// apart. A frame admitting a different set of payers therefore reads as different,
+/// which is fail-closed.
+#[derive(Debug, PartialEq, Eq)]
+enum CostObservableReading {
+    Count(i32),
+    Gate(
+        Vec<(
+            PlayerId,
+            Option<crate::types::game_state::CastingVariant>,
+            bool,
+        )>,
+    ),
 }
 
 /// CR 601.2f + CR 732.2a: every observable a live cost modifier's static reads on
@@ -3787,7 +3998,15 @@ fn static_mode_observables(
             .as_ref()
             .filter(|condition| static_condition_reads_projected(condition))
         {
-            observables.push(CostObservable::Gate(condition));
+            // CR 601.2f: the definition's own `affected` says WHOSE spells the price
+            // applies to; `board_wide_cost_modifier` reads the same axis and rejects
+            // `SelfRef`, so the scope is read here off `affected` directly.
+            observables.push(CostObservable::Gate {
+                condition,
+                caster_scope: crate::types::ability::cost_modifier_caster_scope(
+                    def.affected.as_ref(),
+                ),
+            });
         }
     }
     observables
@@ -3800,25 +4019,78 @@ fn static_condition_reads_projected(condition: &crate::types::ability::StaticCon
 }
 
 /// CR 601.2f: one observable's value on `state`, read exactly as cost determination
-/// reads it — the source's controller is the payer the modifier prices for.
+/// reads it.
+///
+/// The multiplier half keeps the source's controller: CR 601.2f's `dynamic_count`
+/// ("{1} less for each instant and sorcery card in your graveyard") is resolved for the
+/// static's controller by the casting pipeline itself
+/// (`casting::collect_battlefield_cost_modifiers` resolves it with `source_controller`).
+///
+/// The gate half does NOT. A cost static's condition is written about a CAST, and a
+/// cast has two players: the PAYER (the spell's controller, whose "you"/"each opponent"
+/// journal the condition reads) and the static's CONTROLLER (whose turn / ownership the
+/// condition reads). `evaluate_cost_mod_static_condition` takes both, and its default
+/// arm judges the condition for the payer — so passing one player twice makes every
+/// payer-relative gate ("the first noncreature spell each opponent casts each turn
+/// costs {1} more") read the controller's own journal and answer the same on both
+/// frames. The admitted payers come from the modifier's own caster scope, and the
+/// variant is the one the repeat actually casts with.
 fn resolve_cost_observable(
     state: &GameState,
     controller: PlayerId,
     source: ObjectId,
     observable: CostObservable<'_>,
-) -> i32 {
+    casting_variants: &[Option<crate::types::game_state::CastingVariant>],
+) -> CostObservableReading {
     match observable {
-        CostObservable::Count(qty) => resolve_cost_multiplier(state, controller, source, qty),
-        // CR 109.5: "you" in a cost static is its controller, and a cost static's
-        // condition is judged for that player whichever spell is being cast.
-        // CR 109.5: a cost static's condition is judged with its own controller as
-        // the payer ("you"), for the spell it would price.
-        CostObservable::Gate(condition) => {
-            i32::from(crate::game::casting::evaluate_cost_mod_static_condition(
-                state, condition, controller, controller, source, None,
-            ))
+        CostObservable::Count(qty) => {
+            CostObservableReading::Count(resolve_cost_multiplier(state, controller, source, qty))
         }
+        CostObservable::Gate {
+            condition,
+            caster_scope,
+        } => CostObservableReading::Gate(
+            admitted_payers(state, controller, caster_scope)
+                .into_iter()
+                .flat_map(|payer| {
+                    casting_variants.iter().map(move |casting_variant| {
+                        (
+                            payer,
+                            *casting_variant,
+                            crate::game::casting::evaluate_cost_mod_static_condition(
+                                state,
+                                condition,
+                                payer,
+                                controller,
+                                source,
+                                *casting_variant,
+                            ),
+                        )
+                    })
+                })
+                .collect(),
+        ),
     }
+}
+
+/// CR 601.2f: every player a live cost modifier prices on `state`, in player order —
+/// its [`CostModifierCasterScope`] read against the static's controller.
+///
+/// This is the payer half of the two roles [`resolve_cost_observable`] keeps apart. An
+/// unscoped modifier prices every caster, so every player is asked; an eliminated
+/// player casts nothing and is not asked.
+fn admitted_payers(
+    state: &GameState,
+    controller: PlayerId,
+    caster_scope: crate::types::ability::CostModifierCasterScope,
+) -> Vec<PlayerId> {
+    state
+        .players
+        .iter()
+        .filter(|player| !player.is_eliminated)
+        .map(|player| player.id)
+        .filter(|payer| caster_scope.admits(*payer, controller))
+        .collect()
 }
 
 /// CR 601.2f: one cost modifier's multiplier, priced on `state` exactly as cost determination
@@ -9301,6 +9573,198 @@ fn ability_has_per_game_activation_gate(state: &GameState, key: &(ObjectId, usiz
 mod tests {
     use crate::game::game_object::ObjectIncarnationRefExt;
     use std::sync::Arc;
+
+    /// CR 601.2f: one `SpellCastRecord` for the turn's cast journal — the shape
+    /// `finalize_cast` writes, carrying the VARIANT the cast actually used.
+    fn cast_record(
+        name: &str,
+        core_types: Vec<crate::types::card_type::CoreType>,
+        cast_variant: crate::types::game_state::CastingVariant,
+    ) -> crate::types::game_state::SpellCastRecord {
+        crate::types::game_state::SpellCastRecord {
+            name: name.to_string(),
+            core_types,
+            supertypes: vec![],
+            subtypes: vec![],
+            keywords: vec![],
+            colors: vec![],
+            mana_value: 1,
+            has_x_in_cost: false,
+            has_adventure: false,
+            from_zone: crate::types::zones::Zone::Hand,
+            cast_variant,
+            was_kicked: false,
+            spell_object_id: None,
+            prepared_copy_source: None,
+            mana_spent_source_snapshots: Some(Vec::new()),
+            targets: Some(Vec::new()),
+        }
+    }
+
+    /// The board both price-gate witnesses compare: a two-player game in P1's
+    /// precombat main with P1 controlling the static under test. Returns the state
+    /// and the static's source, so a witness can pin the exact conditional shape.
+    ///
+    /// `condition: None` keeps the parser's own gate for the printed line; `Some`
+    /// overrides it with the exact conditional shape a witness needs, because the
+    /// parser stacks a proven casting variant onto the printed gate itself
+    /// (`oracle_static::static_helpers`) and the override mirrors that construction.
+    fn price_gate_board(
+        condition: Option<crate::types::ability::StaticCondition>,
+    ) -> (
+        crate::types::game_state::GameState,
+        crate::types::identifiers::ObjectId,
+    ) {
+        let mut state = crate::types::game_state::GameState::new_two_player(7);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = crate::types::player::PlayerId(1);
+        state.priority_player = crate::types::player::PlayerId(1);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(308),
+            crate::types::player::PlayerId(1),
+            "Heartwood Storyteller Avatar".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        // CR 601.2f: the parser's own `ModifyCost` for the printed line, so the
+        // caster scope (`each opponent`) and the amount are the card's, not a
+        // hand-built approximation of them.
+        let mut definition = crate::parser::oracle_static::parse_static_line(
+            "The first noncreature spell each opponent casts each turn costs {1} more to cast.",
+        )
+        .expect("the printed Heartwood Storyteller Avatar line must parse to a cost modifier");
+        if let Some(condition) = condition {
+            definition.condition = Some(condition);
+        }
+        state
+            .objects
+            .get_mut(&source)
+            .expect("the source was just created")
+            .static_definitions
+            .push(definition);
+        (state, source)
+    }
+
+    /// CR 601.2f: the printed "the first noncreature spell … each turn" gate, as a
+    /// condition comparing the payer's own noncreature cast count against `ordinal - 1`.
+    fn first_noncreature_spell_gate() -> crate::types::ability::StaticCondition {
+        use crate::types::ability::{
+            Comparator, CountScope, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
+        };
+        crate::types::ability::StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: Some(TargetFilter::Typed(
+                        crate::types::ability::TypedFilter::card().with_type(
+                            // CR 205.2a: "noncreature" is negation on the type axis.
+                            TypeFilter::Non(Box::new(TypeFilter::Creature)),
+                        ),
+                    )),
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        }
+    }
+
+    /// CR 109.5 + CR 601.2f: a price gate is asked about the PAYER, not about the
+    /// static's controller.
+    ///
+    /// Heartwood Storyteller Avatar (Vanguard; Oracle verified against Scryfall):
+    /// "The first noncreature spell each opponent casts each turn costs {1} more to
+    /// cast." The static sits on P1's permanent and prices P0's cast, so the gate's
+    /// "each opponent casts" journal is P0's. Two frames that differ only in whether
+    /// P0 has cast a noncreature spell this turn therefore price the next repeat
+    /// differently, and CR 732.2a's "predictable results" forbid certifying the
+    /// recurrence: the veto must fire.
+    ///
+    /// Asking the gate with the static's controller in BOTH roles reads P1's journal
+    /// on both frames, answers the same on both, and misses the difference.
+    #[test]
+    fn a_price_gate_is_asked_about_the_payer_not_the_statics_controller() {
+        use crate::types::card_type::CoreType;
+        use crate::types::game_state::CastingVariant;
+        use crate::types::player::PlayerId;
+
+        let (mut paid, _source) = price_gate_board(None);
+        paid.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            im::Vector::from(vec![cast_record(
+                "Lightning Bolt",
+                vec![CoreType::Instant],
+                CastingVariant::Normal,
+            )]),
+        );
+        let (unpaid, _source) = price_gate_board(None);
+
+        assert!(
+            !paid
+                .spells_cast_this_turn_by_player
+                .contains_key(&PlayerId(1))
+                && !unpaid
+                    .spells_cast_this_turn_by_player
+                    .contains_key(&PlayerId(1)),
+            "reach-guard: the STATIC'S CONTROLLER has cast nothing on either frame, so a gate \
+             asked with the controller in both roles answers the same on both and sees nothing"
+        );
+        assert!(
+            super::cost_modifier_reads_changed_projected_resource(&paid, &unpaid),
+            "CR 109.5 + CR 601.2f: the paid frame has already spent P0's first noncreature \
+             spell, so the next repeat is taxed in one frame and not the other — the payer is \
+             P0 (the opponent the static prices), never the static's controller"
+        );
+    }
+
+    /// CR 601.2f: a variant-gated price is asked with the casting variant the repeat
+    /// ACTUALLY uses, not with `None`.
+    ///
+    /// The parser stacks a proven casting variant onto a cost modifier's gate as
+    /// `And[journal gate, CastingAsVariant]` (`oracle_static::static_helpers`), and
+    /// `And` requires every conjunct. Asked with `casting_variant: None` the variant
+    /// conjunct is false on every frame, so the whole gate is false on both frames and
+    /// a journal gate underneath it can move without the veto seeing anything. Asked
+    /// with the variant the frames' own cast journals record, the journal conjunct
+    /// decides, and the moved gate is visible.
+    #[test]
+    fn a_price_gate_is_asked_with_the_casting_variant_the_repeat_actually_uses() {
+        use crate::types::ability::StaticCondition;
+        use crate::types::card_type::CoreType;
+        use crate::types::game_state::CastingVariant;
+        use crate::types::player::PlayerId;
+
+        let variant_gated = StaticCondition::And {
+            conditions: vec![
+                first_noncreature_spell_gate(),
+                StaticCondition::CastingAsVariant {
+                    variant: CastingVariant::Warp,
+                },
+            ],
+        };
+        let (mut paid, _source) = price_gate_board(Some(variant_gated.clone()));
+        paid.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            im::Vector::from(vec![cast_record(
+                "Lightning Bolt",
+                vec![CoreType::Instant],
+                CastingVariant::Warp,
+            )]),
+        );
+        let (unpaid, _source) = price_gate_board(Some(variant_gated.clone()));
+
+        assert!(
+            super::static_condition_reads_projected(&variant_gated),
+            "reach-guard: the And carries the journal conjunct, so this gate IS an observable \
+             the veto collects"
+        );
+        assert!(
+            super::cost_modifier_reads_changed_projected_resource(&paid, &unpaid),
+            "CR 601.2f: both frames record the same Warp cast variant, so the variant conjunct \
+             agrees and the journal conjunct decides — the payer has spent the turn's first \
+             noncreature spell in one frame and not the other"
+        );
+    }
 
     /// CR 704.3 + CR 704.5a: reading a charge stream one stretch at a time gives the answer of
     /// stepping through it one repetition at a time

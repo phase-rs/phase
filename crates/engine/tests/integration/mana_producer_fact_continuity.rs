@@ -98,7 +98,9 @@ use engine::types::game_state::{
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaPipId, ManaType, ManaUnit};
+use engine::types::mana::{
+    ManaColor, ManaCost, ManaCostShard, ManaPipId, ManaPool, ManaType, ManaUnit,
+};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
@@ -1162,16 +1164,17 @@ fn the_loop_comparison_drops_a_spent_pips_row_with_no_phase_boundary() {
 /// first spends the unit with its producer recorded, so Rain of Riches grants the
 /// cast cascade; the second cannot name a producer at all, so it records no
 /// source and grants nothing. CR 732.2a's "predictable results" forbid the
-/// comparator to call those two positions the same one, and that is what this
-/// witnesses: the prune that keeps before/after LKI
-/// (`GameState::retain_carrier_referenced_lki`) only retains exit records a
-/// trigger-event carrier names, so the comparison used to delete the live side's
-/// record, see two identical pools and two empty record sets, and equate a payable
-/// position with an unpayable one.
+/// comparator to call those two positions the same one — in BOTH comparisons, which
+/// is what this witnesses: the strict one sees the difference through the pin the
+/// prune that keeps before/after LKI
+/// (`GameState::retain_carrier_referenced_lki`) preserves, and the relaxed one sees
+/// it because the projection clears the mana's QUANTITY and never the producer FACT
+/// a payment resolves before any pool arithmetic.
 ///
 /// REVERT-FAIL: drop the floating-pin arm from `retain_carrier_referenced_lki` and
-/// the comparison equates the pair, because normalization deletes the live side's
-/// exit record too.
+/// the strict comparison equates the pair, because normalization deletes the live
+/// side's exit record too; drop the producer-fact conjunct from the relaxed
+/// comparator and IT equates the pair, because the projection resolves no fact.
 #[test]
 fn a_floating_pin_references_its_exit_fact_before_the_carry_ledger_exists() {
     let (mut runner, bears, _aura, sciences) = minimus_board();
@@ -1236,19 +1239,81 @@ fn a_floating_pin_references_its_exit_fact_before_the_carry_ledger_exists() {
         "reach-guard: and neither holds a ledger row"
     );
 
-    // CR 732.2a: they pay differently. WHICH comparison sees that is a second question,
-    // and it is answered by the normalize-level witness
-    // (`GameState`'s `a_floating_pin_references_its_exit_record_only_while_the_mana_is_compared`):
-    // the strict comparison holds the mana and must see the difference, while
-    // `loop_states_equal_modulo_resources` projects the pools away
-    // (`project_out_player_consumables`) and compares no price at all — so it equates
-    // the pair deliberately, which is what keeps a legitimate mana loop (Kitten +
-    // Blazing Firesinger) certifiable.
+    // CR 106.3 + CR 732.2a: they pay differently, and BOTH loop comparisons must see it.
+    // The strict comparator holds the mana and sees the difference through the pin
+    // (`GameState`'s `a_floating_pin_references_its_exit_record_only_while_the_mana_is_compared`);
+    // the relaxed one projects the pools away, but the PRODUCER FACT the floating unit
+    // carries is not a quantity — one position can prove "mana from a Treasure was spent
+    // to cast" and the other cannot, which is a difference a payment resolves before any
+    // pool arithmetic. Equating them would let the loop detector certify a recurrence whose
+    // next cast is granted a cascade in one cycle and not in the other.
     assert!(
-        loop_states_equal_modulo_resources(runner.state(), &without_fact),
-        "control: the resource projection clears every pool, so no floating unit survives it \
-         and this record is history there — a pair one exit record apart is the same position \
-         for a comparison that compares no mana"
+        !loop_states_equal_modulo_resources(runner.state(), &without_fact),
+        "CR 106.3 + CR 732.2a: the two positions hold identical pools but only one can name \
+         the producer of its mana, so the next cast's Rain of Riches price differs between \
+         them — the projection clears the QUANTITY, never the payment-visible FACT"
+    );
+
+    // CONTROL, on the other side of the same line: a FRESH producer of the same kind is
+    // the same position. Re-pin the board's one unit, and the exit record beside it, onto
+    // a later epoch of the SAME object — the fact's content is unchanged, only the epoch
+    // that minted it — which is what every cycle of a real mana loop looks like (Kitten +
+    // Blazing Firesinger mints a fresh producer per cycle). The relaxed comparison must
+    // still equate that pair, so the witness above is a fact test and not an identity test.
+    let fresh_incarnation = incarnation + 7;
+    let mut fresh_producer = runner.state().clone();
+    {
+        let history = fresh_producer
+            .lki_by_incarnation
+            .get(&bears)
+            .expect("reach-guard: the producing epoch's exit record is on the live board");
+        assert_eq!(
+            history.keys().copied().collect::<Vec<_>>(),
+            vec![incarnation],
+            "reach-guard: the record set holds exactly the producing epoch"
+        );
+        let record = history[&incarnation].clone();
+        fresh_producer
+            .lki_by_incarnation
+            .retain(|object_id, _| *object_id != bears);
+        fresh_producer.lki_by_incarnation.insert(
+            bears,
+            std::collections::HashMap::from([(fresh_incarnation, record)]).into(),
+        );
+        let repinned = fresh_producer.players[P0.0 as usize]
+            .mana_pool
+            .units()
+            .map(|unit| ManaUnit {
+                source_incarnation: Some(fresh_incarnation),
+                ..unit
+            })
+            .collect::<Vec<_>>();
+        fresh_producer.players[P0.0 as usize].mana_pool = ManaPool::from_units(repinned);
+    }
+    assert_eq!(
+        (
+            pool_units(&runner)
+                .into_iter()
+                .map(|unit| (unit.source_id, unit.source_incarnation))
+                .collect::<Vec<_>>(),
+            fresh_producer.players[P0.0 as usize]
+                .mana_pool
+                .units()
+                .map(|unit| (unit.source_id, unit.source_incarnation))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            vec![(bears, Some(incarnation))],
+            vec![(bears, Some(fresh_incarnation))]
+        ),
+        "reach-guard: the control's only difference is WHICH epoch of the same object produced \
+         the unit — a fresh producer of an unchanged fact"
+    );
+    assert!(
+        loop_states_equal_modulo_resources(runner.state(), &fresh_producer),
+        "CR 732.2a: two positions whose floating mana comes from a fresh producer of the same \
+         object and the same public characteristics are the same position for a loop — no \
+         payment can tell them apart, so refusing them would veto every real mana loop"
     );
 
     // The difference the comparator must see, stated as the payment's own answer: the
@@ -1271,6 +1336,75 @@ fn a_floating_pin_references_its_exit_fact_before_the_carry_ledger_exists() {
     assert!(
         !without_grant,
         "and Rain of Riches grants nothing: 'mana from a Treasure was spent' is not provable there"
+    );
+}
+
+/// CR 106.3: the mana Minimus Containment's granted ability produces is sourced to
+/// the object the ABILITY belongs to — the enchanted permanent, as it stood when the
+/// ability was activated.
+///
+/// Oracle text verified against Scryfall: **Minimus Containment** `{2}{W}` Aura —
+/// "Enchant nonland permanent / Enchanted permanent is a Treasure artifact with
+/// \"{T}, Sacrifice this artifact: Add one mana of any color,\" and it loses all
+/// other abilities." The ability is the ENCHANTED PERMANENT's, so CR 106.3 makes
+/// that permanent the source of the mana — even though the ability's own cost
+/// sacrifices it, so CR 400.7 makes the graveyard card a different object and the
+/// storage id no longer answers for the producing epoch.
+///
+/// This is the fixture the two comparisons above are built on, stated as the rule:
+/// the unit pins the epoch that generated the ability, and the payment resolves the
+/// producer fact from THAT epoch — a Treasure artifact — which is what Rain of
+/// Riches' "mana from a Treasure was spent to cast" reads.
+#[test]
+fn the_granted_treasure_abilitys_mana_is_sourced_to_the_permanent_it_was_granted_to() {
+    let (mut runner, bears, _aura, _sciences) = minimus_board();
+    let producing_incarnation = runner.state().objects[&bears].incarnation;
+
+    activate_mana_ability(&mut runner, bears, ManaType::Green);
+
+    let units = pool_units(&runner);
+    assert_eq!(
+        units.len(),
+        1,
+        "reach-guard: the granted ability is the board's only mana source"
+    );
+    assert_eq!(
+        units[0].source_id, bears,
+        "CR 106.3: the source of the mana is the source of the ability that produced it — the \
+         enchanted permanent the Aura granted the ability to"
+    );
+    assert_eq!(
+        units[0].source_incarnation,
+        Some(producing_incarnation),
+        "CR 106.3 + CR 113.7 + CR 400.7: the pin names the epoch that GENERATED the ability, not \
+         whatever later occupies the storage id"
+    );
+    assert_ne!(
+        runner.state().objects[&bears].incarnation,
+        producing_incarnation,
+        "reach-guard: the sacrifice moved the card, so the live object at that id is the \
+         graveyard successor — a different object (CR 400.7)"
+    );
+
+    // The rule's observable half: the payment spends that unit and proves "mana from a
+    // Treasure was spent to cast", so Rain of Riches grants the cast cascade. A source
+    // read off the successor (a plain Grizzly Bears in the graveyard) would prove nothing.
+    let bauble = hand_artifact(
+        runner.state_mut(),
+        9401,
+        "Wayfarer's Bauble",
+        ManaCost::generic(1),
+    );
+    let (granted, recorded) = cast_after_restore_and_read_cascade(runner.state().clone(), bauble);
+    assert_eq!(
+        recorded, 1,
+        "CR 106.3: the spent unit's producer fact resolves to the Treasure artifact the Aura \
+         made of the enchanted permanent"
+    );
+    assert!(
+        granted,
+        "CR 106.3: Rain of Riches grants cascade because the mana's source is the Treasure the \
+         granted ability belonged to"
     );
 }
 
