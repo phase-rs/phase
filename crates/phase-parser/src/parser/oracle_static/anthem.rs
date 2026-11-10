@@ -954,10 +954,14 @@ pub(crate) fn parse_typed_you_control_subject_filter(
 ///
 /// The plural "they haven't dealt … damage yet" arm does NOT rely on guard #1:
 /// it runs only when `subject` is [`PrintedSubject::SourceNamed`], i.e. the
-/// host line's printed subject names the source itself. The hardcoded-SelfRef
-/// restriction arms (and the legacy "~ has/gets …" fallback, whose subject
-/// check is a negative list) therefore no longer feed it an attached or typed
-/// subject. The singular arms above are unchanged under either value — the
+/// host line's printed subject names the source itself and is complete, not a
+/// compound that merely starts with the source ("~ and enchanted creature",
+/// "~ together with …"): a self-reference followed by any subject connective is
+/// not a complete subject. The hardcoded-SelfRef restriction arms (and the
+/// legacy "~ has/gets …" fallback, whose subject check is a negative list)
+/// therefore no longer feed it an attached, typed or compound subject. Predicate
+/// coordinators ("~ can't attack or block", "~ has flying and haste") stay
+/// `SourceNamed`. The singular arms above are unchanged under either value — the
 /// Hobble family is out of this function's scope and keeps today's binding.
 ///
 /// Returns the condition unchanged when no permitted arm matches.
@@ -981,10 +985,16 @@ pub(crate) fn rewrite_self_pronoun_subject(condition: &str, subject: PrintedSubj
 /// `shared::printed_subject`; consumed by [`rewrite_self_pronoun_subject`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PrintedSubject {
-    /// The printed subject is the source itself.
+    /// The printed subject is the source itself, and only the source: the
+    /// self-reference is not followed by a subject connective. Predicate
+    /// coordinators ("~ can't attack or block", "~ has flying and haste") do
+    /// not make the subject compound.
     SourceNamed,
     /// Any other subject: attached ("enchanted creature"), typed ("creatures
-    /// you control", "each artifact"), or a bare pronoun ("it").
+    /// you control", "each artifact"), a bare pronoun ("it"), or a compound
+    /// that merely starts with the source ("~ and enchanted creature",
+    /// "~ or …", "~ and/or …", "~ together with …", "~ as well as …",
+    /// "~ plus …", "~ along with …").
     Other,
 }
 

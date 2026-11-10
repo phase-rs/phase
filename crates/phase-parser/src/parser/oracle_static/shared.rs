@@ -4200,12 +4200,28 @@ pub(crate) fn parse_affected_scoped_static_condition(
 /// derivation of [`PrintedSubject`]. `SourceNamed` exactly when the line opens
 /// with the source's own self-reference vocabulary (`~` or a
 /// `SELF_REF_TYPE_PHRASES` entry such as "this creature" / "this Aura")
-/// followed by a word boundary; everything else ("enchanted creature",
-/// "creatures you control", "each artifact", a bare "it", "~'s …") is `Other`.
+/// followed by a word boundary that completes the subject; everything else
+/// ("enchanted creature", "creatures you control", "each artifact", a bare
+/// "it", "~'s …") is `Other`. A self-reference followed by any subject
+/// connective is not a complete subject: a coordinator (`subject_list_separator`
+/// or a bare " or ") or a connective (" together with ", " as well as ",
+/// " plus ", " along with ") makes it a compound ("~ and enchanted creature",
+/// "this creature or each other creature"), which is `Other`, so the plural
+/// "they" gate is never bound to the source alone. Coordinators inside the
+/// predicate ("~ can't attack or block", "~ has flying and haste") are not
+/// adjacent to the self-reference and stay `SourceNamed`.
 pub(crate) fn printed_subject(tp: &TextPair<'_>) -> PrintedSubject {
     let mut source_named = (
         crate::parser::oracle_nom::duration::parse_self_reference_subject,
         peek(tag::<_, _, OracleError<'_>>(" ")),
+        not(peek(alt((
+            subject_list_separator,
+            value((), tag(" or ")),
+            value((), tag(" together with ")),
+            value((), tag(" as well as ")),
+            value((), tag(" plus ")),
+            value((), tag(" along with ")),
+        )))),
     );
     match source_named.parse(tp.lower.trim_start()) {
         Ok(_) => PrintedSubject::SourceNamed,
