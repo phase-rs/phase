@@ -3402,8 +3402,10 @@ fn map_delta<K: Ord + Copy>(
 /// Fail-closed in FOUR places: too few frames for every candidate `k`; a smallest repeating
 /// period whose delta is the zero vector; a certifying window that is not TURN-POSITION
 /// invariant (the CR 703.1 conjunct below); and reading the RING only — never the live
-/// `state` — so every compared frame is a `normalize_for_loop` snapshot taken at
-/// `WaitingFor::Priority{active_player}`, the conjunct both sampler sites gate on.
+/// `state` — so every compared frame is a `normalize_for_loop_sample` snapshot taken at
+/// `WaitingFor::Priority{active_player}`, the conjunct both sampler sites gate on. This
+/// authority reads only rank-insensitive resource axes, so the deferred identity ranks
+/// never affect it.
 pub(crate) fn ring_delta_signature(state: &GameState) -> Option<(u32, ResourceVector)> {
     let frames = state.loop_detect_ring.len();
     // 2k + 1 with k >= 1.
@@ -4971,6 +4973,12 @@ pub(crate) fn loop_states_cover_modulo_object_growth(
     let mut pb = project_out_resources(&cf);
     pa.0.stack.clear();
     pb.0.stack.clear();
+    // Recipient witnesses are the FODDER cover's obligation, which quotients them. This
+    // predicate's claim is pure inert BOARD growth, and the pre-change projection erased
+    // the journal here: a witness naming a freshly grown token is part of that growth, not
+    // a board difference, so it must not split the remainder.
+    pa.0.damage_dealt_this_turn.clear();
+    pb.0.damage_dealt_this_turn.clear();
 
     // Absolute-ObjectId battlefield set-difference. Growth must be PURE —
     // no battlefield object may leave (a shrink is a real board change, not ω-cover).
