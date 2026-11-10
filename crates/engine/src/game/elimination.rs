@@ -237,6 +237,13 @@ pub fn concede(
         // another member afterwards.
         return Ok(Some(scan_from));
     }
+    // CR 704.3 + 704.5f: the concession's staged batch drain can leave the
+    // board needing state-based actions (a counterless 0/0 from a departed
+    // anthem) before the next priority.
+    super::sba::check_state_based_actions(state, events);
+    if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+        return Ok(Some(scan_from));
+    }
     if !resume_canceled_change_zone && !settled_payment {
         return Ok(None);
     }

@@ -4759,7 +4759,7 @@ pub(crate) fn resume_paused_aura_entry_choice(
         }
         // CR 303.4g: genuinely no legal host. The Aura remains in its current
         // zone (or goes to its owner's graveyard from the stack).
-        let member = state
+        let paused_identity = state
             .active_batch_delivery()
             .and_then(|batch| batch.paused_current.as_ref())
             .or_else(|| {
@@ -4771,10 +4771,10 @@ pub(crate) fn resume_paused_aura_entry_choice(
             .filter(|paused| {
                 paused.member.object_id == object_id && paused.terminal_completion.is_none()
             })
-            .map(|paused| paused.member);
-        if let Some(member) = member {
-            let _ = state.prevent_paused_batch_zone_change_delivery(member, &event);
-            let _ = state.prevent_paused_zone_change_delivery(member, &event);
+            .map(|paused| (paused.member, paused.expected_event.clone()));
+        if let Some((member, expected_event)) = paused_identity {
+            let _ = state.prevent_paused_batch_zone_change_delivery(member, &expected_event);
+            let _ = state.prevent_paused_zone_change_delivery(member, &expected_event);
         }
         state.waiting_for = WaitingFor::Priority { player };
         if from_zone == Zone::Stack {

@@ -1333,17 +1333,22 @@ fn olivia_clone_replacement_then_defender_answer_delivers() {
             target: AttackTarget::Player(P2),
         })
         .expect("choose a legal defender");
-    if let WaitingFor::CopyTargetChoice { valid_targets, .. } = runner.state().waiting_for.clone() {
-        let target = valid_targets
-            .first()
-            .copied()
-            .expect("Clone offers a copy target after entry");
-        runner
-            .act(GameAction::ChooseTarget {
-                target: Some(TargetRef::Object(target)),
-            })
-            .expect("choose the copy target");
-    }
+    let WaitingFor::CopyTargetChoice { valid_targets, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "Clone's accepted replacement must require the post-entry copy choice; got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let target = valid_targets
+        .first()
+        .copied()
+        .expect("Clone offers a copy target after entry");
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(target)),
+        })
+        .expect("choose the copy target");
     let state = runner.state();
     let object = state.objects.get(&clone).expect("Clone entered");
     assert_eq!(object.zone, Zone::Battlefield);
@@ -1511,6 +1516,103 @@ fn stale_aura_host_reoffers_surviving_host() {
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 }
 
+/// CR 704.3 + 704.5f: after a Winota-prompt concession the staged batch must
+/// converge through state-based actions; the departing anthem leaves a 0/0 to
+/// die before priority.
+#[test]
+fn winota_concession_runs_sba_after_staged_batch() {
+    const WINOTA: &str = "Whenever a non-Human creature you control attacks, look at the top six cards of your library. You may put a Human creature card from among them onto the battlefield tapped and attacking. It gains indestructible until end of turn. Put the rest of the cards on the bottom of your library in a random order.";
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let human = scenario.add_card_to_library_top(P0, "Winota Human");
+    for name in ["Filler 1", "Filler 2", "Filler 3", "Filler 4", "Filler 5"] {
+        scenario.add_card_to_library_top(P0, name);
+    }
+    scenario
+        .add_creature_from_oracle(P0, "Winota, Joiner of Forces", 4, 4, WINOTA)
+        .with_subtypes(vec!["Human", "Warrior"]);
+    let attacker = scenario
+        .add_creature(P0, "Non-Human Attacker", 2, 2)
+        .with_subtypes(vec!["Goblin"])
+        .id();
+    let elesh = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Elesh Norn, Grand Cenobite",
+            4,
+            7,
+            "Other creatures you control get +2/+2.",
+        )
+        .id();
+    let ballista = scenario
+        .add_creature_from_oracle(
+            P2,
+            "Walking Ballista",
+            0,
+            0,
+            "This creature enters with X +1/+1 counters on it.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    {
+        let card = runner.state_mut().objects.get_mut(&human).unwrap();
+        card.card_types.core_types = vec![CoreType::Creature];
+        card.card_types.subtypes = vec!["Human".to_string()];
+        card.base_card_types = card.card_types.clone();
+        // P0 owns Elesh Norn, but P2 controls her for the ante.
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&elesh)
+            .unwrap()
+            .controller = P2;
+    }
+    runner.advance_to_combat();
+    // The anthem is controlled by P2 while owned by P0; when P0 leaves the
+    // 0/0 Ballista must die to state-based actions before priority.
+    engine::game::layers::flush_layers(runner.state_mut());
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .expect("declare the non-Human attacker");
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DigChoice { .. } => break,
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order Winota's trigger");
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass toward the Dig");
+            }
+            other => panic!("unexpected state before Dig: {other:?}"),
+        }
+    }
+    runner
+        .act(GameAction::SelectCards { cards: vec![human] })
+        .expect("put the Human onto the battlefield");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::EntryAttackTargetChoice { .. }
+    ));
+    runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("the Winota chooser concedes");
+    let state = runner.state();
+    assert!(state.players[P0.0 as usize].is_eliminated);
+    assert_eq!(
+        state.objects[&ballista].zone,
+        Zone::Graveyard,
+        "the departing anthem leaves a 0/0 to die to SBAs before priority"
+    );
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.stack.is_empty());
+}
+
 /// CR 303.4f + 303.4g: the offered host can leave before the chooser answers.
 /// The stale id is rejected at entry time and the Aura stays in its origin.
 #[test]
@@ -1594,7 +1696,7 @@ fn stale_aura_host_is_rejected_and_aura_remains_in_origin() {
     assert_eq!(result.waiting_for, state.waiting_for);
 }
 
-const SPIKE_FEEDER: &str = "Flash\nThis creature enters with two +1/+1 counters on it.\n{T}: Remove a +1/+1 counter from this creature: You gain 2 life.\nRemove a +1/+1 counter from this creature: Put a +1/+1 counter on target creature.";
+const SPIKE_FEEDER: &str = "Flash\nThis creature enters with two +1/+1 counters on it.\nRemove a +1/+1 counter from this creature: You gain 2 life.\n{2}, Remove a +1/+1 counter from this creature: Put a +1/+1 counter on target creature.";
 
 /// CR 614.1c + CR 508.4: the approved event parked at the defender choice
 /// carries the replacement-granted counters, tap state, attacking status and
