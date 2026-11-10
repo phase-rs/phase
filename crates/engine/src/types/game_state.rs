@@ -1662,6 +1662,18 @@ pub enum ActivationTargetFact {
 }
 
 impl ActivationTargetFact {
+    /// CR 601.2c + CR 115.1: WHAT this fact names, stripped of the announcement-time
+    /// characteristics and zone it also carries. The identity is the one axis a save can
+    /// be checked against the spell's own declaration — the characteristics and the zone
+    /// are claims this record makes about the announcement, while "this object/player
+    /// became a target of that spell" is the relation the chain itself states.
+    fn target_ref(&self) -> crate::types::ability::TargetRef {
+        match self {
+            Self::Player(player) => crate::types::ability::TargetRef::Player(*player),
+            Self::Object { id, .. } => crate::types::ability::TargetRef::Object(*id),
+        }
+    }
+
     /// CR 601.2c + CR 109.2: the object target whose announced zone this save
     /// does not state, or `None` when it states one (or the fact names a
     /// player, which has no zone axis).
@@ -12379,6 +12391,45 @@ pub enum PrepaidSpellCopyConflict {
         copy: Vec<ObjectId>,
         settled: Vec<ObjectId>,
     },
+    /// CR 700.14 + CR 702.132a + CR 118.3a: the PER-PAYER split the resumed cast will
+    /// credit to the Expend ledger is not the split this save's payment settled.
+    ///
+    /// The copy above is the cast's COMBINED payment — the spell-wide fact an
+    /// assembled-cost or source-qualified predicate reads. Expend reads the same payment
+    /// per PLAYER: CR 700.14 counts "the amount of mana that player spent this turn to
+    /// cast spells", so the helper's units are the HELPER's expenditure and the caster is
+    /// credited with the remainder (`casting_costs`'s `expend_credits_for_cast`). That
+    /// remainder is derived, not stored: it is the combined amount less the units the
+    /// parked cast's Assist claim names. A save that zeroes the claim — the shape
+    /// `Paid { helper, generic: 0 }` with no units, which
+    /// [`GameState::proven_assist_contribution_units`] admits because a helper CAN pay 0
+    /// (CR 118.3a "0 mana") — while its copy and the journal still hold the helper's
+    /// units leaves the remainder equal to the whole payment, and the caster is then
+    /// credited with mana the helper spent: three helper Treasures fire the CASTER's
+    /// "Whenever you expend 4" (Wandertale Mentor).
+    ///
+    /// The split is therefore read from the same journal that proved the copy, per
+    /// payer, and both halves must match: the units the claim credits the helper, and
+    /// the remainder the resume credits the caster. `None` for a helper means the cast
+    /// names no helper at all, which is the same demand on the caster's side — every
+    /// settled unit must then be the caster's own.
+    PayerSplitDisagreesWithSettledSpend {
+        /// The cast's controller (`ResolvedAbility::controller`, CR 109.5's "you" for
+        /// the spell) — the payer the resume credits with the remainder.
+        caster: PlayerId,
+        /// What the resume will credit the caster: the settled payment less the units
+        /// the cast's contribution names.
+        caster_credit: usize,
+        /// The units the settled spend records as spent BY the caster on this cast.
+        caster_settled: usize,
+        /// The helper the cast's contribution names, or `None` when it names none.
+        helper: Option<PlayerId>,
+        /// The units the contribution credits the helper.
+        helper_credit: usize,
+        /// The units the settled spend records for that helper, `None` when the cast
+        /// names no helper and there is no payer to ask the journal about.
+        helper_settled: Option<usize>,
+    },
 }
 
 impl std::fmt::Display for PrepaidSpellCopyConflict {
@@ -12414,6 +12465,90 @@ impl std::fmt::Display for PrepaidSpellCopyConflict {
                 "its prepaid spell copy names the producers {copy:?} while the settled spend \
                  names {settled:?} (CR 106.3: a unit's source is the source of the ability that \
                  produced it)"
+            ),
+            Self::PayerSplitDisagreesWithSettledSpend {
+                caster,
+                caster_credit,
+                caster_settled,
+                helper,
+                helper_credit,
+                helper_settled,
+            } => {
+                write!(
+                    f,
+                    "the resumed cast would credit {caster:?} with {caster_credit} of its \
+                     {} settled units while the settled spend records {caster_settled} units \
+                     spent by {caster:?}",
+                    caster_credit + helper_credit,
+                )?;
+                match helper {
+                    Some(helper) => write!(
+                        f,
+                        ", and credit {helper:?} with {helper_credit} units while the settled \
+                         spend records {} for {helper:?} (CR 700.14: Expend counts the mana each \
+                         player spent)",
+                        helper_settled.unwrap_or_default(),
+                    ),
+                    None => write!(
+                        f,
+                        ", and names no helper at all, so the whole settled payment is credited \
+                         to the caster (CR 702.132a: the helper's units are the helper's \
+                         expenditure)"
+                    ),
+                }
+            }
+        }
+    }
+}
+
+/// CR 601.2c + CR 115.1: how a parked cast's announced-target LATCH disagrees with the
+/// declaration its own spell chain still states. Produced by
+/// [`GameState::reject_contradictory_announced_target_facts`].
+///
+/// The latch is one statement about one announcement: `casting::latch_committed_target_facts`
+/// projects `declared_targets_in_chain(ability)` through `casting::capture_target_facts`,
+/// so the fact list IS the chain's declared slots, in order, snapshotted. A save that
+/// states facts the chain does not declare (or omits slots it does) has recorded an
+/// announcement the cast never made — which the CR 601.2i history write would then
+/// publish as the truth about that spell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnnouncedTargetFactConflict {
+    /// CR 601.2c: the latch names an object or player as a target of this spell when
+    /// nothing in the spell's declaration names it. The shape that matters is a
+    /// fabricated battlefield PERMANENT: "The chosen objects and/or players each become a
+    /// target of that spell", so a creature the caster never chose is not a target, and
+    /// recording one lets a first-spell gate ("The first spell you cast during each of
+    /// your turns that targets a creature costs {W}{B} less", Head of the Class) read a
+    /// qualification the announcement never produced.
+    UndeclaredTarget {
+        /// The target the latch names and the declaration does not.
+        target: TargetRef,
+    },
+    /// CR 601.2c + CR 115.1: the latch omits a target the spell DID declare, and the
+    /// save still holds that object. An undeclared omission reads as "the cast declared
+    /// nothing", which re-opens the zero-count first-spell gate the cast already spent —
+    /// the loss [`crate::types::game_state::PersistedRestoreError::UnknownPendingTargetFacts`]
+    /// exists to prevent, reached by deleting one fact instead of the whole latch.
+    OmittedDeclaredTarget {
+        /// The declared target the latch omits.
+        target: TargetRef,
+    },
+}
+
+impl std::fmt::Display for AnnouncedTargetFactConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UndeclaredTarget { target } => write!(
+                f,
+                "its announced-target latch names the target {target:?}, which the spell's own \
+                 declaration never chose (CR 601.2c: the chosen objects and/or players each \
+                 become a target of that spell)"
+            ),
+            Self::OmittedDeclaredTarget { target } => write!(
+                f,
+                "its announced-target latch omits the declared target {target:?}, which the \
+                 save still holds, so the record would state a declaration the cast did not \
+                 make (CR 601.2c + CR 115.1)"
             ),
         }
     }
@@ -17497,15 +17632,19 @@ impl TrustedGameStateEnvelope {
 /// CR 601.2h + CR 601.2i: one parked carrier that holds a cast whose mana has ALREADY
 /// been paid, and the settled amount that carrier states for it.
 ///
-/// A prepaid cast's payment facts travel in two shapes. The ordinary root repeats the
+/// A prepaid cast's payment facts travel in several shapes. The ordinary root repeats the
 /// amount it settled on its own [`PendingCast`]
 /// (`PendingCast::prepaid_actual_mana_spent`), and the finalizers gate the whole payment
-/// — and the copy it stamps — out while that field is set. The Sneak / Web-slinging
-/// returned-creature move (CR 702.190a / CR 702.188a) instead parks a cast whose
-/// `PendingCast` was rebuilt at the park (`PendingCast::new`) and so states no amount at
-/// all: its amount rides beside the announced-target latch on
+/// — and the copy it stamps — out while that field is set. A root suspended by a
+/// commit-time prompt instead carries `PendingCast::prepaid_finalization` and states no
+/// amount at all: its continuation reads the amount off the copy the finalizers stamped.
+/// The Sneak / Web-slinging returned-creature move (CR 702.190a / CR 702.188a) parks a
+/// cast whose `PendingCast` was rebuilt at the park (`PendingCast::new`) and so also
+/// states no amount: its amount rides beside the announced-target latch on
 /// [`PendingCostMoveCompletion::FinalizeCast`]. `stated_amount` keeps that difference
-/// visible rather than collapsing both shapes into "some amount was paid".
+/// visible rather than collapsing both shapes into "some amount was paid", and `None`
+/// says the resumed cast will read the copy — which is exactly why the copy is validated
+/// for every carrier rather than only the ones that state a number.
 struct PrepaidSpellCopyCarrier<'a> {
     /// The cast this carrier holds — the temp that carries the payment copy.
     pending: &'a PendingCast,
@@ -18797,11 +18936,14 @@ impl GameState {
     }
 
     /// CR 601.2h + CR 702.190a + CR 702.188a: every parked carrier in this save that holds
-    /// a cast whose payment has already run, with the amount each one states for it.
+    /// a cast whose payment has already run, with the amount each one states for it — or
+    /// `None` where the carrier states no amount and its continuation reads the copy.
     ///
     /// The `PendingCast` walk reuses [`Self::pending_cast_owners`], the single authority on
-    /// inline cast custody. The Sneak / Web-slinging cost-move carrier is added separately
-    /// because its amount is not on the cast it holds
+    /// inline cast custody, and admits the two shapes that prove the payment ran: a stated
+    /// amount, and the commit-time `prepaid_finalization` whose continuation reads the
+    /// amount off the spell copy. The Sneak / Web-slinging cost-move carrier is added
+    /// separately because its amount is not on the cast it holds
     /// ([`PendingCostMoveCompletion::FinalizeCast`]): reaching that park means the
     /// finalizer already paid (it pays before handing the returned creature to the move),
     /// so the copy on the spell is this cast's payment and is validated even when the
@@ -18812,17 +18954,30 @@ impl GameState {
             let Some(pending) = self.pending_cast_at(owner) else {
                 continue;
             };
-            // CR 601.2h: an activation's `prepaid_actual_mana_spent` is a different fact,
-            // and a cast whose payment has not run states no amount.
+            // CR 601.2h: an activation's `prepaid_actual_mana_spent` is a different fact.
             if pending.activation_ability_index.is_some() {
                 continue;
             }
-            let Some(stated_amount) = pending.prepaid_actual_mana_spent else {
+            // CR 601.2h: TWO distinct shapes prove this cast's payment has already run,
+            // and a cast whose payment has not run states neither. The ordinary root
+            // repeats the amount it settled (`prepaid_actual_mana_spent`). The other
+            // shape is the commit-time prompt park — a hand discard or a sacrifice
+            // arrangement (`continue_after_cost_discard`, `pay_deferred_spell_sacrifices_at_commit`)
+            // — which carries `prepaid_finalization` instead: its continuation re-enters
+            // `resume_prepaid_spell_finalization`, and THAT reads the amount off the
+            // spell copy (`recorded_mana_spent_to_cast`) rather than off the root. Keying
+            // this enumeration on the amount alone would therefore skip exactly the roots
+            // whose continuation consumes an amount the root never states, leaving the
+            // copy that supplies it unvalidated. Both are admitted; `stated_amount` keeps
+            // "this root states no amount" (`None`) distinct from "it states this one",
+            // and the copy itself is validated against the settled spend either way.
+            if pending.prepaid_actual_mana_spent.is_none() && pending.prepaid_finalization.is_none()
+            {
                 continue;
-            };
+            }
             carriers.push(PrepaidSpellCopyCarrier {
                 pending,
-                stated_amount: Some(stated_amount),
+                stated_amount: pending.prepaid_actual_mana_spent,
             });
         }
         if let Some(PendingCostMoveResume::Cast {
@@ -18947,7 +19102,69 @@ impl GameState {
                 },
             });
         }
+        // CR 700.14 + CR 702.132a + CR 118.3a: the copy above is this cast's COMBINED
+        // payment; the resume spends it per PLAYER, and every one of those credits is
+        // derived from the parked cast rather than read from the copy. So the SPLIT is
+        // validated here, against the same journal that proved the copy, or the save
+        // decides who spent what by itself.
+        //
+        // The caster is credited with the remainder (`expend_credits_for_cast`), which is
+        // the whole payment when the cast carries no contribution and the payment less the
+        // contribution's units otherwise. `assist_contribution` is the same typed claim
+        // that split is computed from, filtered to this cast exactly as that function
+        // filters it.
+        let contribution = pending
+            .assist_contribution()
+            .filter(|contribution| contribution.source_id == source_id);
+        // CR 118.3a: paying mana removes exactly the units it pays, so the units the
+        // contribution credits the helper must be the units the journal records as spent
+        // BY that helper on this cast. The sibling Assist guard binds the contribution's
+        // unit LIST; this binds its SIZE to the same payer-keyed record the resume's credit
+        // is spent from — including the zero case, where "the helper paid 0" is only true
+        // if the journal records no spend by the helper at all.
+        let helper_settled = contribution
+            .as_ref()
+            .map(|contribution| self.payer_settled_units(contribution.helper, &recipient));
+        let helper_credit = contribution
+            .as_ref()
+            .map_or(0, |contribution| contribution.units.len());
+        // CR 700.14: the caster's share is the remainder of the combined payment. Reading
+        // it, rather than assuming the caster paid it all, is what keeps a helper's mana out
+        // of the caster's Expend tally (and the caster's mana out of the helper's).
+        let caster = pending.ability.controller;
+        let caster_credit = settled.len().saturating_sub(helper_credit);
+        let caster_settled = self.payer_settled_units(caster, &recipient);
+        if helper_settled.unwrap_or_default() != helper_credit || caster_settled != caster_credit {
+            return Err(PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+                source_id,
+                reason: PrepaidSpellCopyConflict::PayerSplitDisagreesWithSettledSpend {
+                    caster,
+                    caster_credit,
+                    caster_settled,
+                    helper: contribution
+                        .as_ref()
+                        .map(|contribution| contribution.helper),
+                    helper_credit,
+                    helper_settled,
+                },
+            });
+        }
         Ok(())
+    }
+
+    /// CR 118.3a + CR 700.14: how many units the resolved-rules journal records as spent by
+    /// `payer` toward `recipient` — the same count, and the same convoke exclusion, as the
+    /// settled-spend projection [`Self::proven_prepaid_spell_copy`] compares the cast copy
+    /// with (CR 702.51a: a convoked creature's tap is not mana paid).
+    fn payer_settled_units(&self, payer: PlayerId, recipient: &ManaPaymentRecipient) -> usize {
+        self.resolved_rules_journal
+            .spent_units_for_payer_and_recipient(payer, recipient)
+            .map_or(0, |units| {
+                units
+                    .iter()
+                    .filter(|unit| !unit.is_convoke_payment())
+                    .count()
+            })
     }
 
     /// CR 601.2 / CR 602.2: at most one announcement is in flight, so every live
@@ -19138,6 +19355,157 @@ impl GameState {
             }
             None => Ok(()),
         }
+    }
+
+    /// CR 601.2c + CR 115.1: refuse a parked cast whose announced-target LATCH is not the
+    /// declaration its own spell chain states.
+    ///
+    /// [`Self::reject_unknown_pending_target_facts`] and
+    /// [`Self::reject_unknown_activation_target_zone`] ask whether the latch EXISTS and
+    /// whether its object facts state a zone. Neither asks the question the latch is FOR:
+    /// `casting::latch_committed_target_facts` writes it by projecting
+    /// `declared_targets_in_chain(ability)` through
+    /// `casting::capture_target_facts`, so the latch and the chain's declared slots are
+    /// one statement about one announcement (CR 601.2c: "The chosen objects and/or
+    /// players each become a target of that spell"). A save can keep a well-formed,
+    /// zone-stating, non-empty latch whose facts name something else entirely, and a
+    /// resumed cast publishes that latch as its CR 601.2i history row.
+    ///
+    /// The consequence is a fabricated target: Spider-Sense's "Counter target instant
+    /// spell, sorcery spell, or triggered ability." admits no battlefield permanent, so a
+    /// latch naming a battlefield creature has recorded a target that spell cannot have.
+    /// Head of the Class's "The first spell you cast during each of your turns that
+    /// targets a creature costs {W}{B} less to cast." is a zero-count gate over exactly
+    /// those records (`filter::declared_target_fact_matches` reads the fact's zone and
+    /// characteristics), so a fabricated battlefield-creature fact both consumes the gate
+    /// and qualifies a spell the announcement never qualified. The
+    /// mirror direction is refused for the same reason the absent latch is: a latch with
+    /// a declared fact deleted reads as "the cast declared nothing", which re-opens a gate
+    /// the cast already spent.
+    ///
+    /// Both directions are decided against the CHAIN, never against the live board. The
+    /// declared slots are what the announcement chose, they travel on the cast itself, and
+    /// they survive every cost the payment moved. A declared object the save no longer
+    /// holds (a token that ceased, CR 704.5d) is exempt from the omission direction —
+    /// `capture_target_facts` drops an id it cannot snapshot, so a shorter latch is the
+    /// honest capture of that board — while a fact it holds IS still required in the
+    /// latch, because the capture that wrote the latch saw it.
+    ///
+    /// Every carrier the other latch guards read is read here: the cast's own
+    /// `committed_target_facts`, the copy inside `prepaid_finalization`'s pre-payment
+    /// checks, and the cost-move completions (`FinalizeCast`, `FinalizeDelvedCast`,
+    /// `FinalizeSpell`) that carry their latch beside a rebuilt cast. A carrier with no
+    /// cast to compare against, and a latch that is absent altogether, are the other
+    /// guards' questions.
+    fn reject_contradictory_announced_target_facts(&self) -> Result<(), PersistedRestoreError> {
+        /// CR 601.2c: the latch must name exactly the targets the cast's chain declares —
+        /// in the identity sense only. The characteristics and zone a fact also carries
+        /// describe the announcement, which is gone; the id list is what the chain still
+        /// states.
+        fn check(
+            state: &GameState,
+            pending: &PendingCast,
+            latched: Option<&[ActivationTargetFact]>,
+        ) -> Result<(), PersistedRestoreError> {
+            let Some(latched) = latched else {
+                // An ABSENT latch is `reject_unknown_pending_target_facts`'s refusal.
+                return Ok(());
+            };
+            // CR 602.2b: an activation's announced targets travel on its
+            // `activation_record`, not on this latch, which only a cast writes.
+            if pending.activation_ability_index.is_some() {
+                return Ok(());
+            }
+            let declared: Vec<TargetRef> =
+                crate::game::ability_utils::declared_target_entries_in_chain(&pending.ability)
+                    .into_iter()
+                    .map(|entry| entry.target)
+                    .collect();
+            let latched: Vec<TargetRef> = latched
+                .iter()
+                .map(ActivationTargetFact::target_ref)
+                .collect();
+            if let Some(target) = latched.iter().find(|target| !declared.contains(target)) {
+                return Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
+                    spell_object_id: pending.object_id,
+                    reason: AnnouncedTargetFactConflict::UndeclaredTarget {
+                        target: target.clone(),
+                    },
+                });
+            }
+            // CR 601.2c + CR 704.5d: a declared target the save can no longer carry is one
+            // the honest capture would have dropped, so it owes no fact; one it still holds
+            // would have produced a fact, and its absence from the latch is a deletion.
+            let omitted = declared.iter().find(|target| {
+                !latched.contains(target)
+                    && match target {
+                        TargetRef::Object(id) => state.objects.contains_key(id),
+                        TargetRef::Player(_) => true,
+                    }
+            });
+            if let Some(target) = omitted {
+                return Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
+                    spell_object_id: pending.object_id,
+                    reason: AnnouncedTargetFactConflict::OmittedDeclaredTarget {
+                        target: target.clone(),
+                    },
+                });
+            }
+            Ok(())
+        }
+        /// CR 601.2h: the same check for a latch carried on a finalization payload.
+        fn check_checks(
+            state: &GameState,
+            pending: &PendingCast,
+            checks: Option<&FinalizePrePaymentChecks>,
+        ) -> Result<(), PersistedRestoreError> {
+            check(
+                state,
+                pending,
+                checks.and_then(|checks| checks.committed_target_facts.as_deref()),
+            )
+        }
+
+        for owner in self.pending_cast_owners() {
+            let Some(pending) = self.pending_cast_at(owner) else {
+                continue;
+            };
+            check(self, pending, pending.committed_target_facts.as_deref())?;
+            if let Some(prepared) = pending.prepaid_finalization.as_deref() {
+                check_checks(self, pending, prepared.pre_payment_checks.as_deref())?;
+            }
+        }
+        // CR 601.2h + CR 601.2i: the cost-move completions are not pending-cast owners, so
+        // the custody walk above cannot reach them — the same reason the sibling latch
+        // guards check them separately.
+        match self.pending_cost_move_resume.as_ref() {
+            Some(PendingCostMoveResume::Cast {
+                pending: Some(pending),
+                completion,
+                ..
+            }) => match completion {
+                PendingCostMoveCompletion::FinalizeCast {
+                    committed_target_facts,
+                    ..
+                } => check(self, pending, committed_target_facts.as_deref())?,
+                PendingCostMoveCompletion::FinalizeDelvedCast {
+                    pre_payment_checks, ..
+                } => check_checks(self, pending, pre_payment_checks.as_deref())?,
+                PendingCostMoveCompletion::FinishPending
+                | PendingCostMoveCompletion::CompleteSelectedReturnToHand { .. }
+                | PendingCostMoveCompletion::PublishExileTrackedSet => {}
+            },
+            Some(PendingCostMoveResume::SacrificeForCost {
+                pending: Some(pending),
+                completion:
+                    PendingSacrificeCostCompletion::FinalizeSpell {
+                        pre_payment_checks, ..
+                    },
+                ..
+            }) => check_checks(self, pending, Some(pre_payment_checks))?,
+            _ => {}
+        }
+        Ok(())
     }
 
     /// A staged payment is a replay authority, not merely display data.  Keep
@@ -19364,6 +19732,22 @@ pub enum PersistedRestoreError {
          {spell_object_id:?} and cannot be resumed"
     )]
     UnknownPendingTargetFacts { spell_object_id: Option<ObjectId> },
+    /// CR 601.2c + CR 115.1: a parked cast's announced-target latch is not the declaration
+    /// its own spell chain states — it names a target the announcement never chose, or
+    /// omits one it did. The latch is the only record of what the cast announced (the
+    /// announcement itself is gone, and the live board's later state is not a substitute
+    /// for it), so admitting a latch the chain does not corroborate would publish a
+    /// fabricated target in the CR 601.2i history row the resumed cast writes, and a
+    /// zero-count first-spell gate reading that row would grant or consume a benefit the
+    /// announcement never earned.
+    #[error(
+        "persisted announced-target latch on spell {spell_object_id:?} does not name the \
+         targets its own declaration chose and cannot be restored: {reason}"
+    )]
+    ContradictoryAnnouncedTargetFacts {
+        spell_object_id: ObjectId,
+        reason: AnnouncedTargetFactConflict,
+    },
     /// CR 601.2c + CR 109.2 + CR 109.2a: a saved activation record's object
     /// target does not state the zone it was announced in. CR 109.2 scopes a
     /// bare type description to a permanent on the battlefield and CR 109.2a
@@ -19779,6 +20163,10 @@ impl PersistedGameState {
         state.reject_contradictory_parked_activation_evidence()?;
         state.reject_conflicting_pending_cast_owners()?;
         state.reject_unknown_pending_target_facts()?;
+        // CR 601.2c + CR 115.1: the latch those guards require must also be the
+        // announcement this cast's own chain declares, or the resumed cast writes a
+        // history row about targets it never chose.
+        state.reject_contradictory_announced_target_facts()?;
         // CR 702.132a + CR 118.3a: a parked cast's Assist contribution is bound to
         // the payment it claims (or recovered from the journal's own record of that
         // payment) before any finalizer can read it. Refusing here — the chokepoint

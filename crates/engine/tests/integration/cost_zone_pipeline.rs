@@ -10736,6 +10736,407 @@ fn restore_decides_a_zero_assist_contribution_by_the_prepaid_spell_copy() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// CR 601.2h + CR 106.3 + CR 118.3a: the OTHER prepaid root — a cast suspended by a
+// commit-time prompt (hand discard, sacrifice arrangement) carries `prepaid_finalization`
+// and states no amount at all. Its continuation re-enters
+// `resume_prepaid_spell_finalization`, which reads the amount off the spell copy
+// (`recorded_mana_spent_to_cast`), so the copy that supplies the number the resume
+// consumes has to be validated exactly like the copy a root that states its amount is
+// validated against.
+// ---------------------------------------------------------------------------
+
+/// Kaervek's Spite (`vis` 63), verbatim from Scryfall: the printed card whose whole cost
+/// is a commit-time prompt — "sacrifice all permanents you control" orders through the
+/// payer's arrangement and "discard your hand" then prompts, both AFTER the mana is spent.
+const KAERVEKS_SPITE: &str = "As an additional cost to cast this spell, sacrifice all permanents you control and discard your hand.\nTarget player loses 5 life.";
+
+/// The parked `PendingCast` a commit-time cost prompt holds, whatever the prompt kind —
+/// `CostResume::Spell` is the one carrier both the sacrifice arrangement and the hand
+/// discard park through.
+fn parked_commit_prompt_cast(runner: &GameRunner) -> &PendingCast {
+    let WaitingFor::PayCost {
+        resume: engine::types::game_state::CostResume::Spell { spell },
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "the commit-time cost prompt is not parking a cast: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    spell
+}
+
+/// Answer the prompts printed Kaervek's Spite raises — its player target, the CR 404.3
+/// arrangement of "all permanents you control", and then whatever comes next — stopping at
+/// the hand-discard prompt that parks the already-paid cast.
+fn drive_kaerveks_spite_to_the_hand_discard_prompt(runner: &mut GameRunner, spell: ObjectId) {
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("printed Kaervek's Spite is announced");
+    let mut seen = Vec::new();
+    for _ in 0..16 {
+        seen.push(runner.waiting_for_kind());
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(P1)),
+                    })
+                    .expect("P1 is a legal target");
+            }
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                choices,
+                ..
+            } => {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: choices.clone(),
+                    })
+                    .expect("the arrangement of the determined sacrifice set is paid");
+            }
+            WaitingFor::PayCost {
+                kind: PayCostKind::Discard,
+                ..
+            } => return,
+            WaitingFor::ManaPayment { .. } | WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("the caster confirms the mana payment");
+            }
+            other => {
+                panic!("unexpected prompt while casting Kaervek's Spite: {other:?}; seen {seen:?}")
+            }
+        }
+    }
+    panic!("Kaervek's Spite never reached its hand-discard prompt; prompts seen: {seen:?}");
+}
+
+/// P0 casts printed Kaervek's Spite from a three-black floating pool, over two creatures
+/// and one other card in hand: the mana is spent before the commit prompts, the
+/// arrangement of the two determined sacrifices and then the whole-hand discard park the
+/// cast, and the finalizers have already stamped the copy the resume reads.
+fn kaerveks_spite_commit_prompt_board() -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Kaervek's Spite", true, KAERVEKS_SPITE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black; 3],
+            generic: 0,
+        })
+        .id();
+    scenario.add_creature(P0, "Spite Arrangement Witness One", 2, 2);
+    scenario.add_creature(P0, "Spite Arrangement Witness Two", 2, 2);
+    scenario.add_card_to_hand(P0, "Spite Hand Witness");
+    // Floating mana, so the three black shards are paid without a land that the
+    // "sacrifice all permanents" clause would also consume.
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    drive_kaerveks_spite_to_the_hand_discard_prompt(&mut runner, spell);
+    (runner, spell)
+}
+
+/// CR 601.2h + CR 106.3 + CR 118.3a: a root that states NO amount but whose continuation
+/// still reads the spell copy must have that copy validated. The save states the
+/// commit-time park's `prepaid_finalization` (its continuation is
+/// `resume_prepaid_spell_finalization`, which takes the amount from the copy) with no
+/// `prepaid_actual_mana_spent` — the shape the amount-keyed enumeration skipped — and a
+/// copy that states a payment the journal does not.
+#[test]
+fn restore_refuses_a_copy_read_by_a_commit_prompt_root_that_states_no_amount() {
+    let (runner, spell) = kaerveks_spite_commit_prompt_board();
+
+    // Reach guards: this IS the other prepaid shape — paid already, suspended on a
+    // commit-time prompt, and carrying the finalization whose continuation reads the copy.
+    {
+        let parked = parked_commit_prompt_cast(&runner);
+        assert_eq!(
+            parked.object_id, spell,
+            "reach-guard: the prompt carries the cast being finalized"
+        );
+        assert!(
+            parked.prepaid_finalization.is_some(),
+            "reach-guard: a commit-time prompt park carries its finalization, which is what \
+             resumes through `resume_prepaid_spell_finalization`"
+        );
+        assert_eq!(
+            parked.prepaid_actual_mana_spent,
+            Some(3),
+            "reach-guard: the live park repeats the amount it settled — the save under test is \
+             what states none"
+        );
+        assert_eq!(
+            runner.state().objects[&spell].mana_spent_to_cast_amount,
+            3,
+            "reach-guard: the payment ran, so the finalizers stamped the copy the resume reads"
+        );
+        assert_eq!(
+            parked.ability.controller, P0,
+            "reach-guard: the cast's controller is the payer CR 700.14 credits"
+        );
+    }
+
+    let killed: Vec<ObjectId> = runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| object.zone == Zone::Graveyard)
+        .map(|object| object.id)
+        .collect();
+    assert!(
+        !killed.is_empty(),
+        "reach-guard: the commit already sacrificed the arranged permanents"
+    );
+
+    // (a) The honest shape: the root states no amount, and the copy it will be read for
+    // agrees with the settled spend — ADMITTED, because the copy is what the guard
+    // validates and the resume consumes exactly that validated number.
+    {
+        let mut state = runner.state().clone();
+        let WaitingFor::PayCost {
+            resume: engine::types::game_state::CostResume::Spell { spell: parked },
+            ..
+        } = &mut state.waiting_for
+        else {
+            panic!("reach-guard: the carrier is still parked");
+        };
+        parked.prepaid_actual_mana_spent = None;
+        assert_eq!(
+            state.objects[&spell].mana_spent_to_cast_amount, 3,
+            "reach-guard: the copy still states the three units the journal settled"
+        );
+        let admitted = PersistedGameState::capture(state).into_game_state().expect(
+            "CR 601.2h: a root that states no amount is admitted when the copy its \
+                 continuation reads states the settled payment",
+        );
+        assert_eq!(
+            admitted.objects[&spell].mana_spent_to_cast_amount, 3,
+            "and the admitted copy still states the caster's three units"
+        );
+    }
+
+    // (b) The same save with the copy stating a payment of another size — REFUSED, because
+    // the amount the continuation consumes is the copy's, and nothing else in the save
+    // states it.
+    let mut state = runner.state().clone();
+    let WaitingFor::PayCost {
+        resume: engine::types::game_state::CostResume::Spell { spell: parked },
+        ..
+    } = &mut state.waiting_for
+    else {
+        panic!("reach-guard: the carrier is still parked");
+    };
+    parked.prepaid_actual_mana_spent = None;
+    state
+        .objects
+        .get_mut(&spell)
+        .expect("the spell object is in the save")
+        .mana_spent_to_cast_amount = 4;
+    let error = PersistedGameState::capture(state)
+        .into_game_state()
+        .expect_err(
+            "CR 118.3a: the amount a prepaid continuation reads off the copy is validated even \
+             when the root states none, or the resume spends a payment nobody made",
+        );
+    match error {
+        engine::types::game_state::PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+            source_id,
+            reason:
+                engine::types::game_state::PrepaidSpellCopyConflict::AmountDisagreesWithSettledSpend {
+                    copy_amount,
+                    settled,
+                    ..
+                },
+        } => {
+            assert_eq!(source_id, spell, "the refusal names the cast it is about");
+            assert_eq!(copy_amount, 4, "and the amount the copy states");
+            assert_eq!(
+                settled, 3,
+                "against the three units the journal records for the cast (CR 118.3a)"
+            );
+        }
+        other => panic!(
+            "CR 118.3a + CR 601.2h: a commit-prompt root that states no amount must still have \
+             the copy its continuation reads validated, got {other:?}"
+        ),
+    }
+}
+
+/// CR 700.14 + CR 702.132a + CR 118.3a: the payer SPLIT the resumed cast credits is
+/// validated, including the zero case.
+///
+/// Wandertale Mentor's "Whenever you expend 4, put a +1/+1 counter on this creature."
+/// reads CR 700.14's "the amount of mana that player spent this turn to cast spells" —
+/// per PLAYER. The resume derives the caster's share as the combined payment less the
+/// units the parked cast's Assist claim names, so a save that ZEROES the claim while its
+/// copy and the journal still hold the helper's unit credits the CASTER with the helper's
+/// mana: one helper Treasure is enough to move the caster's own Expend tally.
+///
+/// The board is the assisted replaced-life-payment cast: Gang Up `{X}{B}` at X=1, the
+/// HELPER (P1) pays the one generic with a Treasure, and the caster pays the `{B}` with 2
+/// life through K'rrik — so the caster spends NO mana and every settled unit is the
+/// helper's.
+#[test]
+fn restore_refuses_a_zeroed_assist_claim_that_would_credit_the_caster_with_the_helpers_mana() {
+    let GangUpBoard {
+        mut runner,
+        gang_up,
+        victim,
+        helper_treasures,
+        ..
+    } = gang_up_board();
+    announce_gang_up(&mut runner, gang_up, victim, GANG_UP_X);
+
+    // Reach guards: the helper really paid, the caster really paid no mana, and the copy
+    // the resume reads is the helper's unit.
+    let recipient = assist_payment_recipient(runner.state(), gang_up, P1);
+    {
+        let journal_units = runner
+            .state()
+            .resolved_rules_journal
+            .spent_units_for_payer_and_recipient(P1, &recipient)
+            .expect("the journal recorded the helper's spend");
+        assert!(
+            journal_units
+                .iter()
+                .all(|unit| helper_treasures.contains(&unit.source_id)),
+            "reach-guard: every unit the journal credits the helper came from its own Treasure, \
+             got {:?}",
+            journal_units
+                .iter()
+                .map(|unit| unit.source_id)
+                .collect::<Vec<_>>()
+        );
+        let parked = parked_gang_up(&runner);
+        assert_eq!(
+            parked.assist_state,
+            engine::types::game_state::AssistState::Paid {
+                helper: P1,
+                generic: GANG_UP_X,
+            },
+            "reach-guard: the helper's contribution reached its paid checkpoint"
+        );
+        assert_eq!(
+            parked.assist_contributed_units, journal_units,
+            "reach-guard: the save's units agree with the journal"
+        );
+    }
+    assert_eq!(
+        runner.state().objects[&gang_up].mana_spent_to_cast_amount,
+        GANG_UP_X,
+        "reach-guard: the settled payment is the helper's one unit"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .resolved_rules_journal
+            .spent_units_for_payer_and_recipient(P0, &recipient),
+        None,
+        "reach-guard: the caster spent no mana at all — K'rrik paid the {{B}} with life"
+    );
+
+    // (a) The claim zeroed: `Paid { helper, generic: 0 }` with no units, the shape
+    // `proven_assist_contribution_units` admits on its `generic == 0` branch without
+    // consulting anything, over a payment that really was the helper's.
+    {
+        let mut state = runner.state().clone();
+        match state.pending_deferred_life_cost_resume.as_mut() {
+            Some(DeferredLifeCostResume::Cast {
+                pending: Some(pending),
+                ..
+            }) => {
+                pending.assist_state = engine::types::game_state::AssistState::Paid {
+                    helper: P1,
+                    generic: 0,
+                };
+                pending.assist_contributed_units.clear();
+            }
+            other => panic!("the replaced life payment is not parking a cast: {other:?}"),
+        }
+        let error = PersistedGameState::capture(state)
+            .into_game_state()
+            .expect_err(
+                "CR 700.14: a zeroed claim over the helper's payment would credit the caster \
+                 with mana the helper spent",
+            );
+        match error {
+            engine::types::game_state::PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+                source_id,
+                reason,
+            } => {
+                assert_eq!(source_id, gang_up, "the refusal names the cast it is about");
+                // The copy is untouched and still agrees with the journal, so no
+                // copy-shaped conflict can explain this refusal: the remaining answer —
+                // the SPLIT — is the one that fired.
+                assert!(
+                    !matches!(
+                        reason,
+                        engine::types::game_state::PrepaidSpellCopyConflict::AmountDisagreesWithSettledSpend { .. }
+                            | engine::types::game_state::PrepaidSpellCopyConflict::ColorsDisagreeWithSettledSpend { .. }
+                            | engine::types::game_state::PrepaidSpellCopyConflict::ProducersDisagreeWithSettledSpend { .. }
+                            | engine::types::game_state::PrepaidSpellCopyConflict::StatedAmountDisagreesWithSettledSpend { .. }
+                    ),
+                    "the refusal is about the payer split, not the spell copy: {reason:?}"
+                );
+                let rendered = reason.to_string();
+                assert!(
+                    rendered.contains("CR 700.14"),
+                    "the refusal names the Expend rule the split feeds: {rendered}"
+                );
+                assert!(
+                    rendered.contains(&format!("{P0:?}")),
+                    "and the payer it would have over-credited: {rendered}"
+                );
+            }
+            other => panic!("expected a prepaid-copy refusal, got {other:?}"),
+        }
+    }
+
+    // (b) The claim ERASED altogether: the same credit, reached by dropping the
+    // contribution instead of zeroing it.
+    let mut state = runner.state().clone();
+    match state.pending_deferred_life_cost_resume.as_mut() {
+        Some(DeferredLifeCostResume::Cast {
+            pending: Some(pending),
+            ..
+        }) => {
+            pending.assist_state = engine::types::game_state::AssistState::NotOffered;
+            pending.assist_contributed_units.clear();
+        }
+        other => panic!("the replaced life payment is not parking a cast: {other:?}"),
+    }
+    let error = PersistedGameState::capture(state)
+        .into_game_state()
+        .expect_err(
+            "CR 702.132a: a cast whose contribution is erased cannot spend the helper's units \
+             on the caster's Expend tally",
+        );
+    assert!(
+        matches!(
+            error,
+            engine::types::game_state::PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+                source_id,
+                ..
+            } if source_id == gang_up
+        ),
+        "expected the split refusal naming the cast, got {error:?}"
+    );
+}
+
 /// CR 106.3 + CR 702.132a + CR 611.3b: the CONTROL for the two refusals above — an
 /// UNTOUCHED prepaid assisted save still restores, still carries the helper's units, and
 /// still records the helper's Treasure pip, which is what Rain of Riches' cascade gate
@@ -11167,6 +11568,214 @@ fn restore_refuses_a_lost_latch_or_a_tampered_copy_on_the_web_slinging_carrier()
             other => panic!("expected a typed copy-amount refusal, got {other:?}"),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// CR 601.2c + CR 115.1: the announced-target LATCH is the only record of what a cast
+// declared, and the resumed cast publishes it as its CR 601.2i history row. A latch that
+// merely parses — right shape, known zones — can still name a target the announcement
+// never chose, so the RELATION the latch is supposed to record (the chosen objects each
+// become a target of that spell) is what the restore boundary checks against the cast's
+// own declaration.
+//
+// Spider-Sense (`spm` 66), verified verbatim from Scryfall: "Counter target instant
+// spell, sorcery spell, or triggered ability." It admits no battlefield permanent, so a
+// latch naming one has recorded a target this spell cannot have — and Head of the Class's
+// "The first spell you cast during each of your turns that targets a creature costs
+// {W}{B} less to cast." is a zero-count gate over exactly those facts. The witness below
+// uses the same shape the Web-slinging carrier already covers: a cast that declared
+// NOTHING (its latch states the empty list) given a fabricated battlefield creature.
+// ---------------------------------------------------------------------------
+
+/// CR 601.2c: one announcement-time fact for `target` as it is in `state` right now — the
+/// forged entry both legs below write into a latch.
+fn forged_target_fact(
+    state: &GameState,
+    target: ObjectId,
+) -> engine::types::game_state::ActivationTargetFact {
+    let object = state
+        .objects
+        .get(&target)
+        .expect("the forged target is an object in this save");
+    assert_eq!(
+        object.zone,
+        Zone::Battlefield,
+        "reach-guard: the forged fact claims a BATTLEFIELD permanent, the shape a \
+         \"targets a creature\" gate counts (CR 109.2)"
+    );
+    engine::types::game_state::ActivationTargetFact::Object {
+        id: target,
+        lki: Box::new(object.snapshot_public_characteristics()),
+        zone: engine::types::game_state::AnnouncedTargetZone::Known(Zone::Battlefield),
+    }
+}
+
+/// CR 601.2c + CR 115.1: a latch naming a battlefield creature the cast never declared is
+/// REFUSED, on both carriers that hold a latch — the rebuilt cast on a cost-move
+/// completion (a cast that declared nothing at all), and a cast's own carrier — rather
+/// than published into the history a first-spell gate reads.
+#[test]
+fn restore_refuses_an_announced_target_latch_that_names_a_target_the_spell_never_declared() {
+    // (a) CR 702.188a: the Web-slinging carrier — a cast that declared NOTHING, so every
+    // observed fact is a fabrication by construction.
+    {
+        let (mut runner, spell, returned) = web_slinging_carrier_board();
+        announce_web_slinging_onto_the_carrier(&mut runner, spell, returned);
+        assert_web_slinging_carrier_reach_guards(&runner, spell);
+        {
+            let Some(PendingCostMoveResume::Cast {
+                completion:
+                    PendingCostMoveCompletion::FinalizeCast {
+                        committed_target_facts,
+                        ..
+                    },
+                ..
+            }) = runner.state().pending_cost_move_resume.as_ref()
+            else {
+                panic!("reach-guard: the paid cast is parked on the cost-move carrier");
+            };
+            assert!(
+                committed_target_facts
+                    .as_deref()
+                    .is_some_and(<[_]>::is_empty),
+                "reach-guard: this cast declared nothing, and its latch states exactly that"
+            );
+        }
+        let forged = forged_target_fact(runner.state(), returned);
+        let mut state = runner.state().clone();
+        let Some(PendingCostMoveResume::Cast {
+            completion:
+                PendingCostMoveCompletion::FinalizeCast {
+                    committed_target_facts,
+                    ..
+                },
+            ..
+        }) = state.pending_cost_move_resume.as_mut()
+        else {
+            panic!("reach-guard: the carrier is still parked");
+        };
+        // The forged fact is well formed in every other respect — a real object, its own
+        // last-known information, and a KNOWN announced zone — so no shape guard can be
+        // what refuses it, only the declared-target relationship.
+        *committed_target_facts = Some(vec![forged]);
+        let error = PersistedGameState::capture(state)
+            .into_game_state()
+            .expect_err(
+                "CR 601.2c: a latch naming a battlefield creature for a cast that declared \
+                 nothing must be refused",
+            );
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("does not name the targets its own declaration chose"),
+            "the refusal is the declared-target relationship, not a shape check: {rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("{returned:?}")),
+            "and it names the fabricated target: {rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("{spell:?}")),
+            "and the cast it is about: {rendered}"
+        );
+    }
+
+    // (b) The cast's OWN carrier, on the assisted replaced-life-payment cast: Gang Up
+    // declares one battlefield creature, and the save swaps it for a DIFFERENT one — the
+    // same "a different object list than the spell declared" shape, reached through the
+    // latch the delayed cast carries rather than through a cost-move completion.
+    let GangUpBoard {
+        mut runner,
+        gang_up,
+        victim,
+        bloodletters,
+        ..
+    } = gang_up_board();
+    announce_gang_up(&mut runner, gang_up, victim, GANG_UP_X);
+    let impostor = bloodletters[0];
+    {
+        let parked = parked_gang_up(&runner);
+        assert_eq!(
+            parked.committed_target_facts.as_deref().map(|facts| facts
+                .iter()
+                .map(|fact| match fact {
+                    engine::types::game_state::ActivationTargetFact::Object { id, .. } => {
+                        Some(*id)
+                    }
+                    engine::types::game_state::ActivationTargetFact::Player(_) => None,
+                })
+                .collect::<Vec<_>>()),
+            Some(vec![Some(victim)]),
+            "reach-guard: the latch names the power-1 creature the cast declared"
+        );
+        assert_ne!(
+            impostor, victim,
+            "reach-guard: the forged target is a different object"
+        );
+    }
+    let forged = forged_target_fact(runner.state(), impostor);
+    let mut state = runner.state().clone();
+    match state.pending_deferred_life_cost_resume.as_mut() {
+        Some(DeferredLifeCostResume::Cast {
+            pending: Some(pending),
+            ..
+        }) => pending.committed_target_facts = Some(vec![forged]),
+        other => panic!("the replaced life payment is not parking a cast: {other:?}"),
+    }
+    let error = PersistedGameState::capture(state)
+        .into_game_state()
+        .expect_err("CR 601.2c: a latch naming a creature the cast never targeted must be refused");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("does not name the targets its own declaration chose"),
+        "the refusal is the declared-target relationship: {rendered}"
+    );
+    assert!(
+        rendered.contains(&format!("{impostor:?}")),
+        "and it names the substituted object: {rendered}"
+    );
+
+    // The CONTROL: the untouched save is admitted, and the CR 601.2i row the resumed cast
+    // writes names the DECLARED target alone — which is the record Head of the Class's
+    // gate counts, so the refusal above is what keeps a fabricated target out of it.
+    let GangUpBoard {
+        mut runner,
+        gang_up,
+        victim,
+        ..
+    } = gang_up_board();
+    announce_gang_up(&mut runner, gang_up, victim, GANG_UP_X);
+    let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the paused prepaid cast serializes");
+    let restored: PersistedGameState =
+        serde_json::from_str(&saved).expect("the paused prepaid cast deserializes");
+    let mut runner = GameRunner::from_state(
+        restored
+            .into_game_state()
+            .expect("a latch that names exactly the declared targets is admitted"),
+    );
+    finish_gang_up(&mut runner, gang_up);
+    let record = runner
+        .state()
+        .spells_cast_this_turn_by_player
+        .get(&P0)
+        .and_then(|rows| rows.iter().find(|row| row.spell_object_id == Some(gang_up)))
+        .expect("CR 601.2i: the resumed cast recorded itself in this turn's history");
+    let recorded_ids: Vec<Option<ObjectId>> = record
+        .targets
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|fact| match fact {
+            engine::types::game_state::ActivationTargetFact::Object { id, .. } => Some(*id),
+            engine::types::game_state::ActivationTargetFact::Player(_) => None,
+        })
+        .collect();
+    assert_eq!(
+        recorded_ids,
+        vec![Some(victim)],
+        "CR 601.2c: the history row states exactly the target the cast declared — the fact \
+         Head of the Class's \"first spell … that targets a creature\" gate counts"
+    );
 }
 
 /// CR 702.132a: the ORDINARY cast path is untouched — a non-Assist spell records exactly
