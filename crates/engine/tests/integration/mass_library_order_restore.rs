@@ -451,12 +451,17 @@ fn mass_library_order_prompt_redacts_public_ids_from_opponent() {
     let opponent = filter_state_for_viewer(&state, PlayerId(1));
     let WaitingFor::EffectZoneChoice {
         cards: opponent_cards,
+        mass_library_order: opponent_batch,
         ..
     } = &opponent.waiting_for
     else {
         panic!("opponent must still see the redacted ordering envelope");
     };
     assert_eq!(opponent_cards.len(), cards.len());
+    assert!(
+        opponent_batch.is_none(),
+        "the typed batch must be cleared for non-arrangers"
+    );
     assert!(
         opponent_cards.iter().all(|id| *id == ObjectId(0)),
         "opponent must receive placeholders, not battlefield ids; got {opponent_cards:?}"

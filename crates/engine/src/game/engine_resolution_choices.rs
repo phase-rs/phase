@@ -6510,6 +6510,9 @@ pub(super) fn handle_resolution_choice(
                     "Selected cards must be distinct".to_string(),
                 ));
             }
+            // The prompt's producer-captured privacy scope is consumed with the
+            // answer; a later prompt must not inherit it.
+            state.effect_zone_choice_privacy_zones = None;
 
             let current_hand: std::collections::HashSet<ObjectId> = state
                 .players

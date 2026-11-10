@@ -3138,7 +3138,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         // is cleared even when unmixed because the eligible subset's size is
         // hand information CR 402.3 withholds; a pure public set is not
         // redacted at all.
-        let privacy_scope = state.effect_zone_choice_privacy_scope();
+        let privacy_scope = state
+            .effect_zone_choice_privacy_zones
+            .clone()
+            .or_else(|| state.effect_zone_choice_privacy_scope());
         let scope_private = privacy_scope
             .as_ref()
             .is_some_and(|zones| zones.iter().any(|zone| !zone.is_public()));
@@ -3160,20 +3163,29 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         // The producer's exact scan scope is authoritative. Candidate-zone
         // inspection remains only as a fallback for prompts restored from
         // saves that predate the scope-carrying producer.
-        let fallback_private = privacy_scope.is_none() && has_private_card;
-        let private_scope = scope_private || fallback_private;
-        let mixed_private_public = (scope_private && scope_public)
-            || (privacy_scope.is_none() && has_private_card && has_public_card);
+        // Legacy saves carry no producer-captured scope; fall back to the
+        // prompt's stored zone plus candidate zones.
+        let fallback_private = privacy_scope.is_none() && (!zone.is_public() || has_private_card);
         // CR 401.4: a Library arrangement prompt hides its member ids even when
         // every candidate is currently public; its bounds are public (the
-        // batch size), so only the cards are redacted.
-        let library_arrangement = matches!(zone, Zone::Library) && mass_library_order.is_some();
+        // batch size), so only the cards are redacted. Keep the base projection
+        // for BOTH typed and archived forms; the archived Terminus prompt
+        // carries no typed batch but must still hide the ordering ids.
+        let library_arrangement = matches!(zone, Zone::Library);
+        let _ = mass_library_order;
+        let private_scope = scope_private || (fallback_private && !library_arrangement);
+        let mixed_private_public = (scope_private && scope_public)
+            || (privacy_scope.is_none()
+                && fallback_private
+                && (has_public_card || zone.is_public()));
         let redact_cards = private_scope || library_arrangement;
         let redact_bounds = private_scope;
         if !can_view_private_for_player(player) && redact_cards {
             filtered.waiting_for = WaitingFor::EffectZoneChoice {
                 player,
-                cards: if mixed_private_public || zone == Zone::Hand {
+                cards: if library_arrangement {
+                    cards.iter().map(|_| ObjectId(0)).collect()
+                } else if mixed_private_public || zone == Zone::Hand {
                     Vec::new()
                 } else {
                     cards.iter().map(|_| ObjectId(0)).collect()

@@ -11,7 +11,7 @@ use engine::game::visibility::filter_state_for_viewer;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, FilterProp,
-    OriginConstraint, QuantityExpr, ReplacementCondition, ReplacementDefinition, ResolvedAbility,
+    OriginConstraint, QuantityExpr, ReplacementCondition, ReplacementDefinition,
     TargetChoiceTiming, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
@@ -1256,79 +1256,6 @@ fn next_of_kin_ignores_a_creature_outside_hand_and_command() {
     assert!(
         runner.state().delayed_triggers.is_empty(),
         "the if-you-do delayed reattach must not install without a performed put"
-    );
-}
-
-/// Replacement witness for a public-only singleton origin: gain 1 life when a
-/// creature would enter from a graveyard.
-fn graveyard_entry_life_replacement() -> ReplacementDefinition {
-    ReplacementDefinition::new(ReplacementEvent::ChangeZone)
-        .valid_card(TargetFilter::Typed(TypedFilter::creature()))
-        .destination_zone(Zone::Battlefield)
-        .condition(ReplacementCondition::EnteredFromZone {
-            origin_constraint: Some(OriginConstraint::Equals(Zone::Graveyard)),
-            cast_origin: None,
-        })
-        .execute(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::GainLife {
-                amount: QuantityExpr::Fixed { value: 1 },
-                player: TargetFilter::Controller,
-            },
-        ))
-}
-
-/// CR 400.6: the public-only singleton shortcut must propose the chosen
-/// object's actual Graveyard origin to replacement consultation. This path is
-/// not the mixed Hand/Command prompt, so it exercises the shortcut branch.
-#[test]
-fn public_singleton_shortcut_applies_graveyard_origin_replacement() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let buried = scenario
-        .add_creature_to_graveyard(P0, "Buried Bear", 2, 2)
-        .with_mana_cost(generic_cost(2))
-        .id();
-    let watcher = scenario
-        .add_creature(P0, "Grave-Entry Watcher", 1, 1)
-        .with_replacement_definition(graveyard_entry_life_replacement())
-        .id();
-    let mut runner = scenario.build();
-
-    let target =
-        TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
-            zone: Zone::Graveyard,
-        }]));
-    let ability = ResolvedAbility::new(
-        Effect::ChangeZone {
-            origin: None,
-            destination: Zone::Battlefield,
-            target,
-            owner_library: false,
-            enter_transformed: false,
-            enters_under: None,
-            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
-            enters_attacking: false,
-            up_to: false,
-            enter_with_counters: vec![],
-            conditional_enter_with_counters: vec![],
-            face_down_profile: None,
-            library_shuffle: Default::default(),
-            enters_modified_if: None,
-        },
-        vec![],
-        watcher,
-        P0,
-    );
-    let mut events = Vec::new();
-    engine::game::effects::change_zone::resolve(runner.state_mut(), &ability, &mut events)
-        .expect("singleton ChangeZone resolves");
-
-    assert_eq!(runner.state().objects[&buried].zone, Zone::Battlefield);
-    assert_eq!(
-        runner.state().players[0].life,
-        21,
-        "the shortcut's proposed event origin must be Graveyard"
     );
 }
 

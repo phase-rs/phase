@@ -1460,6 +1460,27 @@ fn worldsouls_rage_resolves_hand_graveyard_both_and_neither_land_matrix() {
                     assert!(expected.iter().all(|id| cards.contains(id)));
                     assert!(!cards.contains(&opposing_land));
                     assert!(!cards.contains(&nonland));
+
+                    // CR 402.3: the observer envelope is fully normalized even
+                    // when the hidden hand contributes an eligible land.
+                    let observer =
+                        crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+                    let WaitingFor::EffectZoneChoice {
+                        cards: observer_cards,
+                        count: observer_count,
+                        min_count: observer_min_count,
+                        up_to: observer_up_to,
+                        ..
+                    } = &observer.waiting_for
+                    else {
+                        panic!("observer must retain the prompt envelope");
+                    };
+                    assert!(observer_cards.is_empty());
+                    assert_eq!(
+                        (*observer_count, *observer_min_count, *observer_up_to),
+                        (0, 0, true),
+                        "observer envelope must not expose hidden eligibility"
+                    );
                     apply_as_current(
                         &mut state,
                         GameAction::SelectCards {

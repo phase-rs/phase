@@ -23946,6 +23946,12 @@ declare_game_state! {
 
     // Game flow
     pub waiting_for: WaitingFor,
+    /// CR 402.3: the producer-captured scan scope for an `EffectZoneChoice`.
+    /// Persisted with the prompt so capture/restore keeps viewer privacy
+    /// independent of the prompt's validation `zone`; `None` falls back to the
+    /// exact paused producer for older saves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_zone_choice_privacy_zones: Option<Vec<Zone>>,
     /// CR 104.1: the recorded result once the game has ended, written only by
     /// `elimination::end_game`. `waiting_for` is not a durable home for it: a game can end
     /// mid-resolution (the CR 104.4b mandatory-loop draw), and a later step of the SAME
@@ -33993,6 +33999,7 @@ impl GameState {
             waiting_for: WaitingFor::Priority {
                 player: starting_player,
             },
+            effect_zone_choice_privacy_zones: None,
             game_end: None,
             next_resolve_all_consent_epoch: initial_resolve_all_consent_epoch(),
             viewer_projection: None,
@@ -38391,6 +38398,7 @@ impl PartialEq for GameState {
             && self.rng_seed == other.rng_seed
             && self.combat == other.combat
             && self.waiting_for == other.waiting_for
+            && self.effect_zone_choice_privacy_zones == other.effect_zone_choice_privacy_zones
             && self.next_resolve_all_consent_epoch == other.next_resolve_all_consent_epoch
             && self.viewer_projection == other.viewer_projection
             && self.resolve_all_consent_run == other.resolve_all_consent_run
