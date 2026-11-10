@@ -6704,7 +6704,7 @@ mod tests {
     // The copy-only refusals. Each changes one thing on the donor of the positive
     // captures above, so each refusal is that one check's.
 
-    /// CR 400.7: a donor that has become a new object (last-known information).
+    /// CR 400.7: a donor that has become a new object (last-known information). Nearest printed board: Saw in Half ("Destroy target creature. If that creature dies this way, its controller creates two tokens that are copies of that creature, …") destroying Kessig Prowler.
     #[test]
     fn copied_double_faces_refuses_a_departed_donor() {
         let faces = capture_after(Some(LayoutKind::Transform), |_, source| {
@@ -6713,7 +6713,7 @@ mod tests {
         assert!(faces.is_none());
     }
 
-    /// CR 712.4b: a melded permanent.
+    /// CR 712.4b: a melded permanent. Nearest printed board: Cackling Counterpart copying Brisela, Voice of Nightmares (Bruna, the Fading Light melded with Gisela, the Broken Blade).
     #[test]
     fn copied_double_faces_refuses_a_melded_permanent() {
         let faces = capture_after(Some(LayoutKind::Transform), |obj, _| {
@@ -6722,13 +6722,13 @@ mod tests {
         assert!(faces.is_none());
     }
 
-    /// CR 712.4b: a meld card's stored back face.
+    /// CR 712.4b: a meld card's stored back face. Nearest printed board: Cackling Counterpart copying Bruna, the Fading Light ("(Melds with Gisela, the Broken Blade.)").
     #[test]
     fn copied_double_faces_refuses_a_meld_back_face() {
         assert!(capture_after(Some(LayoutKind::Meld), |_, _| {}).is_none());
     }
 
-    /// CR 709.5b: values copied from a Room.
+    /// CR 709.5b: values copied from a Room. Nearest printed board, by a read: Opalescence ("Each other non-Aura enchantment is a creature in addition to its other types …") animates Unholy Annex // Ritual Chamber, Mirrorweave targeting it makes Kessig Prowler a copy of the Room, and Cackling Counterpart copies the Prowler.
     #[test]
     fn copied_double_faces_refuses_room_values() {
         let faces = capture_after(Some(LayoutKind::Transform), |_, source| {
@@ -6743,7 +6743,7 @@ mod tests {
         assert!(faces.is_none());
     }
 
-    /// CR 722.2b: values copied from a preparation creature.
+    /// CR 722.2b: values copied from a preparation creature. Nearest printed board: Mirrorweave targeting Encouraging Aviator ("Whenever this creature attacks, it becomes prepared. …") makes Kessig Prowler a copy of it, and Cackling Counterpart copies the Prowler.
     #[test]
     fn copied_double_faces_refuses_preparation_values() {
         let faces = capture_after(Some(LayoutKind::Transform), |_, source| {
@@ -6765,6 +6765,7 @@ mod tests {
 
     /// CR 708.2: a face-down donor's `back_face` is its face-down stash, which
     /// `transform::stored_double_face` refuses.
+    /// No double-faced card can be face down (CR 712.16), so the stub is synthetic; the nearest printed board is Cackling Counterpart copying a face-down Willbender (Morph {1}{U}, CR 702.37a), whose stash is its face-down one.
     #[test]
     fn copied_double_faces_refuses_a_face_down_donor() {
         let faces = capture_after(Some(LayoutKind::Transform), |obj, _| obj.face_down = true);
@@ -6774,6 +6775,7 @@ mod tests {
     /// CR 707.9a/b/d: the fold lands each exception in the stored face's base:
     /// a type, a trigger, a P/T value and a keyword, and prunes the CDA the P/T
     /// exception overrides while keeping a non-CDA static.
+    /// No printed copy carries all four exceptions at once: the type is Nexus of Becoming's ("except it's a 3/3 Golem artifact creature in addition to its other types"), the trigger Grub, Notorious Auntie's, the P/T Soul Separator's ("except it's 1/1") and the keyword Kiki-Jiki, Mirror Breaker's ("except it has haste"). The face is a synthetic stand-in for Werewolf of Ancient Hunger, whose printed P/T ability is a CDA ("power and toughness are each equal to the total number of cards in all players' hands"); its fixed CDA and its trample static are not printed text. The printed boards are the integration rows in grub_storied_matriarch_769.rs.
     #[test]
     fn fold_copy_exceptions_into_face_lands_exceptions_in_the_face() {
         let cda = StaticDefinition::continuous()
