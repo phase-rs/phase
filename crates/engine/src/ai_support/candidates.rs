@@ -3913,6 +3913,7 @@ pub fn candidate_actions_broad_with_probe(
         WaitingFor::LoopShortcut {
             proposer,
             predicted_winner,
+            certificate,
             schema,
             declaration,
             period,
@@ -3983,18 +3984,21 @@ pub fn candidate_actions_broad_with_probe(
             // its own candidate. Reading `iteration_count` rather than re-deriving anything keeps
             // one authority for that count, the producer's.
             //
-            // WILDCARD-FREE over `IterationCount`: a bounded offer publishes `Fixed`, and the
-            // `UntilLethal` arm above already covers the unbounded case, so an `UntilLethal`
-            // suggestion here has no count to name and emits nothing rather than guessing one.
-            let suggested = match schema.iteration_count {
-                crate::analysis::decision_template::IterationCount::Fixed(n) => Some(n),
-                crate::analysis::decision_template::IterationCount::UntilLethal
-                | crate::analysis::decision_template::IterationCount::WithoutEnd => None,
-            };
-            if let Some(n) = suggested.filter(|_| {
-                schema.is_bounded()
-                    && (schema.points.is_empty() || declaration.is_some() || !period.is_empty())
-            }) {
+            // An `UntilLethal` or without-end suggestion has no count to name, and the arm above
+            // already covers it, so it emits nothing here rather than guessing one.
+            //
+            // `offered_fixed_count` is the engine's authority for which `Fixed` suggestions are a
+            // take of their own: a bounded offer's, and a lethal drain stated at a fixed count
+            // because its crossing lies past what one take can drive. The second measured no
+            // rules threshold, and needs none for its count to be the answer it offers.
+            let suggested = crate::analysis::loop_check::offered_fixed_count(
+                schema,
+                *predicted_winner,
+                certificate,
+            );
+            if let Some(n) = suggested
+                .filter(|_| schema.points.is_empty() || declaration.is_some() || !period.is_empty())
+            {
                 v.push(candidate(
                     GameAction::DeclareShortcut {
                         count: crate::analysis::decision_template::IterationCount::Fixed(n),

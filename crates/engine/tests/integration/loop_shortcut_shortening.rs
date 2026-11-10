@@ -337,7 +337,8 @@ fn tenacity_board_with_seeded_interrupt(
 }
 
 /// CR 732.2b/c end to end, on a real four-seat board: the sole responder names a place above the
-/// budget this engine drives and is REFUSED with their window intact; from the state that
+/// budget — past the crossing the offer proved, so outside the sequence — and is REFUSED with
+/// their window intact; from the state that
 /// refusal left behind they name a place the drive reaches, receive the ending point (CR 732.2c),
 /// and cast the instant in their hand at it — cutting the loop rather than losing to it.
 ///
@@ -379,9 +380,9 @@ fn a_place_the_engine_cannot_drive_is_refused_and_the_next_answer_ends_the_loop(
 
     let over_budget = ShortcutDecisionSchema::default().deliverable_capacity + 1;
     assert!(
-        admitted_places(&state).contains(&over_budget),
-        "reach-guard: CR 732.2b admits this place, so the refusal below is the DRIVE's and not \
-         the range's"
+        !admitted_places(&state).contains(&over_budget),
+        "CR 732.2b: the crossing the offer proved is the sequence's ending point and lies inside \
+         the budget, so a place above the budget is outside the sequence"
     );
     let refused = shorten(&mut state, over_budget);
     assert!(
@@ -946,12 +947,19 @@ fn the_published_range_and_the_reducer_agree_below_the_budget_and_part_above_it(
     let mut refused = 0usize;
     let mut above_budget = 0usize;
 
-    for mut state in [
+    // CR 732.2b: an `UntilLethal` proposal ends at the crossing its offer proved, inside the
+    // budget, so its range agrees with the reducer everywhere; a proposal WITHOUT END has no
+    // ending point, and is the shape whose published range runs past the budget.
+    let without_end = crate::mandatory_loop_draws::performing_without_end_window();
+    let parts_above_the_budget = without_end.is_some();
+    let mut windows = vec![
         weird_window(IterationCount::Fixed(0)),
         weird_window(IterationCount::Fixed(bound)),
         rig_window(IterationCount::Fixed(1)),
         rig_window(IterationCount::UntilLethal),
-    ] {
+    ];
+    windows.extend(without_end);
+    for mut state in windows {
         bind_interaction_authority(&mut state, InteractionSessionId("shortening".to_string()))
             .expect("the responder window binds interaction authority");
         let places = admitted_places(&state);
@@ -1004,10 +1012,11 @@ fn the_published_range_and_the_reducer_agree_below_the_budget_and_part_above_it(
          at or below the budget, so neither a dead projection nor a blanket refusal can satisfy \
          the agreement"
     );
-    assert!(
+    assert_eq!(
         above_budget > 0,
-        "reach-guard on the parting partition: no probed place landed above the budget, so the \
-         disagreement above was asserted over nothing"
+        parts_above_the_budget,
+        "reach-guard on the parting partition: exactly the proposal without end publishes a \
+         place above the budget, so the disagreement above is asserted over something"
     );
 
     let Some(mut state) = crate::mandatory_loop_draws::two_targets_without_end_window() else {
@@ -1406,19 +1415,15 @@ fn a_shortened_mana_engine_is_performed_while_an_accepted_one_is_marked_unbounde
     }
 }
 
-/// CR 732.2c + CR 704.5a: an in-cap place on an unbounded proposal drives that many cycles and
-/// crowns nobody it was not promised. Below the crossing the cycles commit, no game ends and the
-/// ending point lands on the shortener; at or past it the game ends with the seat the OFFER
-/// named, and the unbounded axes stay unmarked — a finite drive is not the unbounded one.
+/// CR 732.2c + CR 704.5a: an in-cap place on an `UntilLethal` proposal drives that many cycles
+/// and crowns nobody. Below the crossing the cycles commit, no game ends and the ending point
+/// lands on the shortener.
 ///
-/// The admitted member rides the same board: a restored proposal whose `predicted_winner` the
-/// drive contradicts is NOT crowned, however far past the crossing it is shortened to. It reds
-/// under its own restoration — clear the name at the rewrite and the drive's winner is crowned
-/// through an arm left with nothing to gate on.
-///
-/// Both legs red at base, where the response reaches no materializer at all. The crown leg's
-/// reach-guard is the crown itself, without which the no-crown leg passes on a drive that never
-/// reached lethal.
+/// CR 732.2b: the crossing the offer proved is the proposal's ending point, so a place at or past
+/// it names nothing inside the sequence — the drive would end the game before reaching it. It is
+/// refused at the responder's seam before any state write, on the proposal the engine minted and
+/// on the same proposal restored with a contradicting name alike: neither reaches a drive that
+/// could crown anybody.
 #[test]
 fn an_in_cap_place_drives_its_cycles_and_crowns_only_the_named_seat() {
     let below = 5u32;
@@ -1470,31 +1475,38 @@ fn an_in_cap_place_drives_its_cycles_and_crowns_only_the_named_seat() {
         .max()
         .expect("the rig has players") as u32
         + 1;
-    let mut crowned = rig_window(IterationCount::UntilLethal);
-    let WaitingFor::RespondToShortcut { proposal, .. } = &crowned.waiting_for else {
+    let mut past = rig_window(IterationCount::UntilLethal);
+    let WaitingFor::RespondToShortcut { proposal, .. } = &past.waiting_for else {
+        panic!("the rig parks on a responder window")
+    };
+    let proved = proposal
+        .win_kind_at
+        .expect("this offer's mint carries the crossing it proved");
+    assert!(
+        (below + 1..=crossing).contains(&proved),
+        "reach guard: the proved crossing lies past the in-cap place and no later than every \
+         seat's life allows, got {proved}"
+    );
+    let window_before = past.waiting_for.clone();
+    let refusal = shorten(&mut past, proved).expect_err("the crossing is outside the sequence");
+    assert!(
+        matches!(&refusal, EngineError::InvalidAction(message) if message.contains("outside the proposed sequence")),
+        "{refusal:?}"
+    );
+    assert_eq!(
+        past.waiting_for, window_before,
+        "the refusal precedes every state write, so the poll is unchanged"
+    );
+    shorten(&mut past, crossing).expect_err("a place past the crossing is outside the sequence");
+
+    // The same place on the proposal restored with a contradicting name is refused the same way.
+    let mut contradicted = rig_window(IterationCount::UntilLethal);
+    let WaitingFor::RespondToShortcut { proposal, .. } = &mut contradicted.waiting_for else {
         panic!("the rig parks on a responder window")
     };
     let named = proposal
         .predicted_winner
         .expect("this offer's mint is the one that names a winner");
-    shorten(&mut crowned, crossing).expect("a place past the crossing is still in range");
-    assert_eq!(
-        crowned.waiting_for,
-        WaitingFor::GameOver {
-            winner: Some(named)
-        },
-        "CR 704.5a: past the crossing the game ends with the seat the offer named"
-    );
-    assert!(
-        crowned.unbounded_resources.is_empty(),
-        "a finite drive is not the unbounded one, so no axis is marked"
-    );
-
-    // The admitted member: the same shortening on a proposal whose name the drive contradicts.
-    let mut contradicted = rig_window(IterationCount::UntilLethal);
-    let WaitingFor::RespondToShortcut { proposal, .. } = &mut contradicted.waiting_for else {
-        panic!("the rig parks on a responder window")
-    };
     proposal.predicted_winner = Some(
         contradicted
             .players
@@ -1509,11 +1521,10 @@ fn an_in_cap_place_drives_its_cycles_and_crowns_only_the_named_seat() {
             .expect("it decodes through the production restore")
             .into_game_state()
             .expect("persisted test snapshot satisfies the checked restore contract");
-    shorten(&mut restored, crossing).expect("the same place is still in range");
+    shorten(&mut restored, crossing).expect_err("the restored crossing still bounds the places");
     assert!(
         !matches!(restored.waiting_for, WaitingFor::GameOver { .. }),
-        "a drive whose CR 704.5a verdict the proposal's own name contradicts crowns nobody, got \
-         {:?}",
+        "nothing past the crossing reaches a drive, got {:?}",
         restored.waiting_for
     );
 }

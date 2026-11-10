@@ -243,3 +243,77 @@ fn a_loop_a_few_repetitions_from_the_limit_states_those_repetitions() {
         );
     }
 }
+
+/// CR 732.2a: an offer restored from a save written before the representable bound existed
+/// decodes the engine budget in place of its capacity. The declare seam re-proves the headroom by
+/// replaying the offer's confirmed period on the board before any response window opens, so the
+/// restored budget is never copied into a proposal as proof: a count past what fits is handed
+/// back, and the representable count is still taken to the limit.
+#[test]
+fn a_restored_budget_only_offer_is_re_proved_by_replaying_its_period() {
+    let Some(db) = shared_card_db() else { return };
+    let mut board = board(i32::MAX - 18, db);
+    drive_to_offer(&mut board);
+    let at_offer = life(board.runner.state());
+    let representable = representable_repetitions(at_offer);
+    assert!(
+        (1..BUDGET).contains(&representable),
+        "reach guard: some but not all of the budget fits ({representable})"
+    );
+
+    let mut legacy =
+        serde_json::to_value(board.runner.state()).expect("the offer board serializes");
+    let schema = legacy["waiting_for"]["data"]["schema"]
+        .as_object_mut()
+        .expect("the schema is an object");
+    schema
+        .remove("deliverable_capacity")
+        .expect("the capacity was serialized before removal");
+    schema.insert(
+        "iteration_count".to_string(),
+        serde_json::to_value(IterationCount::Fixed(BUDGET)).expect("a count serializes"),
+    );
+    let restored = serde_json::from_value::<engine::types::game_state::PersistedGameState>(legacy)
+        .expect("a pre-field offer still decodes")
+        .into_game_state()
+        .expect("a pre-field offer satisfies the checked restore contract");
+    let WaitingFor::LoopShortcut { schema, period, .. } = &restored.waiting_for else {
+        panic!(
+            "the restored offer survives, got {:?}",
+            restored.waiting_for
+        );
+    };
+    assert!(
+        !period.is_empty(),
+        "reach guard: the recorded road carries its period"
+    );
+    assert_eq!(
+        schema.deliverable_capacity, BUDGET,
+        "reach guard: the stripped capacity decodes the budget, which proves nothing"
+    );
+
+    let mut over = GameRunner::from_state(restored.clone());
+    over.act(GameAction::DeclareShortcut {
+        count: IterationCount::Fixed(representable + 1),
+        template: None,
+    })
+    .expect("a refused declaration is handed back, not an error");
+    assert!(
+        matches!(over.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "the re-proved headroom refuses the over-count before any window, got {:?}",
+        over.state().waiting_for
+    );
+    assert_eq!(life(over.state()), at_offer, "nothing was performed");
+
+    let mut taken = Board {
+        runner: GameRunner::from_state(restored),
+        feeder: board.feeder,
+        ability_index: board.ability_index,
+    };
+    take(&mut taken, representable);
+    assert_eq!(
+        life(taken.runner.state()),
+        at_offer + GAIN_PER_REPETITION * representable as i32,
+        "the representable count is still taken"
+    );
+}

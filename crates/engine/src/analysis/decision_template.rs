@@ -487,9 +487,13 @@ pub struct ShortcutDecisionSchema {
 
 /// A schema deserialized from a pre-bound snapshot carries no capacity. The
 /// forward-compatible default is the global safety limit, which is what every producer
-/// emitted before either field existed. Recovering the BOUNDEDNESS of a pre-split save is
-/// not a default's job — a per-field default cannot read the legacy key that carried both
-/// answers — and is done by `types::game_state`'s migration chain before serde runs.
+/// emitted before either field existed. It is NOT a proof that the take can perform that many
+/// repetitions: `game::engine::handle_declare_shortcut` re-derives the representable headroom on
+/// the board it declares against — from the offer's per-period signature or by replaying its
+/// confirmed period — before any response window opens, so a restored budget never reaches a
+/// proposal unchecked. Recovering the BOUNDEDNESS of a pre-split save is not a default's job — a
+/// per-field default cannot read the legacy key that carried both answers — and is done by
+/// `types::game_state`'s migration chain before serde runs.
 ///
 /// DELIBERATELY NOT MIRRORED in `client/src/adapter/types.ts::ShortcutDecisionSchema`, neither
 /// this capacity nor the measured bound above it: the frontend never reads either, it reads

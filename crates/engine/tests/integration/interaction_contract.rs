@@ -3644,6 +3644,7 @@ fn preview_offer_with_points(
                 engine::analysis::resource::PeriodSignature::EveryRepetition(
                     engine::analysis::resource::PeriodicDelta {
                         frames_per_period: 1,
+                        seat_life_gross: None,
                         delta,
                         declarable_victims: Vec::new(),
                         victim_slot,
@@ -4465,6 +4466,7 @@ fn respond_period(
     }
     engine::analysis::resource::PeriodicDelta {
         frames_per_period: 1,
+        seat_life_gross: None,
         delta,
         declarable_victims: Vec::new(),
         victim_slot,
@@ -8533,7 +8535,9 @@ fn stage_sequenced_offer(
             unbounded: Vec::new(),
             rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
-            win_kind_at: None,
+            // CR 732.2a + CR 704.5a: a winner-naming offer carries the crossing its `UntilLethal`
+            // take ends at, as every production mint does.
+            win_kind_at: Some(1_000),
             mandatory: false,
             residual_board_delta: engine::analysis::resource::BoardDelta::default(),
             per_cycle: None,

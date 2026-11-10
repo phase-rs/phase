@@ -942,9 +942,30 @@ pub struct PeriodicDelta {
     /// call that consumes it.
     #[serde(default)]
     pub seat_life_charge: Vec<(PlayerId, i64)>,
+    /// CR 119.3: per seat, the life one observed repetition GAINED and LOST as separate gross
+    /// edits ([`ResourceVector::frame_wise_gross_life`]), read by `analysis::headroom` to step
+    /// the per-turn gained and lost tallies each edit advances. Neither is a net: a repetition
+    /// that gains 1 and loses 2 advances BOTH tallies, and a seat that only loses advances only
+    /// the lost one.
+    ///
+    /// `None` is a signature that measured no gross edits — a save written before this field
+    /// existed, or a producer that reads no frames — and the headroom reader then charges both
+    /// tallies the charge model's gross bound, the conservative reading. `Some` with no entry for
+    /// a seat states that the seat's life never moved inside the repetition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seat_life_gross: Option<Vec<SeatGrossLife>>,
     /// CR 514.1: the hand a turn-cycle period carries into each cleanup; `None` off that cover.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<CleanupPair>,
+}
+
+/// CR 119.3: one seat's gross life edits across one observed repetition — what it gained and
+/// what it lost, each a non-negative magnitude, never netted against the other.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeatGrossLife {
+    pub seat: PlayerId,
+    pub gained: i64,
+    pub lost: i64,
 }
 
 /// CR 732.2a: an offer's published per-period signature, by which repetitions it states. A
@@ -2627,6 +2648,69 @@ impl ResourceVector {
             life,
             ..self.clone()
         }
+    }
+
+    /// CR 119.3 + CR 704.3: this vector with its `life` axis replaced by each seat's per-period
+    /// life DIP — how far below the period's starting total the seat's life stands at its lowest
+    /// frame. The life-total PATH, where [`ResourceVector::with_frame_wise_life_loss`] is the
+    /// GROSS loss: a period that loses 3, regains 3 and loses 3 again has a gross loss of 6 and a
+    /// dip of 3, and only the dip is what CR 704.5a reads at a priority beat.
+    ///
+    /// The dip is never below the period's net loss (the last frame is one of the frames), and
+    /// never above its gross loss. Same NEGATIVE-as-loss convention as that sibling, so
+    /// [`ResourceVector::seat_life_charges`] consumes either.
+    pub(crate) fn with_frame_wise_life_dip(&self, frames: &[&GameState]) -> ResourceVector {
+        let mut life: BTreeMap<PlayerId, i64> = BTreeMap::new();
+        if let Some((&first, rest)) = frames.split_first() {
+            for &frame in rest {
+                for (seat, change) in Self::period(first, frame).life {
+                    let deepest = life.entry(seat).or_insert(0);
+                    *deepest = (*deepest).min(change);
+                }
+            }
+        }
+        life.retain(|_, dip| *dip < 0);
+        ResourceVector {
+            life,
+            ..self.clone()
+        }
+    }
+
+    /// CR 119.3: per seat, the life gained and the life lost across the legs of `frames`, each
+    /// as its own gross edit. A leg's gain is the larger of its life-total rise and its rise in
+    /// the per-turn gained tally, and its loss likewise against the lost tally, so a gain and a
+    /// loss that cancel inside one leg are both still counted. A tally that falls across a leg
+    /// was reset by a turn boundary and contributes only the life-total movement.
+    pub(crate) fn frame_wise_gross_life(frames: &[&GameState]) -> Vec<SeatGrossLife> {
+        let mut gross: BTreeMap<PlayerId, (i64, i64)> = BTreeMap::new();
+        for leg in frames.windows(2) {
+            let (before, after) = (leg[0], leg[1]);
+            for player in &after.players {
+                let Some(prior) = before.players.iter().find(|p| p.id == player.id) else {
+                    continue;
+                };
+                let moved = i64::from(player.life) - i64::from(prior.life);
+                let tally_rise =
+                    |after: u32, before: u32| after.checked_sub(before).map_or(0, i64::from);
+                let gained = moved.max(0).max(tally_rise(
+                    player.life_gained_this_turn,
+                    prior.life_gained_this_turn,
+                ));
+                let lost = (-moved).max(0).max(tally_rise(
+                    player.life_lost_this_turn,
+                    prior.life_lost_this_turn,
+                ));
+                if gained > 0 || lost > 0 {
+                    let entry = gross.entry(player.id).or_insert((0, 0));
+                    entry.0 += gained;
+                    entry.1 += lost;
+                }
+            }
+        }
+        gross
+            .into_iter()
+            .map(|(seat, (gained, lost))| SeatGrossLife { seat, gained, lost })
+            .collect()
     }
 
     /// Iterate every scalar component of this vector as a signed value, paired
@@ -18143,6 +18227,7 @@ mod tests {
         let published = delta.seat_life_charges(&charges);
         let period = PeriodicDelta {
             frames_per_period: 1,
+            seat_life_gross: None,
             delta,
             victim_slot: vec![(slot.clone(), 2)],
             declarable_victims: SlotCharge::declarable_victims(&charges),
@@ -18247,6 +18332,7 @@ mod tests {
         let published = delta.seat_life_charges(&charges);
         let period = PeriodicDelta {
             frames_per_period: 1,
+            seat_life_gross: None,
             delta,
             victim_slot: vec![(slot.clone(), 2)],
             declarable_victims: SlotCharge::declarable_victims(&charges),
@@ -18443,6 +18529,7 @@ mod tests {
         );
         let period = PeriodicDelta {
             frames_per_period: 1,
+            seat_life_gross: None,
             delta,
             victim_slot: vec![(slot.clone(), 2)],
             declarable_victims: SlotCharge::declarable_victims(&charges),
@@ -18522,6 +18609,7 @@ mod tests {
         }];
         let dipping = PeriodicDelta {
             frames_per_period: 2,
+            seat_life_gross: None,
             delta: life_loss_delta(&[(0, 1), (1, 4)]),
             victim_slot: vec![(slot.clone(), 4)],
             declarable_victims: SlotCharge::declarable_victims(&dipping_charges),
@@ -18579,6 +18667,7 @@ mod tests {
         let p1_charge = |losses: &[(u8, i64)], reserved: &[(u8, i64)]| {
             let period = PeriodicDelta {
                 frames_per_period: 1,
+                seat_life_gross: None,
                 delta: life_loss_delta(losses),
                 victim_slot: vec![(slot.clone(), 2)],
                 declarable_victims: vec![p0, p1],
@@ -18681,6 +18770,7 @@ mod tests {
         );
         let swap = PeriodicDelta {
             frames_per_period: 1,
+            seat_life_gross: None,
             delta: swap_delta,
             victim_slot: vec![(s1.clone(), 3), (s2.clone(), 3)],
             declarable_victims: SlotCharge::declarable_victims(&swap_charges),
@@ -18742,6 +18832,7 @@ mod tests {
         }];
         let gain = PeriodicDelta {
             frames_per_period: 1,
+            seat_life_gross: None,
             delta: life_loss_delta(&[(1, 2)]),
             victim_slot: vec![(g.clone(), 2)],
             declarable_victims: SlotCharge::declarable_victims(&gain_charges),
@@ -18784,6 +18875,7 @@ mod tests {
         // ⓒ PAY 1, GAIN 1: the frame-wise charge is 1 and the endpoint pair nets nothing.
         let even = PeriodicDelta {
             frames_per_period: 2,
+            seat_life_gross: None,
             delta: ResourceVector::default(),
             victim_slot: Vec::new(),
             declarable_victims: Vec::new(),
@@ -18841,6 +18933,7 @@ mod tests {
         ];
         let landing = PeriodicDelta {
             frames_per_period: 2,
+            seat_life_gross: None,
             delta: life_loss_delta(&[(1, 2)]),
             victim_slot: vec![(s1.clone(), 2), (s2.clone(), 2)],
             declarable_victims: SlotCharge::declarable_victims(&two_slots),
@@ -18888,6 +18981,7 @@ mod tests {
         }];
         let leaving = PeriodicDelta {
             frames_per_period: 2,
+            seat_life_gross: None,
             delta: life_loss_delta(&[(1, 2)]),
             victim_slot: vec![(s.clone(), 2)],
             declarable_victims: SlotCharge::declarable_victims(&one_slot),
@@ -19512,6 +19606,56 @@ mod tests {
         assert_ne!(
             whole.life, truncated.life,
             "dropping the last leg changes the accumulation, so no leg is decorative"
+        );
+    }
+
+    /// CR 119.3 + CR 704.3: the life DIP follows the life-total path where the gross loss sums
+    /// every fall. P1 falls 4 then 5 and never recovers, so both read 9. P2 rises 4 then falls 4,
+    /// a gross loss of 4 that never takes it below where it started: no dip at all. P3 falls 3,
+    /// recovers 3 and falls 3 again, a gross loss of 6 and a dip of 3. The gross edits split each
+    /// seat's movement into what it gained and what it lost, neither netted against the other.
+    #[test]
+    fn frame_wise_life_dip_reads_the_path_and_gross_edits_split_gains_from_losses() {
+        let walk = [
+            bound_board(&[40, 100, 100, 100]),
+            bound_board(&[40, 96, 104, 97]),
+            bound_board(&[40, 91, 100, 100]),
+            bound_board(&[40, 91, 100, 97]),
+        ];
+        let frames: Vec<&GameState> = walk.iter().collect();
+        assert_eq!(
+            ResourceVector::default()
+                .with_frame_wise_life_loss(&frames)
+                .life,
+            BTreeMap::from([(PlayerId(1), -9), (PlayerId(2), -4), (PlayerId(3), -6)]),
+            "reach guard: the gross loss sums every fall"
+        );
+        assert_eq!(
+            ResourceVector::default()
+                .with_frame_wise_life_dip(&frames)
+                .life,
+            BTreeMap::from([(PlayerId(1), -9), (PlayerId(3), -3)]),
+            "the dip is the deepest point below the start, and a seat never below it has none"
+        );
+        assert_eq!(
+            ResourceVector::frame_wise_gross_life(&frames),
+            vec![
+                SeatGrossLife {
+                    seat: PlayerId(1),
+                    gained: 0,
+                    lost: 9,
+                },
+                SeatGrossLife {
+                    seat: PlayerId(2),
+                    gained: 4,
+                    lost: 4,
+                },
+                SeatGrossLife {
+                    seat: PlayerId(3),
+                    gained: 3,
+                    lost: 6,
+                },
+            ]
         );
     }
 
@@ -21435,6 +21579,7 @@ mod tests {
         );
         let populated = PeriodicDelta {
             frames_per_period: 2,
+            seat_life_gross: None,
             delta,
             victim_slot: vec![(slot.clone(), 1)],
             declarable_victims: vec![PlayerId(1)],
@@ -21646,10 +21791,25 @@ mod tests {
             unbounded: vec![],
             rising: vec![],
             win_kind: Some(WinKind::LethalDamage),
-            win_kind_at: None,
+            // An `UntilLethal` proposal carries the crossing it ends at, or the boundary refuses
+            // it for stating no ending point.
+            win_kind_at: Some(1),
             template: None,
             per_cycle: Some(PeriodSignature::EveryRepetition(PeriodicDelta {
                 frames_per_period: 2,
+                // The gross edits ride the wire too.
+                seat_life_gross: Some(vec![
+                    SeatGrossLife {
+                        seat: PlayerId(0),
+                        gained: 3,
+                        lost: 0,
+                    },
+                    SeatGrossLife {
+                        seat: PlayerId(1),
+                        gained: 0,
+                        lost: 3,
+                    },
+                ]),
                 delta,
                 victim_slot: vec![],
                 declarable_victims: vec![],
@@ -28841,6 +29001,7 @@ mod tests {
     ) -> PeriodicDelta {
         PeriodicDelta {
             frames_per_period: 1,
+            seat_life_gross: None,
             delta,
             victim_slot: victim_slot.to_vec(),
             declarable_victims: domain.iter().copied().map(PlayerId).collect(),

@@ -321,16 +321,28 @@ impl PeriodExcursions {
     }
 
     /// The player-resource excursions of one declared period repetition, from the seat charges
-    /// [`Self::declared_charges_at`] read for it and the period's own net life and poison deltas.
-    /// Declared victim relocations are accounted for in the charges themselves.
+    /// [`Self::declared_charges_at`] read for it, the period's published gross life edits, and its
+    /// own net life and poison deltas. Declared victim relocations are accounted for in the
+    /// charges themselves.
     ///
-    /// BOTH PER-TURN TALLIES ARE CHARGED BY THE SAME GROSS BOUND. `types::game_state`'s checked
-    /// life edit advances the gained tally for a gain and the lost tally for a loss, so one
-    /// repetition whose leg gains 1 and loses 2 advances BOTH — charging only the net loss would
-    /// let an offer overrun a gained tally already near its stored maximum. `net` and `dip` are
-    /// the charge model's per-repetition life movement bounds (the end-of-repetition loss and the
-    /// deepest fall inside it); their maximum is the conservative gross bound this proof carries
-    /// for either direction.
+    /// CR 119.3: EACH PER-TURN TALLY IS STEPPED BY ITS OWN GROSS EDIT. `types::game_state`'s
+    /// checked life edit advances the gained tally for a gain and the lost tally for a loss, so a
+    /// repetition whose leg gains 1 and loses 2 advances the gained tally by 1 and the lost one by
+    /// 2, and a seat that only loses life advances only the lost tally.
+    ///
+    /// * The LOST tally takes the larger of the charge model's `dip` — at
+    ///   [`ChargeBound::Ceiling`](crate::analysis::resource::ChargeBound::Ceiling) the gross loss
+    ///   any conforming declaration inflicts in one repetition, re-aimed slots included — and the
+    ///   loss the observed repetition published, which also counts a loss an offsetting gain
+    ///   cancelled inside one leg.
+    /// * The GAINED tally takes the gain the observed repetition published. A declaration
+    ///   re-aims the period's announced losses, never its gains.
+    /// * The LIFE TOTAL follows its path, not its gross edits: it ends at the period's net gain
+    ///   less the charged net loss, rises at most by the gross gain, and falls at most by the
+    ///   charge model's `dip`, the deepest point inside the repetition.
+    ///
+    /// A signature that published no gross edits (`seat_life_gross: None`) has no gain to read,
+    /// so both tallies take the charge model's gross bound — the conservative reading.
     fn of_declared_iteration(
         per_cycle: &crate::analysis::resource::PeriodicDelta,
         charges: &BTreeMap<(PlayerId, u32), crate::analysis::resource::DeclaredLifeCharge>,
@@ -343,38 +355,58 @@ impl PeriodExcursions {
                 .get(&(player.id, iteration))
                 .copied()
                 .unwrap_or(crate::analysis::resource::DeclaredLifeCharge { net: 0, dip: 0 });
-            if charge.net != 0 || charge.dip != 0 {
-                let gross = charge.dip.max(charge.net);
+            let net_gain = per_cycle
+                .delta
+                .life
+                .get(&player.id)
+                .copied()
+                .unwrap_or(0)
+                .max(0);
+            let charged_loss = charge.dip.max(charge.net);
+            let (gained, lost) = match &per_cycle.seat_life_gross {
+                Some(gross) => {
+                    let observed = gross
+                        .iter()
+                        .find(|edit| edit.seat == player.id)
+                        .copied()
+                        .unwrap_or_default();
+                    (
+                        observed.gained.max(net_gain),
+                        observed.lost.max(charged_loss),
+                    )
+                }
+                None => (charged_loss.max(net_gain), charged_loss),
+            };
+            let net = net_gain - charge.net;
+            if net != 0 || gained != 0 || lost != 0 {
                 excursions.by_scalar.insert(
                     (player.id, PlayerScalar::Life),
                     Excursion {
-                        net: -charge.net,
-                        highest: 0,
-                        lowest: -gross,
+                        net,
+                        highest: gained.max(net).max(0),
+                        lowest: (-charge.dip).min(net).min(0),
                     },
                 );
-                excursions.by_scalar.insert(
-                    (player.id, PlayerScalar::LifeLostThisTurn),
-                    Excursion {
-                        net: charge.net,
-                        highest: gross,
-                        lowest: 0,
-                    },
-                );
+            }
+            if gained > 0 {
                 excursions.by_scalar.insert(
                     (player.id, PlayerScalar::LifeGainedThisTurn),
                     Excursion {
-                        net: gross,
-                        highest: gross,
+                        net: gained,
+                        highest: gained,
                         lowest: 0,
                     },
                 );
             }
-            if let Some(&gain) = per_cycle.delta.life.get(&player.id) {
-                if gain > 0 {
-                    excursions.step(player.id, PlayerScalar::Life, gain);
-                    excursions.step(player.id, PlayerScalar::LifeGainedThisTurn, gain);
-                }
+            if lost > 0 {
+                excursions.by_scalar.insert(
+                    (player.id, PlayerScalar::LifeLostThisTurn),
+                    Excursion {
+                        net: lost,
+                        highest: lost,
+                        lowest: 0,
+                    },
+                );
             }
         }
         for (&player, &delta_poison) in &per_cycle.delta.poison {
@@ -786,6 +818,7 @@ mod tests {
         delta.life.insert(P0, -1);
         let period = PeriodicDelta {
             frames_per_period: 1,
+            seat_life_gross: None,
             delta,
             victim_slot: vec![],
             declarable_victims: vec![],
@@ -810,6 +843,96 @@ mod tests {
             representable(&state),
             Some(1),
             "the gain inside the net-loss repetition still advances the gained tally"
+        );
+    }
+
+    /// CR 119.3: with the repetition's gross edits published, each per-turn tally is stepped by
+    /// its own edit. P0's leg gains 1 and loses 2; P1 only loses 3. A full gained tally on P1
+    /// bounds nothing, because P1 gains no life; P0's gained tally advances by its gain alone, and
+    /// its lost tally by the GROSS loss, never the net — including a loss an offsetting gain
+    /// cancelled inside one leg, which the observed edits count and the charge model does not.
+    #[test]
+    fn published_gross_life_edits_step_each_tally_by_its_own_edit() {
+        use crate::analysis::resource::{
+            AnnouncedLead, PeriodicDelta, ResourceVector, SeatGrossLife,
+        };
+        const P1: PlayerId = PlayerId(1);
+        let period = |p0_lost: i64| {
+            let mut delta = ResourceVector::default();
+            delta.life.insert(P0, -1);
+            delta.life.insert(P1, -3);
+            PeriodicDelta {
+                frames_per_period: 1,
+                seat_life_gross: Some(vec![
+                    SeatGrossLife {
+                        seat: P0,
+                        gained: 1,
+                        lost: p0_lost,
+                    },
+                    SeatGrossLife {
+                        seat: P1,
+                        gained: 0,
+                        lost: 3,
+                    },
+                ]),
+                delta,
+                victim_slot: vec![],
+                declarable_victims: vec![],
+                seat_life_charge: vec![(P0, 2), (P1, 3)],
+                cleanup: None,
+            }
+        };
+        let representable = |period: &PeriodicDelta, state: &GameState| {
+            PeriodExcursions::representable_under_schedule(
+                period,
+                None,
+                None,
+                &[],
+                state,
+                AnnouncedLead::None,
+                BUDGET,
+            )
+        };
+        let plain = period(2);
+        let mut state = state_at(20);
+        assert_eq!(
+            representable(&plain, &state),
+            None,
+            "reach guard: the budget fits"
+        );
+
+        state.players[1].life_gained_this_turn = u32::MAX;
+        assert_eq!(
+            representable(&plain, &state),
+            None,
+            "a seat that only loses life never advances its gained tally"
+        );
+        state.players[1].life_lost_this_turn = u32::MAX - 6;
+        assert_eq!(
+            representable(&plain, &state),
+            Some(2),
+            "P1's lost tally advances by its three-point loss"
+        );
+
+        let mut state = state_at(20);
+        state.players[0].life_gained_this_turn = u32::MAX - 3;
+        assert_eq!(
+            representable(&plain, &state),
+            Some(3),
+            "P0's gained tally advances by its one-point gain, not by its loss"
+        );
+
+        let mut state = state_at(20);
+        state.players[0].life_lost_this_turn = u32::MAX - 5;
+        assert_eq!(
+            representable(&plain, &state),
+            Some(2),
+            "P0's lost tally advances by the gross two, not the net one"
+        );
+        assert_eq!(
+            representable(&period(3), &state),
+            Some(1),
+            "a loss cancelled inside one leg is still a gross loss of three"
         );
     }
 

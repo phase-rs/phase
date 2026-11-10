@@ -16233,6 +16233,15 @@ fn reject_unproved_shortcut_proposal(
             proposal.deliverable_capacity
         ));
     }
+    // CR 732.2a + CR 704.5a: an `UntilLethal` proposal ends at the crossing its offer proved; a
+    // saved one carrying no crossing, or one past its proved capacity, states no ending point.
+    if !proposal.states_its_ending_point() {
+        return Err(format!(
+            "persisted RespondToShortcut proposal runs until lethal with crossing {:?}, which \
+             states no ending point inside its proved capacity {:?}",
+            proposal.win_kind_at, proposal.deliverable_capacity
+        ));
+    }
     Ok(())
 }
 

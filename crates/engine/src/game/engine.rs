@@ -2886,9 +2886,15 @@ fn interactive_loop_bridge_paths(
             // non-eliminated opponent using the lethal-crossing authority (accounting for dip and net).
             // If the engine cannot represent that many repetitions, withhold the shortcut so the loop
             // does not offer a count that overflows before lethal.
-            let frame_wise = delta.with_frame_wise_life_loss(&period_frames);
+            //
+            // CR 119.3 + CR 704.3: the crossing reads the life-total PATH — each seat's deepest
+            // fall inside the period — not its gross loss. A period that drains a seat, lets it
+            // recover, and drains it again loses more than it dips, and charging the gross loss
+            // would place the crossing earlier than the repetition that actually reaches 0.
+            let frame_wise = delta.with_frame_wise_life_dip(&period_frames);
             let periodic = crate::analysis::resource::PeriodicDelta {
                 frames_per_period: period_frames.len() as u32,
+                seat_life_gross: None,
                 delta: delta.clone(),
                 victim_slot: Vec::new(),
                 declarable_victims: Vec::new(),
@@ -2972,6 +2978,16 @@ fn interactive_loop_bridge_paths(
                     _ if !lethal_within_reach => return,
                     other => (other, Some(winner)),
                 };
+            // CR 732.2a + CR 732.2b: an `UntilLethal` offer's ending point is the crossing it
+            // proved, so the repetition count of that crossing rides the certificate beside the
+            // winner it names: the declare seam admits `UntilLethal` only where it lies inside the
+            // capacity, a responder may name only a place before it, and restore and settlement
+            // re-check it. The winner and the capacity alone do not state where the sequence
+            // ends. A fixed fallback states its own ending point and promises no crossing.
+            let mut certificate = certificate;
+            if iteration_count == crate::analysis::decision_template::IterationCount::UntilLethal {
+                certificate.win_kind_at = u32::try_from(cycles_to_lethal).ok();
+            }
             let schema = build_shortcut_schema(Vec::new(), iteration_count, None, representable);
             state.waiting_for = WaitingFor::LoopShortcut {
                 proposer,
@@ -3861,6 +3877,7 @@ fn certified_bounded_cycle_offer<'a>(
                 // spans TWO frames (a gain-life resolution then a lose-life one), and
                 // under the old hardcode its accepted drive committed nothing at all.
                 frames_per_period: span,
+                seat_life_gross: None,
                 delta,
                 victim_slot: Vec::new(),
                 declarable_victims: Vec::new(),
@@ -3938,6 +3955,7 @@ fn certified_bounded_cycle_offer<'a>(
                 touch,
                 PeriodicDelta {
                     frames_per_period: k,
+                    seat_life_gross: None,
                     delta,
                     victim_slot: Vec::new(),
                     declarable_victims: Vec::new(),
@@ -4129,6 +4147,10 @@ fn bounded_offer_tail(
     // CR 119.3 + CR 704.5a: the per-seat divisor, published and then HANDED to the reduction,
     // so the bound cannot be divided by anything other than what the certificate states.
     periodic.seat_life_charge = frame_wise.seat_life_charges(&charged);
+    // CR 119.3: what each seat gained and lost as separate gross edits, so the representable
+    // headroom steps each per-turn tally by its own edit rather than by a net.
+    periodic.seat_life_gross =
+        Some(crate::analysis::resource::ResourceVector::frame_wise_gross_life(&period_frames));
     // (7b) THE DECLARATION, BEFORE THE SCHEMA. The cascade below is DECLARATION-RELATIVE, so the
     // pins have to exist before there is a count to publish. `pin_journalled_declaration` pins
     // each charged slot to its observed aim and every other point from the journal, and stamps
@@ -6158,8 +6180,13 @@ fn apply_confirmed_shortcut(
                 !shortcut_count_is_drivable(state, proposal, n)
             }
             // Bounded elsewhere by the same constant: `apply_until_lethal_shortcut` drives
-            // `shortcut_drive_period` cycles, which clamps to `MAX_SHORTCUT_CYCLES`.
-            crate::analysis::decision_template::IterationCount::UntilLethal => false,
+            // `shortcut_drive_period` cycles, which clamps to `MAX_SHORTCUT_CYCLES`. CR 732.2a +
+            // CR 704.5a: what this seam re-checks is the ending point — the crossing the offer
+            // proved, inside the capacity the declaration proved — which a restored proposal
+            // reaches without the declare seam.
+            crate::analysis::decision_template::IterationCount::UntilLethal => {
+                !proposal.states_its_ending_point()
+            }
             // The take drives no repetition: the accepted proposal is the draw.
             crate::analysis::decision_template::IterationCount::WithoutEnd => false,
         }
@@ -8596,6 +8623,7 @@ pub(crate) fn replay_bounded_offer(
     let &prior = window.first().ok_or(BoundedOfferRefusal::NoCertification)?;
     let periodic = crate::analysis::resource::PeriodicDelta {
         frames_per_period: window.len() as u32,
+        seat_life_gross: None,
         delta: crate::analysis::resource::ResourceVector::period(prior, current),
         victim_slot: Vec::new(),
         declarable_victims: Vec::new(),
@@ -8725,6 +8753,7 @@ pub(crate) fn counted_offer(
         per_cycle: Some(crate::analysis::resource::PeriodSignature::OneRepetition(
             crate::analysis::resource::PeriodicDelta {
                 frames_per_period: frames.len() as u32 - 1,
+                seat_life_gross: None,
                 delta: crate::analysis::resource::ResourceVector::period(prior, current),
                 victim_slot: Vec::new(),
                 declarable_victims: Vec::new(),
@@ -9362,6 +9391,15 @@ fn handle_declare_shortcut(
     }
     // CR 732.2a: bind deliverable_capacity to the proposal, evaluated under the declared template
     // and leading announcement aims so later pins cannot escape the scalar headroom cap.
+    //
+    // RE-PROVED HERE, ON THIS BOARD, rather than copied off the offer. The offer's capacity is
+    // what its producer measured, and an offer restored from a save written before the headroom
+    // measurement existed decodes the engine budget in its place — a number nobody proved the
+    // take can perform. So the headroom is re-derived from what the offer carries before any
+    // response window opens: its per-period signature, or else the confirmed period its take
+    // replays (`representable_on_replay`). An offer carrying neither is a Ring offer, whose
+    // `UntilLethal` ending point is checked below and whose fixed count no save predating this
+    // measurement can state.
     let deliverable_capacity =
         if let Some(crate::analysis::resource::PeriodSignature::EveryRepetition(periodic)) =
             &offer.certificate.per_cycle
@@ -9380,6 +9418,16 @@ fn handle_declare_shortcut(
             rep.map_or(offer.schema.deliverable_capacity, |r| {
                 offer.schema.deliverable_capacity.min(r)
             })
+        } else if !offer.period.is_empty() {
+            representable_on_replay(
+                state,
+                offer.proposer,
+                offer.period,
+                offer.schema.deliverable_capacity,
+            )
+            .map_or(offer.schema.deliverable_capacity, |r| {
+                offer.schema.deliverable_capacity.min(r)
+            })
         } else {
             offer.schema.deliverable_capacity
         };
@@ -9392,6 +9440,19 @@ fn handle_declare_shortcut(
             reject_shortcut_declaration(state, &mut result);
             return Ok(result);
         }
+    }
+    // CR 732.2a + CR 704.5a: an `UntilLethal` declaration's ending point is the crossing the offer
+    // proved. Where that crossing is not carried — an offer restored from a save written before it
+    // was — or lies past the capacity this declaration may drive, the sequence names no ending
+    // point the take can reach, so it is handed back before any response window opens.
+    if count == crate::analysis::decision_template::IterationCount::UntilLethal
+        && !crate::analysis::loop_check::crossing_within(
+            offer.certificate.win_kind_at,
+            deliverable_capacity,
+        )
+    {
+        reject_shortcut_declaration(state, &mut result);
+        return Ok(result);
     }
     let proposal = crate::analysis::loop_check::ShortcutProposal {
         proposer: offer.proposer,
@@ -9438,6 +9499,41 @@ fn handle_declare_shortcut(
         apply_confirmed_shortcut(state, &mut result, &proposal)?;
     }
     Ok(result)
+}
+
+/// The repetitions, up to `budget`, of a confirmed period that `state` can represent, measured by
+/// replaying two of its cycles on a clone exactly as the take performs them
+/// (`period_confirm::perform_cycle`) and stepping the edits they emitted
+/// (`analysis::headroom`); `None` when the whole budget fits. An engine limit, not a rules one.
+///
+/// A replayed cycle whose own final edit does not fit counts the cycles before it. A replay that
+/// fails for any other reason narrows nothing: the take meets that refusal itself, and it is not
+/// this measurement's to decide.
+fn representable_on_replay(
+    state: &GameState,
+    proposer: PlayerId,
+    period: &super::period_confirm::ConfirmedPeriod,
+    budget: u32,
+) -> Option<u32> {
+    let _probe = SimulationProbeGuard::enter();
+    let mut work = state.clone();
+    priority::reset_priority(&mut work);
+    work.waiting_for = WaitingFor::Priority { player: proposer };
+    let mut cycles: [Vec<GameEvent>; 2] = Default::default();
+    for (performed, events) in cycles.iter_mut().enumerate() {
+        match super::period_confirm::perform_cycle(&mut work, period, proposer, events) {
+            Ok(()) => {}
+            Err(OfferRefusal::LifeChangeUnrepresentable { .. }) => {
+                return Some((performed as u32).min(budget));
+            }
+            Err(_) => return None,
+        }
+    }
+    crate::analysis::headroom::PeriodExcursions::representable_repetitions(
+        &cycles.map(|events| crate::analysis::headroom::PeriodExcursions::of_events(&events)),
+        state,
+        budget,
+    )
 }
 
 /// CR 732.2a: the priority holder MAY decline the auto-offered loop shortcut — "the player
