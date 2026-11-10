@@ -1457,6 +1457,14 @@ pub(crate) fn settle_empty_forwarded_zone_result(state: &mut GameState, producer
     }
 }
 
+/// Resumes ready continuations and restores the caller's trigger context.
+///
+/// Only writes by the die-instruction publisher survive successful scope restoration:
+/// survivor values, completed aggregates and explicit clears. Nested drains
+/// propagate their latest publication, or retain the enclosing publication when
+/// they do not write. A failed body or tail discards the scope's publication and
+/// restores the caller's entry die scalar and enclosing publication. Numeric
+/// Attraction events and context replay are not writes.
 pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 601.2h + CR 605.3b + CR 608.2c: a parked counter-cost root whose
     // replacement subtree has retired resumes before any further resolution
@@ -1625,6 +1633,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         // CR 608.2: replay the resolving ability's snapshotted trigger
         // context so TargetFilter::TriggeringPlayer (and its siblings)
         // resolve against the original trigger, not whatever is live now.
+        let entry_die_result = state.die_result_this_resolution;
         let trigger_snapshot = trigger_context
             .as_ref()
             .map(|ctx| super::triggers::push_resolving_trigger_context(state, ctx));
@@ -1638,7 +1647,9 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                 object_incarnations: Vec::new(),
             }));
         }
+        let enclosing_die_publication = state.die_result_publication.take();
         let mut chain_progress = None;
+        let mut execution_failed = false;
         if !player_scope_queue_end {
             if bound_result_is_empty(&chain)
                 && ability_chain_depends_on_missing_forward_result(&chain)
@@ -1649,12 +1660,16 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                         chain.context.forwarded_result_context.clone();
                     // CR 603.10 + CR 608.2c: the choice-driven instruction just completed; its entries are observed before the resumed chain runs.
                     settle_entries_before_instruction(state, events, &remaining, None);
-                    chain_progress = resolve_ability_chain_step(state, &remaining, events, 1).ok();
+                    chain_progress = resolve_ability_chain_step(state, &remaining, events, 1)
+                        .inspect_err(|_| execution_failed = true)
+                        .ok();
                 }
             } else {
                 // CR 603.10 + CR 608.2c: the choice-driven instruction just completed; its entries are observed before the resumed chain runs.
                 settle_entries_before_instruction(state, events, &chain, None);
-                chain_progress = resolve_ability_chain_step(state, &chain, events, 1).ok();
+                chain_progress = resolve_ability_chain_step(state, &chain, events, 1)
+                    .inspect_err(|_| execution_failed = true)
+                    .ok();
             }
         }
         if let Some(source_id) = state
@@ -1697,15 +1712,26 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                     events,
                     1,
                 )
+                .inspect_err(|_| execution_failed = true)
                 .ok();
             }
         }
         // CR 608.2c: the detached "after each player" tail is the rest of the same
         // ability, so it runs under the frame's trigger context too; restore the
         // outer context only once both the chain and its tail have run.
+        // CR 706.2 + CR 608.2c: each die's result is its final value after modifiers;
+        // the ability's own instruction determines how multiple dice are used.
+        // Actual writer authority, not event kind or scalar inequality, determines
+        // ownership. An Attraction can emit a numeric die without publishing.
+        let published_die = state
+            .die_result_publication
+            .take()
+            .filter(|_| !execution_failed);
         if let Some(snapshot) = trigger_snapshot {
             super::triggers::restore_trigger_event_context(state, snapshot);
         }
+        state.die_result_this_resolution = published_die.unwrap_or(entry_die_result);
+        state.die_result_publication = published_die.or(enclosing_die_publication);
         if let Some(kind) = parent_kind {
             events.push(GameEvent::EffectResolved {
                 kind,
@@ -29015,10 +29041,614 @@ mod tests {
     use crate::database::synthesis::synthesize_extort;
     use crate::game::scenario::{GameScenario, P0, P1};
     use crate::types::ability::{
-        filter_requires_parent_target_object, ChooseOneOfKind, CoinFlipRun,
+        filter_requires_parent_target_object, ChooseOneOfKind, CoinFlipRun, DieResultBranch,
         LibraryInstructionActor, LibraryPosition, ParentTargetMissingReason,
         SearchSelectionConstraint, SpentColor, UNION_DEPTH_BUDGET,
     };
+
+    fn continuation_die_context_fixture(effect: Effect) -> (GameState, ObjectId, GameEvent) {
+        let mut state = GameState::new_two_player(42);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            P0,
+            "Continuation context owner".into(),
+            Zone::Battlefield,
+        );
+        state.die_result_this_resolution = Some(7);
+        let chain = ResolvedAbility::new(effect, vec![], source, P0);
+        let pending = PendingContinuation::new(Box::new(chain), &state);
+        state.park_ability_continuation(pending);
+        let ambient = GameEvent::EffectResolved {
+            kind: EffectKind::GainLife,
+            source_id: source,
+            subject: None,
+        };
+        state.current_trigger_event = Some(ambient.clone());
+        state.current_trigger_events = vec![ambient.clone()];
+        state.current_trigger_match_count = Some(17);
+        state.die_result_this_resolution = Some(11);
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        (state, source, ambient)
+    }
+
+    /// Composed fixture: no printed card exhibits this continuation/context shape.
+    /// Box of Free-Range Goblins and Boing! are the nearest printed die payload anchors.
+    #[test]
+    fn continuation_drain_preserves_a_die_result_settled_inside_it() {
+        let (mut state, _, ambient) = continuation_die_context_fixture(Effect::RollDie {
+            count: QuantityExpr::Fixed { value: 1 },
+            sides: 1,
+            modifier: None,
+            results: vec![DieResultBranch {
+                min: 1,
+                max: 1,
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount,
+                        },
+                        player: TargetFilter::Controller,
+                    },
+                )),
+            }],
+        });
+        let before = state.players[0].life;
+        let mut events = vec![];
+        drain_pending_continuation(&mut state, &mut events);
+
+        assert_eq!(state.players[0].life, before + 1);
+        // CR 706.2 + CR 608.2c: the settled post-modifier die result, not the caller's
+        // old scalar, survives context restoration for the continuation.
+        assert_eq!(state.die_result_this_resolution, Some(1));
+        assert_eq!(state.current_trigger_event, Some(ambient.clone()));
+        assert_eq!(state.current_trigger_events, vec![ambient]);
+        assert_eq!(state.current_trigger_match_count, Some(17));
+        assert!(state.resolution_stack.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    /// Composed error/context fixture, not printed-card ancestry. The nearest
+    /// printed die payloads are Box of Free-Range Goblins and Boing! above.
+    #[test]
+    fn continuation_drain_errors_restore_caller_channels_and_entry_publication() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let gain = || {
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                    )
+                };
+                for links in [2, 22] {
+                    let mut branch = gain();
+                    for _ in 0..links {
+                        let mut parent = gain();
+                        parent.sub_ability = Some(Box::new(branch));
+                        branch = parent;
+                    }
+                    let die = Effect::RollDie {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        sides: 1,
+                        modifier: None,
+                        results: vec![DieResultBranch {
+                            min: 1,
+                            max: 1,
+                            effect: Box::new(branch),
+                        }],
+                    };
+                    if links == 22 {
+                        // The drain intentionally swallows its resolver error. Prove
+                        // the exact parked die body produces that error independently.
+                        let (mut exact, _, _) = continuation_die_context_fixture(die.clone());
+                        let frame = exact
+                            .take_active_ability_continuation()
+                            .unwrap()
+                            .unwrap();
+                        crate::game::triggers::push_resolving_trigger_context(
+                            &mut exact,
+                            frame.pending.trigger_context.as_ref().unwrap(),
+                        );
+                        assert_eq!(
+                            resolve_ability_chain_step(
+                                &mut exact,
+                                &frame.pending.chain,
+                                &mut vec![],
+                                1,
+                            ),
+                            Err(EffectError::ChainTooDeep)
+                        );
+                    }
+                    for site in ["body", "pruned-body", "detached-tail"] {
+                        for entry_publication in [None, Some(None), Some(Some(83))] {
+                            let (mut state, source, ambient) =
+                                continuation_die_context_fixture(die.clone());
+                            let pending = &mut state
+                                .active_ability_continuation_frame_mut()
+                                .unwrap()
+                                .pending;
+                            match site {
+                                "body" => {}
+                                "pruned-body" => {
+                                    let mut independent = std::mem::replace(
+                                        &mut pending.chain,
+                                        Box::new(ResolvedAbility::new(
+                                            Effect::Fight {
+                                                target: TargetFilter::Typed(TypedFilter::creature()),
+                                                subject: TargetFilter::ParentTarget,
+                                            },
+                                            vec![],
+                                            source,
+                                            P0,
+                                        )),
+                                    );
+                                    independent.sub_link = SubAbilityLink::SequentialSibling;
+                                    pending.chain.sub_ability = Some(independent);
+                                    pending.chain.context.forwarded_result_context =
+                                        Some(Box::new(ForwardedResultContext {
+                                            targets: vec![],
+                                            object_incarnations: vec![],
+                                        }));
+                                }
+                                "detached-tail" => {
+                                    let after_scope = std::mem::replace(
+                                        &mut pending.chain,
+                                        Box::new(ResolvedAbility::new(
+                                            Effect::GainLife {
+                                                amount: QuantityExpr::Fixed { value: 2 },
+                                                player: TargetFilter::Controller,
+                                            },
+                                            vec![],
+                                            source,
+                                            P0,
+                                        )),
+                                    );
+                                    pending.player_scope_tail = Some(PendingPlayerScopeTail {
+                                        source_id: source,
+                                        after_scope,
+                                        linked_exile_batch: vec![],
+                                        created_tokens: None,
+                                    });
+                                }
+                                _ => unreachable!(),
+                            }
+                            state.die_result_publication = entry_publication;
+                            let before = state.players[0].life;
+                            let mut events = vec![];
+                            drain_pending_continuation(&mut state, &mut events);
+
+                            assert!(events.iter().any(|event| matches!(
+                                event,
+                                GameEvent::DieRolled {
+                                    player_id: P0,
+                                    sides: 1,
+                                    result: Some(1),
+                                }
+                            )), "{site}, links={links}: the die must publish before its branch");
+                            let body_gain = if site == "detached-tail" { 2 } else { 0 };
+                            if links == 22 {
+                                assert!(
+                                    state.players[0].life > before + body_gain,
+                                    "{site}: the failing branch must execute before its error"
+                                );
+                            } else {
+                                assert_eq!(state.players[0].life, before + body_gain + 3);
+                            }
+                            let completed = events.iter().any(|event| matches!(
+                                event,
+                                GameEvent::EffectResolved { kind: EffectKind::RollDie, source_id, .. }
+                                    if *source_id == source
+                            ));
+                            assert_eq!(completed, links == 2, "{site}, links={links}");
+                            assert!(!events.iter().any(|event| matches!(
+                                event,
+                                GameEvent::EffectResolved { kind: EffectKind::Fight, .. }
+                            )));
+                            assert_eq!(state.current_trigger_event, Some(ambient.clone()));
+                            assert_eq!(state.current_trigger_events, vec![ambient]);
+                            assert_eq!(state.current_trigger_match_count, Some(17));
+                            assert_eq!(
+                                state.die_result_this_resolution,
+                                if links == 22 { Some(11) } else { Some(1) },
+                                "{site}, links={links}, entry={entry_publication:?}"
+                            );
+                            assert_eq!(
+                                state.die_result_publication,
+                                if links == 22 { entry_publication } else { Some(Some(1)) },
+                                "{site}, links={links}, entry={entry_publication:?}"
+                            );
+                            assert!(state.resolving_player_scope_tail.is_none());
+                            assert!(state.resolution_stack.is_empty());
+                            assert!(matches!(state.waiting_for, WaitingFor::Priority { player: P0 }));
+                            state.resolution_stack.validate(&state.waiting_for).unwrap();
+                        }
+                    }
+                }
+            })
+            .expect("spawn 256 MiB continuation-error thread")
+            .join()
+            .expect("continuation-error fixture thread must not panic");
+    }
+
+    /// Composed control for the die fixture above; no die instruction runs in this drain.
+    #[test]
+    fn continuation_drain_without_a_die_restores_the_callers_context() {
+        let (mut state, source, ambient) = continuation_die_context_fixture(Effect::GainLife {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            player: TargetFilter::Controller,
+        });
+        state.die_result_publication = Some(Some(23));
+        let before = state.players[0].life;
+        // An earlier die completion in the action must not count as a roll inside this drain.
+        let mut events = vec![GameEvent::EffectResolved {
+            kind: EffectKind::RollDie,
+            source_id: source,
+            subject: None,
+        }];
+        drain_pending_continuation(&mut state, &mut events);
+
+        assert_eq!(state.players[0].life, before + 7);
+        assert_eq!(state.die_result_this_resolution, Some(11));
+        assert_eq!(state.die_result_publication, Some(Some(23)));
+        assert_eq!(state.current_trigger_event, Some(ambient.clone()));
+        assert_eq!(state.current_trigger_events, vec![ambient]);
+        assert_eq!(state.current_trigger_match_count, Some(17));
+        assert!(state.resolution_stack.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    /// Composed split-context fixture; Line Cutter and Command Performance anchor
+    /// the Attraction instruction, not this parked-7/caller-11 ancestry.
+    #[test]
+    fn continuation_attraction_roll_is_not_a_die_result_publication() {
+        let (mut state, _, ambient) =
+            continuation_die_context_fixture(Effect::RollToVisitAttractions);
+        let attraction = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(2),
+            P0,
+            "Context Attraction".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&attraction)
+            .unwrap()
+            .attraction_lights = vec![6];
+        let mut events = vec![];
+        drain_pending_continuation(&mut state, &mut events);
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::DieRolled {
+                result: Some(_),
+                ..
+            }
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::AttractionsRolledToVisit { .. })));
+        assert_eq!(state.die_result_this_resolution, Some(11));
+        assert_eq!(state.die_result_publication, None);
+        assert_eq!(state.current_trigger_event, Some(ambient.clone()));
+        assert_eq!(state.current_trigger_events, vec![ambient]);
+        assert_eq!(state.current_trigger_match_count, Some(17));
+        assert!(state.resolution_stack.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    /// Composed writer control: replay and publication have the same scalar but
+    /// different authority. Printed die payload anchors are listed above.
+    #[test]
+    fn continuation_same_value_die_write_survives_caller_restoration() {
+        let (mut state, _, _) = continuation_die_context_fixture(Effect::RollDie {
+            count: QuantityExpr::Fixed { value: 1 },
+            sides: 1,
+            modifier: None,
+            results: vec![],
+        });
+        state
+            .active_ability_continuation_frame_mut()
+            .unwrap()
+            .pending
+            .trigger_context
+            .as_mut()
+            .unwrap()
+            .die_result = Some(1);
+        let mut events = vec![];
+        drain_pending_continuation(&mut state, &mut events);
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::DieRolled {
+                result: Some(1),
+                ..
+            }
+        )));
+        assert_eq!(state.die_result_this_resolution, Some(1));
+        assert_eq!(state.die_result_publication, Some(Some(1)));
+        assert!(state.resolution_stack.is_empty());
+    }
+
+    /// Composed nested continuation fixture, not printed-card ancestry. A d1 is
+    /// followed by a Clash tail, causing the recursive drain boundary.
+    /// The zero-sided child is an engine fail-safe, not printed die text.
+    #[test]
+    fn nested_continuation_die_publication_propagates_or_preserves_the_outer_write() {
+        for child_sides in [Some(0), Some(1), None] {
+            let child = match child_sides {
+                Some(sides) => Effect::RollDie {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    sides,
+                    modifier: None,
+                    results: vec![],
+                },
+                None => Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                    player: TargetFilter::Controller,
+                },
+            };
+            let (mut state, source, ambient) = continuation_die_context_fixture(Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 1,
+                modifier: Some(crate::types::ability::DieRollModifier::Add {
+                    value: QuantityExpr::Fixed { value: 6 },
+                }),
+                results: vec![],
+            });
+            state
+                .active_ability_continuation_frame_mut()
+                .unwrap()
+                .pending
+                .chain
+                .sub_ability = Some(Box::new(
+                ResolvedAbility::new(Effect::Clash, vec![], source, P0)
+                    .sub_ability(ResolvedAbility::new(child, vec![], source, P0)),
+            ));
+            let before = state.players[0].life;
+            let mut events = vec![];
+            drain_pending_continuation(&mut state, &mut events);
+
+            assert!(events
+                .iter()
+                .any(|event| matches!(event, GameEvent::Clash { .. })));
+            assert!(events.iter().any(|event| matches!(
+                event,
+                GameEvent::DieRolled {
+                    result: Some(7),
+                    ..
+                }
+            )));
+            let expected = match child_sides {
+                Some(0) => None,
+                Some(1) => Some(1),
+                None => {
+                    assert_eq!(state.players[0].life, before + 5);
+                    Some(7)
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                state.die_result_this_resolution, expected,
+                "{child_sides:?}"
+            );
+            assert_eq!(
+                state.die_result_publication,
+                Some(expected),
+                "{child_sides:?}"
+            );
+            assert_eq!(state.current_trigger_event, Some(ambient.clone()));
+            assert_eq!(state.current_trigger_events, vec![ambient]);
+            assert_eq!(state.current_trigger_match_count, Some(17));
+            assert!(state.resolution_stack.is_empty());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        }
+    }
+
+    /// Composed fixture, not printed-card ancestry: an unresolved physical meld
+    /// pair reaches Meld's synchronous completion drain. That invocation consumes
+    /// a previously parked continuation while the calling drain's scope is live;
+    /// the consumed frame is not claimed to be a child of the calling frame.
+    /// The zero-sided row exercises the engine fail-safe, not printed die text.
+    #[test]
+    fn continuation_inner_drain_publication_survives_active_outer_scope_restoration() {
+        for inner_sides in [Some(0), Some(1), None] {
+            let inner_effect = match inner_sides {
+                Some(sides) => Effect::RollDie {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    sides,
+                    modifier: None,
+                    results: vec![],
+                },
+                None => Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                    player: TargetFilter::Controller,
+                },
+            };
+            let (mut state, source, ambient) = continuation_die_context_fixture(inner_effect);
+            state
+                .active_ability_continuation_frame_mut()
+                .unwrap()
+                .pending
+                .trigger_context
+                .as_mut()
+                .unwrap()
+                .die_result = Some(3);
+            let partner = crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(2),
+                P0,
+                "Nested drain partner".into(),
+                Zone::Battlefield,
+            );
+            let marker = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                partner,
+                P0,
+            );
+            let meld = ResolvedAbility::new(
+                Effect::Meld {
+                    source: "Continuation context owner".into(),
+                    partner: "Nested drain partner".into(),
+                    result: "Unregistered composed meld result".into(),
+                    source_filter: TargetFilter::SelfRef,
+                    partner_filter: TargetFilter::SpecificObject { id: partner },
+                    entry: crate::types::ability::PermanentEntryMode::Normal,
+                },
+                vec![],
+                source,
+                P0,
+            )
+            .sub_ability(marker);
+            let outer = ResolvedAbility::new(
+                Effect::RollDie {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    sides: 1,
+                    modifier: Some(crate::types::ability::DieRollModifier::Add {
+                        value: QuantityExpr::Fixed { value: 6 },
+                    }),
+                    results: vec![],
+                },
+                vec![],
+                source,
+                P0,
+            )
+            .sub_ability(meld);
+            state.die_result_this_resolution = Some(7);
+            state.park_ability_continuation(PendingContinuation::new(Box::new(outer), &state));
+            state.die_result_this_resolution = Some(11);
+            let before = state.players[0].life;
+            let mut events = vec![];
+            drain_pending_continuation(&mut state, &mut events);
+
+            assert!(events.iter().any(|event| matches!(
+                event,
+                GameEvent::DieRolled {
+                    result: Some(7),
+                    ..
+                }
+            )));
+            assert_eq!(state.objects[&source].zone, Zone::Exile);
+            assert_eq!(state.objects[&partner].zone, Zone::Exile);
+            let meld_index = events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event,
+                        GameEvent::EffectResolved { kind: EffectKind::Meld, source_id, .. }
+                            if *source_id == source
+                    )
+                })
+                .expect("the selected pair must reach Meld's terminal completion");
+            let inner_kind = if inner_sides.is_some() {
+                EffectKind::RollDie
+            } else {
+                EffectKind::GainLife
+            };
+            let inner_index = events
+                .iter()
+                .enumerate()
+                .find_map(|(index, event)| {
+                    (index > meld_index
+                        && matches!(
+                            event,
+                            GameEvent::EffectResolved { kind, source_id, .. }
+                                if *kind == inner_kind && *source_id == source
+                        ))
+                    .then_some(index)
+                })
+                .expect("Meld's inline drain must complete the inner instruction");
+            let marker_index = events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event,
+                        GameEvent::EffectResolved { kind: EffectKind::GainLife, source_id, .. }
+                            if *source_id == partner
+                    )
+                })
+                .expect("the enclosing chain must continue after Meld returns");
+            assert!(
+                meld_index < inner_index && inner_index < marker_index,
+                "the inner drain must finish before the enclosing chain and its restoration"
+            );
+            let expected = match inner_sides {
+                Some(0) => None,
+                Some(1) => {
+                    assert!(events.iter().any(|event| matches!(
+                        event,
+                        GameEvent::DieRolled {
+                            result: Some(1),
+                            ..
+                        }
+                    )));
+                    Some(1)
+                }
+                None => Some(7),
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                state.players[0].life,
+                before + if inner_sides.is_none() { 7 } else { 2 }
+            );
+            assert_eq!(
+                state.die_result_this_resolution, expected,
+                "{inner_sides:?}"
+            );
+            assert_eq!(
+                state.die_result_publication,
+                Some(expected),
+                "{inner_sides:?}"
+            );
+            assert_eq!(state.current_trigger_event, Some(ambient.clone()));
+            assert_eq!(state.current_trigger_events, vec![ambient]);
+            assert_eq!(state.current_trigger_match_count, Some(17));
+            assert!(state.resolution_stack.is_empty());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        }
+    }
+
+    /// Composed fail-safe fixture: no printed card rolls a zero-sided die.
+    #[test]
+    fn continuation_drain_preserves_a_prevented_die_results_clear() {
+        let (mut state, source, ambient) = continuation_die_context_fixture(Effect::RollDie {
+            count: QuantityExpr::Fixed { value: 1 },
+            sides: 0,
+            modifier: None,
+            results: vec![],
+        });
+        let mut events = vec![];
+        drain_pending_continuation(&mut state, &mut events);
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::RollDie,
+                source_id,
+                ..
+            } if *source_id == source
+        )));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::DieRolled { .. })));
+        assert_eq!(state.die_result_this_resolution, None);
+        assert_eq!(state.current_trigger_event, Some(ambient.clone()));
+        assert_eq!(state.current_trigger_events, vec![ambient]);
+        assert_eq!(state.current_trigger_match_count, Some(17));
+        assert!(state.resolution_stack.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
 
     /// CR 119.3 + CR 608.2c: "the life lost this way" / "that much life" totals
     /// the magnitudes of this instruction's own life changes. A loss of
