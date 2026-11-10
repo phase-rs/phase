@@ -7252,16 +7252,26 @@ fn attach_object_binding(
 /// targeted/mass player shapes; the extra `Typed` arm admits the unscoped
 /// empty-type player filter (Teferi's Reproach's chosen opponent), which the
 /// player axis resolves but `is_player_scope` leaves to object enumeration.
+/// Composite `Or`/`And` filters are player-selecting when any leg is.
 fn filter_selects_players(filter: &TargetFilter) -> bool {
-    filter.is_player_scope()
-        || matches!(
-            filter,
-            TargetFilter::Typed(TypedFilter {
-                type_filters,
-                properties,
-                ..
-            }) if type_filters.is_empty() && properties.is_empty()
-        )
+    match filter {
+        // A mixed population ("target player or creature") still has a player
+        // leg, so an explicitly selected player must not be discarded.
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_selects_players)
+        }
+        _ => {
+            filter.is_player_scope()
+                || matches!(
+                    filter,
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        properties,
+                        ..
+                    }) if type_filters.is_empty() && properties.is_empty()
+                )
+        }
+    }
 }
 
 /// Resolve a player-scoped `TargetFilter` to the concrete set of player ids it
@@ -7335,8 +7345,9 @@ pub(crate) fn collect_player_targets(
         TargetFilter::Typed(TypedFilter {
             type_filters,
             controller,
+            properties,
             ..
-        }) if type_filters.is_empty() => state
+        }) if type_filters.is_empty() && properties.is_empty() => state
             .players
             .iter()
             .filter(|p| match controller {
@@ -16623,6 +16634,30 @@ mod tests {
                 &TargetFilter::Typed(TypedFilter::default())
             ),
             vec![PlayerId(1)]
+        );
+
+        // A mixed population with a player leg preserves the explicit player
+        // target (e.g. "target player or creature phases out").
+        let mixed = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Player,
+                TargetFilter::Typed(TypedFilter::creature()),
+            ],
+        };
+        assert_eq!(
+            collect_player_targets(&state, &ability, &mixed),
+            vec![PlayerId(1)]
+        );
+
+        // A property-only object filter ("cards owned by target player") is not
+        // a player population: the expansion must not phase every player.
+        let owned_by_target_player =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Owned {
+                controller: ControllerRef::TargetPlayer,
+            }]));
+        assert!(
+            collect_player_targets(&state, &ability, &owned_by_target_player).is_empty(),
+            "an object-scoped Owned{{TargetPlayer}} filter must not expand to all players"
         );
     }
 
