@@ -19429,11 +19429,12 @@ fn proposal_shortening_range_and_zero_capacity_fallback() {
     // still published, so the responder is told rather than pre-refused by the projection.
     assert_eq!(proposal.shortening_places(), 0..=9);
     // The drive's own ceiling is the capacity the offer published.
-    assert_eq!(proposal.effective_deliverable_capacity(), 5);
+    assert_eq!(proposal.effective_deliverable_capacity(), Some(5));
 
-    // Restored legacy proposal where deliverable_capacity is 0 falls back to count / MAX_SHORTCUT_CYCLES
+    // Restored legacy proposal where deliverable_capacity is 0 returns None (no valid capacity).
+    // The capacity must come from the offer's ShortcutDecisionSchema at declare time, not from a fallback.
     proposal.deliverable_capacity = 0;
-    assert_eq!(proposal.effective_deliverable_capacity(), 10);
+    assert_eq!(proposal.effective_deliverable_capacity(), None);
 }
 
 const BOON_REFLECTION: &str = "If you would gain life, you gain twice that much life instead.";

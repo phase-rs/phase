@@ -336,16 +336,19 @@ impl ShortcutProposal {
     /// consumption-time bound and the drivability gate. Never the published range: the engine's
     /// budget is not a rule, so `shortening_places` keeps a restored proposal's own ends and the
     /// reducer alone refuses a place the board cannot take.
-    pub fn effective_deliverable_capacity(&self) -> u32 {
+    ///
+    /// Returns `None` if the proposal carries no valid deliverable capacity (zero or exceeding
+    /// the engine maximum). A restored proposal from a save written before this field existed
+    /// will have the default `MAX_SHORTCUT_CYCLES`, which is not a proven capacity and must be
+    /// treated as invalid — the capacity must come from the offer's `ShortcutDecisionSchema`
+    /// at declare time, not from a fallback.
+    pub fn effective_deliverable_capacity(&self) -> Option<u32> {
         if self.deliverable_capacity > 0
             && self.deliverable_capacity <= crate::game::engine::MAX_SHORTCUT_CYCLES
         {
-            self.deliverable_capacity
+            Some(self.deliverable_capacity)
         } else {
-            match self.count {
-                IterationCount::Fixed(n) => n.min(crate::game::engine::MAX_SHORTCUT_CYCLES),
-                _ => crate::game::engine::MAX_SHORTCUT_CYCLES,
-            }
+            None
         }
     }
 

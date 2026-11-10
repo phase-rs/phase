@@ -5880,7 +5880,7 @@ fn shortcut_consumption_bound(
         });
     let ceiling = ceiling
         .capacity_count()
-        .min(proposal.effective_deliverable_capacity());
+        .min(proposal.effective_deliverable_capacity().unwrap_or(0));
     let representable = crate::analysis::headroom::PeriodExcursions::representable_under_schedule(
         per_cycle, template, published, &points, state, lead, ceiling,
     );
@@ -5972,7 +5972,10 @@ pub(crate) fn shortcut_count_is_drivable(
     proposal: &crate::analysis::loop_check::ShortcutProposal,
     count: u32,
 ) -> bool {
-    count <= proposal.effective_deliverable_capacity()
+    let Some(capacity) = proposal.effective_deliverable_capacity() else {
+        return false;
+    };
+    count <= capacity
         && count <= MAX_SHORTCUT_CYCLES
         && match shortcut_consumption_bound(state, proposal, count) {
             // EXHAUSTIVE, no wildcard: the two absences answer ALIKE here, and the arm says so

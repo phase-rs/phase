@@ -4107,6 +4107,15 @@ pub(super) fn handle_resolution_choice(
                                 player, energy, amount
                             )));
                         }
+                        // The delta passed to apply_final_player_resource_edit is i32;
+                        // amount is u32. If amount > i32::MAX, the cast would wrap and
+                        // produce a positive delta (energy gain instead of loss).
+                        if amount > i32::MAX as u32 {
+                            return Err(EngineError::InvalidAction(format!(
+                                "Energy payment amount {} exceeds i32::MAX, would overflow",
+                                amount
+                            )));
+                        }
                         if amount > 0 {
                             crate::game::effects::life::apply_final_player_resource_edit(
                                 state,

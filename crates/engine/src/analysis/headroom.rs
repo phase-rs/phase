@@ -556,6 +556,9 @@ impl PeriodExcursions {
                 .collect();
 
             let mut segment_fit = len;
+            // Store the final start value for each (player, scalar) from the Ceiling limit simulation
+            // to use for updating current_values after the segment.
+            let mut ceiling_final_starts: BTreeMap<(PlayerId, PlayerScalar), i64> = BTreeMap::new();
             for (player, scalar) in &scalars {
                 let Some(&val) = current_values.get(&(*player, *scalar)) else {
                     continue;
@@ -577,6 +580,10 @@ impl PeriodExcursions {
                         }
                         start = start.saturating_add(rep.net);
                     }
+                    // Capture the final start for Ceiling limit after the loop completes.
+                    if limit == Limit::Ceiling {
+                        ceiling_final_starts.insert((*player, *scalar), start);
+                    }
                 }
             }
 
@@ -584,22 +591,15 @@ impl PeriodExcursions {
                 return Some(start_idx + segment_fit);
             }
 
-            // Update current_values by net change of this segment
+            // Update current_values using the final start value from the Ceiling limit simulation.
+            // This preserves the gross edits (highest/lowest) per schedule segment that were
+            // validated in the inner loop, rather than recomputing a net_total that may use a
+            // different projection.
             for (player, scalar) in scalars {
-                let [a, b] = [&c0, &c1].map(|cycle| {
-                    cycle
-                        .by_scalar
-                        .get(&(player, scalar))
-                        .copied()
-                        .unwrap_or_default()
-                });
-                let mut net_total = 0i64;
-                for k in 1..=len {
-                    net_total = net_total
-                        .saturating_add(Excursion::nth(a, b, i64::from(k), Limit::Ceiling).net);
-                }
-                if let Some(val) = current_values.get_mut(&(player, scalar)) {
-                    *val = val.saturating_add(net_total);
+                if let Some(&final_start) = ceiling_final_starts.get(&(player, scalar)) {
+                    if let Some(val) = current_values.get_mut(&(player, scalar)) {
+                        *val = final_start;
+                    }
                 }
             }
         }
