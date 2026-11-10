@@ -196,7 +196,7 @@ pub(super) fn handle_replacement_choice(
     // post-replacement continuations, nested parks) is held to the same rule;
     // the window closes before the combat lifelink batch resumes.
     let parked_for_rejection = state.pending_replacement.as_ref().is_some_and(|pending| {
-        pending.unrepresentable_life_change == UnrepresentablePolicy::Reject
+        pending.unrepresentable_player_resource_change == UnrepresentablePolicy::Reject
     });
     let waiting_for = if parked_for_rejection {
         let (inner, window) = within_ingress_player_resource_window(state, |state| {
@@ -394,7 +394,7 @@ fn handle_replacement_choice_inner(
     let parked_player_resource_policy = state
         .pending_replacement
         .as_ref()
-        .map(|pending| pending.unrepresentable_life_change)
+        .map(|pending| pending.unrepresentable_player_resource_change)
         .unwrap_or_default();
     // CR 701.21a + CR 614.1: An inner graveyard move can have parked after a
     // sacrifice was accepted. The resumed payload is only a ZoneChange, so
@@ -4932,7 +4932,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
-            unrepresentable_life_change: Default::default(),
+            unrepresentable_player_resource_change: Default::default(),
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
 
@@ -5611,7 +5611,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
-            unrepresentable_life_change: Default::default(),
+            unrepresentable_player_resource_change: Default::default(),
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
         state.priority_player = PlayerId(0);

@@ -12037,7 +12037,7 @@ fn park_entry_controller_choice(
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
-        unrepresentable_life_change: state.ingress_player_resource_policy(),
+        unrepresentable_player_resource_change: state.ingress_player_resource_policy(),
     });
     state.waiting_for = WaitingFor::EntryControllerChoice { player, candidates };
     ReplacementResult::NeedsChoice(player)
@@ -12212,7 +12212,7 @@ fn park_as_enters_named_choice(
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
-        unrepresentable_life_change: state.ingress_player_resource_policy(),
+        unrepresentable_player_resource_change: state.ingress_player_resource_policy(),
     });
     raise_as_enters_named_choice(state, object_id, choice, events)
 }
@@ -12422,7 +12422,7 @@ fn park_as_enters_pay_choice(
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
-        unrepresentable_life_change: state.ingress_player_resource_policy(),
+        unrepresentable_player_resource_change: state.ingress_player_resource_policy(),
     });
     raise_as_enters_pay_choice(state, rid.source, choice, events)
 }
@@ -13182,7 +13182,7 @@ fn pipeline_loop(
                     may_cost_paid: false,
                     may_cost_remaining: None,
                     delivery_boundary: None,
-                    unrepresentable_life_change: state.ingress_player_resource_policy(),
+                    unrepresentable_player_resource_change: state.ingress_player_resource_policy(),
                 });
                 return replay_pending_replacement(state, affected, events);
             }
@@ -13253,7 +13253,7 @@ fn pipeline_loop(
                 may_cost_paid: false,
                 may_cost_remaining: None,
                 delivery_boundary: None,
-                unrepresentable_life_change: state.ingress_player_resource_policy(),
+                unrepresentable_player_resource_change: state.ingress_player_resource_policy(),
             });
             return replay_pending_replacement(state, affected, events);
         } else {
@@ -13547,7 +13547,8 @@ fn continue_replacement_impl(
         let reparked_sacrifice_provenance = pending.sacrifice_provenance;
         let reparked_choice_player = pending.choice_player;
         let reparked_delivery_boundary = pending.delivery_boundary.clone();
-        let reparked_unrepresentable_player_resource_change = pending.unrepresentable_life_change;
+        let reparked_unrepresentable_player_resource_change =
+            pending.unrepresentable_player_resource_change;
         let mut proposed = pending.proposed.clone();
         if chosen_index == 0 {
             if let Some((player, entry_candidates)) = entry_controller_choice(state, &proposed, rid)
@@ -13683,7 +13684,8 @@ fn continue_replacement_impl(
                     // The rebuilt record answers the same parked event, so it keeps
                     // the predecessor's stamp (a boxed cost-move resume restores it
                     // unchanged).
-                    unrepresentable_life_change: reparked_unrepresentable_player_resource_change,
+                    unrepresentable_player_resource_change:
+                        reparked_unrepresentable_player_resource_change,
                 };
                 if let Some(crate::types::game_state::PendingCostMoveResume::ReplacementMayCost {
                     outer_replacement: parked_outer,
@@ -14028,7 +14030,7 @@ pub fn continue_replacement(
     let predecessor_player_resource_policy = state
         .pending_replacement
         .as_ref()
-        .map(|pending| pending.unrepresentable_life_change);
+        .map(|pending| pending.unrepresentable_player_resource_change);
     let result = continue_replacement_impl(state, chosen_index, events);
     // CR 616.1f: backstop for the stamp — a record re-parked while a stamped
     // record is answered stays stamped (a fresh park already reads the open
@@ -17051,7 +17053,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
-            unrepresentable_life_change: Default::default(),
+            unrepresentable_player_resource_change: Default::default(),
         });
 
         let WaitingFor::ReplacementChoice {
@@ -17116,7 +17118,7 @@ mod tests {
                 may_cost_paid: false,
                 may_cost_remaining: None,
                 delivery_boundary: None,
-                unrepresentable_life_change: Default::default(),
+                unrepresentable_player_resource_change: Default::default(),
             });
 
             let WaitingFor::ReplacementChoice { candidates, .. } =
@@ -17202,7 +17204,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
-            unrepresentable_life_change: Default::default(),
+            unrepresentable_player_resource_change: Default::default(),
         });
 
         let WaitingFor::ReplacementChoice { candidates, .. } =
@@ -22977,7 +22979,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
-            unrepresentable_life_change: Default::default(),
+            unrepresentable_player_resource_change: Default::default(),
         });
 
         let waiting_for = replacement_choice_waiting_for(PlayerId(0), &state);

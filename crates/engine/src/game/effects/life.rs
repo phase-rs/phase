@@ -2969,7 +2969,7 @@ mod tests {
                         .state()
                         .pending_replacement
                         .as_ref()
-                        .map(|pending| pending.unrepresentable_life_change),
+                        .map(|pending| pending.unrepresentable_player_resource_change),
                     Some(UnrepresentablePolicy::Reject),
                     "a gain parked inside the activation's action window rejects on resume"
                 );

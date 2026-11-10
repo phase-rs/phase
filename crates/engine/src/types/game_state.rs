@@ -29638,13 +29638,15 @@ pub struct PendingReplacement {
     /// rejects the public action and restores its entry state (`Reject`), or
     /// uses the compatibility skip when no ingress window owns it
     /// (`IgnoreImpossible`). Older payloads omit this field and retain that
-    /// compatibility policy. No life change is ever unrepresentable, so the name
-    /// misdescribes the field; it stays because saved games and peers carry it.
+    /// compatibility policy. The serialized key keeps the field's earlier name,
+    /// `unrepresentable_life_change`, because saved games and peers carry it
+    /// (`protocol/changes/ec18f476-7885-4d54-826e-b9f2ed25f966.json`).
     #[serde(
+        rename = "unrepresentable_life_change",
         default,
         skip_serializing_if = "UnrepresentablePolicy::is_ignore_impossible"
     )]
-    pub unrepresentable_life_change: UnrepresentablePolicy,
+    pub unrepresentable_player_resource_change: UnrepresentablePolicy,
 }
 
 /// Who owns a player-resource change (a player counter or energy, on its own or nested under a
@@ -29729,7 +29731,7 @@ impl PendingReplacement {
         predecessor_policy: UnrepresentablePolicy,
     ) {
         if predecessor_policy == UnrepresentablePolicy::Reject {
-            self.unrepresentable_life_change = UnrepresentablePolicy::Reject;
+            self.unrepresentable_player_resource_change = UnrepresentablePolicy::Reject;
         }
     }
 
@@ -57809,12 +57811,14 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
-            unrepresentable_life_change: policy,
+            unrepresentable_player_resource_change: policy,
         }
     }
 
     /// Wire shape of the parked-record policy: present as `"Reject"` and
     /// round-trips; omitted for the ordinary policy; absent in older payloads.
+    /// Named for the policy's wire key, `unrepresentable_life_change`, which the
+    /// field `unrepresentable_player_resource_change` keeps through its serde rename.
     #[test]
     fn pending_replacement_unrepresentable_life_change_wire_shape() {
         let reject = pending_life_gain_replacement(UnrepresentablePolicy::Reject);
@@ -57840,7 +57844,7 @@ mod tests {
         let legacy: PendingReplacement =
             serde_json::from_value(json).expect("legacy record must deserialize");
         assert_eq!(
-            legacy.unrepresentable_life_change,
+            legacy.unrepresentable_player_resource_change,
             UnrepresentablePolicy::IgnoreImpossible
         );
     }
@@ -57854,13 +57858,13 @@ mod tests {
             UnrepresentablePolicy::IgnoreImpossible,
         );
         assert_eq!(
-            reparked.unrepresentable_life_change,
+            reparked.unrepresentable_player_resource_change,
             UnrepresentablePolicy::IgnoreImpossible,
             "an ordinary predecessor leaves the default record ordinary"
         );
         reparked.inherit_unrepresentable_player_resource_change(UnrepresentablePolicy::Reject);
         assert_eq!(
-            reparked.unrepresentable_life_change,
+            reparked.unrepresentable_player_resource_change,
             UnrepresentablePolicy::Reject,
             "a rejecting predecessor stamps the default record"
         );
@@ -57868,7 +57872,7 @@ mod tests {
             UnrepresentablePolicy::IgnoreImpossible,
         );
         assert_eq!(
-            reparked.unrepresentable_life_change,
+            reparked.unrepresentable_player_resource_change,
             UnrepresentablePolicy::Reject,
             "an ordinary predecessor must not downgrade a rejecting record"
         );

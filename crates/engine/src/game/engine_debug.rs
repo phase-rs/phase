@@ -3311,7 +3311,7 @@ mod tests {
                 .state()
                 .pending_replacement
                 .as_ref()
-                .map(|pending| pending.unrepresentable_life_change)
+                .map(|pending| pending.unrepresentable_player_resource_change)
         }
 
         /// The candidate count of the parked replacement proposal, if any.
@@ -4075,7 +4075,7 @@ mod tests {
                     .pending_replacement
                     .as_ref()
                     .unwrap()
-                    .unrepresentable_life_change,
+                    .unrepresentable_player_resource_change,
                 UnrepresentablePolicy::IgnoreImpossible
             );
 
@@ -4370,7 +4370,7 @@ mod tests {
                 "reach guard: two doublers remain to be ordered"
             );
             assert_eq!(
-                reparked.unrepresentable_life_change,
+                reparked.unrepresentable_player_resource_change,
                 UnrepresentablePolicy::Reject,
                 "the re-parked record must keep the rejection stamp"
             );
