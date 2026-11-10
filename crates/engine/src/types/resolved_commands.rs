@@ -2125,6 +2125,30 @@ pub enum RulesExecutionNodeKind {
     PlayerLeave,
 }
 
+impl RulesExecutionNodeKind {
+    /// CR 605.3b: whether a node of this kind has a settlement this journal
+    /// RECORDS — that is, whether anything ever calls
+    /// [`ResolvedRulesJournal::settle_node`] for it.
+    ///
+    /// Only an activated mana ability resolves "immediately after it is activated",
+    /// so only its node carries an open→resolved lifecycle
+    /// (`GameState::settle_mana_activation`, called by the two activation production
+    /// paths). A Proposal, Payment, PlayerLeave or triggered-mana node has no such
+    /// record and is never asked for one: writing `open` onto those and never
+    /// settling them made every save that attributed ambient production to such a
+    /// node look self-contradictory, because a node recorded open beside a pip is
+    /// exactly the shape the validator refuses.
+    pub(crate) fn records_settlement(&self) -> bool {
+        matches!(self, Self::ActivatedMana { .. })
+    }
+
+    /// The settlement record a freshly allocated node of this kind starts with:
+    /// `open` where the lifecycle exists, and "not applicable" where it does not.
+    fn initial_settlement(&self) -> Option<bool> {
+        self.records_settlement().then_some(false)
+    }
+}
+
 /// Metadata shared by every resolved rules-execution node.
 ///
 /// bundle_parent lets a triggered mana ability remain selectable with its
@@ -2162,12 +2186,15 @@ pub struct SettlementNode {
     /// activation was admitted against its finished node and wrote its own
     /// production there ([`Self::node_settled`]).
     ///
-    /// The record is written EXPLICITLY at both ends of a node's life: every
-    /// allocation writes `Some(false)` ("open") and
-    /// [`ResolvedRulesJournal::settle_node`] writes `Some(true)`. Nothing is left
-    /// unstated, so `Open` and `Resolved` are both authoritative — `Open` means a
-    /// live activation holds the node and nothing has produced under it, `Resolved`
-    /// means the activation finished, whether or not it made any mana (CR 605.2).
+    /// The record is written EXPLICITLY at both ends of an ACTIVATED-MANA node's
+    /// life: its allocation writes `Some(false)` ("open") and
+    /// [`ResolvedRulesJournal::settle_node`] writes `Some(true)`. Nothing there is
+    /// left unstated, so `Open` and `Resolved` are both authoritative — `Open` means
+    /// a live activation holds the node and nothing has produced under it,
+    /// `Resolved` means the activation finished, whether or not it made any mana
+    /// (CR 605.2). A node of a kind with no settlement lifecycle records nothing
+    /// ([`RulesExecutionNodeKind::records_settlement`]), because nothing would ever
+    /// settle it.
     ///
     /// `Some(false)` is the one value that can contradict the rest of the payload:
     /// [`ResolvedRulesJournal::validate_serialized_authority`] refuses it beside a
@@ -2858,8 +2885,10 @@ impl ResolvedRulesJournal {
             produced_pips: Vec::new(),
             spent_pips: Vec::new(),
             journal_ordinals: vec![command],
-            // CR 605.3b: open from the moment the node exists — see `SettlementNode::settled`.
-            settled: Some(false),
+            // CR 605.3b: `open` from the moment an activated-mana node exists; kinds
+            // with no settlement lifecycle record nothing — see
+            // `RulesExecutionNodeKind::records_settlement`.
+            settled: RulesExecutionNodeKind::Proposal.initial_settlement(),
         });
         Ok(identity)
     }
@@ -2896,8 +2925,10 @@ impl ResolvedRulesJournal {
             produced_pips: Vec::new(),
             spent_pips: Vec::new(),
             journal_ordinals: vec![command],
-            // CR 605.3b: open from the moment the node exists — see `SettlementNode::settled`.
-            settled: Some(false),
+            // CR 605.3b: `open` from the moment an activated-mana node exists; kinds
+            // with no settlement lifecycle record nothing — see
+            // `RulesExecutionNodeKind::records_settlement`.
+            settled: RulesExecutionNodeKind::PlayerLeave.initial_settlement(),
         });
         Ok(identity)
     }
@@ -3333,6 +3364,9 @@ impl ResolvedRulesJournal {
             node: identity,
             command: None,
         });
+        // CR 605.3b: the record a node starts with depends on whether anything will
+        // ever settle it, so it is decided before `kind` moves into the node.
+        let settled = kind.initial_settlement();
         self.push_node(SettlementNode {
             ordinal,
             identity,
@@ -3343,8 +3377,10 @@ impl ResolvedRulesJournal {
             produced_pips: Vec::new(),
             spent_pips: Vec::new(),
             journal_ordinals: vec![command],
-            // CR 605.3b: open from the moment the node exists — see `SettlementNode::settled`.
-            settled: Some(false),
+            // CR 605.3b: `open` from the moment an activated-mana node exists; kinds
+            // with no settlement lifecycle record nothing — see
+            // `RulesExecutionNodeKind::records_settlement`.
+            settled,
         });
         Ok(identity)
     }
@@ -3490,16 +3526,17 @@ impl ResolvedRulesJournal {
                     "node metadata contains duplicate identities".to_string(),
                 ));
             }
-            // CR 605.2 + CR 605.3b: every node this build allocates records `Open`,
-            // and `settle_node` records `Resolved`, so an ABSENT record is not a
-            // state any shipped build can write: `settled` was introduced with the
-            // journal's settlement record and has never been on the wire without it.
-            // A payload that states nothing is therefore a contradiction, refused
-            // rather than read as the legacy shape — reading it as "open" would let a
-            // completed zero-output activation (Heronblade Elite at power 0) pass for
-            // one a live activation still holds, and reading it through the pip list
-            // would restate the settlement question as a production question.
-            if node.settled.is_none() {
+            // CR 605.2 + CR 605.3b: an ACTIVATED-MANA node is allocated `Open` and
+            // `settle_node` records `Resolved`, so an absent record on one is not a
+            // state any shipped build can write: `settled` was introduced with this
+            // record and has never been on the wire without it. A payload that states
+            // nothing there is a contradiction, refused rather than read as the legacy
+            // shape — reading it as "open" would let a completed zero-output activation
+            // (Heronblade Elite at power 0) pass for one a live activation still holds,
+            // and reading it through the pip list would restate the settlement question
+            // as a production question. Other kinds have no settlement lifecycle at all
+            // (`RulesExecutionNodeKind::records_settlement`), so they record nothing.
+            if node.settled.is_none() && node.kind.records_settlement() {
                 return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
                     "settlement node states no settlement record".to_string(),
                 ));

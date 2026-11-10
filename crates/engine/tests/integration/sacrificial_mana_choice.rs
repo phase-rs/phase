@@ -2542,6 +2542,79 @@ fn zero_output_activation_settles_so_a_later_parked_activation_cannot_claim_its_
     );
 }
 
+/// A journal node that states NO settlement record.
+///
+/// `settled` is written explicitly at both ends of a node's life — `Some(false)` at
+/// allocation, `Some(true)` in `settle_node` — so a payload without it was not written
+/// by any released build. It is refused as a contradiction rather than read as "open"
+/// (which made a completed zero-output activation look live, the defect that let a
+/// later activation write its mana into a finished node) or as "settled" (the
+/// withdrawn pip inference, which restated the settlement question as a production
+/// question — CR 605.2).
+#[test]
+fn a_node_that_states_no_settlement_is_refused_rather_than_read_as_open_or_settled() {
+    let (runner, _source, first_node) = prismite_second_activation_parked();
+    let mut json = persisted_json(runner.state());
+    let first_identity = serde_json::to_value(first_node).expect("the node identity serializes");
+    {
+        let nodes = json["state"]["resolved_rules_journal"]["nodes"]
+            .as_array_mut()
+            .expect("the journal serializes its nodes");
+        let node = nodes
+            .iter_mut()
+            .find(|candidate| candidate["identity"] == first_identity)
+            .expect("the journal retains activation 1's node");
+        assert_eq!(
+            node["settled"],
+            serde_json::json!(true),
+            "reach-guard: this build wrote the settlement record for it"
+        );
+        assert!(
+            node.as_object_mut()
+                .expect("a node serializes as an object")
+                .remove("settled")
+                .is_some(),
+            "reach-guard: the record is what this test removes"
+        );
+        assert!(
+            node["produced_pips"]
+                .as_array()
+                .is_some_and(|pips| pips.len() == 1),
+            "reach-guard: and it still carries the pip its resolution produced, so a reader \
+             that answered from the pips would answer 'settled'"
+        );
+    }
+
+    let persisted = serde_json::from_value::<PersistedGameState>(json)
+        .expect("the payload decodes — the refusal is the journal's authority check");
+    match persisted.into_game_state() {
+        Ok(_) => panic!(
+            "a node stating no settlement must be refused: no released build writes that shape, \
+             and answering it from the pip list reads the resolution record as a production \
+             record — the reading CR 605.2 says is a different question"
+        ),
+        Err(error) => assert!(
+            error.to_string().contains("states no settlement record"),
+            "the refusal must come from the journal's settlement authority, got {error}"
+        ),
+    }
+
+    // Control — the untouched save is admitted and settles normally, so the refusal
+    // above is about the absent record and not about every parked prompt.
+    let (runner, _source, first_node) = prismite_second_activation_parked();
+    let mut runner = GameRunner::from_state(
+        admitted(persisted_json(runner.state())).expect("the untouched save restores"),
+    );
+    runner = choose_blue(runner);
+    assert!(
+        runner
+            .state()
+            .resolved_rules_journal
+            .node_settled(first_node),
+        "the untouched save settles activation 1's node"
+    );
+}
+
 /// The board behind
 /// [`zero_output_activation_settles_so_a_later_parked_activation_cannot_claim_its_node`]:
 /// Heronblade Elite resolves its mana ability at power 0 (no mana, settled), is then
