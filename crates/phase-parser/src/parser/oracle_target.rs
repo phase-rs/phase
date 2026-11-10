@@ -744,19 +744,38 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
 /// keyword: search filters keep their own `SharesQuality` lowering, which their
 /// "different names" suffix reads.
 fn parse_target_not_named_suffix(filter: TargetFilter, rest: &str) -> (TargetFilter, &str) {
-    let TargetFilter::Typed(mut typed) = filter else {
+    // A coordinated "creature or planeswalker not named X" restricts every
+    // alternative, so the restriction distributes over each typed branch.
+    let restrictable = match &filter {
+        TargetFilter::Typed(_) => true,
+        TargetFilter::Or { filters } => {
+            !filters.is_empty() && filters.iter().all(|f| matches!(f, TargetFilter::Typed(_)))
+        }
+        _ => false,
+    };
+    if !restrictable {
+        return (filter, rest);
+    }
+    let lower = rest.to_lowercase();
+    let Some((prop, after)) = nom_on_lower(rest, &lower, |input| {
+        preceded(multispace0, nom_filter::parse_not_named_suffix).parse(input)
+    }) else {
         return (filter, rest);
     };
-    let lower = rest.to_lowercase();
-    match nom_on_lower(rest, &lower, |input| {
-        preceded(multispace0, nom_filter::parse_not_named_suffix).parse(input)
-    }) {
-        Some((prop, after)) => {
-            typed.properties.push(prop);
-            (TargetFilter::Typed(typed), after)
+    let restrict = |f: TargetFilter| match f {
+        TargetFilter::Typed(mut typed) => {
+            typed.properties.push(prop.clone());
+            TargetFilter::Typed(typed)
         }
-        None => (TargetFilter::Typed(typed), rest),
-    }
+        other => other,
+    };
+    let restricted = match filter {
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters.into_iter().map(restrict).collect(),
+        },
+        other => restrict(other),
+    };
+    (restricted, after)
 }
 
 /// CR 115.10a + CR 608.2h: Bind an untargeted "each other" population to the

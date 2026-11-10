@@ -52938,24 +52938,27 @@ fn detention_sphere_keeps_not_named_target_and_same_name_mass_exile() {
 /// boundary and leaving trailing text ("from a graveyard") to the caller.
 #[test]
 fn target_not_named_suffix_restricts_target_filter() {
-    for (name, types, text, expected_name) in [
+    for (name, types, text, expected_name, expected_origin) in [
         (
             "Clever Conjurer",
             "Creature",
             "Mage Hand — {T}: Untap target permanent not named Clever Conjurer. Activate only as a sorcery.",
             "clever conjurer",
+            None,
         ),
         (
             "Dutiful Replicator",
             "Artifact",
             "When this creature enters, you may pay {1}. When you do, create a token that's a copy of target token you control not named Dutiful Replicator.",
             "dutiful replicator",
+            None,
         ),
         (
             "Staff of Eden, Vault's Key",
             "Artifact",
             "When Staff of Eden enters, put target legendary permanent card not named Staff of Eden, Vault's Key from a graveyard onto the battlefield under your control.",
             "staff of eden, vault's key",
+            Some(Zone::Graveyard),
         ),
     ] {
         let parsed =
@@ -52965,11 +52968,12 @@ fn target_not_named_suffix_restricts_target_filter() {
             .first()
             .or_else(|| parsed.triggers.first().and_then(|t| t.execute.as_deref()))
             .unwrap_or_else(|| panic!("{name}: no ability"));
-        let targeted = std::iter::successors(Some(root), |def| def.sub_ability.as_deref())
+        let (targeted, origin) = std::iter::successors(Some(root), |def| def.sub_ability.as_deref())
             .find_map(|def| match &*def.effect {
-                Effect::SetTapState { target, .. }
-                | Effect::CopyTokenOf { target, .. }
-                | Effect::ChangeZone { target, .. } => Some(target.clone()),
+                Effect::SetTapState { target, .. } | Effect::CopyTokenOf { target, .. } => {
+                    Some((target.clone(), None))
+                }
+                Effect::ChangeZone { target, origin, .. } => Some((target.clone(), *origin)),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("{name}: no targeted effect"));
@@ -52985,13 +52989,34 @@ fn target_not_named_suffix_restricts_target_filter() {
             "{name}: target must exclude its name, got {:?}",
             typed.properties
         );
-        if name == "Staff of Eden, Vault's Key" {
-            let Effect::ChangeZone { origin, .. } = &*root.effect else {
-                panic!("{name}: expected ChangeZone");
-            };
-            assert_eq!(*origin, Some(Zone::Graveyard), "{name}: origin zone kept");
-        }
+        assert_eq!(origin, expected_origin, "{name}: origin zone");
     }
+}
+
+/// CR 201.2 + CR 115.1: a coordinated "creature or planeswalker not named X"
+/// restricts every alternative, not just the last one.
+#[test]
+fn target_not_named_suffix_distributes_over_coordinated_types() {
+    let mut ctx = ParseContext::default();
+    let (filter, rest) = crate::parser::oracle_target::parse_target_with_ctx(
+        "target creature or planeswalker not named Foo",
+        &mut ctx,
+    );
+    let TargetFilter::Or { filters } = filter else {
+        panic!("expected Or, got {filter:?}");
+    };
+    assert_eq!(filters.len(), 2);
+    for f in &filters {
+        let TargetFilter::Typed(typed) = f else {
+            panic!("expected Typed branch, got {f:?}");
+        };
+        assert!(typed.properties.contains(&FilterProp::Not {
+            prop: Box::new(FilterProp::Named {
+                name: "foo".to_string(),
+            }),
+        }));
+    }
+    assert!(rest.trim().is_empty(), "suffix consumed, got {rest:?}");
 }
 
 /// CR 608.2c + CR 201.2a: "<verb> target <object> an opponent
