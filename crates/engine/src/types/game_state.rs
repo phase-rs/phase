@@ -16448,7 +16448,20 @@ impl GameState {
     /// set. No paused ChangeZone scope means nothing to migrate.
     fn migrate_restored_effect_zone_choice_scope(&mut self) {
         let current_is_public = match &self.waiting_for {
-            WaitingFor::EffectZoneChoice { zone, .. } => zone.is_public(),
+            WaitingFor::EffectZoneChoice {
+                zone, effect_kind, ..
+            } if matches!(
+                effect_kind,
+                crate::types::ability::EffectKind::ChangeZone
+                    | crate::types::ability::EffectKind::ChangeZoneAll
+                    | crate::types::ability::EffectKind::BounceAll
+            ) =>
+            {
+                zone.is_public()
+            }
+            // A sacrifice/discard/attach prompt is validated against its own
+            // zone; a later ChangeZone instruction in the same chain must not
+            // rewrite it (Strefan's Blood-token sacrifice).
             _ => return,
         };
         if !current_is_public {
@@ -39664,6 +39677,97 @@ mod drain_stack_reentrancy_tests {
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation,
     };
+
+    /// CR 402.3 + CR 608.2: the restore-scope migration is for a paused
+    /// ChangeZone choice. A sacrifice prompt must keep the zone its validation
+    /// uses even when a later hand ChangeZone instruction exists in the chain
+    /// (Strefan's Blood-token sacrifice followed by a Vampire put).
+    #[test]
+    fn restore_scope_migration_leaves_non_change_zone_prompt_unchanged() {
+        let mut state = GameState::new_two_player(42);
+        let blood = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(9_001),
+            PlayerId(0),
+            "Blood".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            player: PlayerId(0),
+            cards: vec![blood],
+            count: 2,
+            min_count: 2,
+            up_to: false,
+            source_id: ObjectId(100),
+            effect_kind: crate::types::ability::EffectKind::Sacrifice,
+            zone: Zone::Battlefield,
+            destination: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enter_transformed: false,
+            enters_under_player: None,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+            face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            count_param: 0,
+            library_position: None,
+            mass_library_order: None,
+            is_cost_payment: false,
+            enters_modified_if: None,
+            duration: None,
+        };
+        let target = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::creature().properties(vec![
+                crate::types::ability::FilterProp::InAnyZone {
+                    zones: vec![Zone::Hand, Zone::Command],
+                },
+            ]),
+        );
+        let chain = Box::new(ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                target,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                library_shuffle: Default::default(),
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        ));
+        let pending = PendingContinuation::new(chain, &state);
+        state
+            .resolution_stack
+            .push_ability_continuation(AbilityContinuationFrame {
+                pending,
+                choose_zone_trigger_context: None,
+            });
+
+        let restored = PersistedGameState::capture(state)
+            .into_game_state()
+            .expect("state restores through the production chokepoint");
+        let WaitingFor::EffectZoneChoice { zone, cards, .. } = &restored.waiting_for else {
+            panic!("restored state must retain the sacrifice prompt");
+        };
+        assert_eq!(
+            *zone,
+            Zone::Battlefield,
+            "a sacrifice prompt's validation zone must not be rewritten from a later hand leg"
+        );
+        assert_eq!(cards, &vec![blood]);
+    }
 
     fn ready_drain(name: &str) -> PostReplacementDrain {
         PostReplacementDrain::ready(PostReplacementContinuation::Template(Box::new(
