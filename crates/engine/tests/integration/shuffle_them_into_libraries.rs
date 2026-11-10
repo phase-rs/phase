@@ -398,3 +398,40 @@ fn compound_shuffle_stale_source_still_shuffles_its_owner() {
         "the target's owner shuffles once: {events:?}"
     );
 }
+
+/// CR 400.7 + CR 701.24c: a plain "when this creature dies, shuffle it into its
+/// owner's library" (Alabaster Dragon class) moves the card from the graveyard,
+/// not from an expected battlefield. The one library shuffle belongs to its
+/// owner.
+#[test]
+fn alabaster_dragon_dies_trigger_shuffles_from_the_graveyard() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dragon = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Alabaster Dragon",
+            4,
+            4,
+            "Flying\nWhen this creature dies, shuffle it into its owner's library.",
+        )
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, "Destroy target creature.")
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner.cast(murder).target_object(dragon).resolve();
+    let events = outcome.events();
+
+    assert_eq!(
+        outcome.state().objects[&dragon].zone,
+        Zone::Library,
+        "the dies-triggered card is shuffled into its owner's library"
+    );
+    assert_eq!(
+        shuffles_for(events, P0),
+        1,
+        "the owner shuffles exactly once: {events:?}"
+    );
+    assert_eq!(shuffles_for(events, P1), 0, "{events:?}");
+}

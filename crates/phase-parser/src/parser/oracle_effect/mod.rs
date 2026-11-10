@@ -25813,9 +25813,9 @@ fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<Pars
         // single owner; the compound instruction must settle every owner from
         // both legs, so replace it with the tracked-owner ScopedPlayer shuffle.
         if let Some(terminal) = sub_def.sub_ability.as_deref_mut() {
-            terminal.effect = Box::new(Effect::Shuffle {
+            *terminal.effect = Effect::Shuffle {
                 target: TargetFilter::ScopedPlayer,
-            });
+            };
             terminal.player_scope = Some(imperative::owner_library_shuffle_scope());
         }
     }
