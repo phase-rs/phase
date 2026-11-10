@@ -3624,7 +3624,7 @@ fn cover_projection(state: &GameState) -> CoverProjection<'static> {
 /// (CR 732.2a, the shortcut) the question asked here is identity in **board, zones and
 /// tap-state on the PROJECTED feed**: the transient sample normal form, then
 /// [`project_out_resources`], then the rank-free
-/// [`projected_states_equal`] — plus the hand conjunct at the end of
+/// [`crate::types::game_state::projected_states_equal`] — plus the hand conjunct at the end of
 /// [`loop_states_equal_modulo_resources_side`], where this gate compensates for an axis the
 /// strict comparator leaves out: [`loyalty_activation_counts_match`] over the per-object
 /// CR 606.3 count and per-permanent extra-activation grant (distinct from the per-player

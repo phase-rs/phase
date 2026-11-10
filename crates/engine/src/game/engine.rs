@@ -31696,7 +31696,8 @@ mod damage_history_priority_cost_tests {
             AUTO_PASS_WINDOW_SAMPLES.with(|samples| samples.set(0));
             let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
             assert!(
-                run_auto_pass_loop(&mut state, &mut result).expect("the finite damage stack resolves"),
+                run_auto_pass_loop(&mut state, &mut result)
+                    .expect("the finite damage stack resolves"),
                 "the automatic route must advance"
             );
             assert!(
