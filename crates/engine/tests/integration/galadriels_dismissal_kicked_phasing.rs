@@ -198,15 +198,20 @@ fn teferi_timeless_voyager_restriction_binds_the_phased_creatures() {
             TEFERI_TIMELESS_VOYAGER,
         )
         .id();
-    let opponent_creature = scenario.add_creature(P1, "Opponent Bear", 2, 2).id();
+    let first_opponent_creature = scenario.add_creature(P1, "Opponent Bear", 2, 2).id();
+    let second_opponent_creature = scenario.add_creature(P1, "Opponent Elf", 1, 1).id();
     let own_creature = scenario.add_creature(P0, "Own Bear", 2, 2).id();
 
     let mut runner = scenario.build();
     runner.activate(teferi, 2).target_player(P1).resolve();
 
     assert!(
-        runner.state().objects[&opponent_creature].is_phased_out(),
-        "the opponent's creature must phase out"
+        runner.state().objects[&first_opponent_creature].is_phased_out(),
+        "the opponent's first creature must phase out"
+    );
+    assert!(
+        runner.state().objects[&second_opponent_creature].is_phased_out(),
+        "the opponent's second creature must phase out"
     );
     assert!(
         !runner.state().players[P1.0 as usize].is_phased_out(),
@@ -217,12 +222,16 @@ fn teferi_timeless_voyager_restriction_binds_the_phased_creatures() {
         "the controller's own creature must remain phased in"
     );
 
-    // Advance to the opponent's untap step: the phased-out creature would
-    // normally phase in here, but Teferi's active restriction holds it out.
+    // Advance to the opponent's untap step: the phased-out creatures would
+    // normally phase in here, but Teferi's active restriction holds them out.
     runner.advance_to_phase(Phase::Untap);
     assert!(
-        runner.state().objects[&opponent_creature].is_phased_out(),
-        "the restriction must be bound to the phased creature during the opponent's untap"
+        runner.state().objects[&first_opponent_creature].is_phased_out(),
+        "the restriction must be bound to the first phased creature"
+    );
+    assert!(
+        runner.state().objects[&second_opponent_creature].is_phased_out(),
+        "the restriction must be bound to every phased creature during the opponent's untap"
     );
     assert!(
         runner.state().objects[&own_creature].is_phased_in(),

@@ -690,6 +690,19 @@ fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<Tar
         return players;
     }
 
+    // A paid "instead" branch can inherit the parent's target ("that
+    // permanent", "it") while the base branch owns the real declared target.
+    // The inherited anaphor is not a retargetable filter, so fall back to the
+    // pre-delegation branch's declared primary filter before attempting the
+    // context filter (kicked Rite of Replication, bargained Torch the Tower).
+    if !std::ptr::eq(active_ability, stack_ability) {
+        if let Some(filter) = extract_target_filter(&stack_ability.effect) {
+            if !filter.is_context_ref() {
+                return find_legal_targets(state, filter, pool_controller, stack_ability.source_id);
+            }
+        }
+    }
+
     // Shapes whose only target is a context reference (SelfRef, …) still keep
     // their standard pool when the mass-aware authority was not the decider.
     if let Some(filter) = extract_target_filter(&active_ability.effect) {

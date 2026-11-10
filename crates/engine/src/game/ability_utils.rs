@@ -3085,7 +3085,9 @@ impl DeclaredNumbering {
     fn delegate(self, node: &ResolvedAbility) -> Option<&ResolvedAbility> {
         match self {
             Self::Recorded => None,
-            Self::Layout => paid_instead_delegate(node),
+            // A paid override that inherits the parent's target owns no
+            // declaration; numbering must read the base branch's real target.
+            Self::Layout => paid_instead_delegate(node).filter(|sub| !sub.targets.is_empty()),
         }
     }
 
@@ -3175,11 +3177,21 @@ fn paid_instead_delegate(ability: &ResolvedAbility) -> Option<&ResolvedAbility> 
 /// declaration when the additional cost was paid. The cast path delegates the
 /// whole chain to the paid "instead" sub (`collect_target_slots` /
 /// `collect_target_slot_specs` return after descending), and assignment mirrors
-/// the sub's targets onto the parent, so the sub — not the unkicked parent — is
-/// the authority for what a retarget may change.
+/// the sub's targets onto the parent, so a sub that owns a target declaration —
+/// kicked Galadriel's Dismissal's player slot — is the authority for what a
+/// retarget may change.
+///
+/// A paid override that inherits the parent's target instead ("that
+/// permanent", kicked Rite of Replication, bargained Torch the Tower) has no
+/// targets of its own: its `ParentTarget` anaphor is not a declaration. Stop at
+/// the pre-delegation node there, or the retarget seam would expose an empty
+/// slot and suppress a legal change.
 pub(crate) fn base_exposed_node(ability: &ResolvedAbility) -> &ResolvedAbility {
     let mut node = ability;
     while let Some(sub) = paid_instead_delegate(node) {
+        if sub.targets.is_empty() {
+            break;
+        }
         node = sub;
     }
     node
@@ -10435,11 +10447,16 @@ fn assign_targets_recursive(
         .filter(|sub| is_paid_instead_sub(&ability.context, sub))
     {
         assign_targets_recursive(state, sub_ability, targets, next_target)?;
-        // The paid-"instead" delegator mirrors its delegate's occurrences.
-        let mirrored = sub_ability.target_occurrences();
-        let bindings = sub_ability.context.attach_target_bindings.clone();
-        ability.replace_target_occurrences(mirrored);
-        ability.context.attach_target_bindings = bindings;
+        // The paid-"instead" delegator mirrors its delegate's occurrences only
+        // when the delegate OWNS a declaration. An inherited-target override
+        // ("that permanent", bargained Torch the Tower) has none; mirroring its
+        // empty list would erase the base branch's real target.
+        if !sub_ability.targets.is_empty() {
+            let mirrored = sub_ability.target_occurrences();
+            let bindings = sub_ability.context.attach_target_bindings.clone();
+            ability.replace_target_occurrences(mirrored);
+            ability.context.attach_target_bindings = bindings;
+        }
         return Ok(());
     }
 
@@ -10832,11 +10849,15 @@ fn assign_selected_slots_recursive(
         .filter(|sub| is_paid_instead_sub(&ability.context, sub))
     {
         assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot, announced)?;
-        // The paid-"instead" delegator mirrors its delegate's occurrences.
-        let mirrored = sub_ability.target_occurrences();
-        let bindings = sub_ability.context.attach_target_bindings.clone();
-        ability.replace_target_occurrences(mirrored);
-        ability.context.attach_target_bindings = bindings;
+        // See `assign_targets_recursive`: an inherited-target paid override
+        // owns no declaration, so its empty list must not erase the base
+        // branch's target.
+        if !sub_ability.targets.is_empty() {
+            let mirrored = sub_ability.target_occurrences();
+            let bindings = sub_ability.context.attach_target_bindings.clone();
+            ability.replace_target_occurrences(mirrored);
+            ability.context.attach_target_bindings = bindings;
+        }
         return Ok(());
     }
 
@@ -12747,7 +12768,11 @@ pub(crate) fn restamp_derived_chain_targets(ability: &mut ResolvedAbility) {
         }
         if let Some(sub) = ability.sub_ability.as_deref_mut() {
             remirror(sub);
-            if is_paid_instead_sub(&ability.context, sub) {
+            // Mirror only a delegate that OWNS a declaration. An
+            // inherited-target paid override has no targets, and copying its
+            // empty list would erase the base branch's real target during a
+            // retarget write.
+            if is_paid_instead_sub(&ability.context, sub) && !sub.targets.is_empty() {
                 mirrored = Some((
                     sub.target_occurrences(),
                     sub.context.attach_target_bindings.clone(),
@@ -21132,6 +21157,40 @@ mod tests {
             illegal_declared_target_slots(&paid_parent, &paid_parent, &validated),
             vec![0],
             "the record's target on a paid \"instead\" parent"
+        );
+    }
+
+    /// CR 601.2c + CR 608.2c: an UNRECORDED paid "instead" branch that
+    /// inherits the parent's target ("that permanent") owns no declaration.
+    /// The layout numbering must read the base branch's target, not substitute
+    /// the empty delegate.
+    #[test]
+    fn unrecorded_paid_inherited_branch_reads_the_base_declaration() {
+        let held = TargetRef::Object(ObjectId(5));
+        let mut sub = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::ParentTarget,
+            },
+            Vec::new(),
+            ObjectId(99),
+            PlayerId(0),
+        );
+        sub.condition = Some(AbilityCondition::AdditionalCostPaidInstead);
+        let mut paid_parent = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![held.clone()],
+            ObjectId(99),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+        paid_parent.context.additional_cost_paid = true;
+
+        assert_eq!(
+            declared_targets_in_chain(&paid_parent),
+            vec![held],
+            "the base branch owns the declaration when the paid delegate has no targets"
         );
     }
 
