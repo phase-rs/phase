@@ -2085,3 +2085,113 @@ fn a_sandbox_action_cannot_leave_the_discard_prompt_unanswerable() {
         "the refused action left the eligible card in place"
     );
 }
+
+/// CR 113.8 + CR 118.12: a nonactive activator keeps its draw ownership and
+/// payer through the replacement and the source's removal.
+#[test]
+fn a_nonactive_composite_draw_cost_activation_resumes_its_retained_suffix() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &STAGED_LIBRARY);
+    scenario.with_library_top(P1, &STAGED_LIBRARY);
+    let source = scenario
+        .add_creature(P1, "Draw Cost Source", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::EffectCost {
+                        effect: Box::new(draw_effect(1)),
+                    },
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                    },
+                ],
+            }),
+        )
+        .id();
+    scenario.add_enchantment_from_oracle(P1, "Abundance", ABUNDANCE_ORACLE);
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        let library: Vec<_> = state.players[P1.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect();
+        for (index, id) in library.iter().enumerate() {
+            let object = state.objects.get_mut(id).expect("library card");
+            object.card_types.core_types.clear();
+            if index == 2 {
+                object
+                    .card_types
+                    .core_types
+                    .push(engine::types::card_type::CoreType::Land);
+            }
+        }
+        state.debug_mode = true;
+        state.format_config.allow_debug_actions = true;
+    }
+    evaluate_layers(runner.state_mut());
+    let life_before = runner.state().players[P1.0 as usize].life;
+
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes priority");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the nonactive controller activates at instant speed");
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accept P1's Abundance");
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Land".to_string(),
+        })
+        .expect("choose Land");
+    let WaitingFor::RevealUntilBottomOrder { cards, .. } = &runner.state().waiting_for else {
+        panic!(
+            "Abundance asks for P1's revealed misses' order: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let order = cards.clone();
+    runner
+        .act(GameAction::Debug(DebugAction::MoveToZone {
+            object_id: source,
+            to_zone: Zone::Graveyard,
+            library_position: None,
+            simulate: false,
+        }))
+        .expect("the debug move removes the nonactive source");
+    runner
+        .act(GameAction::SelectCards { cards: order })
+        .expect("submit the bottom order");
+
+    let state = runner.state();
+    assert!(
+        state.pending_cast.is_none(),
+        "the nonactive activation resumes without its source"
+    );
+    assert_eq!(
+        state.players[P1.0 as usize].life,
+        life_before - 1,
+        "the original controller paid the retained suffix"
+    );
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "the nonactive activation reaches the stack: {:?}",
+        state.waiting_for
+    );
+}
