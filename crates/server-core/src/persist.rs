@@ -81,8 +81,10 @@ impl PersistedSession {
     /// this rather than pairing two `serde_json` decodes themselves.
     ///
     /// The pools are lifted out of `state` before the payload is written, so
-    /// the payload's own decode never walks them. They pass the engine's onset
-    /// admission here instead (CR 611.2e,
+    /// the payload's own decode never walks them. They pass the fight-operand
+    /// migration the payload's own decode applies
+    /// (`migrate_detached_fight_operand_carrier`) first. They pass the engine's
+    /// onset admission here instead (CR 611.2e,
     /// `PersistedEntryOnsetRecord::admit_detached_carrier`), against the record
     /// read from the payload before its decode stamps an admitted unrecorded
     /// state `Recorded`. The payload decodes first, so its own refusals keep
@@ -96,8 +98,9 @@ impl PersistedSession {
             .and_then(PersistedEntryOnsetRecord::of_persisted_state);
         let mut persisted: Self =
             serde_json::from_value(payload).map_err(|error| error.to_string())?;
-        let pools: serde_json::Value =
+        let mut pools: serde_json::Value =
             serde_json::from_str(deck_pools_json).map_err(|error| error.to_string())?;
+        engine::types::game_state::migrate_detached_fight_operand_carrier(&mut pools);
         onset_record?.admit_detached_carrier(&pools)?;
         persisted.deck_pools = serde_json::from_value(pools).map_err(|error| error.to_string())?;
         Ok(persisted)

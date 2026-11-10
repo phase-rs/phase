@@ -8423,14 +8423,15 @@ where
     F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
     G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
 {
-    read_object_pt_by_id_for_incarnation(state, id, None, obj_extract, lki_extract)
+    read_object_characteristic_by_id_for_incarnation(state, id, None, obj_extract, lki_extract)
 }
 
-/// CR 400.7 + CR 608.2h: read P/T for one exact incarnation when the triggering
+/// CR 400.7 + CR 608.2h: read one per-object scalar characteristic (power,
+/// toughness, mana value) for one exact incarnation when the triggering
 /// zone-change record identifies it. A leave and re-entry can reuse the same
 /// `ObjectId`, but the re-entered permanent is a new object; it must not replace
 /// the original entrant's LKI for an already-pending trigger.
-fn read_object_pt_by_id_for_incarnation<F, G>(
+fn read_object_characteristic_by_id_for_incarnation<F, G>(
     state: &GameState,
     id: ObjectId,
     expected_incarnation: Option<u64>,
@@ -8494,7 +8495,7 @@ where
         .and_then(obj_extract)
         .or_else(|| {
             ability.and_then(|_| {
-                read_object_pt_by_id_for_incarnation(
+                read_object_characteristic_by_id_for_incarnation(
                     state,
                     object.object_id,
                     Some(object.incarnation),
@@ -8505,6 +8506,9 @@ where
         })
 }
 
+/// CR 400.7 + CR 603.2: the trigger-event object and, for a battlefield entry,
+/// the exact incarnation that entered — shared by the P/T and mana-value
+/// trigger-event readers.
 fn trigger_event_source_identity(
     state: &GameState,
     ability: Option<&ResolvedAbility>,
@@ -8543,7 +8547,7 @@ where
         DepartureLookback::Absent | DepartureLookback::NotBattlefieldDeparture => {}
     }
     trigger_event_source_identity(state, ability).and_then(|(id, expected_incarnation)| {
-        read_object_pt_by_id_for_incarnation(
+        read_object_characteristic_by_id_for_incarnation(
             state,
             id,
             expected_incarnation,
@@ -8758,10 +8762,11 @@ where
                 // captured incarnation, and the LKI rung is qualified by that
                 // same incarnation rather than the id-keyed `state.lki_cache`,
                 // which `zones.rs` overwrites on every departure. Threading the
-                // incarnation into `read_object_pt_by_id_for_incarnation` gets
-                // both, plus its documented legacy-save handling. The
-                // binding-time `snapshot.lki` remains the last resort.
-                read_object_pt_by_id_for_incarnation(
+                // incarnation into
+                // `read_object_characteristic_by_id_for_incarnation` gets both,
+                // plus its documented legacy-save handling. The binding-time
+                // `snapshot.lki` remains the last resort.
+                read_object_characteristic_by_id_for_incarnation(
                     state,
                     snapshot.object_id,
                     Some(snapshot.incarnation),
@@ -8961,7 +8966,9 @@ fn resolve_object_mana_value(
     // CR 608.2h + CR 603.10a + CR 400.7 + CR 708.2a: the trigger-event source's
     // mana value. A battlefield departure answers from its record-owned
     // last-known information (0 for a face-down permanent), never from a live
-    // same-id object that has since returned; other events keep the id-keyed
+    // same-id object that has since returned. An entry event answers for the
+    // incarnation that entered: live while it remains on the battlefield, else
+    // its last known information. Other events keep the id-keyed
     // live-then-LKI read.
     let event_source_mana_value = || -> Option<i32> {
         match departure_lookback(state, ability) {
@@ -8971,20 +8978,40 @@ fn resolve_object_mana_value(
             DepartureLookback::Malformed => return Some(0),
             DepartureLookback::Absent | DepartureLookback::NotBattlefieldDeparture => {}
         }
-        let id = object_lookback_event(state, ability)
-            .and_then(|e| crate::game::targeting::extract_source_from_event(&e))?;
-        state
-            .objects
-            .get(&id)
-            // CR 202.3d + CR 709.4b: combined MV for a split card off the
-            // stack; CR 202.3e: chosen X for an on-stack source.
-            .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
-            .or_else(|| {
-                state
-                    .lki_cache
-                    .get(&id)
-                    .map(|lki| u32_to_i32_saturating(lki.mana_value))
-            })
+        let (id, expected_incarnation) = trigger_event_source_identity(state, ability)?;
+        // CR 202.3d + CR 709.4b: combined MV for a split card off the stack;
+        // CR 202.3e: chosen X for an on-stack source.
+        let live = |obj: &crate::game::game_object::GameObject| {
+            Some(u32_to_i32_saturating(obj.effective_mana_value()))
+        };
+        let lki = |snapshot: &crate::types::game_state::LKISnapshot| {
+            Some(u32_to_i32_saturating(snapshot.mana_value))
+        };
+        match expected_incarnation {
+            // CR 400.7 + CR 608.2h + CR 708.2a: an entry event names one incarnation of the
+            // entrant. While that incarnation is on the battlefield its current mana value
+            // answers; once it has left — or left and returned as a new object — its last
+            // known information does (0 for a permanent that was face down), never the card
+            // in its new zone.
+            Some(incarnation) => read_object_characteristic_by_id_for_incarnation(
+                state,
+                id,
+                Some(incarnation),
+                &live,
+                &lki,
+            ),
+            // CR 202.3e + CR 202.3d: an event that names no entered incarnation (a cast, an
+            // attack, damage, a counter) keeps the id-keyed read: the object where it now is
+            // first — a spell on the stack reports its chosen X and its cast half — then
+            // id-keyed LKI. This arm has no expected zone to compare against, so it does not
+            // apply CR 608.2h's expected-zone test to an object that has since left the zone
+            // the event observed it in.
+            None => state
+                .objects
+                .get(&id)
+                .and_then(live)
+                .or_else(|| state.lki_cache.get(&id).and_then(lki)),
+        }
     };
     match scope {
         // CR 202.3e: include cost_x_paid so on-stack spells report X's chosen value.
@@ -9051,7 +9078,8 @@ fn resolve_object_mana_value(
         // captured into `effect_context_object` by the `EffectZoneChoice`
         // handler.
         //   3. trigger-event source — the object named by this ability's
-        // trigger condition, live object then LKI.
+        // trigger condition: an entrant's own incarnation (live, else its
+        // LKI); other events live then LKI.
         // Exact parity with the `resolve_object_pt` `CostPaidObject` arm.
         ObjectScope::CostPaidObject => ability
             .and_then(|a| a.cost_paid_object.as_ref())
@@ -9088,9 +9116,9 @@ fn resolve_object_mana_value(
                     // reading it unqualified would report a LATER incarnation:
                     // the very object the gate above just rejected. Qualify the
                     // lookup by the captured incarnation, exactly as
-                    // `read_object_pt_by_id` does, and fall back to the
-                    // binding-time snapshot only when no versioned record
-                    // exists.
+                    // `read_object_characteristic_by_id_for_incarnation`
+                    // does, and fall back to the binding-time snapshot only
+                    // when no versioned record exists.
                     .or_else(|| {
                         state
                             .lki_by_incarnation
@@ -9111,8 +9139,8 @@ fn resolve_object_mana_value(
         // is the CR 608.2c anaphoric binding for the reveal class (Dark
         // Confidant, #511).
         //   2. trigger-event source — the CR 608.2k trigger-condition referent
-        // (#512: "When this creature dies, ... its mana value"), live
-        // object then LKI.
+        // (#512: "When this creature dies, ... its mana value"): an entrant's
+        // own incarnation (live, else its LKI); other events live then LKI.
         //   3. `cost_paid_object` — the CR 608.2k cost referent, last resort.
         // The arm differs from `CostPaidObject` only in slot priority:
         // instruction-order (608.2c) first, vs. cost referent (608.2k) first.
@@ -25343,6 +25371,221 @@ mod tests {
             3,
             "CostPaidObject must still read cost_paid_object (CR 608.2k slot 1)"
         );
+    }
+
+    /// The four scopes whose mana-value read falls back to the trigger-event
+    /// source when no earlier referent is bound.
+    const TRIGGER_EVENT_MANA_VALUE_SCOPES: [ObjectScope; 4] = [
+        ObjectScope::EventSource,
+        ObjectScope::CostPaidObject,
+        ObjectScope::Anaphoric,
+        ObjectScope::Demonstrative,
+    ];
+
+    fn trigger_event_mana_value(state: &GameState, scope: ObjectScope) -> i32 {
+        resolve_quantity(
+            state,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue { scope },
+            },
+            PlayerId(0),
+            ObjectId(1),
+        )
+    }
+
+    /// A {4}{W}{W} creature card in P0's hand.
+    fn six_mana_creature_in_hand(state: &mut GameState) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(9101),
+            PlayerId(0),
+            "Exalted Angel".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White, ManaCostShard::White],
+            generic: 4,
+        };
+        obj.base_mana_cost = obj.mana_cost.clone();
+        obj.power = Some(4);
+        obj.toughness = Some(5);
+        obj.base_power = Some(4);
+        obj.base_toughness = Some(5);
+        id
+    }
+
+    /// Play the card face down (CR 708.2a: mana value 0) and return the ETB
+    /// `ZoneChanged` event with its entered incarnation.
+    fn play_face_down_and_capture_entry(state: &mut GameState, id: ObjectId) -> (GameEvent, u64) {
+        let mut events = Vec::new();
+        crate::game::morph::play_face_down(state, PlayerId(0), id, &mut events)
+            .expect("played face down");
+        let etb = events
+            .into_iter()
+            .find(|event| {
+                matches!(
+                    event,
+                    GameEvent::ZoneChanged { object_id, to: Zone::Battlefield, .. }
+                        if *object_id == id
+                )
+            })
+            .expect("the face-down entry emits a ZoneChanged event");
+        let GameEvent::ZoneChanged { record, .. } = &etb else {
+            unreachable!("matched above");
+        };
+        let entered = record
+            .entered_incarnation
+            .expect("reach guard: an entry record names the entered incarnation");
+        assert!(state.objects[&id].face_down, "reach guard: face down");
+        (etb, entered)
+    }
+
+    /// CR 400.7 + CR 608.2h + CR 708.2a: once the entered face-down incarnation
+    /// has left the battlefield, every trigger-event mana-value scope answers
+    /// with its last known information (0), never with the revealed card in its
+    /// new zone (6).
+    #[test]
+    fn trigger_event_source_mana_value_reads_the_departed_entrants_incarnation() {
+        let mut state = GameState::new_two_player(42);
+        let id = six_mana_creature_in_hand(&mut state);
+        let (etb, entered) = play_face_down_and_capture_entry(&mut state, id);
+        state.current_trigger_event = Some(etb);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+
+        let live = &state.objects[&id];
+        assert_eq!(live.zone, Zone::Graveyard, "reach guard: the entrant died");
+        assert!(
+            !live.face_down,
+            "reach guard: revealed on leaving (CR 708.9)"
+        );
+        assert_eq!(
+            live.effective_mana_value(),
+            6,
+            "reach guard: the revealed card has mana value 6"
+        );
+        assert_eq!(
+            state.lki_by_incarnation[&id][&entered].mana_value, 0,
+            "reach guard: the entered incarnation's LKI records mana value 0"
+        );
+        for scope in TRIGGER_EVENT_MANA_VALUE_SCOPES {
+            assert_eq!(
+                trigger_event_mana_value(&state, scope),
+                0,
+                "{scope:?} must read the departed incarnation's LKI"
+            );
+        }
+    }
+
+    /// CR 400.7: an object that leaves and returns at the same id is a new
+    /// object; the entry event's incarnation keeps answering from its LKI.
+    #[test]
+    fn trigger_event_source_mana_value_ignores_a_reentered_object_at_the_same_id() {
+        let mut state = GameState::new_two_player(42);
+        let id = six_mana_creature_in_hand(&mut state);
+        let (etb, entered) = play_face_down_and_capture_entry(&mut state, id);
+        state.current_trigger_event = Some(etb);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, id, Zone::Exile, &mut events);
+        crate::game::zones::move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
+
+        let live = &state.objects[&id];
+        assert_eq!(live.zone, Zone::Battlefield, "reach guard: it returned");
+        assert_ne!(
+            live.incarnation, entered,
+            "reach guard: the returned object is a new incarnation"
+        );
+        assert_eq!(
+            live.effective_mana_value(),
+            6,
+            "reach guard: the returned object is face up with mana value 6"
+        );
+        for scope in TRIGGER_EVENT_MANA_VALUE_SCOPES {
+            assert_eq!(
+                trigger_event_mana_value(&state, scope),
+                0,
+                "{scope:?} must not read the re-entered object"
+            );
+        }
+    }
+
+    /// CR 608.2h: while the entered incarnation is still on the battlefield, its
+    /// current mana value answers. Paired with the two departure tests so their
+    /// 0 is not vacuous.
+    #[test]
+    fn trigger_event_source_mana_value_reads_a_present_entrant_live() {
+        let mut state = GameState::new_two_player(42);
+        let id = six_mana_creature_in_hand(&mut state);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
+        let etb = events
+            .into_iter()
+            .find(|event| {
+                matches!(
+                    event,
+                    GameEvent::ZoneChanged { object_id, to: Zone::Battlefield, .. }
+                        if *object_id == id
+                )
+            })
+            .expect("the entry emits a ZoneChanged event");
+        state.current_trigger_event = Some(etb);
+
+        for scope in TRIGGER_EVENT_MANA_VALUE_SCOPES {
+            assert_eq!(
+                trigger_event_mana_value(&state, scope),
+                6,
+                "{scope:?} must read the present entrant live"
+            );
+        }
+    }
+
+    /// CR 202.3e + CR 608.2h: a spell cast from exile is in its expected zone,
+    /// the stack, so its current mana value with the chosen X answers, not the
+    /// exile-time last known information (X counted as 0).
+    #[test]
+    fn trigger_event_source_mana_value_reads_a_spell_cast_from_exile_on_the_stack() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(9102),
+            PlayerId(0),
+            "Exiled X Spell".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Red],
+                generic: 0,
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+        }
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, id, Zone::Stack, &mut events);
+        state.objects.get_mut(&id).unwrap().cost_x_paid = Some(3);
+        assert_eq!(
+            state.lki_cache[&id].mana_value, 1,
+            "reach guard: the exile-time LKI (X = 0) exists"
+        );
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(9102),
+            controller: PlayerId(0),
+            object_id: id,
+            cast_mana_value: None,
+        });
+
+        for scope in [ObjectScope::EventSource, ObjectScope::CostPaidObject] {
+            assert_eq!(
+                trigger_event_mana_value(&state, scope),
+                4,
+                "{scope:?} must read the live spell with X = 3"
+            );
+        }
     }
 
     /// CR 608.2c — anaphoric and demonstrative P/T reads use the object from the

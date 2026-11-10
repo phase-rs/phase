@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "Effect::Fight gains up_to_one: Option<FightSlotRole>, binding a printed 'up to one' to the fighter or the fought creature; fight abilities no longer carry an ability-level multi_target. An older peer ignores the field and treats every declared fighter as required, so it refuses a declined optional fighter or fought creature."
+  "reason": "Effect::Fight gains up_to_one: Option<FightSlotRole>, binding a printed 'up to one' to the fighter or the fought creature; fight abilities no longer carry an ability-level multi_target. An older peer ignores the field and treats every declared fighter as required, so it refuses a declined optional fighter or fought creature. Persisted states from an older engine are migrated at restore and never refused: a fight that declares one target slot gets that slot as its up_to_one operand, and a paused target prompt whose fight slots only such fights declare offers their decline; a fight that declares two target slots (or none) cannot say which one its 'up to one' frees, so it is restored as saved and keeps the older behavior, every declared fighter required."
 }

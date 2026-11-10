@@ -2016,6 +2016,176 @@ mod tests {
         );
     }
 
+    /// Bridgeworks Battle, front face (verbatim, reminder text dropped): one
+    /// declared fight slot.
+    const BRIDGEWORKS_BATTLE: &str = "Target creature you control gets +2/+2 until end of turn. It fights up to one target creature you don't control.";
+
+    /// Earth Rumble (verbatim, reminder text dropped): two declared fight
+    /// slots, the fighter optional.
+    const EARTH_RUMBLE: &str = "Earthbend 2. When you do, up to one target creature you control fights target creature an opponent controls.";
+
+    /// The pools column of one deck pool whose sideboard holds a face carrying
+    /// `oracle`'s parsed spell abilities.
+    fn pools_with_parsed_sideboard_face(name: &str, oracle: &str) -> serde_json::Value {
+        use engine::game::scenario::{GameScenario, P0};
+
+        let mut scenario = GameScenario::new();
+        let id = scenario
+            .add_spell_to_hand_from_oracle(P0, name, false, oracle)
+            .id();
+        let runner = scenario.build();
+        let card = engine::types::card::CardFace {
+            name: name.to_string(),
+            abilities: runner.state().objects[&id].abilities.as_ref().clone(),
+            ..Default::default()
+        };
+        let sideboard = std::sync::Arc::new(vec![engine::game::deck_loading::DeckEntry {
+            card,
+            count: 1,
+        }]);
+        let mut pool = pool_named("Forest");
+        pool.registered_sideboard = std::sync::Arc::clone(&sideboard);
+        pool.current_sideboard = sideboard;
+        serde_json::to_value(vec![pool]).expect("the pools serialize")
+    }
+
+    /// Every ability node in `value` whose effect is a fight.
+    fn fight_nodes(value: &serde_json::Value) -> Vec<serde_json::Value> {
+        fn collect(value: &serde_json::Value, out: &mut Vec<serde_json::Value>) {
+            match value {
+                serde_json::Value::Array(values) => {
+                    values.iter().for_each(|value| collect(value, out))
+                }
+                serde_json::Value::Object(object) => {
+                    let is_fight = object
+                        .get("effect")
+                        .and_then(|effect| effect.get("type"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some("Fight");
+                    if is_fight {
+                        out.push(value.clone());
+                    }
+                    object.values().for_each(|value| collect(value, out));
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        collect(value, &mut out);
+        out
+    }
+
+    /// What an engine before `Effect::Fight::up_to_one` wrote for a fight's
+    /// printed "up to one": the ability-level `multi_target` `{min 0, max 1}`.
+    fn as_pre_operand_writer(value: &mut serde_json::Value) -> usize {
+        match value {
+            serde_json::Value::Array(values) => values.iter_mut().map(as_pre_operand_writer).sum(),
+            serde_json::Value::Object(object) => {
+                let removed = object
+                    .get_mut("effect")
+                    .and_then(serde_json::Value::as_object_mut)
+                    .filter(|effect| {
+                        effect.get("type").and_then(serde_json::Value::as_str) == Some("Fight")
+                    })
+                    .and_then(|effect| effect.remove("up_to_one"));
+                let rewritten = usize::from(removed.is_some());
+                if removed.is_some() {
+                    object.insert(
+                        "multi_target".to_string(),
+                        serde_json::to_value(engine::types::ability::MultiTargetSpec::up_to(
+                            engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                        ))
+                        .expect("the spec serializes"),
+                    );
+                    object.insert(
+                        "optional_targeting".to_string(),
+                        serde_json::Value::Bool(false),
+                    );
+                }
+                rewritten
+                    + object
+                        .values_mut()
+                        .map(as_pre_operand_writer)
+                        .sum::<usize>()
+            }
+            _ => 0,
+        }
+    }
+
+    /// The one fight node of the decoded row's sideboard face, typed.
+    fn decoded_fight_node(session: &PersistedSession) -> engine::types::ability::AbilityDefinition {
+        let face = serde_json::to_value(&session.deck_pools[0].current_sideboard[0].card)
+            .expect("the face serializes");
+        let nodes = fight_nodes(&face);
+        assert_eq!(nodes.len(), 1, "one fight node: {nodes:?}");
+        serde_json::from_value(nodes[0].clone()).expect("the fight node decodes")
+    }
+
+    /// CR 115.6 + CR 601.2c: the detached `deck_pools_json` column passes the
+    /// same fight-operand migration as the payload it was lifted from. A fight
+    /// that declares one slot (Bridgeworks Battle) gets that slot as its
+    /// operand; one that declares two (Earth Rumble) cannot say which its "up
+    /// to one" frees, so it is left as saved. Both rows decode.
+    #[test]
+    fn a_pre_operand_pools_column_migrates_one_slot_fights_and_keeps_two_slot_ones() {
+        use engine::types::ability::{Effect, FightSlotRole, MultiTargetSpec, QuantityExpr};
+
+        let payload = serde_json::to_string(&full_snapshot("FIGHTS", 1, 1, None, false).persisted)
+            .expect("the payload serializes");
+
+        let earth_rumble = pools_with_parsed_sideboard_face("Earth Rumble", EARTH_RUMBLE);
+        assert!(
+            fight_nodes(&earth_rumble)
+                .iter()
+                .any(|node| node["effect"]["up_to_one"] == "Subject"),
+            "positive reach: Earth Rumble's fight frees the fighter"
+        );
+        PersistedSession::decode_row(&payload, &earth_rumble.to_string())
+            .expect("positive reach: current Earth Rumble pools decode");
+        let mut legacy = earth_rumble;
+        assert!(as_pre_operand_writer(&mut legacy) >= 1, "transform reach");
+        let decoded = PersistedSession::decode_row(&payload, &legacy.to_string())
+            .expect("a two-slot pre-operand pools column decodes");
+        let node = decoded_fight_node(&decoded);
+        assert!(
+            matches!(
+                *node.effect,
+                Effect::Fight {
+                    up_to_one: None,
+                    ..
+                }
+            ),
+            "the two-slot fight is left as saved: {:?}",
+            node.effect
+        );
+        assert_eq!(
+            node.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+        );
+
+        let bridgeworks =
+            pools_with_parsed_sideboard_face("Bridgeworks Battle", BRIDGEWORKS_BATTLE);
+        PersistedSession::decode_row(&payload, &bridgeworks.to_string())
+            .expect("positive reach: current Bridgeworks pools decode");
+        let mut legacy = bridgeworks;
+        assert!(as_pre_operand_writer(&mut legacy) >= 1, "transform reach");
+        let decoded = PersistedSession::decode_row(&payload, &legacy.to_string())
+            .expect("a one-slot pre-operand pools column decodes");
+        let node = decoded_fight_node(&decoded);
+        assert!(
+            matches!(
+                *node.effect,
+                Effect::Fight {
+                    up_to_one: Some(FightSlotRole::Opponent),
+                    ..
+                }
+            ),
+            "the one-slot fight records its operand: {:?}",
+            node.effect
+        );
+        assert!(node.multi_target.is_none(), "{:?}", node.multi_target);
+    }
+
     /// A row whose pools column is NULL is skipped like a payload that fails
     /// to decode, not propagated out of the reader — one such row must not
     /// cost the boot every other game.

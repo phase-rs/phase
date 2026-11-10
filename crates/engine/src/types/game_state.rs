@@ -25,15 +25,16 @@ use super::ability::{
     ChoiceValue, ChooseFromZoneConstraint, ChosenAttribute, CoinFlipResult, ContinuousModification,
     ControlWindow, CopiableValues, CopyChooseScope, CopyScale, CopyTargetPurpose,
     CostPaidObjectSnapshot, CounterCostSelection, DamageContextSnapshot, DelayedTriggerCondition,
-    DelayedTriggerKind, DigRestOrder, DigRestRemainder, DigRestSplitScope, Duration, EffectKind,
-    EntryAttackDestination, FaceDownProfile, GameRestriction, KeywordAction, KickerVariant,
-    LibraryPosition, ModalChoice, PermanentEntryMode, PileSource, QuantityExpr,
+    DelayedTriggerKind, DigRestOrder, DigRestRemainder, DigRestSplitScope, Duration, Effect,
+    EffectKind, EntryAttackDestination, FaceDownProfile, GameRestriction, KeywordAction,
+    KickerVariant, LibraryPosition, ModalChoice, PermanentEntryMode, PileSource, QuantityExpr,
     ReplacementDefinition, ResolvedAbility, ReturnResultId, SearchDestinationSplit,
     SearchOrderingHint, SearchSelectionConstraint, StackAbilityKind, StaticCondition,
     TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause, TriggerBaseSetInstanceRef,
     TriggerCondition, TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef,
     TriggerEntry,
 };
+use super::ability::{fight_slots, FightSlotRole, MultiTargetSpec};
 use super::actions::{DebugCardCreationKind, GameAction, ResolveAllScope};
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
@@ -15747,6 +15748,193 @@ fn migrate_legacy_coin_flip_effect(effect: &mut serde_json::Value) {
     effect.insert("flips".to_string(), flips);
 }
 
+/// CR 115.6 + CR 601.2c + CR 701.14a: restore migration for a state written before a
+/// fight recorded which of its creatures a printed "up to one" frees. A fight that
+/// declares one target slot gets that slot as its `up_to_one` operand, and a paused
+/// prompt whose Fight slots such fights alone declare offers their decline. A fight
+/// that declares two slots (or none) cannot say which one the ability-level spec
+/// meant, so it is left as decoded and keeps every declared slot required, as the
+/// older engine did. Never refuses a restore.
+///
+/// The live prompt is classified before the node walk, because the walk erases the
+/// legacy marker the classification reads; its slots are patched after it.
+fn migrate_legacy_fight_operand_cardinality(state: &mut serde_json::Value) {
+    let frees_prompt_fight_slots = live_prompt_fight_slots_are_attributable(state);
+    migrate_legacy_fight_nodes(state);
+    if frees_prompt_fight_slots {
+        free_live_prompt_fight_slots(state);
+    }
+}
+
+/// The node migration alone, for a carrier stored detached from its state (the
+/// server's `deck_pools_json` column); a detached carrier holds no prompt.
+pub fn migrate_detached_fight_operand_carrier(carrier: &mut serde_json::Value) {
+    migrate_legacy_fight_nodes(carrier);
+}
+
+/// CR 701.14a: a fight names two creatures, so it declares at most two operand
+/// slots. The declared roles of a legacy fight node: an `AbilityDefinition` or
+/// `ResolvedAbility` whose `Effect::Fight` records no `up_to_one` while the ability
+/// carries an up-to-one `multi_target` or `optional_targeting: true` — the shape only
+/// an engine before `Effect::Fight::up_to_one` wrote. `None` for any other node, and
+/// for a legacy node whose `effect` does not deserialize (left as decoded).
+fn legacy_fight_roles(
+    node: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Vec<FightSlotRole>> {
+    let effect = node.get("effect")?;
+    let is_fight = effect.get("type").and_then(serde_json::Value::as_str) == Some("Fight");
+    let records_operand = effect
+        .get("up_to_one")
+        .is_some_and(|up_to_one| !up_to_one.is_null());
+    let up_to_one_spec = node
+        .get("multi_target")
+        .and_then(|spec| serde_json::from_value::<MultiTargetSpec>(spec.clone()).ok())
+        .is_some_and(|spec| spec.is_up_to_one());
+    let optional_targeting = node.get("optional_targeting") == Some(&serde_json::Value::Bool(true));
+    if !is_fight || records_operand || !(up_to_one_spec || optional_targeting) {
+        return None;
+    }
+    let effect = serde_json::from_value::<Effect>(effect.clone()).ok()?;
+    Some(
+        fight_slots(&effect)?
+            .declared()
+            .map(|(role, _)| role)
+            .collect(),
+    )
+}
+
+/// The whole-value walk: every legacy fight node that declares exactly one slot is
+/// rewritten to a current writer's node; every other node is left as decoded.
+/// Idempotent: a migrated node records `up_to_one` and carries no spec.
+fn migrate_legacy_fight_nodes(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => values.iter_mut().for_each(migrate_legacy_fight_nodes),
+        serde_json::Value::Object(node) => {
+            // CR 115.6 + CR 601.2c: only declared targets are announced, so the printed
+            // "up to one" the ability-level spec stood for frees a legacy fight's only
+            // declared slot. Restore decision ("convert, never refuse"): two declared
+            // slots (or none) do not say which operand the ability-wide spec meant, so
+            // such a node is left as decoded and keeps the older engine's reading,
+            // every declared slot required.
+            if let Some([role]) = legacy_fight_roles(node).as_deref() {
+                if let Some(effect) = node
+                    .get_mut("effect")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    effect.insert("up_to_one".to_string(), serde_json::json!(role));
+                }
+                node.insert("multi_target".to_string(), serde_json::Value::Null);
+                node.insert(
+                    "optional_targeting".to_string(),
+                    serde_json::Value::Bool(false),
+                );
+            }
+            node.values_mut().for_each(migrate_legacy_fight_nodes);
+        }
+        _ => {}
+    }
+}
+
+/// How a Fight node in a paused prompt's chain bears on that prompt's Fight slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptFightNode {
+    /// A legacy fight declaring exactly one slot: its slot is its printed decline.
+    LegacyOneSlot,
+    /// Any other fight declaring a slot (a legacy two-slot fight, a fight that
+    /// records `up_to_one`, or one whose slots cannot be counted).
+    OtherDeclaring,
+    /// A fight declaring no slot; it contributes no Fight slot.
+    DeclaresNone,
+}
+
+fn classify_prompt_fight_node(
+    node: &serde_json::Map<String, serde_json::Value>,
+) -> Option<PromptFightNode> {
+    let effect = node.get("effect")?;
+    if effect.get("type").and_then(serde_json::Value::as_str) != Some("Fight") {
+        return None;
+    }
+    if let Some([_]) = legacy_fight_roles(node).as_deref() {
+        return Some(PromptFightNode::LegacyOneSlot);
+    }
+    let Ok(effect) = serde_json::from_value::<Effect>(effect.clone()) else {
+        return Some(PromptFightNode::OtherDeclaring);
+    };
+    Some(
+        match fight_slots(&effect).and_then(|slots| slots.declared().next()) {
+            Some(_) => PromptFightNode::OtherDeclaring,
+            None => PromptFightNode::DeclaresNone,
+        },
+    )
+}
+
+/// Classify every Fight node on the chain edges of `ResolvedAbility::child_links`
+/// (coin `won`/`lost`, `sub_ability`, `else_ability`). Definitions nested inside an
+/// effect payload declare no slot in this prompt and are not visited.
+fn classify_prompt_chain(node: &serde_json::Value, classes: &mut Vec<PromptFightNode>) {
+    let Some(node) = node.as_object() else {
+        return;
+    };
+    classes.extend(classify_prompt_fight_node(node));
+    let coin_branches = node.get("coin_branches");
+    [
+        coin_branches.and_then(|branches| branches.get("won")),
+        coin_branches.and_then(|branches| branches.get("lost")),
+        node.get("sub_ability"),
+        node.get("else_ability"),
+    ]
+    .into_iter()
+    .flatten()
+    .for_each(|child| classify_prompt_chain(child, classes));
+}
+
+/// CR 115.6 + CR 601.2c: whether every Fight slot of the live target prompt belongs
+/// to a legacy one-slot fight, so each is its own fight's printed decline. The
+/// prompt's ability is the pending trigger's for `TriggerTargetSelection`
+/// (CR 603.3d) and the pending cast's for `TargetSelection`.
+fn live_prompt_fight_slots_are_attributable(state: &serde_json::Value) -> bool {
+    let Some(prompt) = state.get("waiting_for") else {
+        return false;
+    };
+    let ability = match prompt.get("type").and_then(serde_json::Value::as_str) {
+        // CR 603.3d: a triggered ability's targets are announced as it is put on
+        // the stack, so its prompt's ability is the pending trigger's.
+        Some("TriggerTargetSelection") => state
+            .get("pending_trigger")
+            .and_then(|pending| pending.get("ability")),
+        Some("TargetSelection") => prompt
+            .get("data")
+            .and_then(|data| data.get("pending_cast"))
+            .and_then(|pending| pending.get("ability")),
+        _ => None,
+    };
+    let Some(ability) = ability else {
+        return false;
+    };
+    let mut classes = Vec::new();
+    classify_prompt_chain(ability, &mut classes);
+    classes.contains(&PromptFightNode::LegacyOneSlot)
+        && !classes.contains(&PromptFightNode::OtherDeclaring)
+}
+
+/// CR 115.6 + CR 601.2c: free every Fight slot of the live target prompt, which
+/// `live_prompt_fight_slots_are_attributable` found to be one-slot fights' own.
+fn free_live_prompt_fight_slots(state: &mut serde_json::Value) {
+    let fight_kind = serde_json::json!(EffectKind::Fight);
+    let slots = state
+        .get_mut("waiting_for")
+        .and_then(|prompt| prompt.get_mut("data"))
+        .and_then(|data| data.get_mut("target_slots"))
+        .and_then(serde_json::Value::as_array_mut);
+    for slot in slots.into_iter().flatten() {
+        if slot.get("effect_kind") == Some(&fight_kind) {
+            if let Some(slot) = slot.as_object_mut() {
+                slot.insert("optional".to_string(), serde_json::Value::Bool(true));
+            }
+        }
+    }
+}
+
 /// Maps the pre-Option turn-face-up continuation wire shape onto the typed
 /// `Option<u32>` representation. A legacy `cost_had_x: false` plus zero was
 /// never an X announcement, while `true` plus zero was.
@@ -28403,6 +28591,9 @@ impl GameStateDecode {
         migrate_legacy_graveyard_paid_cast_cleanup(value)?;
         migrate_legacy_shortcut_repetition_bound(value)?;
         migrate_legacy_offer_road(value);
+        // Last: the walk deserializes `Effect` fragments and leaves a failing one as
+        // decoded, so every earlier rewrite of a fragment's wire shape runs first.
+        migrate_legacy_fight_operand_cardinality(value);
         Ok(())
     }
 
@@ -41948,6 +42139,231 @@ mod tests {
         let migrated = persisted.clone();
         migrate_legacy_coin_flip_effects(&mut persisted);
         assert_eq!(persisted, migrated, "the migration is idempotent");
+    }
+
+    /// Building-block cases of the pre-operand fight migration
+    /// (`migrate_legacy_fight_operand_cardinality`): CR 115.6 + CR 601.2c frees a
+    /// fight's only declared slot; every node or prompt that does not decide its
+    /// operand is left exactly as decoded, and nothing is refused.
+    #[test]
+    fn legacy_fight_operand_migration_branches() {
+        use crate::types::ability::{ControllerRef, TypedFilter};
+
+        let creature_you_control =
+            || TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        let creature_you_dont_control =
+            || TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+        let fight = |subject: TargetFilter, up_to_one: Option<FightSlotRole>| {
+            serde_json::to_value(Effect::Fight {
+                target: creature_you_dont_control(),
+                subject,
+                up_to_one,
+            })
+            .expect("the fight serializes")
+        };
+        let spec = serde_json::to_value(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+            .expect("the spec serializes");
+        // What an engine before `Effect::Fight::up_to_one` wrote.
+        let legacy = |effect: serde_json::Value| {
+            serde_json::json!({
+                "effect": effect,
+                "multi_target": spec.clone(),
+                "optional_targeting": false
+            })
+        };
+        let one_slot = || legacy(fight(TargetFilter::SelfRef, None));
+        let two_slot = || legacy(fight(creature_you_control(), None));
+        let migrated_one_slot = serde_json::json!({
+            "effect": fight(TargetFilter::SelfRef, Some(FightSlotRole::Opponent)),
+            "multi_target": null,
+            "optional_targeting": false
+        });
+        let fight_slot = |optional: bool| {
+            serde_json::json!({
+                "legal_targets": [],
+                "optional": optional,
+                "effect_kind": "Fight"
+            })
+        };
+        let trigger_prompt = |slots: Vec<serde_json::Value>| {
+            serde_json::json!({
+                "type": "TriggerTargetSelection",
+                "data": { "player": 0, "target_slots": slots }
+            })
+        };
+
+        // (a) A legacy node declaring no slot is left as decoded.
+        let zero_slot = legacy(
+            serde_json::to_value(Effect::Fight {
+                target: TargetFilter::ParentTarget,
+                subject: TargetFilter::SelfRef,
+                up_to_one: None,
+            })
+            .expect("the fight serializes"),
+        );
+        let mut value = serde_json::json!({ "node": zero_slot.clone() });
+        migrate_legacy_fight_operand_cardinality(&mut value);
+        assert_eq!(value["node"], zero_slot, "(a) zero declared slots");
+
+        // (b) `optional_targeting: true` with no spec marks a legacy one-slot node.
+        let mut value = serde_json::json!({
+            "node": {
+                "effect": fight(TargetFilter::SelfRef, None),
+                "optional_targeting": true
+            }
+        });
+        migrate_legacy_fight_operand_cardinality(&mut value);
+        assert_eq!(
+            value["node"],
+            serde_json::json!({
+                "effect": fight(TargetFilter::SelfRef, Some(FightSlotRole::Opponent)),
+                "multi_target": null,
+                "optional_targeting": false
+            }),
+            "(b) the flag-marked one-slot fight records its operand"
+        );
+
+        // (c) Mixed chain: a legacy one-slot root and a current required two-slot
+        // sub. The prompt's three Fight slots cannot be attributed.
+        let current_required = serde_json::json!({
+            "effect": fight(creature_you_control(), None)
+        });
+        let prompt = trigger_prompt(vec![
+            fight_slot(false),
+            fight_slot(false),
+            fight_slot(false),
+        ]);
+        let mut root = one_slot();
+        root["sub_ability"] = current_required.clone();
+        let mut value = serde_json::json!({
+            "waiting_for": prompt.clone(),
+            "pending_trigger": { "ability": root }
+        });
+        migrate_legacy_fight_operand_cardinality(&mut value);
+        let mut expected_root = migrated_one_slot.clone();
+        expected_root["sub_ability"] = current_required;
+        assert_eq!(
+            value["pending_trigger"]["ability"], expected_root,
+            "(c) the root is migrated and the current sub is untouched"
+        );
+        assert_eq!(value["waiting_for"], prompt, "(c) the prompt is untouched");
+
+        // (c2) The same with a legacy two-slot sub, which keeps its spec.
+        let prompt = trigger_prompt(vec![
+            fight_slot(false),
+            fight_slot(false),
+            fight_slot(false),
+        ]);
+        let mut root = one_slot();
+        root["sub_ability"] = two_slot();
+        let mut value = serde_json::json!({
+            "waiting_for": prompt.clone(),
+            "pending_trigger": { "ability": root }
+        });
+        migrate_legacy_fight_operand_cardinality(&mut value);
+        let mut expected_root = migrated_one_slot.clone();
+        expected_root["sub_ability"] = two_slot();
+        assert_eq!(
+            value["pending_trigger"]["ability"], expected_root,
+            "(c2) the root is migrated and the legacy two-slot sub is left as decoded"
+        );
+        assert_eq!(value["waiting_for"], prompt, "(c2) the prompt is untouched");
+
+        // (d) A nested prompt names no ability and is never patched; the node in
+        // its carrier is still migrated.
+        let nested = trigger_prompt(vec![fight_slot(false)]);
+        let mut value = serde_json::json!({
+            "waiting_for": { "type": "Priority", "data": { "player": 0 } },
+            "pending_trigger": { "ability": one_slot() },
+            "pending_trigger_order": { "resume_after_ordering": nested.clone() }
+        });
+        migrate_legacy_fight_operand_cardinality(&mut value);
+        assert_eq!(
+            value["pending_trigger"]["ability"], migrated_one_slot,
+            "(d) the node is migrated"
+        );
+        assert_eq!(
+            value["pending_trigger_order"]["resume_after_ordering"], nested,
+            "(d) the nested prompt is untouched"
+        );
+
+        // (e) A two-slot fight nested in an effect payload (Bloodrage Alpha's boon
+        // shape) is no chain node of the prompt, so it does not block the patch of
+        // the chain's own one-slot fight.
+        let nested_two_slot = two_slot();
+        let sub = legacy(fight(TargetFilter::ParentTarget, None));
+        let root = serde_json::json!({
+            "effect": {
+                "type": "GenericEffect",
+                "additional_modifications": [{
+                    "trigger": { "execute": nested_two_slot.clone() }
+                }]
+            },
+            "sub_ability": sub
+        });
+        let mut value = serde_json::json!({
+            "waiting_for": trigger_prompt(vec![fight_slot(false)]),
+            "pending_trigger": { "ability": root }
+        });
+        migrate_legacy_fight_operand_cardinality(&mut value);
+        let ability = &value["pending_trigger"]["ability"];
+        assert_eq!(
+            ability["sub_ability"]["effect"]["up_to_one"], "Opponent",
+            "(e) the chain's one-slot fight is migrated"
+        );
+        assert_eq!(
+            ability["effect"]["additional_modifications"][0]["trigger"]["execute"], nested_two_slot,
+            "(e) the nested two-slot fight is left as decoded"
+        );
+        assert_eq!(
+            value["waiting_for"],
+            trigger_prompt(vec![fight_slot(true)]),
+            "(e) the prompt's Fight slot offers the decline"
+        );
+
+        // (f) Idempotence, and current or required nodes are untouched.
+        let current = serde_json::json!({
+            "effect": fight(TargetFilter::SelfRef, Some(FightSlotRole::Opponent))
+        });
+        let required = serde_json::json!({ "effect": fight(creature_you_control(), None) });
+        let mut value = serde_json::json!({
+            "legacy": one_slot(),
+            "current": current.clone(),
+            "required": required.clone()
+        });
+        migrate_legacy_fight_operand_cardinality(&mut value);
+        assert_eq!(value["legacy"], migrated_one_slot);
+        assert_eq!(value["current"], current, "(f) a current node is untouched");
+        assert_eq!(
+            value["required"], required,
+            "(f) a required node is untouched"
+        );
+        let migrated = value.clone();
+        migrate_legacy_fight_operand_cardinality(&mut value);
+        assert_eq!(value, migrated, "(f) the migration is idempotent");
+
+        // (g) The detached carrier migrates one-slot nodes only.
+        let mut carrier = serde_json::json!([one_slot(), two_slot()]);
+        migrate_detached_fight_operand_carrier(&mut carrier);
+        assert_eq!(
+            carrier,
+            serde_json::json!([migrated_one_slot, two_slot()]),
+            "(g) one-slot migrated, two-slot left as decoded"
+        );
+
+        // (h) An undecodable fight is left as decoded, without a panic.
+        let undecodable = legacy(serde_json::json!({
+            "type": "Fight",
+            "subject": { "type": "NoSuchFilter" },
+            "target": serde_json::to_value(creature_you_dont_control())
+                .expect("the filter serializes")
+        }));
+        let mut value = serde_json::json!({ "node": undecodable.clone() });
+        migrate_legacy_fight_operand_cardinality(&mut value);
+        assert_eq!(
+            value["node"], undecodable,
+            "(h) undecodable fight untouched"
+        );
     }
 
     /// The committed Dina/Conqueror capture holds legacy single `FlipCoin` triggers

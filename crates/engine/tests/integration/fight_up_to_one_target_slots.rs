@@ -11,19 +11,31 @@
 //!   identity through announcement, validation and resolution (CR 608.2b).
 //! - One declared slot, "it fights up to one target creature" after a targeted
 //!   pump (Bridgeworks Battle, Primal Might): the fight may be declined.
+//! - Restore: a pre-`up_to_one` save is migrated when its fight declares one
+//!   slot; a fight that declares two keeps every slot required, as the older
+//!   engine did. A restore is never refused.
 //!
 //! Review findings on https://github.com/phase-rs/phase/pull/8820 and
 //! https://github.com/phase-rs/phase/pull/10714.
 
+use std::collections::HashSet;
+use std::path::Path;
+
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{EffectKind, TargetRef};
+use engine::types::ability::{
+    Effect, EffectKind, FightSlotRole, MultiTargetSpec, QuantityExpr, ResolvedAbility,
+    TargetFilter, TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{CastPaymentMode, TargetSelectionSlot, WaitingFor};
+use engine::types::game_state::{
+    CastPaymentMode, GameState, PersistedGameState, PersistedRestoreFinalization,
+    TargetSelectionSlot, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaCost};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -431,6 +443,159 @@ fn boxing_ring_without_a_same_mana_value_creature_fights_nothing() {
     }
 }
 
+/// Exalted Angel (verbatim, all three lines, reminder text dropped). Its mana
+/// value is 6; cast face down it is a 2/2 with mana value 0.
+const EXALTED_ANGEL: &str =
+    "Flying\nWhenever this creature deals damage, you gain that much life.\nMorph {2}{W}{W}";
+
+/// Elesh Norn, Grand Cenobite (verbatim, all three lines).
+const ELESH_NORN: &str = "Vigilance\nOther creatures you control get +2/+2.\nCreatures your opponents control get -2/-2.";
+
+/// A Boxing Ring board whose entrant dies before its trigger is announced.
+struct FaceDownEntrantBoard {
+    runner: GameRunner,
+    angel: ObjectId,
+    elesh_norn: ObjectId,
+    opponent_zero: ObjectId,
+    opponent_six: ObjectId,
+}
+
+/// Boxing Ring and three Forests for you, with Exalted Angel in hand: the
+/// Forests pay {3} but not {4}{W}{W}, so the cast goes face down. The opponent
+/// controls Elesh Norn, Grand Cenobite (whose -2/-2 kills a face-down 2/2) and
+/// two 2/2s with mana values 0 and 6.
+fn face_down_entrant_board() -> FaceDownEntrantBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_artifact_from_oracle(P0, "Boxing Ring", BOXING_RING)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        });
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
+    let angel = scenario
+        .add_creature_to_hand(P0, "Exalted Angel", 4, 5)
+        .from_oracle_text_with_keywords(&["Flying", "Morph"], EXALTED_ANGEL)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White, ManaCostShard::White],
+            generic: 4,
+        })
+        .id();
+    let elesh_norn = scenario
+        .add_creature_from_oracle(P1, "Elesh Norn, Grand Cenobite", 4, 7, ELESH_NORN)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White, ManaCostShard::White],
+            generic: 5,
+        })
+        .id();
+    let opponent_zero = scenario
+        .add_creature(P1, "Opponent Zero", 2, 2)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let opponent_six = scenario
+        .add_creature(P1, "Opponent Six", 2, 2)
+        .with_mana_cost(ManaCost::generic(6))
+        .id();
+    FaceDownEntrantBoard {
+        runner: scenario.build(),
+        angel,
+        elesh_norn,
+        opponent_zero,
+        opponent_six,
+    }
+}
+
+/// CR 400.7 + CR 608.2h + CR 708.2a: the entering face-down creature (mana value
+/// 0) dies to Elesh Norn before the trigger's target is announced (CR 704.5f,
+/// CR 117.5); "the same mana value" compares with its last known information,
+/// not the revealed card in the graveyard. CR 701.14b: the departed fighter
+/// fights nobody, and the chosen target stays legal at resolution (CR 608.2b).
+#[test]
+fn boxing_ring_compares_with_a_dead_face_down_entrants_last_known_mana_value() {
+    let mut board = face_down_entrant_board();
+    let angel = board.angel;
+    let card_id = board.runner.state().objects[&angel].card_id;
+    let mut events = board
+        .runner
+        .act(GameAction::CastSpell {
+            object_id: angel,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Exalted Angel is cast")
+        .events;
+    {
+        let cast = &board.runner.state().objects[&angel];
+        assert!(
+            cast.face_down && cast.zone == Zone::Stack,
+            "reach guard: only {{3}} is payable, so the Angel is cast face down: face_down={}, zone={:?}",
+            cast.face_down,
+            cast.zone
+        );
+    }
+
+    let (slots, more) = pass_to_trigger_targets(&mut board.runner);
+    events.extend(more);
+    let slots = slots.expect("Boxing Ring's trigger asks for a target");
+    {
+        let dead = &board.runner.state().objects[&angel];
+        assert_eq!(
+            dead.zone,
+            Zone::Graveyard,
+            "reach guard: the face-down 2/2 died to Elesh Norn before announcement"
+        );
+        assert!(
+            !dead.face_down,
+            "reach guard: revealed on leaving (CR 708.9)"
+        );
+        assert_eq!(
+            dead.effective_mana_value(),
+            6,
+            "reach guard: the revealed card in the graveyard has mana value 6"
+        );
+    }
+    assert_eq!(
+        slots.len(),
+        1,
+        "\"it\" is the entrant, not a slot: {slots:?}"
+    );
+    assert_eq!(
+        slots[0].legal_targets,
+        vec![TargetRef::Object(board.opponent_zero)],
+        "only the opponent creature with the entrant's last known mana value (0) is legal"
+    );
+    assert!(
+        !slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(board.elesh_norn)),
+        "Elesh Norn (mana value 7) is never offered"
+    );
+
+    board
+        .runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(board.opponent_zero)),
+        })
+        .expect("the mana-value-0 creature is chosen");
+    events.extend(drain_stack(&mut board.runner));
+
+    assert_eq!(
+        fights_resolved(&events),
+        1,
+        "the chosen target stays legal at resolution, so the trigger resolves: {events:?}"
+    );
+    let state = board.runner.state();
+    for untouched in [board.opponent_zero, board.opponent_six] {
+        assert_eq!(state.objects[&untouched].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&untouched].damage_marked, 0);
+    }
+    assert_completed(&board.runner);
+}
+
 /// Gut, Fanatical Priestess's enters trigger (its second Oracle line,
 /// verbatim). Its first line, "Specialize {5}", is a separate ability not under
 /// test.
@@ -447,14 +612,16 @@ const RAY_OF_COMMAND: &str = "Untap target creature an opponent controls and gai
 const SMELL_FEAR: &str =
     "Proliferate.\nTarget creature you control fights up to one target creature you don't control.";
 
-/// A 3/3 "Champion" for you, a 2/2 for the opponent, and Gut (4/3) in your
-/// hand. Returns the unbuilt scenario so a row can add more cards, plus the
-/// Champion, the opponent's creature and Gut.
+/// A 3/3 "Champion" for you, a 2/4 for the opponent, which survives the
+/// Champion's 3 damage so no assertion depends on Gut's unparsed exile-instead
+/// rider (#10744), and Gut (4/3) in your hand. Returns the unbuilt scenario so
+/// a row can add more cards, plus the Champion, the opponent's creature and
+/// Gut.
 fn gut_scenario() -> (GameScenario, ObjectId, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let champion = scenario.add_creature(P0, "Champion", 3, 3).id();
-    let opponent = scenario.add_creature(P1, "Opponent Bear", 2, 2).id();
+    let opponent = scenario.add_creature(P1, "Opponent Bear", 2, 4).id();
     let gut = scenario
         .add_creature_to_hand_from_oracle(P0, "Gut, Fanatical Priestess", 4, 3, GUT_ENTERS)
         .id();
@@ -535,7 +702,8 @@ fn gut_declined_fighter_resolves_without_a_fight() {
     assert_completed(&board.runner);
 }
 
-/// CR 701.14a: Gut's chosen pair fights.
+/// CR 701.14a: Gut's chosen pair fights; each deals damage equal to its power to
+/// the other.
 #[test]
 fn gut_selected_pair_fights() {
     let mut board = gut_board();
@@ -547,8 +715,9 @@ fn gut_selected_pair_fights() {
     resolve_stack(&mut board);
 
     let state = board.runner.state();
-    assert_eq!(state.objects[&opponent].zone, Zone::Graveyard);
-    assert_eq!(state.objects[&fighter].damage_marked, 2, "2/2 deals 2 back");
+    assert_eq!(state.objects[&opponent].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&opponent].damage_marked, 3, "3/3 deals 3");
+    assert_eq!(state.objects[&fighter].damage_marked, 2, "2/4 deals 2 back");
     assert_completed(&board.runner);
 }
 
@@ -821,8 +990,9 @@ fn gut_bulk_selection_of_both_fights() {
     resolve_stack(&mut board);
 
     let state = board.runner.state();
-    assert_eq!(state.objects[&opponent].zone, Zone::Graveyard);
-    assert_eq!(state.objects[&fighter].damage_marked, 2);
+    assert_eq!(state.objects[&opponent].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&opponent].damage_marked, 3, "3/3 deals 3");
+    assert_eq!(state.objects[&fighter].damage_marked, 2, "2/4 deals 2 back");
     assert_completed(&board.runner);
 }
 
@@ -919,4 +1089,583 @@ fn smell_fear_bulk_selection_of_both_fights() {
     assert_eq!(state.objects[&opponent].zone, Zone::Graveyard);
     assert_eq!(state.objects[&fighter].damage_marked, 2);
     assert_completed(&board.runner);
+}
+
+/// Kogla, the Titan Ape (verbatim, all three lines).
+const KOGLA: &str = "When Kogla enters, it fights up to one target creature you don't control.\nWhenever Kogla attacks, destroy target artifact or enchantment defending player controls.\n{1}{G}: Return target Human you control to its owner's hand. Kogla gains indestructible until end of turn.";
+
+/// Kogla (7/6) in your hand; the opponent controls a 2/2 "Opponent Bear" and a
+/// 3/3 "Opponent Wolf". With two legal targets an engine that required every
+/// fight slot would also have prompted rather than auto-assigned. Returns the
+/// runner, Kogla, the bear and the wolf.
+fn kogla_board() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario.add_creature(P1, "Opponent Bear", 2, 2).id();
+    let wolf = scenario.add_creature(P1, "Opponent Wolf", 3, 3).id();
+    let kogla = scenario
+        .add_creature_to_hand_from_oracle(P0, "Kogla, the Titan Ape", 7, 6, KOGLA)
+        .id();
+    (scenario.build(), kogla, bear, wolf)
+}
+
+/// `board(true, name, oracle, enchantment)` plus a second opponent creature, a
+/// 2/2 "Opponent Wolf", so that with every fight slot required the Champion ×
+/// {bear, wolf} pairs are two legal combinations and the trigger prompts.
+fn two_opponent_board(name: &str, oracle: &str, enchantment: bool) -> (Board, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let fighter = scenario.add_creature(P0, "Champion", 3, 3).id();
+    let opponent = scenario.add_creature(P1, "Opponent Bear", 2, 2).id();
+    let card = {
+        let mut builder = scenario.add_spell_to_hand_from_oracle(P0, name, false, oracle);
+        if enchantment {
+            builder.as_enchantment();
+        }
+        builder.id()
+    };
+    let wolf = scenario.add_creature(P1, "Opponent Wolf", 2, 2).id();
+    (
+        Board {
+            runner: scenario.build(),
+            card,
+            fighter: Some(fighter),
+            opponent,
+        },
+        wolf,
+    )
+}
+
+/// Save the runner's state as the trusted persistence writer does.
+fn save(runner: &GameRunner) -> serde_json::Value {
+    serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+        .expect("the state serializes")
+}
+
+/// Restore a save through the production persistence decode.
+fn restore(save: serde_json::Value) -> Result<GameState, String> {
+    serde_json::from_value::<PersistedGameState>(save)
+        .map_err(|error| error.to_string())?
+        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+        .map_err(|error| error.to_string())?
+        .finalize_after_rehydration(|_| Ok(()))
+        .map_err(|error| error.to_string())
+}
+
+/// The ability-level spec an older writer stored for a fight's printed "up to
+/// one".
+fn legacy_up_to_one_spec() -> serde_json::Value {
+    serde_json::to_value(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+        .expect("the spec serializes")
+}
+
+/// What an engine before `Effect::Fight::up_to_one` wrote: the printed 'up to
+/// one' as the ability-level `multi_target` `{min 0, max 1}` and every fight
+/// slot of a paused prompt required.
+fn as_pre_operand_writer(save: &mut serde_json::Value) -> usize {
+    match save {
+        serde_json::Value::Array(values) => values.iter_mut().map(as_pre_operand_writer).sum(),
+        serde_json::Value::Object(object) => {
+            let mut rewritten = 0;
+            let is_operand_fight = object.get("effect").is_some_and(|effect| {
+                effect.get("type").and_then(serde_json::Value::as_str) == Some("Fight")
+                    && effect.get("up_to_one").is_some()
+            });
+            if is_operand_fight {
+                object
+                    .get_mut("effect")
+                    .and_then(serde_json::Value::as_object_mut)
+                    .expect("the fight effect is an object")
+                    .remove("up_to_one");
+                object.insert("multi_target".to_string(), legacy_up_to_one_spec());
+                object.insert(
+                    "optional_targeting".to_string(),
+                    serde_json::Value::Bool(false),
+                );
+                rewritten += 1;
+            }
+            let is_prompt = matches!(
+                object.get("type").and_then(serde_json::Value::as_str),
+                Some("TriggerTargetSelection" | "TargetSelection")
+            );
+            if is_prompt {
+                let slots = object
+                    .get_mut("data")
+                    .and_then(|data| data.get_mut("target_slots"))
+                    .and_then(serde_json::Value::as_array_mut);
+                for slot in slots.into_iter().flatten() {
+                    if slot.get("effect_kind").and_then(serde_json::Value::as_str) == Some("Fight")
+                    {
+                        slot["optional"] = serde_json::Value::Bool(false);
+                    }
+                }
+            }
+            rewritten
+                + object
+                    .values_mut()
+                    .map(as_pre_operand_writer)
+                    .sum::<usize>()
+        }
+        _ => 0,
+    }
+}
+
+/// Test-side twin of the restore migration's legacy-node predicate: a fight
+/// with no `up_to_one` whose ability carries the up-to-one spec or
+/// `optional_targeting`.
+fn is_legacy_fight_node(node: &serde_json::Map<String, serde_json::Value>) -> bool {
+    let Some(effect) = node.get("effect") else {
+        return false;
+    };
+    effect.get("type").and_then(serde_json::Value::as_str) == Some("Fight")
+        && effect
+            .get("up_to_one")
+            .is_none_or(serde_json::Value::is_null)
+        && (node
+            .get("multi_target")
+            .and_then(|spec| serde_json::from_value::<MultiTargetSpec>(spec.clone()).ok())
+            .is_some_and(|spec| spec.is_up_to_one())
+            || node.get("optional_targeting") == Some(&serde_json::Value::Bool(true)))
+}
+
+fn legacy_fight_count(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Array(values) => values.iter().map(legacy_fight_count).sum(),
+        serde_json::Value::Object(object) => {
+            usize::from(is_legacy_fight_node(object))
+                + object.values().map(legacy_fight_count).sum::<usize>()
+        }
+        _ => 0,
+    }
+}
+
+/// Every `Effect::Fight` payload in `value`, as JSON text, sorted.
+fn fight_effects(value: &serde_json::Value) -> Vec<String> {
+    fn collect(value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Array(values) => values.iter().for_each(|value| collect(value, out)),
+            serde_json::Value::Object(object) => {
+                if object.get("type").and_then(serde_json::Value::as_str) == Some("Fight") {
+                    out.push(value.to_string());
+                }
+                object.values().for_each(|value| collect(value, out));
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    collect(value, &mut out);
+    out.sort();
+    out
+}
+
+/// The paused target prompt's slots.
+fn prompt_slots(state: &GameState) -> Vec<TargetSelectionSlot> {
+    match &state.waiting_for {
+        WaitingFor::TriggerTargetSelection { target_slots, .. }
+        | WaitingFor::TargetSelection { target_slots, .. } => target_slots.clone(),
+        other => panic!("expected a target prompt, got {other:?}"),
+    }
+}
+
+fn optionals(state: &GameState) -> Vec<bool> {
+    prompt_slots(state)
+        .iter()
+        .map(|slot| slot.optional)
+        .collect()
+}
+
+fn choose_target(
+    runner: &mut GameRunner,
+    target: Option<ObjectId>,
+) -> Result<Vec<GameEvent>, String> {
+    runner
+        .act(GameAction::ChooseTarget {
+            target: target.map(TargetRef::Object),
+        })
+        .map(|result| result.events)
+        .map_err(|error| format!("{error:?}"))
+}
+
+/// The paused trigger's pending ability.
+fn pending_trigger_ability(state: &GameState) -> &ResolvedAbility {
+    &state
+        .pending_trigger
+        .as_ref()
+        .expect("a trigger is pending its targets")
+        .ability
+}
+
+/// CR 115.6 + CR 603.3d + CR 601.2c: a save written before a fight recorded its
+/// printed operand restores with Kogla's 'up to one' on the fought creature,
+/// and its paused prompt offers the decline; with no target chosen the fight
+/// does nothing (CR 701.14a + CR 609.3).
+#[test]
+fn restored_pre_operand_kogla_prompt_offers_the_printed_decline() {
+    let (mut runner, kogla, bear, wolf) = kogla_board();
+    let _commit = runner.cast(kogla).commit();
+    let (slots, _) = pass_to_trigger_targets(&mut runner);
+    let slots = slots.expect("Kogla's trigger asks for a target");
+    assert_eq!(slots.len(), 1, "reach guard: one fight slot: {slots:?}");
+    assert_eq!(slots[0].effect_kind, EffectKind::Fight);
+    assert!(
+        slots[0].optional,
+        "reach guard: the current slot is optional"
+    );
+    assert_eq!(
+        slots[0]
+            .legal_targets
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>(),
+        HashSet::from([TargetRef::Object(bear), TargetRef::Object(wolf)]),
+    );
+    assert!(
+        matches!(
+            &pending_trigger_ability(runner.state()).effect,
+            Effect::Fight {
+                subject: TargetFilter::SelfRef,
+                up_to_one: Some(FightSlotRole::Opponent),
+                ..
+            }
+        ),
+        "reach guard: Kogla's fight is one SelfRef slot with its operand recorded: {:?}",
+        pending_trigger_ability(runner.state()).effect
+    );
+
+    let mut legacy = save(&runner);
+    assert!(
+        as_pre_operand_writer(&mut legacy) >= 1,
+        "transform reach: a fight node was rewritten"
+    );
+    assert_eq!(
+        legacy_up_to_one_spec(),
+        serde_json::json!({"min": 0, "max": {"type": "Fixed", "value": 1}}),
+        "transform reach: the rewritten spec is the shape older engines exported"
+    );
+
+    let restored = restore(legacy.clone()).expect("the pre-operand save restores");
+    assert_eq!(
+        optionals(&restored),
+        vec![true],
+        "the restored prompt offers the printed decline"
+    );
+    {
+        let ability = pending_trigger_ability(&restored);
+        assert!(
+            matches!(
+                &ability.effect,
+                Effect::Fight {
+                    up_to_one: Some(FightSlotRole::Opponent),
+                    ..
+                }
+            ),
+            "the restored fight records Kogla's operand: {:?}",
+            ability.effect
+        );
+        assert!(ability.multi_target.is_none(), "{:?}", ability.multi_target);
+        assert!(!ability.optional_targeting);
+    }
+    let mut runner = GameRunner::from_state(restored);
+    let mut events = choose_target(&mut runner, None).expect("Kogla's fight is declined");
+    events.extend(drain_stack(&mut runner));
+    assert_eq!(fights_resolved(&events), 1, "{events:?}");
+    for creature in [bear, wolf, kogla] {
+        assert_eq!(runner.state().objects[&creature].damage_marked, 0);
+    }
+    assert_completed(&runner);
+
+    // Sibling: selection still works on the restored prompt.
+    let mut runner = GameRunner::from_state(restore(legacy).expect("restores again"));
+    choose_target(&mut runner, Some(bear)).expect("the bear is chosen");
+    drain_stack(&mut runner);
+    let state = runner.state();
+    assert_eq!(state.objects[&bear].zone, Zone::Graveyard, "Kogla deals 7");
+    assert_eq!(
+        state.objects[&kogla].damage_marked, 2,
+        "the bear deals 2 back"
+    );
+    assert_completed(&runner);
+}
+
+/// Primal Might (verbatim, reminder text dropped).
+const PRIMAL_MIGHT: &str = "Target creature you control gets +X/+X until end of turn. Then it fights up to one target creature you don't control.";
+
+/// CR 601.2c + CR 115.6: a save paused at Primal Might's target prompt restores
+/// with only its fight slot freed; the pump's target stays required. With the
+/// fight declined the pump still resolves and nobody fights (CR 701.14a +
+/// CR 609.3).
+///
+/// Primal Might rather than Bridgeworks Battle (the same shape: a required pump
+/// on the fighter, then a `ParentTarget` fight declaring one up-to-one slot):
+/// a saved prompt holding a fixed-direction pump slot ("+2/+2") does not
+/// restore at all, because `TargetEffectDetail` and `PtDirection` both use the
+/// serde tag `type` and collide; that defect is tracked separately. Primal
+/// Might's "+X/+X" pump slot carries no direction, so its prompt round-trips.
+#[test]
+fn restored_pre_operand_primal_might_prompt_frees_only_the_fight_slot() {
+    let (mut board, wolf) = two_opponent_board("Primal Might", PRIMAL_MIGHT, false);
+    let champion = board.fighter.unwrap();
+    let card_id = board.runner.state().objects[&board.card].card_id;
+    board
+        .runner
+        .act(GameAction::CastSpell {
+            object_id: board.card,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Primal Might is cast");
+    assert!(
+        matches!(
+            board.runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "reach guard: a spell target prompt: {:?}",
+        board.runner.state().waiting_for
+    );
+    let slots = prompt_slots(board.runner.state());
+    assert_eq!(slots.len(), 2, "reach guard: pump + fight: {slots:?}");
+    assert_ne!(slots[0].effect_kind, EffectKind::Fight);
+    assert!(
+        !slots[0].optional,
+        "reach guard: the pump target is required"
+    );
+    assert_eq!(slots[1].effect_kind, EffectKind::Fight);
+    assert!(slots[1].optional, "reach guard: the fight is up to one");
+
+    let mut legacy = save(&board.runner);
+    assert!(as_pre_operand_writer(&mut legacy) >= 1, "transform reach");
+
+    let restored = restore(legacy.clone()).expect("the pre-operand save restores");
+    assert_eq!(
+        optionals(&restored),
+        vec![false, true],
+        "only the fight slot is freed"
+    );
+    let mut runner = GameRunner::from_state(restored);
+    let mut events = choose_target(&mut runner, Some(champion)).expect("the pump target is chosen");
+    events.extend(choose_target(&mut runner, None).expect("the fight is declined"));
+    events.extend(drain_stack(&mut runner));
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&champion].power,
+        Some(3),
+        "the pump resolved with X = 0 (the staged card has no mana cost)"
+    );
+    for creature in [champion, board.opponent, wolf] {
+        assert_eq!(state.objects[&creature].damage_marked, 0);
+    }
+    assert_eq!(fights_resolved(&events), 1, "{events:?}");
+    assert_completed(&runner);
+
+    // Hostile: the pump slot is still required after restore.
+    let mut runner = GameRunner::from_state(restore(legacy).expect("restores again"));
+    let declined = choose_target(&mut runner, None);
+    assert!(
+        declined.is_err(),
+        "the pump target is required: {declined:?}"
+    );
+}
+
+/// Both declines are refused on fresh restores of `save`: slot 0 outright, and
+/// slot 1 after `fighter` fills slot 0.
+fn assert_every_fight_slot_required(save: &serde_json::Value, fighter: ObjectId) {
+    let mut runner = GameRunner::from_state(restore(save.clone()).expect("restores"));
+    let declined = choose_target(&mut runner, None).expect_err("slot 0 is required");
+    assert!(
+        declined.contains("Cannot skip a required target"),
+        "{declined}"
+    );
+    let mut runner = GameRunner::from_state(restore(save.clone()).expect("restores"));
+    choose_target(&mut runner, Some(fighter)).expect("slot 0 is filled");
+    let declined = choose_target(&mut runner, None).expect_err("slot 1 is required");
+    assert!(
+        declined.contains("Cannot skip a required target"),
+        "{declined}"
+    );
+}
+
+/// The restored pending trigger is the legacy fight left as decoded.
+fn assert_left_as_decoded(state: &GameState) {
+    let ability = pending_trigger_ability(state);
+    assert!(
+        matches!(
+            &ability.effect,
+            Effect::Fight {
+                up_to_one: None,
+                ..
+            }
+        ),
+        "{:?}",
+        ability.effect
+    );
+    assert_eq!(
+        ability.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+    );
+    assert!(!ability.optional_targeting);
+}
+
+/// Restore decision ('Convert, never refuse'): a save written before a fight
+/// recorded its printed operand, whose fight declares two slots, cannot say
+/// which one its 'up to one' frees (CR 115.6 + CR 601.2c). It restores as saved
+/// and keeps the older engine's reading, every declared slot required, in a
+/// paused prompt and in an idle definition; the chosen pair still fights
+/// (CR 701.14a).
+#[test]
+fn restored_pre_operand_two_slot_fights_keep_every_slot_required() {
+    // (a) Favored Enemy paused at its trigger prompt.
+    let (mut favored, _wolf) = two_opponent_board("Favored Enemy", FAVORED_ENEMY_ENTERS, true);
+    let champion = favored.fighter.unwrap();
+    let bear = favored.opponent;
+    cast_to_trigger_targets(&mut favored).expect("Favored Enemy's trigger asks for targets");
+    let current = save(&favored.runner);
+    assert_eq!(
+        optionals(&restore(current.clone()).expect("the current save restores")),
+        vec![false, true],
+        "positive reach: untransformed, the fought creature is optional"
+    );
+    let mut legacy = current;
+    assert!(as_pre_operand_writer(&mut legacy) >= 1, "transform reach");
+    let restored = restore(legacy.clone()).expect("the two-slot save restores");
+    assert_left_as_decoded(&restored);
+    assert_eq!(optionals(&restored), vec![false, false]);
+    assert_every_fight_slot_required(&legacy, champion);
+    let mut runner = GameRunner::from_state(restored);
+    let mut events = choose_target(&mut runner, Some(champion)).expect("the fighter is chosen");
+    events.extend(choose_target(&mut runner, Some(bear)).expect("the bear is chosen"));
+    events.extend(drain_stack(&mut runner));
+    let state = runner.state();
+    assert_eq!(state.objects[&bear].zone, Zone::Graveyard, "3/3 deals 3");
+    assert_eq!(
+        state.objects[&champion].damage_marked, 2,
+        "2/2 deals 2 back"
+    );
+    assert_eq!(fights_resolved(&events), 1, "{events:?}");
+    assert_completed(&runner);
+
+    // (b) Gut paused at its trigger prompt.
+    let mut gut = gut_board();
+    let champion = gut.fighter.unwrap();
+    let opponent = gut.opponent;
+    cast_to_trigger_targets(&mut gut).expect("Gut's trigger asks for targets");
+    let current = save(&gut.runner);
+    assert_eq!(
+        optionals(&restore(current.clone()).expect("the current save restores")),
+        vec![true, false],
+        "positive reach: untransformed, the fighter is optional"
+    );
+    let mut legacy = current;
+    assert!(as_pre_operand_writer(&mut legacy) >= 1, "transform reach");
+    let restored = restore(legacy.clone()).expect("the two-slot save restores");
+    assert_left_as_decoded(&restored);
+    assert_eq!(optionals(&restored), vec![false, false]);
+    assert_every_fight_slot_required(&legacy, champion);
+    let mut runner = GameRunner::from_state(restored);
+    choose_target(&mut runner, Some(champion)).expect("the fighter is chosen");
+    choose_target(&mut runner, Some(opponent)).expect("the fought creature is chosen");
+    drain_stack(&mut runner);
+    let state = runner.state();
+    assert_eq!(state.objects[&opponent].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&opponent].damage_marked, 3, "3/3 deals 3");
+    assert_eq!(
+        state.objects[&champion].damage_marked, 2,
+        "2/4 deals 2 back"
+    );
+    assert_completed(&runner);
+
+    // (c) Idle: Favored Enemy still in hand at the save, cast after restore.
+    let (idle, _wolf) = two_opponent_board("Favored Enemy", FAVORED_ENEMY_ENTERS, true);
+    let champion = idle.fighter.unwrap();
+    let mut legacy = save(&idle.runner);
+    assert!(as_pre_operand_writer(&mut legacy) >= 1, "transform reach");
+    let restored = restore(legacy).expect("the idle two-slot save restores");
+    assert!(
+        legacy_fight_count(
+            &serde_json::to_value(&restored.objects[&idle.card]).expect("the card serializes")
+        ) >= 1,
+        "the hand card keeps its legacy fight node"
+    );
+    let mut runner = GameRunner::from_state(restored);
+    let _commit = runner.cast(idle.card).commit();
+    let (slots, _) = pass_to_trigger_targets(&mut runner);
+    let slots = slots.expect("the restored card's trigger prompts");
+    assert_eq!(
+        slots.iter().map(|slot| slot.optional).collect::<Vec<_>>(),
+        vec![false, false]
+    );
+    assert_every_fight_slot_required(&save(&runner), champion);
+}
+
+/// CR 115.6 + CR 601.2c: current saves restore unchanged. Kogla's and Favored
+/// Enemy's "up to one" frees the fought creature; Gut's frees the fighter.
+#[test]
+fn current_fight_saves_restore_unchanged() {
+    let (mut kogla_runner, kogla, _, _) = kogla_board();
+    let _commit = kogla_runner.cast(kogla).commit();
+    pass_to_trigger_targets(&mut kogla_runner)
+        .0
+        .expect("Kogla's trigger asks for a target");
+    let mut favored = favored_enemy(true);
+    cast_to_trigger_targets(&mut favored).expect("Favored Enemy's trigger asks for targets");
+    let mut gut = gut_board();
+    cast_to_trigger_targets(&mut gut).expect("Gut's trigger asks for targets");
+
+    for (runner, role) in [
+        (&kogla_runner, FightSlotRole::Opponent),
+        (&favored.runner, FightSlotRole::Opponent),
+        (&gut.runner, FightSlotRole::Subject),
+    ] {
+        let current = save(runner);
+        let restored = restore(current.clone()).expect("a current save restores");
+        let ability = pending_trigger_ability(&restored);
+        assert!(
+            matches!(
+                &ability.effect,
+                Effect::Fight { up_to_one: Some(restored_role), .. } if *restored_role == role
+            ),
+            "{:?}",
+            ability.effect
+        );
+        assert_eq!(optionals(&restored), optionals(runner.state()));
+        assert_eq!(
+            fight_effects(&save(&GameRunner::from_state(restored))),
+            fight_effects(&current),
+            "every fight payload restores unchanged"
+        );
+    }
+}
+
+/// The production decoder migrates every legacy fight in real committed dumps
+/// written before the operand was recorded, including a granted trigger nested
+/// in an effect payload and deck-pool faces.
+#[test]
+fn committed_pre_operand_dumps_migrate_every_legacy_fight() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    for dump in [
+        "engine/tests/fixtures/witherbloom_sprout_lumaret_4p.json.gz",
+        "engine/tests/fixtures/witherbloom_sprout_lumaret_simple_4p.json.gz",
+    ] {
+        let path = root.join(dump);
+        let raw = crate::loop_shortcut_drain_boards::committed_document(&path);
+        assert!(
+            legacy_fight_count(&raw) >= 1,
+            "positive reach: {dump} holds a legacy fight node"
+        );
+        let restored = crate::committed_dump_walk::restore_committed(&path)
+            .unwrap_or_else(|error| panic!("{dump} restores: {error}"));
+        let restored = serde_json::to_value(&restored).expect("the state serializes");
+        assert_eq!(
+            legacy_fight_count(&restored),
+            0,
+            "{dump}: every legacy fight node is migrated"
+        );
+        assert!(
+            fight_effects(&restored)
+                .iter()
+                .any(|effect| effect.contains("\"up_to_one\":\"Opponent\"")),
+            "{dump}: a migrated fight records its operand"
+        );
+    }
 }
