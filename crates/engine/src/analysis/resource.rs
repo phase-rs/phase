@@ -10150,7 +10150,9 @@ mod tests {
                 };
                 **ability = ResolvedAbility::new(
                     Effect::DealDamage {
-                        amount: QuantityExpr::Ref(QuantityRef::EventContextAmount),
+                        amount: QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount,
+                        },
                         target: TargetFilter::SpecificPlayer { id: PlayerId(1) },
                         damage_source: None,
                         excess: None,
