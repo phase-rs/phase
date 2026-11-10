@@ -3689,47 +3689,75 @@ pub(crate) fn loop_states_equal_modulo_resources_side<'a, C: CurrentSide<'a>>(
 /// position that can prove its mana's producer and one that cannot compare UNEQUAL,
 /// which suppresses the loop match rather than manufacturing one.
 ///
-/// WHERE THE QUESTION IS ASKED. Only when the two positions hold the SAME mana
-/// ([`identical_floating_mana`]). A differing pool is the QUANTITY — and, through it, the
-/// composition — this comparator deliberately does not compare (a growing pool is a
-/// mana loop's whole point), so a fact difference that comes with a differing pool is
-/// already governed by that relaxation and is not this conjunct's business. What it does
-/// answer is the shape that has no such excuse: identical pools, one of which can still
-/// prove where its mana came from and one of which cannot. That is a difference of
-/// EVIDENCE at a fixed quantity, which no relaxation reaches and which a payment reads.
+/// WHERE THE QUESTION IS ASKED, AND OF WHOM. The comparison is per PAYER, and a payer
+/// votes only while they hold the SAME mana on both sides. Two independent reasons, both
+/// from the payment side:
+///
+/// * CR 118.3a + CR 601.2h: a payment removes the indicated mana from the PAYING player's
+///   pool. Rain of Riches asks about "the first spell YOU cast each turn that mana from a
+///   Treasure was spent to cast", so the facts its gate reads are the ones the CASTER's
+///   pool can prove and no other player's. A fact carried by another payer's unit is not
+///   available to this payer's payment at all, so two positions that agree on the pooled
+///   union of every player's facts but differ in WHICH payer's unit carries one are not
+///   the same position — the very cast the clause prices answers differently. That is why
+///   the comparison is keyed by the payer's own id
+///   ([`crate::types::player::Player::id`]) instead of being flattened into one set for
+///   the whole state.
+/// * CR 106.1: for ONE payer, a differing pool is the QUANTITY — and, through it, the
+///   composition — this comparator deliberately does not compare (a growing pool is a
+///   mana loop's whole point), so a fact difference that comes with a differing pool is
+///   already governed by that relaxation and is not this conjunct's business. That
+///   relaxation is per payer too: another player's pool growing says nothing about this
+///   payer's evidence, so it must not be able to switch the question off for this payer.
+///   What this conjunct does answer is the shape that has no such excuse: a payer's
+///   identical pools, one of which can still prove where its mana came from and one of
+///   which cannot. That is a difference of EVIDENCE at a fixed quantity, which no
+///   relaxation reaches and which a payment reads.
 fn floating_producer_facts_match(a: &GameState, b: &GameState) -> bool {
-    if !identical_floating_mana(a, b) {
+    a.players.len() == b.players.len()
+        && a.players.iter().all(|payer| {
+            b.players
+                .iter()
+                .find(|candidate| candidate.id == payer.id)
+                .is_some_and(|counterpart| payer_producer_facts_match(a, payer, b, counterpart))
+        })
+}
+
+/// CR 118.3a + CR 106.1: ONE payer's facts against that same payer's facts — the
+/// payer-relative half of [`floating_producer_facts_match`].
+///
+/// [`ManaPool`](crate::types::mana::ManaPool)'s own equality is the gate, and it is the
+/// right one: it compares each unit's shape in pool order — colour, producing object,
+/// producing incarnation, restrictions, grants and expiry — and excludes only the mint
+/// tag (CR 104.4b), which is not position. A payer whose pool moved is governed by the
+/// quantity relaxation and casts no vote; a payer who holds the same bodies of mana but
+/// different EVIDENCE about them is what this conjunct is asked about.
+fn payer_producer_facts_match(
+    a: &GameState,
+    payer: &Player,
+    b: &GameState,
+    counterpart: &Player,
+) -> bool {
+    if payer.mana_pool != counterpart.mana_pool {
         return true;
     }
-    let left = floating_producer_facts(a);
-    let right = floating_producer_facts(b);
+    let left = floating_producer_facts(a, payer.mana_pool.units());
+    let right = floating_producer_facts(b, counterpart.mana_pool.units());
     left.iter().all(|fact| right.contains(fact)) && right.iter().all(|fact| left.contains(fact))
 }
 
-/// CR 106.1: do the two positions hold the same floating mana, unit for unit?
+/// CR 106.3 + CR 118.3a: the DISTINCT producer facts ONE payer's floating mana can prove,
+/// read through the payment's own resolver and canonicalized to the payment-visible part
+/// (see [`floating_producer_facts_match`]).
 ///
-/// [`ManaPool`](crate::types::mana::ManaPool)'s own equality is the answer, and it is
-/// the right one: it compares each unit's shape in pool order — colour, producing object,
-/// producing incarnation, restrictions, grants and expiry — and excludes only the mint
-/// tag (CR 104.4b), which is not position. Two positions that hold the same bodies of
-/// mana but different EVIDENCE about them are what
-/// [`floating_producer_facts_match`] is asked about.
-fn identical_floating_mana(a: &GameState, b: &GameState) -> bool {
-    a.players.len() == b.players.len()
-        && a.players
-            .iter()
-            .zip(&b.players)
-            .all(|(left, right)| left.mana_pool == right.mana_pool)
-}
-
-/// CR 106.3 + CR 118.3a: the DISTINCT producer facts the mana still floating in `state`
-/// can prove, read through the payment's own resolver and canonicalized to the
-/// payment-visible part (see [`floating_producer_facts_match`]).
+/// The units are the caller's — one payer's pool, in pool order — because the fact belongs
+/// to the payer whose payment can spend it, not to the state as a whole.
 ///
 /// `None` is one floating unit whose producer the payment cannot name — the shape a
 /// position whose exit record was lost falls into.
 fn floating_producer_facts(
     state: &GameState,
+    units: impl Iterator<Item = crate::types::mana::ManaUnit>,
 ) -> Vec<Option<crate::types::game_state::LKISnapshot>> {
     fn push(
         facts: &mut Vec<Option<crate::types::game_state::LKISnapshot>>,
@@ -3740,11 +3768,7 @@ fn floating_producer_facts(
         }
     }
 
-    let units: Vec<crate::types::mana::ManaUnit> = state
-        .players
-        .iter()
-        .flat_map(|player| player.mana_pool.units())
-        .collect();
+    let units: Vec<crate::types::mana::ManaUnit> = units.collect();
     // One listed fact per FLOATING UNIT. `mana_spent_source_snapshots` drops the units it
     // cannot resolve, so the unresolved ones are the remainder — they carry the distinct
     // "cannot say" fact rather than vanishing, which is what makes an unprovable pool
@@ -10731,6 +10755,300 @@ mod tests {
         assert!(
             loop_states_equal_modulo_resources(&a, &b),
             "same board with only monotone resources differing must be modulo-resources equal (CR 732.2a net-progress loop point)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 106.3 + CR 118.3a: a producer fact belongs to the PAYER whose payment
+    // can spend it. One Treasure token, one floating red unit pinned to the
+    // epoch that produced it — the shape real production writes, so the
+    // payment resolves the unit through the epoch it recorded rather than
+    // through whatever occupies the storage id later.
+    // -----------------------------------------------------------------------
+
+    /// CR 106.3: one Treasure token on the battlefield — the producer shape
+    /// **Rain of Riches** (`{3}{R}{R}` Enchantment; Oracle verified against
+    /// Scryfall: "The first spell you cast each turn that mana from a Treasure was
+    /// spent to cast has cascade.") prices a cast by.
+    fn treasure_on_battlefield(state: &mut GameState, id: u64, owner: PlayerId) -> ObjectId {
+        let treasure = crate::game::zones::create_object(
+            state,
+            CardId(id),
+            owner,
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state
+            .objects
+            .get_mut(&treasure)
+            .expect("the Treasure exists");
+        object.card_types.core_types = vec![CoreType::Artifact];
+        object.card_types.subtypes = vec!["Treasure".to_string()];
+        treasure
+    }
+
+    /// CR 106.3 + CR 113.7: float one red unit in `payer`'s pool, pinned to the
+    /// incarnation of `source` that produced it.
+    fn float_pinned_red(state: &mut GameState, payer: PlayerId, source: ObjectId) {
+        let incarnation = state.objects[&source].incarnation;
+        let mut unit = crate::types::mana::ManaUnit::new(ManaType::Red, source, false, Vec::new());
+        unit.source_incarnation = Some(incarnation);
+        state.players[payer.0 as usize].mana_pool.add(unit);
+    }
+
+    /// CR 400.7: move `source` to a successor epoch at the same storage id, so a unit
+    /// that pinned the previous epoch no longer resolves through the live object — the
+    /// "this unit's producer cannot be named" position. Nothing else about the object
+    /// changes, and `incarnation` is a volatile identity axis the loop comparators
+    /// deliberately omit (`objects_content_eq`), so the pair stays otherwise equal.
+    fn reincarnate(state: &mut GameState, source: ObjectId) {
+        state
+            .objects
+            .get_mut(&source)
+            .expect("the producing object exists")
+            .bump_incarnation();
+    }
+
+    /// The canonical producer fact of EVERY unit in `units`, one entry per unit, read
+    /// through the payment's own resolver (`game::casting::mana_spent_source_snapshots`)
+    /// and canonicalized exactly as the comparison does.
+    ///
+    /// `None` is one unit whose producer the payment cannot name. This is the test's own
+    /// oracle, deliberately independent of [`floating_producer_facts`]'s shape, so the
+    /// same witnesses compile and mean the same thing before and after the comparison is
+    /// keyed by payer.
+    fn unit_facts(
+        state: &GameState,
+        units: &[crate::types::mana::ManaUnit],
+    ) -> Vec<Option<LKISnapshot>> {
+        let resolved = crate::game::casting::mana_spent_source_snapshots(state, units);
+        let unresolved = units.len().saturating_sub(resolved.len());
+        let mut facts: Vec<Option<LKISnapshot>> = resolved
+            .into_iter()
+            .map(|snapshot| Some(canonical_producer_fact(snapshot.lki)))
+            .collect();
+        facts.extend(std::iter::repeat_n(None, unresolved));
+        facts
+    }
+
+    /// The facts ONE payer's floating mana proves, unit by unit.
+    fn payer_unit_facts(state: &GameState, payer: PlayerId) -> Vec<Option<LKISnapshot>> {
+        let units: Vec<crate::types::mana::ManaUnit> =
+            state.players[payer.0 as usize].mana_pool.units().collect();
+        unit_facts(state, &units)
+    }
+
+    /// The PRE-FIX reading, kept only as a reach-guard: every player's units flattened
+    /// into one set of facts, keyed by nobody. A witness asserts this is EQUAL for a pair
+    /// the payer-relative comparison must reject, so the witness cannot pass by accident
+    /// on a pair the old question already answered.
+    fn cross_payer_unit_facts(state: &GameState) -> Vec<Option<LKISnapshot>> {
+        let units: Vec<crate::types::mana::ManaUnit> = state
+            .players
+            .iter()
+            .flat_map(|player| player.mana_pool.units())
+            .collect();
+        unit_facts(state, &units)
+    }
+
+    /// The SET reading the comparison uses (see [`floating_producer_facts_match`]): two
+    /// fact lists agree when each one's facts all appear in the other, so a repeated fact
+    /// is the same evidence, not more of it.
+    fn same_fact_set(left: &[Option<LKISnapshot>], right: &[Option<LKISnapshot>]) -> bool {
+        left.iter().all(|fact| right.contains(fact)) && right.iter().all(|fact| left.contains(fact))
+    }
+
+    /// CR 106.3 + CR 118.3a: the maintainer's control — equal raw pools, the only
+    /// Treasure-backed proof attached to a DIFFERENT payer's unit.
+    ///
+    /// `a` and `b` hold the same two units, in the same two pools, sourced from the
+    /// same two Treasures; only the Treasure that still IS the pinned epoch differs. In
+    /// `a` it is P0's, in `b` it is P1's, so the pooled union of facts is the same set
+    /// ({Treasure, cannot-say}) in both while the payer-relative answer is inverted. Rain
+    /// of Riches asks whether "mana from a Treasure was spent to cast" the payer's own
+    /// spell, and a payment under CR 118.3a removes mana from the paying player's pool
+    /// only — so P0's cast is distinguishable in exactly one of the two positions.
+    ///
+    /// Both Treasures belong to P0, so the two canonical facts are the SAME fact
+    /// (controller and owner are part of it) — which is what makes the pooled union
+    /// identical rather than merely same-sized. A unit in P1's pool produced by a
+    /// permanent P0 controls is the printed shape of **Spectral Searchlight** (`{3}`
+    /// Artifact; Oracle verified against Scryfall: "{T}: Choose a player. That player
+    /// adds one mana of any color they choose.").
+    fn swapped_treasure_proof() -> (GameState, GameState) {
+        let mut a = GameState::new_two_player(7);
+        let p0_treasure = treasure_on_battlefield(&mut a, 601, PlayerId(0));
+        let p1_treasure = treasure_on_battlefield(&mut a, 602, PlayerId(0));
+        float_pinned_red(&mut a, PlayerId(0), p0_treasure);
+        float_pinned_red(&mut a, PlayerId(1), p1_treasure);
+
+        let mut b = a.clone();
+        // In `a`, P1's unit has lost its proving epoch; in `b`, P0's has.
+        reincarnate(&mut a, p1_treasure);
+        reincarnate(&mut b, p0_treasure);
+        (a, b)
+    }
+
+    #[test]
+    fn a_treasure_proof_on_another_payers_unit_is_not_the_same_position() {
+        let (a, b) = swapped_treasure_proof();
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+
+        // Reach-guards: the maintainer's "equal raw pools" precondition holds for BOTH
+        // payers, and the pre-fix cross-payer set really is identical — the trap is
+        // armed, so the assertion below can only be satisfied by the payer keying.
+        assert_eq!(
+            a.players[0].mana_pool, b.players[0].mana_pool,
+            "the positions must hold the same raw pool for P0"
+        );
+        assert_eq!(
+            a.players[1].mana_pool, b.players[1].mana_pool,
+            "the positions must hold the same raw pool for P1"
+        );
+        assert!(
+            same_fact_set(&cross_payer_unit_facts(&a), &cross_payer_unit_facts(&b)),
+            "reach-guard: the pooled union of facts must be EQUAL, or this pair is not the \
+             shape the finding describes. got {:?} vs {:?}",
+            cross_payer_unit_facts(&a),
+            cross_payer_unit_facts(&b)
+        );
+        assert!(
+            !same_fact_set(&payer_unit_facts(&a, p0), &payer_unit_facts(&b, p0)),
+            "reach-guard: P0's OWN facts must really differ between the two positions. got \
+             {:?} vs {:?}",
+            payer_unit_facts(&a, p0),
+            payer_unit_facts(&b, p0)
+        );
+        assert!(
+            !same_fact_set(&payer_unit_facts(&a, p1), &payer_unit_facts(&b, p1)),
+            "reach-guard: P1's own facts must really differ too (the proof moved, it did not \
+             appear or vanish)"
+        );
+
+        assert!(
+            !floating_producer_facts_match(&a, &b),
+            "CR 106.3 + CR 118.3a: moving the only Treasure-backed proof from one payer's \
+             unit to another's is NOT the same position. Rain of Riches' gate reads the \
+             CASTER's pool (CR 118.3a spends the paying player's mana), so the two positions \
+             answer it differently even though the pooled union of facts is identical. got \
+             P0={:?} P1={:?}",
+            payer_unit_facts(&a, p0),
+            payer_unit_facts(&b, p0)
+        );
+        assert!(
+            !loop_states_equal_modulo_resources(&a, &b),
+            "CR 732.2a: the payer-relative evidence difference must veto the loop cover — the \
+             rest of the position is identical, so this conjunct is the only thing that can"
+        );
+    }
+
+    /// CR 106.3 + CR 118.3a: the maintainer's control B — unrelated growth in ANOTHER
+    /// player's pool must not switch the question off for the payer whose evidence moved.
+    ///
+    /// P0's pool is identical on both sides and P0's Treasure proof is gone in `b`; the
+    /// only other movement is an unrelated unit appearing in P1's pool. Growth is the
+    /// quantity relaxation (CR 732.2a) and is projected away — but that relaxation belongs
+    /// to the pool that grew, not to the whole state, so it cannot make P0's lost evidence
+    /// invisible.
+    #[test]
+    fn another_payers_pool_growth_cannot_mask_a_payers_evidence_difference() {
+        let mut a = GameState::new_two_player(7);
+        let p0_treasure = treasure_on_battlefield(&mut a, 611, PlayerId(0));
+        let unrelated = battlefield_creature(&mut a, 612, 1);
+        float_pinned_red(&mut a, PlayerId(0), p0_treasure);
+
+        let mut b = a.clone();
+        // P0 keeps the same pool but loses the proof.
+        reincarnate(&mut b, p0_treasure);
+        // P1's pool grows, from a source unrelated to P0's proof.
+        float_pinned_red(&mut b, PlayerId(1), unrelated);
+
+        assert_eq!(
+            a.players[0].mana_pool, b.players[0].mana_pool,
+            "reach-guard: the payer whose evidence moved must hold the same raw pool"
+        );
+        assert_ne!(
+            a.players[1].mana_pool, b.players[1].mana_pool,
+            "reach-guard: the OTHER payer's pool must really have grown"
+        );
+
+        assert!(
+            !floating_producer_facts_match(&a, &b),
+            "CR 106.3 + CR 118.3a: the payer-relative evidence difference must be UNEQUAL \
+             even though another player's pool grew. The growth is the quantity relaxation \
+             for THAT pool; it says nothing about P0's evidence. got P0={:?} vs {:?}",
+            payer_unit_facts(&a, PlayerId(0)),
+            payer_unit_facts(&b, PlayerId(0))
+        );
+        assert!(
+            !loop_states_equal_modulo_resources(&a, &b),
+            "CR 732.2a: the projected-away growth cannot cover for the payer's lost evidence"
+        );
+    }
+
+    /// CR 732.2a + CR 106.3: the guard against satisfying the two controls by making the
+    /// comparator always unequal. Equivalent positions still compare EQUAL — same evidence
+    /// in the same payer, only a monotone resource (life) moved.
+    #[test]
+    fn equivalent_payer_positions_still_compare_equal() {
+        let mut a = GameState::new_two_player(7);
+        let p0_treasure = treasure_on_battlefield(&mut a, 621, PlayerId(0));
+        let p1_treasure = treasure_on_battlefield(&mut a, 622, PlayerId(1));
+        float_pinned_red(&mut a, PlayerId(0), p0_treasure);
+        float_pinned_red(&mut a, PlayerId(1), p1_treasure);
+
+        let mut b = a.clone();
+        b.players[0].life += 1;
+        b.players[1].life -= 1;
+
+        assert!(
+            floating_producer_facts_match(&a, &b),
+            "CR 106.3: two positions whose payers hold the same evidence are the same \
+             position"
+        );
+        assert!(
+            loop_states_equal_modulo_resources(&a, &b),
+            "CR 732.2a: the shipped shape — both payers keep their Treasure proof while a \
+             monotone resource moves — must still be certified"
+        );
+    }
+
+    /// CR 732.2a: the quantity relaxation is not withdrawn either. A payer whose OWN pool
+    /// grew is governed by the pool difference and casts no vote, even when the extra unit
+    /// proves a fact the pool did not hold before — that is what a mana loop looks like.
+    #[test]
+    fn a_payers_own_pool_growth_keeps_the_quantity_relaxation() {
+        let mut a = GameState::new_two_player(7);
+        let treasure = treasure_on_battlefield(&mut a, 631, PlayerId(0));
+        let non_treasure = battlefield_creature(&mut a, 632, 0);
+        float_pinned_red(&mut a, PlayerId(0), treasure);
+
+        let mut b = a.clone();
+        float_pinned_red(&mut b, PlayerId(0), non_treasure);
+
+        assert_ne!(
+            a.players[0].mana_pool, b.players[0].mana_pool,
+            "reach-guard: the payer's own pool must really have grown"
+        );
+        assert!(
+            !same_fact_set(
+                &payer_unit_facts(&a, PlayerId(0)),
+                &payer_unit_facts(&b, PlayerId(0))
+            ),
+            "reach-guard: the growth must really add a fact, so this is not a vacuous pass. \
+             got {:?} vs {:?}",
+            payer_unit_facts(&a, PlayerId(0)),
+            payer_unit_facts(&b, PlayerId(0))
+        );
+        assert!(
+            floating_producer_facts_match(&a, &b),
+            "CR 732.2a: a payer's own growing pool is the QUANTITY this comparator does not \
+             compare — a mana loop's whole point — so it must not veto"
+        );
+        assert!(
+            loop_states_equal_modulo_resources(&a, &b),
+            "CR 732.2a: a growing payer pool must stay covered"
         );
     }
 
