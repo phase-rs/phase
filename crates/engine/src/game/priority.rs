@@ -469,12 +469,12 @@ fn resolution_can_remove_activatable_mana_source(
 
 /// CR 701.26b + CR 605.3a: whether resolving `top`, `player`'s own activated
 /// ability, untaps its own source while `player` can tap that source for mana
-/// now, and a copy of the game shows that mana action listed again once the
-/// untap has resolved (`mana_sources::untap_repeats_mana`). Only tapped
-/// permanents can be untapped, so the untap does nothing unless they tap it
-/// first, and this is the window to do it. Basalt Monolith: "{3}:
-/// Untap this artifact." under Rings of Brighthearth, with the copy resolved and
-/// the original still on the stack. Only the top entry and its source are read.
+/// now, and untapping it would give that mana again, read from public facts
+/// (`mana_sources::untap_would_repeat_mana`). Only tapped permanents can be
+/// untapped, so the untap does nothing unless they tap it first, and this is
+/// the window to do it. Basalt Monolith: "{3}: Untap this artifact." under
+/// Rings of Brighthearth, with the copy resolved and the original still on the
+/// stack. Only the entry and its source are read.
 fn resolution_untaps_ready_mana_source(
     state: &GameState,
     player: PlayerId,
@@ -494,12 +494,8 @@ fn resolution_untaps_ready_mana_source(
         | StackEntryKind::KeywordAction { .. }
         | StackEntryKind::CombatDamage { .. } => return false,
     };
-    // The copy plays the stack from its top, so only the top's window is read.
-    if state.stack.back().map(|entry| entry.id) != Some(top.id) {
-        return false;
-    }
     untapped_source(state, ability)
-        .is_some_and(|source| mana_sources::untap_repeats_mana(state, player, top.id, source))
+        .is_some_and(|source| mana_sources::untap_would_repeat_mana(state, player, source))
 }
 
 /// The object `ability` untaps when it is a plain "Untap this artifact." /

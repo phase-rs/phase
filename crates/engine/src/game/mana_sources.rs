@@ -25,9 +25,7 @@ use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::card_type::Supertype;
 use crate::types::events::{GameEvent, ManaTapState};
-use crate::types::game_state::{
-    GameState, ManaAbilityResume, ManaChoice, ManaChoicePrompt, ProductionOverride, WaitingFor,
-};
+use crate::types::game_state::{GameState, ManaAbilityResume, ProductionOverride, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{
     ManaColor, ManaCostShard, ManaPip, ManaRestriction, ManaSourceOutput, ManaSourceQuantity,
@@ -398,33 +396,63 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
     actions
 }
 
-/// [`activatable_mana_actions_for_player`]'s actions for one object, without
-/// sweeping the rest of the battlefield. A land's rows read the `TapsForMana`
-/// triggers ([`taps_for_mana_trigger_sources`]).
-pub(crate) fn activatable_mana_actions_for_object(
+/// CR 605.3a + CR 701.26b + CR 122.1d: whether untapping `object` gives `player`
+/// its mana a second time, read from public facts only. `object` must have a
+/// {T} mana ability `player` can activate now (it is untapped, the action is
+/// listed), whose cost doesn't move it off the battlefield (Treasure, Lotus
+/// Petal, Mirrored Lotus), and no stun counter, which an untap removes instead.
+/// What a use might reveal or cost later (a tap trigger, a color choice, the
+/// mana left for a second payment) isn't read, so the answer can hold once
+/// where a second use turns out impossible, and never passes a real one. Only
+/// `object`'s rows are listed, without the `TapsForMana` triggers: an aura's
+/// bonus mana doesn't decide whether a row is there.
+pub(crate) fn untap_would_repeat_mana(
     state: &GameState,
     player: PlayerId,
-    object_id: ObjectId,
-) -> Vec<GameAction> {
-    let is_land = state
-        .objects
-        .get(&object_id)
-        .is_some_and(|object| object.card_types.core_types.contains(&CoreType::Land));
-    let aura_sources = if is_land {
-        taps_for_mana_trigger_sources(state)
-    } else {
-        Vec::new()
+    object: ObjectId,
+) -> bool {
+    let Some(source) = state.objects.get(&object) else {
+        return false;
     };
+    if source
+        .counters
+        .get(&crate::types::counter::CounterType::Stun)
+        .is_some_and(|stun| *stun > 0)
+    {
+        return false;
+    }
     let mut actions = Vec::new();
     push_object_mana_actions(
         state,
         player,
-        object_id,
-        &aura_sources,
+        object,
+        &[],
         &mana_abilities::ManaActivationGates::compute(state),
         &mut actions,
     );
-    actions
+    actions.iter().any(|action| {
+        let ability_index = match action {
+            GameAction::TapLandForMana { selection } => selection.ability_index,
+            GameAction::ActivateAbility { ability_index, .. } => Some(*ability_index),
+            _ => return false,
+        };
+        // CR 305.6: a land's intrinsic "{T}: Add" row names no ability.
+        ability_index.is_none_or(|ability_index| {
+            source.abilities.get(ability_index).is_some_and(|ability| {
+                has_tap_component(&ability.cost)
+                    && mana_abilities::is_renewable_mana_ability(ability)
+                    && !cost_has_component(&ability.cost, |component| {
+                        matches!(
+                            component,
+                            AbilityCost::Exile {
+                                filter: Some(TargetFilter::SelfRef),
+                                ..
+                            }
+                        )
+                    })
+            })
+        })
+    })
 }
 
 fn push_object_mana_actions(
@@ -496,142 +524,6 @@ fn push_object_mana_actions(
     }
 }
 
-/// CR 605.3a + CR 701.26b + CR 117.4: whether letting `untap_entry`, the untap
-/// of `object` on top of the stack, resolve after `player` taps `object` for
-/// mana gives that mana a second time. It is played on a copy of the game the
-/// way the players would play it, through the engine's own paths:
-///
-/// 1. `player` sends each {T} mana action of `object`'s that the client lists
-///    (`activatable_mana_actions_for_object`, the legality authority, which
-///    reads mana affordability), answering a color prompt with its first color
-///    (CR 605.3b), and must be back at priority, still in the game.
-///    The public action's terminal checkpoint ran, so a use that costs the game
-///    stops here (CR 704.5a), and one that only ends an opponent's doesn't.
-/// 2. Every player passes until the untap has resolved, through the resolver,
-///    where a stun counter is removed instead (CR 122.1d) and a replacement
-///    may apply. A prompt on the way keeps the pass.
-/// 3. The same action must be listed again for `player`.
-///
-/// The copy drops auto-pass settings, any stack-resolution session and loop
-/// detection, so every pass is the player's own, and runs as a simulation probe
-/// whose lifecycle facts are discarded. Only the top entry and `object`'s rows
-/// are read: per {T} mana row, one copy and the applies that play it out, each
-/// costing what that action costs in the game, however deep the stack is.
-pub(crate) fn untap_repeats_mana(
-    state: &GameState,
-    player: PlayerId,
-    untap_entry: ObjectId,
-    object: ObjectId,
-) -> bool {
-    let Some(source) = state.objects.get(&object) else {
-        return false;
-    };
-    let taps = |action: &GameAction| match action {
-        GameAction::TapLandForMana { .. } => true,
-        GameAction::ActivateAbility { ability_index, .. } => source
-            .abilities
-            .get(*ability_index)
-            .is_some_and(|ability| has_tap_component(&ability.cost)),
-        _ => false,
-    };
-    activatable_mana_actions_for_object(state, player, object)
-        .into_iter()
-        .filter(taps)
-        .any(|action| {
-            #[cfg(feature = "test-support")]
-            crate::game::perf_counters::record_untap_repeat_probe_clone();
-            let _probe = super::engine::SimulationProbeGuard::enter();
-            let _discarded_facts = super::lifecycle::enter_action_frame();
-            let mut copy = state.clone();
-            copy.auto_pass.clear();
-            copy.stack_resolution_session = None;
-            copy.loop_detection = crate::types::game_state::LoopDetectionMode::Off;
-            use_mana_on_copy(&mut copy, player, &action)
-                && pass_until_resolved(&mut copy, untap_entry)
-                && in_game(&copy, player)
-                && activatable_mana_actions_for_object(&copy, player, object).contains(&action)
-        })
-}
-
-/// Step 1 of [`untap_repeats_mana`]: `player` sends `action` on `copy`.
-fn use_mana_on_copy(copy: &mut GameState, player: PlayerId, action: &GameAction) -> bool {
-    let actor = turn_control::authorized_submitter_for_player(copy, player);
-    if super::engine::apply_for_simulation(copy, actor, action.clone()).is_err() {
-        return false;
-    }
-    if let WaitingFor::ChooseManaColor { choice, .. } = &copy.waiting_for {
-        let Some(chosen) = first_mana_choice(choice) else {
-            return false;
-        };
-        let answer = GameAction::ChooseManaColor {
-            choice: chosen,
-            count: 1,
-        };
-        if super::engine::apply_for_simulation(copy, actor, answer).is_err() {
-            return false;
-        }
-    }
-    matches!(copy.waiting_for, WaitingFor::Priority { player: holder } if holder == player)
-        && in_game(copy, player)
-}
-
-/// Step 2 of [`untap_repeats_mana`]: every player passes until the pass that
-/// resolves `entry` reports it (`GameEvent::StackResolved`), each pass the
-/// engine's own (CR 117.4), triggers put above it on the way (Manabarbs on each
-/// side) resolving first; the stack itself isn't searched. A window that isn't
-/// a priority window means a choice, which the copy can't make for the player.
-/// [`UNTAP_PROBE_PASS_CAP`] passes without the entry resolving read as no
-/// repeat.
-fn pass_until_resolved(copy: &mut GameState, entry: ObjectId) -> bool {
-    for _ in 0..UNTAP_PROBE_PASS_CAP {
-        let WaitingFor::Priority { player } = copy.waiting_for else {
-            return false;
-        };
-        let actor = turn_control::authorized_submitter_for_player(copy, player);
-        let Ok(result) = super::engine::apply_for_simulation(copy, actor, GameAction::PassPriority)
-        else {
-            return false;
-        };
-        let resolved = result.events.iter().any(
-            |event| matches!(event, GameEvent::StackResolved { object_id } if *object_id == entry),
-        );
-        if resolved {
-            return resolution_settled(copy);
-        }
-        // CR 800.4a: the untap left the stack without resolving, with a player
-        // who left the game.
-        if copy.stack.is_empty() {
-            return false;
-        }
-    }
-    false
-}
-
-/// CR 117.2e: no player has priority while a spell or ability is resolving, so
-/// the untap's resolution has settled once a player has priority again with
-/// nothing left mid-resolution (a replacement's ordering prompt, a parked
-/// final part).
-fn resolution_settled(copy: &GameState) -> bool {
-    matches!(copy.waiting_for, WaitingFor::Priority { .. })
-        && copy.resolving_stack_entry.is_none()
-        && copy.resolving_trigger_firing.is_none()
-        && copy.resolving_spell_final_part.is_none()
-}
-
-/// The most passes [`pass_until_resolved`] makes: a guard against a trigger
-/// cascade above the untap that never empties, far past the passes a few
-/// triggers per player need.
-const UNTAP_PROBE_PASS_CAP: usize = 256;
-
-/// `player` hasn't left the game (CR 800.4a), and the game goes on.
-fn in_game(state: &GameState, player: PlayerId) -> bool {
-    !matches!(state.waiting_for, WaitingFor::GameOver { .. })
-        && state
-            .players
-            .iter()
-            .any(|seat| seat.id == player && !seat.is_eliminated)
-}
-
 /// The `TapLandForMana` rows [`activatable_mana_actions_for_player`] emits for
 /// one land, without sweeping the rest of the battlefield.
 ///
@@ -687,66 +579,18 @@ pub fn activatable_mana_source_selections(
             continue;
         }
 
-        push_object_mana_source_selections(
-            state,
-            player,
-            object_id,
-            &aura_sources,
-            &gates,
-            &mut selections,
-        );
+        let options = current_mana_source_options(state, player, object_id, &aura_sources, &gates);
+        for option in options {
+            let Some(selection) = manual_selection_for_option(state, &option) else {
+                continue;
+            };
+            if !selections.contains(&selection) {
+                selections.push(selection);
+            }
+        }
     }
     selections.sort_by(|left, right| left.cmp_stable(right));
     selections
-}
-
-/// The first answer a mana color prompt offers.
-fn first_mana_choice(prompt: &ManaChoicePrompt) -> Option<ManaChoice> {
-    match prompt {
-        ManaChoicePrompt::SingleColor { options } => {
-            options.first().copied().map(ManaChoice::SingleColor)
-        }
-        ManaChoicePrompt::Combination { options } => {
-            options.first().cloned().map(ManaChoice::Combination)
-        }
-        ManaChoicePrompt::AnyCombination { count, options } => options
-            .first()
-            .map(|&mana| ManaChoice::Combination(vec![mana; *count])),
-    }
-}
-
-/// The `TapsForMana` trigger sources [`current_mana_source_options`] reads for
-/// `object_id`: every one on the battlefield for a land, whose rows add an
-/// aura's or a global trigger's mana, and none for any other source, whose rows
-/// don't read them, so nothing is scanned for it.
-fn object_taps_for_mana_trigger_sources(state: &GameState, object_id: ObjectId) -> Vec<ObjectId> {
-    let is_land = state
-        .objects
-        .get(&object_id)
-        .is_some_and(|object| object.card_types.core_types.contains(&CoreType::Land));
-    if is_land {
-        taps_for_mana_trigger_sources(state)
-    } else {
-        Vec::new()
-    }
-}
-
-fn push_object_mana_source_selections(
-    state: &GameState,
-    player: PlayerId,
-    object_id: ObjectId,
-    aura_sources: &[ObjectId],
-    gates: &mana_abilities::ManaActivationGates,
-    selections: &mut Vec<ManaSourceSelection>,
-) {
-    for option in current_mana_source_options(state, player, object_id, aura_sources, gates) {
-        let Some(selection) = manual_selection_for_option(state, &option) else {
-            continue;
-        };
-        if !selections.contains(&selection) {
-            selections.push(selection);
-        }
-    }
 }
 
 /// CR 605.3a: Return the source rows a frozen, explicit mana selection may
@@ -892,11 +736,15 @@ pub(crate) fn live_mana_source_option_for_selection(
     player: PlayerId,
     selection: &ManaSourceSelection,
 ) -> Result<ManaSourceOption, EngineError> {
-    // Only the selected object's rows can name the selection, so they are the
-    // only ones rebuilt: none of them matching is the stale case below.
-    let object_id = selection.source.object_id;
-    let aura_sources = object_taps_for_mana_trigger_sources(state, object_id);
+    if !activatable_mana_source_selections(state, player).contains(selection) {
+        return Err(EngineError::ActionNotAllowed(
+            "Mana source selection is stale or no longer legal".to_string(),
+        ));
+    }
+
+    let aura_sources = taps_for_mana_trigger_sources(state);
     let gates = mana_abilities::ManaActivationGates::compute(state);
+    let object_id = selection.source.object_id;
     let options = current_mana_source_options(state, player, object_id, &aura_sources, &gates);
     let mut matches = options
         .into_iter()
@@ -4192,36 +4040,7 @@ pub(crate) fn opponent_land_color_options(
 /// their per-land loop and thread it into `taps_for_mana_aura_bonus_indexed`,
 /// turning a per-land full-battlefield scan into a per-land walk over only the
 /// (usually tiny) set of trigger-bearing permanents.
-///
-/// Once the trigger index is built it answers without a battlefield scan: its
-/// unclassified bucket, then its `TapsForMana` bucket (battlefield order as of
-/// the last layer flush), each kept only while it is on the battlefield with a
-/// `TapsForMana` trigger. Before the index is built the scan runs, in
-/// battlefield order. Every reader of one state gets the same order.
 pub(crate) fn taps_for_mana_trigger_sources(state: &GameState) -> Vec<ObjectId> {
-    let index = &state.trigger_index;
-    if index.readiness == crate::types::game_state::DerivedIndexReadiness::Built {
-        let mut sources: Vec<ObjectId> = Vec::new();
-        for &object_id in index.unclassified.iter().chain(
-            index
-                .by_key
-                .get(&crate::types::triggers::TriggerEventKey::TapsForMana)
-                .into_iter()
-                .flatten(),
-        ) {
-            let has_trigger = state.objects.get(&object_id).is_some_and(|object| {
-                object.zone == Zone::Battlefield
-                    && object
-                        .trigger_definitions
-                        .iter_all()
-                        .any(|entry| entry.definition.mode == TriggerMode::TapsForMana)
-            });
-            if has_trigger && !sources.contains(&object_id) {
-                sources.push(object_id);
-            }
-        }
-        return sources;
-    }
     crate::game::perf_counters::record_mana_aura_trigger_scan();
     state
         .battlefield
