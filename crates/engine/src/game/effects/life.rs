@@ -701,7 +701,7 @@ pub fn apply_life_gain_after_replacement(
 /// stamped with. The settle never refuses the gain (its total and per-turn
 /// counter saturate), so the policy reaches only the shared settle routing; a
 /// nested player-counter or energy settlement the answer reaches is held to
-/// `handle_replacement_choice`'s ingress window.
+/// the ingress window `handle_replacement_choice` opens for a record stamped `Reject`.
 pub(crate) fn settle_life_gain_after_choice(
     state: &mut GameState,
     event: ProposedEvent,
@@ -1224,12 +1224,14 @@ pub fn resolve_set_life_total(
         // individual player's life total, that cost or effect uses the
         // team's life total instead" — degenerates to `Player::life` outside
         // team-based formats. CR 810.9c: the player gains or loses the
-        // difference, and the team's total moves by exactly the amount gained
-        // or lost (the edit authority adjusts the shared total, CR 810.9);
-        // unless a replacement changes that gain or loss (CR 614.1a) or the
-        // player can't gain or can't lose life (CR 119.7 / CR 119.8;
-        // `apply_life_gain` / `apply_life_loss` stop before the pipeline), the
-        // team lands on the new total.
+        // difference, and the team's total moves by the amount gained or lost
+        // (the edit authority adjusts the shared total, CR 810.9), stopping at
+        // the `i32` limit it moves toward (an engine limit, not a rule); unless
+        // a replacement changes that gain or loss (CR 614.1a), the player can't
+        // gain or can't lose life (CR 119.7 / CR 119.8; `apply_life_gain` /
+        // `apply_life_loss` stop before the pipeline), or the difference passes
+        // `u32::MAX` (a shared total outside `i32`; `apply_life_difference`
+        // saturates its magnitude), the team lands on the new total.
         if !state.players.iter().any(|p| p.id == target_player_id) {
             return Err(EffectError::PlayerNotFound);
         }
@@ -1798,9 +1800,14 @@ mod tests {
     /// difference past the `i32` range exactly through serialization, and the
     /// resume lands every receiver on the other's previous total. "Life
     /// Shield" is synthetic: no printed card has an optional replacement of a
-    /// life total being reduced whose acceptance leaves the reduction as it is,
-    /// and the test needs one so the assignment parks on a choice and the
-    /// resume lands the exact difference. The nearest printed card is Enduring
+    /// life total being reduced whose acceptance leaves the reduction as it is.
+    /// Here it parks the assignment on its first leg, the loss, so the tail
+    /// holds the gain's exact difference. A printed board parks an assignment
+    /// too: Rhox Faithmender and Boon Reflection ("If you would gain life, you
+    /// gain twice that much life instead.") under a gaining receiver ask that
+    /// player to order them (`parked_gain_resume_saturates_at_the_cap`), and
+    /// with that gain listed first the tail holds the loss's exact difference.
+    /// The nearest printed card to Life Shield is Enduring
     /// Angel, whose "If your life total would be reduced to 0 or less, instead
     /// transform this creature and your life total becomes 3. Then if this
     /// creature didn't transform this way, you lose the game." replaces the

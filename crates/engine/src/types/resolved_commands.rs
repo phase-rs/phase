@@ -99,7 +99,9 @@ pub enum ResolvedPlayerEdit {
     /// CR 119.2 + CR 119.3 + CR 119.4 + CR 119.5: A final gain/loss delta
     /// applied after any replacement. `i64` so every settled amount (a
     /// `u32`; a replacement quantity past `u32` lands on `u32::MAX` before it
-    /// settles) and every set/exchange difference is recorded exactly; the
+    /// settles, as does a set-life difference past `u32::MAX` from a shared
+    /// total outside `i32`, `game::effects::life::apply_life_difference`) and
+    /// every debug `SetLife` difference is recorded exactly; the
     /// edit authority adjusts a life total by the delta (CR 119.3), and a life
     /// total may be negative (CR 107.1b). The total stops at the `i32` limit
     /// the change moves toward: an engine storage limit, not a rule

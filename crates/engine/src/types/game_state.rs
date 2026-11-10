@@ -24841,8 +24841,9 @@ declare_game_state! {
 
     /// CR 732.2a: for each controller that accepted an unbounded loop shortcut, the
     /// list of deferred persistent-axis materializations captured at accept. Part 1
-    /// marks the ∞ axes and applies any batched life (a take with a `Tokens` or `Counters`
-    /// item batches none, since one batching life beside them is performed); for a token loop
+    /// marks the ∞ axes other than life and applies any batched life (a take with a `Tokens` or
+    /// `Counters` item batches none, since one batching life beside them is performed); for a token
+    /// loop
     /// whose period taps a fodder each cycle while the proposer has none tapped, it seeds a
     /// tapped display anchor and one untapped token (`seed_representative_fodder`); the
     /// concrete finite growth is applied at the next phase/step boundary,
@@ -37438,8 +37439,9 @@ impl GameState {
     ///
     /// No item kind names a `Mana(_)` axis. Note the two axis classes end their `∞` by
     /// different routes: `Tokens` / `Counters` are DEFERRED and end here, when the boundary
-    /// applies the growth (as does a `Life` item restored from an earlier save; a take marks no
-    /// `Life` axis, route (f)); a `Mana(_)` is already materialized in the pool
+    /// applies the growth (as does a `Life` item restored from an earlier save; a Mark take marks
+    /// no `Life` axis, route (f), and a drain crown's `Life` mark ends with the game); a `Mana(_)`
+    /// is already materialized in the pool
     /// (`mana_payment::refill_infinite_mana` re-tops it off this very store) and its `∞` ends at
     /// the CR 500.5 step/phase end instead.
     ///

@@ -980,8 +980,8 @@ fn handle_replacement_choice_inner(
                 // settle saturates the total and never refuses a life change, so
                 // the parked record's policy reaches only the shared settle
                 // routing; a nested player-counter or energy settlement this
-                // answer reaches is held to it by `handle_replacement_choice`'s
-                // ingress window.
+                // answer reaches is held to a `Reject` stamp by the ingress window
+                // `handle_replacement_choice` opens for it.
                 gain @ ProposedEvent::LifeGain { .. } => {
                     // A settle that parks a prompt (the Horde loss redirect's
                     // mill choice; gain itself never pauses) early-returns the
