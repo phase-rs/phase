@@ -4973,12 +4973,6 @@ pub(crate) fn loop_states_cover_modulo_object_growth(
     let mut pb = project_out_resources(&cf);
     pa.0.stack.clear();
     pb.0.stack.clear();
-    // Recipient witnesses are the FODDER cover's obligation, which quotients them. This
-    // predicate's claim is pure inert BOARD growth, and the pre-change projection erased
-    // the journal here: a witness naming a freshly grown token is part of that growth, not
-    // a board difference, so it must not split the remainder.
-    pa.0.damage_dealt_this_turn.clear();
-    pb.0.damage_dealt_this_turn.clear();
 
     // Absolute-ObjectId battlefield set-difference. Growth must be PURE —
     // no battlefield object may leave (a shrink is a real board change, not ω-cover).
@@ -4994,6 +4988,17 @@ pub(crate) fn loop_states_cover_modulo_object_growth(
     if grown_ids.is_empty() {
         return false;
     }
+    // CR 400.7 + CR 608.2k: recipient witnesses naming a GROWN object are part of the
+    // growth, so they must not split the remainder. A witness naming any other object
+    // keeps its live/stale relation: the FODDER cover quotients those, and this predicate
+    // must not become a blanket erasure of the sharing it protects.
+    let nominates_grown = |record: &DamageRecord| {
+        matches!(&record.target, TargetRef::Object(id) if grown_ids.contains(id))
+    };
+    pa.0.damage_dealt_this_turn
+        .retain(|record| !nominates_grown(record));
+    pb.0.damage_dealt_this_turn
+        .retain(|record| !nominates_grown(record));
 
     // (1) Board equal modulo the inert growth set, plus the non-object GameState remainder.
     if !(board_covers(&pa, &pb, &grown_ids)
@@ -16746,6 +16751,67 @@ mod tests {
         assert!(
             cover(&prior, &current),
             "retained damage history naming the grown token is part of the growth"
+        );
+    }
+
+    /// The narrowed erasure must not become blanket history removal: a pending damage
+    /// carrier naming a NON-grown recipient keeps its live/stale relation, so a blink of
+    /// that recipient across the period still refuses the growth cover.
+    #[test]
+    fn object_growth_keeps_non_grown_recipient_relation() {
+        use crate::types::ability::{Effect, ResolvedAbility, TargetRef};
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::{DamageRecord, StackEntry, StackEntryKind};
+
+        fn with_carrier(state: &mut GameState, target: ObjectId, stamp: u64) {
+            state.stack.push_back(StackEntry {
+                id: ObjectId(901),
+                source_id: target,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: target,
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::NoOp,
+                        vec![],
+                        target,
+                        PlayerId(0),
+                    )),
+                    condition: None,
+                    trigger_event: Some(GameEvent::DamageDealt {
+                        source_id: target,
+                        source_incarnation: Some(stamp),
+                        target: TargetRef::Object(target),
+                        amount: 1,
+                        is_combat: false,
+                        excess: 0,
+                    }),
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+            state.damage_dealt_this_turn.push_back(DamageRecord {
+                source_id: target,
+                source_incarnation: Some(stamp),
+                target: TargetRef::Object(target),
+                target_incarnation: Some(stamp),
+                amount: 1,
+                ..Default::default()
+            });
+        }
+
+        let (mut prior, mut current) = og_cover_base();
+        let recipient = ObjectId(700);
+        let live = prior.objects[&recipient].incarnation;
+        let stale = live + 1_000;
+        with_carrier(&mut prior, recipient, live);
+        with_carrier(&mut current, recipient, stale);
+        assert!(
+            !cover(&prior, &current),
+            "a non-grown recipient that is live in the prior frame and stale in the current \
+             frame must refuse the growth cover"
         );
     }
 
