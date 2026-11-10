@@ -2234,10 +2234,11 @@ mod tests {
     /// 2. (Create an Incubator token with two +1/+1 counters on it and "{2}:
     /// Transform this token." It transforms into a 0/0 Phyrexian artifact
     /// creature.)"). `incubate::resolve` leaves its flag unset until its first
-    /// layer pass. The case is still needed because charter D3.2 requires the
-    /// stash to hold the face for an uninitialized base. Also, 48 existing tests
-    /// build swap subjects with `create_object` and live-only writes. For those,
-    /// the sync mirrors `reset_recipient_to_base`'s materialization (CR 613.1).
+    /// layer pass. The case is still needed because a stash must hold the
+    /// face's copiable values even when no layer pass has seeded the base,
+    /// which is how many unit fixtures build swap subjects (`create_object`
+    /// plus live-only writes). For those, the sync mirrors
+    /// `reset_recipient_to_base`'s materialization (CR 613.1).
     ///
     /// Revert-failing: let `swap_object_faces` store the live snapshot again and
     /// (i) keeps red in the stored face; drop its

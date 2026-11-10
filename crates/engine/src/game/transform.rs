@@ -475,10 +475,22 @@ mod tests {
     /// integration row. This mirrors `flip::tests::
     /// flip_stashes_printed_characteristics_not_layer_modified_ones`.
     ///
+    /// Case (ii): no printed card reaches a transform with an uninitialized
+    /// base: every card object is installed by `apply_card_face_to_object`, and
+    /// a token's first layer pass seeds its base before it can be transformed.
+    /// The nearest printed shape is the Incubator token from Blighted
+    /// Burgeoning ("When this Aura enters, incubate 2. (Create an Incubator
+    /// token with two +1/+1 counters on it and "{2}: Transform this token." It
+    /// transforms into a 0/0 Phyrexian artifact creature.)"). This mirrors
+    /// `printed_cards::tests::swap_object_faces_stores_copiable_values_in_every_zone`
+    /// case (ii) for the transform writer.
+    ///
     /// Revert-failing: let the transform stash the live snapshot again
     /// (`snapshot_object_face`) and the stored front face is 3/4 with haste, so
     /// the restored front face is 3/4 with haste in both its live and base
-    /// fields — every P/T and keyword assertion below fails.
+    /// fields — every P/T and keyword assertion in (i) fails. Drop
+    /// `turn_to_other_face`'s `sync_missing_base_characteristics` call and (ii)
+    /// stores no P/T and no card types.
     #[test]
     fn transform_stashes_copiable_values_not_layer_modified_ones() {
         let mut state = GameState::new_two_player(42);
@@ -519,6 +531,44 @@ mod tests {
         assert_eq!((obj.base_power, obj.base_toughness), (Some(2), Some(3)));
         assert_eq!(obj.keywords, vec![Keyword::Vigilance]);
         assert_eq!(obj.base_keywords, vec![Keyword::Vigilance]);
+
+        // (ii) A fixture whose base no layer pass has seeded: live-only writes.
+        let fixture = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Unseeded Front".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&fixture).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Incubator".to_string());
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            let mut back = crate::game::printed_cards::snapshot_object_face(obj);
+            back.name = "Unseeded Back".to_string();
+            obj.back_face = Some(back);
+            assert!(
+                !obj.base_characteristics_initialized
+                    && obj.base_power.is_none()
+                    && obj.base_card_types == CardType::default(),
+                "reach-guard: the fixture's base is unseeded"
+            );
+        }
+
+        transform_permanent(&mut state, fixture, &mut events).unwrap();
+        let obj = &state.objects[&fixture];
+        assert_eq!(obj.name, "Unseeded Back", "reach-guard: it transformed");
+        let stored = obj.back_face.as_ref().expect("the front face is stored");
+        assert_eq!(stored.name, "Unseeded Front");
+        assert_eq!(
+            (stored.power, stored.toughness),
+            (Some(2), Some(2)),
+            "CR 613.1: the stored face holds the unseeded face's P/T"
+        );
+        assert_eq!(stored.card_types.core_types, vec![CoreType::Artifact]);
+        assert_eq!(stored.card_types.subtypes, vec!["Incubator".to_string()]);
     }
 
     /// G1: transforming a double-faced permanent issues a new timestamp on each

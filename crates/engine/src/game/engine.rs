@@ -13465,9 +13465,9 @@ fn apply_non_priority_pass_action(
                         // type. A land face is put onto the battlefield via the play-land
                         // special action (CR 712.12); a spell face is cast (CR 712.11b — Esika
                         // // The Prismatic Bridge). After a swap
-                        // the new back_face (from snapshot_object_face) has layout_kind: None,
-                        // and a front-face choice clears it explicitly — so neither the
-                        // both-faces-land intercept nor the spell-face intercept re-fires.
+                        // the shared swap keeps the pair's `layout_kind` on the new back_face;
+                        // `cast_face_committed` (set above) is what keeps the both-faces-land
+                        // intercept and the spell-face intercept from re-firing.
                         let active_is_land = state.objects.get(object_id).is_some_and(|obj| {
                             obj.card_types
                                 .core_types
