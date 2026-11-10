@@ -207,13 +207,13 @@ fn replay(
             shadow.all_card_names = state.all_card_names.clone();
             shadow.log_player_names = state.log_player_names.clone();
             // CR 706.1a: newly accepted entries run on the host's fresh stream
-            // and interaction namespace; the checkpoint keeps only the
-            // accepted prefix's outcomes.
-            shadow.rng = state.rng.clone();
-            shadow.rng_seed = state.rng_seed;
-            shadow.rng_word_pos = state.rng_word_pos;
+            // and interaction binding; the checkpoint keeps only the accepted
+            // prefix's outcomes, including any stream advancement it holds.
+            adopt_host_stream(&mut shadow, state);
+            shadow.interaction_session_id = state.interaction_session_id.clone();
             shadow.interaction_generation = state.interaction_generation;
             shadow.next_interaction_serial = state.next_interaction_serial.clone();
+            shadow.active_interaction_slots = state.active_interaction_slots.clone();
             restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
             (
                 shadow,
@@ -711,6 +711,20 @@ fn checkpoint_state(shadow: &GameState) -> GameState {
     checkpoint
 }
 
+/// Adopt the live host's fresh entropy while keeping any advancement the
+/// checkpoint shadow already accepted on the same seed.
+fn adopt_host_stream(shadow: &mut GameState, live: &GameState) {
+    let shadow_seed = shadow.rng_seed;
+    let shadow_position = shadow.rng.get_word_pos();
+    shadow.rng = live.rng.clone();
+    shadow.rng_seed = live.rng_seed;
+    shadow.rng_word_pos = live.rng_word_pos;
+    if shadow_seed == live.rng_seed && shadow_position > shadow.rng.get_word_pos() {
+        shadow.rng.set_word_pos(shadow_position);
+        shadow.rng_word_pos = shadow_position;
+    }
+}
+
 /// CR 118.12: apply a sandbox/debug action to the hidden checkpoint board only.
 /// Its events are buffered with the accepted prefix and publish once when the
 /// payment settles; the canonical base is left untouched.
@@ -738,12 +752,12 @@ pub(crate) fn mirror_checkpoint_action(
     shadow.all_card_names = state.all_card_names.clone();
     shadow.log_player_names = state.log_player_names.clone();
     // CR 706.1a: the sandbox action's new entropy is the host's fresh stream,
-    // not the checkpoint's recorded cursor.
-    shadow.rng = state.rng.clone();
-    shadow.rng_seed = state.rng_seed;
-    shadow.rng_word_pos = state.rng_word_pos;
+    // preserving any advancement already accepted in the checkpoint.
+    adopt_host_stream(&mut shadow, state);
+    shadow.interaction_session_id = state.interaction_session_id.clone();
     shadow.interaction_generation = state.interaction_generation;
     shadow.next_interaction_serial = state.next_interaction_serial.clone();
+    shadow.active_interaction_slots = state.active_interaction_slots.clone();
     // The sandbox authority is the live session's, not the checkpoint's older
     // bytes; mirror it before the action's own preflight reads it.
     shadow.debug_mode = state.debug_mode;
@@ -875,18 +889,11 @@ fn carry_runtime_authorities(shadow: &mut GameState, live: &GameState) {
     // be overwritten by the checkpoint's older cursor. If the action consumed
     // entropy on the same seed, keep the advanced position so the host does not
     // replay those words.
-    let shadow_seed = shadow.rng_seed;
-    let shadow_position = shadow.rng.get_word_pos();
-    shadow.rng = live.rng.clone();
-    shadow.rng_seed = live.rng_seed;
-    shadow.rng_word_pos = live.rng_word_pos;
-    if shadow_seed == live.rng_seed {
-        let live_position = shadow.rng.get_word_pos();
-        if shadow_position > live_position {
-            shadow.rng.set_word_pos(shadow_position);
-            shadow.rng_word_pos = shadow_position;
-        }
-    }
+    adopt_host_stream(shadow, live);
+    shadow.interaction_session_id = live.interaction_session_id.clone();
+    shadow.interaction_generation = live.interaction_generation;
+    shadow.next_interaction_serial = live.next_interaction_serial.clone();
+    shadow.active_interaction_slots = live.active_interaction_slots.clone();
     // Session/authority state is not part of the accepted payment: a restored
     // or revoked capability decision belongs to the live session, not to the
     // checkpoint snapshot.

@@ -1436,8 +1436,11 @@ fn apply_action_boundary_core(
     authorize_actor: bool,
 ) -> Result<RawActionApplication, EngineError> {
     let lifecycle = super::lifecycle::enter_action_frame();
-    // CR 104.3a: the concession marker is scoped to this public action.
-    state.conceded_this_action = None;
+    // CR 104.3a: the concession marker is scoped to this public action; a
+    // nested replay inside the payment continuation keeps the outer marker.
+    if !state.payment_transaction_replay {
+        state.conceded_this_action = None;
+    }
     if let Err(error) = mana_sources::preflight_tap_land_action(state, authenticated_actor, &action)
     {
         lifecycle.discard();
