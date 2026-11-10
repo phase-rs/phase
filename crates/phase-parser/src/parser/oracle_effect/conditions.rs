@@ -38,13 +38,14 @@ use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr,
 };
 use crate::types::ability::{
-    effect_announced_target_roles, AbilityCondition, AbilityDefinition, AbilityKind,
-    AbilityUseTally, AdditionalCostOrigin, AttachCardinality, AttachSelection, CastManaObjectScope,
-    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CostCategory,
-    CountScope, DamageChannel, DigSource, Duration, Effect, EffectOutcomeSignal, FilterProp,
-    GuessOutcome, LibraryPosition, MultiTargetSpec, ObjectScope, ParsedCondition, PlayerScope,
-    PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SpentColor, StaticCondition,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
+    effect_announced_target_roles, payer_is_declared_target, AbilityCondition, AbilityDefinition,
+    AbilityKind, AbilityUseTally, AdditionalCostOrigin, AttachCardinality, AttachSelection,
+    CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator,
+    ControllerRef, CostCategory, CountScope, DamageChannel, DigSource, Duration, Effect,
+    EffectOutcomeSignal, FilterProp, GuessOutcome, LibraryPosition, MultiTargetSpec, ObjectScope,
+    ParsedCondition, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
+    SpentColor, StaticCondition, TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -4971,7 +4972,7 @@ fn probe_effect_target(effect_text: &str, ctx: &ParseContext) -> Option<EffectTa
 /// excludes it. The throwaway context also carries the announced-role registry
 /// (`try_parse_two_targets`), so a two-role instruction is distinguishable.
 fn probe_declared_target_slot(effect_text: &str, ctx: &ParseContext) -> Option<EffectTargetProbe> {
-    let clause = parse_effect_clause_inner(effect_text, &mut ctx.clone_throwaway());
+    let clause = super::parse_effect_clause(effect_text, &mut ctx.clone_throwaway());
     // CR 115.1d + CR 115.10a: the timing decision runs before any slot is
     // read. A resolution-time recipient (Prize Wall's sticker target, an
     // untargeted bounce) announces no target and cannot supply the antecedent.
@@ -4985,7 +4986,20 @@ fn probe_declared_target_slot(effect_text: &str, ctx: &ParseContext) -> Option<E
     if timing != TargetChoiceTiming::Stack {
         return None;
     }
-    let declared_slots = effect_announced_target_roles(&clause.effect);
+    let mut declared_slots = effect_announced_target_roles(&clause.effect);
+    // CR 115.1 + CR 118.12a: a targeted unless-payer is announced before the
+    // primary filter (ability_utils::ability_needs_companion_target_player_slot).
+    let payer_first = clause
+        .unless_pay
+        .as_ref()
+        .is_some_and(|modifier| payer_is_declared_target(&modifier.payer));
+    if payer_first
+        && !declared_slots
+            .first()
+            .is_some_and(|f| matches!(f, TargetFilter::Player))
+    {
+        declared_slots.insert(0, TargetFilter::Player);
+    }
     if declared_slots.is_empty() {
         return None;
     }
@@ -11084,6 +11098,30 @@ mod tests {
         assert!(cond.is_some(), "the typed spell slot must satisfy the noun");
     }
 
+    /// CR 109.4 + CR 111.1: Kraul Whipcracker's "destroy target token an
+    /// opponent controls" is a property-only typed filter on the battlefield.
+    #[test]
+    fn property_only_token_target_binds_a_controller() {
+        let (cond, text) = strip_suffix_conditional(
+            "Destroy target token an opponent controls if its controller controls no other creatures",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(text, "Destroy target token an opponent controls");
+        assert!(cond.is_some(), "a battlefield token has a controller");
+    }
+
+    /// CR 205.2a + CR 109.4: Disenchant's "destroy target artifact or
+    /// enchantment" is a typed disjunction; both branches are permanents.
+    #[test]
+    fn typed_disjunctive_permanent_target_binds_a_controller() {
+        let (cond, text) = strip_suffix_conditional(
+            "Destroy target artifact or enchantment if its controller controls no other creatures",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(text, "Destroy target artifact or enchantment");
+        assert!(cond.is_some(), "both branches are battlefield permanents");
+    }
+
     /// Grammar-only discriminator for the optional `other` axis. The phrase is a
     /// synthetic exception to the real-card test contract: the checked
     /// AtomicCards corpus has no printed "controls no creatures" destroy-artifact
@@ -11245,6 +11283,19 @@ mod tests {
         let effect = "Put a sticker on a nonland permanent you own";
         assert!(probe_declared_target_slot(effect, &ctx).is_none());
         let condition = "you control more creatures than that permanent's controller";
+        assert_eq!(
+            parse_target_controller_control_condition_text(condition, effect, &ctx),
+            None,
+            "{effect} if {condition}"
+        );
+
+        // Printed Athreos, God of Passage: "…return it to your hand unless
+        // target opponent pays 3 life." A declared unless-payer is announced
+        // before the primary filter, so the object is not the first target.
+        let effect = "Destroy target creature unless target opponent pays 3 life";
+        let probe = probe_declared_target_slot(effect, &ctx).expect("unless-payer probe");
+        assert_eq!(probe.declared_slots[0], TargetFilter::Player);
+        let condition = "you control more creatures than that creature's controller";
         assert_eq!(
             parse_target_controller_control_condition_text(condition, effect, &ctx),
             None,

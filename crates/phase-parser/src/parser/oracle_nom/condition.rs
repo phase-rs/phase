@@ -4834,14 +4834,20 @@ fn typed_slot_type_axis_matches(
             .type_filters
             .iter()
             .any(|type_filter| type_filter_every_branch_matches(type_filter, predicate)),
+        // Composition: an `Or` guarantees the noun only when every branch does;
+        // an `And` narrows one object, so any typed conjunct is enough.
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .all(|filter| typed_slot_type_axis_matches(filter, predicate)),
+        TargetFilter::And { filters } => filters
+            .iter()
+            .any(|filter| typed_slot_type_axis_matches(filter, predicate)),
         // Every non-`Typed` shape names no type axis this projection can
         // classify, so it fails closed. Listed explicitly rather than with a
         // wildcard so a new variant requires a compiler-checked decision.
         TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::GrantingObject { .. }
         | TargetFilter::Not { .. }
-        | TargetFilter::Or { .. }
-        | TargetFilter::And { .. }
         | TargetFilter::StackAbility { .. }
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
@@ -4951,6 +4957,19 @@ pub(crate) fn filter_guarantees_object_controller(filter: &TargetFilter) -> bool
         TargetFilter::StackSpell | TargetFilter::StackAbility { .. } => true,
         TargetFilter::Or { filters } => filters.iter().all(filter_guarantees_object_controller),
         TargetFilter::And { filters } => filters.iter().any(filter_guarantees_object_controller),
+        // CR 109.4 + CR 111.1: a property-only typed filter (Kraul Whipcracker's
+        // "target token") still denotes a battlefield object;
+        // `denotes_battlefield_objects` rejects it only because it requires a
+        // type axis. Keep the player/zone guards and accept a property axis.
+        TargetFilter::Typed(tf) => {
+            let typed = TargetFilter::Typed(tf.clone());
+            !typed.denotes_player_target()
+                && typed
+                    .extract_zones()
+                    .iter()
+                    .all(|zone| *zone == Zone::Battlefield)
+                && (!tf.type_filters.is_empty() || !tf.properties.is_empty())
+        }
         other => other.denotes_battlefield_objects(),
     }
 }
