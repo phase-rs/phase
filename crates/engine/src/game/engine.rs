@@ -11024,7 +11024,7 @@ fn stack_resolution_session_participant_authorizes_pass(
         // skipped windows are not rechecked for a meaningful action (only its
         // live window is, in `stack_resolution_session_priority_decision`).
         // CR 117.1: Full Control is the one window consent doesn't cover, so the
-        // standing-pass ladder, whose `Held` reasons probe the board, isn't read.
+        // standing-pass ladder, whose `Held` reasons read the board, isn't read.
         StackResolutionPolicy::Committed => !priority::holds_full_control(state, participant),
         // A verified AI pass authorizes later windows in this exact fenced
         // cohort; CR 117.3d + CR 732.2b: a representative's standing pass over
@@ -11101,8 +11101,10 @@ pub(crate) fn stack_resolution_session_authorized_limit(state: &GameState) -> Op
     // Every run the resolver batches (`stack::resolve_next_with_limit`) is of
     // triggered abilities, so a spell or an activated ability always resolves
     // alone, and the window over one is read when it comes rather than looked
-    // ahead to. Basalt Monolith's queued "{3}: Untap this artifact" entries then
-    // cost one window each, not a probe of every entry below. A keyword action
+    // ahead to: its window is judged against the board as it is then, after the
+    // entries above it resolved, not before (an untap above it may have untapped
+    // the source). Basalt Monolith's queued "{3}: Untap this artifact" entries
+    // each get their own window. A keyword action
     // never batches either, but it isn't held for an untap, so its windows are
     // still looked ahead to as before.
     let resolves_alone = |entry: &StackEntry| match entry.kind {

@@ -474,7 +474,8 @@ fn resolution_can_remove_activatable_mana_source(
 /// untapped, so the untap does nothing unless they tap it first, and this is
 /// the window to do it. Basalt Monolith: "{3}: Untap this artifact." under
 /// Rings of Brighthearth, with the copy resolved and the original still on the
-/// stack. Only the entry and its source are read.
+/// stack. Only public facts are read: the entry, and its source's listed mana
+/// actions.
 fn resolution_untaps_ready_mana_source(
     state: &GameState,
     player: PlayerId,
@@ -1529,8 +1530,7 @@ mod tests {
         }
 
         /// CR 701.26b: the untap does nothing to a permanent that is already
-        /// untapped, so the window is held until it has been tapped. The untap
-        /// is on the stack, where the hold plays it out on a copy.
+        /// untapped, so the window is held until it has been tapped.
         #[test]
         fn own_activated_untap_holds_only_while_its_object_can_tap_for_mana() {
             let (mut state, forest, _) = board();

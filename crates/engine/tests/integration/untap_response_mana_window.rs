@@ -26,15 +26,16 @@
 //! ("Whenever an ability of equipped creature is activated, if it isn't a mana
 //! ability, copy that ability.") copying such an untap.
 //!
-//! What keeps the pass: a stunned source (CR 122.1d), a first use that ends the
-//! game, an untap of another permanent (Arbor Elf, Freed from the Real), an
+//! What keeps the pass: a stunned source (CR 122.1d), a source whose only mana
+//! ability removes it, an untap of another permanent (Arbor Elf, Freed from the Real), an
 //! ability that does more than untap (Eater of the Dead, Harsh Deceiver), and
 //! a trigger (Wilderness Reclamation: "At the beginning of your end step, untap
 //! all lands you control."), which goes on the stack with no player act.
 
 use super::support::shared_card_db;
 use engine::ai_support::{
-    auto_pass_recommended, legal_actions, legal_actions_full, AiDecisionContract,
+    auto_pass_recommended, auto_pass_recommended_for_viewer, legal_actions, legal_actions_full,
+    AiDecisionContract,
 };
 use engine::analysis::decision_template::IterationCount;
 use engine::analysis::loop_check::{ShortcutResponse, WinKind};
@@ -651,8 +652,17 @@ fn a_land_source_holds_with_mana_triggers_around_it() {
     }
 }
 
-/// CR 401.2: the hold reads only public facts, so the hidden top card of the
-/// player's library doesn't change it.
+/// The recommendation P0's client receives (`auto_pass_recommended_for_viewer`).
+fn viewer_recommends_pass(runner: &GameRunner) -> bool {
+    let state = runner.state();
+    auto_pass_recommended_for_viewer(state, P0, &legal_actions(state))
+}
+
+/// CR 401.2: the recommendation P0's client receives is the same whatever the
+/// hidden top card of P0's library is. Basalt Monolith's untap holds over a
+/// land and over a creature. Harsh Deceiver's "{2}: Reveal the top card of your
+/// library. If it's a land card, untap this creature" keeps the pass over
+/// both, though only the land would untap it.
 #[test]
 fn the_hold_reads_no_hidden_card() {
     let Some(db) = shared_card_db() else { return };
@@ -670,8 +680,37 @@ fn the_hold_reads_no_hidden_card() {
         let untap = untap_ability_index(&runner, monolith);
         activate(&mut runner, monolith, untap, &[]);
         assert!(
-            !recommends_pass(&runner),
-            "{top_card} on top: the window holds either way"
+            !viewer_recommends_pass(&runner),
+            "Monolith over a {top_card}: the window holds"
+        );
+
+        let mut scenario = main_phase_scenario();
+        scenario.add_enchantment_from_oracle(P0, "Cryptolith Rite", CRYPTOLITH_RITE);
+        let deceiver = scenario
+            .add_creature_from_oracle(P0, "Harsh Deceiver", 1, 4, HARSH_DECEIVER)
+            .id();
+        scenario.add_real_card(P0, top_card, Zone::Library, db);
+        let islands: Vec<_> = (0..2)
+            .map(|_| scenario.add_real_card(P0, "Island", Zone::Battlefield, db))
+            .collect();
+        let mut runner = scenario.build();
+        clear_summoning_sickness(&mut runner, deceiver);
+        for island in islands {
+            tap_for_mana(&mut runner, island);
+        }
+        let reveal = runner.state().objects[&deceiver]
+            .abilities
+            .iter()
+            .enumerate()
+            .filter(|(_, ability)| !is_mana_ability(ability))
+            .nth(1)
+            .map(|(index, _)| index)
+            .expect("the reveal ability");
+        activate(&mut runner, deceiver, reveal, &[]);
+        assert_eq!(top_source_name(&runner).as_deref(), Some("Harsh Deceiver"));
+        assert!(
+            viewer_recommends_pass(&runner),
+            "Deceiver over a {top_card}: the pass stays"
         );
     }
 }
