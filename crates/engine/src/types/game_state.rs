@@ -3556,6 +3556,12 @@ pub enum LogicalZoneChangeTerminalOutcome {
     /// not an ordinary replacement result and must not synthesize its original
     /// `ZoneChanged` event or any settlement source authority.
     AbandonedByPlayerLeft,
+    /// CR 400.7 + CR 603.7c: the object left the battlefield, or changed
+    /// incarnation, before this shared batch consulted it — another effect
+    /// resolved first. The member is terminal for the original logical action
+    /// with no occurrence and no post-event authority, exactly like a departed
+    /// member, but no player left the game.
+    Preempted,
 }
 
 /// Terminal result of one attempted zone-move delivery before a logical owner
@@ -3939,7 +3945,8 @@ impl LogicalZoneChangeGroup {
                         }
                     }
                 }
-                LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft => {
+                LogicalZoneChangeTerminalOutcome::Preempted
+                | LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft => {
                     if post_event_context.is_some() {
                         return Err(format!(
                             "abandoned logical zone-change member {}:{} has a post-event context",
@@ -4133,6 +4140,13 @@ impl LogicalZoneChangeGroup {
     /// its owner left the game. A shared batch retains its other members and
     /// their original event authority; the abandoned member contributes neither
     /// an occurrence nor a post-event source context to the original action.
+    /// CR 400.7 + CR 603.7c: retire a member whose object left the battlefield
+    /// or changed incarnation before it was consulted. No occurrence and no
+    /// post-event source context belong to the original action.
+    pub fn record_preempted(&mut self, member: ObjectIncarnationRef) -> Result<(), String> {
+        self.record_terminal_for_member(member, LogicalZoneChangeTerminalOutcome::Preempted)
+    }
+
     pub fn record_abandoned_by_player_left(
         &mut self,
         member: ObjectIncarnationRef,
@@ -4146,7 +4160,8 @@ impl LogicalZoneChangeGroup {
         };
         match self.terminal_outcomes.get(index) {
             Some(LogicalZoneChangeTerminalOutcome::Moved { .. })
-            | Some(LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft) => Ok(()),
+            | Some(LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft)
+            | Some(LogicalZoneChangeTerminalOutcome::Preempted) => Ok(()),
             Some(
                 LogicalZoneChangeTerminalOutcome::Pending
                 | LogicalZoneChangeTerminalOutcome::Prevented
@@ -4368,6 +4383,12 @@ impl LogicalZoneChangeGroup {
                     member.identity.object_id.0, member.identity.incarnation
                 ));
             }
+            LogicalZoneChangeTerminalOutcome::Preempted => {
+                return Err(format!(
+                    "logical zone-change member {}:{} left before it was consulted",
+                    member.identity.object_id.0, member.identity.incarnation
+                ));
+            }
             LogicalZoneChangeTerminalOutcome::Pending => {
                 return Err(format!(
                     "logical zone-change member {}:{} is not terminal",
@@ -4476,7 +4497,8 @@ impl LogicalZoneChangeGroup {
                 }
                 LogicalZoneChangeTerminalOutcome::Prevented
                 | LogicalZoneChangeTerminalOutcome::Remained => {}
-                LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft => {
+                LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft
+                | LogicalZoneChangeTerminalOutcome::Preempted => {
                     if self
                         .post_event_member_contexts
                         .get(index)
@@ -4539,7 +4561,8 @@ impl LogicalZoneChangeGroup {
                 }
                 LogicalZoneChangeTerminalOutcome::Prevented
                 | LogicalZoneChangeTerminalOutcome::Remained
-                | LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft => None,
+                | LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft
+                | LogicalZoneChangeTerminalOutcome::Preempted => None,
                 LogicalZoneChangeTerminalOutcome::Pending => unreachable!(
                     "validate_complete rejects pending logical zone-change member outcomes"
                 ),
@@ -7573,7 +7596,16 @@ impl PendingBatchDeliveries {
     ) -> Result<(), String> {
         if !matches!(
             arrangement.position,
-            LibraryPosition::Top | LibraryPosition::Bottom | LibraryPosition::NthFromTop { .. }
+            LibraryPosition::Top
+                | LibraryPosition::Bottom
+                | LibraryPosition::NthFromTop { .. }
+                // CR 401.4 + CR 401.7: "just beneath the top X cards" is a
+                // fixed slot whose owner also arranges the arrivals. This is
+                // the exact set the producer groups; keeping the two in step
+                // makes a parked fixed-depth arrangement a savable state.
+                | LibraryPosition::BeneathTop {
+                    depth: crate::types::ability::QuantityExpr::Fixed { .. },
+                }
         ) {
             return Err("a staged arrangement groups an unsupported library position".to_string());
         }
@@ -7752,6 +7784,16 @@ pub struct StagedBatchDelivery {
     pub members: Vec<StagedBatchMember>,
     /// Next member to consult (`Approving`) or deliver (`Delivering`).
     pub cursor: usize,
+    /// CR 616.1 + CR 101.4c + CR 101.4d: announcement indices in the order the
+    /// approval loop asks for them — APNAP by the player each member's next
+    /// decision will ask, then announcement order. Physical delivery stays in
+    /// announcement order through `cursor`; this order only schedules choices,
+    /// and is rebuilt whenever a pause resolves and new choices may exist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consult_order: Vec<u32>,
+    /// Position in `consult_order` while `Approving`.
+    #[serde(default)]
+    pub consult_pos: usize,
     /// Owner/position groups derived from final approvals, in prompt order.
     pub arrangements: Vec<StagedLibraryArrangement>,
     /// Next arrangement group to prompt (`Arranging`).
@@ -7813,6 +7855,12 @@ pub struct StagedBatchMember {
     pub announcement_index: u32,
     pub request: PendingBatchZoneMoveRequest,
     pub identity: ObjectIncarnationRef,
+    /// CR 400.7 + CR 603.7c: the origin zone the producer snapshotted for this
+    /// member. A member that is no longer there must not be consulted for a
+    /// replacement, exactly as the ordinary path refuses it before proposing.
+    /// `None` (legacy saves) keeps the frozen delivery-time identity check only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_origin: Option<Zone>,
     /// CR 400.3 owner recorded at approval; validated live before delivery.
     pub owner: PlayerId,
     pub state: StagedBatchMemberState,
@@ -7831,6 +7879,11 @@ pub struct StagedBatchMember {
     /// CR 616.1: approved replacement work retained until member delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_post_replacement: Option<PostReplacementDrainStack>,
+    /// CR 616.1 + CR 101.4c: the player the next outstanding decision for this
+    /// member will actually ask, cached when the approval order is scheduled.
+    /// `None` means the member has no decision and only needs delivery order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_chooser: Option<PlayerId>,
 }
 
 /// The current-member consultation and delivery states. The Destroy adapter
@@ -8213,7 +8266,8 @@ pub(crate) fn change_zone_settled_facts(
             Some(
                 LogicalZoneChangeTerminalOutcome::Prevented
                 | LogicalZoneChangeTerminalOutcome::Remained
-                | LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft,
+                | LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft
+                | LogicalZoneChangeTerminalOutcome::Preempted,
             )
             | None => {}
             Some(LogicalZoneChangeTerminalOutcome::Pending) => {
@@ -54609,6 +54663,7 @@ mod tests {
     fn abandoned_destroy_member_with_outer_approval_validates() {
         let member = StagedBatchMember {
             announcement_index: 0,
+            expected_origin: None,
             request: PendingBatchZoneMoveRequest {
                 object_id: ObjectId(1),
                 destination: Zone::Graveyard,
@@ -54643,6 +54698,7 @@ mod tests {
                 outer: StagedDestroyOuterApproval::Approved,
             }),
             approved_post_replacement: None,
+            pending_chooser: None,
         };
         PendingBatchDeliveries::validate_staged_member(&member)
             .expect("concession-pruned destroy member with its outer approval is legal");
@@ -54663,6 +54719,7 @@ mod tests {
         );
         StagedBatchMember {
             announcement_index: 0,
+            expected_origin: None,
             request: PendingBatchZoneMoveRequest {
                 object_id,
                 destination: Zone::Graveyard,
@@ -54693,6 +54750,7 @@ mod tests {
             terminal,
             operation: StagedMemberOperation::ZoneMove,
             approved_post_replacement: None,
+            pending_chooser: None,
         }
     }
 
@@ -54885,6 +54943,8 @@ mod tests {
                 cursor,
                 arrangements: Vec::new(),
                 arrangement_cursor: 0,
+                consult_order: Vec::new(),
+                consult_pos: 0,
                 population_devour_snapshot: None,
             }),
         }

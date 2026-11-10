@@ -7603,6 +7603,7 @@ pub(super) fn handle_resolution_choice(
                                 requests,
                                 logical_zone_change_group,
                                 tail,
+                                ctx.origin,
                                 events,
                             ) {
                                 crate::game::zone_pipeline::StagedChangeZoneOutcome::Paused => {

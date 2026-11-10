@@ -2785,8 +2785,21 @@ pub(crate) fn arranged_library_slot(
                 .min(library_len_after_current_removal.saturating_sub(present))
                 + before
         }
-        crate::types::ability::LibraryPosition::BeneathTop { .. }
-        | crate::types::ability::LibraryPosition::RandomWithinTop { .. } => {
+        // CR 401.7: "just beneath the top X cards" is the fixed slot X
+        // (0-based index X) and shares the numbered-block insertion math.
+        crate::types::ability::LibraryPosition::BeneathTop { depth } => {
+            let crate::types::ability::QuantityExpr::Fixed { value } = depth else {
+                debug_assert!(false, "arranged BeneathTop needs a fixed depth");
+                return 0;
+            };
+            let (present, before) = delivered_ranks
+                .fold((0usize, 0usize), |(present, before), other| {
+                    (present + 1, before + usize::from(other < rank))
+                });
+            (*value as usize).min(library_len_after_current_removal.saturating_sub(present))
+                + before
+        }
+        crate::types::ability::LibraryPosition::RandomWithinTop { .. } => {
             debug_assert!(false, "unsupported arranged library position");
             0
         }

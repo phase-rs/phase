@@ -12090,7 +12090,16 @@ fn detach_after_player_scope_local_chain(
         next.player_scope,
         Some(PlayerFilter::PerformedActionThisWay { .. })
     );
+    // CR 608.2c + CR 109.5: a child that declares its OWN, distinct scope is a
+    // separate iteration, not a continuation inside the parent's. Comparing the
+    // explicit scope here is what keeps a typed `RevealTop`-style continuation
+    // from silently inheriting the parent's owner iteration.
+    let child_scope_is_distinct = next
+        .player_scope
+        .as_ref()
+        .is_some_and(|child_scope| child_scope != scope);
     let next_is_local_continuation = next.sub_link == SubAbilityLink::ContinuationStep
+        && !child_scope_is_distinct
         && is_player_scope_local_continuation(&node.effect, &next.effect, scope)
         && !next_is_scoped_search_shuffle_tail;
     if next_is_performed_gated
@@ -63363,6 +63372,83 @@ mod tests {
             );
         }
         assert_eq!(state.last_effect_count, Some(0));
+    }
+
+    /// CR 608.2c + CR 109.5: a continuation that declares its own, distinct
+    /// player scope is a separate iteration, not part of the parent's. The
+    /// detach must hand it back (scope intact) instead of absorbing it into the
+    /// owner iteration and clearing the scope.
+    #[test]
+    fn distinct_continuation_scope_is_not_absorbed_into_the_owner_iteration() {
+        let owner_shuffle_scope = PlayerFilter::TrackedSetPossessor {
+            relation: crate::types::ability::PlayerRelation::All,
+            possession: crate::types::ability::PossessionAxis::Owner,
+            filter: TargetFilter::Any,
+            caused_by: Some(crate::types::ability::ThisWayCause::OwnerLibraryShuffleSubject),
+        };
+        let mut node = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            },
+            vec![],
+            ObjectId(7),
+            PlayerId(0),
+        );
+        let mut child = ResolvedAbility::new(
+            Effect::RevealTop {
+                player: TargetFilter::ScopedPlayer,
+                count: 1,
+            },
+            vec![],
+            ObjectId(7),
+            PlayerId(0),
+        );
+        child.sub_link = SubAbilityLink::ContinuationStep;
+        child.player_scope = Some(PlayerFilter::Opponent);
+        node.sub_ability = Some(Box::new(child));
+
+        let tail = detach_after_player_scope_local_chain(&mut node, &owner_shuffle_scope, false);
+        let tail = tail.expect("a distinct child scope is detached, not absorbed");
+        assert_eq!(
+            tail.player_scope,
+            Some(PlayerFilter::Opponent),
+            "the child keeps the scope it declared"
+        );
+        assert!(
+            node.sub_ability.is_none(),
+            "the distinct child is not re-attached inside the owner iteration"
+        );
+
+        // Control: the same chain without its own scope IS the local
+        // continuation and is absorbed with the redundant scope cleared.
+        let mut node = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            },
+            vec![],
+            ObjectId(7),
+            PlayerId(0),
+        );
+        let mut child = ResolvedAbility::new(
+            Effect::RevealTop {
+                player: TargetFilter::ScopedPlayer,
+                count: 1,
+            },
+            vec![],
+            ObjectId(7),
+            PlayerId(0),
+        );
+        child.sub_link = SubAbilityLink::ContinuationStep;
+        node.sub_ability = Some(Box::new(child));
+        assert!(
+            detach_after_player_scope_local_chain(&mut node, &owner_shuffle_scope, false).is_none(),
+            "an unscoped owner-seat continuation stays in the iteration"
+        );
+        let attached = node
+            .sub_ability
+            .as_ref()
+            .expect("the absorbed continuation stays attached");
+        assert!(attached.player_scope.is_none());
     }
 
     /// CR 608.2c + CR 701.24a: The runtime keeps only the exact immediate

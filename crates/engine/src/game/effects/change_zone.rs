@@ -922,7 +922,7 @@ fn bound_move_members(
 /// The single per-member test for "this object can no longer undergo the
 /// move": [`process_one_zone_move_with_terminal`] leaves such a member where it
 /// is, and the optional-move feasibility predicates below read the same test.
-fn zone_move_member_cannot_move(
+pub(crate) fn zone_move_member_cannot_move(
     state: &GameState,
     obj_id: ObjectId,
     expected_origin: Option<Zone>,
@@ -1791,6 +1791,7 @@ pub fn resolve(
             requests,
             logical_zone_change_group,
             tail,
+            ctx.origin,
             events,
         ) {
             crate::game::zone_pipeline::StagedChangeZoneOutcome::Paused => return Ok(None),
@@ -3356,11 +3357,28 @@ pub fn resolve_all(
                 };
                 // CR 730.3c: expand merged components only after binding the
                 // actual referent; absent selections never fall back to source.
-                Some(crate::game::merge::expand_returned_merge_components(
-                    state,
-                    objects,
-                    &target_filter,
-                ))
+                //
+                // A `ParentTarget` slot here names an announced choice (the
+                // owner-library object of "its owner shuffles it into their
+                // library"), not the object a merged permanent became as it
+                // left the battlefield: the leave itself was performed by the
+                // parent instruction, which already carried the survivor's
+                // components. Expanding a freshly chosen card would move its
+                // unselected former siblings too.
+                let expandable = crate::game::merge::references_object_that_left(&target_filter)
+                    && !matches!(
+                        target_filter,
+                        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+                    );
+                Some(if expandable {
+                    crate::game::merge::expand_returned_merge_components(
+                        state,
+                        objects,
+                        &target_filter,
+                    )
+                } else {
+                    objects
+                })
             }
         }
     } else {
@@ -3699,6 +3717,7 @@ pub fn resolve_all(
             requests,
             logical_zone_change_group,
             tail,
+            ctx.origin,
             events,
         ) {
             crate::game::zone_pipeline::StagedChangeZoneOutcome::Paused => return Ok(()),

@@ -672,6 +672,79 @@ mod tests {
         leader
     }
 
+    /// CR 701.50b + CR 616.1: when the conniving permanent has already left,
+    /// two applicable Leader replacements must still be offered to the departed
+    /// object's controller (its last known information), and the connive must
+    /// run instead of being prevented.
+    #[test]
+    fn departed_connive_uses_last_known_controller_for_two_leader_choices() {
+        use crate::game::effects::connive::propose_connive;
+        use crate::game::engine_replacement::handle_replacement_choice;
+        use crate::types::identifiers::ObjectIncarnationRef;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let conniver = make_battlefield_creature(&mut state, PlayerId(0));
+        let identity = ObjectIncarnationRef::from_object(&state.objects[&conniver]);
+        install_leader_replacement(&mut state, PlayerId(0));
+        install_leader_replacement(&mut state, PlayerId(0));
+        add_card_to_library(&mut state, PlayerId(0), "Drawn one", false);
+        add_card_to_library(&mut state, PlayerId(0), "Drawn two", false);
+        crate::game::zones::move_to_zone(&mut state, conniver, Zone::Graveyard, &mut Vec::new());
+        let subject = state
+            .capture_departed_connive_subject(identity)
+            .expect("the departed conniver retains last known information");
+
+        let mut events = Vec::new();
+        propose_connive(&mut state, subject, 1, Default::default(), &mut events)
+            .expect("a departed connive still resolves from last known information");
+
+        let crate::types::game_state::WaitingFor::ReplacementChoice { player, .. } =
+            state.waiting_for.clone()
+        else {
+            panic!(
+                "two applicable Leaders must offer the ordering choice, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(
+            player,
+            PlayerId(0),
+            "CR 701.50b: the departed object's controller chooses"
+        );
+
+        let mut resumed = Vec::new();
+        handle_replacement_choice(&mut state, 0, &mut resumed)
+            .expect("accepting the first Leader replacement resumes the connive");
+        // Discriminator: the accepted Leader replacement draws exactly once,
+        // and the connive itself then draws exactly once. A fixture that only
+        // checked "a draw happened" would pass on the replacement's own draw
+        // even if the connive never started.
+        let draws = resumed
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    crate::types::events::GameEvent::CardDrawn { player_id, .. }
+                        if *player_id == PlayerId(0)
+                )
+            })
+            .count();
+        assert_eq!(
+            draws, 2,
+            "one Leader replacement draw plus the connive's own draw: {resumed:?}"
+        );
+        assert!(
+            state.objects[&conniver]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0)
+                == 0,
+            "the departed object is not the returned permanent and gains no counter"
+        );
+    }
+
     /// Make a battlefield creature controlled by `controller`.
     fn make_battlefield_creature(state: &mut GameState, controller: PlayerId) -> ObjectId {
         let id = create_object(

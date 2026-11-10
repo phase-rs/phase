@@ -728,6 +728,189 @@ fn hallowed_burial_interleaved_commander_host_declines_command_after_round_trip(
     check_hallowed_burial_commander_host_round_trip(true, false);
 }
 
+/// CR 903.9b + CR 730.3a + CR 401.4: declining the command-zone replacement
+/// leaves the merged permanent's component order pending, and that pending
+/// choice survives a save/reopen before the resumed admission delivers.
+#[test]
+fn hallowed_burial_declined_component_order_survives_round_trip_and_continues() {
+    let mut scenario =
+        GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, burial_mana());
+    scenario.with_library_top(P0, &["Sentinel"]);
+    let host = scenario
+        .add_creature_from_oracle(P0, "Otrimi, the Ever-Playful", 6, 6, OTRIMI_ORACLE)
+        .with_subtypes(vec!["Nightmare", "Beast"])
+        .commander()
+        .id();
+    let rider = scenario
+        .add_creature_to_hand_from_oracle(P0, "Gemrazer", 4, 4, GEMRAZER_ORACLE)
+        .with_subtypes(vec!["Beast"])
+        .id();
+    let burial = add_hallowed_burial(&mut scenario);
+    let mut runner = scenario.build();
+    merge_pair(&mut runner, host, rider);
+    let sentinel = library(&runner, P0)[0];
+    let cast = runner.cast(burial).resolve();
+    // One merged permanent, one owner: the pending replacement is the first
+    // pause (the component order only follows a decline).
+    assert!(matches!(
+        cast.final_waiting_for(),
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+    // Save/reopen before the decline: the resumable replacement pause is intact.
+    round_trip_arrangement(&mut runner);
+    let declined = runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("P0 declines the command-zone replacement");
+    assert_eq!(
+        put_at_library_position_resolutions(&declined.events),
+        0,
+        "the declined host still owes its component order"
+    );
+    match &runner.state().waiting_for {
+        WaitingFor::DigRestSplitChoice { player, cards, .. } => {
+            assert_eq!(*player, P0);
+            let mut offered = cards.clone();
+            offered.sort_unstable();
+            let mut expected = vec![host, rider];
+            expected.sort_unstable();
+            assert_eq!(offered, expected);
+        }
+        other => panic!("expected lone merged permanent's component order, got {other:?}"),
+    }
+    // Save/reopen with the component-order choice pending, then finish it.
+    round_trip_arrangement(&mut runner);
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![rider, host],
+        })
+        .expect("P0 submits the resumed component order");
+    assert_eq!(
+        library(&runner, P0),
+        vec![sentinel, rider, host],
+        "the declined host and its rider land in submitted order"
+    );
+    assert_eq!(zone(&runner, host), Zone::Library);
+    assert_eq!(zone(&runner, rider), Zone::Library);
+    assert_eq!(zone(&runner, burial), Zone::Graveyard);
+    assert!(
+        runner.state().active_batch_delivery().is_none(),
+        "the resumed order settles its batch owner"
+    );
+    assert_arrangement_finished(&runner);
+}
+
+/// CR 730.3c + CR 401.4 + CR 401.7: a merged permanent put "just beneath the
+/// top X cards" makes its components one owner arrangement at a fixed slot, and
+/// that pending fixed-depth arrangement is a savable state: capture, reopen and
+/// finish it.
+#[test]
+fn unexpectedly_absent_fixed_depth_component_arrangement_survives_reopen() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::White, ManaType::White, ManaType::White]
+            .into_iter()
+            .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let absent = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Unexpectedly Absent",
+            false,
+            "Put target nonland permanent into its owner's library just beneath the top X cards of that library.",
+        )
+        .with_mana_cost(engine::types::mana::ManaCost::Cost {
+            shards: vec![
+                engine::types::mana::ManaCostShard::X,
+                engine::types::mana::ManaCostShard::White,
+                engine::types::mana::ManaCostShard::White,
+            ],
+            generic: 0,
+        })
+        .id();
+    let host = scenario.add_creature(P1, "Merged host", 3, 3).id();
+    let rider = scenario.add_creature(P1, "Merged rider", 2, 2).id();
+    scenario.with_library_top(P1, &["Sentinel"]);
+    let mut runner = scenario.build();
+    merge_pair(&mut runner, host, rider);
+    let sentinel = library(&runner, P1)[0];
+
+    runner.cast(absent).target_object(host).x(1).commit();
+    if matches!(runner.state().waiting_for, WaitingFor::ChooseXValue { .. }) {
+        runner.act(GameAction::ChooseX { value: 1 }).unwrap();
+    }
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(engine::types::ability::TargetRef::Object(host)),
+            })
+            .unwrap();
+    }
+    for _ in 0..16 {
+        match &runner.state().waiting_for {
+            WaitingFor::ReplacementChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .unwrap();
+            }
+            WaitingFor::ChooseXValue { .. } => {
+                runner.act(GameAction::ChooseX { value: 1 }).unwrap();
+            }
+            WaitingFor::DigRestSplitChoice { .. } => break,
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            _ => {
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+        }
+    }
+    let WaitingFor::DigRestSplitChoice { player, cards, .. } = &runner.state().waiting_for else {
+        panic!(
+            "the fixed-depth component arrangement must pause for its owner: {:?} host={:?} rider={:?} lib={:?}",
+            runner.state().waiting_for,
+            zone(&runner, host),
+            zone(&runner, rider),
+            library(&runner, P1)
+        );
+    };
+    assert_eq!(*player, P1);
+    let mut offered = cards.clone();
+    offered.sort_unstable();
+    let mut expected = vec![host, rider];
+    expected.sort_unstable();
+    assert_eq!(offered, expected);
+
+    // The blocker: this pending fixed-slot arrangement must pass persistence
+    // validation, so the game can be saved and reopened here.
+    round_trip_arrangement(&mut runner);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DigRestSplitChoice { player, .. } if player == P1
+    ));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![rider, host],
+        })
+        .expect("P1 submits the reopened fixed-depth arrangement");
+    assert_eq!(
+        library(&runner, P1),
+        vec![sentinel, rider, host],
+        "the X=1 slot keeps one card above the pair, submitted in top-down order"
+    );
+    assert_eq!(zone(&runner, host), Zone::Library);
+    assert_eq!(zone(&runner, rider), Zone::Library);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
 /// CR 903.9b + CR 401.4: an earlier consultation can pause while the seeded
 /// permanent has not yet been consulted. Its original submitted order survives.
 #[test]

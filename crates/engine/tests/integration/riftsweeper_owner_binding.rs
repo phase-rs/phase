@@ -552,3 +552,84 @@ fn worldsouls_rage_keeps_damage_target_and_resolution_land_choice_separate() {
         assert_eq!(runner.state().objects[&nonland].zone, Zone::Graveyard);
     }
 }
+
+// CR 730.3c: a freshly chosen exile target is one card, even when that card is a
+// former merged component whose siblings sit beside it in exile. The continuity
+// expansion belongs to "return the object it became", not to a new selection.
+#[test]
+fn riftsweeper_fresh_target_does_not_expand_merged_components() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_to_hand(P0, "Riftsweeper", 2, 2)
+        .with_subtypes(vec!["Elf", "Shaman"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+        .from_oracle_text(RIFTSWEEPER)
+        .id();
+    let host = scenario.add_creature(P0, "Merged host", 3, 3).id();
+    let rider = scenario.add_creature(P0, "Merged rider", 2, 2).id();
+    let spare = scenario.add_land_to_exile(P1, "Island").id();
+    scenario.with_mana_pool(
+        P0,
+        (0..2)
+            .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    engine::game::merge::merge_object_onto(
+        runner.state_mut(),
+        rider,
+        host,
+        engine::game::merge::MergeSide::Bottom,
+        &mut Vec::new(),
+    );
+    runner.state_mut().battlefield.retain(|&id| id != rider);
+    // The merged permanent leaves the battlefield: the survivor moves and the
+    // absorbed card splits into the same zone with a back-link.
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), host, Zone::Exile, &mut events);
+    assert_eq!(runner.state().objects[&host].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&rider].zone, Zone::Exile);
+    assert!(runner.state().objects[&rider]
+        .split_from_merge_survivor
+        .is_some());
+
+    runner.cast(source).commit();
+    runner.advance_until_stack_empty();
+    let WaitingFor::TriggerTargetSelection { target_slots, .. } = &runner.state().waiting_for
+    else {
+        panic!(
+            "Riftsweeper must announce an exile target: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(target_slots.len(), 1);
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(host)));
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(spare)));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(host)),
+        })
+        .unwrap();
+    let mut events = vec![];
+    for _ in 0..2 {
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    finished(&runner);
+    assert_eq!(
+        shuffles(&events),
+        vec![P0],
+        "only the chosen card's owner shuffles"
+    );
+    assert_eq!(runner.state().objects[&host].zone, Zone::Library);
+    assert_eq!(
+        runner.state().objects[&rider].zone,
+        Zone::Exile,
+        "the unselected former component stays in exile"
+    );
+    assert_eq!(runner.state().objects[&spare].zone, Zone::Exile);
+}

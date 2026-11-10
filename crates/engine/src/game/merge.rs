@@ -662,7 +662,7 @@ fn leave_successor(survivor: &GameObject) -> ObjectIncarnationRef {
 /// battlefield" — i.e. continuity references that find the object a merged
 /// permanent became — as opposed to a freshly chosen target. Only these expand
 /// to a former merged permanent's component cards.
-fn references_object_that_left(target_filter: &TargetFilter) -> bool {
+pub(crate) fn references_object_that_left(target_filter: &TargetFilter) -> bool {
     matches!(
         target_filter,
         TargetFilter::ParentTarget

@@ -4815,8 +4815,14 @@ impl ResolutionStack {
                     // the single staged ROOT, so the staged lookup population is
                     // exactly {root} ∪ {its linked children} — never a second,
                     // independent owner.
+                    // A staged component child answers to exactly one owner:
+                    // either the staged ROOT of this group, or the legacy batch
+                    // whose delivery opened it (a restored legacy save can
+                    // still reach the private component arrangement). A staged
+                    // non-root parent would be a second, independent owner.
                     if child.staged.is_some()
-                        && !(parent.staged.is_some() && parent.component_delivery_parent.is_none())
+                        && parent.staged.is_some()
+                        && parent.component_delivery_parent.is_some()
                     {
                         return Err(ResolutionStackError::InvalidPayload {
                             frame: FrameKind::BatchDelivery,

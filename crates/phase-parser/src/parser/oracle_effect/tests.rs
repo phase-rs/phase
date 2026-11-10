@@ -28285,20 +28285,31 @@ fn shuffle_compound_subject_into_owners_libraries() {
 
 /// CR 400.7e + CR 608.2c: only a bare singular "it" falls back to the ability's
 /// source when the chain established no chosen referent. A demonstrative or
-/// plural object phrase names an earlier set and must not become the source.
+/// plural object phrase with no proven set is an honest gap, never the source.
 #[test]
 fn shuffle_owner_library_source_fallback_is_bare_singular_it_only() {
-    for (text, expect_self_ref) in [
-        ("shuffle it into its owner's library", true),
-        ("shuffle that card into its owner's library", false),
-        ("shuffle them into their owners' libraries", false),
+    let it = parse_effect_clause(
+        "shuffle it into its owner's library",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(it.effect.target_filter(), Some(TargetFilter::SelfRef)),
+        "a bare \"it\" names the source: {:?}",
+        it.effect
+    );
+    for text in [
+        "shuffle that card into its owner's library",
+        "shuffle them into their owners' libraries",
     ] {
         let clause = parse_effect_clause(text, &mut ParseContext::default());
-        let target = clause.effect.target_filter().cloned();
-        let has_self_ref = matches!(target, Some(TargetFilter::SelfRef));
-        assert_eq!(
-            has_self_ref, expect_self_ref,
-            "{text:?} target={target:?} effect={:?}",
+        assert!(
+            !matches!(clause.effect.target_filter(), Some(TargetFilter::SelfRef)),
+            "an unbound set phrase must not become the source: {text:?} -> {:?}",
+            clause.effect
+        );
+        assert!(
+            matches!(clause.effect, Effect::Unimplemented { .. }),
+            "an unbound set phrase stays an honest gap: {text:?} -> {:?}",
             clause.effect
         );
     }

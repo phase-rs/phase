@@ -2939,3 +2939,251 @@ fn two_player_replacement_chooser_concession_keeps_game_over() {
     assert!(state.pending_replacement.is_none());
     assert!(state.resolution_stack.is_empty());
 }
+
+/// CR 400.7 + CR 603.7c: a staged member that changed zone while an earlier
+/// chooser was answering is refused before any replacement is offered for it.
+/// The pause here is a real replacement choice with the second member still
+/// unconsulted, not the commander graveyard SBA that runs after delivery.
+#[test]
+fn staged_member_that_left_during_a_pause_is_not_consulted() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let watcher = scenario.add_creature(P0, "Watcher of P0", 1, 1).id();
+    let first = scenario.add_creature(P1, "First Bear", 2, 2).id();
+    let later = scenario.add_creature(P1, "Later Bear", 2, 2).id();
+    let day = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
+
+    let mut runner = scenario.build();
+    add_source_authority_optional_replacement(runner.state_mut(), watcher, "First Bear");
+    runner.cast(day).commit();
+    resolve_to_first_replacement_choice(&mut runner);
+    match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } => {
+            assert_eq!(*player, P0, "the first member's chooser is asked first");
+            assert!(candidates
+                .iter()
+                .any(|candidate| candidate.source_id == watcher));
+        }
+        other => panic!("expected the first member's replacement choice, got {other:?}"),
+    }
+    let staged = runner
+        .state()
+        .active_batch_delivery()
+        .and_then(|pending| pending.staged.as_ref())
+        .expect("the staged owner is parked at the choice");
+    assert!(
+        staged.members.iter().any(|member| {
+            member.identity.object_id == later
+                && member.state == engine::types::game_state::StagedBatchMemberState::Unconsulted
+        }),
+        "the later member must still be unconsulted when the pause happens"
+    );
+
+    // Stand-in for another effect moving the not-yet-consulted member while the
+    // chooser is still deciding.
+    let mut moved = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), later, Zone::Hand, &mut moved);
+    assert_eq!(zone_of_state(runner.state(), later), Zone::Hand);
+
+    let answered = runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("P0 declines, so the first member is destroyed");
+    assert_eq!(zone_of_state(runner.state(), first), Zone::Graveyard);
+    assert_eq!(
+        zone_of_state(runner.state(), later),
+        Zone::Hand,
+        "the departed member is never destroyed from its new zone"
+    );
+    assert!(
+        !answered.events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { object_id, .. } if *object_id == later
+        )),
+        "no delivery is attempted for the member that left"
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 616.1 + CR 903.9b: a replacement's chooser is not always the affected
+/// object's controller. A source-authority replacement is answered by its
+/// source's controller, so the staged approval asks that player in APNAP order
+/// even when the affected objects' controllers point the other way.
+#[test]
+fn staged_destroy_consults_a_source_authority_chooser_in_apnap_order() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // `first` is P0's creature but its replacement is granted by P1's watcher;
+    // `second` is P1's creature and its replacement comes from P0's watcher.
+    let watcher_p1 = scenario.add_creature(P1, "Watcher of P1", 1, 1).id();
+    let watcher_p0 = scenario.add_creature(P0, "Watcher of P0", 1, 1).id();
+    let first = scenario.add_creature(P0, "First Bear", 2, 2).id();
+    let second = scenario.add_creature(P1, "Second Bear", 2, 2).id();
+    let day = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
+
+    let mut runner = scenario.build();
+    add_source_authority_optional_replacement(runner.state_mut(), watcher_p1, "First Bear");
+    add_source_authority_optional_replacement(runner.state_mut(), watcher_p0, "Second Bear");
+    runner.cast(day).commit();
+    resolve_to_first_replacement_choice(&mut runner);
+    match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } => {
+            assert_eq!(
+                *player, P0,
+                "the P0-watcher's choice is asked first in APNAP order: {candidates:?}"
+            );
+            assert!(candidates
+                .iter()
+                .any(|candidate| candidate.source_id == watcher_p0));
+        }
+        other => panic!("expected P0's watcher choice first, got {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("P0 declines, so the second bear is destroyed");
+    resolve_to_first_replacement_choice(&mut runner);
+    match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } => {
+            assert_eq!(*player, P1);
+            assert!(candidates
+                .iter()
+                .any(|candidate| candidate.source_id == watcher_p1));
+        }
+        other => panic!("expected P1's watcher choice second, got {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .unwrap();
+    for id in [first, second] {
+        assert_eq!(zone_of_state(runner.state(), id), Zone::Graveyard);
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 101.4c: when one player owns the order of several simultaneous decisions,
+/// the approval asks that same player for each of them, one at a time, and does
+/// not interleave another player's choice.
+#[test]
+fn staged_destroy_asks_one_player_for_two_simultaneous_decisions_in_order() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let watcher = scenario.add_creature(P0, "Watcher of P0", 1, 1).id();
+    let first = scenario.add_creature(P1, "First Bear", 2, 2).id();
+    let second = scenario.add_creature(P1, "Second Bear", 2, 2).id();
+    let day = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
+
+    let mut runner = scenario.build();
+    add_source_authority_optional_replacement(runner.state_mut(), watcher, "First Bear");
+    add_source_authority_optional_replacement(runner.state_mut(), watcher, "Second Bear");
+    runner.cast(day).commit();
+    let mut asked = Vec::new();
+    for _ in 0..2 {
+        resolve_to_first_replacement_choice(&mut runner);
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "expected a replacement choice: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        asked.push(*player);
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.source_id == watcher),
+            "both decisions belong to P0's watcher: {candidates:?}"
+        );
+        runner
+            .act(GameAction::ChooseReplacement { index: 1 })
+            .expect("P0 declines so the protected bear is destroyed");
+    }
+    assert_eq!(
+        asked,
+        vec![P0, P0],
+        "one player answers both simultaneous decisions"
+    );
+    assert_eq!(zone_of_state(runner.state(), first), Zone::Graveyard);
+    assert_eq!(zone_of_state(runner.state(), second), Zone::Graveyard);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+fn zone_of_state(state: &GameState, id: ObjectId) -> Zone {
+    state.objects[&id].zone
+}
+
+/// Attach an optional replacement answered by the definition source's
+/// controller ("the source's controller chooses") for the named creature's
+/// move, standing in for a printed source-authority replacement.
+fn add_source_authority_optional_replacement(state: &mut GameState, watcher: ObjectId, card: &str) {
+    state
+        .objects
+        .get_mut(&watcher)
+        .expect("watcher exists")
+        .replacement_definitions
+        .push(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .mode(ReplacementMode::Optional { decline: None })
+                .valid_card(TargetFilter::Typed(engine::types::ability::TypedFilter {
+                    type_filters: vec![engine::types::ability::TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![engine::types::ability::FilterProp::Named {
+                        name: card.to_string(),
+                    }],
+                }))
+                .choice_authority(
+                    engine::types::ability::ReplacementChoiceAuthority::SourceController,
+                )
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        library_shuffle: Default::default(),
+                        origin: None,
+                        destination: Zone::Exile,
+                        target: TargetFilter::Any,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
+                        face_down_profile: None,
+                        enters_modified_if: None,
+                    },
+                )),
+        );
+}
+
+/// Pass priority until the spell resolves into its first replacement choice.
+fn resolve_to_first_replacement_choice(runner: &mut GameRunner) {
+    for _ in 0..16 {
+        match &runner.state().waiting_for {
+            WaitingFor::ReplacementChoice { .. } | WaitingFor::CommanderZoneChoice { .. } => return,
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority passes to resolve the spell");
+            }
+            other => panic!("expected a replacement choice, got {other:?}"),
+        }
+    }
+    panic!("the destruction never reached a replacement choice");
+}

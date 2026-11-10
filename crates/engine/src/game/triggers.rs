@@ -4981,6 +4981,7 @@ pub(crate) fn collect_logical_zone_trigger_settlement(
         if matches!(
             group.terminal_outcomes[member_index],
             LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft
+                | LogicalZoneChangeTerminalOutcome::Preempted
         ) {
             continue;
         }
