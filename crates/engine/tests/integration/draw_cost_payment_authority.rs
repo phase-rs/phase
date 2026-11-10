@@ -2167,13 +2167,10 @@ fn a_nonactive_composite_draw_cost_activation_resumes_its_retained_suffix() {
     };
     let order = cards.clone();
     runner
-        .act(GameAction::Debug(DebugAction::MoveToZone {
+        .act(GameAction::Debug(DebugAction::RemoveObject {
             object_id: source,
-            to_zone: Zone::Graveyard,
-            library_position: None,
-            simulate: false,
         }))
-        .expect("the debug move removes the nonactive source");
+        .expect("the debug removal takes the nonactive source and its definition away");
     runner
         .act(GameAction::SelectCards { cards: order })
         .expect("submit the bottom order");

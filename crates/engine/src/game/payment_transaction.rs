@@ -1124,7 +1124,20 @@ pub(crate) fn owns_action(state: &GameState, action: &GameAction) -> bool {
     // admitted outside the payment; probing the canonical base would reject an
     // action whose cards were drawn into the hidden checkpoint.
     let mut probe = if let Some(checkpoint) = transaction.recovered.as_deref() {
-        (*checkpoint.state).clone()
+        let mut probe = (*checkpoint.state).clone();
+        // The admission probe uses the same runtime preparation as replay:
+        // card registries and the host's current interaction binding.
+        probe.card_db = state.card_db.clone();
+        probe.card_face_registry = state.card_face_registry.clone();
+        probe.meld_pair_registry = state.meld_pair_registry.clone();
+        probe.booster_shelf = state.booster_shelf.clone();
+        probe.all_card_names = state.all_card_names.clone();
+        probe.log_player_names = state.log_player_names.clone();
+        probe.interaction_session_id = state.interaction_session_id.clone();
+        probe.interaction_generation = state.interaction_generation;
+        probe.next_interaction_serial = state.next_interaction_serial.clone();
+        probe.active_interaction_slots = state.active_interaction_slots.clone();
+        probe
     } else {
         project(state)
     };

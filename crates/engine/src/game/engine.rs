@@ -18323,6 +18323,22 @@ pub fn preflight_debug_action(
     action: &DebugAction,
 ) -> Result<(), EngineError> {
     check_debug_action_access(state, actor)?;
+    // CR 118.12: the shared admission authority for source-bound sandbox card
+    // creation while a recovered payment owns the executable state. A
+    // zero-count request stays the no-op projection.
+    if let DebugAction::CreateCard { count, .. } = action {
+        if *count > 0
+            && state
+                .payment_transaction
+                .as_ref()
+                .is_some_and(|transaction| transaction.recovered.is_some())
+        {
+            return Err(EngineError::InvalidAction(
+                "sandbox card creation is unavailable while a recovered payment is parked"
+                    .to_string(),
+            ));
+        }
+    }
     action
         .validate_create_count()
         .map_err(EngineError::InvalidAction)?;

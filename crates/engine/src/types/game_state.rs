@@ -16677,6 +16677,15 @@ impl GameState {
                     "recovery checkpoint prompt does not match the canonical prompt".to_string(),
                 );
             }
+            // CR 616.1: a replacement prompt without its nested owner cannot be
+            // answered; the restored checkpoint must carry the executable frame.
+            if matches!(
+                checkpoint.state.waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ) && checkpoint.state.pending_replacement.is_none()
+            {
+                return Err("recovery checkpoint prompt lacks its replacement owner".to_string());
+            }
             // The outer structural checks cannot see this nested state; apply
             // the same non-resolvable stack refusal to it.
             if checkpoint

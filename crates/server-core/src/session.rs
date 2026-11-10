@@ -1964,21 +1964,6 @@ impl GameSession {
                 takeback: None,
             });
         }
-        // CR 118.12: a sandbox creation materialized straight onto the live
-        // board would be discarded by the accepted checkpoint at settlement.
-        // The transport cannot materialize inside the hidden board, so refuse
-        // the source-bound route while a recovered payment is parked.
-        if matches!(&action, GameAction::Debug(DebugAction::CreateCard { .. }))
-            && self
-                .state
-                .payment_transaction
-                .as_ref()
-                .is_some_and(|transaction| transaction.recovered.is_some())
-        {
-            return Err(SessionActionError::Rejected(ActionRejection::new(
-                engine::types::action_rejection::ActionRejectionCode::ActionNotAllowed,
-            )));
-        }
         let debug_card_source = match &action {
             GameAction::Debug(DebugAction::CreateCard { card_name, .. }) => {
                 let card_db = card_db.ok_or_else(|| {
