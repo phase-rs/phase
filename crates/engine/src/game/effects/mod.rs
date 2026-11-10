@@ -29268,6 +29268,7 @@ mod tests {
                                     player_id: P0,
                                     sides: 1,
                                     result: Some(1),
+                                    ..
                                 }
                             )), "{site}, links={links}: the die must publish before its branch");
                             let body_gain = if site == "detached-tail" { 2 } else { 0 };

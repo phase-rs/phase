@@ -8314,8 +8314,10 @@ fn offered_replacements<'a>(state: &'a GameState, what: &str) -> Vec<(&'a str, &
 
 /// Answer the roll's ordering prompt with Pixie Guide first, after checking it
 /// offers `names` (sorted) and describes Pixie Guide's replacement by its own
-/// text: a render on a board where Humility is on the battlefield finds no
-/// definition, and falls back to "Replacement effect".
+/// text. A live render after Humility's effect applies (a prompt asked after an
+/// action boundary, as in BothPrompts CoFirst and V3b) finds no definition and
+/// falls back to "Replacement effect"; inside one inline batch (WithBarbarian
+/// CoFirst) the live board has not yet applied it.
 fn answer_roll_order_with_pixie(
     runner: &mut GameRunner,
     names: &[&str],
@@ -8423,7 +8425,7 @@ fn add_resident_pixie_barbarian_wyll_and_grumgully(scenario: &mut GameScenario) 
 }
 
 /// V3b. V3's board with Wyll, Blade of Frontiers resident too, and Humility
-/// delivered first + CR 616.1f + CR 603.6d + CR 614.12: answering Pixie Guide
+/// delivered first + CR 616.1f + CR 603.6d + CR 611.3b + CR 614.12 + CR 706.6 + CR 603.2c: answering Pixie Guide
 /// re-scans the roll on the board before its event, and the next ordering prompt,
 /// between Barbarian Class and Wyll, is rendered from that board, so Wyll's
 /// replacement is described by its own text. Three "plus one and ignore the
