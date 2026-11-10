@@ -182,7 +182,7 @@ pub(crate) fn drain_pending_connive_reentry(
 /// A completed draw frame also retires the emptied post-replacement frame it
 /// exposes, so the stack top seen by every caller is the frame that was beneath
 /// the draw's substitute.
-fn resume_active_draw_sequences(
+pub(super) fn resume_active_draw_sequences(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {

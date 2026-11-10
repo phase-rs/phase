@@ -9850,6 +9850,17 @@ pub(super) fn resume_pending_continuation_if_priority(
             || state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
             || !after.is_strictly_inside(&before)
         {
+            // CR 614.11a + CR 118.11: a bare cast/activation whose draw cost
+            // paused on an interactive substitute must resume once the whole
+            // draw instruction and its substitute subtree have finished.
+            if matches!(state.waiting_for, WaitingFor::Priority { .. })
+                && state.active_ability_continuation().is_none()
+                && (state.pending_cast.is_some() || state.pending_discard_for_cost.is_some())
+                && super::engine_replacement::resume_active_draw_sequences(state, events).is_none()
+            {
+                state.waiting_for =
+                    super::casting_costs::resume_interrupted_cost_payment(state, events, None)?;
+            }
             return Ok(());
         }
     }

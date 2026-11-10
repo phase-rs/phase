@@ -1272,3 +1272,105 @@ fn a_hand_reorder_between_recovery_and_completion_keeps_the_drawn_card() {
         "the accepted canonical order survives and the drawn card was discarded"
     );
 }
+
+/// Abundance, verbatim Oracle text: an interactive draw substitute with a
+/// land/nonland choice and a bottom-ordering prompt.
+const ABUNDANCE_ORACLE: &str = "If you would draw a card, you may instead choose land or \
+nonland and reveal cards from the top of your library until you reveal a card \
+of the chosen kind. Put that card into your hand and put all other cards \
+revealed this way on the bottom of your library in any order.";
+
+/// CR 614.11a + CR 118.11: a bare draw-cost activation resumes after both
+/// Abundance choices (the land/nonland choice and the bottom ordering), and the
+/// ability reaches the stack.
+#[test]
+fn a_draw_cost_activation_resumes_after_abundance_bottom_order() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &STAGED_LIBRARY);
+    scenario.with_library_top(P1, &STAGED_LIBRARY);
+    let source = scenario
+        .add_creature(P0, "Draw Cost Source", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::EffectCost {
+                effect: Box::new(draw_effect(1)),
+            }),
+        )
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Abundance", ABUNDANCE_ORACLE);
+    let mut runner = scenario.build();
+    // Two nonlands above a land so "Land" reveals both misses and asks for the
+    // bottom order.
+    {
+        let state = runner.state_mut();
+        let library: Vec<_> = state.players[P0.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect();
+        for (index, id) in library.iter().enumerate() {
+            let object = state.objects.get_mut(id).expect("library card");
+            object.card_types.core_types.clear();
+            if index == 2 {
+                object
+                    .card_types
+                    .core_types
+                    .push(engine::types::card_type::CoreType::Land);
+            }
+        }
+    }
+    evaluate_layers(runner.state_mut());
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the draw-cost activation begins");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player, .. } if player == P0
+        ),
+        "Abundance offers its optional replacement: {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accept Abundance");
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Land".to_string(),
+        })
+        .expect("choose Land");
+    let WaitingFor::RevealUntilBottomOrder { cards, .. } = &runner.state().waiting_for else {
+        panic!(
+            "Abundance asks for the revealed misses' order: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let order = cards.clone();
+    runner
+        .act(GameAction::SelectCards { cards: order })
+        .expect("submit the bottom order");
+
+    let state = runner.state();
+    assert!(
+        state.pending_cast.is_none(),
+        "the bare activation is no longer a pending cast"
+    );
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "the activation reaches the stack after the whole substitute settles: {:?}",
+        state.waiting_for
+    );
+}
