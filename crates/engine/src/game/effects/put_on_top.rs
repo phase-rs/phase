@@ -573,6 +573,28 @@ pub fn resolve(
         LibraryPosition::Top | LibraryPosition::Bottom | LibraryPosition::NthFromTop { .. } => true,
         LibraryPosition::BeneathTop { .. } | LibraryPosition::RandomWithinTop { .. } => false,
     };
+    // CR 730.3 + CR 730.3c + CR 401.4: a single selected permanent that is still
+    // a merged permanent leaves as its physical component cards (CR 730.3), and
+    // CR 730.3c applies this instruction to each of them. Those cards land in one
+    // library position at the same time, so each owner orders theirs (CR 401.4).
+    // The merge primitive delivers the whole pile as ONE leave event, so the
+    // arrangement is opened over the components and applied by that event's
+    // delivery (`engine_resolution_choices`) instead of being bypassed here.
+    let merged_leave_components: Option<Vec<ObjectId>> = to_place
+        .first()
+        .filter(|_| to_place.len() == 1)
+        .and_then(|id| state.objects.get(id))
+        .filter(|object| !object.merged_components.is_empty())
+        .map(|object| object.merged_components.clone());
+    // CR 701.24a + CR 401.4: "shuffle it into its owner's library" is parsed as
+    // an exact-source library placement followed by a terminal `Shuffle`
+    // sub-ability (the position is only a staging slot). A shuffle is not a
+    // placement at a specific position, so no owner arrangement applies; the
+    // direct delivery below stages the cards and the chained shuffle randomizes.
+    let position_is_staged_for_shuffle = matches!(
+        ability.sub_ability.as_deref().map(|sub| &sub.effect),
+        Some(Effect::Shuffle { .. })
+    );
     // CR 401.4 + CR 601.2c + CR 608.2d: an announced target set arrives in the
     // caster's announcement order, which is not an arrangement; the owner of two
     // or more cards put into one position of their library orders them as the
@@ -582,30 +604,49 @@ pub fn resolve(
     // is delivered below. A linked-exile pool is a resolution-time scan, not the
     // announcement. Resolution-time selections and ordered searches already
     // carry the chooser's own arrangement and never announce a target set.
-    if announced_target_set
-        && !target_filter.references_exiled_by_source()
-        && position_can_be_arranged
-    {
-        let owner_batches = super::change_zone::group_object_ids_by_owner_apnap(state, to_place);
-        if owner_batches.iter().any(|(_, cards)| cards.len() >= 2) {
-            // CR 401.4 + CR 101.1 + CR 608.2c + CR 608.2d: the arranger the
-            // instruction names is determined now, at resolution, and snapshotted
-            // onto each owner's batch. A named arranger that resolves to no player
-            // leaves the owner default standing; that fallback is unreachable for
-            // every current producer, whose `Controller` always resolves.
-            let arranger = arranger_filter
-                .as_ref()
-                .and_then(|filter| super::resolve_player_for_context_ref(state, ability, filter));
-            super::change_zone::open_owner_library_arrangement(
-                state,
-                owner_batches,
-                arranger,
-                ability.source_id,
-                position,
-                false,
-                ability.duration.clone(),
-            );
-            return Ok(());
+    //
+    // CR 730.3c: a recorded-departure expansion places the physical cards the
+    // merged permanent became. That trigger announced no target set, so without
+    // this branch its only recorded order was the delivery order built by
+    // `expand_returned_merge_components`, never the owner's own (CR 401.4).
+    let arrangement_members: Option<&[ObjectId]> = if announced_target_set {
+        Some(to_place)
+    } else if position_is_staged_for_shuffle {
+        None
+    } else if departure_expanded {
+        Some(to_place)
+    } else {
+        merged_leave_components.as_deref()
+    };
+    if let Some(members) = arrangement_members {
+        if !target_filter.references_exiled_by_source() && position_can_be_arranged {
+            let owner_batches = super::change_zone::group_object_ids_by_owner_apnap(state, members);
+            if owner_batches.iter().any(|(_, cards)| cards.len() >= 2) {
+                // CR 401.4 + CR 101.1 + CR 608.2c + CR 608.2d: the arranger the
+                // instruction names is determined now, at resolution, and snapshotted
+                // onto each owner's batch. A named arranger that resolves to no player
+                // leaves the owner default standing; that fallback is unreachable for
+                // every current producer, whose `Controller` always resolves.
+                let arranger = arranger_filter.as_ref().and_then(|filter| {
+                    super::resolve_player_for_context_ref(state, ability, filter)
+                });
+                if !announced_target_set {
+                    // CR 701.24c: the direct delivery this branch replaces published
+                    // the placed objects' owners before the move; keep that publication
+                    // ahead of the order prompt for the same chained consumers.
+                    publish_finalized_owner_library_subjects(state, ability, &collected_targets);
+                }
+                super::change_zone::open_owner_library_arrangement(
+                    state,
+                    owner_batches,
+                    arranger,
+                    ability.source_id,
+                    position,
+                    false,
+                    ability.duration.clone(),
+                );
+                return Ok(());
+            }
         }
     }
     // CR 701.24a + CR 401.4: Top placement is reversed at request construction so the

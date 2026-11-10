@@ -7771,6 +7771,51 @@ pub(super) fn handle_resolution_choice(
                         }
                         _ => LibraryPosition::Top,
                     };
+                    // CR 730.3 + CR 730.3c + CR 401.4: when the arranged cards are
+                    // exactly the physical components of one still-merged battlefield
+                    // permanent, the arrangement IS that leave event's component
+                    // delivery order. Reorder the merge stack and let the merge
+                    // primitive make the single leave (CR 730.3d replacement
+                    // inheritance, the split back-links and per-component CR 903.9c
+                    // routing all stay in that primitive).
+                    if let Some(survivor_id) = merged_leave_survivor_for_arrangement(state, &chosen)
+                    {
+                        let delivery_order = effect_zone_non_library_delivery_order(
+                            state,
+                            &chosen,
+                            &[],
+                            &library_position,
+                        );
+                        if let Some(survivor) = state.objects.get_mut(&survivor_id) {
+                            survivor.merged_components = delivery_order;
+                        }
+                        state.waiting_for = WaitingFor::Priority { player };
+                        let requests = vec![zone_pipeline::ZoneMoveRequest::effect(
+                            survivor_id,
+                            Zone::Library,
+                            source_id,
+                        )
+                        .at_library_position(library_position.clone())];
+                        let completion = BatchCompletion::EffectZonePutAtLibraryPositionComplete {
+                            player,
+                            source_id,
+                            chosen: chosen.clone(),
+                            library_origin: Vec::new(),
+                            library_position,
+                        };
+                        match zone_pipeline::move_objects_simultaneously_then(
+                            state,
+                            requests,
+                            Some(completion),
+                            events,
+                        ) {
+                            zone_pipeline::BatchMoveResult::Done
+                            | zone_pipeline::BatchMoveResult::NeedsChoice => {}
+                        }
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
                     let library_origin: Vec<ObjectId> = chosen
                         .iter()
                         .copied()
@@ -9744,6 +9789,32 @@ fn pop_first_pile_result(
         .pop_front()
         .expect("at least one completed pile result");
     (first, completed)
+}
+
+/// CR 730.3 + CR 730.3c + CR 401.4: the survivor whose still-merged component
+/// stack is exactly `chosen`, when `chosen` is a non-empty arrangement over
+/// physical cards of one live merged permanent. The survivor keeps its
+/// `ObjectId` (CR 730.2c) and owns the whole stack, so exactly one member
+/// answers. `None` for any other arrangement.
+fn merged_leave_survivor_for_arrangement(
+    state: &GameState,
+    chosen: &[ObjectId],
+) -> Option<ObjectId> {
+    let unique: HashSet<ObjectId> = chosen.iter().copied().collect();
+    if unique.len() != chosen.len() || unique.len() < 2 {
+        return None;
+    }
+    chosen.iter().copied().find(|id| {
+        state.objects.get(id).is_some_and(|object| {
+            object.zone == Zone::Battlefield
+                && !object.merged_components.is_empty()
+                && object.merged_components.len() == unique.len()
+                && object
+                    .merged_components
+                    .iter()
+                    .all(|component| unique.contains(component))
+        })
+    })
 }
 
 fn effect_zone_library_placement_order(

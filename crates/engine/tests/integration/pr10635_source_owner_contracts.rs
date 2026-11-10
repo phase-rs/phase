@@ -358,14 +358,18 @@ fn alabaster_death_after_the_survivor_is_exiled_still_shuffles_the_sibling() {
             .last()
             .is_some_and(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
     };
+    let mut events = Vec::new();
     for _ in 0..16 {
         if top_is_trigger(&runner) {
             break;
         }
         if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
-            runner
-                .act(GameAction::PassPriority)
-                .expect("resolve the removal");
+            events.extend(
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("resolve the removal")
+                    .events,
+            );
         } else {
             break;
         }
@@ -388,9 +392,12 @@ fn alabaster_death_after_the_survivor_is_exiled_still_shuffles_the_sibling() {
             break;
         }
         if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
-            runner
-                .act(GameAction::PassPriority)
-                .expect("resolve the response and the trigger");
+            events.extend(
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("resolve the response and the trigger")
+                    .events,
+            );
         } else {
             break;
         }
@@ -408,4 +415,47 @@ fn alabaster_death_after_the_survivor_is_exiled_still_shuffles_the_sibling() {
     );
     assert!(state.players[P0.0 as usize].library.contains(&component));
     assert!(!state.players[P0.0 as usize].library.contains(&dragon));
+
+    // CR 701.24c: the library is shuffled even though the survivor itself is no
+    // longer in the zone it was expected in. Exactly one owner shuffle, after the
+    // component actually arrived.
+    let arrival = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Library,
+                    ..
+                } if *object_id == component
+            )
+        })
+        .expect("the trigger moves the surviving component into the library");
+    let shuffles: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some((index, *player_id)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shuffles.len(),
+        1,
+        "the owner shuffles exactly once, after the delivery: {shuffles:?}"
+    );
+    assert_eq!(shuffles[0].1, P0);
+    assert!(
+        shuffles[0].0 > arrival,
+        "the shuffle must follow the component's library arrival"
+    );
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.stack.is_empty());
+    assert!(state.resolution_stack.is_empty());
+    assert!(state.deferred_triggers.is_empty());
 }

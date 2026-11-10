@@ -21,6 +21,7 @@ mod ancient_copper_dragon_roll_d20;
 mod animation_where_x_expression;
 mod announced_x_effect_counts;
 mod archnemesis_you_attack_enchanted_player;
+mod arrangement_merged_leave;
 mod attack_qualifier_stack_conditions;
 mod attacks_alone_targeted_trigger;
 mod attacks_while_saddled_trigger;
