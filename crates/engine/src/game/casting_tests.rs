@@ -1475,7 +1475,13 @@ fn worldsouls_rage_resolves_hand_graveyard_both_and_neither_land_matrix() {
 
         assert_eq!(state.players[1].life, 18, "Rage must deal its X damage");
         assert!(state.stack.is_empty(), "Rage should fully resolve");
-        assert_eq!(saw_choice, !expected.is_empty());
+        // A mixed hand/graveyard scope keeps the prompt present even with no
+        // eligible cards, so the opponent's observable sequence cannot reveal
+        // whether the hidden hand contained a match.
+        assert!(
+            saw_choice,
+            "the mixed scope must prompt even with no candidates"
+        );
         for id in expected {
             assert_eq!(state.objects[&id].zone, Zone::Battlefield);
             assert!(state.objects[&id].tapped);

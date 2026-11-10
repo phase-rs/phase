@@ -3117,7 +3117,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         ref conditional_enter_with_counters,
         count_param,
         ref library_position,
-        mass_library_order: _,
+        ref mass_library_order,
         is_cost_payment: _,
         enters_modified_if: _,
         ref duration,
@@ -3160,11 +3160,17 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         // The producer's exact scan scope is authoritative. Candidate-zone
         // inspection remains only as a fallback for prompts restored from
         // saves that predate the scope-carrying producer.
-        let private_scope = scope_private || (privacy_scope.is_none() && has_private_card);
+        let fallback_private = privacy_scope.is_none() && has_private_card;
+        let private_scope = scope_private || fallback_private;
         let mixed_private_public = (scope_private && scope_public)
             || (privacy_scope.is_none() && has_private_card && has_public_card);
+        // CR 401.4: a Library arrangement prompt hides its member ids even when
+        // every candidate is currently public; its bounds are public (the
+        // batch size), so only the cards are redacted.
+        let library_arrangement = matches!(zone, Zone::Library) && mass_library_order.is_some();
+        let redact_cards = private_scope || library_arrangement;
         let redact_bounds = private_scope;
-        if !can_view_private_for_player(player) && private_scope {
+        if !can_view_private_for_player(player) && redact_cards {
             filtered.waiting_for = WaitingFor::EffectZoneChoice {
                 player,
                 cards: if mixed_private_public || zone == Zone::Hand {
