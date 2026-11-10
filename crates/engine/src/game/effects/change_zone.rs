@@ -806,6 +806,20 @@ fn self_ref_owner_move_origin(
     let Some(source) = state.objects.get(&ability.source_id) else {
         return origin;
     };
+    // A plain "when this creature dies, shuffle it into its owner's library"
+    // names the card in the graveyard; a compound "this creature and target …"
+    // names the permanent only while it is on the battlefield. The compound
+    // carries a second ChangeZone leg; use that shape to keep the stale-source
+    // guard without stranding the dies-trigger class.
+    let compound = ability.sub_ability.as_deref().is_some_and(|sub| {
+        matches!(
+            &sub.effect,
+            Effect::ChangeZone { .. } | Effect::ChangeZoneAll { .. }
+        )
+    });
+    if !compound && source.zone == Zone::Graveyard {
+        return Some(Zone::Graveyard);
+    }
     use crate::types::card_type::CoreType;
     let is_permanent = source.card_types.core_types.iter().any(|core| {
         matches!(
