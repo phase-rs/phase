@@ -695,6 +695,7 @@ pub fn apply_debug_action(
                 copy: None,
                 enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
                 count,
+                blocking_target: None,
                 appended: Vec::new(),
                 applied: HashSet::new(),
             };
@@ -1232,6 +1233,7 @@ fn route_debug_token_to_battlefield(
         controller: staged.controller,
         // Debug-token route stages no donor; empty mods are stamp-proof.
         donor: None,
+        blocking_target: None,
     };
     let mut token = super::game_object::GameObject::new(
         object_id,

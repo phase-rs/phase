@@ -44,8 +44,9 @@
 //! `seed_live_characteristics_from_base` helper.
 //!
 //! Deferred: copy effects targeting a merged permanent, DFC components, full CR
-//! 702.140d downstream reflexive effects, and the CR 730.3a graveyard/library
-//! arrange-order UI (a deterministic order is used).
+//! 702.140d downstream reflexive effects, and the CR 730.3a graveyard
+//! arrange-order UI (a deterministic order is used). Library destinations are
+//! arranged by the caller's owner-arrangement authority (CR 401.4).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -393,9 +394,10 @@ pub(crate) fn install_merge_layer_effect(
 /// accepting places that commander component in Command while the other
 /// components receive their appropriate destinations.
 ///
-/// CR 730.3a deferred: the owner's arrange-order choice for graveyard/library
+/// CR 730.3a deferred: the owner's arrange-order choice for graveyard
 /// destinations is not modeled — components are placed in their stored
-/// (topmost-first) order.
+/// (topmost-first) order. Library destinations are arranged by the caller's
+/// owner-arrangement authority (CR 401.4), which offers every component.
 pub fn split_merged_permanent_on_leave(
     state: &mut GameState,
     merged_id: ObjectId,
@@ -597,6 +599,58 @@ pub(crate) fn expand_returned_merge_components(
         expanded.extend(components);
     }
     expanded
+}
+
+/// CR 730.3 + CR 730.3c: the physical cards `object_ids` become when they leave
+/// the battlefield — each still-merged battlefield permanent's component stack,
+/// outermost first — and any other id unchanged. A resolution-time instruction
+/// that must act on "each card the merged permanent became" (CR 401.4 ordering
+/// among them) reads its arrivals here, so one selected target id and the cards
+/// it actually delivers can never diverge.
+pub(crate) fn physical_arrivals(state: &GameState, object_ids: &[ObjectId]) -> Vec<ObjectId> {
+    let mut arrivals = Vec::with_capacity(object_ids.len());
+    for &object_id in object_ids {
+        match state.objects.get(&object_id) {
+            Some(object)
+                if object.zone == Zone::Battlefield && !object.merged_components.is_empty() =>
+            {
+                arrivals.extend(object.merged_components.iter().copied());
+            }
+            _ => arrivals.push(object_id),
+        }
+    }
+    arrivals
+}
+
+/// CR 730.2c + CR 730.3: Is `object_id` a permanent the battlefield actually
+/// publishes? An absorbed merge component keeps a stored `Zone::Battlefield`
+/// row (`absorb_component`) so component queries see a consistent location, but
+/// it is NOT a member of `state.battlefield` and is never a permanent on its
+/// own — only the surviving host is. A mass scan that ranges over "all
+/// permanents" must select real battlefield membership, not the stored zone:
+/// otherwise it selects an absorbed member the merge primitive would never move
+/// independently (an uncrewed Smuggler's Copter with an absorbed creature is
+/// not one of the creatures Hallowed Burial puts on the bottom of its owner's
+/// library).
+pub(crate) fn is_battlefield_member(state: &GameState, object_id: ObjectId) -> bool {
+    state.battlefield.contains(&object_id)
+}
+
+/// CR 730.3: the still-merged battlefield permanent among `carriers` that
+/// carries `component_id` out of the battlefield. The merge primitive makes the
+/// whole pile leave with the survivor's single request, so an absorbed component
+/// is never moved on its own; a carrier is what the delivery asks for instead.
+pub(crate) fn merged_component_carrier(
+    state: &GameState,
+    carriers: &[ObjectId],
+    component_id: ObjectId,
+) -> Option<ObjectId> {
+    carriers.iter().copied().find(|carrier| {
+        *carrier != component_id
+            && state.objects.get(carrier).is_some_and(|object| {
+                object.zone == Zone::Battlefield && object.merged_components.contains(&component_id)
+            })
+    })
 }
 
 /// CR 730.3c + CR 400.7e + CR 603.7c: Whether this effect references the object

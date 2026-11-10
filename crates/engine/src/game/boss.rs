@@ -2199,8 +2199,11 @@ mod tests {
             token_flags[..100].iter().any(|t| *t) && token_flags[100..].iter().any(|t| !t),
             "ID order must mix nontokens and tokens, not list them group by group"
         );
-        // Viewer reach-guard: the hero's snapshot really does project the
-        // pile ID order (the surface the fixed mapping would have exploited).
+        // Viewer reach-guard: a hidden library's SLOT ORDER is as private as its
+        // identities (CR 401.2 + CR 730.3a). The hero's snapshot must not expose
+        // the allocation order the fixed mapping exploited; hidden entries are
+        // projected in a canonical order that is identical across seeds, while
+        // the identities stay redacted.
         let viewer = crate::game::visibility::filter_state_for_viewer(&state_a, hero_a);
         let seen: Vec<ObjectId> = viewer
             .players
@@ -2211,7 +2214,30 @@ mod tests {
             .iter()
             .copied()
             .collect();
-        assert_eq!(seen, pile_a, "the viewer sees the pile ID order");
+        let viewer_b = crate::game::visibility::filter_state_for_viewer(&state_b, hero_a);
+        let seen_b: Vec<ObjectId> = viewer_b
+            .players
+            .iter()
+            .find(|p| p.id == horde_a)
+            .expect("horde in view")
+            .library
+            .iter()
+            .copied()
+            .collect();
+        let canonical = {
+            let mut sorted = seen.clone();
+            sorted.sort_by_key(|id| id.0);
+            sorted
+        };
+        assert_eq!(
+            seen, canonical,
+            "a viewer without private access must see a canonical slot order"
+        );
+        assert_eq!(
+            seen, seen_b,
+            "different true allocations must project the same hidden order"
+        );
+        assert_ne!(seen, pile_a, "the true allocation order is not projected");
         assert!(
             seen.iter().all(|id| viewer
                 .objects

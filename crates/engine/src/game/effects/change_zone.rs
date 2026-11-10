@@ -3036,16 +3036,21 @@ pub fn resolve_all(
         state
             .objects
             .iter()
-            .filter(|(_, obj)| {
-                // CR 108.3 + CR 400.1 as modified by a shared-zone format: a card
-                // in the scoped player's shared graveyard or library is theirs
-                // whichever seat owns it.
-                crate::game::filter::zone_axis_admits(
-                    state,
-                    (obj.zone != Zone::Battlefield).then_some(obj.zone),
-                    player,
-                    |seat| change_zone_all_player_scope_member_matches(obj, seat, &origin_zones),
-                )
+            .filter(|(&id, obj)| {
+                // CR 730.2c: an absorbed merge component stores
+                // `Zone::Battlefield` without being a battlefield permanent;
+                // the scan selects published membership, never that row.
+                (obj.zone != Zone::Battlefield
+                    || crate::game::merge::is_battlefield_member(state, id))
+                    // CR 108.3 + CR 400.1 as modified by a shared-zone format: a card
+                    // in the scoped player's shared graveyard or library is theirs
+                    // whichever seat owns it.
+                    && crate::game::filter::zone_axis_admits(
+                        state,
+                        (obj.zone != Zone::Battlefield).then_some(obj.zone),
+                        player,
+                        |seat| change_zone_all_player_scope_member_matches(obj, seat, &origin_zones),
+                    )
             })
             .map(|(id, _)| *id)
             .collect()
@@ -3055,6 +3060,14 @@ pub fn resolve_all(
             .iter()
             .filter(|(&id, obj)| {
                 origin_zones.contains(&obj.zone)
+                    // CR 730.2c + CR 730.3: an absorbed merge component keeps a
+                    // stored `Zone::Battlefield` row but is not a battlefield
+                    // permanent. Selecting that row independently would feed a
+                    // phantom arrival into the physical-arrival expansion and
+                    // the delivery below, so a battlefield-origin scan reads
+                    // actual membership and expands only the published host.
+                    && (obj.zone != Zone::Battlefield
+                        || crate::game::merge::is_battlefield_member(state, id))
                     // CR 108.2 + CR 109.1: a mass move out of exile moves
                     // cards; the CR 722.3c retained prepare copy is not one.
                     && obj.is_card_population_member()
@@ -3151,13 +3164,30 @@ pub fn resolve_all(
     // relative order ("in any order" restates this default). Route through the
     // shared `EffectZoneChoice` + `PutAtLibraryPosition` production path instead
     // of silently picking an engine-default batch order.
-    if dest_zone == Zone::Library
-        && effect_library_position.is_some()
-        && !random_order
-        && matching.len() > 1
-    {
-        // `matching.len() > 1` guarantees at least one owner batch.
-        let owner_batches = group_object_ids_by_owner_apnap(state, &matching);
+    //
+    // CR 730.3 + CR 730.3c: the arrangement is over the PHYSICAL ARRIVALS, not
+    // the matched ids. One matched id can be a still-merged battlefield permanent
+    // whose leave delivers its whole component stack (Hallowed Burial on a mutate
+    // pile plus an ordinary creature: two permanents, three arriving cards), and
+    // a single merged id alone still delivers two. Every delivered card is
+    // offered to its owner, exactly as the single-target producers do through
+    // `merge::physical_arrivals`.
+    //
+    // CR 730.2c: the scan above matches objects by zone, so an absorbed
+    // component (whose zone is Battlefield but which is not itself a permanent)
+    // can already be in `matching` and would otherwise be offered twice.
+    let library_order_arrivals: Vec<ObjectId> =
+        if dest_zone == Zone::Library && effect_library_position.is_some() && !random_order {
+            let mut arrivals = crate::game::merge::physical_arrivals(state, &matching);
+            let mut seen = std::collections::HashSet::new();
+            arrivals.retain(|object_id| seen.insert(*object_id));
+            arrivals
+        } else {
+            Vec::new()
+        };
+    if library_order_arrivals.len() > 1 {
+        // `len() > 1` guarantees at least one owner batch.
+        let owner_batches = group_object_ids_by_owner_apnap(state, &library_order_arrivals);
         // CR 401.4: a mass move names no arranger; each owner orders their own.
         open_owner_library_arrangement(
             state,

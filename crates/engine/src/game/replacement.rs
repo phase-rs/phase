@@ -5091,6 +5091,7 @@ fn create_token_applier(
         mut copy,
         enter_tapped,
         count,
+        blocking_target,
         mut appended,
         applied,
     } = event
@@ -5150,6 +5151,7 @@ fn create_token_applier(
                 copy,
                 enter_tapped,
                 count: 0,
+                blocking_target,
                 appended,
                 applied,
             });
@@ -5182,6 +5184,13 @@ fn create_token_applier(
         // applicable is offered then (CR 616.2). It shares the event's applied set
         // (CR 614.5), which already holds this replacement, so it cannot re-fire
         // on its own batch.
+        // CR 506.3e + CR 509.4: an appended member inherits the creating
+        // effect's other instructions — Wizards' Chatterfang ruling applies them
+        // to the original tokens and the Squirrels alike — so the event's own
+        // declared entering block (Mirror Match's copy) binds the added batch
+        // too. `copy` is `None` for the added batch (it is not a copy); the
+        // binding rides the batch's own slot.
+        let appended_blocking = copy.as_ref().and_then(|copy| copy.blocking_target);
         if let Some(mut extra) = additional_spec {
             // Fill in the replacement source's runtime identity. The parser
             // stores placeholder ObjectId(0) / PlayerId(0) since these cannot
@@ -5207,6 +5216,7 @@ fn create_token_applier(
                     copy: None,
                     enter_tapped: EtbTapState::Unspecified,
                     count: new_count,
+                    blocking_target: appended_blocking,
                 },
             );
         }
@@ -5245,6 +5255,7 @@ fn create_token_applier(
                         copy: None,
                         enter_tapped: EtbTapState::Unspecified,
                         count: new_count,
+                        blocking_target: appended_blocking,
                     },
                 );
             }
@@ -5256,6 +5267,7 @@ fn create_token_applier(
             copy,
             enter_tapped,
             count: new_count,
+            blocking_target,
             appended,
             applied,
         })
@@ -5337,6 +5349,7 @@ fn create_entry_copy_spec_for_replacement(
         // Forwards BecomeCopy mods, but no BecomeCopy+halving card exists, so the
         // None fallback (today's token-id read) preserves behavior on this route.
         donor: None,
+        blocking_target: None,
     })
 }
 
@@ -10864,9 +10877,29 @@ fn apply_single_replacement(
                         *cause = Some(rid.source);
                     }
                 }
-                if let (Some(copy_spec), ProposedEvent::CreateToken { copy, .. }) =
-                    (entry_copy.clone(), &mut new_event)
+                if let (
+                    Some(mut copy_spec),
+                    ProposedEvent::CreateToken {
+                        copy,
+                        blocking_target,
+                        ..
+                    },
+                ) = (entry_copy.clone(), &mut new_event)
                 {
+                    // CR 509.4 + CR 614.6: Mystic Reflection's "they enter as
+                    // copies of the chosen creature" replaces the entrants'
+                    // characteristics inside the same creation event; it does
+                    // not remove what the creating effect specified the creature
+                    // is blocking (Mirror Match's copy). The member binding may
+                    // live on the copy spec (the event's own copy batch) or on
+                    // the event's batch/member slot (a replacement-appended
+                    // member projected through `TokenBatch::into_event`).
+                    if copy_spec.blocking_target.is_none() {
+                        copy_spec.blocking_target = copy
+                            .as_ref()
+                            .and_then(|existing| existing.blocking_target)
+                            .or(*blocking_target);
+                    }
                     *copy = Some(Box::new(copy_spec));
                 }
                 if let (
@@ -15374,6 +15407,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
         let cases = [
             (
@@ -18433,6 +18467,7 @@ mod tests {
                 count: 3,
                 appended: Vec::new(),
                 applied: HashSet::new(),
+                blocking_target: None,
             };
 
             let mut events = Vec::new();
@@ -20472,6 +20507,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
 
         let proposed = |step: ReplacementStep| ReplacementPrecedence {
@@ -20587,6 +20623,7 @@ mod tests {
             count,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
         let source = ObjectId(10);
         assert!(
@@ -20784,6 +20821,7 @@ mod tests {
             enter_tapped: EtbTapState::Unspecified,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
         let registry = build_replacement_registry();
         let candidates = find_applicable_replacements(&state, &proposed, &registry);
@@ -20809,6 +20847,7 @@ mod tests {
             enter_tapped: EtbTapState::Unspecified,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
         let registry = build_replacement_registry();
         let candidates = find_applicable_replacements(&state, &proposed, &registry);
@@ -21541,6 +21580,7 @@ mod tests {
             enter_tapped: EtbTapState::Unspecified,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
 
         let ReplacementResult::Execute(event) = replace_event(&mut state, proposed, &mut events)
@@ -21582,6 +21622,7 @@ mod tests {
             enter_tapped: EtbTapState::Tapped,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
 
         let ReplacementResult::Execute(event) = replace_event(&mut state, proposed, &mut events)
@@ -23982,6 +24023,7 @@ mod tests {
             count: 2,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
 
         let result = replace_event(&mut state, proposed, &mut events);
@@ -24078,6 +24120,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
 
         let result = replace_event(&mut state, proposed, &mut events);
@@ -24155,6 +24198,7 @@ mod tests {
             copy: None,
             enter_tapped: EtbTapState::Unspecified,
             count: 1,
+            blocking_target: None,
             appended: vec![TokenBatch {
                 owner: PlayerId(0),
                 spec: Box::new(compound_test_token_spec(
@@ -24165,6 +24209,7 @@ mod tests {
                 copy: None,
                 enter_tapped: EtbTapState::Unspecified,
                 count: 1,
+                blocking_target: None,
             }],
             applied: HashSet::new(),
         }
@@ -24222,6 +24267,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
         // Reach guard: the gate rejects the Treasure on its own.
         assert!(
@@ -24376,6 +24422,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
 
         let mut events = Vec::new();
@@ -24451,6 +24498,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
 
         let mut events = Vec::new();
@@ -24540,6 +24588,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
         let mut events = Vec::new();
         let ReplacementResult::NeedsChoice(PlayerId(0)) =
@@ -24755,6 +24804,7 @@ mod tests {
             count,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
         let mut events = Vec::new();
         match replace_event(&mut state, proposed, &mut events) {
@@ -24854,6 +24904,7 @@ mod tests {
             enter_tapped: EtbTapState::Unspecified,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
         let token_matches = find_applicable_replacements(&state, &token_event, &registry);
         assert!(
@@ -24954,6 +25005,7 @@ mod tests {
             count: 5,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
 
         let mut events = Vec::new();
@@ -25531,6 +25583,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
 
         let mut events = Vec::new();
@@ -25633,6 +25686,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
 
         let mut events = Vec::new();
@@ -25785,6 +25839,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
 
         let mut events = Vec::new();
@@ -26593,6 +26648,7 @@ mod tests {
             count: 2,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
 
         let cases: Vec<(&str, ReplacementDefinition, ProposedEvent)> = vec![

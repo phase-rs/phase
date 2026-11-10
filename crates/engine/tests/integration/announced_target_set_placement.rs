@@ -1238,13 +1238,11 @@ fn submit_p1_order(board: &mut RiptideBoard) {
 }
 
 /// P1's library after P1's two cards are delivered third from the top in
-/// P1's order. CHARACTERIZATION of the prompt's `NthFromTop` mapping (#10216):
-/// each submitted card is inserted at index `n - 1`, so submitting
-/// `[borrowed, demon]` leaves `demon` third and `borrowed` fourth. The card
-/// does not fix this mapping; CR 401.4 lets the owner choose any order.
+/// P1's submitted order (CR 401.4): the arrangement UI submits top to bottom,
+/// so `[borrowed, demon]` lands `borrowed` third and `demon` fourth.
 fn p1_library_after_both(board: &RiptideBoard) -> Vec<ObjectId> {
     let f = &board.p1_library;
-    vec![f[0], f[1], board.demon, board.borrowed, f[2]]
+    vec![f[0], f[1], board.borrowed, board.demon, f[2]]
 }
 
 fn p3_library_after(board: &RiptideBoard) -> Vec<ObjectId> {
@@ -1791,6 +1789,52 @@ fn lodestone_bauble_after_an_owner_departure_moves_exactly_its_own_cards() {
     resolve_to_priority(&mut board.runner);
 
     lodestone_arrangement_moves_exactly_its_own_cards(&mut board);
+}
+
+/// CR 401.2 + CR 401.4: Lodestone Bauble lets P0 arrange cards on P1's library,
+/// but no serialized viewer state may encode that private order — the
+/// destination owner included. Two otherwise identical runs that submit
+/// opposite permutations must project identically for P0, P1, and the spectator.
+#[test]
+fn lodestone_opposite_arrangements_project_identically() {
+    const SPECTATOR: PlayerId = PlayerId(99);
+    let mut projections = Vec::new();
+    for order in [false, true] {
+        let mut board = riptide_four_player_board();
+        let [l1, l2] = board.lands;
+        let outcome = board
+            .runner
+            .activate(board.bauble, 0)
+            .target_objects(&[l1, l2])
+            .resolve();
+        assert_controller_arrangement_prompt(
+            outcome.final_waiting_for(),
+            P0,
+            P1,
+            &[l1, l2],
+            LibraryPosition::Top,
+        );
+        let submitted = if order { vec![l1, l2] } else { vec![l2, l1] };
+        board
+            .runner
+            .act(GameAction::SelectCards { cards: submitted })
+            .expect("P0 submits their arrangement");
+        let state = board.runner.state();
+        projections.push([
+            serde_json::to_value(engine::game::visibility::filter_state_for_viewer(state, P0))
+                .expect("P0 projection serializes"),
+            serde_json::to_value(engine::game::visibility::filter_state_for_viewer(state, P1))
+                .expect("P1 projection serializes"),
+            serde_json::to_value(engine::game::visibility::filter_state_for_viewer(
+                state, SPECTATOR,
+            ))
+            .expect("spectator projection serializes"),
+        ]);
+    }
+    assert_eq!(
+        projections[0], projections[1],
+        "no viewer projection may encode P0's private arrangement on P1's library"
+    );
 }
 
 /// Paired positive for `lodestone_bauble_after_an_owner_departure_moves_exactly_its_own_cards`:

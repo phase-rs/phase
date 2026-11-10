@@ -15678,7 +15678,7 @@ fn is_owner_library_shuffle_consumer(ability: &ResolvedAbility) -> bool {
         .is_some_and(is_owner_library_shuffle_scope)
 }
 
-fn is_owner_library_shuffle_scope(scope: &PlayerFilter) -> bool {
+pub(crate) fn is_owner_library_shuffle_scope(scope: &PlayerFilter) -> bool {
     matches!(
         scope,
         PlayerFilter::TrackedSetPossessor {

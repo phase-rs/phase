@@ -7402,6 +7402,14 @@ pub enum BatchCompletion {
         library_origin: Vec<ObjectId>,
         /// Normalized placement requested by the original instruction.
         library_position: LibraryPosition,
+        /// CR 401.4 + CR 730.3a: this delivery carried out an owner arrangement.
+        /// `chosen` then holds the owner's submitted order over the PHYSICAL
+        /// arrivals (a still-merged pile's component cards included), while the
+        /// batch moved those arrivals in a canonical order, so the choice is
+        /// applied privately to the hidden library slots here. `false` for a
+        /// resolution-time selection, whose delivery order already is its order.
+        #[serde(default)]
+        owner_arrangement: bool,
     },
     /// CR 701.13a + CR 614.1 + CR 616.1: A per-category exile member has
     /// settled, so its tracked-set extension and next-member prompt can run.
@@ -8014,6 +8022,11 @@ pub enum PendingCounterPostAction {
         sacrifice_at: Option<Duration>,
         source_id: ObjectId,
         controller: PlayerId,
+        /// CR 506.3e + CR 509.4: the batch's declared entering-block attacker,
+        /// carried across the counter-ordering pause so a replacement-appended
+        /// member (Chatterfang's Squirrels) blocks at publication.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocking_target: Option<ObjectId>,
     },
     ContinueTokenCreation {
         owner: PlayerId,
@@ -8023,6 +8036,10 @@ pub enum PendingCounterPostAction {
         spec: Box<TokenSpec>,
         enter_tapped: EtbTapState,
         remaining_count: u32,
+        /// CR 506.3e + CR 509.4: the batch's declared entering-block attacker,
+        /// carried to the resumed tokens of the same appended batch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocking_target: Option<ObjectId>,
     },
     /// CR 614.1a + CR 616.1f: deliver the rest of a compound CreateToken event
     /// and publish its referent; see `token::continue_token_event_delivery`.
@@ -8041,6 +8058,11 @@ pub enum PendingCounterPostAction {
         attack_destination: EntryAttackDestination,
         source_id: ObjectId,
         controller: PlayerId,
+        /// CR 506.3e + CR 509.3d: the declared entering-block attacker, carried
+        /// across the counter-ordering pause so the block is applied at
+        /// publication (never to the unpublished entrant).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocking_target: Option<ObjectId>,
     },
     ContinueCopyTokenCreation {
         owner: PlayerId,
@@ -8066,6 +8088,10 @@ pub enum PendingCounterPostAction {
         /// counter pause so resumed dynamic-P/T stamps halve donor values.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         donor: Option<ObjectIncarnationRef>,
+        /// CR 506.3e + CR 509.3d: the declared entering-block attacker, carried
+        /// across the counter pause and applied only at publication.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocking_target: Option<ObjectId>,
     },
     /// CR 303.4f: finish a NON-liminal copy-token entry whose CR 303.4f Aura-host
     /// choice paused it between the body's materialization and the rest of its
@@ -8112,6 +8138,11 @@ pub enum PendingCounterPostAction {
         created_ids: Vec<ObjectId>,
         ability_injection: LiminalTokenAbilityInjection,
         entry_events: TokenEntryEventEmission,
+        /// CR 506.3e + CR 509.3d: the declared entering-block attacker, carried
+        /// across a liminal counter-ordering or Aura-host pause and applied only
+        /// at publication.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocking_target: Option<ObjectId>,
     },
     ContinueLiminalCopyTokenBatch {
         owner: PlayerId,
@@ -19244,6 +19275,15 @@ pub enum WaitingFor {
         /// from the top or on the bottom". `top: false` is always the bottom.
         #[serde(default, skip_serializing_if = "LibraryPosition::is_top")]
         top_position: LibraryPosition,
+        /// CR 730.3c: the physical component cards recorded when this prompt was
+        /// created, when the chosen object is (or was) a merged permanent. The
+        /// object id alone cannot recover components that the leave-the-
+        /// battlefield split (CR 730.3) already separated: by answer time the
+        /// survivor is off the battlefield and live merge state is gone. Empty
+        /// for an ordinary single-card prompt, which keeps the wire shape and
+        /// the single-card delivery path unchanged.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        components: Vec<ObjectId>,
     },
     /// CR 701.36a: Choose a creature token you control to create a copy of.
     PopulateChoice {
@@ -40292,6 +40332,7 @@ mod tests {
             source_id: object_id,
             controller: PlayerId(0),
             donor: None,
+            blocking_target: None,
         });
         check(
             |attack_destination| CopyTokenEntryTail {
@@ -40313,6 +40354,7 @@ mod tests {
                 attack_destination,
                 source_id: object_id,
                 controller: PlayerId(0),
+                blocking_target: None,
             },
             |action| match action {
                 PendingCounterPostAction::FinalizeCopyTokenEntry {
@@ -40360,6 +40402,7 @@ mod tests {
                         copy: None,
                         enter_tapped: EtbTapState::Unspecified,
                         count: 2,
+                        blocking_target: None,
                     },
                 }],
                 delivered: vec![PositionedTokenIds {
@@ -40602,6 +40645,7 @@ mod tests {
                         controller: PlayerId(0),
                         // Test batch: no donor in scope (no dynamic P/T mods).
                         donor: None,
+                        blocking_target: None,
                     }),
                 }]),
                 effect_kind: EffectKind::CopyTokenOf,

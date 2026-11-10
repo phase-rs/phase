@@ -360,3 +360,66 @@ fn hallowed_burial_owner_whose_cards_leave_with_their_controller_completes_empty
     );
     assert!(runner.state().pending_mass_library_order_choice.is_none());
 }
+
+/// CR 730.3 + CR 730.3c + CR 401.4: Hallowed Burial puts all creatures on the
+/// bottom of their owners' libraries. A still-merged creature leaves as BOTH of
+/// its physical cards (CR 730.3) and CR 730.3c applies the instruction to each,
+/// so one merged creature plus an ordinary creature delivers three cards into
+/// one position at the same time — and the owner's arrangement prompt must name
+/// all three, not the two announced permanent ids.
+///
+/// REVERT-FAILING: the mass producer grouped the matched ids, so the prompt
+/// offered two of the three arrivals and the absorbed component reached the
+/// library in the merge stack's order.
+#[test]
+fn hallowed_burial_offers_every_physical_arrival_of_a_merged_creature() {
+    use engine::game::merge::{merge_object_onto, MergeSide};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, burial_mana());
+    scenario.with_library_top(P0, &["P0 Library"]);
+    let pile = scenario.add_creature(P0, "P0 Host", 3, 3).id();
+    let component = scenario.add_creature(P0, "P0 Component", 2, 2).id();
+    let bear = scenario.add_creature(P0, "P0 Bear", 2, 2).id();
+    let burial = add_hallowed_burial(&mut scenario);
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.battlefield.retain(|&id| id != component);
+        let mut events = Vec::new();
+        merge_object_onto(state, component, pile, MergeSide::Top, &mut events);
+    }
+    let filler = library(&runner, P0)[0];
+
+    let outcome = runner.cast(burial).resolve();
+    assert_bottom_arrangement_prompt(outcome.final_waiting_for(), P0, &[pile, component, bear]);
+    let offered = match outcome.final_waiting_for() {
+        WaitingFor::EffectZoneChoice { cards, .. } => cards.clone(),
+        other => panic!("expected P0's arrangement prompt, got {other:?}"),
+    };
+    assert_eq!(
+        offered.len(),
+        3,
+        "the pile's two cards and the ordinary creature are all offered"
+    );
+
+    let mut chosen = offered.clone();
+    chosen.reverse();
+    runner
+        .act(GameAction::SelectCards {
+            cards: chosen.clone(),
+        })
+        .expect("P0 submits their arrangement");
+    assert_eq!(
+        library(&runner, P0),
+        vec![filler, chosen[0], chosen[1], chosen[2]],
+        "CR 401.4: the owner's order reaches the bottom of their library intact"
+    );
+    for id in [pile, component, bear] {
+        assert_eq!(zone(&runner, id), Zone::Library, "every arrival is placed");
+    }
+    assert_eq!(put_at_library_position_resolutions(outcome.events()), 0);
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().pending_mass_library_order_choice.is_none());
+}

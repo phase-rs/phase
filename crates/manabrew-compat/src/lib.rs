@@ -6567,6 +6567,7 @@ mod tests {
             player: PlayerId(0),
             object_id,
             top_position: Default::default(),
+            components: Vec::new(),
         };
         bind_interaction_authority(&mut state, InteractionSessionId("generic-path".to_string()))
             .expect("valid interaction authority binding");
@@ -6618,6 +6619,7 @@ mod tests {
             player: PlayerId(0),
             object_id,
             top_position: engine::types::ability::LibraryPosition::NthFromTop { n: 2 },
+            components: Vec::new(),
         };
         bind_interaction_authority(&mut state, InteractionSessionId("nth-top".to_string()))
             .expect("valid interaction authority binding");
@@ -7077,6 +7079,7 @@ mod tests {
             player: PlayerId(0),
             object_id,
             top_position: Default::default(),
+            components: Vec::new(),
         };
 
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();

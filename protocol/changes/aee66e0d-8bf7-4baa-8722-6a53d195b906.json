@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "CR 730.3c: WaitingFor::TopOrBottomChoice gains optional components (Vec<ObjectId>, omitted when empty) recording the physical components of a merged permanent at prompt time so a prompt answered after the pile split (Arashin Sovereign's dies trigger on a merged permanent) moves and arranges every component. An older full-game or wire peer drops the unknown field when decoding and re-encoding the pending prompt, then answers it by moving only the survivor and stranding the other components in the graveyard."
+}

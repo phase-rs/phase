@@ -224,6 +224,7 @@ fn create_token_and_count_draws(
         copy: None,
         enter_tapped: EtbTapState::Unspecified,
         count: 1,
+        blocking_target: None,
         appended: Vec::new(),
         applied: HashSet::new(),
     };

@@ -3257,6 +3257,57 @@ enum AnaphorConsumer {
     Other,
 }
 
+/// CR 108.3 + CR 608.2c: the owner-subject roles this parser recognizes,
+/// classified ONCE through the typed subject authority so the source-owner
+/// shuffle branch and the selected-owner placement route cannot drift.
+pub(super) enum OwnerSubject {
+    /// "~'s owner" names the ability source's owner (Cerulean Sphinx); it
+    /// declares no target.
+    Source,
+    /// "the owner of target X" / "target X's owner" carries the announced
+    /// object whose owner acts.
+    Selected(TargetFilter),
+    /// "that creature's owner" / "Enchanted creature's owner" is a possessive
+    /// noun anaphor: no declared target, and the moved object is the printed
+    /// noun phrase.
+    Anaphoric(TargetFilter),
+}
+
+pub(super) fn parse_owner_subject(subject: &str, ctx: &mut ParseContext) -> Option<OwnerSubject> {
+    let mut trial = ctx.clone();
+    if let Some(application) = parse_subject_application(subject, &mut trial) {
+        if application.multi_target.is_none() {
+            if application.affected == TargetFilter::Owner && application.target.is_none() {
+                *ctx = trial;
+                return Some(OwnerSubject::Source);
+            }
+            if application.affected == TargetFilter::ParentTargetOwner {
+                if let Some(target) = application.target {
+                    *ctx = trial;
+                    return Some(OwnerSubject::Selected(target));
+                }
+            }
+        }
+    }
+    // A possessive-anaphor actor declares no target of its own; the moved
+    // object is the printed noun phrase, parsed through the shared type-phrase
+    // entry point so attached-host and parent-anaphor nouns keep their filters.
+    let idx = subject
+        .find("'s owner") // allow-noncombinator: possessive boundary scan on an already-tokenized subject
+        .or_else(|| subject.find("\u{2019}s owner"))?; // allow-noncombinator: the same scan for the typographic apostrophe
+    let noun = subject[..idx].trim();
+    if nom_primitives::scan_contains(&noun.to_ascii_lowercase(), "target ") {
+        return None;
+    }
+    let (filter, remainder) = ctx.with_player_antecedents(|scoped| {
+        crate::parser::oracle_target::parse_target_with_ctx(noun, scoped)
+    });
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+    Some(OwnerSubject::Anaphoric(filter))
+}
+
 pub(super) fn parse_subject_application(
     subject: &str,
     ctx: &mut ParseContext,

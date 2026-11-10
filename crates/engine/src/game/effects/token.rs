@@ -658,6 +658,7 @@ pub(crate) fn resolve_with_host_override(
         copy: None,
         enter_tapped: crate::types::proposed_event::EtbTapState::from_seeded_tapped(tapped),
         count,
+        blocking_target: None,
         appended: Vec::new(),
         applied: state
             .post_replacement_token_choice_applied
@@ -1108,18 +1109,25 @@ pub(crate) fn deliver_create_token_event(
     events: &mut Vec<GameEvent>,
 ) -> CreateTokenDelivery {
     if !event.has_appended_token_batches() {
-        let ProposedEvent::CreateToken { spec, .. } = &event else {
-            return CreateTokenDelivery::Completed {
-                primary_ids: Vec::new(),
-            };
+        let (effect_source, member_blocking) = match &event {
+            ProposedEvent::CreateToken {
+                spec,
+                blocking_target,
+                ..
+            } => (spec.source_id, *blocking_target),
+            _ => {
+                return CreateTokenDelivery::Completed {
+                    primary_ids: Vec::new(),
+                };
+            }
         };
-        let effect_source = spec.source_id;
         return apply_create_token_batch(
             state,
             event,
             initial_created_ids,
             pause_completion_event,
             effect_source,
+            member_blocking,
             events,
         );
     }
@@ -1266,6 +1274,7 @@ fn drive_token_event_delivery(
         } = cursor.remaining.remove(0);
         match batch.copy.take() {
             None => {
+                let blocking_target = batch.blocking_target;
                 let event = batch.into_event(HashSet::new());
                 let completed = apply_create_token_batch(
                     state,
@@ -1273,6 +1282,7 @@ fn drive_token_event_delivery(
                     Vec::new(),
                     pause_event,
                     cursor.source_id,
+                    blocking_target,
                     events,
                 )
                 .is_completed();
@@ -1307,6 +1317,14 @@ fn drive_token_event_delivery(
                 }
             }
             Some(copy) => {
+                // CR 506.3e + CR 509.4: a member's batch binding (an appended
+                // Squirrel later made a copy by Mystic Reflection) is part of
+                // the creating effect's instruction; carry it onto the copy
+                // payload this delivery applies.
+                let mut copy = *copy;
+                if copy.blocking_target.is_none() {
+                    copy.blocking_target = batch.blocking_target;
+                }
                 // The copy route publishes after the ids already in
                 // the ledger (its `initial_created_ids` prefix contract), so the
                 // plain batches stay in the referent across a copy pause.
@@ -1320,7 +1338,7 @@ fn drive_token_event_delivery(
                 let status = super::token_copy::apply_copy_token_after_replacement_with_created_ids(
                     state,
                     batch.owner,
-                    *copy,
+                    copy,
                     batch.enter_tapped,
                     batch.spec.enter_with_counters,
                     batch.count,
@@ -1443,12 +1461,17 @@ fn token_event_cursor_completion(
 /// batch's source — the creating instruction's (CR 608.2c) unless a
 /// replacement substituted that batch's spec — which for a
 /// replacement-appended batch is not the batch's own `spec.source_id`.
-fn apply_create_token_batch(
+pub(crate) fn apply_create_token_batch(
     state: &mut GameState,
     event: ProposedEvent,
     initial_created_ids: Vec<ObjectId>,
     pause_completion_event: PendingEffectResolutionEvent,
     effect_source: ObjectId,
+    // CR 506.3e + CR 509.4: a binding the creating effect declared for every
+    // token of this (plain, replacement-appended) batch — Chatterfang's
+    // Squirrels inherit Mirror Match's entering block. `None` for a batch
+    // whose instruction declared none.
+    blocking_target: Option<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> CreateTokenDelivery {
     let ProposedEvent::CreateToken {
@@ -1466,10 +1489,17 @@ fn apply_create_token_batch(
     };
 
     if let Some(copy) = copy {
+        // CR 506.3e + CR 509.4: the member/batch binding rides the event even
+        // when the copy spec was rebuilt by a later replacement; a binding the
+        // effect declared for THIS member wins over an absent spec binding.
+        let mut copy = *copy;
+        if copy.blocking_target.is_none() {
+            copy.blocking_target = blocking_target;
+        }
         let status = super::token_copy::apply_copy_token_after_replacement(
             state,
             owner,
-            *copy,
+            copy,
             enter_tapped,
             spec.enter_with_counters.clone(),
             final_count,
@@ -1644,12 +1674,14 @@ fn apply_create_token_batch(
                         sacrifice_at: spec.sacrifice_at.clone(),
                         source_id: spec.source_id,
                         controller: spec.controller,
+                        blocking_target,
                     },
                     PendingCounterPostAction::ContinueTokenCreation {
                         owner,
                         spec: resume_spec,
                         enter_tapped,
                         remaining_count,
+                        blocking_target,
                     },
                 ];
                 let completion = match pause_completion_event {
@@ -1726,6 +1758,14 @@ fn apply_create_token_batch(
             spec.source_id,
             events,
         );
+
+        // CR 506.3e + CR 509.4: publication is this token's creation moment, so
+        // the creating effect's declared entering block (inherited by a
+        // replacement-appended member — Chatterfang) applies here and only
+        // here, once the entrant actually exists.
+        if let Some(attacker) = blocking_target {
+            crate::game::combat::place_blocking(state, obj_id, attacker, events);
+        }
 
         // CR 603.7: Tokens with a limited duration get a delayed sacrifice trigger.
         // Used by Mobilize and similar keywords that create temporary attacking tokens.
@@ -2201,6 +2241,25 @@ fn liminal_copy_token_continuation_for_event(
     })
 }
 
+/// CR 608.2c + 616.1f: add `ids` to the active CopyToken owner's created
+/// referent WITHOUT dropping the batches it already delivered. The owner's
+/// `created_ids` is the whole resolution's referent (assigned wholesale onto
+/// `last_created_token_ids` at its drain), while `state.last_created_token_ids`
+/// holds only the current batch's ids. An assignment here would lose every
+/// earlier batch of a multi-batch Mirror Match resolution when a later batch
+/// resumes from a liminal entry pause. Duplicates are skipped, so a repeated
+/// sync of the same batch is idempotent.
+pub(crate) fn merge_created_ids_into_copy_frame(state: &mut GameState, ids: &[ObjectId]) {
+    let Some(pending) = state.active_copy_token_mut() else {
+        return;
+    };
+    for id in ids {
+        if !pending.created_ids.contains(id) {
+            pending.created_ids.push(*id);
+        }
+    }
+}
+
 fn continue_liminal_copy_token_batch(
     state: &mut GameState,
     continuation: Option<LiminalCopyTokenContinuation>,
@@ -2210,9 +2269,7 @@ fn continue_liminal_copy_token_batch(
         player: state.active_player,
     };
     let created_ids = state.last_created_token_ids.clone();
-    if let Some(pending) = state.active_copy_token_mut() {
-        pending.created_ids = created_ids;
-    }
+    merge_created_ids_into_copy_frame(state, &created_ids);
     let Some(continuation) = continuation else {
         return finish_liminal_copy_token_batch(state, events);
     };
@@ -2251,9 +2308,7 @@ pub(crate) fn finish_liminal_copy_token_batch(
         return false;
     }
     let created_ids = state.last_created_token_ids.clone();
-    if let Some(pending) = state.active_copy_token_mut() {
-        pending.created_ids = created_ids;
-    }
+    merge_created_ids_into_copy_frame(state, &created_ids);
     if state.active_copy_token().is_some() {
         super::token_copy::drain_pending_copy_token_resolution(state, events);
     }
@@ -2747,6 +2802,12 @@ fn liminal_token_entry_finalization_action(
             LiminalTokenAbilityInjection::ResolvedToken
         },
         entry_events,
+        // CR 506.3e + CR 509.3d: the copy's declared entering block, read from
+        // the spec the liminal entry carries across every pause.
+        blocking_target: entry
+            .copy_resume
+            .as_ref()
+            .and_then(|copy| copy.blocking_target),
     }
 }
 
@@ -2767,6 +2828,7 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
         created_ids,
         ability_injection,
         entry_events,
+        blocking_target,
     } = action
     else {
         return true;
@@ -2878,6 +2940,12 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
     // withheld its `TokenCreated` and wrote no `created_tokens_this_turn` row. Appending after the
     // assignment is the same position `created_ids.push(object_id)` produced.
     record_last_created_token(state, object_id);
+    // CR 506.3e + CR 509.3d: this finalize is the liminal entry's publication —
+    // the counter-ordering or Aura-host pause ends here — so the declared
+    // entering block applies exactly once, after the entrant is actually created.
+    if let Some(attacker) = blocking_target {
+        crate::game::combat::place_blocking(state, object_id, attacker, events);
+    }
 
     true
 }
@@ -3254,6 +3322,7 @@ fn token_creation_needs_choice(
         copy: None,
         enter_tapped,
         count,
+        blocking_target: None,
         appended: Vec::new(),
         applied: HashSet::new(),
     };
@@ -5692,6 +5761,7 @@ mod tests {
             count: 2,
             appended: Vec::new(),
             applied: std::collections::HashSet::new(),
+            blocking_target: None,
         };
         let mut events = vec![];
         apply_create_token_after_replacement(&mut state, event, &mut events);
@@ -5922,6 +5992,7 @@ mod tests {
                 created_ids: Vec::new(),
                 ability_injection: LiminalTokenAbilityInjection::ResolvedToken,
                 entry_events: emission,
+                blocking_target: None,
             },
             &mut events,
         ));
@@ -7731,6 +7802,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: std::collections::HashSet::new(),
+            blocking_target: None,
         };
         let mut events = vec![];
         apply_create_token_after_replacement(&mut state, event, &mut events);
@@ -7807,12 +7879,14 @@ mod tests {
             copy: None,
             enter_tapped: EtbTapState::Unspecified,
             count: 2,
+            blocking_target: None,
             appended: vec![TokenBatch {
                 owner: PlayerId(0),
                 spec: Box::new(creature_spec("Squirrel")),
                 copy: None,
                 enter_tapped: EtbTapState::Unspecified,
                 count: 1,
+                blocking_target: None,
             }],
             applied: HashSet::new(),
         };
@@ -7889,6 +7963,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
         let mut events = vec![];
         apply_create_token_after_replacement(&mut state, event, &mut events);
@@ -7961,6 +8036,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
         let mut events = vec![];
         apply_create_token_after_replacement(&mut state, event, &mut events);
@@ -8042,6 +8118,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
         let mut events = vec![];
         apply_create_token_after_replacement(&mut state, event, &mut events);
@@ -8237,6 +8314,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
         let mut events = vec![];
         apply_create_token_after_replacement(&mut state, event, &mut events);
@@ -8802,6 +8880,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
 
         let mut events = vec![];
@@ -8870,6 +8949,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
 
         let mut events = vec![];
@@ -8941,6 +9021,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
 
         let mut events = vec![];
@@ -9019,6 +9100,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
 
         let mut events = vec![];
@@ -9076,6 +9158,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
+            blocking_target: None,
         };
 
         let mut events = vec![];
@@ -9544,6 +9627,7 @@ mod tests {
                     controller: PlayerId(0),
                     // Liminal resume carries values only; empty mods are stamp-proof.
                     donor: None,
+                    blocking_target: None,
                 })),
                 spec_resume: None,
                 enter_tapped: EtbTapState::Unspecified,

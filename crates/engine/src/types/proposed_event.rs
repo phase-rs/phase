@@ -365,6 +365,14 @@ pub struct CopyTokenSpec {
     /// `None` where no donor is in scope; consumers fall back to the token id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub donor: Option<ObjectIncarnationRef>,
+    /// CR 506.3e + CR 509.3d: the attacker this copy enters blocking (Mirror
+    /// Match). Declared by `Effect::CopyTokenBlockingAttacker` and carried on
+    /// the spec so it survives every entry pause — a copied "as this creature
+    /// enters, pay any amount of life" replacement included — and is applied
+    /// by the shared copy delivery only when the entrant is actually
+    /// published, never against an unpublished token and never twice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking_target: Option<ObjectId>,
 }
 
 /// CR 614.1a + CR 111.1 + CR 616.1f: one batch of a CreateToken event — the
@@ -381,6 +389,16 @@ pub struct TokenBatch {
     #[serde(default)]
     pub enter_tapped: EtbTapState,
     pub count: u32,
+    /// CR 506.3e + CR 509.4: the attacker this batch's tokens enter blocking,
+    /// when the creating effect declares one. Copy batches carry their own
+    /// binding on [`CopyTokenSpec::blocking_target`]; this slot lets a batch a
+    /// replacement appended ("those tokens plus …" — Chatterfang's Squirrels)
+    /// inherit the creating effect's other instruction. Wizards' Chatterfang
+    /// ruling: anything else the creating effect specifies applies to the
+    /// original tokens and the Squirrels alike. `None` for a batch whose
+    /// creating effect declared no block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking_target: Option<ObjectId>,
 }
 
 impl TokenBatch {
@@ -392,6 +410,7 @@ impl TokenBatch {
             copy,
             enter_tapped,
             count,
+            blocking_target,
         } = self;
         ProposedEvent::CreateToken {
             owner,
@@ -399,6 +418,7 @@ impl TokenBatch {
             copy,
             enter_tapped,
             count,
+            blocking_target,
             appended: Vec::new(),
             applied,
         }
@@ -704,6 +724,16 @@ pub enum ProposedEvent {
         enter_tapped: EtbTapState,
         /// CR 614.1a: Number of tokens to create. May be modified by replacement effects.
         count: u32,
+        /// CR 506.3e + CR 509.4: the attacker this member's tokens enter
+        /// blocking, when the creating effect declares one for this member.
+        /// A replacement-appended batch carries its inherited instruction here
+        /// through the single-batch projection (`TokenBatch::into_event`) and
+        /// every view round-trip, so copy reconstruction and delivery can read
+        /// it even when the entrant itself is no longer a creature (a crewed
+        /// Smuggler's Copter copy) or the copy spec was rebuilt by a later
+        /// replacement (Mystic Reflection).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocking_target: Option<ObjectId>,
         /// CR 614.1a + CR 616.1f + CR 614.5: batches this event's own
         /// replacements added ("those tokens plus that many 1/1 green Squirrel
         /// creature tokens", "instead create one of each"), in event order.
@@ -1161,6 +1191,7 @@ impl ProposedEvent {
                 copy,
                 enter_tapped,
                 count,
+                blocking_target,
                 appended,
                 applied,
             } => {
@@ -1171,6 +1202,7 @@ impl ProposedEvent {
                     copy,
                     enter_tapped,
                     count,
+                    blocking_target,
                     appended: Vec::new(),
                     applied: applied.clone(),
                 });
@@ -1226,6 +1258,7 @@ impl ProposedEvent {
             copy,
             enter_tapped,
             count,
+            blocking_target,
             mut appended,
             mut applied,
         } = views.next()?
@@ -1239,6 +1272,7 @@ impl ProposedEvent {
                 copy,
                 enter_tapped,
                 count,
+                blocking_target,
                 appended: view_appended,
                 applied: view_applied,
             } = view
@@ -1251,6 +1285,7 @@ impl ProposedEvent {
                 copy,
                 enter_tapped,
                 count,
+                blocking_target,
             });
             appended.extend(view_appended);
             applied.extend(view_applied);
@@ -1261,6 +1296,7 @@ impl ProposedEvent {
             copy,
             enter_tapped,
             count,
+            blocking_target,
             appended,
             applied,
         })
@@ -1276,6 +1312,7 @@ impl ProposedEvent {
             copy,
             enter_tapped,
             count,
+            blocking_target,
             appended,
             ..
         } = self
@@ -1289,6 +1326,7 @@ impl ProposedEvent {
             copy,
             enter_tapped,
             count,
+            blocking_target,
         });
         batches.extend(appended);
         Some(batches)
@@ -1701,6 +1739,7 @@ mod tests {
             copy: None,
             enter_tapped: EtbTapState::Unspecified,
             count,
+            blocking_target: None,
         }
     }
 
@@ -1717,6 +1756,7 @@ mod tests {
             count: 2,
             appended,
             applied: applied_with(0),
+            blocking_target: None,
         }
     }
 
@@ -1909,6 +1949,7 @@ mod tests {
             source_id: ObjectId(1),
             controller: PlayerId(0),
             donor: None,
+            blocking_target: None,
         }
     }
 

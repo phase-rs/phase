@@ -16262,13 +16262,8 @@ fn try_parse_owner_of_target_shuffle(
     // whole-clause: it only accepts the owner actor with no object target of
     // its own, then validates the predicate tail.
     let mut subject_ctx = ctx.clone();
-    let is_source_owner = subject::parse_subject_application(subject_text, &mut subject_ctx)
-        .is_some_and(|app| {
-            app.affected == TargetFilter::Owner
-                && app.target.is_none()
-                && app.multi_target.is_none()
-        });
-    if is_source_owner {
+    let owner_subject = subject::parse_owner_subject(subject_text, &mut subject_ctx);
+    if matches!(owner_subject, Some(subject::OwnerSubject::Source)) {
         // CR 201.5: source-name references still name this particular object
         // even when an earlier instruction declared a different target.
         let (_, (_, _, _, draw_tail)) = all_consuming((
@@ -16320,7 +16315,14 @@ fn try_parse_owner_of_target_shuffle(
     ))
     .parse(object_text)
     .ok()?;
-    let target = extract_owner_of_target(tp, ctx)?;
+    // The owner actor was classified once above; dispatch on that typed result
+    // instead of splitting and parsing the subject again.
+    let target = match owner_subject {
+        Some(subject::OwnerSubject::Selected(target)) => target,
+        Some(subject::OwnerSubject::Anaphoric(filter)) => filter,
+        Some(subject::OwnerSubject::Source) | None => return None,
+    };
+    *ctx = subject_ctx;
     // CR 115.10a + CR 303.4b: an attachment's host is an operand, not
     // an announced target. The resolution-time attachment binder owns it.
     if target.contains_source_attachment_host()
@@ -16398,42 +16400,21 @@ fn parse_into_library_nth_from_top_or_bottom(i: &str) -> OracleResult<'_, Librar
 fn extract_owner_of_target(tp: TextPair, ctx: &mut ParseContext) -> Option<TargetFilter> {
     let predicate_start = subject::find_predicate_start(tp.original)?;
     let subject_text = tp.original[..predicate_start].trim();
-
-    // The owner-subject role is classified by the shared typed subject
-    // authority. Its declared-owner shapes ("the owner of target X", "target
-    // X's owner") carry the announced object directly; a bare anaphoric owner
-    // ("its owner" / "their owner") announces none and stays fail-closed here,
-    // because the generic chain binder owns that shape.
     let mut trial = ctx.clone();
-    if let Some(application) = subject::parse_subject_application(subject_text, &mut trial) {
-        if application.affected == TargetFilter::ParentTargetOwner
-            && application.multi_target.is_none()
-        {
-            if let Some(target) = application.target {
-                *ctx = trial;
-                return Some(target);
-            }
+    match subject::parse_owner_subject(subject_text, &mut trial)? {
+        subject::OwnerSubject::Selected(target) => {
+            *ctx = trial;
+            Some(target)
         }
+        // A bare anaphoric owner announces no target and stays fail-closed here
+        // because the generic chain binder owns that shape.
+        subject::OwnerSubject::Anaphoric(filter) => {
+            *ctx = trial;
+            Some(filter)
+        }
+        // The source-owner role has its own whole-clause recognizer.
+        subject::OwnerSubject::Source => None,
     }
-
-    // CR 608.2c: a possessive-anaphor subject ("That creature's owner",
-    // "Enchanted creature's owner") declares no target of its own; the moved
-    // object is the printed noun phrase. Recover it through the shared
-    // type-phrase entry point so attached-host and parent-anaphor nouns keep
-    // their existing filters.
-    let idx = subject_text
-        .find("'s owner") // allow-noncombinator: possessive boundary scan on the already-tokenized subject; the noun is parsed by `parse_target_with_ctx`
-        .or_else(|| subject_text.find("\u{2019}s owner"))?; // allow-noncombinator: the same scan for the typographic apostrophe
-    let noun = subject_text[..idx].trim();
-    if nom_primitives::scan_contains(&noun.to_ascii_lowercase(), "target ") {
-        return None;
-    }
-    let (filter, remainder) =
-        ctx.with_player_antecedents(|scoped| parse_target_with_ctx(noun, scoped));
-    if !remainder.trim().is_empty() {
-        return None;
-    }
-    Some(filter)
 }
 
 fn try_parse_exile_from_top_until(

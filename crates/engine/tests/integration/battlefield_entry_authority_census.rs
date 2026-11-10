@@ -1134,7 +1134,9 @@ const ANAPHORA_AUTHORITIES: &str = "\n  \
      token::record_last_created_token            — the object-existence predicate, and the ONLY \
      production `.push` into ledger 3;\n  \
      token::record_last_created_copy_batch_token — consumes that same verdict and mirrors the id \
-     into the in-flight copy batch, so one evaluation owns BOTH destinations.\n";
+     into the in-flight copy batch, so one evaluation owns BOTH destinations;\n  \
+     token::merge_created_ids_into_copy_frame    — merges the already-published ids of the current \
+     resolution into the in-flight batch (no new object-existence verdict).\n";
 
 #[test]
 fn every_single_id_anaphora_publish_lives_in_an_authority() {
@@ -1147,9 +1149,9 @@ fn every_single_id_anaphora_publish_lives_in_an_authority() {
 
     assert_eq!(
         (production.len(), test_scoped.len()),
-        (2, 0),
-        "the single-id anaphora-publish surface moved. Expected exactly 2 production publishes and \
-         0 test-scoped ones — the two authorities:{ANAPHORA_AUTHORITIES}\
+        (3, 0),
+        "the single-id anaphora-publish surface moved. Expected exactly 3 production publishes and \
+         0 test-scoped ones — the three authorities:{ANAPHORA_AUTHORITIES}\
          A NEW production hit means a single just-created id can reach \
          `TargetFilter::LastCreated` WITHOUT the object-existence predicate, which is the defect \
          this change's round 10 review found after four enumeration sweeps had each declared the \
@@ -1161,7 +1163,7 @@ fn every_single_id_anaphora_publish_lives_in_an_authority() {
 
     assert_eq!(
         multiset,
-        vec![("engine/src/game/effects/token.rs".to_string(), 2)],
+        vec![("engine/src/game/effects/token.rs".to_string(), 3)],
         "per-file single-id anaphora-publish multiset moved. Absent files must NOT appear: \
          `counters.rs` and `token_copy.rs` are exactly where the round 9 and round 10 defects were \
          written, and their absence here is the claim this conjunct exists to keep \
@@ -1192,12 +1194,13 @@ fn every_single_id_anaphora_publish_lives_in_an_authority() {
     assert_eq!(
         enclosing,
         vec![
+            "merge_created_ids_into_copy_frame",
             "record_last_created_copy_batch_token",
             "record_last_created_token",
         ],
-        "token.rs's single-id anaphora publishes are not the two authorities' own. Every `.push` \
-         into either container in this file must live in one of them; a third one elsewhere in the \
-         file — or one of these two moving out — is the clone this anchor exists to \
+        "token.rs's single-id anaphora publishes are not the three authorities' own. Every `.push` \
+         into either container in this file must live in one of them; one elsewhere in the \
+         file — or one of these moving out — is the clone this anchor exists to \
          catch.{ANAPHORA_AUTHORITIES}"
     );
 

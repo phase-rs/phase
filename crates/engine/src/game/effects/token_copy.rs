@@ -43,6 +43,42 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    resolve_with_blocking(state, ability, events, None)
+}
+
+/// CR 506.3e + CR 509.3d: [`resolve`] with an entering-block binding — every
+/// token this resolution creates blocks `blocking_target` as it enters (Mirror
+/// Match). The binding rides the batch's [`CopyTokenSpec`] instead of being
+/// applied here, so a copied as-enters payment that pauses the entry cannot
+/// pre-apply it to an unpublished token, lose it across the pause, or apply it
+/// twice: only the shared publication seam (`finish_non_liminal_copy_token_entry`
+/// / the liminal commit) consumes it, once, when the entrant is actually created.
+pub(crate) fn resolve_with_blocking(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    blocking_target: Option<ObjectId>,
+) -> Result<(), EffectError> {
+    resolve_with_blocking_bindings(state, ability, events, |_| blocking_target)
+}
+
+/// CR 506.3e + CR 509.3d: [`resolve_with_blocking`] with one entering-block
+/// binding per copy source. The creating effect declares the binding for each
+/// member it asks for — `Effect::CopyTokenBlockingAttacker` binds each copy to
+/// the attacker it copies. Every binding is stored on its own batch of the ONE
+/// [`PendingCopyTokenResolution`], so a pause on an earlier member holds the
+/// later members (they do not run ahead) and the resumed drain publishes the
+/// whole batch's ids, in order, to `state.last_created_token_ids` ("those
+/// tokens" for the delayed exile).
+pub(crate) fn resolve_with_blocking_bindings<F>(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    blocking_for: F,
+) -> Result<(), EffectError>
+where
+    F: Fn(ObjectId) -> Option<ObjectId>,
+{
     // Extract fields from effect
     let (
         target_filter,
@@ -259,6 +295,10 @@ pub fn resolve(
     // CR 616.1 choice.
     let mut remaining = VecDeque::with_capacity(copy_sources.len());
     for source in copy_sources {
+        // CR 506.3e + CR 509.3d: the creating effect's declared binding for
+        // THIS member, captured before any member is delivered so a pause on
+        // one cannot lose or reorder another's assignment.
+        let blocking_target = blocking_for(source.incarnation.object_id);
         remaining.push_back(PendingCopyTokenBatch {
             owner: token_owner,
             count,
@@ -282,6 +322,9 @@ pub fn resolve(
                 // CR 608.2h + CR 707.9b: carry the donor incarnation Step 1
                 // bound so donor-referential exceptions halve donor values.
                 donor: Some(source.incarnation),
+                // CR 506.3e + CR 509.3d: the entering-block binding declared by
+                // `CopyTokenBlockingAttacker`, applied only at publication.
+                blocking_target,
             }),
         });
     }
@@ -518,6 +561,8 @@ fn drain_copy_token_resolution(
             copy: Some(batch.copy),
             enter_tapped,
             count: batch.count,
+            // A copy batch carries its member binding on the copy spec.
+            blocking_target: None,
             // CR 614.6 + CR 616.1: a copy-token-substitution continuation
             // (Moonlit Meditation) inherits the originating event's applied set
             // so the substitution replacement cannot re-prompt on its own copy
@@ -742,6 +787,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         source_id,
         controller,
         donor,
+        blocking_target,
     } = copy;
     let name = values.name.clone();
     // CR 508.4: a resume carries the earlier ids so they are republished, but a
@@ -813,6 +859,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 source_id,
                 controller,
                 donor,
+                blocking_target,
             });
             // CR 707.9b/9c: this seam only runs when every exception is
             // stampable onto copiable values before entry, so the body is
@@ -944,6 +991,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             source_id,
             controller,
             donor,
+            blocking_target,
         });
         // CR 707.9: unlike the liminal seam, this one applies its exceptions
         // AFTER the birth through `apply_token_modifications`, which is pausable,
@@ -1197,9 +1245,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             player: state.active_player,
         };
         let created_ids_for_pending = state.last_created_token_ids.clone();
-        if let Some(pending) = state.active_copy_token_mut() {
-            pending.created_ids = created_ids_for_pending;
-        }
+        super::token::merge_created_ids_into_copy_frame(state, &created_ids_for_pending);
         if state.active_copy_token().is_some() {
             drain_pending_copy_token_resolution(state, events);
         }
@@ -1252,6 +1298,9 @@ struct CopyTokenFinalization {
     /// CR 608.2h + CR 707.9b: donor incarnation donor-referential exceptions
     /// (`Source`-scoped dynamic P/T) read at the stamp; `None` reads the token.
     donor: Option<ObjectIncarnationRef>,
+    /// CR 506.3e + CR 509.3d: the declared entering-block attacker, carried
+    /// through the modification/counter pauses to publication.
+    blocking_target: Option<ObjectId>,
 }
 
 /// CR 111.1 + CR 707.2: where a finished non-liminal copy-token entry publishes
@@ -1327,6 +1376,7 @@ fn finish_non_liminal_copy_token_entry(
         source_id,
         controller,
         donor: copy_spec.donor,
+        blocking_target: copy_spec.blocking_target,
     };
     if !apply_token_modifications(
         state,
@@ -1394,6 +1444,9 @@ fn finish_non_liminal_copy_token_entry(
                             attack_destination: attack_destination.clone(),
                             source_id,
                             controller,
+                            // CR 506.3e: the declared block rides the pause to
+                            // the finalize (publication) step.
+                            blocking_target: copy_spec.blocking_target,
                         },
                         PendingCounterPostAction::ContinueCopyTokenCreation {
                             owner: token_owner,
@@ -1445,6 +1498,17 @@ fn finish_non_liminal_copy_token_entry(
     super::token::push_committed_token_entry_events(state, token_id, name, source_id, events)
         .expect("token just created");
     sink.publish(state, token_id);
+    // CR 506.3e + CR 509.3d: publication IS this copy's creation moment, so the
+    // entering-block binding declared by `CopyTokenBlockingAttacker` applies here
+    // and only here. A copied as-enters payment that paused the entry parked this
+    // tail (`ContinueNonLiminalCopyTokenAfterEntryPayment`) with the binding still
+    // on the spec; a paused token is unpublished, so nothing was assigned to it
+    // and this single publication is the one application. Both the immediate and
+    // the resumed routes reach this exact point, so the pair cannot be applied
+    // twice.
+    if let Some(attacker) = copy_spec.blocking_target {
+        crate::game::combat::place_blocking(state, token_id, attacker, events);
+    }
     true
 }
 
@@ -1728,6 +1792,7 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
     controller: crate::types::player::PlayerId,
     remaining_modifications: Vec<ContinuousModification>,
     donor: Option<ObjectIncarnationRef>,
+    blocking_target: Option<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> bool {
     let finalization = CopyTokenFinalization {
@@ -1737,6 +1802,7 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
         source_id,
         controller,
         donor,
+        blocking_target,
     };
     if !apply_token_modifications(
         state,
@@ -1781,6 +1847,12 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
     // the guarded list on top of it.
     super::token::push_committed_token_entry_events(state, token_id, name, source_id, events);
     super::token::record_last_created_copy_batch_token(state, token_id);
+    // CR 506.3e + CR 509.3d: this resumed finalize is the copy's publication;
+    // the declared entering block applies once, here, after the counter
+    // ordering that paused the entry is answered.
+    if let Some(attacker) = finalization.blocking_target {
+        crate::game::combat::place_blocking(state, token_id, attacker, events);
+    }
     true
 }
 
@@ -1897,6 +1969,9 @@ fn apply_token_modifications(
                                 controller: finalization.controller,
                                 remaining_modifications: modifications[index + 1..].to_vec(),
                                 donor: finalization.donor,
+                                // CR 506.3e: the declared block rides the pause
+                                // to the resumed finalize (publication).
+                                blocking_target: finalization.blocking_target,
                             },
                         ],
                     );
@@ -2398,6 +2473,7 @@ mod tests {
             source_id,
             controller: PlayerId(0),
             donor: None,
+            blocking_target: None,
         };
         let mut events = Vec::new();
         let status = apply_copy_token_after_replacement(
@@ -2514,6 +2590,7 @@ mod tests {
             source_id,
             controller: PlayerId(0),
             donor: None,
+            blocking_target: None,
         }
     }
 

@@ -6207,6 +6207,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: std::collections::HashSet::new(),
+            blocking_target: None,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::NeedsChoice(player) = result else {
@@ -6337,6 +6338,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: std::collections::HashSet::new(),
+            blocking_target: None,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::NeedsChoice(player) = result else {
@@ -6502,6 +6504,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: std::collections::HashSet::new(),
+            blocking_target: None,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::NeedsChoice(player) = result else {
@@ -6683,6 +6686,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: std::collections::HashSet::new(),
+            blocking_target: None,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::NeedsChoice(player) = result else {
@@ -6841,6 +6845,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied,
+            blocking_target: None,
         };
         assert!(
             proposed
@@ -6985,6 +6990,7 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: std::collections::HashSet::new(),
+            blocking_target: None,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::NeedsChoice(player) = result else {
@@ -9026,6 +9032,7 @@ mod tests {
                 controller: PlayerId(0),
                 // Test-only Treasure tail stages no donor; empty mods are stamp-proof.
                 donor: None,
+                blocking_target: None,
             }),
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),

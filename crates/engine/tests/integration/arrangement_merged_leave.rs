@@ -5,9 +5,10 @@
 //!   * Avenging Angel's dies trigger ("you may put it on top of its owner's
 //!     library") expands a recorded departure to the absorbed component
 //!     (`merge::expand_returned_merge_components`).
-//!   * Tel-Jilad Stylus ("{T}: Put target permanent you control on the bottom of
-//!     its owner's library.") selects the merged permanent itself, which the
-//!     merge primitive splits into components as it leaves (CR 730.3).
+//!   * Tel-Jilad Stylus ("{T}: Put target permanent you own on the bottom of its
+//!     owner's library.") selects the merged permanent itself, which the merge
+//!     primitive splits into components as it leaves (CR 730.3). Ownership, not
+//!     control, is the target restriction.
 //!
 //! Each test drives public actions over real Oracle text and asserts the
 //! REVERSE of the offered order, so an engine-default delivery order cannot
@@ -29,7 +30,7 @@ const AVENGING_ANGEL: &str =
 const MURDER: &str = "Destroy target creature.";
 // Tel-Jilad Stylus's real Oracle text (verified against data/mtgjson/AtomicCards.json).
 const TEL_JILAD_STYLUS: &str =
-    "{T}: Put target permanent you control on the bottom of its owner's library.";
+    "{T}: Put target permanent you own on the bottom of its owner's library.";
 
 fn black_mana(n: usize) -> Vec<ManaUnit> {
     (0..n)
@@ -295,4 +296,125 @@ fn tel_jilad_single_permanent_opens_no_arrangement() {
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
+}
+
+/// CR 108.3 + CR 401.4: Tel-Jilad Stylus names a permanent its activator OWNS,
+/// not one they control. A merged permanent owned but controlled by an opponent
+/// is a legal target, and its owner orders the physical cards in their library.
+#[test]
+fn tel_jilad_targets_an_owned_permanent_controlled_by_an_opponent() {
+    use engine::types::ability::TargetRef;
+    use engine::types::game_state::CastPaymentMode;
+    use engine::types::player::PlayerId;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Existing A", "Existing B"]);
+    let stylus = scenario
+        .add_artifact_from_oracle(P0, "Tel-Jilad Stylus", TEL_JILAD_STYLUS)
+        .id();
+    // Owned by P0 (the activator), controlled by P1.
+    let host = scenario
+        .add_creature(P0, "Host Creature", 2, 2)
+        .controlled_by(PlayerId(1))
+        .id();
+    let component = scenario.add_creature(P0, "Migratory Greathorn", 3, 4).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.battlefield.retain(|&id| id != component);
+        let mut events = Vec::new();
+        merge_object_onto(state, component, host, MergeSide::Top, &mut events);
+    }
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: stylus,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the stylus is activatable");
+    match &runner.state().waiting_for {
+        WaitingFor::TargetSelection { target_slots, .. } => assert!(
+            target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(host)),
+            "an owned, opponent-controlled permanent is a legal target: {:?}",
+            target_slots[0].legal_targets
+        ),
+        other => panic!("the stylus must announce its target: {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(host)),
+        })
+        .expect("the owned target is accepted");
+    let offered = accept_optional_until_arrangement(&mut runner).unwrap_or_else(|| {
+        panic!(
+            "CR 401.4: the owner orders the physical cards regardless of control; waiting {:?}",
+            runner.state().waiting_for
+        )
+    });
+    let mut chosen = offered.clone();
+    chosen.reverse();
+    runner
+        .act(GameAction::SelectCards {
+            cards: chosen.clone(),
+        })
+        .expect("the owner's reversed order is accepted");
+    resolve_to_priority(&mut runner);
+
+    let bottom = library(&runner);
+    assert_eq!(&bottom[2..], &chosen[..]);
+    assert_eq!(runner.state().objects[&host].zone, Zone::Library);
+    assert_eq!(runner.state().objects[&component].zone, Zone::Library);
+}
+
+/// CR 108.3: an opponent-owned permanent the activator controls is NOT what
+/// "a permanent you own" names, so it is not a legal target.
+#[test]
+fn tel_jilad_rejects_an_opponent_owned_permanent_you_control() {
+    use engine::types::ability::TargetRef;
+    use engine::types::game_state::CastPaymentMode;
+    use engine::types::player::PlayerId;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let stylus = scenario
+        .add_artifact_from_oracle(P0, "Tel-Jilad Stylus", TEL_JILAD_STYLUS)
+        .id();
+    let borrowed = scenario
+        .add_creature(PlayerId(1), "Borrowed Creature", 2, 2)
+        .controlled_by(P0)
+        .id();
+    // A decoy keeps the target prompt open so the exclusion is observable.
+    let owned = scenario.add_creature(P0, "Owned Creature", 2, 2).id();
+    let mut runner = scenario.build();
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: stylus,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the stylus is activatable");
+    match &runner.state().waiting_for {
+        WaitingFor::TargetSelection { target_slots, .. } => {
+            assert!(
+                target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(owned)),
+                "reach guard: the owned decoy is offered: {:?}",
+                target_slots[0].legal_targets
+            );
+            assert!(
+                !target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(borrowed)),
+                "control does not satisfy \"you own\": {:?}",
+                target_slots[0].legal_targets
+            );
+        }
+        other => panic!("the stylus must announce its target: {other:?}"),
+    }
 }

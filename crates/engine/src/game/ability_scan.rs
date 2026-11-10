@@ -9984,12 +9984,6 @@ mod tests {
                  also present in-file",
             ),
             (
-                "copy_token_blocking.rs",
-                true,
-                "CopyTokenBlockingAttacker: UNCONDITIONAL zone_object_ids(Battlefield) scan, \
-                 one token copy per matching attacker, grows the board (CR 707.2)",
-            ),
-            (
                 "counters.rs",
                 true,
                 "PutCounterAll (resolve_add_all) + the shared nontargeted_counter_\
@@ -10127,7 +10121,6 @@ mod tests {
             .collect();
         let census_reps: &[(&str, &str)] = &[
             ("change_zone.rs", "ChangeZoneAll"),
-            ("copy_token_blocking.rs", "CopyTokenBlockingAttacker"),
             ("counters.rs", "PutCounterAll"),
             ("goad.rs", "GoadAll"),
             ("phase_out.rs", "PhaseOut"),
@@ -10146,6 +10139,14 @@ mod tests {
                  census member in effect_census_role (reverting its tag breaks this tie)"
             );
         }
+        // CopyTokenBlockingAttacker delegates its attacker enumeration to the shared
+        // copy resolver (`token_copy::resolve`), so this file no longer matches the
+        // in-file scan idiom; the effect is still a live board census and is tied here.
+        assert!(
+            census_names.contains("CopyTokenBlockingAttacker"),
+            "CopyTokenBlockingAttacker remains a live board census through the shared copy \
+             resolver; reverting its census tag breaks this tie"
+        );
     }
 
     /// Byte-identity: the self-asserting `QuantityRef` board-census arms yield
