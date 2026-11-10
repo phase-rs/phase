@@ -12,7 +12,7 @@
 //! latched — a later can't-effect clamps each draw but never unpays it.
 
 use engine::game::effects::resolve_ability_chain;
-use engine::game::engine::apply;
+use engine::game::engine::{apply, EngineError};
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
@@ -1486,5 +1486,304 @@ fn a_sandbox_mutation_between_recovery_and_completion_publishes_once() {
             .count(),
         1,
         "the buffered sandbox action publishes once"
+    );
+}
+
+/// CR 402.3 + CR 118.12: the order names the canonical hand; a card the
+/// accepted prefix discarded is absent from the checkpoint, so the surviving
+/// IDs are reordered and the hidden extras keep their own slots.
+#[test]
+fn a_reorder_that_names_a_prefix_discarded_card_keeps_the_survivors() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in 0..3 {
+        scenario.with_library_top(PlayerId(player), &STAGED_LIBRARY);
+    }
+    let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+    scenario
+        .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+        .from_oracle_text(STINKWEED_IMP_ORACLE);
+    scenario.add_card_to_hand(P0, "Hand A");
+    scenario.add_card_to_hand(P0, "Hand B");
+    scenario.add_card_to_hand(P0, "Hand C");
+    let mut runner = scenario.build();
+    evaluate_layers(runner.state_mut());
+
+    let mut root = ResolvedAbility::new(
+        pay_cost(AbilityCost::Composite {
+            costs: vec![discard_cost(), draw_cost(1), discard_cost()],
+        }),
+        vec![],
+        source,
+        P0,
+    );
+    root.sub_ability = None;
+    let state = runner.state_mut();
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+    let WaitingFor::DiscardChoice { .. } = &state.waiting_for else {
+        panic!(
+            "the first discard leg owns the cursor: {:?}",
+            state.waiting_for
+        );
+    };
+    let canonical: Vec<_> = state.players[P0.0 as usize].hand.iter().copied().collect();
+    assert_eq!(canonical.len(), 3);
+    apply(
+        state,
+        P0,
+        GameAction::SelectCards {
+            cards: vec![canonical[0]],
+        },
+    )
+    .expect("discard the first canonical card");
+    assert!(is_dredge_prompt_for_p0(state));
+    apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+        .expect("declining Dredge accepts the draw");
+    let WaitingFor::DiscardChoice { .. } = &state.waiting_for else {
+        panic!(
+            "the second discard leg owns the cursor: {:?}",
+            state.waiting_for
+        );
+    };
+    apply(
+        state,
+        PlayerId(2),
+        GameAction::Concede {
+            player_id: PlayerId(2),
+        },
+    )
+    .expect("a player can concede at any time");
+
+    let checkpoint_hand: Vec<_> = state
+        .payment_transaction
+        .as_ref()
+        .and_then(|transaction| transaction.recovered.as_ref())
+        .expect("the checkpoint is live")
+        .state
+        .players[P0.0 as usize]
+        .hand
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(checkpoint_hand.len(), 3);
+    assert!(
+        !checkpoint_hand.contains(&canonical[0]),
+        "the accepted prefix discarded the first canonical card"
+    );
+    let order = vec![canonical[2], canonical[1], canonical[0]];
+    apply(state, P0, GameAction::ReorderHand { order })
+        .expect("the reorder that names the prefix-discarded card is accepted");
+
+    let after: Vec<_> = state
+        .payment_transaction
+        .as_ref()
+        .and_then(|transaction| transaction.recovered.as_ref())
+        .expect("the checkpoint is live")
+        .state
+        .players[P0.0 as usize]
+        .hand
+        .iter()
+        .copied()
+        .collect();
+    let mut expected = checkpoint_hand.clone();
+    let left = expected
+        .iter()
+        .position(|id| *id == canonical[1])
+        .expect("survivor one");
+    let right = expected
+        .iter()
+        .position(|id| *id == canonical[2])
+        .expect("survivor two");
+    expected.swap(left, right);
+    assert_eq!(
+        after, expected,
+        "the two surviving canonical IDs swap; the hidden prefix card keeps its slot"
+    );
+    assert!(
+        state.payment_transaction.is_some(),
+        "the payment is still parked"
+    );
+}
+
+/// CR 118.12: a sandbox draw for another seat that would open its own
+/// replacement prompt is refused while a recovered payment is parked, so the
+/// payment's single executable cursor is never replaced by an un-restorable
+/// sandbox prompt.
+#[test]
+fn a_sandbox_draw_that_would_open_dredge_is_refused() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in 0..3 {
+        scenario.with_library_top(PlayerId(player), &STAGED_LIBRARY);
+    }
+    let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+    scenario
+        .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+        .from_oracle_text(STINKWEED_IMP_ORACLE);
+    scenario
+        .add_creature_to_graveyard(P1, "Stinkweed Imp", 1, 2)
+        .from_oracle_text(STINKWEED_IMP_ORACLE);
+    scenario.add_card_to_hand(P0, "Hand A");
+    scenario.add_card_to_hand(P0, "Hand B");
+    let mut runner = scenario.build();
+    evaluate_layers(runner.state_mut());
+    let mut root = ResolvedAbility::new(
+        pay_cost(AbilityCost::Composite {
+            costs: vec![draw_cost(1), discard_cost()],
+        }),
+        vec![],
+        source,
+        P0,
+    );
+    root.sub_ability = None;
+    let state = runner.state_mut();
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+    assert!(is_dredge_prompt_for_p0(state));
+    apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+        .expect("declining leg 1's Dredge accepts the draw");
+    let WaitingFor::DiscardChoice { .. } = &state.waiting_for else {
+        panic!("the discard leg owns the cursor: {:?}", state.waiting_for);
+    };
+    apply(
+        state,
+        PlayerId(2),
+        GameAction::Concede {
+            player_id: PlayerId(2),
+        },
+    )
+    .expect("a player can concede at any time");
+    state.debug_mode = true;
+    state.format_config.allow_debug_actions = true;
+    let waiting_before = state.waiting_for.clone();
+
+    let error = apply(
+        state,
+        P0,
+        GameAction::Debug(DebugAction::DrawCards {
+            player_id: P1,
+            count: 1,
+        }),
+    )
+    .expect_err("a prompt-opening sandbox draw is refused while the payment is parked");
+    assert!(
+        matches!(error, EngineError::InvalidAction(_)),
+        "the refusal is a typed invalid action: {error:?}"
+    );
+    assert_eq!(
+        state.waiting_for, waiting_before,
+        "the payment's executable cursor is unchanged"
+    );
+    assert!(
+        state
+            .payment_transaction
+            .as_ref()
+            .is_some_and(|transaction| transaction.recovered.is_some()),
+        "the checkpoint is retained atomically"
+    );
+}
+
+/// CR 118.12 + CR 614.11a: an activation whose retained composite cost parks
+/// a draw and still owes a suffix resumes from that suffix after the
+/// replacement subtree retires, then reaches the stack.
+#[test]
+fn a_composite_draw_cost_activation_resumes_its_retained_suffix() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &STAGED_LIBRARY);
+    scenario.with_library_top(P1, &STAGED_LIBRARY);
+    let source = scenario
+        .add_creature(P0, "Draw Cost Source", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::EffectCost {
+                        effect: Box::new(draw_effect(1)),
+                    },
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                    },
+                ],
+            }),
+        )
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Abundance", ABUNDANCE_ORACLE);
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        let library: Vec<_> = state.players[P0.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect();
+        for (index, id) in library.iter().enumerate() {
+            let object = state.objects.get_mut(id).expect("library card");
+            object.card_types.core_types.clear();
+            if index == 2 {
+                object
+                    .card_types
+                    .core_types
+                    .push(engine::types::card_type::CoreType::Land);
+            }
+        }
+    }
+    evaluate_layers(runner.state_mut());
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the composite draw-cost activation begins");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player, .. } if player == P0
+        ),
+        "Abundance offers its optional replacement: {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accept Abundance");
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Land".to_string(),
+        })
+        .expect("choose Land");
+    let WaitingFor::RevealUntilBottomOrder { cards, .. } = &runner.state().waiting_for else {
+        panic!(
+            "Abundance asks for the revealed misses' order: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let order = cards.clone();
+    runner
+        .act(GameAction::SelectCards { cards: order })
+        .expect("submit the bottom order");
+
+    let state = runner.state();
+    assert!(
+        state.pending_cast.is_none(),
+        "the composite activation is no longer a pending cast"
+    );
+    assert_eq!(
+        state.players[P0.0 as usize].life,
+        life_before - 1,
+        "the retained PayLife suffix was paid after the replacement"
+    );
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "the activation reaches the stack after the retained suffix settles: {:?}",
+        state.waiting_for
     );
 }

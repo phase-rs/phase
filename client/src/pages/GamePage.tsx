@@ -3897,9 +3897,36 @@ function formatUnlessCost(
     }
     case "PayEnergy":
       return t("gamePage.cost.energy", { amount: cost.amount ?? 0 });
-    default:
+    default: {
+      // A repeated draw cost (Psychic Vortex) is an EffectCost wrapping the
+      // printed Draw instruction; show the instruction, not a generic cost.
+      const raw = cost as unknown as {
+        type?: string;
+        effect?: { type?: string; count?: unknown };
+      };
+      if (raw.type === "EffectCost" && raw.effect?.type === "Draw") {
+        const count = drawInstructionCount(raw.effect.count);
+        return count > 1
+          ? t("gamePage.cost.drawCount", { count })
+          : t("gamePage.cost.draw");
+      }
       return t("gamePage.cost.generic");
+    }
   }
+}
+
+/** The printed size of a Draw instruction's count expression. */
+function drawInstructionCount(count: unknown): number {
+  if (typeof count === "number") return count;
+  if (
+    count &&
+    typeof count === "object" &&
+    "value" in count &&
+    typeof (count as { value?: unknown }).value === "number"
+  ) {
+    return (count as { value: number }).value;
+  }
+  return 1;
 }
 
 /** The say-it prompt for a `SayPhrase` unless-cost. Answering "pay" says the phrase. */

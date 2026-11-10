@@ -1,8 +1,8 @@
 use crate::game::filter;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, ControllerRef, Effect, EffectKind, EffectScope, ResolvedAbility,
-    SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
+    AbilityCondition, AbilityCost, ControllerRef, Effect, EffectKind, EffectScope, QuantityExpr,
+    ResolvedAbility, SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
@@ -1206,6 +1206,8 @@ pub(super) fn handle_unless_payment(
                     pending_effect,
                     trigger_event,
                     effect_description,
+                    resume_cost: None,
+                    paused_draw_pending: false,
                 },
             ));
             let waiting_for = drive_pending_unless_draw_repeat(state, events)?;
@@ -2113,6 +2115,68 @@ pub(crate) fn drive_pending_unless_draw_repeat(
         let Some(mut pending) = state.pending_unless_draw_repeat.take() else {
             return Ok(state.waiting_for.clone());
         };
+        if pending.paused_draw_pending {
+            // The open replacement prompt has settled, so its draw committed.
+            pending.paused_draw_pending = false;
+            pending.remaining = pending.remaining.saturating_sub(1);
+        }
+        if let Some(suffix) = pending.resume_cost.take() {
+            let suffix_count = repeated_draw_count(&suffix);
+            match costs::pay_ability_cost_for_resolution(
+                state,
+                pending.player,
+                &suffix,
+                pending.pending_effect.as_ref(),
+                events,
+            )? {
+                PaymentOutcome::Paid => {
+                    pending.remaining = pending.remaining.saturating_sub(suffix_count);
+                    if pending.remaining == 0 {
+                        return finish_successful_unless_payment(
+                            state,
+                            pending.pending_effect.as_ref(),
+                            &pending.trigger_event,
+                            events,
+                        );
+                    }
+                    state.pending_unless_draw_repeat = Some(pending);
+                    continue;
+                }
+                PaymentOutcome::Paused { remaining_cost } => {
+                    // CR 118.12: retain the exact unpaid suffix of this chunk;
+                    // the open prompt owns one instruction, the remainder is
+                    // carried by `resume_cost`. Only instructions actually
+                    // completed leave `remaining`.
+                    let after = remaining_cost
+                        .as_ref()
+                        .map(repeated_draw_count)
+                        .unwrap_or(0);
+                    let unpaid = 1 + after;
+                    pending.remaining = pending
+                        .remaining
+                        .saturating_sub(suffix_count.saturating_sub(unpaid));
+                    pending.resume_cost = remaining_cost.map(Box::new);
+                    pending.paused_draw_pending = true;
+                    state.pending_unless_draw_repeat = Some(pending);
+                    return Ok(state.waiting_for.clone());
+                }
+                PaymentOutcome::Failed { .. } => {
+                    return finish_unless_payment(
+                        state,
+                        true,
+                        true,
+                        *pending.base,
+                        pending.pending_effect,
+                        pending.trigger_event,
+                        pending.effect_description,
+                        Vec::new(),
+                        None,
+                        events,
+                    )
+                    .map(|result| result.waiting_for);
+                }
+            }
+        }
         if pending.remaining == 0 {
             return finish_successful_unless_payment(
                 state,
@@ -2142,10 +2206,20 @@ pub(crate) fn drive_pending_unless_draw_repeat(
                 }
                 state.pending_unless_draw_repeat = Some(pending);
             }
-            PaymentOutcome::Paused { .. } => {
-                // The chunk's suffix owns the paused legs; the remaining count
-                // resumes once that suffix settles.
-                pending.remaining -= chunk;
+            PaymentOutcome::Paused { remaining_cost } => {
+                // CR 118.12 + CR 702.24a: the pause is one draw instruction;
+                // its suffix holds the rest of this chunk. Subtracting the
+                // whole chunk here lost up to 63 draws.
+                let after = remaining_cost
+                    .as_ref()
+                    .map(repeated_draw_count)
+                    .unwrap_or(0);
+                let unpaid = 1 + after;
+                pending.remaining = pending
+                    .remaining
+                    .saturating_sub(chunk.saturating_sub(unpaid));
+                pending.resume_cost = remaining_cost.map(Box::new);
+                pending.paused_draw_pending = true;
                 state.pending_unless_draw_repeat = Some(pending);
                 return Ok(state.waiting_for.clone());
             }
@@ -2165,6 +2239,21 @@ pub(crate) fn drive_pending_unless_draw_repeat(
                 .map(|result| result.waiting_for);
             }
         }
+    }
+}
+
+/// The number of printed draw instructions in a cost-shaped chunk.
+fn repeated_draw_count(cost: &AbilityCost) -> u32 {
+    match cost {
+        AbilityCost::EffectCost { effect } => match effect.as_ref() {
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value },
+                ..
+            } if *value > 0 => *value as u32,
+            _ => 0,
+        },
+        AbilityCost::Composite { costs } => costs.iter().map(repeated_draw_count).sum(),
+        _ => 0,
     }
 }
 

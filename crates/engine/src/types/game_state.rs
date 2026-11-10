@@ -5710,12 +5710,21 @@ pub struct PendingPlayerScopeSacrificeChoice {
 pub struct PendingUnlessDrawRepeat {
     pub player: PlayerId,
     pub base: Box<AbilityCost>,
+    /// Draws still owed, including the one whose replacement prompt is open.
     pub remaining: u32,
     pub pending_effect: Box<ResolvedAbility>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_event: Option<GameEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effect_description: Option<String>,
+    /// CR 118.12: the unfinished suffix of the chunk that paused. It owns the
+    /// exact remaining draw instructions and is paid before the next chunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_cost: Option<Box<AbilityCost>>,
+    /// The draw instruction that opened the open replacement prompt has been
+    /// committed by that prompt; `remaining` still counts it until resumed.
+    #[serde(default)]
+    pub paused_draw_pending: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -16660,6 +16669,25 @@ impl GameState {
             {
                 return Err("recovery checkpoint carries combat damage on the stack".to_string());
             }
+            // The outer executable-ownership refusal applies to the nested
+            // checkpoint too: a Dispatching replacement drain has no
+            // synchronous dispatch handle at the persistence boundary there.
+            if checkpoint
+                .state
+                .resolution_stack
+                .iter()
+                .any(|frame| match frame {
+                    ResolutionFrame::PostReplacement(drains) => drains
+                        .drains
+                        .iter()
+                        .any(|drain| matches!(drain.status, DrainStatus::Dispatching)),
+                    _ => false,
+                })
+            {
+                return Err(
+                    "recovery checkpoint carries a dispatching replacement frame".to_string(),
+                );
+            }
         }
         for (index, entry) in transaction.transcript.iter().enumerate() {
             if crate::game::payment_transaction::is_outside_transaction(&entry.action) {
@@ -17008,6 +17036,7 @@ impl PersistedGameState {
         state
             .validate_payment_transaction()
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
+        state.rehydrate_recovered_checkpoint_rng();
         crate::game::effects::choose_from_zone::migrate_legacy_per_player_frame_on_restore(
             &mut state,
         )
@@ -32868,6 +32897,17 @@ impl GameState {
     pub fn rehydrate_rng(&mut self) {
         self.rng = GameRng::seed_from_u64(self.rng_seed);
         self.rng.set_word_pos(self.rng_word_pos);
+    }
+
+    /// CR 706.1a + CR 118.12: a persisted recovery checkpoint skips the live
+    /// ChaCha20 stream and keeps only the seed/high-water. Rehydrate it before
+    /// any replay so an accepted shuffle cursor is not rewound to word 0.
+    fn rehydrate_recovered_checkpoint_rng(&mut self) {
+        if let Some(transaction) = self.payment_transaction.as_mut() {
+            if let Some(checkpoint) = transaction.recovered.as_mut() {
+                checkpoint.state.rehydrate_rng();
+            }
+        }
     }
 
     /// Advances the persisted entropy high-water without rewinding the live

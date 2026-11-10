@@ -2316,6 +2316,25 @@ fn restore_boundary_preserving_departure(
     *state = restored;
 }
 
+/// CR 104.3a + CR 800.4j: whether this action committed a departure the
+/// boundary snapshot does not contain.
+fn departure_committed(state: &GameState, snapshot: &GameState) -> bool {
+    state.eliminated_players.len() > snapshot.eliminated_players.len()
+}
+
+/// CR 800.4j: the next living player to hold priority after a departure.
+fn living_priority_player(state: &GameState) -> PlayerId {
+    if state
+        .players
+        .get(state.active_player.0 as usize)
+        .is_some_and(|seat| seat.is_eliminated)
+    {
+        crate::game::players::next_player_in_turn_order(state, state.active_player)
+    } else {
+        state.active_player
+    }
+}
+
 fn finish_action_boundary(
     state: &mut GameState,
     raw: RawActionApplication,
@@ -2395,11 +2414,27 @@ fn finish_action_boundary_with_lifecycle(
             Ok(advanced) => advanced,
             Err(error) => {
                 let life_failure = close_ingress_window(state, &mut prior_window);
-                lifecycle.discard();
-                restore_boundary_preserving_departure(state, boundary_snapshot);
-                return Err(life_failure.map_or(error, |player| {
-                    EngineError::LifeChangeUnrepresentable { player }
-                }));
+                if departure_committed(state, &boundary_snapshot) && life_failure.is_none() {
+                    if state.payment_transaction.is_some() {
+                        payment_transaction::abandon_failed_recovery(state);
+                    }
+                    if !matches!(
+                        state.waiting_for,
+                        WaitingFor::Priority { .. } | WaitingFor::GameOver { .. }
+                    ) {
+                        state.waiting_for = WaitingFor::Priority {
+                            player: living_priority_player(state),
+                        };
+                    }
+                    result.waiting_for = state.waiting_for.clone();
+                    false
+                } else {
+                    lifecycle.discard();
+                    restore_boundary_preserving_departure(state, boundary_snapshot);
+                    return Err(life_failure.map_or(error, |player| {
+                        EngineError::LifeChangeUnrepresentable { player }
+                    }));
+                }
             }
         }
     };
@@ -2412,13 +2447,30 @@ fn finish_action_boundary_with_lifecycle(
     if let Err(err) = reconcile_terminal_result_completing_resolution(state, &mut result, reconcile)
     {
         let life_failure = close_ingress_window(state, &mut prior_window);
-        lifecycle.discard();
-        restore_boundary_preserving_departure(state, boundary_snapshot);
-        return Err(
-            life_failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
-                player,
-            }),
-        );
+        if departure_committed(state, &boundary_snapshot) && life_failure.is_none() {
+            // CR 104.3a: the concession stands even when the terminal
+            // finalizer fails. Keep the committed board and hand the caller
+            // its events with a living priority continuation.
+            if state.payment_transaction.is_some() {
+                payment_transaction::abandon_failed_recovery(state);
+            }
+            if !matches!(
+                state.waiting_for,
+                WaitingFor::Priority { .. } | WaitingFor::GameOver { .. }
+            ) {
+                state.waiting_for = WaitingFor::Priority {
+                    player: living_priority_player(state),
+                };
+            }
+            result.waiting_for = state.waiting_for.clone();
+            tracing::debug!(?err, "recovered departure keeps the committed board");
+        } else {
+            lifecycle.discard();
+            restore_boundary_preserving_departure(state, boundary_snapshot);
+            return Err(life_failure.map_or(err, |player| {
+                EngineError::LifeChangeUnrepresentable { player }
+            }));
+        }
     }
     if matches!(result.waiting_for, WaitingFor::GameOver { .. }) {
         payment_transaction::retire_terminal_transaction(state);
@@ -9845,6 +9897,15 @@ fn pending_cast_is_draw_cost_activation(
     state: &GameState,
     pending: &crate::types::game_state::PendingCast,
 ) -> bool {
+    // CR 118.12: the retained unpaid suffix can still own the parked draw when
+    // the pause happened before it.
+    if pending
+        .activation_cost
+        .as_ref()
+        .is_some_and(cost_includes_draw_instruction)
+    {
+        return true;
+    }
     let Some(index) = pending.activation_ability_index else {
         return false;
     };
@@ -9852,12 +9913,25 @@ fn pending_cast_is_draw_cost_activation(
         .into_iter()
         .find(|(candidate, _)| *candidate == index)
         .is_some_and(|(_, definition)| {
-            matches!(
-                definition.cost,
-                Some(crate::types::ability::AbilityCost::EffectCost { effect })
-                    if matches!(effect.as_ref(), crate::types::ability::Effect::Draw { .. })
-            )
+            definition
+                .cost
+                .as_ref()
+                .is_some_and(cost_includes_draw_instruction)
         })
+}
+
+/// Whether a cost (possibly a composite) contains a printed Draw instruction.
+fn cost_includes_draw_instruction(cost: &crate::types::ability::AbilityCost) -> bool {
+    use crate::types::ability::AbilityCost;
+    match cost {
+        AbilityCost::EffectCost { effect } => {
+            matches!(effect.as_ref(), crate::types::ability::Effect::Draw { .. })
+        }
+        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+            costs.iter().any(cost_includes_draw_instruction)
+        }
+        _ => false,
+    }
 }
 
 pub(super) fn resume_pending_continuation_if_priority(
@@ -12446,7 +12520,31 @@ fn apply_action(
         .is_some_and(|transaction| transaction.recovered.is_some())
         && matches!(action, GameAction::Debug(_))
     {
+        // CR 118.12: a sandbox action that opens its own prompt would replace
+        // the payment's executable cursor with a prompt the payment transcript
+        // cannot restore. Keep the one executable prompt: refuse the sandbox
+        // action atomically and leave the parked payment's cursor untouched.
+        let before = state
+            .payment_transaction
+            .as_ref()
+            .and_then(|transaction| transaction.recovered.as_ref())
+            .map(|checkpoint| checkpoint.state.waiting_for.clone());
+        let before_transaction = state.payment_transaction.clone();
         payment_transaction::mirror_checkpoint_action(state, actor, action)?;
+        let after = state
+            .payment_transaction
+            .as_ref()
+            .and_then(|transaction| transaction.recovered.as_ref())
+            .map(|checkpoint| checkpoint.state.waiting_for.clone());
+        if before != after {
+            // The mirror only mutated the descriptor; the canonical board is
+            // untouched, so restoring the pre-action descriptor is atomic.
+            state.payment_transaction = before_transaction;
+            return Err(EngineError::InvalidAction(
+                "a sandbox action that opens a prompt is unavailable while a recovered payment is parked"
+                    .to_string(),
+            ));
+        }
         return Ok(ActionResult::applied(Vec::new(), state.waiting_for.clone()));
     }
     // Clear stale revealed_cards from the previous action.

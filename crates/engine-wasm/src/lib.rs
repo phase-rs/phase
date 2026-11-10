@@ -2340,6 +2340,21 @@ fn submit_action_inner(actor: PlayerId, action: GameAction) -> Result<SubmittedA
         }
     }
 
+    // CR 118.12: the source-bound creation materializes on the live board and
+    // would disappear at checkpoint settlement; refuse it while a recovered
+    // payment owns the executable state.
+    if matches!(&action, GameAction::Debug(DebugAction::CreateCard { .. }))
+        && with_installed_state(|state| {
+            state
+                .payment_transaction
+                .as_ref()
+                .is_some_and(|transaction| transaction.recovered.is_some())
+        })?
+    {
+        return Ok(SubmittedAction::Rejected {
+            rejection: ActionRejection::new(ActionRejectionCode::ActionNotAllowed),
+        });
+    }
     if let GameAction::Debug(DebugAction::CreateCard {
         card_name,
         owner,

@@ -748,24 +748,41 @@ pub(crate) fn mirror_outside_action(state: &mut GameState, actor: PlayerId, acti
         let Some(player) = shadow.players.get(actor.0 as usize) else {
             return;
         };
+        let Some(canonical) = state.players.get(actor.0 as usize) else {
+            return;
+        };
         let hand: Vec<crate::types::identifiers::ObjectId> = player.hand.iter().copied().collect();
-        if order.len() != hand.len() {
-            let extras: Vec<crate::types::identifiers::ObjectId> = hand
+        let canonical_hand: std::collections::HashSet<_> = canonical.hand.iter().copied().collect();
+        let hand_set: std::collections::HashSet<_> = hand.iter().copied().collect();
+        let order_set: std::collections::HashSet<_> = order.iter().copied().collect();
+        // CR 402.3 + CR 118.12: the order names the canonical hand. The
+        // accepted prefix can have removed one of its cards (the checkpoint
+        // hand no longer holds it), so reorder the surviving IDs only and
+        // leave the hidden prefix cards in their own slots.
+        if order_set.len() != order.len()
+            || order
                 .iter()
-                .copied()
-                .filter(|id| !order.contains(id))
-                .collect();
-            let mut merged = order.clone();
-            merged.extend(extras);
-            if merged.len() != hand.len() || merged.iter().any(|id| !hand.contains(id)) {
-                return;
-            }
-            shadow.players[actor.0 as usize].hand = merged.into_iter().collect();
-        } else if engine::apply_admitted_recorded_action(&mut shadow, actor, actor, action.clone())
-            .is_err()
+                .any(|id| !hand_set.contains(id) && !canonical_hand.contains(id))
         {
             return;
         }
+        let surviving_order: Vec<_> = order
+            .iter()
+            .copied()
+            .filter(|id| hand_set.contains(id))
+            .collect();
+        let surviving_in_hand = hand.iter().filter(|id| order_set.contains(id)).count();
+        if surviving_order.len() != surviving_in_hand {
+            return;
+        }
+        let mut merged = hand.clone();
+        let mut ordered = surviving_order.iter();
+        for slot in &mut merged {
+            if order_set.contains(slot) {
+                *slot = *ordered.next().expect("counts match");
+            }
+        }
+        shadow.players[actor.0 as usize].hand = merged.into_iter().collect();
     } else if engine::apply_admitted_recorded_action(&mut shadow, actor, actor, action.clone())
         .is_err()
     {
@@ -802,9 +819,10 @@ fn carry_runtime_authorities(shadow: &mut GameState, live: &GameState) {
     shadow.card_db = live.card_db.clone();
     shadow.all_card_names = live.all_card_names.clone();
     shadow.log_player_names = live.log_player_names.clone();
-    shadow.rng = live.rng.clone();
-    shadow.rng_seed = live.rng_seed;
-    shadow.rng_word_pos = live.rng_word_pos;
+    // CR 706.1a + CR 118.12: the completed shadow carries the accepted
+    // entropy (seed, word cursor, and any recorded shuffle permutation).
+    // Overwriting it with the live stream would rewind the randomness that
+    // produced the accepted outcome.
     // Session/authority state is not part of the accepted payment: a restored
     // or revoked capability decision belongs to the live session, not to the
     // checkpoint snapshot.
@@ -857,9 +875,17 @@ pub(crate) fn abandon_failed_recovery(state: &mut GameState) {
         state.waiting_for,
         WaitingFor::Priority { .. } | WaitingFor::GameOver { .. }
     ) {
-        state.waiting_for = WaitingFor::Priority {
-            player: state.active_player,
+        // CR 800.4j: never hand priority to the seat that just left.
+        let player = if state
+            .players
+            .get(state.active_player.0 as usize)
+            .is_some_and(|seat| seat.is_eliminated)
+        {
+            crate::game::players::next_player_in_turn_order(state, state.active_player)
+        } else {
+            state.active_player
         };
+        state.waiting_for = WaitingFor::Priority { player };
     }
 }
 

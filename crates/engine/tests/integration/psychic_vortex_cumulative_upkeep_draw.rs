@@ -1541,3 +1541,46 @@ fn a_large_age_count_accepts_through_the_counted_cursor() {
         "the counted cursor retires after the last chunk"
     );
 }
+
+/// CR 702.24a + CR 118.12: a counted chunk that pauses on the first draw's
+/// replacement keeps the exact unpaid instruction count; every one of the
+/// printed draws is still issued after the pause settles.
+#[test]
+fn a_counted_chunk_pause_retains_the_unpaid_draws() {
+    const AGE: u32 = 100;
+    let names: Vec<String> = (0..(AGE as usize + 50))
+        .map(|index| format!("Library {index}"))
+        .collect();
+    let library: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (mut runner, vortex, ()) = vortex_board(AGE - 1, &library, |scenario| {
+        scenario
+            .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+            .from_oracle_text(STINKWEED_IMP_ORACLE);
+    });
+    advance_through_upkeep(&mut runner);
+    assert_draw_cost_prompt(&runner, AGE as usize, 1);
+    let before = ZoneSizes::of(&runner, P0);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("paying a large cumulative upkeep is legal");
+    for instruction in 1..=AGE {
+        assert_replacement_choice(&runner, &format!("Dredge pauses draw {instruction}"));
+        runner
+            .act(GameAction::ChooseReplacement {
+                index: DECLINE_REPLACEMENT,
+            })
+            .expect("declining Dredge is legal");
+    }
+    let after = ZoneSizes::of(&runner, P0);
+    assert_eq!(
+        after.hand,
+        before.hand + AGE as usize,
+        "the paused chunk keeps its unpaid draws"
+    );
+    assert_eq!(after.library, before.library - AGE as usize);
+    assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
+    assert!(
+        runner.state().pending_unless_draw_repeat.is_none(),
+        "the counted cursor retires after the last paused draw"
+    );
+}
