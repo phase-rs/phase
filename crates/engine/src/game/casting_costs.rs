@@ -8148,6 +8148,8 @@ pub(super) fn push_activated_ability_to_stack(
                 );
                 pending.activation_residual = activation_residual;
                 pending.activation_cost = remaining_cost.cloned();
+                pending.activation_cost_paused_on_draw =
+                    remaining_cost.is_some_and(crate::game::engine::cost_includes_draw_instruction);
                 pending.pending_loyalty_activation_player = pending_loyalty_activation_player;
                 pending.activation_trigger_collection = activation_trigger_collection.clone();
                 if activation_cost_committed {
@@ -8370,6 +8372,8 @@ pub(super) fn push_activated_ability_to_stack(
                 payment_mode,
             );
             pending.activation_cost = remaining_cost;
+            pending.activation_cost_paused_on_draw =
+                crate::game::engine::cost_includes_draw_instruction(cost);
             pending.pending_loyalty_activation_player = should_record_loyalty
                 .then_some(player)
                 .or(pending_loyalty_activation_player);

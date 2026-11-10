@@ -25986,6 +25986,9 @@ fn pending_activation_after_cost_pause(
         activation_cost_snapshot,
         payment_mode,
     );
+    pending.activation_cost_paused_on_draw = remaining_cost
+        .as_ref()
+        .is_some_and(crate::game::engine::cost_includes_draw_instruction);
     pending.activation_cost = remaining_cost;
     pending
 }

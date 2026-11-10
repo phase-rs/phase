@@ -1532,17 +1532,6 @@ fn a_large_age_count_accepts_through_the_counted_cursor() {
     runner
         .act(GameAction::PayUnlessCost { pay: true })
         .expect("paying a large cumulative upkeep is legal");
-    // CR 702.24a: one bounded chunk per public action; priority between them.
-    while runner.state().pending_unless_draw_repeat.is_some() {
-        match &runner.state().waiting_for {
-            WaitingFor::Priority { .. } => {
-                runner
-                    .act(GameAction::PassPriority)
-                    .expect("passing between counted chunks is legal");
-            }
-            other => panic!("expected priority between counted chunks, got {other:?}"),
-        }
-    }
     let after = ZoneSizes::of(&runner, P0);
     assert_eq!(after.hand, before.hand + AGE as usize);
     assert_eq!(after.library, before.library - AGE as usize);
@@ -1606,5 +1595,35 @@ fn a_counted_chunk_pause_retains_the_unpaid_draws() {
     assert!(
         runner.state().pending_unless_draw_repeat.is_none(),
         "the counted cursor retires after the last paused draw"
+    );
+}
+
+/// CR 117.2e + CR 121.4 + CR 702.24a: a counted payment that can't be paid is
+/// resolved atomically inside the ability's resolution; it never parks a
+/// partially paid cursor and returns priority with one instruction owed.
+#[test]
+fn a_counted_payment_with_an_empty_library_fails_atomically() {
+    const AGE: u32 = 65;
+    let (mut runner, vortex, ()) = vortex_board(AGE - 1, &[], |_| ());
+    advance_through_upkeep(&mut runner);
+    assert_draw_cost_prompt(&runner, AGE as usize, 1);
+    let before = ZoneSizes::of(&runner, P0);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the choice is admitted or refused, but never parks a cursor");
+    let state = runner.state();
+    assert!(
+        state.pending_unless_draw_repeat.is_none(),
+        "no partially paid counted cursor survives the resolution"
+    );
+    assert_ne!(
+        zone_of(&runner, vortex),
+        Zone::Battlefield,
+        "the unpaid permanent leaves the battlefield"
+    );
+    assert_eq!(
+        ZoneSizes::of(&runner, P0).hand,
+        before.hand,
+        "no partial draws were kept"
     );
 }

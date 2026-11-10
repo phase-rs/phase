@@ -1996,3 +1996,92 @@ fn a_composite_draw_cost_activation_resumes_after_the_source_leaves() {
         state.waiting_for
     );
 }
+
+/// CR 118.12: a sandbox action that would leave the parked discard prompt with
+/// no legal answer is refused atomically.
+#[test]
+fn a_sandbox_action_cannot_leave_the_discard_prompt_unanswerable() {
+    let (mut runner, source) = concession_board_with_hand();
+    let mut root = ResolvedAbility::new(
+        pay_cost(AbilityCost::Composite {
+            costs: vec![draw_cost(1), discard_cost()],
+        }),
+        vec![],
+        source,
+        P0,
+    );
+    root.sub_ability = None;
+    let state = runner.state_mut();
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+    assert!(is_dredge_prompt_for_p0(state));
+    apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+        .expect("declining leg 1's Dredge accepts the draw");
+    let WaitingFor::DiscardChoice { .. } = &state.waiting_for else {
+        panic!("the discard leg owns the cursor: {:?}", state.waiting_for);
+    };
+    apply(
+        state,
+        PlayerId(2),
+        GameAction::Concede {
+            player_id: PlayerId(2),
+        },
+    )
+    .expect("a player can concede at any time");
+    state.debug_mode = true;
+    state.format_config.allow_debug_actions = true;
+    let canonical: Vec<_> = state.players[P0.0 as usize].hand.iter().copied().collect();
+    let prompt_cards: Vec<_> = {
+        let checkpoint = state
+            .payment_transaction
+            .as_ref()
+            .and_then(|transaction| transaction.recovered.as_ref())
+            .expect("the checkpoint is live");
+        match &checkpoint.state.waiting_for {
+            WaitingFor::DiscardChoice { cards, .. } => cards.clone(),
+            other => panic!("expected the discard prompt: {other:?}"),
+        }
+    };
+    for id in &canonical {
+        apply(
+            state,
+            P0,
+            GameAction::Debug(DebugAction::MoveToZone {
+                object_id: *id,
+                to_zone: Zone::Exile,
+                library_position: None,
+                simulate: false,
+            }),
+        )
+        .expect("removing a visible card keeps the prompt answerable");
+    }
+    let hidden = prompt_cards
+        .iter()
+        .copied()
+        .find(|id| !canonical.contains(id))
+        .expect("the prefix-drawn card");
+    let error = apply(
+        state,
+        P0,
+        GameAction::Debug(DebugAction::MoveToZone {
+            object_id: hidden,
+            to_zone: Zone::Exile,
+            library_position: None,
+            simulate: false,
+        }),
+    )
+    .expect_err("removing the last eligible card must be refused");
+    assert!(matches!(error, EngineError::InvalidAction(_)));
+    let checkpoint_hand_has_hidden = state
+        .payment_transaction
+        .as_ref()
+        .and_then(|transaction| transaction.recovered.as_ref())
+        .expect("the checkpoint is live")
+        .state
+        .players[P0.0 as usize]
+        .hand
+        .contains(&hidden);
+    assert!(
+        checkpoint_hand_has_hidden,
+        "the refused action left the eligible card in place"
+    );
+}

@@ -28924,16 +28924,24 @@ fn resolve_unless_payers(
 /// concrete expansion.
 pub(crate) fn repeated_draw_check_cost(base: &AbilityCost, count: u32) -> AbilityCost {
     if let AbilityCost::EffectCost { effect } = base {
-        if let Effect::Draw {
-            count: QuantityExpr::Fixed { value },
-            target,
-        } = effect.as_ref()
-        {
+        if let Effect::Draw { count: qty, target } = effect.as_ref() {
+            // CR 614.17b + CR 702.24a: carry the whole unsigned repetition into
+            // the admission check. `count as i32` wrapped to a negative value
+            // for 2^31 and was clamped to zero draws, admitting a payment the
+            // board cannot make.
+            let repetitions = i32::try_from(count).unwrap_or(i32::MAX);
+            let total = match qty {
+                QuantityExpr::Fixed { value } => QuantityExpr::Fixed {
+                    value: value.saturating_mul(repetitions),
+                },
+                other => QuantityExpr::Multiply {
+                    factor: repetitions,
+                    inner: Box::new(other.clone()),
+                },
+            };
             return AbilityCost::EffectCost {
                 effect: Box::new(Effect::Draw {
-                    count: QuantityExpr::Fixed {
-                        value: value.saturating_mul(count as i32),
-                    },
+                    count: total,
                     target: target.clone(),
                 }),
             };
@@ -67399,5 +67407,51 @@ mod parser_oracle_effect_tests {
             !evaluate_condition(&cond, &state, &ability_for(strong)),
             "3/3 is not least power"
         );
+    }
+}
+
+#[cfg(test)]
+mod repeat_admission_tests {
+    use super::repeated_draw_check_cost;
+    use crate::types::ability::{AbilityCost, Effect, QuantityExpr, TargetFilter};
+
+    /// CR 614.17b: the whole unsigned repetition reaches the admission check;
+    /// 2^31 must not wrap negative and admit zero draws.
+    #[test]
+    fn the_repeat_check_carries_the_large_unsigned_count() {
+        let draw = |count| AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count,
+                target: TargetFilter::Controller,
+            }),
+        };
+        let fixed = repeated_draw_check_cost(&draw(QuantityExpr::Fixed { value: 1 }), 1 << 31);
+        match fixed {
+            AbilityCost::EffectCost { effect } => match effect.as_ref() {
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value },
+                    ..
+                } => assert_eq!(*value, i32::MAX),
+                other => panic!("expected the compact fixed draw: {other:?}"),
+            },
+            other => panic!("expected an effect cost: {other:?}"),
+        }
+
+        let non_fixed = repeated_draw_check_cost(
+            &draw(QuantityExpr::Sum {
+                exprs: vec![QuantityExpr::Fixed { value: 1 }],
+            }),
+            1 << 31,
+        );
+        match non_fixed {
+            AbilityCost::EffectCost { effect } => match effect.as_ref() {
+                Effect::Draw {
+                    count: QuantityExpr::Multiply { factor, .. },
+                    ..
+                } => assert_eq!(*factor, i32::MAX),
+                other => panic!("expected a symbolic product: {other:?}"),
+            },
+            other => panic!("expected an effect cost: {other:?}"),
+        }
     }
 }

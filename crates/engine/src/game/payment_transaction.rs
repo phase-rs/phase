@@ -201,6 +201,9 @@ fn replay(
             // checkpoint; rehydrate them from the live session so the
             // executable replay has the card database and log names.
             shadow.card_db = state.card_db.clone();
+            shadow.card_face_registry = state.card_face_registry.clone();
+            shadow.meld_pair_registry = state.meld_pair_registry.clone();
+            shadow.booster_shelf = state.booster_shelf.clone();
             shadow.all_card_names = state.all_card_names.clone();
             shadow.log_player_names = state.log_player_names.clone();
             restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
@@ -714,6 +717,9 @@ pub(crate) fn mirror_checkpoint_action(
     // Runtime registries are `#[serde(skip)]` on the persisted checkpoint;
     // rehydrate them from the live session before the sandbox action runs.
     shadow.card_db = state.card_db.clone();
+    shadow.card_face_registry = state.card_face_registry.clone();
+    shadow.meld_pair_registry = state.meld_pair_registry.clone();
+    shadow.booster_shelf = state.booster_shelf.clone();
     shadow.all_card_names = state.all_card_names.clone();
     shadow.log_player_names = state.log_player_names.clone();
     // The sandbox authority is the live session's, not the checkpoint's older
@@ -833,6 +839,9 @@ pub(crate) fn retire_terminal_transaction(state: &mut GameState) {
 /// settlement replaces the outer state.
 fn carry_runtime_authorities(shadow: &mut GameState, live: &GameState) {
     shadow.card_db = live.card_db.clone();
+    shadow.card_face_registry = live.card_face_registry.clone();
+    shadow.meld_pair_registry = live.meld_pair_registry.clone();
+    shadow.booster_shelf = live.booster_shelf.clone();
     shadow.all_card_names = live.all_card_names.clone();
     shadow.log_player_names = live.log_player_names.clone();
     // CR 706.1a + CR 118.12: the completed shadow carries the accepted

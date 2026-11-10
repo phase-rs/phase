@@ -1436,8 +1436,6 @@ fn apply_action_boundary_core(
     authorize_actor: bool,
 ) -> Result<RawActionApplication, EngineError> {
     let lifecycle = super::lifecycle::enter_action_frame();
-    // CR 702.24a: bound counted-draw work to one chunk per public action.
-    state.unless_draw_chunks_this_action = 0;
     // CR 104.3a: the concession marker is scoped to this public action.
     state.conceded_this_action = None;
     if let Err(error) = mana_sources::preflight_tap_land_action(state, authenticated_actor, &action)
@@ -1802,7 +1800,11 @@ fn apply_action_boundary_core(
     result.waiting_for = std::mem::replace(&mut state.waiting_for, reducer_wait);
     if let Some(player) = boundary_life_change_failure(state) {
         lifecycle.discard();
-        *state = cast_undo_boundary.restore(boundary_snapshot);
+        // CR 104.3a: an authenticated concession is committed; the ingress
+        // failure must not roll it back.
+        if state.conceded_this_action.is_none() {
+            *state = cast_undo_boundary.restore(boundary_snapshot);
+        }
         return Err(EngineError::LifeChangeUnrepresentable { player });
     }
     // Do not carry the core's window into finalization: that pass owns its own
@@ -2313,11 +2315,44 @@ fn restore_boundary_preserving_departure(
     state: &mut GameState,
     snapshot: std::sync::Arc<GameState>,
 ) {
-    let restored = std::sync::Arc::unwrap_or_clone(snapshot);
-    if state.eliminated_players.len() > restored.eliminated_players.len() {
+    // CR 104.3a: the explicit concession marker keeps the authenticated
+    // departure (and its settlement) even when a later step fails. Other
+    // rollback sites restore the snapshot in full.
+    if state.conceded_this_action.is_some() {
         return;
     }
-    *state = restored;
+    *state = std::sync::Arc::unwrap_or_clone(snapshot);
+}
+
+/// CR 118.12: the parked payment's prompt must still have a legal answer
+/// after a sandbox action touched the checkpoint board.
+fn checkpoint_prompt_has_legal_answer(state: &GameState) -> bool {
+    let Some(inner) = state
+        .payment_transaction
+        .as_ref()
+        .and_then(|transaction| transaction.recovered.as_ref())
+        .map(|checkpoint| checkpoint.state.as_ref())
+    else {
+        return true;
+    };
+    match &inner.waiting_for {
+        WaitingFor::DiscardChoice {
+            player,
+            count,
+            cards,
+            up_to,
+            ..
+        } => {
+            if *up_to {
+                return true;
+            }
+            let Some(seat) = inner.players.get(player.0 as usize) else {
+                return false;
+            };
+            cards.iter().filter(|id| seat.hand.contains(id)).count() >= *count
+        }
+        _ => true,
+    }
 }
 
 /// CR 104.3a + CR 800.4j: whether this action committed a departure the
@@ -12547,12 +12582,12 @@ fn apply_action(
             .as_ref()
             .and_then(|transaction| transaction.recovered.as_ref())
             .map(|checkpoint| checkpoint.state.waiting_for.clone());
-        if before != after {
+        if before != after || !checkpoint_prompt_has_legal_answer(state) {
             // The mirror only mutated the descriptor; the canonical board is
             // untouched, so restoring the pre-action descriptor is atomic.
             state.payment_transaction = before_transaction;
             return Err(EngineError::InvalidAction(
-                "a sandbox action that opens a prompt is unavailable while a recovered payment is parked"
+                "a sandbox action that opens a prompt or empties the parked prompt's legal answers is unavailable while a recovered payment is parked"
                     .to_string(),
             ));
         }
