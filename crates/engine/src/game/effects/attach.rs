@@ -2231,8 +2231,11 @@ pub(crate) fn attachment_illegality_projected(
     None
 }
 
-/// CR 702.16c/d + CR 702.16n/p: True when some protection instance on `host`
-/// matches `attachment` and is not exempted for that attachment.
+/// CR 702.16c/d + CR 613.7: only protection that the layer pass left on the
+/// host applies at the attachment boundary. A matching quality blocks unless
+/// EVERY surviving instance of it is a ridered grant that exempts this
+/// attachment (CR 702.16m + CR 702.16n + CR 702.16p); an instance with no
+/// recorded provenance (printed or copiable) never exempts.
 fn protection_blocks_attachment(
     state: &GameState,
     host_id: ObjectId,
@@ -2240,119 +2243,34 @@ fn protection_blocks_attachment(
     host: &crate::game::game_object::GameObject,
     attachment: &crate::game::game_object::GameObject,
 ) -> bool {
-    use crate::types::ability::ContinuousModification;
     use crate::types::keywords::Keyword;
-    use crate::types::statics::StaticMode;
 
-    // CR 702.16: Printed / base protection on the host has no 702.16n rider —
-    // it always blocks matching attachments.
-    for kw in &host.base_keywords {
-        if let Keyword::Protection(ref pt) = kw {
-            if crate::game::keywords::source_matches_protection_target(pt, host, attachment) {
-                return true;
-            }
+    host.keywords.iter().any(|keyword| {
+        let Keyword::Protection(quality) = keyword else {
+            return false;
+        };
+        if !crate::game::keywords::source_matches_protection_target(quality, host, attachment) {
+            return false;
         }
-    }
-
-    // Continuous grants: each matching protection instance blocks unless its
-    // StaticDefinition/TCE carries a CR 702.16n/p exemption covering this
-    // attachment.
-    let mut any_matching_grant = false;
-    for (source_obj, def) in crate::game::functioning_abilities::battlefield_active_statics(state) {
-        if !matches!(def.mode, StaticMode::Continuous) {
-            continue;
-        }
-        let source_id = source_obj.id;
-        let def_index = live_static_def_index(source_obj, def);
-        let affected = def.affected.clone().unwrap_or(TargetFilter::Any);
-        let ctx = FilterContext::from_source(state, source_id);
-        if !matches_target_filter(state, host_id, &affected, &ctx) {
-            continue;
-        }
-        // CR 109.5: "you" in a static ability is its source's current controller.
-        let you = crate::game::layers::condition_controller(
-            state,
-            None,
-            source_obj.controller,
-            source_id,
-        );
-        for (mod_index, modification) in def.modifications.iter().enumerate() {
-            let ContinuousModification::AddKeyword {
-                keyword: Keyword::Protection(pt),
-            } = modification
-            else {
-                continue;
-            };
-            // CR 702.16i + CR 702.16n: each expanded quality is its own protection
-            // ability; another grant's "doesn't remove" rider never exempts this one.
-            for resolved in
-                crate::game::keywords::resolve_granted_protection(state, pt, source_id, you)
-            {
-                if !crate::game::keywords::source_matches_protection_target(
-                    &resolved, host, attachment,
-                ) {
-                    continue;
-                }
-                any_matching_grant = true;
-                if !protection_grant_exempts_attachment(
-                    state,
-                    attachment_id,
-                    source_id,
-                    (def_index, mod_index, host_id),
-                    &resolved,
-                    def.protection_does_not_remove.as_ref(),
-                ) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    // Transient continuous protection grants (e.g. Mother of Runes) — no
-    // StaticDefinition rider today; treat as always-blocking when they match.
-    for tce in &state.transient_continuous_effects {
-        let ctx = FilterContext::from_source(state, tce.source_id);
-        if !matches_target_filter(state, host_id, &tce.affected, &ctx) {
-            continue;
-        }
-        // CR 109.5: "you" in a resolution-created effect is the controller that
-        // created it, not its source's current controller.
-        let you = crate::game::layers::condition_controller(
-            state,
-            Some(tce.id),
-            tce.controller,
-            tce.source_id,
-        );
-        for modification in &tce.modifications {
-            let ContinuousModification::AddKeyword {
-                keyword: Keyword::Protection(pt),
-            } = modification
-            else {
-                continue;
-            };
-            let blocks =
-                crate::game::keywords::resolve_granted_protection(state, pt, tce.source_id, you)
-                    .iter()
-                    .any(|resolved| {
-                        crate::game::keywords::source_matches_protection_target(
-                            resolved, host, attachment,
-                        )
-                    });
-            if blocks {
-                // Transients currently carry no 702.16n rider field.
-                return true;
-            }
-        }
-    }
-
-    // If host.keywords still match (granted protection present) but we found no
-    // continuous grant — fall back to the pre-exemption query so we never open
-    // a hole when grant discovery misses a path.
-    if !any_matching_grant && crate::game::keywords::protection_prevents_from(host, attachment) {
-        return true;
-    }
-
-    false
+        let mut instances = host
+            .protection_provenance
+            .iter()
+            .filter(|entry| entry.quality == *quality)
+            .peekable();
+        instances.peek().is_none()
+            || instances.any(|entry| {
+                !entry.rider.as_ref().is_some_and(|rider| {
+                    protection_grant_exempts_attachment(
+                        state,
+                        attachment_id,
+                        rider.source,
+                        (rider.def_index, rider.mod_index, host_id),
+                        quality,
+                        &rider.does_not_remove,
+                    )
+                })
+            })
+    })
 }
 
 /// Composite key for one protection modification on a host:
@@ -2570,15 +2488,12 @@ fn protection_grant_exempts_attachment(
     grant_source_id: ObjectId,
     grant_key: ProtectionEffectHostKey,
     resolved_pt: &crate::types::keywords::ProtectionTarget,
-    exemption: Option<&crate::types::ability::ProtectionDoesNotRemove>,
+    exemption: &crate::types::ability::ProtectionDoesNotRemove,
 ) -> bool {
     use crate::types::ability::ProtectionDoesNotRemove;
 
     let (grant_def_index, grant_mod_index, host_id) = grant_key;
 
-    let Some(exemption) = exemption else {
-        return false;
-    };
     let Some(attachment) = state.objects.get(&attachment_id) else {
         return false;
     };
@@ -5475,6 +5390,22 @@ mod tests {
             .push(def);
     }
 
+    /// Unit fixtures push a static onto `static_definitions` directly; a full
+    /// pass reseeds that set from `base_static_definitions`, so mirror it when
+    /// the fixture is created after the source was already initialized.
+    fn persist_last_static(state: &mut GameState, source_id: ObjectId) {
+        let defs: Vec<_> = state.objects[&source_id]
+            .static_definitions
+            .iter_all()
+            .cloned()
+            .collect();
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .base_static_definitions = std::sync::Arc::new(defs);
+    }
+
     fn evaluate_protection_layers(state: &mut GameState) {
         crate::game::layers::mark_layers_full(state);
         crate::game::layers::evaluate_layers(state);
@@ -5505,6 +5436,165 @@ mod tests {
         obj.static_definitions.clear();
         obj.base_static_definitions = Arc::new(Vec::new());
         obj.base_characteristics_initialized = false;
+    }
+
+    /// CR 702.16p + CR 613.7: the start-time snapshot is tied to the protection
+    /// EFFECT starting to apply, not to the resulting keyword surviving. A later
+    /// layer-6 removal must not prune it.
+    #[test]
+    fn cr_702_16p_snapshot_survives_later_ability_removal() {
+        use crate::types::ability::{ContinuousModification, ProtectionDoesNotRemove};
+        use crate::types::keywords::ProtectionTarget;
+        use crate::types::mana::ManaColor;
+
+        let mut state = setup();
+        let host = spawn_creature(&mut state, "Bear");
+        let equipment = spawn_equipment(&mut state, "Sword", 12);
+        {
+            let obj = state.objects.get_mut(&equipment).unwrap();
+            obj.color.push(ManaColor::White);
+        }
+        attach_to(&mut state, equipment, host);
+
+        let blessing = spawn_grant_source(&mut state, "Benevolent Blessing", 13);
+        apply_protection_grant(
+            &mut state,
+            blessing,
+            host,
+            ProtectionTarget::Color(ManaColor::White),
+            Some(ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached),
+        );
+        persist_last_static(&mut state, blessing);
+        evaluate_protection_layers(&mut state);
+        assert_eq!(
+            protection_snapshot_ids(&state, blessing, 0, 0, host),
+            vec![equipment],
+            "the already-attached Equipment is snapshotted at effect start"
+        );
+
+        // Timestamp-later Humility removes the resulting protection ability.
+        let humility = spawn_grant_source(&mut state, "Humility", 14);
+        {
+            let obj = state.objects.get_mut(&humility).unwrap();
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: host })
+                    .modifications(vec![ContinuousModification::RemoveAllAbilities]),
+            );
+        }
+        evaluate_protection_layers(&mut state);
+
+        assert!(state.objects[&host]
+            .keywords
+            .iter()
+            .all(|k| !matches!(k, crate::types::keywords::Keyword::Protection(_))));
+        assert!(
+            state.objects[&host].protection_provenance.is_empty(),
+            "the surviving layer result carries no protection instance"
+        );
+        assert_eq!(
+            protection_snapshot_ids(&state, blessing, 0, 0, host),
+            vec![equipment],
+            "the effect never stopped applying, so its start snapshot must survive"
+        );
+    }
+
+    /// CR 702.16m + CR 702.16n: printed protection and a ridered grant of the
+    /// same quality are separate instances; the rider exempts only its own
+    /// Aura, never the printed instance.
+    #[test]
+    fn printed_protection_blocks_own_rider_aura_after_layers() {
+        use crate::types::ability::ProtectionDoesNotRemove;
+        use crate::types::keywords::{Keyword, ProtectionTarget};
+        use crate::types::mana::ManaColor;
+
+        let mut state = setup();
+        let host = spawn_creature(&mut state, "Black Knight");
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.base_keywords
+                .push(Keyword::Protection(ProtectionTarget::Color(
+                    ManaColor::White,
+                )));
+        }
+        // The attachment is also the granting source, like Flickering Ward.
+        let aura = create_object(
+            &mut state,
+            CardId(77),
+            PlayerId(0),
+            "Flickering Ward".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.subtypes.push("Aura".to_string());
+            // The quality is white, so the attachment must be white to match.
+            obj.color.push(ManaColor::White);
+        }
+        attach_to(&mut state, aura, host);
+        apply_protection_grant(
+            &mut state,
+            aura,
+            host,
+            ProtectionTarget::Color(ManaColor::White),
+            Some(ProtectionDoesNotRemove::Source),
+        );
+        persist_last_static(&mut state, aura);
+        evaluate_protection_layers(&mut state);
+
+        let provenance = &state.objects[&host].protection_provenance;
+        assert_eq!(
+            provenance.len(),
+            2,
+            "printed protection and the ridered grant are separate surviving instances"
+        );
+        assert!(
+            provenance.iter().any(|entry| entry.rider.is_none()),
+            "the syntheses branch must record the printed contributor"
+        );
+        assert!(state.objects[&host].keywords.contains(&Keyword::Protection(
+            ProtectionTarget::Color(ManaColor::White)
+        )));
+        // REVERT-PROBE: drop the rider-less synthesis from
+        // `record_protection_provenance` ⇒ only the exempting Source instance
+        // remains, so this returns None and the assertion fails.
+        assert_eq!(
+            attachment_illegality(&state, aura, host),
+            Some(AttachIllegality::Protection),
+            "the printed instance must block the ridered Aura itself"
+        );
+
+        // CR 702.16m + CR 702.16n: a LATER chosen-keyword grant of the same
+        // quality is its own surviving instance, even though the flat keyword
+        // list already holds that quality. It must be recorded, not dropped by
+        // the duplicate check.
+        let chooser = spawn_grant_source(&mut state, "Chosen Ward", 78);
+        {
+            use crate::types::ability::{ChosenAttribute, ContinuousModification};
+            use crate::types::keywords::ProtectionTarget;
+            use crate::types::mana::ManaColor;
+            let obj = state.objects.get_mut(&chooser).unwrap();
+            obj.chosen_attributes
+                .push(ChosenAttribute::Keyword(Keyword::Protection(
+                    ProtectionTarget::Color(ManaColor::White),
+                )));
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: host })
+                    .modifications(vec![ContinuousModification::AddChosenKeyword]),
+            );
+        }
+        persist_last_static(&mut state, chooser);
+        evaluate_protection_layers(&mut state);
+        assert!(
+            state.objects[&host].protection_provenance.len() >= 3,
+            "the chosen grant must add its own rider-less instance"
+        );
+        assert_eq!(
+            attachment_illegality(&state, aura, host),
+            Some(AttachIllegality::Protection),
+            "the chosen instance must keep blocking after the duplicate check"
+        );
     }
 
     #[test]

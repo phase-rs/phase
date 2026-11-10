@@ -4940,7 +4940,7 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         obj.name = HIDDEN_CARD_NAME.to_string();
         redact_printed_identity(obj);
         Arc::make_mut(&mut obj.abilities).clear();
-        obj.keywords.clear();
+        obj.clear_keywords();
         obj.power = None;
         obj.toughness = None;
         obj.loyalty = None;
@@ -5025,7 +5025,7 @@ fn redact_face_down_identity_from_observer(obj: &mut crate::game::game_object::G
         redact_secret_agenda_choices(obj);
         obj.card_types = Default::default();
         obj.mana_cost = crate::types::mana::ManaCost::NoCost;
-        obj.keywords.clear();
+        obj.clear_keywords();
         obj.color.clear();
     }
 }

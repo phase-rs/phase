@@ -3335,6 +3335,31 @@ fn shared_dynamic_quantity_resolution_count() -> usize {
     SHARED_DYNAMIC_QUANTITY_RESOLUTIONS.with(core::cell::Cell::get)
 }
 
+// Test-only counter incremented once per granted-protection quality-set
+// expansion performed by `apply_continuous_effect_filtered`. The expansion
+// scans the battlefield (CR 702.16i: one protection per set member), so it is
+// the unit the empty-affected-set skip in front of it is measured in.
+#[cfg(test)]
+thread_local! {
+    static GRANTED_PROTECTION_RESOLUTIONS: core::cell::Cell<usize> =
+        const { core::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_granted_protection_resolution() {
+    GRANTED_PROTECTION_RESOLUTIONS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+fn reset_granted_protection_resolution_count() {
+    GRANTED_PROTECTION_RESOLUTIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn granted_protection_resolution_count() -> usize {
+    GRANTED_PROTECTION_RESOLUTIONS.with(core::cell::Cell::get)
+}
+
 #[cfg(test)]
 pub(crate) fn reset_active_effect_collection_count() {
     ACTIVE_EFFECT_COLLECTION_COUNT.with(|count| count.set(0));
@@ -3479,7 +3504,7 @@ fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameO
     obj.loyalty = obj.base_loyalty;
     obj.card_types = obj.base_card_types.clone();
     obj.mana_cost = obj.base_mana_cost.clone();
-    obj.keywords = obj.base_keywords.clone();
+    obj.reset_keywords_to_base();
     // CR 613.1: Reset live ability fields to the printed-card baseline.
     // Post Commit 2 of Arc-share migration: both sides are `Arc<Vec<T>>`
     // (via `Definitions<T>`-holds-`Arc`), so this reset is a refcount
@@ -3758,7 +3783,7 @@ fn derive_layer_characteristics(state: &mut GameState) -> Vec<ObjectId> {
     for id in hand_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
             obj.sync_missing_base_characteristics();
-            obj.keywords = obj.base_keywords.clone();
+            obj.reset_keywords_to_base();
         }
     }
     reset_remote_layer_recipients(state, remote_layer_recipients);
@@ -3823,7 +3848,7 @@ fn derive_layer_characteristics(state: &mut GameState) -> Vec<ObjectId> {
     for (id, base) in stack_bases {
         if let Some(obj) = state.objects.get_mut(&id) {
             obj.sync_missing_base_characteristics();
-            obj.keywords = obj.base_keywords.clone(); // pre-existing, unchanged
+            obj.reset_keywords_to_base(); // pre-existing, unchanged
 
             // CR 123.5 + CR 123.7: a spell's ability stickers (retained from a
             // public zone, or put on the spell) keep granting their keywords
@@ -9938,7 +9963,7 @@ fn apply_cant_have_keyword_denials(
     }
     for (id, keyword) in denials {
         if let Some(obj) = state.objects.get_mut(&id) {
-            obj.keywords.retain(|k| k != &keyword);
+            obj.retain_keywords(|k| k != &keyword);
         }
     }
 }
@@ -11201,6 +11226,24 @@ fn trigger_origin(effect: &ActiveContinuousEffect) -> TriggerProducerOrigin {
         .expect("trigger-producing continuous effect must carry an exact origin")
 }
 
+/// CR 702.16 + CR 613.7: record a surviving protection instance's provenance,
+/// then grant the keyword through the shared dedup policy.
+fn grant_protection_instance(
+    obj: &mut crate::game::game_object::GameObject,
+    quality: crate::types::keywords::ProtectionTarget,
+    rider: Option<&crate::game::game_object::ProtectionRiderGrant>,
+    effect: &ActiveContinuousEffect,
+    keyword_output_index: usize,
+) {
+    obj.record_protection_provenance(quality.clone(), rider.cloned());
+    grant_keyword_instance(
+        obj,
+        Keyword::Protection(quality),
+        effect,
+        keyword_output_index,
+    );
+}
+
 /// Layer 6 `AddKeyword` tail: push one already-resolved keyword instance onto
 /// `obj` under the three-way grant policy and install its keyword-derived
 /// companion triggers. `keyword_output_index` distinguishes the several keyword
@@ -11973,14 +12016,48 @@ fn apply_continuous_effect_filtered(
             keyword: Keyword::Protection(quality),
         } = &effect.modification
         {
-            crate::game::keywords::resolve_granted_protection(
-                state,
-                quality,
-                effect.source_id,
-                active_effect_condition_controller(state, effect),
-            )
+            if affected_ids.is_empty() {
+                Vec::new()
+            } else {
+                #[cfg(test)]
+                record_granted_protection_resolution();
+                crate::game::keywords::resolve_granted_protection(
+                    state,
+                    quality,
+                    effect.source_id,
+                    active_effect_condition_controller(state, effect),
+                )
+            }
         } else {
             Vec::new()
+        };
+
+    // CR 702.16n + CR 702.16p: the rider of the printed static that produced
+    // this grant. Transients and granted-static children carry no `def_index`,
+    // so they have no rider. The modification-equality check makes a stale
+    // index fail closed to `None` rather than name the wrong static.
+    let protection_rider: Option<crate::game::game_object::ProtectionRiderGrant> =
+        match (&effect.modification, effect.def_index) {
+            (
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Protection(_),
+                },
+                Some(def_index),
+            ) if !affected_ids.is_empty() => state
+                .objects
+                .get(&effect.source_id)
+                .and_then(|source| source.static_definitions.get(def_index))
+                .filter(|def| def.modifications.get(effect.mod_index) == Some(&effect.modification))
+                .and_then(|def| def.protection_does_not_remove.clone())
+                .map(
+                    |does_not_remove| crate::game::game_object::ProtectionRiderGrant {
+                        source: effect.source_id,
+                        def_index,
+                        mod_index: effect.mod_index,
+                        does_not_remove,
+                    },
+                ),
+            _ => None,
         };
 
     // Pre-read chosen card name from source (avoids borrow conflict in the loop).
@@ -12296,9 +12373,10 @@ fn apply_continuous_effect_filtered(
                 // enforces CR 702.16b/d/e/f. An unresolved quality grants nothing.
                 crate::types::keywords::Keyword::Protection(_) => {
                     for (keyword_output_index, quality) in granted_protection.iter().enumerate() {
-                        grant_keyword_instance(
+                        grant_protection_instance(
                             obj,
-                            crate::types::keywords::Keyword::Protection(quality.clone()),
+                            quality.clone(),
+                            protection_rider.as_ref(),
                             effect,
                             keyword_output_index,
                         );
@@ -12310,8 +12388,7 @@ fn apply_continuous_effect_filtered(
             // Generic removal keeps same-variant scope, extended to the full
             // hexproof family by CR 702.11e. Chosen-keyword loss below stays exact.
             ContinuousModification::RemoveKeyword { keyword } => {
-                obj.keywords
-                    .retain(|k| !super::keywords::keyword_matches_removal(k, keyword));
+                obj.retain_keywords(|k| !super::keywords::keyword_matches_removal(k, keyword));
                 obj.trigger_definitions.retain(|entry| {
                     !KeywordTriggerInstaller::trigger_matches_keyword_kind(
                         entry.definition(),
@@ -12338,7 +12415,7 @@ fn apply_continuous_effect_filtered(
             // behavior of `AddChosenColor`.
             ContinuousModification::RemoveChosenKeyword => {
                 if let Some(kw) = chosen_keyword.as_ref() {
-                    obj.keywords.retain(|k| k != kw);
+                    obj.retain_keywords(|k| k != kw);
                     obj.trigger_definitions.retain(|entry| {
                         !KeywordTriggerInstaller::trigger_matches_keyword_kind(
                             entry.definition(),
@@ -12365,6 +12442,13 @@ fn apply_continuous_effect_filtered(
                 // gathered before the choose effect has resolved), the list is
                 // empty and this is a no-op rather than a panic.
                 for (keyword_output_index, kw) in add_chosen_keywords.iter().enumerate() {
+                    // CR 702.16m + CR 702.16n: a chosen protection grant is its
+                    // own instance even when the flat keyword list already holds
+                    // that quality; record it before the duplicate check so a
+                    // ridered co-contributor cannot exempt an Aura alone.
+                    if let Keyword::Protection(quality) = kw {
+                        obj.record_protection_provenance(quality.clone(), None);
+                    }
                     // CR 702.164b: summing keywords (Toxic) accumulate rather
                     // than dedup, mirroring the plain `AddKeyword` arm above.
                     if kw.instances_must_coexist() || !obj.keywords.contains(kw) {
@@ -12399,7 +12483,7 @@ fn apply_continuous_effect_filtered(
                 obj.replacement_definitions
                     .retain(|d| d.is_resolution_installed());
                 obj.static_definitions.clear();
-                obj.keywords.clear();
+                obj.clear_keywords();
                 abilities_suppressed.insert(id);
             }
             // CR 122.1 + CR 614.1c: One-shot counter placement is consumed at
@@ -12765,6 +12849,9 @@ fn apply_continuous_effect_filtered(
                     }
                     for keyword in keywords {
                         if !obj.keywords.contains(keyword) {
+                            if let Keyword::Protection(quality) = keyword {
+                                obj.record_protection_provenance(quality.clone(), None);
+                            }
                             obj.keywords.push(keyword.clone());
                         }
                     }
@@ -12984,7 +13071,7 @@ fn set_land_subtype_replacing(obj: &mut crate::game::game_object::GameObject, su
     obj.replacement_definitions
         .retain(|d| d.is_resolution_installed());
     obj.static_definitions.clear();
-    obj.keywords.clear();
+    obj.clear_keywords();
 }
 
 /// CR 305.6: After layer 4 establishes final land types, derive each land's
@@ -14991,6 +15078,108 @@ mod tests {
             );
         }
         assert_eq!(state.objects[&entrant].power, Some(2));
+    }
+
+    /// CR 702.16i: expanding a color set is a battlefield-hunting read. An
+    /// effect whose incremental restricted set is EMPTY must not run it.
+    ///
+    /// REVERT-PROBE (discriminating): drop the `affected_ids.is_empty()` guard
+    /// from `granted_protection` ⇒ the counter below becomes 1 and the
+    /// zero-assertion fails.
+    #[test]
+    fn incremental_flush_skips_protection_color_expansion_reaching_no_recipient() {
+        let mut state = setup();
+        let source = make_creature(&mut state, "Empty-Shrine Kannushi", 1, 1, P0);
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(crate::types::keywords::ProtectionTarget::EachColor(
+                    crate::types::keywords::ProtectionColorSet::AmongPermanentsYouControl,
+                )),
+            }]);
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.static_definitions.push(def.clone());
+            obj.base_static_definitions = Arc::new(vec![def]);
+            obj.color.push(ManaColor::White);
+        }
+        evaluate_layers(&mut state);
+        // REACH GUARD: the expansion is live on a full pass.
+        assert!(
+            state.objects[&source]
+                .keywords
+                .iter()
+                .any(|k| matches!(k, Keyword::Protection(_))),
+            "the fixture must grant protection on a full pass"
+        );
+
+        // An opponent's entrant: the SelfRef effect does not reach it, and it
+        // cannot escalate the controller-population read (CR 109.5).
+        let entrant = make_creature(&mut state, "Opponent Bears", 2, 2, P1);
+        state.layers_dirty = LayersDirty::EnteredObjects([entrant].into());
+        crate::game::perf_counters::reset();
+        reset_granted_protection_resolution_count();
+        flush_layers(&mut state);
+        let counters = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            (counters.layers_incremental, counters.layers_full_eval),
+            (1, 0),
+            "the entrant must stay on the incremental arm"
+        );
+        assert_eq!(
+            granted_protection_resolution_count(),
+            0,
+            "no recipient, so the battlefield color expansion must not run"
+        );
+        assert!(state.objects[&source]
+            .keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Protection(_))));
+    }
+
+    /// The other side: a board-wide grant DOES reach the entrant, so the
+    /// expansion must still run. Without this pair the guard above could be
+    /// satisfied by never expanding any color set.
+    #[test]
+    fn incremental_flush_still_runs_protection_color_expansion_reaching_a_recipient() {
+        let mut state = setup();
+        let lord = make_creature(&mut state, "Commander's Plate bearer", 2, 2, P0);
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(crate::types::keywords::ProtectionTarget::EachColor(
+                    crate::types::keywords::ProtectionColorSet::AmongPermanentsYouControl,
+                )),
+            }]);
+        {
+            let obj = state.objects.get_mut(&lord).unwrap();
+            obj.static_definitions.push(def.clone());
+            obj.base_static_definitions = Arc::new(vec![def]);
+            obj.color.push(ManaColor::White);
+        }
+        evaluate_layers(&mut state);
+        let entrant = make_creature(&mut state, "Grizzly Bears", 2, 2, P0);
+        state.layers_dirty = LayersDirty::EnteredObjects([entrant].into());
+        crate::game::perf_counters::reset();
+        reset_granted_protection_resolution_count();
+        flush_layers(&mut state);
+        let counters = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            (counters.layers_incremental, counters.layers_full_eval),
+            (1, 0),
+            "a same-controller entrant must stay on the incremental arm"
+        );
+        assert_eq!(
+            granted_protection_resolution_count(),
+            1,
+            "the effect reaches the entrant, so its color set must be expanded once"
+        );
+        assert!(state.objects[&entrant]
+            .keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Protection(_))));
     }
 
     /// The other side of that guard: a dynamic count whose effect DOES reach a

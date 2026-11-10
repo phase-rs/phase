@@ -445,6 +445,32 @@ pub struct ProtectionStartSnapshot {
 /// `(static_definitions index, modifications index, host object id)`.
 pub type ProtectionEffectHostKey = (usize, usize, ObjectId);
 
+/// CR 702.16n + CR 702.16p: the exemption rider of the continuous static whose
+/// layer-6 application produced one surviving protection instance, with that
+/// static's identity on its source. `(def_index, mod_index)` are the same live
+/// `static_definitions` / `modifications` indices `ProtectionEffectHostKey`
+/// uses, so a `ControlledAttachmentsAlreadyAttached` rider joins the source's
+/// `protection_start_exempt_attachments` entry for this host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtectionRiderGrant {
+    pub source: ObjectId,
+    pub def_index: usize,
+    pub mod_index: usize,
+    pub does_not_remove: crate::types::ability::ProtectionDoesNotRemove,
+}
+
+/// CR 702.16m + CR 613.1f: one protection instance the layer pass left on this
+/// object. `keywords` deduplicates redundant instances (CR 702.16m); this list
+/// keeps each contributor so an attachment is exempt only when every surviving
+/// instance of the matching quality exempts it (CR 702.16n).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtectionProvenance {
+    pub quality: crate::types::keywords::ProtectionTarget,
+    /// `None` = an instance with no rider: printed or copiable, transient,
+    /// chosen keyword, retained-other-abilities, or an unridered static.
+    pub rider: Option<ProtectionRiderGrant>,
+}
+
 /// Stable art family name for one printed keyword.
 ///
 /// Separate from [`Keyword::kind`]: `kind()` collapses ~60 recognized
@@ -786,6 +812,14 @@ pub struct GameObject {
     )]
     pub protection_start_exempt_attachments:
         HashMap<ProtectionEffectHostKey, ProtectionStartSnapshot>,
+    /// CR 702.16 + CR 613.1f: provenance of the protection abilities in
+    /// `keywords` after the last layer pass. Layer-derived and reset with
+    /// `keywords` through the `GameObject` keyword methods. A `Protection(q)`
+    /// in `keywords` with no entry for `q` came only from writers that run
+    /// before layer 6 (printed, copy layer, stickers), and none of those
+    /// carries a rider.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protection_provenance: Vec<ProtectionProvenance>,
     /// CR 702.95b-d: Soulbond pair relationship. Pairing is symmetric:
     /// if `A.paired_with == Some(B)`, then `B.paired_with == Some(A)`.
     /// This is independent from attachments; paired creatures are not
@@ -2033,6 +2067,8 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         mana_spent_source_snapshots: _,
         phase_status: _,
         protection_start_exempt_attachments: _,
+        // OMITTED, LAYER-DERIVED: re-derived with `keywords` by every layer flush.
+        protection_provenance: _,
         // Activation-cost-payment latch — same omission class as
         // `mana_spent_to_cast`/`colors_spent_to_cast` above: drained
         // synchronously by `push_ability_entry` into the resolving
@@ -3209,6 +3245,7 @@ impl GameObject {
             attached_to: None,
             attachments: Vec::new(),
             protection_start_exempt_attachments: HashMap::new(),
+            protection_provenance: Vec::new(),
             paired_with: None,
             pair_controller: None,
             counters: HashMap::new(),
@@ -3762,6 +3799,52 @@ impl GameObject {
         }
     }
 
+    /// CR 702.16 + CR 613.1f: replace the live keyword set with the printed
+    /// baseline and drop the provenance that described the previous live set.
+    pub(crate) fn reset_keywords_to_base(&mut self) {
+        self.keywords = self.base_keywords.clone();
+        self.protection_provenance.clear();
+    }
+
+    /// CR 613.1f: remove every live keyword and the provenance that described it.
+    pub(crate) fn clear_keywords(&mut self) {
+        self.keywords.clear();
+        self.protection_provenance.clear();
+    }
+
+    /// CR 613.1f: keep only the live keywords `keep` accepts, and drop the
+    /// provenance of every protection instance it removed.
+    pub(crate) fn retain_keywords(&mut self, keep: impl Fn(&Keyword) -> bool) {
+        self.keywords.retain(&keep);
+        self.protection_provenance
+            .retain(|entry| keep(&Keyword::Protection(entry.quality.clone())));
+    }
+
+    /// CR 702.16m + CR 702.16n: record one surviving protection instance before
+    /// its keyword is pushed. When the quality is already live with no recorded
+    /// instance (printed or copiable protection), record a rider-less instance
+    /// first, so a ridered co-contributor cannot exempt an Aura on its own.
+    pub(crate) fn record_protection_provenance(
+        &mut self,
+        quality: crate::types::keywords::ProtectionTarget,
+        rider: Option<ProtectionRiderGrant>,
+    ) {
+        let keyword = Keyword::Protection(quality.clone());
+        if self.keywords.contains(&keyword)
+            && !self
+                .protection_provenance
+                .iter()
+                .any(|entry| entry.quality == quality)
+        {
+            self.protection_provenance.push(ProtectionProvenance {
+                quality: quality.clone(),
+                rider: None,
+            });
+        }
+        self.protection_provenance
+            .push(ProtectionProvenance { quality, rider });
+    }
+
     /// CR 613.1 + CR 400.7: Revert layer-derived characteristics to the object's
     /// printed baseline. Mirrors the per-object reset in `evaluate_layers` Step 1
     /// (layers.rs) but runs at zone-exit time so off-battlefield objects — e.g. a
@@ -3780,7 +3863,7 @@ impl GameObject {
         self.defense = self.base_defense;
         self.card_types = self.base_card_types.clone();
         self.mana_cost = self.base_mana_cost.clone();
-        self.keywords = self.base_keywords.clone();
+        self.reset_keywords_to_base();
         self.abilities = Arc::clone(&self.base_abilities);
         self.granted_abilities_from = None;
         self.layer1_copy_effect = None;

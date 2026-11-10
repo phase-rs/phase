@@ -542,6 +542,7 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     // re-seed an exile object, so they would otherwise describe the permanent
     // instead of the prepare-face characteristics installed afterwards.
     copy.granted_abilities_from = None;
+    copy.protection_provenance.clear();
     copy.layer1_copy_effect = None;
     copy.layer1_name_origin = None;
     copy.copied_room_halves = None;

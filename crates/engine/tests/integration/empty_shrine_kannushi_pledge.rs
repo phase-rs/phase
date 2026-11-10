@@ -1036,3 +1036,81 @@ fn kannushi_pledge_prototype_entry_updates_existing_recipient() {
         }
     }
 }
+
+// CR 613.7: the reversed order. Humility's timestamp is earlier, so Pledge's
+// later grant applies and its protection survives.
+#[test]
+fn kannushi_pledge_humility_before_pledge_keeps_grant() {
+    let mut s = scenario();
+    let host = s.add_creature(P1, "Colorless host fixture", 4, 6).id();
+    let humility = s.add_real_card(P0, "Humility", Zone::Hand, db());
+    let pledge = s.add_real_card(P0, "Pledge of Loyalty", Zone::Hand, db());
+    let pacifism = s.add_real_card(P1, "Pacifism", Zone::Hand, db());
+    let mut runner = s.build();
+    cast(&mut runner, P0, humility);
+    cast_on(&mut runner, P0, pledge, host);
+    assert_eq!(colors(&runner, host), vec![ManaColor::White]);
+    attached(&runner, pledge, host);
+    assert!(!find_legal_targets(
+        runner.state(),
+        &TargetFilter::Typed(TypedFilter::creature()),
+        P1,
+        pacifism,
+    )
+    .contains(&TargetRef::Object(host)));
+}
+
+// CR 702.16n: a removed old grant must not be mixed into a surviving later
+// ridered grant of the same quality. Flickering Ward's own rider exempts only
+// Ward, so it removes Pledge.
+#[test]
+fn kannushi_pledge_humility_then_flickering_ward_keeps_only_surviving_rider() {
+    let mut s = scenario();
+    let host = s.add_creature(P1, "Colorless host fixture", 4, 6).id();
+    let pledge = s.add_real_card(P0, "Pledge of Loyalty", Zone::Hand, db());
+    let humility = s.add_real_card(P0, "Humility", Zone::Hand, db());
+    let ward = s.add_real_card(P1, "Flickering Ward", Zone::Hand, db());
+    let pacifism = s.add_real_card(P1, "Pacifism", Zone::Hand, db());
+    let mut runner = s.build();
+    cast_on(&mut runner, P0, pledge, host);
+    cast(&mut runner, P0, humility);
+    prepare(&mut runner, P1);
+    let outcome = runner.cast(ward).target_object(host).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::NamedChoice { player, .. } if *player == P1)
+    );
+    let WaitingFor::NamedChoice { options, .. } = &runner.state().waiting_for else {
+        panic!("Ward must ask a color")
+    };
+    let white = options
+        .iter()
+        .find(|option| option.eq_ignore_ascii_case("white"))
+        .expect("white option")
+        .clone();
+    runner
+        .act(GameAction::ChooseOption { choice: white })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    complete(&runner);
+    attached(&runner, ward, host);
+    assert_eq!(colors(&runner, host), vec![ManaColor::White]);
+    assert_eq!(runner.state().objects[&pledge].zone, Zone::Graveyard);
+    // Serialization keeps the surviving ridered grant, observed through the
+    // public state rather than the provenance type (so a production revert
+    // still compiles this test and fails it at runtime).
+    let wire = serde_json::to_string(runner.state()).unwrap();
+    let restored: GameState = serde_json::from_str(&wire).unwrap();
+    let mut restored = GameRunner::from_state(restored);
+    prepare(&mut restored, P1);
+    restored.advance_until_stack_empty();
+    attached(&restored, ward, host);
+    // Reach guard: the restored state really derives the surviving protection,
+    // so Pacifism has no legal target on this host.
+    assert!(!find_legal_targets(
+        restored.state(),
+        &TargetFilter::Typed(TypedFilter::creature()),
+        P1,
+        pacifism,
+    )
+    .contains(&TargetRef::Object(host)));
+}
