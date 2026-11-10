@@ -16659,6 +16659,19 @@ impl GameState {
             {
                 return Err("recovery checkpoint seats differ".to_string());
             }
+            // CR 800.4a: the same seats under the same prompt but a different
+            // departed set are not the accepted executable state.
+            if checkpoint
+                .state
+                .players
+                .iter()
+                .zip(self.players.iter())
+                .any(|(checkpoint_player, live_player)| {
+                    checkpoint_player.is_eliminated != live_player.is_eliminated
+                })
+            {
+                return Err("recovery checkpoint departure set differs".to_string());
+            }
             if checkpoint.state.waiting_for != self.waiting_for {
                 return Err(
                     "recovery checkpoint prompt does not match the canonical prompt".to_string(),
@@ -30513,6 +30526,10 @@ impl GameState {
             || self.pending_discard_for_cost.is_some()
             || self.waiting_for.is_mana_ability_continuation()
             || self.pending_triggered_mana_resume.is_some()
+            // CR 702.24a: the counted repeated-payment owner is a resolving
+            // instruction sequence; the loss/priority safety net must not run
+            // before its next replacement opportunity.
+            || self.pending_unless_draw_repeat.is_some()
     }
 
     /// CR 601.2: The cast or activation announcement currently in flight, if

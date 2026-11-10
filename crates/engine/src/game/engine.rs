@@ -1799,13 +1799,20 @@ fn apply_action_boundary_core(
     super::announcement_triggers::end_action(state, &result.events);
     result.waiting_for = std::mem::replace(&mut state.waiting_for, reducer_wait);
     if let Some(player) = boundary_life_change_failure(state) {
-        lifecycle.discard();
-        // CR 104.3a: an authenticated concession is committed; the ingress
-        // failure must not roll it back.
-        if state.conceded_this_action.is_none() {
+        if state.conceded_this_action.is_some() {
+            // CR 104.3a: the authenticated departure and its event buffer are
+            // committed together; the fallible life tail cannot roll them back
+            // or suppress publication. The unrepresentable tail is logged and
+            // the action returns the committed board.
+            tracing::debug!(
+                ?player,
+                "keeping the committed concession after an unrepresentable life tail"
+            );
+        } else {
+            lifecycle.discard();
             *state = cast_undo_boundary.restore(boundary_snapshot);
+            return Err(EngineError::LifeChangeUnrepresentable { player });
         }
-        return Err(EngineError::LifeChangeUnrepresentable { player });
     }
     // Do not carry the core's window into finalization: that pass owns its own
     // scope over convergence, auto-pass, and re-convergence.

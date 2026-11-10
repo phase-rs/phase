@@ -3775,11 +3775,9 @@ pub(crate) fn resume_interrupted_cost_payment(
         });
     };
     let pending = *pending;
-    let player = state
-        .objects
-        .get(&pending.object_id)
-        .map(|o| o.controller)
-        .unwrap_or(state.active_player);
+    // CR 113.8: the activated ability belongs to the player who activated it,
+    // even after the source changed controller or left the battlefield.
+    let player = pending.ability.controller;
     if pending.activation_ability_index.is_some() {
         return finish_activated_ability_at_payment_boundary(state, player, pending, events);
     }
