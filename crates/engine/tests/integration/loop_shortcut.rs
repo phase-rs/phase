@@ -12003,19 +12003,14 @@ fn bounded_drain_at_offer(priest: DrainCard, blood: DrainCard, p0_life: i32) -> 
 /// repetition starts on, the crossing repetition read as a different period and the take
 /// handed back after one repetition (−2 each).
 ///
-/// Ignored because it is slow, not because it is wrong: a bounded take with a seat near
-/// `i32::MAX` walks the elimination cascade across the seats' summed life totals
-/// (`cascade_horizon` × `first_life_crossing`, pre-existing), measured at about 93 s to mint
-/// the offer and about 380 s for the take in a debug build. The CI-run unit test of the
-/// predicate itself is
+/// The board is `bounded_drain_at_offer`'s with the synthetic `DRAIN_TWO_PRIEST` (its doc names
+/// the nearest printed cards) and Exquisite Blood ("Whenever an opponent loses life, you gain
+/// that much life."). The unit test of the predicate itself is
 /// `analysis::resource::tests::conforms_between_admits_what_a_life_limit_holds_back_and_still_refuses_a_divergence`,
-/// and the CI-run take across the cap is
+/// and the take across the cap is
 /// `a_bounded_drain_commits_every_agreed_repetition_while_its_proposer_gains_across_the_cap`;
 /// this test keeps the board offered just below the cap.
-/// Run with
-/// `cargo nextest run -p phase-engine --run-ignored all -E 'test(/loop_shortcut::a_bounded_drain_.*(into_the_cap|life_cap)/)'`.
 #[test]
-#[ignore = "end-to-end evidence for conforms_between: a bounded take with a seat at i32::MAX walks the elimination cascade across the seats' summed life totals, about eight minutes in a debug build; see the doc comment"]
 fn a_bounded_drain_commits_every_agreed_repetition_while_its_proposer_gains_into_the_cap() {
     const N: u32 = 10;
     let lead = bounded_drain_at_offer(DRAIN_TWO_PRIEST, EXQUISITE_BLOOD, 20).life(P0) - 20;
@@ -12085,19 +12080,12 @@ fn a_bounded_drain_commits_every_agreed_repetition_while_its_proposer_gains_into
 /// the predicate's unit test, end to end: a reading of the observed side that credited P0's
 /// counters would refuse the first repetition.
 ///
-/// Ignored because it is slow, not because it is wrong: a bounded take with a seat at
-/// `i32::MAX` walks the elimination cascade across the seats' summed life totals
-/// (`cascade_horizon` × `first_life_crossing`, pre-existing), measured at about 93 s to mint
-/// the offer and about 380 s for the take in a debug build. The CI-run unit test of the
-/// predicate itself is
+/// The unit test of the predicate itself is
 /// `analysis::resource::tests::conforms_between_admits_what_a_life_limit_holds_back_and_still_refuses_a_divergence`,
-/// and the CI-run take across the cap is
+/// and the take across the cap is
 /// `a_bounded_drain_commits_every_agreed_repetition_while_its_proposer_gains_across_the_cap`;
 /// this test keeps the board offered at the cap.
-/// Run with
-/// `cargo nextest run -p phase-engine --run-ignored all -E 'test(/loop_shortcut::a_bounded_drain_.*(into_the_cap|life_cap)/)'`.
 #[test]
-#[ignore = "end-to-end evidence for conforms_between: a bounded take with a seat at i32::MAX walks the elimination cascade across the seats' summed life totals, about eight minutes in a debug build; see the doc comment"]
 fn a_bounded_drain_offered_at_its_proposers_life_cap_commits_every_agreed_repetition() {
     const N: u32 = 10;
     let mut runner = bounded_drain_at_offer(MARAUDING_BLIGHT_PRIEST, EXQUISITE_BLOOD, i32::MAX);
@@ -12156,14 +12144,10 @@ fn a_bounded_drain_offered_at_its_proposers_life_cap_commits_every_agreed_repeti
 /// each opponent loses n, P0 is held at `i32::MAX` from the crossing on, and P0's gained
 /// counter moves n·2^24, the rules amount (CR 119.3).
 ///
-/// Why it is shaped so: the bounded offer and take walk the elimination cascade across the
-/// seats' summed life totals (`cascade_horizon`, pre-existing), so a seat near `i32::MAX` at
-/// the offer costs minutes (the two ignored tests above). Starting P0 low with a large fixed
-/// gain keeps the offer board's summed life small while the take still crosses the cap;
-/// measured at 6.5 s in a debug build (offer 0.8 s, take 5.7 s). Reverting the drive's
+/// Starting P0 low with a large fixed gain makes the take itself carry P0 across the cap, where
+/// the two tests above are offered just below the cap and at it. Reverting the drive's
 /// per-repetition check to `conforms_in` over `ResourceVector::period_among` commits 126 of
-/// 130 repetitions (each opponent −126), so this test fails. The two ignored tests keep the
-/// boards offered just below and at the cap.
+/// 130 repetitions (each opponent −126), so this test fails.
 #[test]
 fn a_bounded_drain_commits_every_agreed_repetition_while_its_proposer_gains_across_the_cap() {
     let mut runner = bounded_drain_at_offer(MARAUDING_BLIGHT_PRIEST, DRAIN_GAIN_BLOOD, 20);
@@ -12184,8 +12168,8 @@ fn a_bounded_drain_commits_every_agreed_repetition_while_its_proposer_gains_acro
     let life = u64::try_from(state.players[0].life).expect("P0's life at the offer is positive");
     assert!(
         life < 1 << 25,
-        "REACH-GUARD: P0's life at the offer ({life}) stays small, because the cascade walk \
-         (`cascade_horizon`) is O(Σ life) over the seats"
+        "REACH-GUARD: P0's life at the offer ({life}) is far below the cap, so the take, not \
+         the offer, carries P0 across it"
     );
     // The repetition whose gain carries P0 past `i32::MAX`, and three more held there.
     let crossing = (u64::from(i32::MAX.unsigned_abs()) - life).div_ceil(gain);

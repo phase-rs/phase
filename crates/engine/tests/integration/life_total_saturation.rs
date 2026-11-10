@@ -19,8 +19,9 @@
 //! which `engine_debug.rs`'s
 //! `a_loss_past_i32_reports_i32_min_and_that_much_reads_its_magnitude` and
 //! `a_gain_past_i32_substituted_by_tainted_remedy_reads_the_saturated_stamp`
-//! pin. Set/exchange/redistribute land exactly across the whole range, and in
-//! Two-Headed Giant a change caps the team's shared total (CR 810.4 + CR 810.9).
+//! pin. Set/exchange/redistribute land exactly across the whole range, and a
+//! change to a shared life total, a Two-Headed Giant team's (CR 810.4) or the
+//! Archenemy Commander heroes' (CR 904.13b), caps that total (CR 810.9).
 //! A life replacement quantity past
 //! `u32` lands on `u32::MAX`. A mandatory life-gain loop at the cap is drawn
 //! (CR 104.4b + CR 732.4), as are a mandatory loop that drains a seat held at
@@ -974,6 +975,79 @@ fn the_edit_authority_caps_a_shared_life_total_and_replays_its_spread() {
     );
 }
 
+/// Archenemy Commander: the heroes share one life total (CR 904.13b), which a life change
+/// adjusts as in Two-Headed Giant (CR 810.9). With the heroes' fields at (`i32::MAX`,
+/// `i32::MAX - 2`, `i32::MIN`), a shared total of `i32::MAX - 3`, P1 casts Whitesun's Passage
+/// ("You gain 5 life."). The total stops at `i32::MAX` (an engine storage limit,
+/// `arithmetic::saturating_life_total`), so it moves by 3, stored on P1's field first and then
+/// on each teammate's in turn (`players::spread_life_change`): P1's field is full, P2's takes 2
+/// and P3's takes the last 1. The `LifeChanged` event and P1's gained counter report the rules
+/// amount, 5 (CR 119.3), and the archenemy's own total does not move.
+#[test]
+fn an_archenemy_commander_gain_spills_past_the_first_teammate_at_the_cap() {
+    let Some(db) = crate::support::shared_card_db() else {
+        return;
+    };
+    let p3 = PlayerId(3);
+    let heroes = [P1, P2, p3];
+    let mut scenario = GameScenario::new_with_format(FormatConfig::archenemy_commander(), 4, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    for (hero, life) in heroes.into_iter().zip([i32::MAX, i32::MAX - 2, i32::MIN]) {
+        scenario.with_life(hero, life);
+    }
+    let passage = scenario.add_real_card(P1, "Whitesun's Passage", Zone::Hand, db);
+    scenario.with_mana_pool(P1, mana_pool(ManaType::White, 2));
+    let mut runner = scenario.build();
+    let archenemy_life = runner.life(P0);
+    assert_eq!(
+        team_life_sum(runner.state(), P1),
+        i64::from(i32::MAX) - 3,
+        "REACH-GUARD: the heroes' shared total is 3 below the cap"
+    );
+
+    // CR 117.3d: the archenemy, the active player, passes and P1 receives priority.
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the archenemy passes priority");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1),
+        "P1 holds priority, got {:?}",
+        runner.state().waiting_for
+    );
+    let outcome = runner.cast(passage).resolve();
+
+    assert_eq!(
+        life_changes(outcome.events()),
+        vec![(P1, 5, Some(i32::MAX))]
+    );
+    assert_eq!(
+        heroes.map(|hero| runner.life(hero)),
+        [i32::MAX, i32::MAX, i32::MIN + 1]
+    );
+    assert_eq!(team_life_sum(runner.state(), P1), i64::from(i32::MAX));
+    assert_eq!(
+        heroes.map(|hero| runner.state().players[usize::from(hero.0)].life_gained_this_turn),
+        [5, 0, 0],
+        "the acting hero counts the rules amount; the teammates' counters do not move"
+    );
+    assert_eq!(
+        runner.life(P0),
+        archenemy_life,
+        "the archenemy's total does not move"
+    );
+    assert!(
+        runner
+            .state()
+            .players
+            .iter()
+            .all(|player| !player.is_eliminated),
+        "the heroes' total is above 0 (CR 810.8c)"
+    );
+    assert_eq!(runner.state().objects[&passage].zone, Zone::Graveyard);
+    assert!(runner.state().stack.is_empty());
+    assert!(is_priority(runner.state()));
+}
+
 /// Angel of Grace ("Your life total becomes 10.") in Two-Headed Giant sets
 /// the team's total to 10 (CR 810.9c): P0 gains or loses the difference from
 /// the team's exact total (CR 810.9a), which a hand-built state may put outside
@@ -1276,7 +1350,7 @@ fn doubling_a_life_total_at_i32_min_reports_the_saturated_loss() {
 /// Blessed Wine's verbatim Oracle text (not a member of the test fixture): its
 /// gain of 1 starts a life-gain loop. Its delayed draw comes only at the next
 /// turn's upkeep, which no test here reaches.
-const BLESSED_WINE: &str =
+pub(crate) const BLESSED_WINE: &str =
     "You gain 1 life.\nDraw a card at the beginning of the next turn's upkeep.";
 
 /// Marauding Blight-Priest's verbatim Oracle text: each gain makes every

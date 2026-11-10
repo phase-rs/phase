@@ -10,7 +10,8 @@ use engine::analysis::decision_template::IterationCount;
 use engine::analysis::loop_check::{CountedTake, LoopCertificate, OfferRoad, ShortcutResponse};
 use engine::analysis::resource::{ResourceAxis, ResourceVector};
 use engine::game::derived_views::{derive_views, DisplayMagnitude, UnboundedResourceView};
-use engine::game::scenario::GameRunner;
+use engine::game::scenario::{GameRunner, GameScenario};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
@@ -18,8 +19,9 @@ use engine::types::game_state::{CastPaymentMode, GameState, LoopDetectionMode, W
 use engine::types::mana::ManaType;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
 
-use crate::life_total_saturation::life_changes;
+use crate::life_total_saturation::{life_changes, BLESSED_WINE};
 use crate::loop_period_remade_token_source::{markers, repetitions};
 use crate::loop_shortcut::{
     declare_and_accept, drive_collect, gunzip_dump, restore_dump, setup_2p_drain,
@@ -546,9 +548,7 @@ fn a_pre_field_certificate_marks_no_seat_as_rising() {
 
 /// A synthetic drain, not a printed board ("Whenever you gain life, each opponent loses 1 life."
 /// and "Whenever an opponent loses life, you gain 1 life."): P0's life rises and P1's falls
-/// (CR 704.5a), so on every crowning producer only P0 reads ∞. The On crown's game-over frame
-/// emits the client's life wire golden (`unbounded-life-wire.json`), and every route's frame
-/// projects to it.
+/// (CR 704.5a), so on every crowning producer only P0 reads ∞.
 #[test]
 fn crowned_drains_read_only_the_gaining_seat_as_unbounded() {
     type Crown = fn() -> GameRunner;
@@ -575,10 +575,6 @@ fn crowned_drains_read_only_the_gaining_seat_as_unbounded() {
             runner
         }),
     ];
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../client/src/test/fixtures/unbounded-life-wire.json"
-    );
     for (route, crown) in crowns {
         let runner = crown();
         let state = runner.state();
@@ -601,32 +597,91 @@ fn crowned_drains_read_only_the_gaining_seat_as_unbounded() {
             BTreeMap::from([(P0, BTreeSet::from([ResourceAxis::Life(P0)]))]),
             "{route}"
         );
-        let views = derive_views(state, None);
-        assert_eq!(views.life_magnitude, unbounded(&[P0]), "{route}");
-
-        let wire = serde_json::to_value(&views).expect("derived views serialize");
-        let golden = serde_json::json!({
-            "life_magnitude": wire
-                .get("life_magnitude")
-                .expect("the game-over frame emits life_magnitude")
-                .clone(),
-        });
-        if route == "On" && std::env::var_os("UPDATE_WIRE_GOLDEN").is_some() {
-            std::fs::write(
-                path,
-                format!("{}\n", serde_json::to_string_pretty(&golden).unwrap()),
-            )
-            .expect("write the wire golden");
-        }
-        let committed: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(path).expect("committed wire golden"))
-                .unwrap();
         assert_eq!(
-            golden, committed,
-            "{route}: the client's life wire golden drifted from engine output — re-run with \
-             UPDATE_WIRE_GOLDEN=1"
+            derive_views(state, None).life_magnitude,
+            unbounded(&[P0]),
+            "{route}"
         );
     }
+}
+
+/// Marauding Blight-Priest ("Whenever you gain life, each opponent loses 1 life.") and Exquisite
+/// Blood ("Whenever an opponent loses life, you gain that much life."), under P0, started by
+/// Blessed Wine ("You gain 1 life." / "Draw a card at the beginning of the next turn's
+/// upkeep."): each gain drains P1 1 and each loss gains P0 that 1, a loop of mandatory triggers
+/// in which P0's life rises and P1's falls (CR 704.5a). The detector (`LoopDetectionMode::On`)
+/// takes it as a shortcut (CR 732.2a) and ends the game with P0 the winner, marking both seats'
+/// life and recording only P0's as rising, so only P0 reads ∞. That game-over frame emits the
+/// client's life wire golden (`client/src/test/fixtures/unbounded-life-wire.json`); regenerate it
+/// with `UPDATE_WIRE_GOLDEN=1` and this test's name as the filter.
+#[test]
+fn blight_priest_and_exquisite_blood_crown_reads_only_the_gaining_seat_as_unbounded() {
+    let db = shared_card_db().expect("card db");
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 6);
+    scenario.add_real_card(P0, "Marauding Blight-Priest", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Exquisite Blood", Zone::Battlefield, db);
+    let kickoff = scenario
+        .add_spell_to_hand_from_oracle(P0, "Blessed Wine", true, BLESSED_WINE)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::On;
+
+    let mut events = runner.cast(kickoff).resolve().events().to_vec();
+    events.extend(drive_collect(&mut runner, 500).0);
+
+    assert_eq!(
+        life_changes(&events).get(..3),
+        Some(&[(P0, 1, Some(21)), (P1, -1, Some(5)), (P0, 1, Some(22))][..]),
+        "REACH-GUARD: Blessed Wine's gain, the Blight-Priest's drain and Exquisite Blood's gain \
+         of that much"
+    );
+    let state = runner.state();
+    assert_eq!(state.waiting_for, WaitingFor::GameOver { winner: Some(P0) });
+    let marked = state
+        .unbounded_resources
+        .get(&P0)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        marked.contains(&ResourceAxis::Life(P0)) && marked.contains(&ResourceAxis::Life(P1)),
+        "{marked:?}"
+    );
+    assert_eq!(
+        state.unbounded_rising,
+        BTreeMap::from([(P0, BTreeSet::from([ResourceAxis::Life(P0)]))])
+    );
+    let views = derive_views(state, None);
+    assert_eq!(views.life_magnitude, unbounded(&[P0]));
+
+    let wire = serde_json::to_value(&views).expect("derived views serialize");
+    let golden = serde_json::json!({
+        "life_magnitude": wire
+            .get("life_magnitude")
+            .expect("the game-over frame emits life_magnitude")
+            .clone(),
+    });
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../client/src/test/fixtures/unbounded-life-wire.json"
+    );
+    if std::env::var_os("UPDATE_WIRE_GOLDEN").is_some() {
+        std::fs::write(
+            path,
+            format!("{}\n", serde_json::to_string_pretty(&golden).unwrap()),
+        )
+        .expect("write the wire golden");
+    }
+    let committed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).expect("committed wire golden"))
+            .unwrap();
+    assert_eq!(
+        golden, committed,
+        "the client's life wire golden drifted from engine output — re-run with \
+         UPDATE_WIRE_GOLDEN=1"
+    );
 }
 
 /// CR 732.2a: the rising subset is `unbounded_axes_for` minus every axis the delta drives down.
