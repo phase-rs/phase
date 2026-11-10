@@ -187,11 +187,22 @@ fn replay(
     // completed, so the checkpoint is the authority while it exists.
     let (mut shadow, mut buffered_events, mut buffered_log_entries, consumed) =
         if let Some(checkpoint) = transaction.recovered.as_deref() {
+            if checkpoint.consumed > transaction.transcript.len() {
+                return Err(EngineError::InvalidAction(
+                    "recovery checkpoint consumed beyond its transcript".to_string(),
+                ));
+            }
             let mut shadow = (*checkpoint.state).clone();
             shadow.payment_transaction = None;
             shadow.payment_transaction_replay = true;
             shadow.payment_transaction_just_handled = false;
             shadow.cost_payment_failed_flag = false;
+            // Runtime registries are `#[serde(skip)]` on the persisted
+            // checkpoint; rehydrate them from the live session so the
+            // executable replay has the card database and log names.
+            shadow.card_db = state.card_db.clone();
+            shadow.all_card_names = state.all_card_names.clone();
+            shadow.log_player_names = state.log_player_names.clone();
             restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
             (
                 shadow,
@@ -700,6 +711,11 @@ pub(crate) fn mirror_checkpoint_action(
     shadow.payment_transaction = None;
     shadow.payment_transaction_replay = true;
     shadow.payment_transaction_just_handled = false;
+    // Runtime registries are `#[serde(skip)]` on the persisted checkpoint;
+    // rehydrate them from the live session before the sandbox action runs.
+    shadow.card_db = state.card_db.clone();
+    shadow.all_card_names = state.all_card_names.clone();
+    shadow.log_player_names = state.log_player_names.clone();
     // The sandbox authority is the live session's, not the checkpoint's older
     // bytes; mirror it before the action's own preflight reads it.
     shadow.debug_mode = state.debug_mode;

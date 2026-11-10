@@ -1311,9 +1311,9 @@
       },
       "generic": "um custo",
       "pay": "Pagar {{cost}}",
-      "draw": "draw a card",
-      "drawCount_one": "draw {{count}} card",
-      "drawCount_other": "draw {{count}} cards"
+      "draw": "compre uma carta",
+      "drawCount_one": "compre {{count}} carta",
+      "drawCount_other": "compre {{count}} cartas"
     },
     "unlessPayment": {
       "defaultEffect": "Anular a Menos Que Você Pague",

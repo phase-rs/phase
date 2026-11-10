@@ -173,6 +173,9 @@ pub fn eliminate_players_simultaneously(
 /// a leaves-the-battlefield observer sees the conceding player's permanents leave
 /// the game (CR 603.6c).
 pub fn concede(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
+    // CR 104.3a: record the authenticated concession explicitly; the action
+    // boundary keeps it (and its settlement) even if later finalization fails.
+    state.conceded_this_action = Some(player);
     eliminate_players(
         state,
         &[player],

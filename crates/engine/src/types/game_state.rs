@@ -8936,6 +8936,11 @@ pub struct PendingCast {
     pub activation_cost_snapshot: Option<Box<crate::types::casting_costs::ActivationCostSnapshot>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_cost: Option<AbilityCost>,
+    /// CR 118.12 + CR 614.11a: set when the activation's cost paused on a draw
+    /// instruction. The resume must use this retained owner instead of
+    /// rediscovering the source ability (which may have left or lost the grant).
+    #[serde(default)]
+    pub activation_cost_paused_on_draw: bool,
     /// CR 601.2h: A hand discard paid at the payment commit, after mana
     /// abilities; see `DeferredHandDiscardCost` for what each kind reserves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -9975,6 +9980,7 @@ impl PendingCast {
             cost_reduction_election: None,
             activation_cost_snapshot: None,
             activation_cost: None,
+            activation_cost_paused_on_draw: false,
             deferred_hand_discard_cost: None,
             prepaid_finalization: None,
             activation_ability_index: None,
@@ -25808,6 +25814,11 @@ declare_game_state! {
     /// pause; the serde guard is belt-and-suspenders.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leaving_game_departure: Option<LeavingGameDeparture>,
+    /// CR 104.3a: the seat that conceded in this public action. Runtime-only;
+    /// distinguishes a concession from an ordinary elimination the boundary
+    /// must still roll back on failure.
+    #[serde(skip)]
+    pub conceded_this_action: Option<PlayerId>,
 
     /// CR 705.2: Result of the most recent coin flip in the current resolution,
     /// carrying the flipper so `AbilityCondition::CoinFlipOutcome` is
@@ -34363,6 +34374,7 @@ impl GameState {
             resolving_created_token_seats: None,
             merged_card_component_route: None,
             leaving_game_departure: None,
+            conceded_this_action: None,
             resolution_coin_flip: None,
             repeat_process_requested: None,
             pending_player_scope_sacrifice_choice: None,
@@ -38327,6 +38339,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolving_created_token_seats: _,
         merged_card_component_route: _,
         leaving_game_departure: _,
+        conceded_this_action: _,
         resolution_coin_flip: _,
         repeat_process_requested: _,
         may_trigger_auto_choices: _,
@@ -53424,6 +53437,7 @@ mod tests {
                 cost_reduction_election: None,
                 activation_cost_snapshot: None,
                 activation_cost: None,
+                activation_cost_paused_on_draw: false,
                 deferred_hand_discard_cost: None,
                 prepaid_finalization: None,
                 activation_ability_index: None,
@@ -53976,6 +53990,7 @@ mod tests {
             cost_reduction_election: None,
             activation_cost_snapshot: None,
             activation_cost: None,
+            activation_cost_paused_on_draw: false,
             deferred_hand_discard_cost: None,
             prepaid_finalization: None,
             activation_ability_index: None,

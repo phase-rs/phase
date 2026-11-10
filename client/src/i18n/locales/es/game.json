@@ -1311,9 +1311,9 @@
       },
       "generic": "un coste",
       "pay": "Pagar {{cost}}",
-      "draw": "draw a card",
-      "drawCount_one": "draw {{count}} card",
-      "drawCount_other": "draw {{count}} cards"
+      "draw": "roba una carta",
+      "drawCount_one": "roba {{count}} carta",
+      "drawCount_other": "roba {{count}} cartas"
     },
     "unlessPayment": {
       "defaultEffect": "Contrarrestar a menos que pagues",

@@ -1311,9 +1311,9 @@
       },
       "generic": "un coût",
       "pay": "Payer {{cost}}",
-      "draw": "draw a card",
-      "drawCount_one": "draw {{count}} card",
-      "drawCount_other": "draw {{count}} cards"
+      "draw": "piochez une carte",
+      "drawCount_one": "piochez {{count}} carte",
+      "drawCount_other": "piochez {{count}} cartes"
     },
     "unlessPayment": {
       "defaultEffect": "Contrer à moins que vous ne payiez",

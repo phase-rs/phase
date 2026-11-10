@@ -1,8 +1,8 @@
 use crate::game::filter;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, ControllerRef, Effect, EffectKind, EffectScope, QuantityExpr,
-    ResolvedAbility, SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
+    AbilityCondition, AbilityCost, ControllerRef, Effect, EffectKind, EffectScope, ResolvedAbility,
+    SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
@@ -2135,8 +2135,8 @@ pub(crate) fn drive_pending_unless_draw_repeat(
             pending.remaining = pending.remaining.saturating_sub(1);
         }
         if let Some(suffix) = pending.resume_cost.take() {
-            let suffix_count = repeated_draw_count(&suffix);
-            match costs::pay_ability_cost_for_resolution(
+            let suffix_count = repeated_draw_instructions(&suffix);
+            match costs::resume_ability_cost_for_resolution(
                 state,
                 pending.player,
                 &suffix,
@@ -2164,7 +2164,7 @@ pub(crate) fn drive_pending_unless_draw_repeat(
                     // completed leave `remaining`.
                     let after = remaining_cost
                         .as_ref()
-                        .map(repeated_draw_count)
+                        .map(repeated_draw_instructions)
                         .unwrap_or(0);
                     let unpaid = 1 + after;
                     pending.remaining = pending
@@ -2202,7 +2202,7 @@ pub(crate) fn drive_pending_unless_draw_repeat(
         }
         let chunk = pending.remaining.min(REPEATED_DRAW_CHUNK);
         let cost = crate::game::effects::expand_per_counter(&pending.base, chunk);
-        match costs::pay_ability_cost_for_resolution(
+        match costs::resume_ability_cost_for_resolution(
             state,
             pending.player,
             &cost,
@@ -2228,7 +2228,7 @@ pub(crate) fn drive_pending_unless_draw_repeat(
                 // whole chunk here lost up to 63 draws.
                 let after = remaining_cost
                     .as_ref()
-                    .map(repeated_draw_count)
+                    .map(repeated_draw_instructions)
                     .unwrap_or(0);
                 let unpaid = 1 + after;
                 pending.remaining = pending
@@ -2259,16 +2259,14 @@ pub(crate) fn drive_pending_unless_draw_repeat(
 }
 
 /// The number of printed draw instructions in a cost-shaped chunk.
-fn repeated_draw_count(cost: &AbilityCost) -> u32 {
+/// The number of printed draw instructions in a cost-shaped chunk. A single
+/// instruction that draws several cards still counts once (CR 702.24a).
+fn repeated_draw_instructions(cost: &AbilityCost) -> u32 {
     match cost {
-        AbilityCost::EffectCost { effect } => match effect.as_ref() {
-            Effect::Draw {
-                count: QuantityExpr::Fixed { value },
-                ..
-            } if *value > 0 => *value as u32,
-            _ => 0,
-        },
-        AbilityCost::Composite { costs } => costs.iter().map(repeated_draw_count).sum(),
+        AbilityCost::EffectCost { effect } => {
+            u32::from(matches!(effect.as_ref(), Effect::Draw { .. }))
+        }
+        AbilityCost::Composite { costs } => costs.iter().map(repeated_draw_instructions).sum(),
         _ => 0,
     }
 }
@@ -7378,5 +7376,24 @@ mod dandan_read_sweep_tests {
             state.players[1].life, 20,
             "the payment suppressed the effect"
         );
+    }
+}
+
+#[cfg(test)]
+mod counted_draw_instruction_tests {
+    use super::repeated_draw_instructions;
+    use crate::types::ability::{AbilityCost, Effect, QuantityExpr, TargetFilter};
+
+    /// CR 702.24a: repetition is per printed instruction, not per card drawn.
+    #[test]
+    fn a_multi_card_draw_instruction_counts_once() {
+        let draw = || AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            }),
+        };
+        let expanded = crate::game::effects::expand_per_counter(&draw(), 3);
+        assert_eq!(repeated_draw_instructions(&expanded), 3);
     }
 }

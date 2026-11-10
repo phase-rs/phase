@@ -1438,6 +1438,8 @@ fn apply_action_boundary_core(
     let lifecycle = super::lifecycle::enter_action_frame();
     // CR 702.24a: bound counted-draw work to one chunk per public action.
     state.unless_draw_chunks_this_action = 0;
+    // CR 104.3a: the concession marker is scoped to this public action.
+    state.conceded_this_action = None;
     if let Err(error) = mana_sources::preflight_tap_land_action(state, authenticated_actor, &action)
     {
         lifecycle.discard();
@@ -1598,7 +1600,7 @@ fn apply_action_boundary_core(
         .as_ref()
         .is_some_and(|transaction| transaction.recovered.is_some())
         && action.is_submitter_scoped()
-        && !matches!(action, GameAction::Concede { .. }))
+        && !matches!(action, GameAction::Concede { .. } | GameAction::Debug(_)))
     .then(|| (action.clone(), authenticated_actor));
     let mut result = match if payment_transaction::owns_action(state, &action) {
         // All staged-payment actions enter through this admission point. The
@@ -2320,8 +2322,10 @@ fn restore_boundary_preserving_departure(
 
 /// CR 104.3a + CR 800.4j: whether this action committed a departure the
 /// boundary snapshot does not contain.
-fn departure_committed(state: &GameState, snapshot: &GameState) -> bool {
-    state.eliminated_players.len() > snapshot.eliminated_players.len()
+fn departure_committed(state: &GameState, _snapshot: &GameState) -> bool {
+    // An explicit concession marker, not an eliminated-seat count: an
+    // ordinary state-based elimination must still roll back on failure.
+    state.conceded_this_action.is_some()
 }
 
 /// CR 800.4j: the next living player to hold priority after a departure.
@@ -2630,6 +2634,9 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
 fn settle_finished_game(state: &mut GameState, result: &mut ActionResult) {
     super::elimination::retire_finished_game_resolution(state);
     if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+        // CR 104.1: retire the staged payment before the match transition can
+        // move the state to sideboarding with a live descriptor.
+        payment_transaction::retire_terminal_transaction(state);
         match_flow::handle_game_over_transition(state);
         result.waiting_for = state.waiting_for.clone();
     }
@@ -9900,11 +9907,13 @@ fn pending_cast_is_draw_cost_activation(
     pending: &crate::types::game_state::PendingCast,
 ) -> bool {
     // CR 118.12: the retained unpaid suffix can still own the parked draw when
-    // the pause happened before it.
-    if pending
-        .activation_cost
-        .as_ref()
-        .is_some_and(cost_includes_draw_instruction)
+    // the pause happened before it; the paused-on-draw flag survives the source
+    // leaving or losing the grant.
+    if pending.activation_cost_paused_on_draw
+        || pending
+            .activation_cost
+            .as_ref()
+            .is_some_and(cost_includes_draw_instruction)
     {
         return true;
     }
@@ -9923,7 +9932,7 @@ fn pending_cast_is_draw_cost_activation(
 }
 
 /// Whether a cost (possibly a composite) contains a printed Draw instruction.
-fn cost_includes_draw_instruction(cost: &crate::types::ability::AbilityCost) -> bool {
+pub(crate) fn cost_includes_draw_instruction(cost: &crate::types::ability::AbilityCost) -> bool {
     use crate::types::ability::AbilityCost;
     match cost {
         AbilityCost::EffectCost { effect } => {

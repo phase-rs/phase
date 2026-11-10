@@ -1506,9 +1506,9 @@
       "returnToHand_other": "将{{count}}个永久物移回手牌",
       "sacrifice_one": "牺牲一个永久物",
       "sacrifice_other": "牺牲{{count}}个永久物",
-      "draw": "draw a card",
-      "drawCount_one": "draw {{count}} card",
-      "drawCount_other": "draw {{count}} cards"
+      "draw": "抓一张牌",
+      "drawCount_one": "抓{{count}}张牌",
+      "drawCount_other": "抓{{count}}张牌"
     },
     "debug": {
       "modeBanner": "调试模式 —— 点击任意牌",

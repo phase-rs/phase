@@ -24,6 +24,7 @@ use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
 
 /// Alms Collector, verbatim Oracle text: an instruction-level CR 121.2a
 /// replacement that applies only to an instruction to draw two or more cards.
@@ -1784,6 +1785,214 @@ fn a_composite_draw_cost_activation_resumes_its_retained_suffix() {
         state.stack.len(),
         1,
         "the activation reaches the stack after the retained suffix settles: {:?}",
+        state.waiting_for
+    );
+}
+
+/// CR 118.12: a non-idempotent sandbox action (a draw) is applied exactly
+/// once to the hidden checkpoint while the payment is parked.
+#[test]
+fn a_sandbox_gain_is_applied_once_while_the_payment_is_parked() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in 0..3 {
+        scenario.with_library_top(PlayerId(player), &STAGED_LIBRARY);
+    }
+    let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+    scenario.add_card_to_hand(P0, "Hand A");
+    scenario.add_card_to_hand(P0, "Hand B");
+    let mut runner = scenario.build();
+    evaluate_layers(runner.state_mut());
+    let mut root = ResolvedAbility::new(
+        pay_cost(AbilityCost::Composite {
+            costs: vec![draw_cost(1), discard_cost()],
+        }),
+        vec![],
+        source,
+        P0,
+    );
+    root.sub_ability = None;
+    let state = runner.state_mut();
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+    let WaitingFor::DiscardChoice { .. } = &state.waiting_for else {
+        panic!("the discard leg owns the cursor: {:?}", state.waiting_for);
+    };
+    apply(
+        state,
+        PlayerId(2),
+        GameAction::Concede {
+            player_id: PlayerId(2),
+        },
+    )
+    .expect("a player can concede at any time");
+    state.debug_mode = true;
+    state.format_config.allow_debug_actions = true;
+    let canonical_hand = state.players[P0.0 as usize].hand.len();
+
+    apply(
+        state,
+        P0,
+        GameAction::Debug(DebugAction::DrawCards {
+            player_id: P0,
+            count: 1,
+        }),
+    )
+    .expect("the sandbox draw applies to the hidden checkpoint");
+    assert_eq!(
+        state.players[P0.0 as usize].hand.len(),
+        canonical_hand,
+        "the canonical base was not mutated"
+    );
+    let checkpoint_hand = state
+        .payment_transaction
+        .as_ref()
+        .and_then(|transaction| transaction.recovered.as_ref())
+        .expect("the checkpoint is live")
+        .state
+        .players[P0.0 as usize]
+        .hand
+        .len();
+    assert_eq!(
+        checkpoint_hand,
+        canonical_hand + 2,
+        "the prefix draw and the sandbox draw each ran exactly once"
+    );
+
+    let drawn = state
+        .payment_transaction
+        .as_ref()
+        .and_then(|transaction| transaction.recovered.as_ref())
+        .expect("the checkpoint is live")
+        .events
+        .iter()
+        .find_map(|event| match event {
+            GameEvent::CardDrawn {
+                player_id,
+                object_id,
+                ..
+            } if *player_id == P0 => Some(*object_id),
+            _ => None,
+        })
+        .expect("the prefix draw");
+    apply(
+        runner.state_mut(),
+        P0,
+        GameAction::SelectCards { cards: vec![drawn] },
+    )
+    .expect("discard the prefix-drawn card");
+    let state = runner.state();
+    assert!(state.payment_transaction.is_none());
+    assert_eq!(
+        state.players[P0.0 as usize].hand.len(),
+        canonical_hand + 1,
+        "two draws and one discard leave one extra card; nothing was doubled"
+    );
+}
+
+/// CR 118.12 + CR 614.11a: the activation retains draw ownership even when the
+/// source leaves during the replacement's choice; the resume does not need to
+/// rediscover the live ability.
+#[test]
+fn a_composite_draw_cost_activation_resumes_after_the_source_leaves() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &STAGED_LIBRARY);
+    scenario.with_library_top(P1, &STAGED_LIBRARY);
+    let source = scenario
+        .add_creature(P0, "Draw Cost Source", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::EffectCost {
+                        effect: Box::new(draw_effect(1)),
+                    },
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                    },
+                ],
+            }),
+        )
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Abundance", ABUNDANCE_ORACLE);
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        let library: Vec<_> = state.players[P0.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect();
+        for (index, id) in library.iter().enumerate() {
+            let object = state.objects.get_mut(id).expect("library card");
+            object.card_types.core_types.clear();
+            if index == 2 {
+                object
+                    .card_types
+                    .core_types
+                    .push(engine::types::card_type::CoreType::Land);
+            }
+        }
+        state.debug_mode = true;
+        state.format_config.allow_debug_actions = true;
+    }
+    evaluate_layers(runner.state_mut());
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the composite draw-cost activation begins");
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accept Abundance");
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Land".to_string(),
+        })
+        .expect("choose Land");
+    let WaitingFor::RevealUntilBottomOrder { cards, .. } = &runner.state().waiting_for else {
+        panic!(
+            "Abundance asks for the revealed misses' order: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let order = cards.clone();
+    runner
+        .act(GameAction::Debug(DebugAction::MoveToZone {
+            object_id: source,
+            to_zone: Zone::Graveyard,
+            library_position: None,
+            simulate: false,
+        }))
+        .expect("the debug move removes the source");
+    runner
+        .act(GameAction::SelectCards { cards: order })
+        .expect("submit the bottom order");
+
+    let state = runner.state();
+    assert!(
+        state.pending_cast.is_none(),
+        "the retained draw owner resumes without the source"
+    );
+    assert_eq!(
+        state.players[P0.0 as usize].life,
+        life_before - 1,
+        "the retained PayLife suffix was paid"
+    );
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "the activation reaches the stack after the source left: {:?}",
         state.waiting_for
     );
 }
