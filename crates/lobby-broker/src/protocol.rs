@@ -1238,7 +1238,7 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 /// broker's window went disjoint from the shipped client's. This constant is
 /// the fix — it moves only for reasons the lobby can actually observe.
 ///
-/// 21 — Tournament deck submission for server-hosted play: a new
+/// 22 — Tournament deck submission for server-hosted play: a new
 ///      `SubmitTournamentDeck` [`LobbyClientMessage`] (client → broker, carrying
 ///      a `DeckData`) — the "a lobby variant is added" trigger — and a
 ///      `deck_submitted` readiness flag added to `PlayerSummary` (broker →
@@ -1248,6 +1248,11 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///      older reader ignores the new `PlayerSummary` field, and no broker rejects
 ///      an absent one), and no client emits `SubmitTournamentDeck` until the
 ///      hosted-play UI ships behind its own client-side capability floor.
+/// 21 — `DeckData`/`PlayerDeckList` gain an optional name-keyed printings
+///      sidecar (owner-chosen card printings, display-only). Merged from main
+///      (`protocol/changes/e1e92950-…json`); additive, so
+///      [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does not move. Listed here so the jump
+///      from 20 to this message's 22 is traceable.
 /// 19 — Prospective: no lobby variant or field changes shape in this
 ///      commit. Moved ahead of the `PlanechaseCommander` `GameFormat`
 ///      variant, on the same terms as 11 and 16 (see those entries for the

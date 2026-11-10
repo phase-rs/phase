@@ -734,11 +734,11 @@ mod tests {
 
     /// A tournament deck routes through the shared `inbound_guard::validate_deck_payload`,
     /// so it is bounded on exactly the lists that shared authority covers — the
-    /// same ones a casual `CreateGameWithSettings` is. `sticker_sheets` is not among
-    /// them (a deliberate omission of the shared payload validator, not a
-    /// tournament-path regression); its persistence is instead bounded in aggregate
-    /// by `tournament::MAX_AGGREGATE_DECK_ENCODED_BYTES`, which counts the whole
-    /// encoded deck (every field, `sticker_sheets` included).
+    /// same ones a casual `CreateGameWithSettings` is, `sticker_sheets` now included
+    /// (every `DeckData` name list is bounded there). Persistence is bounded on two
+    /// further axes by `tournament`: `MAX_SINGLE_DECK_ENCODED_BYTES` caps one deck's
+    /// encoded size and `MAX_AGGREGATE_DECK_ENCODED_BYTES` the summed encoded bytes of
+    /// every retained deck (every field included).
     #[test]
     fn submit_tournament_deck_bounds_every_supplementary_list() {
         let cases = [
@@ -767,6 +767,13 @@ mod tests {
                 "signature_spell",
                 DeckData {
                     signature_spell: vec!["Card".into(); 5],
+                    ..Default::default()
+                },
+            ),
+            (
+                "sticker_sheets",
+                DeckData {
+                    sticker_sheets: vec!["Sheet".into(); 11],
                     ..Default::default()
                 },
             ),

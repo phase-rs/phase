@@ -42,6 +42,14 @@ pub const MAX_ATTRACTION_DECK_ENTRIES: usize = 200;
 /// Max supplementary Contraption-deck entries accepted on the wire (Contraptions are
 /// outside the Comprehensive Rules, CR 701.45a; 200 mirrors the other supplementary decks).
 pub const MAX_CONTRAPTION_DECK_ENTRIES: usize = 200;
+/// Max sticker-sheet entries accepted on the wire. Sticker play is a supplemental
+/// mechanic (not covered by the Comprehensive Rules snapshot in `docs/`), where a
+/// player brings a small chosen set of sticker sheets; 10 is a generous wire
+/// ceiling. Bounding this closes the only `DeckData` name list left unbounded by
+/// [`validate_deck_payload`] — each entry is still capped at
+/// [`MAX_DECK_CARD_NAME_LEN`], so the worst-case sticker list is ~2.5 KB, not the
+/// multi-hundred-KB single entry an unbounded `Vec<String>` would admit.
+pub const MAX_STICKER_SHEET_ENTRIES: usize = 10;
 /// Max byte length of a single card name string inside a deck payload. Defined once
 /// in the engine (`engine::types::card_printing`), where the printings sidecar's
 /// bound reads it too; re-exported so this path stays valid.
@@ -90,11 +98,12 @@ pub fn validate_deck_list(field: &str, cards: &[String], max_entries: usize) -> 
     Ok(())
 }
 
-/// Bound the deck half of Create/Join lobby messages: every card-section name list,
-/// and the printings sidecar through the engine's single bound
-/// (`validate_deck_printings_bounds`). Sticker sheets are not bounded here (recorded
-/// pre-existing gap). Lobby-only mode ignores deck contents for matchmaking, but the
-/// native shell still deserializes and clones the full structure on every frame.
+/// Bound the deck half of Create/Join lobby messages: every card-section name list
+/// (`sticker_sheets` included), and the printings sidecar through the engine's single
+/// bound (`validate_deck_printings_bounds`). Every `DeckData` name list is now bounded
+/// here — none is left as an unbounded `Vec<String>`. Lobby-only mode ignores deck
+/// contents for matchmaking, but the native shell still deserializes and clones the
+/// full structure on every frame.
 pub fn validate_deck_payload(field: &str, deck: &DeckData) -> Result<(), String> {
     validate_deck_list(
         &format!("{field}.main_deck"),
@@ -140,6 +149,11 @@ pub fn validate_deck_payload(field: &str, deck: &DeckData) -> Result<(), String>
         &format!("{field}.signature_spell"),
         &deck.signature_spell,
         MAX_SIGNATURE_SPELL_ENTRIES,
+    )?;
+    validate_deck_list(
+        &format!("{field}.sticker_sheets"),
+        &deck.sticker_sheets,
+        MAX_STICKER_SHEET_ENTRIES,
     )?;
     validate_deck_printings_bounds(&format!("{field}.printings"), &deck.printings)
 }

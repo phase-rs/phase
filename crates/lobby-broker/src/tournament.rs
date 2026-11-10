@@ -1249,6 +1249,23 @@ impl TournamentMeta {
         })
     }
 
+    /// Single authority for reclaiming retained decks when a tournament becomes
+    /// terminal (`Completed`/`Abandoned`). Submitted decks are pure server-hosting
+    /// registration — once no pairing can ever be hosted again (hosting and deck
+    /// resubmission both refuse on a terminal status), the decks are dead weight.
+    /// Dropping them reclaims their bytes from the single-key broker snapshot so a
+    /// terminal event stops charging the shared [`MAX_AGGREGATE_DECK_ENCODED_BYTES`]
+    /// budget and can never block an unrelated event — and makes the whole-snapshot
+    /// deck cost bounded by the *live* events alone. The derived `deck_submitted`
+    /// readiness flag on a terminal event's `PlayerSummary` consequently reads
+    /// false, which is correct: readiness is moot once nothing can be hosted. Pure
+    /// bookkeeping — pairing results, standings, and drop history are untouched.
+    fn release_retained_decks(&mut self) {
+        for player in &mut self.players {
+            player.deck = None;
+        }
+    }
+
     pub fn report_gate(&self, pairing: &TournamentPairing) -> ReportGate {
         if self.status.is_terminal() {
             return ReportGate::TournamentNotRunning;
@@ -2153,25 +2170,40 @@ pub enum TournamentExpiryEvent {
     Abandoned(String),
 }
 
-/// Aggregate budget for the card-name bytes of every persisted deck this manager
+/// Aggregate budget for the encoded bytes of every persisted deck this manager
 /// holds, across all tournaments, enforced at [`TournamentManager::submit_deck`]
 /// admission. The lobby Durable Object serializes the ENTIRE broker — the lobby
 /// registry plus every tournament and its retained decks — as one JSON value
-/// under a single SQLite key, and Cloudflare caps a key+value at 2 MB. The
+/// under a single SQLite key, and Cloudflare caps a SQLite key+value at 8 MB. The
 /// per-deck wire bounds ([`crate::inbound_guard::validate_deck_payload`])
-/// individually accept decks whose *persisted* size sums far past that cap in
-/// aggregate: six maxed name lists are ~2.46 MB of names alone, and the
+/// individually accept decks whose *persisted* size sums far past a safe share of
+/// that cap in aggregate: the maxed name lists are ~2.46 MB of names alone, and the
 /// separately-bounded `printings` sidecar independently admits
 /// [`MAX_DECK_PRINTING_ENTRIES`](engine::types::card_printing::MAX_DECK_PRINTING_ENTRIES)
 /// entries (~256 B name + 32 B set code + 32 B collector number each) per list
 /// with no matching name-list entry — so one empty-name deck can still serialize
-/// past 512 KiB. A per-deck bound therefore cannot bound the snapshot. This caps
-/// the summed *encoded* deck bytes (every persisted field, JSON escaping and
-/// per-entry overhead; see [`deck_encoded_bytes`]) well under 2 MB, leaving
-/// headroom for the rest of the broker snapshot. A refused submission leaves every
-/// retained deck and its readiness unchanged (the check precedes the single
-/// mutation).
+/// past 512 KiB. This caps the summed *encoded* deck bytes (every persisted field,
+/// JSON escaping and per-entry overhead; see [`deck_encoded_bytes`]) deliberately
+/// conservative at 512 KiB — well under the 8 MB hard limit — leaving ample
+/// headroom for the rest of the broker snapshot. This bounds the whole-snapshot
+/// deck cost; [`MAX_SINGLE_DECK_ENCODED_BYTES`] separately bounds any *one*
+/// entrant's share so a single submission cannot monopolize the aggregate. A
+/// refused submission leaves every retained deck and its readiness unchanged (the
+/// check precedes the single mutation).
 pub const MAX_AGGREGATE_DECK_ENCODED_BYTES: usize = 512 * 1024;
+
+/// Per-deck ceiling on a single entrant's encoded deck, enforced at
+/// [`TournamentManager::submit_deck`] admission before the aggregate check. The
+/// aggregate budget alone lets one entrant submit a deck sized to the entire
+/// budget and so deny every other entrant and every unrelated event a submission
+/// (the public Worker routes all tournaments to one global lobby instance). This
+/// caps any one deck at 1/8 of [`MAX_AGGREGATE_DECK_ENCODED_BYTES`], guaranteeing
+/// at least eight entrants can always submit while sitting far above any
+/// legitimate deck: a full Commander or Oathbreaker deck with a printing for every
+/// card encodes to ~15 KB, an oversized supplementary deck to well under 64 KB. It
+/// is an abuse ceiling, not an expected size. Measured with the same
+/// [`deck_encoded_bytes`] codec as the aggregate.
+pub const MAX_SINGLE_DECK_ENCODED_BYTES: usize = 64 * 1024;
 
 /// The exact byte cost `deck` adds to the persisted broker snapshot: its
 /// `serde_json` encoding, the same codec the lobby Durable Object snapshots the
@@ -2769,12 +2801,23 @@ impl TournamentManager {
             .iter_mut()
             .find(|p| p.player_key == player_key)
             .ok_or_else(|| format!("Player {player_key} is not registered in {code}"))?;
+        // Individual charge cap: refuse a single deck larger than one entrant's
+        // fair share, so no one submission can consume the shared aggregate budget
+        // and deny every other entrant and unrelated event. Checked before the
+        // aggregate so an abusive payload gets the specific error.
+        if incoming_bytes > MAX_SINGLE_DECK_ENCODED_BYTES {
+            return Err(format!(
+                "Deck rejected: its encoded size exceeds the per-deck limit \
+                 ({MAX_SINGLE_DECK_ENCODED_BYTES} encoded bytes)"
+            ));
+        }
         // Aggregate persistence budget: the whole broker serializes under one
-        // 2 MB Durable Object key, so admit the deck only if the summed encoded
-        // bytes of all retained decks stay under the budget. `saturating_add` so a
-        // deck that failed to serialize (`usize::MAX`) refuses instead of
-        // overflowing. Checked last, right before the single mutation, so a refusal
-        // leaves every retained deck and its readiness unchanged.
+        // 8 MB Durable Object key, so admit the deck only if the summed encoded
+        // bytes of all retained decks stay under the (deliberately conservative)
+        // budget. `saturating_add` so a deck that failed to serialize
+        // (`usize::MAX`) refuses instead of overflowing. Checked last, right before
+        // the single mutation, so a refusal leaves every retained deck and its
+        // readiness unchanged.
         if retained_other_bytes.saturating_add(incoming_bytes) > MAX_AGGREGATE_DECK_ENCODED_BYTES {
             return Err(format!(
                 "Deck rejected: it would exceed the server's aggregate tournament deck \
@@ -2994,6 +3037,9 @@ impl TournamentManager {
             ));
         }
         meta.status = TournamentStatus::Completed;
+        // Reclaim retained decks the moment the event is terminal — nothing can be
+        // hosted again, so they stop charging the shared aggregate budget.
+        meta.release_retained_decks();
         meta.last_activity_at = now;
         Ok(())
     }
@@ -3022,6 +3068,10 @@ impl TournamentManager {
                 TournamentStatus::InProgress => {
                     if idle > IN_PROGRESS_ABANDON_SECS {
                         meta.status = TournamentStatus::Abandoned;
+                        // Reclaim retained decks on the terminal transition, same as
+                        // `complete_tournament` — an abandoned event hosts nothing
+                        // more, so its decks must stop charging the aggregate budget.
+                        meta.release_retained_decks();
                         // The transition is itself a state change, so it bumps
                         // `last_activity_at` — which is what starts the 30-day
                         // retention clock from the moment of abandonment.
@@ -4294,6 +4344,111 @@ mod tests {
         // A within-budget deck is still admitted afterwards.
         mgr.submit_deck("T", &key(0), deck_of("Island"), &env)
             .expect("a modest deck stays within budget");
+    }
+
+    /// `submit_deck` refuses a single deck larger than [`MAX_SINGLE_DECK_ENCODED_BYTES`]
+    /// even when the aggregate budget is otherwise empty — so one entrant cannot
+    /// submit a deck sized to the whole shared budget and deny everyone else. The
+    /// witness is over the per-deck cap but under the aggregate, proving the
+    /// individual cap (not the aggregate) is what fires, and the refusal leaves the
+    /// slot unchanged. REVERT-FAIL: drop the per-deck check and this deck stores,
+    /// consuming a fifth of the global budget from one entrant.
+    #[test]
+    fn submit_deck_refuses_a_single_deck_over_the_per_deck_cap() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        // ~300 maxed printing entries: well over the 64 KiB per-deck cap, well
+        // under the 512 KiB aggregate — so only the individual cap can refuse it.
+        let oversized = printings_only_deck(300);
+        let encoded = deck_encoded_bytes(&oversized);
+        assert!(
+            encoded > MAX_SINGLE_DECK_ENCODED_BYTES && encoded < MAX_AGGREGATE_DECK_ENCODED_BYTES,
+            "witness must sit between the per-deck cap and the aggregate (was {encoded})"
+        );
+        let err = mgr
+            .submit_deck("T", &key(0), oversized, &env)
+            .expect_err("a deck over the per-deck cap is refused");
+        assert!(err.contains("per-deck limit"), "{err}");
+        // Slot untouched; a modest deck is still admitted.
+        assert!(mgr
+            .get("T")
+            .expect("t")
+            .players
+            .iter()
+            .find(|p| p.player_key == key(0))
+            .and_then(|p| p.deck.as_ref())
+            .is_none());
+        mgr.submit_deck("T", &key(0), deck_of("Island"), &env)
+            .expect("a modest deck is admitted");
+    }
+
+    /// Completing a tournament reclaims every retained deck: once terminal nothing
+    /// can be hosted, so the decks are dropped and stop charging the aggregate
+    /// budget. REVERT-FAIL: drop the `release_retained_decks` call in
+    /// `complete_tournament` and the decks persist, charging the shared budget for
+    /// the full 30-day retention window with no way to replace them.
+    #[test]
+    fn completing_a_tournament_reclaims_retained_decks() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        mgr.submit_deck("T", &key(0), deck_of("Island"), &env)
+            .expect("submit p0");
+        mgr.submit_deck("T", &key(1), deck_of("Forest"), &env)
+            .expect("submit p1");
+        assert!(
+            mgr.get("T")
+                .expect("t")
+                .players
+                .iter()
+                .all(|p| p.deck.is_some()),
+            "both decks are retained while the event runs"
+        );
+        report_all_pending(&mut mgr, "T", &env);
+        mgr.complete_tournament("T", &env).expect("complete");
+        assert_eq!(mgr.get("T").expect("t").status, TournamentStatus::Completed);
+        assert!(
+            mgr.get("T")
+                .expect("t")
+                .players
+                .iter()
+                .all(|p| p.deck.is_none()),
+            "a completed event retains no decks"
+        );
+    }
+
+    /// Abandoning a tournament through the inactivity sweep reclaims retained decks
+    /// on the same terms as completion — the other terminal transition must not leak
+    /// the budget. REVERT-FAIL: drop the `release_retained_decks` call in the
+    /// `check_expired` abandon arm and an abandoned event's decks keep charging.
+    #[test]
+    fn abandoning_a_tournament_reclaims_retained_decks() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(4, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        mgr.submit_deck("T", &key(0), deck_of("Island"), &env)
+            .expect("submit p0");
+        assert!(mgr
+            .get("T")
+            .expect("t")
+            .players
+            .iter()
+            .any(|p| p.deck.is_some()));
+        env.advance_secs(IN_PROGRESS_ABANDON_SECS + 1);
+        assert_eq!(
+            mgr.check_expired(&env),
+            vec![TournamentExpiryEvent::Abandoned("T".to_string())]
+        );
+        assert_eq!(mgr.get("T").expect("t").status, TournamentStatus::Abandoned);
+        assert!(
+            mgr.get("T")
+                .expect("t")
+                .players
+                .iter()
+                .all(|p| p.deck.is_none()),
+            "an abandoned event retains no decks"
+        );
     }
 
     /// `submit_deck` stores a per-entrant deck and `pairing_decks_submitted`
