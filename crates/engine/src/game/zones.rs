@@ -2734,22 +2734,22 @@ pub(crate) fn capture_combat_status(
 
 /// CR 701.20d: If cards in a player's library are shuffled or otherwise
 /// reordered, any revealed cards that are reordered stop being revealed and
-/// become new objects.
-///
-/// Stack-bound reveal leases (CR 701.20a) belong to abilities on the stack
-/// and keep their unindexed reveal presentation separate from exposure of
-/// library positions.
+/// become new objects. This includes stack-bound reveal leases (CR 701.20a)
+/// — a reordered card becomes a new object, so all reveal leases for the
+/// old occurrence end.
 pub(crate) fn retire_reordered_library_reveals(state: &mut GameState, cards: &[ObjectId]) {
     for &object_id in cards {
         let is_revealed = state.revealed_cards.contains(&object_id)
-            || state.public_revealed_cards.contains(&object_id);
+            || state.public_revealed_cards.contains(&object_id)
+            || state.holds_stack_bound_reveal(object_id);
         if is_revealed {
             if let Some(obj) = state.objects.get(&object_id) {
                 let occurrence = ObjectIncarnationRef::from_object(obj);
-                state.clear_reordered_library_reveal(occurrence);
+                // CR 701.20d + CR 701.20a: Clear all reveal information (controller,
+                // public, and stack-bound) for the old occurrence, then bump the
+                // incarnation so the card becomes a new object.
+                state.clear_revealed_information_on_zone_exit(occurrence, Zone::Library);
             }
-            state.revealed_cards.remove(&object_id);
-            state.public_revealed_cards.remove(&object_id);
             if let Some(obj) = state.objects.get_mut(&object_id) {
                 obj.bump_incarnation();
             }

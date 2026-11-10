@@ -33081,47 +33081,6 @@ impl GameState {
         self.drop_stack_bound_reveals_for_occurrence(occurrence);
     }
 
-    /// CR 701.20d: Any revealed cards that are reordered in a library stop being
-    /// revealed and become new objects.
-    /// Does NOT drop stack-bound reveal leases (CR 701.20a), which belong to
-    /// abilities on the stack and keep their unindexed reveal presentation
-    /// separate from library positions.
-    pub(crate) fn clear_reordered_library_reveal(&mut self, occurrence: ObjectIncarnationRef) {
-        let (controller, owner) = self
-            .objects
-            .get(&occurrence.object_id)
-            .map(|object| (object.controller, object.owner))
-            .expect("reorder reveal clear must reference a live object");
-        self.product_knowledge_state
-            .facts
-            .retain(|fact| fact.identity != occurrence);
-        self.canonicalize_library_knowledge_epoch(owner);
-        if self.information_active(
-            ResolvedInformationAudience::Controller(controller),
-            ResolvedInformationLifetime::UntilActionBoundary,
-            occurrence,
-        ) {
-            let _ = self.apply_information_edit(
-                &[occurrence],
-                ResolvedInformationAudience::Controller(controller),
-                ResolvedInformationLifetime::UntilActionBoundary,
-                ResolvedInformationEdit::Hide,
-            );
-        }
-        if self.information_active(
-            ResolvedInformationAudience::Public,
-            ResolvedInformationLifetime::UntilZoneChange,
-            occurrence,
-        ) {
-            let _ = self.apply_information_edit(
-                &[occurrence],
-                ResolvedInformationAudience::Public,
-                ResolvedInformationLifetime::UntilZoneChange,
-                ResolvedInformationEdit::Hide,
-            );
-        }
-    }
-
     /// CR 400.7 + CR 701.20a: A stack-bound reveal lease belongs to one exact
     /// occurrence; once that object changes zones it is a new object, so every
     /// lease row naming the old occurrence ends. Called by the live zone-exit
