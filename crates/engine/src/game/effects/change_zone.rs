@@ -673,6 +673,16 @@ fn append_effect_resolved_after_counter_pause(
     );
 }
 
+fn target_filter_contains_self_ref(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::SelfRef => true,
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_contains_self_ref)
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn publish_finalized_owner_library_subjects(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -695,6 +705,22 @@ pub(super) fn publish_finalized_owner_library_subjects(
             if let Some(player) = change_zone_all_player_scope(state, ability, target) {
                 participants.push(player);
             }
+        }
+    }
+    // CR 701.24c + CR 400.3: a compound "this creature and target …" move can
+    // resolve after the source has left. The source object is then absent from
+    // the moved set, but its owner is still an affected owner and must be
+    // captured for the terminal shuffle.
+    if matches!(
+        &ability.effect,
+        Effect::ChangeZone {
+            destination: Zone::Library,
+            target,
+            ..
+        } if target_filter_contains_self_ref(target)
+    ) {
+        if let Some(owner) = super::source_owner(state, ability) {
+            participants.push(owner);
         }
     }
     participants.sort_unstable();
@@ -761,6 +787,51 @@ pub(crate) fn until_event_already_occurred(
 /// CR 400.7 + CR 603.2: the zone a move expects its object to be in — the
 /// effect's origin, or for an event referent the zone the trigger event put it
 /// in.
+/// CR 400.7 + CR 701.24c: "shuffle this creature/permanent" acts only on the
+/// source while it is the permanent it was on the battlefield; a source that
+/// left (sacrificed as a cost, destroyed in response) must not be moved out of
+/// its graveyard. A spell source ("shuffle ~ into its owner's library") is the
+/// object on the stack. The parser cannot see the card type at this seam, so
+/// derive the expected zone from the exact source incarnation.
+fn self_ref_owner_move_origin(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    origin: Option<Zone>,
+    target_filter: &TargetFilter,
+    owner_library: bool,
+) -> Option<Zone> {
+    if origin.is_some() || !owner_library || !matches!(target_filter, TargetFilter::SelfRef) {
+        return origin;
+    }
+    let Some(source) = state.objects.get(&ability.source_id) else {
+        return origin;
+    };
+    use crate::types::card_type::CoreType;
+    let is_permanent = source.card_types.core_types.iter().any(|core| {
+        matches!(
+            core,
+            CoreType::Artifact
+                | CoreType::Battle
+                | CoreType::Creature
+                | CoreType::Enchantment
+                | CoreType::Land
+                | CoreType::Planeswalker
+        )
+    });
+    if is_permanent {
+        Some(Zone::Battlefield)
+    } else if source
+        .card_types
+        .core_types
+        .iter()
+        .any(|core| matches!(core, CoreType::Instant | CoreType::Sorcery))
+    {
+        Some(Zone::Stack)
+    } else {
+        origin
+    }
+}
+
 fn expected_move_origin(
     state: &GameState,
     origin: Option<Zone>,
@@ -1108,6 +1179,7 @@ pub fn resolve(
     }
     let target_filter = &effective_target_filter;
     let origin = expected_move_origin(state, origin, target_filter);
+    let origin = self_ref_owner_move_origin(state, ability, origin, target_filter, owner_library);
     let filter_controller =
         crate::game::effects::controller_for_relative_filter(state, ability, target_filter);
     let performer = instruction_performer(state, ability, filter_controller);

@@ -10543,8 +10543,9 @@ pub(super) fn parse_shuffle_ast(
     .parse(lower)
     .is_ok()
     {
-        return Some(ShuffleImperativeAst::OwnersChangeZoneToLibrary {
+        return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
             target: TargetFilter::ParentTarget,
+            owner_library: true,
         });
     }
     if tag::<_, _, OracleError<'_>>("shuffle")
@@ -10875,38 +10876,6 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 enters_modified_if: None,
             };
             with_shuffle_sub_ability(effect)
-        }
-        ShuffleImperativeAst::OwnersChangeZoneToLibrary { target } => {
-            // CR 701.24c + CR 400.3: the declared cards may share an owner or
-            // span several owners. Suppress each member's delivery shuffle and
-            // let the terminal ScopedPlayer shuffle iterate the prospective
-            // owner population: the publisher dedups owners, so one library is
-            // randomized exactly once no matter how many of its cards moved.
-            let mut clause = parsed_clause(Effect::ChangeZone {
-                library_shuffle: LibraryShuffleMode::TerminalShuffle,
-                origin: None,
-                destination: Zone::Library,
-                target,
-                owner_library: true,
-                enter_transformed: false,
-                enters_under: None,
-                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-                enters_attacking: false,
-                up_to: false,
-                enter_with_counters: vec![],
-                conditional_enter_with_counters: vec![],
-                face_down_profile: None,
-                enters_modified_if: None,
-            });
-            let mut shuffle = AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Shuffle {
-                    target: TargetFilter::ScopedPlayer,
-                },
-            );
-            shuffle.player_scope = Some(owner_library_shuffle_scope());
-            clause.sub_ability = Some(Box::new(shuffle));
-            clause
         }
         ShuffleImperativeAst::ChangeZoneAllToLibrary { origins } => {
             // CR 400.6 + CR 400.3: "shuffle {possessive} {zone} into {possessive}

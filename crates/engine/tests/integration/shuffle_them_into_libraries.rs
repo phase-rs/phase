@@ -188,10 +188,11 @@ fn turn_the_earth_replaced_deliveries_still_shuffle_the_owner() {
     assert_eq!(shuffles_for(events, P1), 0, "{events:?}");
 }
 
-/// CR 701.24c + CR 400.3: "shuffle that card into its owner's library" (the
-/// Malfegor Avatar / Mephidross Slime shape) captures the moved card's owner
-/// before delivery. The printed Malfegor trigger's "if it was unearthed"
-/// condition is unsupported, so this exercises the same supported trigger and
+/// CR 701.24c + CR 400.3: "shuffle that card into its owner's library" captures
+/// the moved card's owner before delivery. Malfegor Avatar and Mephidross Slime
+/// are Alchemy shapes; the nearest printed owner-move cards are Serene
+/// Remembrance (compound, covered above) and Cathartic Parting (specific,
+/// covered below). This synthetic trigger exercises the supported trigger and
 /// effect shape: one exiled card, one owner, exactly one shuffle.
 #[test]
 fn exile_trigger_shuffle_that_card_shuffles_its_owner_once() {
@@ -286,5 +287,114 @@ fn serene_remembrance_settles_once_for_each_compound_owner() {
         shuffles_for(events, P1),
         1,
         "the selected cards' owner shuffles once: {events:?}"
+    );
+}
+
+/// CR 701.24c + CR 400.3: Cathartic Parting's target is a pure type-union
+/// ("artifact or enchantment an opponent controls") — one object, one exact
+/// owner — so it settles through the specific owner terminal with one shuffle.
+#[test]
+fn cathartic_parting_pure_type_union_shuffles_owner_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Cathartic Parting",
+            false,
+            "The owner of target artifact or enchantment an opponent controls shuffles it into their library. You may shuffle up to four target cards from your graveyard into your library.",
+        )
+        .id();
+    let relic = scenario
+        .add_artifact_from_oracle(P1, "Opponent Relic", "")
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner.cast(spell).target_object(relic).resolve();
+    let events = outcome.events();
+
+    assert_eq!(outcome.state().objects[&relic].zone, Zone::Library);
+    assert_eq!(
+        shuffles_for(events, P1),
+        1,
+        "the chosen target's owner shuffles once: {events:?}"
+    );
+    assert_eq!(shuffles_for(events, P0), 0, "{events:?}");
+}
+
+/// CR 701.24c: when the compound source and both selected cards share an owner,
+/// that owner's library is shuffled exactly once for the whole instruction.
+#[test]
+fn serene_remembrance_same_owner_shuffles_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Serene Remembrance",
+            false,
+            "Shuffle Serene Remembrance and up to three target cards from a single graveyard into their owners' libraries.",
+        )
+        .id();
+    let first = scenario
+        .add_creature_to_graveyard(P0, "P0 First Relic", 1, 1)
+        .id();
+    let second = scenario
+        .add_creature_to_graveyard(P0, "P0 Second Relic", 1, 1)
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner
+        .cast(spell)
+        .target_objects(&[first, second])
+        .resolve();
+    let events = outcome.events();
+
+    assert_eq!(
+        shuffles_for(events, P0),
+        1,
+        "the shared owner shuffles exactly once: {events:?}"
+    );
+    assert_eq!(shuffles_for(events, P1), 0, "{events:?}");
+    assert_eq!(outcome.state().objects[&spell].zone, Zone::Library);
+    assert_eq!(outcome.state().objects[&first].zone, Zone::Library);
+    assert_eq!(outcome.state().objects[&second].zone, Zone::Library);
+}
+
+/// CR 701.24c: the source of a compound "this creature and target …" move can
+/// leave before resolution (here sacrificed as the activation cost). The
+/// source's owner is still an affected owner and shuffles once; the legal
+/// target's owner shuffles once. The stale source itself is not moved.
+#[test]
+fn compound_shuffle_stale_source_still_shuffles_its_owner() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Sacrificial Shuffler",
+            1,
+            1,
+            "{T}, Sacrifice this creature: Shuffle this creature and target creature into their owners' libraries.",
+        )
+        .id();
+    let target = scenario.add_creature(P1, "P1 Target", 1, 1).id();
+    let mut runner = scenario.build();
+    let outcome = runner.activate(source, 0).target_object(target).resolve();
+    let events = outcome.events();
+
+    assert_eq!(
+        outcome.state().objects[&source].zone,
+        Zone::Graveyard,
+        "the sacrificed source stays in the graveyard, not the library"
+    );
+    assert_eq!(outcome.state().objects[&target].zone, Zone::Library);
+    assert_eq!(
+        shuffles_for(events, P0),
+        1,
+        "the stale source's owner still shuffles once: {events:?}"
+    );
+    assert_eq!(
+        shuffles_for(events, P1),
+        1,
+        "the target's owner shuffles once: {events:?}"
     );
 }

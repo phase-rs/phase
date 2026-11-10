@@ -47020,6 +47020,82 @@ fn reveal_until_passive_has_chosen_name_tv_pattern() {
     );
 }
 
+/// CR 608.2c + CR 400.3: the source-owner anchor is for the following Draw/
+/// Reveal anaphor only. A later caster-defaulted "search your library … then
+/// shuffle" must keep the activator.
+#[test]
+fn owner_anchor_does_not_leak_into_following_search_or_shuffle() {
+    let def = parse_effect_chain(
+        "This creature's owner shuffles it into their library. Search your library for a basic land card, reveal it, put it into your hand, then shuffle.",
+        AbilityKind::Activated,
+    );
+    let mut node = Some(&def);
+    let mut checked = 0;
+    let mut skipped_source_shuffle = false;
+    while let Some(def) = node {
+        match &*def.effect {
+            Effect::SearchLibrary { target_player, .. } => {
+                assert!(
+                    matches!(*target_player, None | Some(TargetFilter::Controller)),
+                    "the caster's search keeps the activator: {target_player:?}"
+                );
+                checked += 1;
+            }
+            Effect::Shuffle { target }
+                if *target == TargetFilter::Owner && !skipped_source_shuffle =>
+            {
+                skipped_source_shuffle = true;
+            }
+            Effect::Shuffle { target } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::Controller,
+                    "the caster's shuffle keeps the activator"
+                );
+                checked += 1;
+            }
+            _ => {}
+        }
+        node = def.sub_ability.as_deref();
+    }
+    assert!(checked > 0, "reach guard: the search/shuffle parsed");
+}
+
+/// CR 109.5 + CR 608.2c: the reveal's printed library possessor controls the
+/// actor. "your library" forces the activator even under an owner anchor;
+/// "their library" keeps the owner antecedent.
+#[test]
+fn reveal_library_possessor_survives_the_owner_anchor() {
+    for (possessive, expected) in [
+        ("your", TargetFilter::Controller),
+        ("their", TargetFilter::Owner),
+    ] {
+        let def = parse_effect_chain(
+            &format!(
+                "This creature's owner shuffles it into their library. They reveal cards from the top of {possessive} library until they reveal a creature card."
+            ),
+            AbilityKind::Activated,
+        );
+        let mut node = def.sub_ability.as_deref();
+        let mut reveal = None;
+        while let Some(def) = node {
+            if matches!(&*def.effect, Effect::RevealUntil { .. }) {
+                reveal = Some(def);
+                break;
+            }
+            node = def.sub_ability.as_deref();
+        }
+        let reveal = reveal.expect("the reveal is present");
+        let Effect::RevealUntil { player, .. } = &*reveal.effect else {
+            unreachable!()
+        };
+        assert_eq!(
+            *player, expected,
+            "the {possessive} library possessor must survive lowering"
+        );
+    }
+}
+
 /// CR 608.2c: an explicit "You reveal" after an owner shuffle keeps the
 /// activator; the owner anchor must not overwrite a printed subject.
 #[test]
